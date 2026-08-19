@@ -95,12 +95,78 @@ fn run_doctor_token_efficiency(
 }
 
 /// Returns bundle names whose directory does not exist under `bundles_dir`.
-fn bundles_with_missing_dirs<'a>(bundles: &'a [Bundle], bundles_dir: &Path) -> Vec<&'a str> {
-    bundles
-        .iter()
-        .filter(|b| !bundles_dir.join(&b.name).is_dir())
-        .map(|b| b.name.as_str())
-        .collect()
+///
+/// # Errors
+///
+/// A stat error other than "not found" — permission denied, an unreachable
+/// mount — is propagated instead of being folded into the missing list
+/// (#1436). "The directory isn't there" and "I can't tell whether it's there"
+/// need different fixes, so reporting the second as the first sends the user
+/// hunting for a folder that is present but unreadable.
+fn bundles_with_missing_dirs<'a>(
+    bundles: &'a [Bundle],
+    bundles_dir: &Path,
+) -> anyhow::Result<Vec<&'a str>> {
+    let mut missing = Vec::new();
+    for bundle in bundles {
+        let path = bundles_dir.join(&bundle.name);
+        match std::fs::metadata(&path) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => missing.push(bundle.name.as_str()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(bundle.name.as_str());
+            }
+            Err(e) => {
+                return Err(anyhow::Error::new(e)
+                    .context(format!("stat bundle directory {}", path.display())));
+            }
+        }
+    }
+    Ok(missing)
+}
+
+/// Version folder names cached under one adapter's cache directory, with any
+/// content-hash suffix stripped. `Ok(None)` means the adapter has no cache dir
+/// at all — normal for an adapter that was never materialized.
+///
+/// # Errors
+///
+/// Any read or stat error other than the cache directory being absent (#1436).
+/// The caller downgrades this to a `warn` line rather than aborting: an
+/// unreadable cache is worth telling the user about, but it must not take down
+/// the rest of the diagnostics.
+fn cached_version_folders(adapter_cache: &Path) -> anyhow::Result<Option<Vec<String>>> {
+    let Some(entries) = crate::paths::read_dir_optional(adapter_cache)? else {
+        return Ok(None);
+    };
+    let mut versions = Vec::new();
+    for entry in entries {
+        let entry = entry.with_context(|| format!("reading {}", adapter_cache.display()))?;
+        let path = entry.path();
+        match std::fs::metadata(&path) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => continue,
+            // A dangling symlink or an entry a concurrent GC just removed is
+            // genuinely not a cached build, so it is skipped rather than raised.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(
+                    anyhow::Error::new(e).context(format!("stat cache entry {}", path.display()))
+                );
+            }
+        }
+        let Some(dir_name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if dir_name.ends_with(".tmp") {
+            continue;
+        }
+        versions.push(match dir_name.rsplit_once('-') {
+            Some((prefix, tail)) if super::is_content_hash(tail) => prefix.to_string(),
+            _ => dir_name,
+        });
+    }
+    Ok(Some(versions))
 }
 
 /// Returns marketplace names defined in `config` that no plugin collection references.
@@ -892,7 +958,7 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     let config_dir = paths::config_dir()?;
     let bundles_dir = config_dir.join("bundles");
 
-    for name in bundles_with_missing_dirs(&config.bundle, &bundles_dir) {
+    for name in bundles_with_missing_dirs(&config.bundle, &bundles_dir)? {
         eprintln!(
             "{info} Bundle '{}' declared but directory does not exist at {}",
             crate::util::display_safe(name),
@@ -955,46 +1021,29 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     if skew_relevant {
         for adapter in crate::adapter::registered_adapters() {
             let adapter_cache = cache_dir.join(adapter.name());
-            if let Ok(entries) = std::fs::read_dir(&adapter_cache) {
-                let mut cached_versions: Vec<String> = Vec::new();
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if !path.is_dir() {
-                        continue;
-                    }
-                    let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) else {
-                        continue;
-                    };
-                    if dir_name.ends_with(".tmp") {
-                        continue;
-                    }
-                    let version = match dir_name.rsplit_once('-') {
-                        Some((prefix, tail)) if super::is_content_hash(tail) => prefix.to_string(),
-                        _ => dir_name.to_string(),
-                    };
-                    cached_versions.push(version);
+            let mut cached_versions = match cached_version_folders(&adapter_cache) {
+                Ok(Some(versions)) => versions,
+                Ok(None) => continue,
+                Err(e) => {
+                    eprintln!(
+                        "{warn} Could not check {} for version skew: {e:#}",
+                        adapter_cache.display(),
+                    );
+                    continue;
                 }
-                cached_versions.sort();
-                cached_versions.dedup();
-                let version_folder = crate::materialize::cache::version_major();
-                let current_built = |v: &String| v == super::VERSION_TAG || *v == version_folder;
-                if !cached_versions.is_empty() {
-                    let cached_versions_str = cached_versions.join(", ");
-                    if !cached_versions.iter().any(current_built) {
-                        eprintln!(
-                            "{warn} {} version skew detected: running llmenv {} but cache has versions [{}]",
-                            adapter.name(),
-                            super::VERSION_TAG,
-                            cached_versions_str
-                        );
-                        eprintln!("{warn}   → Fix: cargo install --path . --force");
-                    }
-                }
-            } else {
-                tracing::error!(
-                    "failed to read adapter cache directory {:?} for version skew check",
-                    adapter_cache,
+            };
+            cached_versions.sort();
+            cached_versions.dedup();
+            let version_folder = crate::materialize::cache::version_major();
+            let current_built = |v: &String| v == super::VERSION_TAG || *v == version_folder;
+            if !cached_versions.is_empty() && !cached_versions.iter().any(current_built) {
+                eprintln!(
+                    "{warn} {} version skew detected: running llmenv {} but cache has versions [{}]",
+                    adapter.name(),
+                    super::VERSION_TAG,
+                    cached_versions.join(", "),
                 );
+                eprintln!("{warn}   → Fix: cargo install --path . --force");
             }
         }
     }
@@ -1714,7 +1763,7 @@ mod tests {
                 when: vec!["office".into()],
             },
         ];
-        let missing = bundles_with_missing_dirs(&bundles, &bundles_dir);
+        let missing = bundles_with_missing_dirs(&bundles, &bundles_dir).unwrap();
         assert!(missing.is_empty(), "expected empty: {missing:?}");
     }
 
@@ -1734,9 +1783,90 @@ mod tests {
                 when: vec!["y".into()],
             },
         ];
-        let mut missing = bundles_with_missing_dirs(&bundles, &bundles_dir);
+        let mut missing = bundles_with_missing_dirs(&bundles, &bundles_dir).unwrap();
         missing.sort_unstable();
         assert_eq!(missing, vec!["missing"]);
+    }
+
+    // #1436: an unreadable bundles dir must not be reported as "bundle
+    // directory does not exist" — that sends the user looking for a missing
+    // folder that is actually right there, just unstattable.
+    #[cfg(unix)]
+    #[test]
+    fn bundles_with_missing_dirs_propagates_stat_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let bundles_dir = tmp.path().join("bundles");
+        std::fs::create_dir_all(bundles_dir.join("home")).unwrap();
+        std::fs::set_permissions(&bundles_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let bundles = vec![Bundle {
+            name: "home".into(),
+            when: vec!["local".into()],
+        }];
+        let result = bundles_with_missing_dirs(&bundles, &bundles_dir);
+        let readable_anyway = std::fs::metadata(bundles_dir.join("home")).is_ok();
+        std::fs::set_permissions(&bundles_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if readable_anyway {
+            return; // running as root / FS ignores perms — can't exercise EACCES
+        }
+        assert!(
+            result.is_err(),
+            "unreadable bundles dir must surface the stat error, got {result:?}"
+        );
+    }
+
+    // -- cached_version_folders --
+
+    #[test]
+    fn cached_version_folders_none_when_adapter_cache_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(
+            cached_version_folders(&tmp.path().join("nope"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn cached_version_folders_strips_content_hash_suffix_and_skips_tmp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("claude_code");
+        std::fs::create_dir_all(cache.join(format!("v3-{}", "0123456789abcdef".repeat(4))))
+            .unwrap();
+        std::fs::create_dir_all(cache.join(format!("v3-{}", "a".repeat(64)))).unwrap();
+        std::fs::create_dir_all(cache.join("v4")).unwrap();
+        std::fs::create_dir_all(cache.join("v9.tmp")).unwrap();
+        std::fs::write(cache.join("stray-file"), b"").unwrap();
+
+        let mut versions = cached_version_folders(&cache).unwrap().unwrap();
+        versions.sort();
+        versions.dedup();
+        assert_eq!(versions, vec!["v3".to_string(), "v4".to_string()]);
+    }
+
+    // #1436: the skew scan used to swallow every read error, so an unreadable
+    // adapter cache silently reported "no cached builds" instead of "could not
+    // check". The caller turns this error into a `warn` line.
+    #[cfg(unix)]
+    #[test]
+    fn cached_version_folders_propagates_permission_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("claude_code");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = cached_version_folders(&cache);
+        let readable_anyway = std::fs::read_dir(&cache).is_ok();
+        std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if readable_anyway {
+            return; // running as root / FS ignores perms — can't exercise EACCES
+        }
+        assert!(
+            result.is_err(),
+            "unreadable adapter cache must surface the error, got {result:?}"
+        );
     }
 
     // -- unused_marketplaces --
