@@ -566,14 +566,19 @@ pub(crate) fn open_bounded_log(
     // that behind a generic "inspecting log ..." in `Display`'s default
     // (non-`{:#}`) output.
     crate::paths::reject_non_regular_file(path)?;
-    if let Ok(meta) = std::fs::metadata(path)
-        && meta.len() >= max_bytes
-    {
-        // Single generation: enough to keep the previous failure's trace
-        // around without unbounded growth. A failed rotation isn't worth
-        // aborting the spawn over — the append below still succeeds, though
-        // the size bound then depends on the next attempt.
-        let _ = std::fs::rename(path, path.with_extension("log.1"));
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.len() >= max_bytes => {
+            // Single generation: enough to keep the previous failure's trace
+            // around without unbounded growth. A failed rotation isn't worth
+            // aborting the spawn over — the append below still succeeds,
+            // though the size bound then depends on the next attempt.
+            let _ = std::fs::rename(path, path.with_extension("log.1"));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(anyhow::Error::new(e).context(format!("inspecting log {}", path.display())));
+        }
     }
 
     let mut opts = std::fs::OpenOptions::new();
