@@ -254,15 +254,19 @@ fn open_or_create_dir_at(dir: BorrowedFd<'_>, name: &OsStr, mode: Mode) -> io::R
 /// any of them, landing the write inside the symlink's target — a strictly
 /// stronger primitive than writing through the leaf alone (#1427).
 ///
-/// `rel` must be a relative path with no `..` components — validate with
-/// [`super::is_unsafe_join_target`] before calling; this function does not
-/// re-check.
+/// `rel` should be validated with [`super::is_unsafe_join_target`] before
+/// calling — both current callers do — but `..`, an absolute path, or an
+/// empty/embedded-separator component fails safe here too, as a defense in
+/// depth: each component goes through [`open_or_create_dir_at`]'s or
+/// [`write_file_at`]'s own `reject_traversal` check, which rejects anything
+/// but a single ordinary path component (security-audit, #1427).
 ///
 /// # Errors
 ///
-/// `InvalidInput` when `rel` has no components. Otherwise propagates any
-/// open, `mkdir`, or write failure — including a symlinked directory
-/// component, which fails the walk rather than being followed.
+/// `InvalidInput` when `rel` has no components, or any component isn't a
+/// single ordinary path component. Otherwise propagates any open, `mkdir`,
+/// or write failure — including a symlinked directory component, which
+/// fails the walk rather than being followed.
 pub(crate) fn write_file_through_dirs(
     root: &Path,
     rel: &Path,
@@ -632,6 +636,27 @@ mod tests {
             !outside.join("b/leaf.txt").exists(),
             "the write must not land inside the symlinked directory's target"
         );
+    }
+
+    /// Defense in depth (security-audit, #1427): both current callers
+    /// pre-validate `rel` with `is_unsafe_join_target`, but this function
+    /// must fail safe on its own too — each component goes through
+    /// `reject_traversal` internally via `open_or_create_dir_at`/
+    /// `write_file_at`, so `..`, an absolute path, or an embedded `..`
+    /// never reach a real `openat`/`mkdirat` call.
+    #[test]
+    fn write_file_through_dirs_rejects_unsafe_components_even_without_caller_validation() {
+        let tmp = tempfile::tempdir().unwrap();
+        for bad in [
+            Path::new("../escape.txt"),
+            Path::new("/etc/passwd"),
+            Path::new("a/../b.txt"),
+        ] {
+            assert!(
+                write_file_through_dirs(tmp.path(), bad, b"x", Mode::from(0o600)).is_err(),
+                "{bad:?} must be rejected even without a caller's own pre-validation"
+            );
+        }
     }
 
     #[test]
