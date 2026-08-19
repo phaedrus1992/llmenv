@@ -2448,8 +2448,9 @@ fn inherit_claude_state(adapter_root: &Path, state_dir: &Path, cache_path: &Path
 }
 
 /// Inherit the Codex durable state that has no env var to relocate it: session
-/// transcripts and prompt history (mirrors [`inherit_claude_state`]), plus the
-/// cached `auth.json` credential (#1105).
+/// transcripts and prompt history (mirrors [`inherit_claude_state`]), the
+/// cached `auth.json` credential (#1105), and the three durable SQLite state
+/// DBs (`goals_1.sqlite`, `memories_1.sqlite`, `queue_1.sqlite` — #1420).
 ///
 /// No stranded-folder migration here: Codex materialization is new enough
 /// that there is no pre-existing legacy data to fold in the way
@@ -2491,6 +2492,9 @@ fn inherit_codex_state(state_dir: &Path, cache_path: &Path) {
     }
     if let Err(e) = crate::materialize::inherit::inherit_codex_auth(state_dir, cache_path) {
         tracing::warn!("could not inherit Codex auth (non-fatal): {e:#}");
+    }
+    if let Err(e) = crate::materialize::inherit::link_codex_sqlite_dbs(state_dir, cache_path) {
+        tracing::warn!("could not inherit Codex SQLite state DBs (non-fatal): {e:#}");
     }
 }
 

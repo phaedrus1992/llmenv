@@ -27,12 +27,14 @@
 //!   documented gaps, not missed work.
 //! - session/history/auth inheritance across hash changes (#1105) — landed;
 //!   see [`crate::materialize::inherit::link_codex_sessions_dir`] and sibling
-//!   functions. The six SQLite state databases Codex also writes into
-//!   `$CODEX_HOME` (state/logs/goals/memories/queue/thread-history) are **not**
-//!   covered: naively symlinking or copying a live SQLite file risks
-//!   corruption via its WAL/shm sidecars, and deserves its own design pass
-//!   rather than reusing the single-file-copy contract that only fits
-//!   `auth.json`/`history.jsonl`.
+//!   functions.
+//! - three of the six SQLite state databases Codex writes into `$CODEX_HOME`
+//!   (#1420) — `goals_1.sqlite`, `memories_1.sqlite`, `queue_1.sqlite` — are
+//!   symlinked into the durable store alongside their WAL sidecars; see
+//!   [`crate::materialize::inherit::link_codex_sqlite_dbs`]. The other three
+//!   (`state_5.sqlite`, `logs_2.sqlite`, `thread_history_1.sqlite`) are
+//!   deliberately excluded — each is rebuildable or disposable, per that
+//!   function's doc comment.
 //! - rules beyond the merged AGENTS.md (#1103) — landed; Codex has no
 //!   `rules/*.md`-with-glob-frontmatter convention
 //!   (`docs/reference/codex/agents-md.md`), so `manifest.rules` folds into
