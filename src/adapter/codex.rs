@@ -112,6 +112,21 @@ const BASELINE_HOOK_EVENTS: &[(&str, &str)] = &[
     ("session_end", "SessionEnd"),
 ];
 
+/// `(engine-neutral event, native Codex event)` pairs registered when any
+/// session-log sink is enabled — per-hook prompt/tool-use capture (#382).
+///
+/// Claude Code's set minus `Notification`, which `HookEventsToml` has no field
+/// for: emitting it would write a key Codex silently ignores, so the capture
+/// would look wired and never fire.
+const SESSION_LOG_HOOK_EVENTS: &[(&str, &str)] = &[
+    ("user_prompt_submit", "UserPromptSubmit"),
+    ("pre_tool_use", "PreToolUse"),
+    ("post_tool_use", "PostToolUse"),
+    ("stop", "Stop"),
+    ("subagent_stop", "SubagentStop"),
+    ("pre_compact", "PreCompact"),
+];
+
 /// Keys this adapter renders itself, and which a `native.codex` catch-all
 /// fragment must therefore not overwrite.
 ///
@@ -672,6 +687,51 @@ fn emit_baseline_hooks(
             .or_default()
             .push(command_group(format!("{HOOK_RUN_COMMAND} {neutral_event}")));
     }
+
+    // #317: the rules digest runs on UserPromptSubmit, so enabling the layer has
+    // to register the event — the memory-recall gate below and session logging
+    // are the only other things that do, and neither is implied by turning
+    // slippage on.
+    if super::slippage_rule_reinjection_enabled(manifest)
+        && !manifest.session_log.any_sink_enabled()
+        && !super::lifecycle_event_registered(manifest, "turn_start")
+    {
+        by_event
+            .entry("UserPromptSubmit".into())
+            .or_default()
+            .push(command_group(format!(
+                "{HOOK_RUN_COMMAND} user_prompt_submit"
+            )));
+    }
+
+    // #499: continuous per-prompt memory recall. Gated (unlike the baseline
+    // events above) because it runs on every prompt — an unconditional
+    // network-backed per-turn hook would add latency for scopes with no memory
+    // backend configured at all.
+    if super::lifecycle_event_registered(manifest, "turn_start") {
+        by_event
+            .entry("UserPromptSubmit".into())
+            .or_default()
+            .push(command_group(format!("{HOOK_RUN_COMMAND} turn_start")));
+    }
+
+    if manifest.session_log.any_sink_enabled() {
+        for (neutral_event, native_event) in SESSION_LOG_HOOK_EVENTS {
+            by_event
+                .entry((*native_event).to_string())
+                .or_default()
+                .push(command_group(format!("{HOOK_RUN_COMMAND} {neutral_event}")));
+        }
+    } else if super::lifecycle_event_registered(manifest, "stop") {
+        // #231/#317: the task tracker's Stop reminder and the self-critique
+        // layer each need their own registration rather than depending on
+        // session logging happening to be on. Only in the `else` branch, so a
+        // session-log setup doesn't get two `hook-run` calls on the same event.
+        by_event
+            .entry("Stop".into())
+            .or_default()
+            .push(command_group(format!("{HOOK_RUN_COMMAND} stop")));
+    }
 }
 
 /// Render `manifest.mcps` into Codex's `mcp_servers` table.
@@ -859,7 +919,10 @@ pub(crate) fn apply_seeded_settings(
 #[cfg(test)]
 #[expect(clippy::unwrap_used, clippy::expect_used, reason = "test scaffolding")]
 mod tests {
-    use super::{CodexAdapter, render_mcp_servers};
+    use super::{
+        CodexAdapter, HOOK_RUN_COMMAND, SESSION_LOG_HOOK_EVENTS, SUPPORTED_HOOK_EVENTS,
+        render_mcp_servers,
+    };
     use crate::adapter::AgentAdapter;
     use crate::config::McpTransport;
     use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
@@ -1285,6 +1348,245 @@ mod tests {
         }
         assert!(events.contains_key("SessionStart"));
         assert!(events.contains_key("SessionEnd"));
+    }
+
+    /// Every `command` string registered under one native Codex event.
+    fn hook_commands_for(parsed: &toml::Table, event: &str) -> Vec<String> {
+        parsed["hooks"]["events"]
+            .get(event)
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|group| group.get("hooks").and_then(toml::Value::as_array))
+            .flatten()
+            .filter_map(|h| h.get("command").and_then(toml::Value::as_str))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn manifest_with_memory_mcp() -> MergedManifest {
+        MergedManifest {
+            mcps: vec![crate::mcp::resolve::ResolvedMcp {
+                name: crate::mcp::resolve::MEMORY_MCP_NAME.to_string(),
+                kind: crate::mcp::resolve::ResolvedKind::Remote {
+                    url: "http://localhost:9999".into(),
+                    transport: crate::config::McpTransport::Http,
+                },
+                headers: Default::default(),
+                timeout: None,
+                disabled_tools: vec![],
+                mcp_permissions: None,
+                wakeup_max_tokens: None,
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// A manifest with session logging off, so gates that session logging would
+    /// otherwise satisfy on its own can actually be told apart.
+    fn manifest_without_session_log() -> MergedManifest {
+        let mut manifest = MergedManifest::default();
+        manifest.session_log.file = None;
+        manifest.session_log.transcript = None;
+        manifest
+    }
+
+    /// #1435: Codex materialized the memory MCP but never the per-turn recall
+    /// hook, so `features.memory` was configured and nothing ever fired.
+    #[test]
+    fn turn_start_wired_when_memory_backend_active() {
+        let (_dir, parsed) = materialize_to_toml(&manifest_with_memory_mcp());
+        assert!(
+            hook_commands_for(&parsed, "UserPromptSubmit")
+                .contains(&format!("{HOOK_RUN_COMMAND} turn_start")),
+            "{parsed:?}"
+        );
+    }
+
+    /// Per-prompt and network-backed, so it stays off for scopes with no memory
+    /// backend — same gate the Claude Code adapter applies.
+    #[test]
+    fn turn_start_not_wired_without_memory_backend() {
+        let (_dir, parsed) = materialize_to_toml(&MergedManifest::default());
+        assert!(
+            !hook_commands_for(&parsed, "UserPromptSubmit")
+                .contains(&format!("{HOOK_RUN_COMMAND} turn_start")),
+            "{parsed:?}"
+        );
+    }
+
+    /// #231: the task tracker's Stop reminder must not depend on session
+    /// logging happening to be on.
+    #[test]
+    fn stop_wired_for_task_tracker_without_session_log() {
+        let mut manifest = manifest_without_session_log();
+        manifest.capabilities.features = Some(llmenv_config::Features {
+            task_tracker: Some(llmenv_config::TaskTracker {
+                enabled: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let (_dir, parsed) = materialize_to_toml(&manifest);
+        assert!(
+            hook_commands_for(&parsed, "Stop").contains(&format!("{HOOK_RUN_COMMAND} stop")),
+            "{parsed:?}"
+        );
+    }
+
+    /// #317: the self-critique layer runs on Stop, so enabling it has to
+    /// register the event — otherwise the layer is a phantom.
+    #[test]
+    fn stop_wired_for_slippage_self_critique_alone() {
+        let mut manifest = manifest_without_session_log();
+        manifest.capabilities.features = Some(llmenv_config::Features {
+            slippage: Some(llmenv_config::SlippageControl {
+                enabled: true,
+                self_critique: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let (_dir, parsed) = materialize_to_toml(&manifest);
+        assert!(
+            hook_commands_for(&parsed, "Stop").contains(&format!("{HOOK_RUN_COMMAND} stop")),
+            "{parsed:?}"
+        );
+    }
+
+    #[test]
+    fn stop_not_wired_without_session_log_task_tracker_or_self_critique() {
+        let (_dir, parsed) = materialize_to_toml(&manifest_without_session_log());
+        assert!(
+            !hook_commands_for(&parsed, "Stop").contains(&format!("{HOOK_RUN_COMMAND} stop")),
+            "{parsed:?}"
+        );
+    }
+
+    /// #317: the rules digest runs on UserPromptSubmit, so enabling
+    /// reinjection has to register the event on its own.
+    #[test]
+    fn slippage_rule_reinjection_alone_registers_user_prompt_submit() {
+        let mut manifest = manifest_without_session_log();
+        manifest.capabilities.features = Some(llmenv_config::Features {
+            slippage: Some(llmenv_config::SlippageControl {
+                enabled: true,
+                rule_reinjection: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let (_dir, parsed) = materialize_to_toml(&manifest);
+        assert!(
+            hook_commands_for(&parsed, "UserPromptSubmit")
+                .contains(&format!("{HOOK_RUN_COMMAND} user_prompt_submit")),
+            "{parsed:?}"
+        );
+    }
+
+    /// #382: per-turn capture, registered when any sink is enabled. Codex has
+    /// no `Notification` event, so that one member of Claude's set is dropped
+    /// rather than emitted as a key Codex would ignore.
+    #[test]
+    fn session_log_turn_hooks_registered_when_a_sink_is_enabled() {
+        let (_dir, parsed) = materialize_to_toml(&MergedManifest::default());
+        for (neutral, native) in SESSION_LOG_HOOK_EVENTS {
+            assert!(
+                hook_commands_for(&parsed, native)
+                    .contains(&format!("{HOOK_RUN_COMMAND} {neutral}")),
+                "{native} missing {neutral}: {parsed:?}"
+            );
+        }
+        assert!(
+            !parsed["hooks"]["events"]
+                .as_table()
+                .unwrap()
+                .contains_key("Notification"),
+            "Codex has no Notification event: {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn session_log_turn_hooks_absent_when_every_sink_is_off() {
+        let (_dir, parsed) = materialize_to_toml(&manifest_without_session_log());
+        assert!(
+            !hook_commands_for(&parsed, "PostToolUse")
+                .contains(&format!("{HOOK_RUN_COMMAND} post_tool_use")),
+            "{parsed:?}"
+        );
+    }
+
+    /// Every session-log event Codex registers has to be one Codex actually
+    /// accepts, or the hook looks wired and never fires.
+    #[test]
+    fn session_log_events_are_all_supported_by_codex() {
+        for (_, native) in SESSION_LOG_HOOK_EVENTS {
+            assert!(
+                SUPPORTED_HOOK_EVENTS.contains(native),
+                "{native} is not a Codex event"
+            );
+        }
+    }
+
+    /// The gates `doctor` reports must match what this adapter actually writes,
+    /// the same way `claude_code`'s equivalent test keeps its two halves honest.
+    ///
+    /// Enumerates every combination of the four inputs the gates read rather
+    /// than a handful of fixtures: with hand-picked cases a gate that quietly
+    /// starts requiring two enablers instead of one still passes, because no
+    /// fixture isolates the second.
+    #[test]
+    fn lifecycle_registrations_match_the_rendered_hooks() {
+        for bits in 0..16u8 {
+            let (session_log, task_tracker, self_critique, memory) =
+                (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0);
+            let label = format!(
+                "session_log={session_log} task_tracker={task_tracker} \
+                 self_critique={self_critique} memory={memory}"
+            );
+            let mut manifest = if memory {
+                manifest_with_memory_mcp()
+            } else {
+                MergedManifest::default()
+            };
+            if !session_log {
+                manifest.session_log.file = None;
+                manifest.session_log.transcript = None;
+            }
+            manifest.capabilities.features = Some(llmenv_config::Features {
+                task_tracker: Some(llmenv_config::TaskTracker {
+                    enabled: task_tracker,
+                    ..Default::default()
+                }),
+                slippage: Some(llmenv_config::SlippageControl {
+                    enabled: true,
+                    self_critique,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+
+            let (_dir, parsed) = materialize_to_toml(&manifest);
+            let commands: Vec<String> = parsed["hooks"]["events"]
+                .as_table()
+                .unwrap()
+                .keys()
+                .flat_map(|event| hook_commands_for(&parsed, event))
+                .collect();
+            for (event, registered, why) in crate::adapter::lifecycle_hook_registrations(&manifest)
+            {
+                // Space-delimited so `stop` doesn't also match `subagent_stop`.
+                let suffix = format!(" {event}");
+                let present = commands
+                    .iter()
+                    .any(|c| c.contains("hook-run") && c.ends_with(&suffix));
+                assert_eq!(
+                    present, registered,
+                    "{label}: doctor says {event} registered={registered} ({why}), \
+                     config.toml disagrees: {commands:?}"
+                );
+            }
+        }
     }
 
     /// The `--engine` value is validated at the CLI boundary (#1386), so it has
