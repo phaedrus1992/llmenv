@@ -710,7 +710,18 @@ own `create_if_missing` writes it straight into the durable state dir — inside
 the state dir's `0o700` permissions, but under whatever umask Codex itself
 uses, not the `0o600` forced on the copied files. A pre-existing real file from
 before this link existed is folded in once (copied, then owner-only) the same
-way the files above are.
+way the files above are. That fold-or-keep decision is made once from the base
+`.sqlite` file and applied to every sidecar together — a base file and its
+`-wal` are never folded from two different points in time
+(added in v4.0.0, [#1449](https://github.com/phaedrus1992/llmenv/pull/1449)).
+
+If a DB's base file still looks unmigrated *and* its `-shm` sidecar exists —
+evidence Codex may currently have the DB open in WAL mode — the fold is
+skipped for that `export` rather than risked: folding a live DB could copy a
+torn snapshot, or leave Codex's open file descriptor writing to the file's old,
+now-orphaned inode after the symlink swap. llmenv warns and retries the fold on
+the next `export` instead
+(added in v4.0.0, [#1448](https://github.com/phaedrus1992/llmenv/issues/1448)).
 
 - **`goals_1.sqlite`** — per-thread objectives/status/token budgets.
 - **`memories_1.sqlite`** — generated memory content and its extraction/
