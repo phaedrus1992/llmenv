@@ -3832,7 +3832,10 @@ SOFTWARE.
 Used by:
 - [llmenv-config 4.0.0-alpha.1](https://github.com/phaedrus1992/llmenv)
 - [llmenv-git 4.0.0-alpha.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv-mcp 4.0.0-alpha.1](https://github.com/phaedrus1992/llmenv)
 - [llmenv-paths 4.0.0-alpha.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv-scope 4.0.0-alpha.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv-task 4.0.0-alpha.1](https://github.com/phaedrus1992/llmenv)
 - [llmenv-util 4.0.0-alpha.1](https://github.com/phaedrus1992/llmenv)
 - [anes 0.1.6](https://github.com/zrzka/anes-rs)
 - [difflib 0.4.0](https://github.com/DimaKudosh/difflib)

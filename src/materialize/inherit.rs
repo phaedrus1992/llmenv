@@ -21,6 +21,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
+use zeroize::Zeroizing;
 
 /// Subdirectory of the durable state dir holding Claude Code's transcripts.
 const PROJECTS_DIR: &str = "projects";
@@ -417,7 +418,11 @@ fn capture_codex_auth_with_hook(
 /// produce a trustworthy read — open/read/stat errors, and an mtime that
 /// moved between the two stats — so the caller always treats it as "skip
 /// this capture, the next `export` retries."
-fn read_auth_stable(path: &Path, after_initial_stat: impl FnOnce()) -> Option<Vec<u8>> {
+///
+/// The buffer holds a plaintext OAuth credential, so it's a `Zeroizing`
+/// wrapper rather than a plain `Vec` — scrubbed on drop instead of left in
+/// freed-but-unscrubbed heap memory (security-audit, #1456).
+fn read_auth_stable(path: &Path, after_initial_stat: impl FnOnce()) -> Option<Zeroizing<Vec<u8>>> {
     let file = match open_file_nofollow(path) {
         Ok(f) => f,
         Err(e) => {
@@ -427,7 +432,7 @@ fn read_auth_stable(path: &Path, after_initial_stat: impl FnOnce()) -> Option<Ve
     };
     let before = file.metadata().and_then(|m| m.modified());
     after_initial_stat();
-    let mut bytes = Vec::new();
+    let mut bytes = Zeroizing::new(Vec::new());
     if let Err(e) = std::io::Read::read_to_end(&mut &file, &mut bytes) {
         tracing::warn!(path = %path.display(), error = %e, "inherit: could not read auth.json for capture, skipping");
         return None;
@@ -1756,6 +1761,27 @@ mod tests {
         assert!(
             std::fs::symlink_metadata(state.join(CODEX_AUTH_FILE)).is_err(),
             "nothing should land in the durable store when the read can't be verified stable"
+        );
+    }
+
+    /// Security hardening (#1456): `read_auth_stable`'s buffer holds a
+    /// plaintext OAuth credential, so it must be a `Zeroizing<Vec<u8>>` —
+    /// scrubbed on drop — rather than a plain `Vec<u8>` left in
+    /// freed-but-unscrubbed heap memory. The type annotation below only
+    /// compiles once the return type is wrapped; a plain `Vec<u8>` fails
+    /// to compile against it.
+    #[test]
+    fn read_auth_stable_returns_a_zeroizing_buffer() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = tmp.path().join("codex-hash");
+        write(&cfg.join(CODEX_AUTH_FILE), r#"{"account":"secret-token"}"#);
+
+        let bytes: Option<zeroize::Zeroizing<Vec<u8>>> =
+            read_auth_stable(&cfg.join(CODEX_AUTH_FILE), || {});
+
+        assert_eq!(
+            bytes.as_deref().map(Vec::as_slice),
+            Some(br#"{"account":"secret-token"}"#.as_slice())
         );
     }
 

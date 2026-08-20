@@ -1337,6 +1337,7 @@ dependencies = [
  "url",
  "walkdir",
  "wiremock",
+ "zeroize",
 ]
 
 [[package]]
