@@ -2281,7 +2281,7 @@ fn handle_web_fetch_post_tool_use(payload: &serde_json::Value) -> Option<std::pr
     cmd.arg("icm-store")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null());
-    redirect_stderr_to_detached_log(&mut cmd);
+    redirect_stderr_to_detached_log(&mut cmd, detached_child_log_path);
     crate::mcp::proxy::detach_process_group(&mut cmd);
     let Ok(mut child) = cmd.spawn() else {
         tracing::debug!("icm-store: failed to spawn detached store child");
@@ -2326,7 +2326,7 @@ const BOUNDED_LOG_MAX_BYTES: u64 = 1 << 19; // 512 KiB
 ///
 /// # Errors
 /// Propagates `state_dir()` resolution failure.
-fn detached_child_log_path() -> anyhow::Result<std::path::PathBuf> {
+pub(crate) fn detached_child_log_path() -> anyhow::Result<std::path::PathBuf> {
     Ok(crate::paths::state_dir()?.join("detached-hook.log"))
 }
 
@@ -2373,8 +2373,17 @@ fn redirect_stderr_to_bounded_log(
 /// `Stdio::null()` leaves such a child with no report channel whatsoever: its
 /// own `tracing` events go to a fmt layer writing to that same null stderr, so
 /// a failure is discarded twice over.
-pub(crate) fn redirect_stderr_to_detached_log(cmd: &mut std::process::Command) {
-    match detached_child_log_path() {
+///
+/// `log_path` resolves the log's location; every real caller passes
+/// [`detached_child_log_path`]. Parameterized rather than calling it
+/// directly so a test can inject a fixed tempdir path — this workspace
+/// forbids `unsafe`, so a test can't safely override `state_dir()`'s
+/// `LLMENV_STATE_DIR`/`HOME` env vars to control the real resolver instead.
+pub(crate) fn redirect_stderr_to_detached_log(
+    cmd: &mut std::process::Command,
+    log_path: impl FnOnce() -> anyhow::Result<std::path::PathBuf>,
+) {
+    match log_path() {
         // Always state_dir-rooted, so `LogDirMode::OwnerOnly` is safe.
         Ok(path) => redirect_stderr_to_bounded_log(
             cmd,
@@ -2470,7 +2479,7 @@ fn post_session_consolidation() {
     cmd.arg("consolidation-run")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null());
-    redirect_stderr_to_detached_log(&mut cmd);
+    redirect_stderr_to_detached_log(&mut cmd, detached_child_log_path);
     crate::mcp::proxy::detach_process_group(&mut cmd);
     if let Err(e) = cmd.spawn() {
         tracing::debug!("consolidation-run: failed to spawn detached child: {e}");
@@ -2979,6 +2988,27 @@ mod tests {
             Some("detached-hook.log")
         );
         assert!(path.starts_with(crate::paths::state_dir().expect("test")));
+    }
+
+    /// End-to-end coverage for `redirect_stderr_to_detached_log` itself, not
+    /// just the `redirect_stderr_to_bounded_log` helper it delegates to
+    /// (`redirect_stderr_to_bounded_log_captures_child_stderr` above already
+    /// covers that) — this calls the exact same function signature real
+    /// callers do, with an injected path resolver instead of the real
+    /// `detached_child_log_path`, so it's the one test that would catch this
+    /// function's own body being replaced wholesale.
+    #[test]
+    fn redirect_stderr_to_detached_log_writes_to_the_resolved_path() {
+        let dir = tempfile::tempdir().expect("test");
+        let log_path = dir.path().join("detached-hook.log");
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg("echo boom >&2");
+        redirect_stderr_to_detached_log(&mut cmd, || Ok(log_path.clone()));
+
+        assert!(cmd.status().expect("test").success());
+        let body = std::fs::read_to_string(&log_path)
+            .expect("a detached child's stderr must reach the resolved log path");
+        assert!(body.contains("boom"), "stderr not captured: {body}");
     }
 
     /// Fixture for the two #1132 failure modes: a firing bundle whose
