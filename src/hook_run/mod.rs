@@ -1182,7 +1182,7 @@ fn run_inner(
                 // child process so the hook returns immediately instead of
                 // blocking on MCP. The result is fire-and-forget — PostSession is
                 // the final event, so no caller needs its output.
-                if event == HookEvent::PostSession {
+                if is_post_session_consolidation_event(event) {
                     drop(post_session_consolidation());
                 }
 
@@ -2464,6 +2464,15 @@ fn trigger_codebase_memory_index(
     if let Err(e) = cmd.spawn() {
         tracing::debug!("codebase-memory-mcp index_repository: failed to spawn: {e}");
     }
+}
+
+/// Whether `event` should trigger [`post_session_consolidation`] — only
+/// `PostSession`, the final event of a session. Extracted as its own
+/// directly-testable predicate (#1465): the call site sits inside
+/// `run_inner`'s async, MCP-client-mocked block, too heavy a harness to
+/// exercise just for this one routing decision.
+fn is_post_session_consolidation_event(event: HookEvent) -> bool {
+    event == HookEvent::PostSession
 }
 
 /// Spawn a detached child to run post-session consolidation. Best-effort
@@ -5166,6 +5175,28 @@ mod tests {
         let mut child =
             child.expect("current_exe() resolving must spawn a detached consolidation child");
         reap_test_child(&mut child, std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn is_post_session_consolidation_event_fires_only_for_post_session() {
+        assert!(is_post_session_consolidation_event(HookEvent::PostSession));
+        for other in [
+            HookEvent::SessionStart,
+            HookEvent::TurnStart,
+            HookEvent::SessionEnd,
+            HookEvent::UserPromptSubmit,
+            HookEvent::PreToolUse,
+            HookEvent::PostToolUse,
+            HookEvent::Notification,
+            HookEvent::Stop,
+            HookEvent::SubagentStop,
+            HookEvent::PreCompact,
+        ] {
+            assert!(
+                !is_post_session_consolidation_event(other),
+                "{other:?} must not trigger post-session consolidation"
+            );
+        }
     }
 
     /// Wait for `child` to exit, bounded by `timeout`; force-kill and wait
