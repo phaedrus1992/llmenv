@@ -2,11 +2,12 @@
 #
 # The `llmenv` binary is the only entry point hawk analyses reachability *from*.
 #
-# #1314: the four `crates/*` libs are NOT internal-only, as this file previously
-# claimed. `.github/workflows/release.yml` publishes `llmenv-util`,
-# `llmenv-paths`, `llmenv-git`, and `llmenv-config` to crates.io on every
-# release, so their public API is an external surface and narrowing a `pub`
-# there is a breaking change for downstream consumers, not a cleanup.
+# #1314: the `crates/*` libs are NOT internal-only, as this file previously
+# claimed. `.github/workflows/release.yml` publishes every one of them
+# (`llmenv-util`, `llmenv-paths`, `llmenv-git`, `llmenv-config`,
+# `llmenv-scope`, `llmenv-mcp`, `llmenv-task`) to crates.io on every release,
+# so their public API is an external surface and narrowing a `pub` there is a
+# breaking change for downstream consumers, not a cleanup.
 #
 # They're marked as external boundaries via `--exclude-crate`, which hawk has no
 # hawk.toml equivalent for — see scripts/hawk-check.sh, the single place that

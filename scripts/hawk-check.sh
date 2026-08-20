@@ -25,6 +25,9 @@ EXTERNAL_BOUNDARY_CRATES=(
   llmenv_git
   llmenv_paths
   llmenv_util
+  llmenv_scope
+  llmenv_mcp
+  llmenv_task
 )
 
 args=()

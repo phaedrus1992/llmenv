@@ -1,4 +1,4 @@
-use crate::config::{ContentScope, HostScope, NetworkScope, UserScope};
+use llmenv_config::{ContentScope, HostScope, NetworkScope, UserScope};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
@@ -9,8 +9,11 @@ use std::time::{Duration, Instant};
 /// and yields a minimal project with defaults (cwd folder name for id/name).
 #[derive(Debug, Clone)]
 pub struct ResolvedProject {
-    pub(crate) root: std::path::PathBuf,
-    pub(crate) id: String,
+    // `root`/`id` are read externally (`task::project` discovers the project
+    // root via `discover_project`), so both are `pub`. Every other field is
+    // only ever consumed inside this crate.
+    pub root: std::path::PathBuf,
+    pub id: String,
     pub(crate) name: String,
     pub(crate) description: Option<String>,
     pub(crate) tags: Vec<String>,
@@ -113,7 +116,7 @@ impl Env {
     /// detection is cheap, and caching a MAC-less env could shadow a later
     /// [`detect`] that needs it within the same process.
     #[must_use]
-    pub(crate) fn detect_for_config(config: &crate::config::Config) -> Self {
+    pub fn detect_for_config(config: &llmenv_config::Config) -> Self {
         if config.scope.network.is_empty() {
             Self::detect_fresh(false)
         } else {
@@ -186,7 +189,7 @@ fn parse_extra_tags(raw: &str) -> Vec<String> {
 /// the resulting error silently disables memory recall/store *and*
 /// session-log for the whole session (#1035), so untrusted sources are
 /// filtered here, at creation, rather than left to fail downstream.
-pub(crate) fn is_valid_tag_charset(tag: &str) -> bool {
+pub fn is_valid_tag_charset(tag: &str) -> bool {
     !tag.is_empty()
         && tag
             .chars()
@@ -442,7 +445,7 @@ pub(crate) fn matches_content_all<'a>(
 /// dropped in e.g. `/tmp` (on a shared host) or `/Volumes/...` from being
 /// picked up. When `$HOME` is unknown, only the cwd itself is checked.
 #[must_use]
-pub(crate) fn discover_project(env: &Env) -> Option<ResolvedProject> {
+pub fn discover_project(env: &Env) -> Option<ResolvedProject> {
     let mut cur = std::path::PathBuf::from(&env.cwd);
     loop {
         let marker_path = cur.join(".llmenv.yaml");
@@ -655,7 +658,7 @@ mod tests {
     fn content_scope(id: &str, glob: &str, depth: Option<usize>) -> ContentScope {
         ContentScope {
             id: id.to_string(),
-            r#match: crate::config::ContentMatch {
+            r#match: llmenv_config::ContentMatch {
                 glob: glob.to_string(),
                 depth,
             },
@@ -1039,6 +1042,31 @@ mod tests {
         ) {
             let raw = tags.join(",");
             prop_assert_eq!(parse_extra_tags(&raw), tags);
+        }
+
+        // Any string built entirely from the accepted charset (alphanumeric,
+        // `-`, `_`) is accepted, regardless of length or which characters
+        // from that set it uses (property-test-gap-finder, #1465).
+        #[test]
+        fn is_valid_tag_charset_accepts_any_string_from_the_allowed_charset(
+            tag in "[a-zA-Z0-9_-]{1,64}"
+        ) {
+            prop_assert!(is_valid_tag_charset(&tag));
+        }
+
+        // A string containing at least one character outside the accepted
+        // charset is always rejected, wherever that character falls.
+        #[test]
+        fn is_valid_tag_charset_rejects_any_string_containing_a_disallowed_char(
+            prefix in "[a-zA-Z0-9_-]{0,10}",
+            bad in prop::char::any().prop_filter(
+                "must be outside the accepted charset",
+                |c| !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_'),
+            ),
+            suffix in "[a-zA-Z0-9_-]{0,10}",
+        ) {
+            let tag = format!("{prefix}{bad}{suffix}");
+            prop_assert!(!is_valid_tag_charset(&tag));
         }
 
         // discover_project never panics on arbitrary cwd paths.

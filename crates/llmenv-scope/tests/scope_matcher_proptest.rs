@@ -1,5 +1,5 @@
-use llmenv::config::{Config, Scopes};
-use llmenv::scope::Env;
+use llmenv_config::{Config, Scopes};
+use llmenv_scope::Env;
 use proptest::prelude::*;
 
 // ===== Scope Evaluation Determinism =====
@@ -10,16 +10,16 @@ fn prop_scope_evaluation_is_deterministic() {
             let cfg = Config {
                 scope: Scopes {
                     host: vec![
-                        llmenv::config::HostScope {
+                        llmenv_config::HostScope {
                             id: "h1".into(),
-                            r#match: llmenv::config::HostMatch {
+                            r#match: llmenv_config::HostMatch {
                                 hostname: Some(hostname.clone()),
                             },
                             tags: vec!["tag1".into()],
     },
-                        llmenv::config::HostScope {
+                        llmenv_config::HostScope {
                             id: "h2".into(),
-                            r#match: llmenv::config::HostMatch {
+                            r#match: llmenv_config::HostMatch {
                                 hostname: None,
                             },
                             tags: vec!["tag2".into()],
@@ -37,8 +37,8 @@ fn prop_scope_evaluation_is_deterministic() {
                 ..Env::empty()
             };
 
-            let result1 = llmenv::scope::evaluate(&cfg, &env);
-            let result2 = llmenv::scope::evaluate(&cfg, &env);
+            let result1 = llmenv_scope::evaluate(&cfg, &env);
+            let result2 = llmenv_scope::evaluate(&cfg, &env);
 
             assert_eq!(result1.scopes.len(), result2.scopes.len());
             assert_eq!(result1.tags.len(), result2.tags.len());
@@ -60,16 +60,16 @@ fn prop_multiple_scopes_accumulate_tags() {
         )| {
             let cfg = Config {
                 scope: Scopes {
-                    host: vec![llmenv::config::HostScope {
+                    host: vec![llmenv_config::HostScope {
                         id: "h".into(),
-                        r#match: llmenv::config::HostMatch {
+                        r#match: llmenv_config::HostMatch {
                             hostname: Some(hostname.clone()),
                         },
                         tags: vec!["host_tag".into()],
     }],
-                    user: vec![llmenv::config::UserScope {
+                    user: vec![llmenv_config::UserScope {
                         id: "u".into(),
-                        r#match: llmenv::config::UserMatch {
+                        r#match: llmenv_config::UserMatch {
                             user: Some(user.clone()),
                         },
                         tags: vec!["user_tag".into()],
@@ -86,7 +86,7 @@ fn prop_multiple_scopes_accumulate_tags() {
                 ..Env::empty()
             };
 
-            let active = llmenv::scope::evaluate(&cfg, &env);
+            let active = llmenv_scope::evaluate(&cfg, &env);
 
             assert_eq!(active.scopes.len(), 2);
             assert!(active.tags.contains("host_tag"));
@@ -99,17 +99,17 @@ fn prop_multiple_scopes_accumulate_tags() {
 #[test]
 fn prop_scope_matching_order_independent() {
     proptest!(|(hostname in "[a-z0-9]{1,15}")| {
-            let scope1 = llmenv::config::HostScope {
+            let scope1 = llmenv_config::HostScope {
                 id: "first".into(),
-                r#match: llmenv::config::HostMatch {
+                r#match: llmenv_config::HostMatch {
                     hostname: Some(hostname.clone()),
                 },
                 tags: vec!["tag1".into()],
     };
 
-            let scope2 = llmenv::config::HostScope {
+            let scope2 = llmenv_config::HostScope {
                 id: "second".into(),
-                r#match: llmenv::config::HostMatch {
+                r#match: llmenv_config::HostMatch {
                     hostname: None,
                 },
                 tags: vec!["tag2".into()],
@@ -138,8 +138,8 @@ fn prop_scope_matching_order_independent() {
                 ..Env::empty()
             };
 
-            let result1 = llmenv::scope::evaluate(&cfg1, &env);
-            let result2 = llmenv::scope::evaluate(&cfg2, &env);
+            let result1 = llmenv_scope::evaluate(&cfg1, &env);
+            let result2 = llmenv_scope::evaluate(&cfg2, &env);
 
             let ids1: std::collections::HashSet<_> =
                 result1.scopes.iter().map(|s| s.id.as_str()).collect();

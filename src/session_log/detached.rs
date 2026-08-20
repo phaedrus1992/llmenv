@@ -60,7 +60,10 @@ pub(crate) fn spawn_record(session_id: &str, ev: &SessionLogEvent) -> Option<Chi
     cmd.arg("session-log-record")
         .stdin(Stdio::piped())
         .stdout(Stdio::null());
-    crate::hook_run::redirect_stderr_to_detached_log(&mut cmd);
+    crate::hook_run::redirect_stderr_to_detached_log(
+        &mut cmd,
+        crate::hook_run::detached_child_log_path,
+    );
     crate::mcp::proxy::detach_process_group(&mut cmd);
     let Ok(mut child) = cmd.spawn() else {
         tracing::debug!("session_log: failed to spawn detached record child");
