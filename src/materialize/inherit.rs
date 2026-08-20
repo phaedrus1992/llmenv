@@ -75,6 +75,18 @@ const CODEX_COPIED_FILES: &[&str] = &[CODEX_HISTORY_FILE];
 /// durably relocating. Idempotent: a link already pointing at the target is
 /// left untouched.
 ///
+/// No liveness guard runs before this fold, unlike
+/// [`sqlite_fold_would_race_a_live_db`] — deliberately, not by omission
+/// (security-audit, #1451). [`move_dir_newest_wins`] relocates each file via
+/// `rename`, which repoints a directory entry without touching the
+/// underlying inode: a writer with the file already open keeps writing to
+/// the same inode at its new location, so there is no SQLite-style split
+/// between a moved "base" and an independently-opened sidecar for `rename`
+/// to strand. The remaining risk is a *new* file created after this fold's
+/// directory listing was taken; [`clear_link_site`] already covers that by
+/// refusing to remove a directory the fold couldn't empty, deferring the
+/// swap to the next `export` instead of destroying what landed mid-fold.
+///
 /// # Errors
 /// Returns an error when the durable dir cannot be created, an existing tree
 /// cannot be folded in, or the link cannot be created.
@@ -161,6 +173,18 @@ pub(crate) fn inherit_codex_copied_files(
     inherit_copied_files_named(state_dir, config_dir, CODEX_COPIED_FILES)
 }
 
+/// No liveness/atomicity guard runs before the copy, deliberately, not by
+/// omission (security-audit, #1451). [`COPIED_FILES`]/[`CODEX_COPIED_FILES`]
+/// entries are copied out of the store only when the destination folder has
+/// none yet ([`dest_already_present`]), and the store's own copy is written
+/// exactly once, by [`capture_copied_files_named`], which likewise never
+/// overwrites an existing store entry. So by the time this function's source
+/// read can race anything, that source has already stopped changing — the
+/// narrow window is the very first capture into an empty store, and a torn
+/// read there costs at most a slightly-off `history.jsonl`/needs-auth cache
+/// for one folder, not lost or corrupted state (unlike `auth.json`'s
+/// newest-mtime-wins contract in [`capture_codex_auth`], which does need a
+/// guard because it *keeps* overwriting).
 fn inherit_copied_files_named(
     state_dir: &Path,
     config_dir: &Path,
@@ -320,10 +344,32 @@ pub(crate) fn inherit_codex_auth(state_dir: &Path, config_dir: &Path) -> anyhow:
 /// [`is_newer_at`]'s same tie-break for the reverse reason (a missing
 /// *source* there vs. a missing *destination* here).
 ///
+/// Unlike the SQLite fold, this path never symlinks the source, so it has no
+/// orphaned-inode failure mode — but it does have a torn-read one. Codex's
+/// own `save()` (`codex-rs/login/src/auth/storage.rs`, `rust-v0.148.0`)
+/// truncates and writes `auth.json` in place rather than temp-then-rename, so
+/// a read racing a token refresh can observe a torn or empty file. There is
+/// no sidecar artifact like SQLite's `-shm` to check beforehand, so the read
+/// is bracketed by an mtime stat immediately before and after it; a change in
+/// between means the bytes may span two writes and are discarded rather than
+/// risked in the durable store (security-audit, #1451). The next capture
+/// retries once the file has settled.
+///
 /// # Errors
-/// Returns an error when a copy fails. A file absent from the folder is a
-/// no-op.
+/// Returns an error when the read or write fails. A file absent from the
+/// folder is a no-op.
 pub(crate) fn capture_codex_auth(state_dir: &Path, config_dir: &Path) -> anyhow::Result<()> {
+    capture_codex_auth_with_hook(state_dir, config_dir, || {})
+}
+
+/// [`capture_codex_auth`] with a hook run between the pre-read mtime stat and
+/// the read itself, so a concurrent modification racing the read can be
+/// simulated deterministically in tests without a real writer thread.
+fn capture_codex_auth_with_hook(
+    state_dir: &Path,
+    config_dir: &Path,
+    after_initial_stat: impl FnOnce(),
+) -> anyhow::Result<()> {
     let src = config_dir.join(CODEX_AUTH_FILE);
     let dst = state_dir.join(CODEX_AUTH_FILE);
     if !is_real_file(&src) {
@@ -332,7 +378,31 @@ pub(crate) fn capture_codex_auth(state_dir: &Path, config_dir: &Path) -> anyhow:
     if dest_already_present(&dst) && !src_is_newer(&src, &dst) {
         return Ok(());
     }
-    copy_owner_only(&src, &dst)
+    let before = std::fs::metadata(&src).and_then(|m| m.modified()).ok();
+    after_initial_stat();
+    let bytes = std::fs::read(&src).with_context(|| format!("reading {}", src.display()))?;
+    let after = std::fs::metadata(&src).and_then(|m| m.modified()).ok();
+    if !capture_read_was_stable(before, after) {
+        tracing::warn!(
+            path = %src.display(),
+            "inherit: auth.json changed mid-read — likely a concurrent Codex \
+             token refresh; skipping this capture, will retry on the next export"
+        );
+        return Ok(());
+    }
+    crate::paths::write_owner_only(&dst, &bytes)
+        .with_context(|| format!("writing {}", dst.display()))
+}
+
+/// Whether a read bracketed by `before` and `after` mtimes is safe to trust.
+/// A stat failure on either side (`None`) counts as unstable — the same
+/// err-toward-caution default as [`sqlite_fold_would_race_a_live_db`]'s own
+/// stat-error handling.
+fn capture_read_was_stable(
+    before: Option<std::time::SystemTime>,
+    after: Option<std::time::SystemTime>,
+) -> bool {
+    matches!((before, after), (Some(b), Some(a)) if b == a)
 }
 
 /// Whether `src`'s mtime is strictly newer than `dst`'s. A destination whose
@@ -410,9 +480,10 @@ const SQLITE_SIDECAR_SUFFIXES: &[&str] = &["-wal", "-shm"];
 /// (`sqlite.rs`) writes straight into the durable store the first time it
 /// opens a DB that has never existed on either side.
 ///
-/// A family whose base file [`sqlite_fold_would_race_a_live_db`] is skipped
-/// entirely this pass rather than folded, to avoid racing a Codex process
-/// that may still have it open (#1448); the next `export` retries it.
+/// A family for which [`sqlite_fold_would_race_a_live_db`] returns `true` is
+/// skipped entirely this pass rather than folded, to avoid racing a Codex
+/// process that may still have it open (#1448); the next `export` retries
+/// it.
 ///
 /// # Errors
 /// Returns an error when an existing file can't be folded in or a link can't
@@ -446,9 +517,35 @@ pub(crate) fn link_codex_sqlite_dbs(state_dir: &Path, config_dir: &Path) -> anyh
     Ok(())
 }
 
-/// True when `<config_dir>/<name>` is still a real, not-yet-migrated file
-/// (the fold branch in [`link_durable_sqlite_member`] would fire on it) *and*
-/// its `-shm` sidecar exists — SQLite creates `-shm` while a WAL-mode
+/// True when at least one member of `name`'s family (base file or either of
+/// [`SQLITE_SIDECAR_SUFFIXES`]) is still a real, not-yet-migrated file in
+/// `config_dir` — i.e. [`link_durable_sqlite_member`]'s fold branch would
+/// still fire on it. Once every member is already a symlink, the idempotent
+/// no-op path never touches any of them, so there is nothing left to protect
+/// against a live connection (#1450).
+///
+/// A stat failure other than "not found" counts as unmigrated — the same
+/// err-toward-caution default [`sqlite_fold_would_race_a_live_db`] applies to
+/// its own checks, since this helper only exists to decide whether that
+/// liveness check needs to run at all.
+fn family_has_an_unmigrated_member(name: &str, config_dir: &Path) -> bool {
+    std::iter::once((*name).to_string())
+        .chain(SQLITE_SIDECAR_SUFFIXES.iter().map(|s| format!("{name}{s}")))
+        .any(
+            |member| match std::fs::symlink_metadata(config_dir.join(&member)) {
+                Ok(md) => md.file_type().is_file(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                Err(e) => {
+                    tracing::warn!(db = name, member, error = %e, "inherit: could not stat Codex SQLite family member, treating as unmigrated to be safe");
+                    true
+                }
+            },
+        )
+}
+
+/// True when `name`'s family (base file + [`SQLITE_SIDECAR_SUFFIXES`]) has a
+/// member still real (per [`family_has_an_unmigrated_member`]) *and* the
+/// base name's `-shm` sidecar exists — SQLite creates `-shm` while a WAL-mode
 /// connection is attached, and removes it once the last connection closes
 /// cleanly, so its presence is evidence a running Codex process may still
 /// hold the DB open (#1448). Folding a live DB risks reading a torn snapshot
@@ -456,30 +553,26 @@ pub(crate) fn link_codex_sqlite_dbs(state_dir: &Path, config_dir: &Path) -> anyh
 /// file descriptor keeps writing to the orphaned inode instead of the new
 /// symlink target — losing those writes once it closes the file.
 ///
-/// Scoped to the not-yet-migrated case only: an already-symlinked DB with an
-/// active connection is the normal steady state and carries none of this
-/// risk, since the idempotent no-op path never touches the file.
+/// Checked family-wide, not just on the base file: a prior
+/// `link_codex_sqlite_dbs` run can partially fail after symlinking the base
+/// but before symlinking a sidecar (e.g. `attach_store_atomic` erroring on
+/// the sidecar's rename after the base's succeeded), leaving the base
+/// migrated while a sidecar is still real and potentially live. Gating on the
+/// base file alone would miss exactly that case (#1450) — an already fully
+/// migrated family is the only case with nothing left to protect.
 ///
 /// Not exhaustive — a `-shm` left behind by an ungraceful exit reads as
 /// "live" too — but a false positive only defers this one-time migration to
 /// a later `export`; it never loses or corrupts data.
 ///
 /// A stat failure other than "not found" (permission denied, transient I/O)
-/// on either check is treated as live rather than absent — this function
+/// on the `-shm` check is treated as live rather than absent — this function
 /// exists purely to avoid a data-losing race, so an inconclusive answer must
 /// err toward skipping the fold, not toward proceeding with one it can no
 /// longer rule out (mirrors [`is_real_file`]'s NotFound-vs-other-error split,
 /// #1341).
 fn sqlite_fold_would_race_a_live_db(name: &str, config_dir: &Path) -> bool {
-    let is_unmigrated_file = match std::fs::symlink_metadata(config_dir.join(name)) {
-        Ok(md) => md.file_type().is_file(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-        Err(e) => {
-            tracing::warn!(db = name, error = %e, "inherit: could not stat Codex SQLite file, treating as live to be safe");
-            return true;
-        }
-    };
-    if !is_unmigrated_file {
+    if !family_has_an_unmigrated_member(name, config_dir) {
         return false;
     }
     match std::fs::symlink_metadata(config_dir.join(format!("{name}-shm"))) {
@@ -1494,6 +1587,57 @@ mod tests {
         );
     }
 
+    /// #1451: `auth.json` has no artifact like SQLite's `-shm` sidecar to
+    /// signal a write in progress — Codex's `save()`
+    /// (`codex-rs/login/src/auth/storage.rs`, `rust-v0.148.0`) truncates and
+    /// writes the file in place rather than temp-then-rename, so a
+    /// concurrent read can observe a torn write. The hook simulates that
+    /// race landing between the pre-read stat and the read itself; the
+    /// capture must discard the read rather than persist a possibly-torn
+    /// snapshot into the durable store.
+    #[test]
+    fn capture_codex_auth_skips_a_read_that_races_a_concurrent_modification() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        std::fs::create_dir_all(&state).unwrap();
+        write(&cfg.join(CODEX_AUTH_FILE), "before-refresh");
+
+        capture_codex_auth_with_hook(&state, &cfg, || {
+            write(&cfg.join(CODEX_AUTH_FILE), "mid-refresh-content");
+            let now = filetime::FileTime::now();
+            filetime::set_file_mtime(
+                cfg.join(CODEX_AUTH_FILE),
+                filetime::FileTime::from_unix_time(now.unix_seconds() + 60, 0),
+            )
+            .unwrap();
+        })
+        .unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(state.join(CODEX_AUTH_FILE)).is_err(),
+            "a capture that raced a concurrent write must not land in the durable store"
+        );
+    }
+
+    /// The pure stability decision: only a matching, successfully-read mtime
+    /// on both sides of the read counts as safe. A stat failure on either
+    /// side must count as unstable, not absent — same conservative default
+    /// as [`sqlite_fold_would_race_a_live_db`]'s stat-error handling.
+    #[test]
+    fn capture_read_was_stable_requires_matching_non_error_mtimes() {
+        let t1 = SystemTime::UNIX_EPOCH;
+        let t2 = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        assert!(capture_read_was_stable(Some(t1), Some(t1)));
+        assert!(
+            !capture_read_was_stable(Some(t1), Some(t2)),
+            "an mtime change between stats means the read may be torn"
+        );
+        assert!(!capture_read_was_stable(None, Some(t1)));
+        assert!(!capture_read_was_stable(Some(t1), None));
+        assert!(!capture_read_was_stable(None, None));
+    }
+
     #[test]
     fn projects_and_history_names_are_stable() {
         assert_eq!(PathBuf::from(PROJECTS_DIR), PathBuf::from("projects"));
@@ -1591,6 +1735,51 @@ mod tests {
         assert!(
             std::fs::symlink_metadata(state.join(CODEX_GOALS_DB)).is_err(),
             "nothing should land in the durable store while the DB looks live"
+        );
+    }
+
+    /// #1450: a prior `link_codex_sqlite_dbs` run can partially fail after
+    /// symlinking the base file but before symlinking a WAL sidecar (e.g.
+    /// `attach_store_atomic` erroring on the sidecar's rename after the
+    /// base's succeeded). The base then reads as "already migrated," but a
+    /// sidecar left real and live must still block the fold — not just the
+    /// base-file-is-still-real case #1448 covered.
+    #[cfg(unix)]
+    #[test]
+    fn link_codex_sqlite_dbs_skips_a_sidecar_left_real_after_a_partial_prior_failure() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(&cfg).unwrap();
+
+        // Base file already fully migrated by a prior successful pass.
+        write(&state.join(CODEX_GOALS_DB), "goals-content");
+        std::os::unix::fs::symlink(state.join(CODEX_GOALS_DB), cfg.join(CODEX_GOALS_DB)).unwrap();
+
+        // The `-wal` sidecar was left real by that prior run's partial
+        // failure, and Codex still has it open (`-shm` present).
+        let wal = cfg.join(format!("{CODEX_GOALS_DB}-wal"));
+        write(&wal, "live-wal-content");
+        write(&cfg.join(format!("{CODEX_GOALS_DB}-shm")), "shm");
+
+        link_codex_sqlite_dbs(&state, &cfg).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&wal)
+                .unwrap()
+                .file_type()
+                .is_file(),
+            "a sidecar left real by a partial prior failure must not be folded while it looks live"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&wal).unwrap(),
+            "live-wal-content",
+            "the folder's copy must be left exactly as it was"
+        );
+        assert!(
+            std::fs::symlink_metadata(state.join(format!("{CODEX_GOALS_DB}-wal"))).is_err(),
+            "nothing should land in the durable store for the sidecar while the DB looks live"
         );
     }
 
