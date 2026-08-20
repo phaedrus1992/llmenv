@@ -186,7 +186,7 @@ jobs:
           # sub-crates were left at the old version.
           validate_versions() {
             local tag_version="$1" errors=0 actual
-            for crate in llmenv llmenv-util llmenv-paths llmenv-git llmenv-config; do
+            for crate in llmenv llmenv-util llmenv-paths llmenv-git llmenv-config llmenv-scope llmenv-mcp llmenv-task; do
               actual=$(cargo metadata --no-deps --format-version 1 | \
                 jq -r --arg n "$crate" '.packages[] | select(.name == $n) | .version')
               if [[ "${actual}" != "${tag_version}" ]]; then
@@ -250,7 +250,19 @@ jobs:
           publish_crate "llmenv-config" "${VERSION}"
           wait_for_crate "llmenv-config" "${VERSION}"
 
-          # Root crate depends on all four sub-crates.
+          # llmenv-scope depends on llmenv-config; llmenv-mcp depends on
+          # llmenv-config and llmenv-paths (already indexed above) — both can
+          # publish in the same batch, independent of each other.
+          publish_crate "llmenv-scope" "${VERSION}"
+          publish_crate "llmenv-mcp"   "${VERSION}"
+          wait_for_crate "llmenv-scope" "${VERSION}"
+          wait_for_crate "llmenv-mcp"   "${VERSION}"
+
+          # llmenv-task depends on llmenv-scope and llmenv-paths.
+          publish_crate "llmenv-task" "${VERSION}"
+          wait_for_crate "llmenv-task" "${VERSION}"
+
+          # Root crate depends on all seven sub-crates.
           publish_crate "llmenv" "${VERSION}"
 
   create-release:
