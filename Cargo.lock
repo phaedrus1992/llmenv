@@ -1312,7 +1312,10 @@ dependencies = [
  "jiff",
  "llmenv-config",
  "llmenv-git",
+ "llmenv-mcp",
  "llmenv-paths",
+ "llmenv-scope",
+ "llmenv-task",
  "llmenv-util",
  "predicates",
  "proptest",
@@ -1360,11 +1363,56 @@ dependencies = [
 ]
 
 [[package]]
+name = "llmenv-mcp"
+version = "4.0.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "llmenv-config",
+ "llmenv-paths",
+ "proptest",
+ "tempfile",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "llmenv-paths"
 version = "4.0.0-alpha.1"
 dependencies = [
  "anyhow",
  "proptest",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "llmenv-scope"
+version = "4.0.0-alpha.1"
+dependencies = [
+ "globset",
+ "llmenv-config",
+ "proptest",
+ "rustix",
+ "serde",
+ "serde_yaml_ng",
+ "tempfile",
+ "tracing",
+ "walkdir",
+]
+
+[[package]]
+name = "llmenv-task"
+version = "4.0.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "humantime",
+ "llmenv-paths",
+ "llmenv-scope",
+ "proptest",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha2",
  "tempfile",
  "tracing",
 ]

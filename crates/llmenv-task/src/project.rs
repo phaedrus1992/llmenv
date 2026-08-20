@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 ///
 /// # Errors
 /// Propagates a failure to read the current working directory.
-pub(crate) fn current_tag() -> std::io::Result<String> {
+pub fn current_tag() -> std::io::Result<String> {
     let cwd = std::env::current_dir()?;
     let home = std::env::var("HOME")
         .ok()
@@ -50,12 +50,12 @@ fn resolve_project_tag(cwd: &Path, home: Option<&Path>) -> String {
             (root, name)
         })
         .or_else(|| {
-            let env = crate::scope::matcher::Env {
+            let env = llmenv_scope::matcher::Env {
                 cwd: cwd.to_string_lossy().into_owned(),
                 home: home.map(Path::to_path_buf),
-                ..crate::scope::matcher::Env::empty()
+                ..llmenv_scope::matcher::Env::empty()
             };
-            crate::scope::matcher::discover_project(&env).map(|p| (p.root, p.id))
+            llmenv_scope::matcher::discover_project(&env).map(|p| (p.root, p.id))
         })
         .unwrap_or_else(|| (cwd.to_path_buf(), basename(cwd)));
 

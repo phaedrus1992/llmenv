@@ -1,0 +1,27 @@
+[package]
+name = "llmenv-scope"
+version = "4.0.0-alpha.1"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+description = "Scope detection and matching for llmenv"
+repository = "https://github.com/phaedrus1992/llmenv"
+
+[lints]
+workspace = true
+
+[dependencies]
+llmenv-config = { path = "../llmenv-config", version = "4.0.0-alpha.1" }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+globset = { workspace = true }
+walkdir = "=2.5.0"
+tracing = "=0.1.44"
+# uname(2) for hostname detection — same reasoning as the main crate's own
+# use of rustix for this (see src/scope/matcher.rs's original comment):
+# one syscall, no subprocess, no unsafe.
+rustix = { version = "=1.1.4", features = ["system"] }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }

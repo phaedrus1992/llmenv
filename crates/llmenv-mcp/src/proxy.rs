@@ -129,7 +129,7 @@ where
     }
 
     if let Some(parent) = pid_path.parent() {
-        crate::paths::create_dir_owner_only(parent)
+        llmenv_paths::create_dir_owner_only(parent)
             .with_context(|| format!("creating state directory {}", parent.display()))?;
     }
 
@@ -478,7 +478,7 @@ fn write_pidfile_atomic(pid_path: &Path, pid: u32) -> anyhow::Result<()> {
 /// Returns an error if neither `XDG_STATE_HOME` nor `HOME` is set — writing a
 /// pidfile to a relative path in the caller's CWD would silently scatter state
 /// across whatever directories `llmenv` happens to be invoked from.
-pub(crate) fn default_pid_path() -> anyhow::Result<PathBuf> {
+pub fn default_pid_path() -> anyhow::Result<PathBuf> {
     if let Ok(xdg) = std::env::var("XDG_STATE_HOME")
         && !xdg.is_empty()
     {
@@ -540,14 +540,14 @@ fn open_proxy_log(path: &Path) -> anyhow::Result<std::fs::File> {
 /// # Errors
 /// Returns an error if the parent directory cannot be created/hardened or the
 /// log cannot be opened.
-pub(crate) fn open_bounded_log(
+pub fn open_bounded_log(
     path: &Path,
     max_bytes: u64,
     harden_dir: bool,
 ) -> anyhow::Result<std::fs::File> {
     if let Some(parent) = path.parent() {
         if harden_dir {
-            crate::paths::create_dir_owner_only(parent)
+            llmenv_paths::create_dir_owner_only(parent)
                 .with_context(|| format!("creating state directory {}", parent.display()))?;
         } else {
             std::fs::create_dir_all(parent)
@@ -565,7 +565,7 @@ pub(crate) fn open_bounded_log(
     // already names the path and the reason, and wrapping it would bury
     // that behind a generic "inspecting log ..." in `Display`'s default
     // (non-`{:#}`) output.
-    crate::paths::reject_non_regular_file(path)?;
+    llmenv_paths::reject_non_regular_file(path)?;
     match std::fs::metadata(path) {
         Ok(meta) if meta.len() >= max_bytes => {
             // Single generation: enough to keep the previous failure's trace
@@ -728,7 +728,7 @@ fn mcp_proxy_command() -> anyhow::Result<(PathBuf, Vec<&'static str>)> {
 /// [`mcp_proxy_command`] against an explicit `PATH` value, so the preference
 /// order is testable without mutating the process environment.
 ///
-/// Uses [`crate::paths::resolve_in_path_list`] rather than a local resolver:
+/// Uses [`llmenv_paths::resolve_in_path_list`] rather than a local resolver:
 /// until #1390 this module carried its own copy, which never picked up the
 /// empty-`PATH`-entry guard #1382 added, so `doctor`'s "is mcp-proxy available"
 /// and this function's answer could disagree — and a `mcp-proxy` or `uvx` in
@@ -736,9 +736,9 @@ fn mcp_proxy_command() -> anyhow::Result<(PathBuf, Vec<&'static str>)> {
 fn mcp_proxy_command_in(
     path_var: &std::ffi::OsStr,
 ) -> anyhow::Result<(PathBuf, Vec<&'static str>)> {
-    if let Some(proxy) = crate::paths::resolve_in_path_list("mcp-proxy", path_var) {
+    if let Some(proxy) = llmenv_paths::resolve_in_path_list("mcp-proxy", path_var) {
         Ok((proxy, vec![]))
-    } else if let Some(uvx) = crate::paths::resolve_in_path_list("uvx", path_var) {
+    } else if let Some(uvx) = llmenv_paths::resolve_in_path_list("uvx", path_var) {
         Ok((uvx, vec!["mcp-proxy"]))
     } else {
         Err(anyhow::anyhow!(
@@ -790,7 +790,7 @@ fn parse_bind(bind: &str) -> anyhow::Result<std::net::SocketAddr> {
 /// # Errors
 /// Returns an error if `bind` has no `:port` suffix, if neither `mcp-proxy` nor
 /// `uvx` is on `PATH`, or if the child cannot be spawned.
-pub(crate) fn spawn_mcp_proxy(bind: &str) -> anyhow::Result<Child> {
+pub fn spawn_mcp_proxy(bind: &str) -> anyhow::Result<Child> {
     let addr = parse_bind(bind)?;
     let (program, leading) = mcp_proxy_command()?;
     let mut cmd = Command::new(&program);
@@ -864,7 +864,7 @@ fn configure_detached(cmd: &mut Command, stderr: Stdio) {
 /// different stdio wiring than `configure_detached`'s null-everything default
 /// (e.g. `session_log::detached`, which pipes a JSON payload over stdin) can
 /// still share the process-group isolation.
-pub(crate) fn detach_process_group(cmd: &mut Command) {
+pub fn detach_process_group(cmd: &mut Command) {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
