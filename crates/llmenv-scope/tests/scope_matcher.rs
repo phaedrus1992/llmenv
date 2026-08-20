@@ -1,10 +1,10 @@
 #![expect(clippy::unwrap_used, reason = "test scaffolding")]
 #![expect(clippy::expect_used, reason = "test scaffolding")]
-use llmenv::config::{
+use llmenv_config::{
     Config, ContentMatch, ContentScope, HostMatch, HostScope, NetworkMatch, NetworkScope, Scopes,
     UserMatch, UserScope,
 };
-use llmenv::scope::{Env, evaluate};
+use llmenv_scope::{Env, evaluate};
 
 fn cfg() -> Config {
     Config {

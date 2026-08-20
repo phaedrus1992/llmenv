@@ -15,7 +15,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use crate::config::{CodebaseMemory, HostEntry, McpPermissions, McpServer, McpTransport, Memory};
+use llmenv_config::{CodebaseMemory, HostEntry, McpPermissions, McpServer, McpTransport, Memory};
 
 use tracing::debug;
 
@@ -76,7 +76,7 @@ pub use llmenv_config::MEMORY_MCP_NAME;
 
 /// Registration name for the codebase-memory-mcp server in the agent's MCP
 /// config.
-pub(crate) const CODEBASE_MEMORY_MCP_NAME: &str = "codebase-memory-mcp";
+pub const CODEBASE_MEMORY_MCP_NAME: &str = "codebase-memory-mcp";
 
 /// Errors raised while resolving MCP config for the active host.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -115,13 +115,13 @@ pub enum ResolveError {
 /// selected. The memory backend always resolves to a network (HTTP) client —
 /// even the host running the daemon connects through the proxy — so the role of
 /// this host doesn't affect what gets rendered, only whether the CLI launches
-/// the proxy locally (see [`crate::cli`]).
+/// the proxy locally (see `llmenv`'s `cli` module).
 ///
 /// # Errors
 /// Returns a [`ResolveError`] when: a plain server is missing its required
 /// `command`/`url`; a memory backend references an unknown host; or more than
 /// one `memory` entry is active simultaneously ([`ResolveError::AmbiguousMemory`]).
-pub(crate) fn resolve_mcps(
+pub fn resolve_mcps(
     mcp: &[McpServer],
     memory: &[Memory],
     host: &BTreeMap<String, HostEntry>,
@@ -165,7 +165,7 @@ pub(crate) fn resolve_mcps(
 /// Returns the first [`ResolveError`] encountered: a server using the
 /// reserved `"icm"` name, or a server missing its required `command`/`url`.
 pub fn resolve_bundle_mcps(
-    bundle_mcps: &[crate::config::McpServer],
+    bundle_mcps: &[llmenv_config::McpServer],
     active_tags: &BTreeSet<String>,
 ) -> Result<Vec<ResolvedMcp>, ResolveError> {
     let mut out = Vec::new();
@@ -198,7 +198,7 @@ pub fn resolve_bundle_mcps(
 /// `classify_missing_memory`/`suppressed_memory_bundles` and doctor's
 /// `memory_orphaned_by_disable_bundles` — can't drift from the selection rule
 /// itself by reimplementing the intersection check separately (#1140/#1141).
-pub(crate) fn memory_is_tag_active(m: &Memory, active_tags: &BTreeSet<String>) -> bool {
+pub fn memory_is_tag_active(m: &Memory, active_tags: &BTreeSet<String>) -> bool {
     m.when.iter().any(|t| active_tags.contains(t))
 }
 
@@ -264,9 +264,9 @@ fn resolve_memory(
 /// # Errors
 /// Returns an error if the current directory or state directory can't be
 /// resolved.
-pub(crate) fn codebase_memory_paths() -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf)> {
+pub fn codebase_memory_paths() -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf)> {
     let project_root = std::env::current_dir()?;
-    let state_dir = crate::paths::state_dir()?;
+    let state_dir = llmenv_paths::state_dir()?;
     Ok((project_root, state_dir))
 }
 
@@ -324,7 +324,7 @@ fn resolve_codebase_memory(
 /// # Errors
 /// Returns [`ResolveError::AmbiguousCodebaseMemory`] when more than one entry
 /// is active simultaneously.
-pub(crate) fn resolve_codebase_memory_entries(
+pub fn resolve_codebase_memory_entries(
     entries: &[CodebaseMemory],
     active_tags: &BTreeSet<String>,
     project_root: &Path,
@@ -377,7 +377,7 @@ fn remote_kind(m: &McpServer, transport: McpTransport) -> Result<ResolvedKind, R
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::config::{McpServer, Memory};
+    use llmenv_config::{McpServer, Memory};
     use proptest::strategy::Strategy;
 
     fn tags(ts: &[&str]) -> BTreeSet<String> {

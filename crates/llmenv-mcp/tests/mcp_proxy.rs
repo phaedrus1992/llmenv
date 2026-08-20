@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
-use llmenv::mcp::proxy::{
+use llmenv_mcp::proxy::{
     EnsureOutcome, ensure_running, ensure_running_within, is_alive, probe_tcp,
 };
 use tempfile::tempdir;

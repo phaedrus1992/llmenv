@@ -3362,7 +3362,7 @@ THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [llmenv 4.0.0-alpha.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv 5.0.0-alpha.1](https://github.com/phaedrus1992/llmenv)
 
 ```
 Copyright (c) 2026 The llmenv Authors
@@ -3830,10 +3830,13 @@ SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [llmenv-config 4.0.0-alpha.1](https://github.com/phaedrus1992/llmenv)
-- [llmenv-git 4.0.0-alpha.1](https://github.com/phaedrus1992/llmenv)
-- [llmenv-paths 4.0.0-alpha.1](https://github.com/phaedrus1992/llmenv)
-- [llmenv-util 4.0.0-alpha.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv-config 5.0.0-alpha.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv-git 5.0.0-alpha.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv-mcp 5.0.0-alpha.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv-paths 5.0.0-alpha.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv-scope 5.0.0-alpha.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv-task 5.0.0-alpha.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv-util 5.0.0-alpha.1](https://github.com/phaedrus1992/llmenv)
 - [anes 0.1.6](https://github.com/zrzka/anes-rs)
 - [difflib 0.4.0](https://github.com/DimaKudosh/difflib)
 - [jni-macros 0.22.4](https://github.com/jni-rs/jni-rs)

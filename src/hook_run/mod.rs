@@ -1182,8 +1182,8 @@ fn run_inner(
                 // child process so the hook returns immediately instead of
                 // blocking on MCP. The result is fire-and-forget — PostSession is
                 // the final event, so no caller needs its output.
-                if event == HookEvent::PostSession {
-                    post_session_consolidation();
+                if is_post_session_consolidation_event(event) {
+                    drop(post_session_consolidation());
                 }
 
                 // PostToolUse WebFetch/WebSearch: auto-store fetched content in ICM
@@ -2281,7 +2281,7 @@ fn handle_web_fetch_post_tool_use(payload: &serde_json::Value) -> Option<std::pr
     cmd.arg("icm-store")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null());
-    redirect_stderr_to_detached_log(&mut cmd);
+    redirect_stderr_to_detached_log(&mut cmd, detached_child_log_path);
     crate::mcp::proxy::detach_process_group(&mut cmd);
     let Ok(mut child) = cmd.spawn() else {
         tracing::debug!("icm-store: failed to spawn detached store child");
@@ -2326,7 +2326,7 @@ const BOUNDED_LOG_MAX_BYTES: u64 = 1 << 19; // 512 KiB
 ///
 /// # Errors
 /// Propagates `state_dir()` resolution failure.
-fn detached_child_log_path() -> anyhow::Result<std::path::PathBuf> {
+pub(crate) fn detached_child_log_path() -> anyhow::Result<std::path::PathBuf> {
     Ok(crate::paths::state_dir()?.join("detached-hook.log"))
 }
 
@@ -2340,10 +2340,10 @@ fn detached_child_log_path() -> anyhow::Result<std::path::PathBuf> {
 /// can't be opened the child still runs with stderr discarded — a missing
 /// diagnostic is a smaller problem than skipping the work.
 ///
-/// `harden_dir` is forwarded to `open_bounded_log`, which does the 0700
-/// hardening itself (#1196) — pass `false` when `log_path`'s directory may be
-/// shared with a process running under a different uid (e.g. a
-/// user-configured `index_path`). `context` names the caller in the
+/// `dir_mode` is forwarded to `open_bounded_log`, which does the 0700
+/// hardening itself (#1196) — pass `LogDirMode::Inherit` when `log_path`'s
+/// directory may be shared with a process running under a different uid
+/// (e.g. a user-configured `index_path`). `context` names the caller in the
 /// debug-level "log unavailable" message, since that message is shared across
 /// callers with different failure consequences (#1141). No `max_bytes`
 /// parameter: every caller bounds to the same [`BOUNDED_LOG_MAX_BYTES`] now
@@ -2353,11 +2353,11 @@ fn detached_child_log_path() -> anyhow::Result<std::path::PathBuf> {
 fn redirect_stderr_to_bounded_log(
     cmd: &mut std::process::Command,
     log_path: &std::path::Path,
-    harden_dir: bool,
+    dir_mode: crate::mcp::proxy::LogDirMode,
     context: &str,
 ) {
     cmd.stderr(std::process::Stdio::null());
-    match crate::mcp::proxy::open_bounded_log(log_path, BOUNDED_LOG_MAX_BYTES, harden_dir) {
+    match crate::mcp::proxy::open_bounded_log(log_path, BOUNDED_LOG_MAX_BYTES, dir_mode) {
         Ok(file) => {
             cmd.stderr(std::process::Stdio::from(file));
         }
@@ -2373,10 +2373,24 @@ fn redirect_stderr_to_bounded_log(
 /// `Stdio::null()` leaves such a child with no report channel whatsoever: its
 /// own `tracing` events go to a fmt layer writing to that same null stderr, so
 /// a failure is discarded twice over.
-pub(crate) fn redirect_stderr_to_detached_log(cmd: &mut std::process::Command) {
-    match detached_child_log_path() {
-        // Always state_dir-rooted, so `harden_dir: true` is safe.
-        Ok(path) => redirect_stderr_to_bounded_log(cmd, &path, true, "detached child"),
+///
+/// `log_path` resolves the log's location; every real caller passes
+/// [`detached_child_log_path`]. Parameterized rather than calling it
+/// directly so a test can inject a fixed tempdir path — this workspace
+/// forbids `unsafe`, so a test can't safely override `state_dir()`'s
+/// `LLMENV_STATE_DIR`/`HOME` env vars to control the real resolver instead.
+pub(crate) fn redirect_stderr_to_detached_log(
+    cmd: &mut std::process::Command,
+    log_path: impl FnOnce() -> anyhow::Result<std::path::PathBuf>,
+) {
+    match log_path() {
+        // Always state_dir-rooted, so `LogDirMode::OwnerOnly` is safe.
+        Ok(path) => redirect_stderr_to_bounded_log(
+            cmd,
+            &path,
+            crate::mcp::proxy::LogDirMode::OwnerOnly,
+            "detached child",
+        ),
         Err(e) => {
             cmd.stderr(std::process::Stdio::null());
             tracing::debug!("detached child: cannot resolve log path ({e:#}), stderr discarded");
@@ -2435,11 +2449,15 @@ fn trigger_codebase_memory_index(
     // with a codebase-memory-mcp process running under a different uid —
     // forcing it to 0700 would silently break that sharing with an EACCES on
     // the next run.
-    let harden_dir = cm.index_path.is_none();
+    let dir_mode = if cm.index_path.is_none() {
+        crate::mcp::proxy::LogDirMode::OwnerOnly
+    } else {
+        crate::mcp::proxy::LogDirMode::Inherit
+    };
     redirect_stderr_to_bounded_log(
         &mut cmd,
         &log_path,
-        harden_dir,
+        dir_mode,
         "codebase-memory-mcp index_repository",
     );
     crate::mcp::proxy::detach_process_group(&mut cmd);
@@ -2448,25 +2466,42 @@ fn trigger_codebase_memory_index(
     }
 }
 
+/// Whether `event` should trigger [`post_session_consolidation`] — only
+/// `PostSession`, the final event of a session. Extracted as its own
+/// directly-testable predicate (#1465): the call site sits inside
+/// `run_inner`'s async, MCP-client-mocked block, too heavy a harness to
+/// exercise just for this one routing decision.
+fn is_post_session_consolidation_event(event: HookEvent) -> bool {
+    event == HookEvent::PostSession
+}
+
 /// Spawn a detached child to run post-session consolidation. Best-effort
 /// fire-and-forget — spawn failures are logged at debug level and the caller
 /// never waits on the child. The child's stderr goes to the shared bounded log
 /// rather than `/dev/null` so its own failures are diagnosable (#1133).
-fn post_session_consolidation() {
+///
+/// Returns the spawned [`std::process::Child`] purely so callers such as
+/// tests can reap it (#1095) — production intentionally drops it unwaited,
+/// identical to the previous behavior, since the child is
+/// process-group-detached and outlives this process regardless.
+fn post_session_consolidation() -> Option<std::process::Child> {
     let Ok(exe) = std::env::current_exe() else {
         tracing::debug!("consolidation-run: cannot resolve current_exe");
-        return;
+        return None;
     };
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("consolidation-run")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null());
-    redirect_stderr_to_detached_log(&mut cmd);
+    redirect_stderr_to_detached_log(&mut cmd, detached_child_log_path);
     crate::mcp::proxy::detach_process_group(&mut cmd);
-    if let Err(e) = cmd.spawn() {
-        tracing::debug!("consolidation-run: failed to spawn detached child: {e}");
+    match cmd.spawn() {
+        Ok(child) => Some(child),
+        Err(e) => {
+            tracing::debug!("consolidation-run: failed to spawn detached child: {e}");
+            None
+        }
     }
-    // Not waited on: the child is process-group-detached and outlives us.
 }
 
 #[cfg(test)]
@@ -2947,7 +2982,12 @@ mod tests {
         let log = dir.path().join("detached-hook.log");
         let mut cmd = std::process::Command::new("sh");
         cmd.arg("-c").arg("echo boom >&2");
-        redirect_stderr_to_bounded_log(&mut cmd, &log, true, "test");
+        redirect_stderr_to_bounded_log(
+            &mut cmd,
+            &log,
+            crate::mcp::proxy::LogDirMode::OwnerOnly,
+            "test",
+        );
 
         assert!(cmd.status().expect("test").success());
         let body = std::fs::read_to_string(&log)
@@ -2965,6 +3005,27 @@ mod tests {
             Some("detached-hook.log")
         );
         assert!(path.starts_with(crate::paths::state_dir().expect("test")));
+    }
+
+    /// End-to-end coverage for `redirect_stderr_to_detached_log` itself, not
+    /// just the `redirect_stderr_to_bounded_log` helper it delegates to
+    /// (`redirect_stderr_to_bounded_log_captures_child_stderr` above already
+    /// covers that) — this calls the exact same function signature real
+    /// callers do, with an injected path resolver instead of the real
+    /// `detached_child_log_path`, so it's the one test that would catch this
+    /// function's own body being replaced wholesale.
+    #[test]
+    fn redirect_stderr_to_detached_log_writes_to_the_resolved_path() {
+        let dir = tempfile::tempdir().expect("test");
+        let log_path = dir.path().join("detached-hook.log");
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg("echo boom >&2");
+        redirect_stderr_to_detached_log(&mut cmd, || Ok(log_path.clone()));
+
+        assert!(cmd.status().expect("test").success());
+        let body = std::fs::read_to_string(&log_path)
+            .expect("a detached child's stderr must reach the resolved log path");
+        assert!(body.contains("boom"), "stderr not captured: {body}");
     }
 
     /// Fixture for the two #1132 failure modes: a firing bundle whose
@@ -5089,12 +5150,52 @@ mod tests {
             start.elapsed() < std::time::Duration::from_secs(5),
             "handle_web_fetch_post_tool_use must not block on the child"
         );
+        // A well-formed WebFetch payload must actually spawn a child —
+        // this is the one assertion that would catch the whole function
+        // being replaced with an unconditional `None` (#1465).
+        let mut child = child.expect("a well-formed WebFetch payload must spawn a detached child");
         // Reap: production deliberately never waits (the child is
         // process-group-detached), but this test process is still its OS
         // parent — leaving it un-waited leaks a zombie for the rest of the
         // cargo-test run (#1095).
-        if let Some(mut child) = child {
-            reap_test_child(&mut child, std::time::Duration::from_secs(5));
+        reap_test_child(&mut child, std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn post_session_consolidation_spawns_a_child() {
+        // `current_exe()` always resolves under the test harness, so this
+        // must spawn — the one assertion that would catch the whole
+        // function being replaced with an unconditional `None` (#1465).
+        let start = std::time::Instant::now();
+        let child = post_session_consolidation();
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "post_session_consolidation must not block on the child"
+        );
+        let mut child =
+            child.expect("current_exe() resolving must spawn a detached consolidation child");
+        reap_test_child(&mut child, std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn is_post_session_consolidation_event_fires_only_for_post_session() {
+        assert!(is_post_session_consolidation_event(HookEvent::PostSession));
+        for other in [
+            HookEvent::SessionStart,
+            HookEvent::TurnStart,
+            HookEvent::SessionEnd,
+            HookEvent::UserPromptSubmit,
+            HookEvent::PreToolUse,
+            HookEvent::PostToolUse,
+            HookEvent::Notification,
+            HookEvent::Stop,
+            HookEvent::SubagentStop,
+            HookEvent::PreCompact,
+        ] {
+            assert!(
+                !is_post_session_consolidation_event(other),
+                "{other:?} must not trigger post-session consolidation"
+            );
         }
     }
 

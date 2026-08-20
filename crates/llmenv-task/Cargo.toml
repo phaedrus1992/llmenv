@@ -1,0 +1,26 @@
+[package]
+name = "llmenv-task"
+version = "5.0.0-alpha.1"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+description = "In-engine task tracker for llmenv"
+repository = "https://github.com/phaedrus1992/llmenv"
+
+[lints]
+workspace = true
+
+[dependencies]
+llmenv-scope = { path = "../llmenv-scope", version = "5.0.0-alpha.1" }
+llmenv-paths = { path = "../llmenv-paths", version = "5.0.0-alpha.1" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+anyhow = { workspace = true }
+sha2 = { workspace = true }
+humantime = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }
