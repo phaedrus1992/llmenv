@@ -386,7 +386,7 @@ fn capture_codex_auth_with_hook(
     let Some(bytes) = read_auth_stable(&src, after_initial_stat) else {
         return Ok(());
     };
-    if serde_json::from_slice::<serde_json::Value>(&bytes).is_err() {
+    if !is_valid_json(&bytes) {
         tracing::warn!(
             path = %src.display(),
             "inherit: auth.json read is not valid JSON despite a stable mtime \
@@ -398,6 +398,18 @@ fn capture_codex_auth_with_hook(
     }
     crate::paths::write_owner_only(&dst, &bytes)
         .with_context(|| format!("writing {}", dst.display()))
+}
+
+/// Checks that `bytes` parses as JSON without building an owned value tree.
+///
+/// `bytes` is a plaintext OAuth credential, so validating it must not
+/// materialize a `serde_json::Value` — its heap `String`s would carry the
+/// token out of a `Zeroizing` wrapper and into ordinary, unscrubbed memory
+/// on drop, one line after the read that was hardened to avoid exactly that
+/// (security-audit, #1456). `IgnoredAny` scans the input to confirm it's one
+/// well-formed JSON value without retaining any of its content.
+fn is_valid_json(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<serde::de::IgnoredAny>(bytes).is_ok()
 }
 
 /// Open `path` for reading without following a final-component symlink —
@@ -1783,6 +1795,18 @@ mod tests {
             bytes.as_deref().map(Vec::as_slice),
             Some(br#"{"account":"secret-token"}"#.as_slice())
         );
+    }
+
+    /// Security hardening (#1456, pre-pr-review finding): validating the
+    /// read as JSON must not materialize an owned `serde_json::Value` — its
+    /// heap `String`s would carry the credential out of the `Zeroizing`
+    /// wrapper and into ordinary, unscrubbed memory one line after the fix
+    /// above. `is_valid_json` checks well-formedness without building one.
+    #[test]
+    fn is_valid_json_accepts_well_formed_and_rejects_garbage() {
+        assert!(is_valid_json(br#"{"account":"secret-token"}"#));
+        assert!(!is_valid_json(b""));
+        assert!(!is_valid_json(b"not json"));
     }
 
     #[test]
