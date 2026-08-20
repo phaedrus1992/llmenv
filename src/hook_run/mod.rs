@@ -1183,7 +1183,7 @@ fn run_inner(
                 // blocking on MCP. The result is fire-and-forget — PostSession is
                 // the final event, so no caller needs its output.
                 if event == HookEvent::PostSession {
-                    post_session_consolidation();
+                    drop(post_session_consolidation());
                 }
 
                 // PostToolUse WebFetch/WebSearch: auto-store fetched content in ICM
@@ -2470,10 +2470,15 @@ fn trigger_codebase_memory_index(
 /// fire-and-forget — spawn failures are logged at debug level and the caller
 /// never waits on the child. The child's stderr goes to the shared bounded log
 /// rather than `/dev/null` so its own failures are diagnosable (#1133).
-fn post_session_consolidation() {
+///
+/// Returns the spawned [`std::process::Child`] purely so callers such as
+/// tests can reap it (#1095) — production intentionally drops it unwaited,
+/// identical to the previous behavior, since the child is
+/// process-group-detached and outlives this process regardless.
+fn post_session_consolidation() -> Option<std::process::Child> {
     let Ok(exe) = std::env::current_exe() else {
         tracing::debug!("consolidation-run: cannot resolve current_exe");
-        return;
+        return None;
     };
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("consolidation-run")
@@ -2481,10 +2486,13 @@ fn post_session_consolidation() {
         .stdout(std::process::Stdio::null());
     redirect_stderr_to_detached_log(&mut cmd, detached_child_log_path);
     crate::mcp::proxy::detach_process_group(&mut cmd);
-    if let Err(e) = cmd.spawn() {
-        tracing::debug!("consolidation-run: failed to spawn detached child: {e}");
+    match cmd.spawn() {
+        Ok(child) => Some(child),
+        Err(e) => {
+            tracing::debug!("consolidation-run: failed to spawn detached child: {e}");
+            None
+        }
     }
-    // Not waited on: the child is process-group-detached and outlives us.
 }
 
 #[cfg(test)]
@@ -5133,13 +5141,31 @@ mod tests {
             start.elapsed() < std::time::Duration::from_secs(5),
             "handle_web_fetch_post_tool_use must not block on the child"
         );
+        // A well-formed WebFetch payload must actually spawn a child —
+        // this is the one assertion that would catch the whole function
+        // being replaced with an unconditional `None` (#1465).
+        let mut child = child.expect("a well-formed WebFetch payload must spawn a detached child");
         // Reap: production deliberately never waits (the child is
         // process-group-detached), but this test process is still its OS
         // parent — leaving it un-waited leaks a zombie for the rest of the
         // cargo-test run (#1095).
-        if let Some(mut child) = child {
-            reap_test_child(&mut child, std::time::Duration::from_secs(5));
-        }
+        reap_test_child(&mut child, std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn post_session_consolidation_spawns_a_child() {
+        // `current_exe()` always resolves under the test harness, so this
+        // must spawn — the one assertion that would catch the whole
+        // function being replaced with an unconditional `None` (#1465).
+        let start = std::time::Instant::now();
+        let child = post_session_consolidation();
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "post_session_consolidation must not block on the child"
+        );
+        let mut child =
+            child.expect("current_exe() resolving must spawn a detached consolidation child");
+        reap_test_child(&mut child, std::time::Duration::from_secs(5));
     }
 
     /// Wait for `child` to exit, bounded by `timeout`; force-kill and wait
