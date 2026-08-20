@@ -694,7 +694,14 @@ lost on every config edit or version bump, the same problem Claude Code's
   newest-`mtime`-wins rule instead of "only when the store has none": a
   re-login or token rotation replaces the store's copy, rather than pinning
   the first-ever captured credential forever and serving a stale or revoked
-  token to every new folder indefinitely.
+  token to every new folder indefinitely. Because Codex writes `auth.json` by
+  truncating and rewriting it in place rather than atomically, capture reads
+  it through a single file handle and only commits the read if the file's
+  mtime was unchanged before and after, plus a JSON-validity check as a
+  backstop on filesystems whose timestamp resolution is too coarse to catch a
+  write in progress; a read that fails either check is discarded and retried
+  on the next `export` instead of risking a torn credential in the durable
+  store (added in v4.0.0, [#1451](https://github.com/phaedrus1992/llmenv/issues/1451)).
 
 Every *copied* file (`history.jsonl`, `mcp-needs-auth-cache.json`, `auth.json`)
 has its permissions forced to owner-only (`0o600`) regardless of the source's
@@ -715,13 +722,18 @@ way the files above are. That fold-or-keep decision is made once from the base
 `-wal` are never folded from two different points in time
 (added in v4.0.0, [#1449](https://github.com/phaedrus1992/llmenv/pull/1449)).
 
-If a DB's base file still looks unmigrated *and* its `-shm` sidecar exists —
-evidence Codex may currently have the DB open in WAL mode — the fold is
-skipped for that `export` rather than risked: folding a live DB could copy a
-torn snapshot, or leave Codex's open file descriptor writing to the file's old,
-now-orphaned inode after the symlink swap. llmenv warns and retries the fold on
-the next `export` instead
-(added in v4.0.0, [#1448](https://github.com/phaedrus1992/llmenv/issues/1448)).
+If any member of a DB's family (base file, `-wal`, or `-shm`) still looks
+unmigrated *and* the base name's `-shm` sidecar exists — evidence Codex may
+currently have the DB open in WAL mode — the fold is skipped for that
+`export` rather than risked: folding a live DB could copy a torn snapshot, or
+leave Codex's open file descriptor writing to the file's old, now-orphaned
+inode after the symlink swap. llmenv warns and retries the fold on the next
+`export` instead (added in v4.0.0,
+[#1448](https://github.com/phaedrus1992/llmenv/issues/1448)). The check
+covers the whole family, not just the base file, so a sidecar left real by a
+partial prior fold failure — the base already symlinked, a `-wal`/`-shm`
+sidecar not — still gets the same protection
+(added in v4.0.0, [#1450](https://github.com/phaedrus1992/llmenv/issues/1450)).
 
 - **`goals_1.sqlite`** — per-thread objectives/status/token budgets.
 - **`memories_1.sqlite`** — generated memory content and its extraction/
