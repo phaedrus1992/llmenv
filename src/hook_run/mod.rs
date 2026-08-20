@@ -2340,10 +2340,10 @@ fn detached_child_log_path() -> anyhow::Result<std::path::PathBuf> {
 /// can't be opened the child still runs with stderr discarded — a missing
 /// diagnostic is a smaller problem than skipping the work.
 ///
-/// `harden_dir` is forwarded to `open_bounded_log`, which does the 0700
-/// hardening itself (#1196) — pass `false` when `log_path`'s directory may be
-/// shared with a process running under a different uid (e.g. a
-/// user-configured `index_path`). `context` names the caller in the
+/// `dir_mode` is forwarded to `open_bounded_log`, which does the 0700
+/// hardening itself (#1196) — pass `LogDirMode::Inherit` when `log_path`'s
+/// directory may be shared with a process running under a different uid
+/// (e.g. a user-configured `index_path`). `context` names the caller in the
 /// debug-level "log unavailable" message, since that message is shared across
 /// callers with different failure consequences (#1141). No `max_bytes`
 /// parameter: every caller bounds to the same [`BOUNDED_LOG_MAX_BYTES`] now
@@ -2353,11 +2353,11 @@ fn detached_child_log_path() -> anyhow::Result<std::path::PathBuf> {
 fn redirect_stderr_to_bounded_log(
     cmd: &mut std::process::Command,
     log_path: &std::path::Path,
-    harden_dir: bool,
+    dir_mode: crate::mcp::proxy::LogDirMode,
     context: &str,
 ) {
     cmd.stderr(std::process::Stdio::null());
-    match crate::mcp::proxy::open_bounded_log(log_path, BOUNDED_LOG_MAX_BYTES, harden_dir) {
+    match crate::mcp::proxy::open_bounded_log(log_path, BOUNDED_LOG_MAX_BYTES, dir_mode) {
         Ok(file) => {
             cmd.stderr(std::process::Stdio::from(file));
         }
@@ -2375,8 +2375,13 @@ fn redirect_stderr_to_bounded_log(
 /// a failure is discarded twice over.
 pub(crate) fn redirect_stderr_to_detached_log(cmd: &mut std::process::Command) {
     match detached_child_log_path() {
-        // Always state_dir-rooted, so `harden_dir: true` is safe.
-        Ok(path) => redirect_stderr_to_bounded_log(cmd, &path, true, "detached child"),
+        // Always state_dir-rooted, so `LogDirMode::OwnerOnly` is safe.
+        Ok(path) => redirect_stderr_to_bounded_log(
+            cmd,
+            &path,
+            crate::mcp::proxy::LogDirMode::OwnerOnly,
+            "detached child",
+        ),
         Err(e) => {
             cmd.stderr(std::process::Stdio::null());
             tracing::debug!("detached child: cannot resolve log path ({e:#}), stderr discarded");
@@ -2435,11 +2440,15 @@ fn trigger_codebase_memory_index(
     // with a codebase-memory-mcp process running under a different uid —
     // forcing it to 0700 would silently break that sharing with an EACCES on
     // the next run.
-    let harden_dir = cm.index_path.is_none();
+    let dir_mode = if cm.index_path.is_none() {
+        crate::mcp::proxy::LogDirMode::OwnerOnly
+    } else {
+        crate::mcp::proxy::LogDirMode::Inherit
+    };
     redirect_stderr_to_bounded_log(
         &mut cmd,
         &log_path,
-        harden_dir,
+        dir_mode,
         "codebase-memory-mcp index_repository",
     );
     crate::mcp::proxy::detach_process_group(&mut cmd);
@@ -2947,7 +2956,12 @@ mod tests {
         let log = dir.path().join("detached-hook.log");
         let mut cmd = std::process::Command::new("sh");
         cmd.arg("-c").arg("echo boom >&2");
-        redirect_stderr_to_bounded_log(&mut cmd, &log, true, "test");
+        redirect_stderr_to_bounded_log(
+            &mut cmd,
+            &log,
+            crate::mcp::proxy::LogDirMode::OwnerOnly,
+            "test",
+        );
 
         assert!(cmd.status().expect("test").success());
         let body = std::fs::read_to_string(&log)

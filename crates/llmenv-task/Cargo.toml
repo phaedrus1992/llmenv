@@ -17,9 +17,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 anyhow = { workspace = true }
-sha2 = "=0.11.0"
-humantime = "=2.4.0"
-tracing = "=0.1.44"
+sha2 = { workspace = true }
+humantime = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

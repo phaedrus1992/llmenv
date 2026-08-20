@@ -1,10 +1,9 @@
 pub use llmenv_task::{
-    DisplayRow, ParentSpec, Task, TaskEdit, TaskNote, TaskState, add_task, add_task_for_session,
-    block_task, current_wip_title, delete_task, display_rows, done_task, edit_task,
-    filter_by_state, filter_tasks_for_project, list_tasks, load_task, note_task,
-    parent_soft_block_warning, render_task_list, resolve_current_task, resolve_identifier,
-    resolve_next_task, save_task, session_start_reminder, start_task, stop_hook_reminder,
-    tasks_dir, try_list_tasks, wait_task,
+    DisplayRow, ParentSpec, Task, TaskEdit, TaskState, add_task, add_task_for_session, block_task,
+    current_wip_title, delete_task, display_rows, done_task, edit_task, filter_by_state,
+    filter_tasks_for_project, list_tasks, load_task, note_task, parent_soft_block_warning,
+    render_task_list, resolve_current_task, resolve_identifier, resolve_next_task,
+    session_start_reminder, start_task, stop_hook_reminder, tasks_dir, try_list_tasks, wait_task,
 };
 
 pub mod project {

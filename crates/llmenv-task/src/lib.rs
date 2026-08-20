@@ -171,7 +171,19 @@ fn unique_slug(dir: &Path, base_slug: &str) -> String {
 /// Write a task to disk atomically. Callers that mutate an existing task
 /// (rather than just persisting one already exclusively held under
 /// [`with_store_lock`]) are expected to call this from within that lock.
+///
+/// `task.slug` is validated the same way [`resolve_identifier`]'s input is —
+/// this crate's `slug` field is `pub` (needed by callers that display or
+/// compare it), so a caller could otherwise mutate it to a path-traversal
+/// payload (`../../etc/passwd`) and reach outside [`tasks_dir`] via
+/// [`task_path`]'s naive `join`.
+///
+/// # Errors
+/// Returns an error when `task.slug` fails validation, or the write fails.
 pub fn save_task(state_dir: &Path, task: &Task) -> anyhow::Result<()> {
+    if !llmenv_paths::is_valid_short_name(&task.slug) {
+        anyhow::bail!("'{}' is not a valid task slug", task.slug);
+    }
     let dir = tasks_dir(state_dir);
     llmenv_paths::create_dir_owner_only(&dir)?;
     let json = serde_json::to_string_pretty(task)?;
@@ -180,7 +192,18 @@ pub fn save_task(state_dir: &Path, task: &Task) -> anyhow::Result<()> {
 }
 
 /// Load a single task by its exact slug.
+///
+/// `slug` is validated the same way [`resolve_identifier`]'s input is — see
+/// [`save_task`]'s doc comment for why this crate can't rely on every caller
+/// pre-validating it.
+///
+/// # Errors
+/// Returns an error when `slug` fails validation, the file can't be read, or
+/// its contents aren't a valid `Task`.
 pub fn load_task(state_dir: &Path, slug: &str) -> anyhow::Result<Task> {
+    if !llmenv_paths::is_valid_short_name(slug) {
+        anyhow::bail!("'{slug}' is not a valid task slug");
+    }
     let content = std::fs::read_to_string(task_path(state_dir, slug))?;
     Ok(serde_json::from_str(&content)?)
 }
@@ -1420,6 +1443,26 @@ mod tests {
 
         let loaded = load_task(dir.path(), "fix-login-timeout").expect("test");
         assert_eq!(loaded, task);
+    }
+
+    /// `slug` is `pub`, so a caller with a `Task` in hand could mutate it to
+    /// a path-traversal payload before calling `save_task`/`load_task` — both
+    /// must reject it rather than build a path outside `tasks_dir` (security-
+    /// audit, #1465).
+    #[test]
+    fn load_task_rejects_a_path_traversal_slug() {
+        let dir = TempDir::new().expect("test");
+        let err = load_task(dir.path(), "../../etc/passwd").expect_err("must reject");
+        assert!(err.to_string().contains("not a valid task slug"));
+    }
+
+    #[test]
+    fn save_task_rejects_a_task_with_a_path_traversal_slug() {
+        let dir = TempDir::new().expect("test");
+        let mut task = mk(dir.path(), "Fix login timeout", None).expect("test");
+        task.slug = "../../etc/passwd".to_string();
+        let err = save_task(dir.path(), &task).expect_err("must reject");
+        assert!(err.to_string().contains("not a valid task slug"));
     }
 
     #[test]
@@ -2745,8 +2788,13 @@ mod tests {
         /// get a slug via [`slugify`] (lowercase alnum + hyphen) — this
         /// generator matches that realistic shape for the file-backed
         /// [`save_task`]/[`load_task`] round-trip (#1283).
+        ///
+        /// No leading `-`: [`save_task`]/[`load_task`] validate the slug via
+        /// [`llmenv_paths::is_valid_short_name`], which rejects one (so it
+        /// can't be mistaken for a CLI flag) — a slug this generator produces
+        /// must be one `save_task`/`load_task` will actually accept.
         fn arb_task_with_fs_safe_slug() -> impl Strategy<Value = Task> {
-            ("[A-Za-z0-9_-]{1,40}", arb_task()).prop_map(|(slug, mut task)| {
+            ("[A-Za-z0-9_][A-Za-z0-9_-]{0,39}", arb_task()).prop_map(|(slug, mut task)| {
                 task.slug = slug;
                 task
             })

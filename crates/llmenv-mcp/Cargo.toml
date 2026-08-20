@@ -15,7 +15,7 @@ llmenv-config = { path = "../llmenv-config", version = "4.0.0-alpha.1" }
 llmenv-paths = { path = "../llmenv-paths", version = "4.0.0-alpha.1" }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
-tracing = "=0.1.44"
+tracing = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
