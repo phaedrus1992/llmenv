@@ -21,6 +21,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
+use zeroize::Zeroizing;
 
 /// Subdirectory of the durable state dir holding Claude Code's transcripts.
 const PROJECTS_DIR: &str = "projects";
@@ -385,7 +386,7 @@ fn capture_codex_auth_with_hook(
     let Some(bytes) = read_auth_stable(&src, after_initial_stat) else {
         return Ok(());
     };
-    if serde_json::from_slice::<serde_json::Value>(&bytes).is_err() {
+    if !is_valid_json(&bytes) {
         tracing::warn!(
             path = %src.display(),
             "inherit: auth.json read is not valid JSON despite a stable mtime \
@@ -397,6 +398,18 @@ fn capture_codex_auth_with_hook(
     }
     crate::paths::write_owner_only(&dst, &bytes)
         .with_context(|| format!("writing {}", dst.display()))
+}
+
+/// Checks that `bytes` parses as JSON without building an owned value tree.
+///
+/// `bytes` is a plaintext OAuth credential, so validating it must not
+/// materialize a `serde_json::Value` — its heap `String`s would carry the
+/// token out of a `Zeroizing` wrapper and into ordinary, unscrubbed memory
+/// on drop, one line after the read that was hardened to avoid exactly that
+/// (security-audit, #1456). `IgnoredAny` scans the input to confirm it's one
+/// well-formed JSON value without retaining any of its content.
+fn is_valid_json(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<serde::de::IgnoredAny>(bytes).is_ok()
 }
 
 /// Open `path` for reading without following a final-component symlink —
@@ -417,7 +430,11 @@ fn capture_codex_auth_with_hook(
 /// produce a trustworthy read — open/read/stat errors, and an mtime that
 /// moved between the two stats — so the caller always treats it as "skip
 /// this capture, the next `export` retries."
-fn read_auth_stable(path: &Path, after_initial_stat: impl FnOnce()) -> Option<Vec<u8>> {
+///
+/// The buffer holds a plaintext OAuth credential, so it's a `Zeroizing`
+/// wrapper rather than a plain `Vec` — scrubbed on drop instead of left in
+/// freed-but-unscrubbed heap memory (security-audit, #1456).
+fn read_auth_stable(path: &Path, after_initial_stat: impl FnOnce()) -> Option<Zeroizing<Vec<u8>>> {
     let file = match open_file_nofollow(path) {
         Ok(f) => f,
         Err(e) => {
@@ -427,7 +444,7 @@ fn read_auth_stable(path: &Path, after_initial_stat: impl FnOnce()) -> Option<Ve
     };
     let before = file.metadata().and_then(|m| m.modified());
     after_initial_stat();
-    let mut bytes = Vec::new();
+    let mut bytes = Zeroizing::new(Vec::new());
     if let Err(e) = std::io::Read::read_to_end(&mut &file, &mut bytes) {
         tracing::warn!(path = %path.display(), error = %e, "inherit: could not read auth.json for capture, skipping");
         return None;
@@ -1757,6 +1774,39 @@ mod tests {
             std::fs::symlink_metadata(state.join(CODEX_AUTH_FILE)).is_err(),
             "nothing should land in the durable store when the read can't be verified stable"
         );
+    }
+
+    /// Security hardening (#1456): `read_auth_stable`'s buffer holds a
+    /// plaintext OAuth credential, so it must be a `Zeroizing<Vec<u8>>` —
+    /// scrubbed on drop — rather than a plain `Vec<u8>` left in
+    /// freed-but-unscrubbed heap memory. The type annotation below only
+    /// compiles once the return type is wrapped; a plain `Vec<u8>` fails
+    /// to compile against it.
+    #[test]
+    fn read_auth_stable_returns_a_zeroizing_buffer() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = tmp.path().join("codex-hash");
+        write(&cfg.join(CODEX_AUTH_FILE), r#"{"account":"secret-token"}"#);
+
+        let bytes: Option<zeroize::Zeroizing<Vec<u8>>> =
+            read_auth_stable(&cfg.join(CODEX_AUTH_FILE), || {});
+
+        assert_eq!(
+            bytes.as_deref().map(Vec::as_slice),
+            Some(br#"{"account":"secret-token"}"#.as_slice())
+        );
+    }
+
+    /// Security hardening (#1456, pre-pr-review finding): validating the
+    /// read as JSON must not materialize an owned `serde_json::Value` — its
+    /// heap `String`s would carry the credential out of the `Zeroizing`
+    /// wrapper and into ordinary, unscrubbed memory one line after the fix
+    /// above. `is_valid_json` checks well-formedness without building one.
+    #[test]
+    fn is_valid_json_accepts_well_formed_and_rejects_garbage() {
+        assert!(is_valid_json(br#"{"account":"secret-token"}"#));
+        assert!(!is_valid_json(b""));
+        assert!(!is_valid_json(b"not json"));
     }
 
     #[test]
