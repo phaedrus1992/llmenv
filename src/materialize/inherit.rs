@@ -350,14 +350,18 @@ pub(crate) fn inherit_codex_auth(state_dir: &Path, config_dir: &Path) -> anyhow:
 /// truncates and writes `auth.json` in place rather than temp-then-rename, so
 /// a read racing a token refresh can observe a torn or empty file. There is
 /// no sidecar artifact like SQLite's `-shm` to check beforehand, so the read
-/// is bracketed by an mtime stat immediately before and after it; a change in
-/// between means the bytes may span two writes and are discarded rather than
-/// risked in the durable store (security-audit, #1451). The next capture
-/// retries once the file has settled.
+/// is bracketed by an mtime stat immediately before and after it, taken from
+/// a single open handle rather than two path-based stats (security-audit,
+/// #1451 — see [`read_auth_stable`]); a change in between, or content that
+/// doesn't even parse as JSON despite a stable mtime (a coarse-grained
+/// filesystem's mtime resolution can be coarser than the write it's meant to
+/// catch), means the bytes are discarded rather than risked in the durable
+/// store. The next capture retries once the file has settled.
 ///
 /// # Errors
-/// Returns an error when the read or write fails. A file absent from the
-/// folder is a no-op.
+/// Returns an error when the write fails. A file absent from the folder, or
+/// one that can't be read/stat'd stably, is a no-op — see
+/// [`read_auth_stable`].
 pub(crate) fn capture_codex_auth(state_dir: &Path, config_dir: &Path) -> anyhow::Result<()> {
     capture_codex_auth_with_hook(state_dir, config_dir, || {})
 }
@@ -378,15 +382,16 @@ fn capture_codex_auth_with_hook(
     if dest_already_present(&dst) && !src_is_newer(&src, &dst) {
         return Ok(());
     }
-    let before = std::fs::metadata(&src).and_then(|m| m.modified()).ok();
-    after_initial_stat();
-    let bytes = std::fs::read(&src).with_context(|| format!("reading {}", src.display()))?;
-    let after = std::fs::metadata(&src).and_then(|m| m.modified()).ok();
-    if !capture_read_was_stable(before, after) {
+    let Some(bytes) = read_auth_stable(&src, after_initial_stat) else {
+        return Ok(());
+    };
+    if serde_json::from_slice::<serde_json::Value>(&bytes).is_err() {
         tracing::warn!(
             path = %src.display(),
-            "inherit: auth.json changed mid-read — likely a concurrent Codex \
-             token refresh; skipping this capture, will retry on the next export"
+            "inherit: auth.json read is not valid JSON despite a stable mtime \
+             — likely a torn read a coarse-grained filesystem's timestamp \
+             resolution didn't catch; skipping this capture, will retry on \
+             the next export"
         );
         return Ok(());
     }
@@ -394,15 +399,73 @@ fn capture_codex_auth_with_hook(
         .with_context(|| format!("writing {}", dst.display()))
 }
 
-/// Whether a read bracketed by `before` and `after` mtimes is safe to trust.
-/// A stat failure on either side (`None`) counts as unstable — the same
-/// err-toward-caution default as [`sqlite_fold_would_race_a_live_db`]'s own
-/// stat-error handling.
-fn capture_read_was_stable(
-    before: Option<std::time::SystemTime>,
-    after: Option<std::time::SystemTime>,
-) -> bool {
-    matches!((before, after), (Some(b), Some(a)) if b == a)
+/// Open `path` for reading without following a final-component symlink —
+/// the file-level counterpart to
+/// [`crate::paths::dirfd::open_dir_nofollow`]'s directory variant — then
+/// read its full contents, but only if its mtime is unchanged immediately
+/// before and after the read, both stat'd from that one handle.
+///
+/// A single fd instead of two path-based `std::fs::metadata` calls closes a
+/// gap security-audit flagged (#1451): a path-based before/after bracket
+/// only proves *some* object at `path` had a matching mtime at two points,
+/// not that the bytes came from one stable inode — a symlink swapped in
+/// between with a matching mtime would pass unnoticed, and `O_NOFOLLOW`
+/// refuses one planted after [`is_real_file`]'s check outright rather than
+/// following it.
+///
+/// `None` (with the reason logged) covers every way this can fail to
+/// produce a trustworthy read — open/read/stat errors, and an mtime that
+/// moved between the two stats — so the caller always treats it as "skip
+/// this capture, the next `export` retries."
+fn read_auth_stable(path: &Path, after_initial_stat: impl FnOnce()) -> Option<Vec<u8>> {
+    let file = match open_file_nofollow(path) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "inherit: could not open auth.json for capture, skipping");
+            return None;
+        }
+    };
+    let before = file.metadata().and_then(|m| m.modified());
+    after_initial_stat();
+    let mut bytes = Vec::new();
+    if let Err(e) = std::io::Read::read_to_end(&mut &file, &mut bytes) {
+        tracing::warn!(path = %path.display(), error = %e, "inherit: could not read auth.json for capture, skipping");
+        return None;
+    }
+    let after = file.metadata().and_then(|m| m.modified());
+    match (before, after) {
+        (Ok(b), Ok(a)) if b == a => Some(bytes),
+        (Ok(_), Ok(_)) => {
+            tracing::warn!(
+                path = %path.display(),
+                "inherit: auth.json changed mid-read — likely a concurrent Codex \
+                 token refresh; skipping this capture, will retry on the next export"
+            );
+            None
+        }
+        (before, after) => {
+            let error = before.err().or_else(|| after.err());
+            tracing::warn!(path = %path.display(), error = ?error, "inherit: could not stat auth.json around the capture read, skipping");
+            None
+        }
+    }
+}
+
+/// Unix: refuses a final-component symlink via `O_NOFOLLOW`, same protection
+/// [`crate::paths::dirfd::open_dir_nofollow`] gives directories. Non-unix:
+/// plain open — this module's symlink defenses are unix-only throughout
+/// (see [`attach_store`]'s non-unix stub), so there is no narrower guarantee
+/// to preserve here than on any other path in this file.
+#[cfg(unix)]
+fn open_file_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
+    use rustix::fs::{CWD, Mode, OFlags, openat};
+    let fd = openat(CWD, path, OFlags::RDONLY | OFlags::NOFOLLOW, Mode::empty())?;
+    Ok(std::fs::File::from(fd))
+}
+
+#[cfg(not(unix))]
+fn open_file_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
 }
 
 /// Whether `src`'s mtime is strictly newer than `dst`'s. A destination whose
@@ -1521,13 +1584,13 @@ mod tests {
         let state = tmp.path().join("state");
         let cfg = tmp.path().join("codex-hash");
         std::fs::create_dir_all(&state).unwrap();
-        write(&cfg.join(CODEX_AUTH_FILE), "from-folder");
+        write(&cfg.join(CODEX_AUTH_FILE), r#"{"account":"from-folder"}"#);
 
         capture_codex_auth(&state, &cfg).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(state.join(CODEX_AUTH_FILE)).unwrap(),
-            "from-folder"
+            r#"{"account":"from-folder"}"#
         );
     }
 
@@ -1542,8 +1605,11 @@ mod tests {
         let state = tmp.path().join("state");
         let cfg = tmp.path().join("codex-hash");
         std::fs::create_dir_all(&state).unwrap();
-        write(&state.join(CODEX_AUTH_FILE), "old-account");
-        write(&cfg.join(CODEX_AUTH_FILE), "re-logged-in-account");
+        write(&state.join(CODEX_AUTH_FILE), r#"{"account":"old-account"}"#);
+        write(
+            &cfg.join(CODEX_AUTH_FILE),
+            r#"{"account":"re-logged-in-account"}"#,
+        );
         let now = filetime::FileTime::now();
         filetime::set_file_mtime(
             cfg.join(CODEX_AUTH_FILE),
@@ -1555,7 +1621,7 @@ mod tests {
 
         assert_eq!(
             std::fs::read_to_string(state.join(CODEX_AUTH_FILE)).unwrap(),
-            "re-logged-in-account",
+            r#"{"account":"re-logged-in-account"}"#,
             "a newer folder credential must replace the store's stale one"
         );
     }
@@ -1569,8 +1635,14 @@ mod tests {
         let state = tmp.path().join("state");
         let cfg = tmp.path().join("codex-hash");
         std::fs::create_dir_all(&state).unwrap();
-        write(&cfg.join(CODEX_AUTH_FILE), "stale-folder-account");
-        write(&state.join(CODEX_AUTH_FILE), "current-account");
+        write(
+            &cfg.join(CODEX_AUTH_FILE),
+            r#"{"account":"stale-folder-account"}"#,
+        );
+        write(
+            &state.join(CODEX_AUTH_FILE),
+            r#"{"account":"current-account"}"#,
+        );
         let now = filetime::FileTime::now();
         filetime::set_file_mtime(
             state.join(CODEX_AUTH_FILE),
@@ -1582,7 +1654,7 @@ mod tests {
 
         assert_eq!(
             std::fs::read_to_string(state.join(CODEX_AUTH_FILE)).unwrap(),
-            "current-account",
+            r#"{"account":"current-account"}"#,
             "an older folder copy must not roll back a newer store credential"
         );
     }
@@ -1620,22 +1692,71 @@ mod tests {
         );
     }
 
-    /// The pure stability decision: only a matching, successfully-read mtime
-    /// on both sides of the read counts as safe. A stat failure on either
-    /// side must count as unstable, not absent — same conservative default
-    /// as [`sqlite_fold_would_race_a_live_db`]'s stat-error handling.
+    /// A read a coarse-grained filesystem's mtime resolution can't
+    /// distinguish from "no write happened" is still caught by the content
+    /// check: invalid JSON despite a stable mtime must not be persisted into
+    /// the durable store (security-audit, #1451 — mtime equality alone is a
+    /// fail-open heuristic on a filesystem whose timestamp resolution is
+    /// coarser than Codex's truncate-then-rewrite window).
     #[test]
-    fn capture_read_was_stable_requires_matching_non_error_mtimes() {
-        let t1 = SystemTime::UNIX_EPOCH;
-        let t2 = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
-        assert!(capture_read_was_stable(Some(t1), Some(t1)));
+    fn capture_codex_auth_rejects_non_json_content_despite_a_stable_mtime() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        std::fs::create_dir_all(&state).unwrap();
+        // A torn/empty read that a coarse mtime tick failed to flag.
+        write(&cfg.join(CODEX_AUTH_FILE), "");
+
+        capture_codex_auth(&state, &cfg).unwrap();
+
         assert!(
-            !capture_read_was_stable(Some(t1), Some(t2)),
-            "an mtime change between stats means the read may be torn"
+            std::fs::symlink_metadata(state.join(CODEX_AUTH_FILE)).is_err(),
+            "content that isn't valid JSON must not land in the durable store, \
+             even with a mtime bracket that reported no change"
         );
-        assert!(!capture_read_was_stable(None, Some(t1)));
-        assert!(!capture_read_was_stable(Some(t1), None));
-        assert!(!capture_read_was_stable(None, None));
+    }
+
+    /// An open failure on the file itself (simulated with a mode-0 auth.json
+    /// — `is_real_file`'s directory-level stat still succeeds, so this
+    /// exercises [`read_auth_stable`]'s own open error path specifically)
+    /// must be treated as unsafe and skip the capture, never fall through to
+    /// writing whatever bytes happened to be read — same conservative
+    /// default as [`sqlite_fold_would_race_a_live_db`]'s stat-error
+    /// handling.
+    #[cfg(unix)]
+    #[test]
+    fn capture_codex_auth_treats_an_open_error_as_unsafe_not_stable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        let cfg = tmp.path().join("codex-hash");
+        std::fs::create_dir_all(&state).unwrap();
+        write(&cfg.join(CODEX_AUTH_FILE), r#"{"OPENAI_API_KEY":"sk-x"}"#);
+        // Deny read permission on the file itself — `symlink_metadata` (used
+        // by `is_real_file`) needs no permission on the file, only on its
+        // parent directories, so this isolates `open()`'s own EACCES rather
+        // than short-circuiting earlier.
+        std::fs::set_permissions(
+            cfg.join(CODEX_AUTH_FILE),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+
+        let readable_anyway = std::fs::File::open(cfg.join(CODEX_AUTH_FILE)).is_ok();
+        let result = capture_codex_auth(&state, &cfg);
+
+        if readable_anyway {
+            return; // running as root / FS ignores perms — can't exercise EACCES
+        }
+        assert!(
+            result.is_ok(),
+            "an open error must be handled, not propagated: {result:?}"
+        );
+        assert!(
+            std::fs::symlink_metadata(state.join(CODEX_AUTH_FILE)).is_err(),
+            "nothing should land in the durable store when the read can't be verified stable"
+        );
     }
 
     #[test]
