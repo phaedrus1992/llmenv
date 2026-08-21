@@ -4400,8 +4400,9 @@ fn capture_login_credentials(
 
 /// Import auth from an existing `.claude.json` file into the stable cache (#172).
 fn import_auth_from_file(source: &Path, adapter_root: &Path) -> anyhow::Result<()> {
-    let bytes = std::fs::read(source).with_context(|| format!("reading {}", source.display()))?;
-    let doc: serde_json::Value =
+    let bytes = crate::auth::read_zeroizing(source)
+        .with_context(|| format!("reading {}", source.display()))?;
+    let mut doc: serde_json::Value =
         serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", source.display()))?;
     let entry = crate::auth::extract_auth_entry(&doc).ok_or_else(|| {
         anyhow::anyhow!(
@@ -4409,7 +4410,9 @@ fn import_auth_from_file(source: &Path, adapter_root: &Path) -> anyhow::Result<(
              Try `llmenv login` to authenticate.",
             source.display()
         )
-    })?;
+    });
+    crate::auth::zeroize_json_value(&mut doc);
+    let entry = entry?;
     crate::auth::save_auth_entry(adapter_root, &entry)?;
     eprintln!("[llmenv] login: imported auth for {}", entry.email);
     Ok(())

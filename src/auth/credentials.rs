@@ -189,9 +189,12 @@ impl Credentials {
         &self.0
     }
 
-    /// Serialize for a backend write.
-    fn to_blob(&self) -> anyhow::Result<String> {
+    /// Serialize for a backend write. The result is scrubbed on drop — it
+    /// carries the plaintext access and refresh tokens verbatim, same as
+    /// `self.0` (security-audit, #1469).
+    fn to_blob(&self) -> anyhow::Result<zeroize::Zeroizing<String>> {
         serde_json::to_string(&self.0)
+            .map(zeroize::Zeroizing::new)
             .map_err(|e| anyhow::anyhow!("serializing credential blob: {e}"))
     }
 }
@@ -485,8 +488,12 @@ fn keychain_read(config_dir: &Path) -> anyhow::Result<Option<Credentials>> {
         };
     }
     // Deliberately not logged or surfaced — stdout is the token itself.
-    let raw = String::from_utf8_lossy(&out.stdout);
-    match serde_json::from_str::<serde_json::Value>(raw.trim()) {
+    // Zeroized before parse, and parsed straight from bytes rather than
+    // through an intermediate `String::from_utf8_lossy` copy — that would
+    // allocate a second unscrubbed buffer holding the same plaintext token
+    // (security-audit, #1469).
+    let stdout = zeroize::Zeroizing::new(out.stdout);
+    match parse_keychain_stdout(&stdout) {
         Ok(value) => Ok(Credentials::from_json(value)),
         Err(e) => {
             tracing::debug!(
@@ -497,6 +504,14 @@ fn keychain_read(config_dir: &Path) -> anyhow::Result<Option<Credentials>> {
             Ok(None)
         }
     }
+}
+
+/// Parses a keychain lookup's stdout as JSON. `serde_json::from_slice`
+/// tolerates the trailing newline `security find-generic-password -w`
+/// appends, so no intermediate trimmed `&str` is needed.
+#[cfg(any(target_os = "macos", test))]
+fn parse_keychain_stdout(stdout: &[u8]) -> Result<serde_json::Value, serde_json::Error> {
+    serde_json::from_slice(stdout)
 }
 
 /// Store a credential in the keychain via the Security framework directly
@@ -588,6 +603,23 @@ mod tests {
             serde_json::to_string(value).unwrap(),
         )
         .unwrap();
+    }
+
+    // -- parse_keychain_stdout --
+
+    /// `security find-generic-password -w` appends a trailing newline;
+    /// the old code stripped it with `.trim()` on an intermediate `&str`
+    /// before parsing. Parsing straight from bytes must tolerate it too.
+    #[test]
+    fn parse_keychain_stdout_tolerates_a_trailing_newline() {
+        let value =
+            parse_keychain_stdout(b"{\"claudeAiOauth\":{\"accessToken\":\"x\"}}\n").unwrap();
+        assert_eq!(value["claudeAiOauth"]["accessToken"], "x");
+    }
+
+    #[test]
+    fn parse_keychain_stdout_rejects_non_json() {
+        assert!(parse_keychain_stdout(b"not json").is_err());
     }
 
     // -- keychain_service --
@@ -702,6 +734,20 @@ mod tests {
         let back = load_cached(tmp.path()).unwrap().unwrap();
         assert_eq!(back.mcp_server_count(), 1);
         assert_eq!(back.as_json(), creds.as_json());
+    }
+
+    /// Security hardening (pre-pr-review finding on #1469): `to_blob` is the
+    /// one place `Credentials`'s plaintext token gets serialized for a
+    /// backend write — its result must be scrubbed on drop like every other
+    /// credential-bearing buffer in this module, not left in a plain
+    /// `String`. The type annotation only compiles once wrapped.
+    #[test]
+    fn to_blob_returns_a_zeroizing_string() {
+        let creds = Credentials::from_json(blob(FUTURE_MS, None)).unwrap();
+
+        let blob: zeroize::Zeroizing<String> = creds.to_blob().unwrap();
+
+        assert!(blob.contains("sk-ant-oat-TESTONLY"));
     }
 
     /// Security hardening (#1469): `Credentials` holds the OAuth token

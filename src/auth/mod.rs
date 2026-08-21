@@ -37,10 +37,12 @@ pub struct AuthEntry {
     raw: serde_json::Value,
 }
 
-/// Scrubs `raw` on drop — it carries the plaintext OAuth token verbatim
-/// (security-audit, #1469), and `AuthEntry` instances are cloned and held in
+/// Scrubs `raw` on drop. `raw` is `.claude.json`'s `oauthAccount` block —
+/// account *identity* (uuid/email/display name), not the OAuth token itself
+/// (that lives separately, in [`credentials::Credentials`]) — but it's still
+/// PII worth scrubbing, and `AuthEntry` instances are cloned and held in
 /// memory across `load_all_auth_entries`/`choose_auth_for_inheritance` for
-/// the life of an `export`.
+/// the life of an `export` (security-audit, #1469).
 impl Drop for AuthEntry {
     fn drop(&mut self) {
         zeroize_json_value(&mut self.raw);
@@ -53,7 +55,7 @@ impl Drop for AuthEntry {
 /// (security-audit, #1469). A drop-in replacement for [`std::fs::read`]: the
 /// `Err` variant is untouched, so every caller's existing error handling
 /// (e.g. matching on `ErrorKind::NotFound`) still applies unchanged.
-fn read_zeroizing(path: &Path) -> std::io::Result<Zeroizing<Vec<u8>>> {
+pub(crate) fn read_zeroizing(path: &Path) -> std::io::Result<Zeroizing<Vec<u8>>> {
     std::fs::read(path).map(Zeroizing::new)
 }
 
@@ -62,7 +64,7 @@ fn read_zeroizing(path: &Path) -> std::io::Result<Zeroizing<Vec<u8>>> {
 /// before its heap allocations are freed (security-audit, #1469).
 /// Numbers/bools/null carry no secret bytes; arrays/objects need only their
 /// children walked, not zeroized themselves.
-fn zeroize_json_value(value: &mut serde_json::Value) {
+pub(crate) fn zeroize_json_value(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::String(s) => s.zeroize(),
         serde_json::Value::Array(arr) => arr.iter_mut().for_each(zeroize_json_value),
@@ -127,9 +129,14 @@ pub(crate) fn read_auth_from_dir(config_dir: &Path) -> anyhow::Result<Option<Aut
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(anyhow::anyhow!("reading {}: {e}", path.display())),
     };
-    let doc: serde_json::Value = serde_json::from_slice(&bytes)
+    let mut doc: serde_json::Value = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing {} for auth extraction", path.display()))?;
-    Ok(extract_auth_entry(&doc))
+    let entry = extract_auth_entry(&doc);
+    // `doc` is the whole .claude.json document, not just what extract_auth_entry
+    // needed — scrubbed here rather than left to an ordinary drop (security-audit,
+    // #1469), the same treatment every other credential-bearing Value gets.
+    zeroize_json_value(&mut doc);
+    Ok(entry)
 }
 
 /// Write (or refresh) an [`AuthEntry`] to the stable auth cache.
@@ -140,7 +147,7 @@ pub(crate) fn read_auth_from_dir(config_dir: &Path) -> anyhow::Result<Option<Aut
 /// Returns an error when the UUID is unsafe or the write fails.
 pub(crate) fn save_auth_entry(adapter_root: &Path, entry: &AuthEntry) -> anyhow::Result<()> {
     let path = auth_entry_path(adapter_root, &entry.uuid)?;
-    let json = serde_json::to_string_pretty(entry)?;
+    let json = Zeroizing::new(serde_json::to_string_pretty(entry)?);
     crate::paths::write_owner_only_atomic(&path, json.as_bytes())
         .map_err(|e| anyhow::anyhow!("writing auth cache {}: {e}", path.display()))
 }
@@ -244,9 +251,11 @@ pub(crate) fn inject_auth_into_claude_json(
         );
     };
     obj.insert(OAUTH_ACCOUNT_KEY.to_string(), entry.raw.clone());
-    let json = serde_json::to_string_pretty(&doc)?;
-    crate::paths::write_owner_only_atomic(&path, json.as_bytes())
-        .map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()))
+    let json = Zeroizing::new(serde_json::to_string_pretty(&doc)?);
+    let result = crate::paths::write_owner_only_atomic(&path, json.as_bytes())
+        .map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()));
+    zeroize_json_value(&mut doc);
+    result
 }
 
 /// Read `.claude.json`, returning `{}` when absent. Corrupt = hard error.
@@ -379,13 +388,14 @@ mod tests {
         assert!(value["gone"].is_null());
     }
 
-    /// Security hardening (#1469): `AuthEntry.raw` carries the same
-    /// plaintext OAuth blob `extract_auth_entry` cloned out of
-    /// `.claude.json` — it must be scrubbed on drop like every other
-    /// credential-bearing type in this module. Compiles only once
-    /// `AuthEntry` has an explicit `impl Drop`.
+    /// Security hardening (#1469): `AuthEntry.raw` carries account identity
+    /// (uuid/email/display name) that `extract_auth_entry` cloned out of
+    /// `.claude.json` — PII worth scrubbing on drop like every other
+    /// credential-bearing type in this module, even though the OAuth token
+    /// itself lives elsewhere (`credentials::Credentials`). Compiles only
+    /// once `AuthEntry` has an explicit `impl Drop`.
     #[test]
-    fn auth_entry_implements_drop_to_zeroize_its_raw_token_blob() {
+    fn auth_entry_implements_drop_to_zeroize_its_identity_blob() {
         #[expect(
             drop_bounds,
             reason = "deliberate: the bound is a compile-time check that AuthEntry has an \
@@ -627,6 +637,53 @@ mod tests {
             s in r"[a-zA-Z0-9\-]*(\.\.|\.|/|\\|:|\x00)[a-zA-Z0-9\-]*"
         ) {
             prop_assert!(!is_safe_uuid(&s), "expected path-unsafe UUID to be rejected: {:?}", s);
+        }
+
+        /// Security hardening (pre-pr-review finding on #1469): the single
+        /// hand-written fixture in `zeroize_json_value_scrubs_every_nested_string`
+        /// only proves the function works on one shape. An arbitrarily nested
+        /// document must come out with every string emptied and its
+        /// structure (array/object shape, non-string values) untouched.
+        #[test]
+        fn prop_zeroize_json_value_scrubs_every_string_in_arbitrary_json(
+            mut value in llmenv_util::testkit::arb_json()
+        ) {
+            let before_shape = json_shape(&value);
+            zeroize_json_value(&mut value);
+            prop_assert!(all_strings_empty(&value), "a string survived zeroizing: {value:?}");
+            prop_assert_eq!(json_shape(&value), before_shape, "structure changed by zeroizing");
+        }
+    }
+
+    #[cfg(test)]
+    fn all_strings_empty(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::String(s) => s.is_empty(),
+            serde_json::Value::Array(arr) => arr.iter().all(all_strings_empty),
+            serde_json::Value::Object(obj) => obj.values().all(all_strings_empty),
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+                true
+            }
+        }
+    }
+
+    /// A shape fingerprint that ignores string *content* but preserves
+    /// everything else — variant kind, array length, object keys, and
+    /// non-string values — so a proptest can assert zeroizing only empties
+    /// strings without altering the document's structure.
+    #[cfg(test)]
+    fn json_shape(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::String(_) => serde_json::Value::String(String::new()),
+            serde_json::Value::Array(arr) => {
+                serde_json::Value::Array(arr.iter().map(json_shape).collect())
+            }
+            serde_json::Value::Object(obj) => serde_json::Value::Object(
+                obj.iter()
+                    .map(|(k, v)| (k.clone(), json_shape(v)))
+                    .collect(),
+            ),
+            other => other.clone(),
         }
     }
 }
