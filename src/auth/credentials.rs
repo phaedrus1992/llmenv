@@ -76,6 +76,14 @@ impl Backend {
 #[derive(Clone, PartialEq, Eq)]
 pub struct Credentials(serde_json::Value);
 
+/// Scrubs the wrapped document on drop — it carries the plaintext access and
+/// refresh tokens verbatim (security-audit, #1469).
+impl Drop for Credentials {
+    fn drop(&mut self) {
+        super::zeroize_json_value(&mut self.0);
+    }
+}
+
 /// Redacting `Debug` — a derived one would print the access and refresh tokens
 /// verbatim into any `{:?}` or `tracing` field. Only the expiry timestamps are
 /// safe to show, and they're the only part worth debugging.
@@ -217,7 +225,7 @@ pub(crate) fn cache_path(adapter_root: &Path) -> PathBuf {
 /// Returns an error only when the file exists but cannot be read.
 pub(crate) fn load_cached(adapter_root: &Path) -> anyhow::Result<Option<Credentials>> {
     let path = cache_path(adapter_root);
-    let bytes = match std::fs::read(&path) {
+    let bytes = match super::read_zeroizing(&path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(anyhow::anyhow!("reading {}: {e}", path.display())),
@@ -290,7 +298,7 @@ pub(crate) fn write_backend(
 
 fn read_credentials_file(config_dir: &Path) -> anyhow::Result<Option<Credentials>> {
     let path = config_dir.join(CREDENTIALS_FILE);
-    let bytes = match std::fs::read(&path) {
+    let bytes = match super::read_zeroizing(&path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(anyhow::anyhow!("reading {}: {e}", path.display())),
@@ -694,6 +702,21 @@ mod tests {
         let back = load_cached(tmp.path()).unwrap().unwrap();
         assert_eq!(back.mcp_server_count(), 1);
         assert_eq!(back.as_json(), creds.as_json());
+    }
+
+    /// Security hardening (#1469): `Credentials` holds the OAuth token
+    /// verbatim in `self.0` — it must be scrubbed on drop, not left in
+    /// freed-but-unscrubbed heap memory. Compiles only once `Credentials`
+    /// has an explicit `impl Drop`.
+    #[test]
+    fn credentials_implements_drop_to_zeroize_its_token() {
+        #[expect(
+            drop_bounds,
+            reason = "deliberate: the bound is a compile-time check that Credentials has an \
+                      explicit `impl Drop`, not a (mistaken) attempt to detect droppability"
+        )]
+        fn assert_impls_drop<T: Drop>() {}
+        assert_impls_drop::<Credentials>();
     }
 
     /// A derived `Debug` would print both tokens verbatim into any log line that

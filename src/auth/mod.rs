@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, Zeroizing};
 
 /// Top-level key in `.claude.json` that carries OAuth tokens.
 const OAUTH_ACCOUNT_KEY: &str = "oauthAccount";
@@ -34,6 +35,40 @@ pub struct AuthEntry {
     last_seen: String,
     /// Full `oauthAccount` JSON blob, injected verbatim into new folders.
     raw: serde_json::Value,
+}
+
+/// Scrubs `raw` on drop — it carries the plaintext OAuth token verbatim
+/// (security-audit, #1469), and `AuthEntry` instances are cloned and held in
+/// memory across `load_all_auth_entries`/`choose_auth_for_inheritance` for
+/// the life of an `export`.
+impl Drop for AuthEntry {
+    fn drop(&mut self) {
+        zeroize_json_value(&mut self.raw);
+    }
+}
+
+/// Reads `path` into a zeroizing buffer — every caller here and in
+/// [`credentials`] reads a plaintext credential file, and the buffer must be
+/// scrubbed on drop rather than left in freed-but-unscrubbed heap memory
+/// (security-audit, #1469). A drop-in replacement for [`std::fs::read`]: the
+/// `Err` variant is untouched, so every caller's existing error handling
+/// (e.g. matching on `ErrorKind::NotFound`) still applies unchanged.
+fn read_zeroizing(path: &Path) -> std::io::Result<Zeroizing<Vec<u8>>> {
+    std::fs::read(path).map(Zeroizing::new)
+}
+
+/// Recursively zeroizes every string in a JSON value tree in place, so a
+/// `Drop` impl can scrub a parsed document that held a plaintext credential
+/// before its heap allocations are freed (security-audit, #1469).
+/// Numbers/bools/null carry no secret bytes; arrays/objects need only their
+/// children walked, not zeroized themselves.
+fn zeroize_json_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(s) => s.zeroize(),
+        serde_json::Value::Array(arr) => arr.iter_mut().for_each(zeroize_json_value),
+        serde_json::Value::Object(obj) => obj.values_mut().for_each(zeroize_json_value),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
 }
 
 /// Auth cache directory: `<adapter_root>/state/auth/`.
@@ -87,7 +122,7 @@ pub(crate) fn extract_auth_entry(doc: &serde_json::Value) -> Option<AuthEntry> {
 /// Returns an error when the file exists but cannot be read or is not valid JSON.
 pub(crate) fn read_auth_from_dir(config_dir: &Path) -> anyhow::Result<Option<AuthEntry>> {
     let path = config_dir.join(CLAUDE_JSON_FILE);
-    let bytes = match std::fs::read(&path) {
+    let bytes = match read_zeroizing(&path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(anyhow::anyhow!("reading {}: {e}", path.display())),
@@ -143,7 +178,7 @@ fn load_all_auth_entries(adapter_root: &Path) -> anyhow::Result<Vec<AuthEntry>> 
             if path.file_name().and_then(|n| n.to_str()) == Some(credentials::CACHE_FILE) {
                 return None;
             }
-            let bytes = std::fs::read(&path)
+            let bytes = read_zeroizing(&path)
                 .inspect_err(|e| {
                     tracing::warn!("failed to read auth entry {}: {e}", path.display())
                 })
@@ -216,7 +251,7 @@ pub(crate) fn inject_auth_into_claude_json(
 
 /// Read `.claude.json`, returning `{}` when absent. Corrupt = hard error.
 fn read_claude_json_for_inject(path: &Path) -> anyhow::Result<serde_json::Value> {
-    match std::fs::read(path) {
+    match read_zeroizing(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| {
             format!(
                 "existing {} is not valid JSON; refusing to overwrite (would destroy Claude \
@@ -294,6 +329,71 @@ fn is_leap(year: u64) -> bool {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// Security hardening (#1469): every credential-file read in this module
+    /// must return a `Zeroizing<Vec<u8>>`, scrubbed on drop, not a plain
+    /// `Vec<u8>` left in freed-but-unscrubbed heap memory — the type
+    /// annotation only compiles once `read_zeroizing` is wrapped.
+    #[test]
+    fn read_zeroizing_returns_the_files_content_in_a_zeroizing_buffer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secret.json");
+        std::fs::write(&path, r#"{"token":"sk-ant-TESTONLY"}"#).unwrap();
+
+        let bytes: zeroize::Zeroizing<Vec<u8>> = read_zeroizing(&path).unwrap();
+
+        assert_eq!(&*bytes, br#"{"token":"sk-ant-TESTONLY"}"#);
+    }
+
+    #[test]
+    fn read_zeroizing_propagates_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = read_zeroizing(&tmp.path().join("missing.json")).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    /// Security hardening (#1469): scrubbing a parsed credential document
+    /// must reach every string in the tree, not just the top level — a
+    /// nested `oauthAccount`/`claudeAiOauth` blob carries the token several
+    /// levels deep.
+    #[test]
+    fn zeroize_json_value_scrubs_every_nested_string() {
+        let mut value = serde_json::json!({
+            "token": "sk-ant-oat-TESTONLY",
+            "nested": { "refresh": "sk-ant-ort-TESTONLY" },
+            "list": ["also-secret", "and-this"],
+            "count": 3,
+            "live": true,
+            "gone": null,
+        });
+
+        zeroize_json_value(&mut value);
+
+        assert_eq!(value["token"], "");
+        assert_eq!(value["nested"]["refresh"], "");
+        assert_eq!(value["list"][0], "");
+        assert_eq!(value["list"][1], "");
+        // Non-string values carry no secret bytes and are left as-is.
+        assert_eq!(value["count"], 3);
+        assert_eq!(value["live"], true);
+        assert!(value["gone"].is_null());
+    }
+
+    /// Security hardening (#1469): `AuthEntry.raw` carries the same
+    /// plaintext OAuth blob `extract_auth_entry` cloned out of
+    /// `.claude.json` — it must be scrubbed on drop like every other
+    /// credential-bearing type in this module. Compiles only once
+    /// `AuthEntry` has an explicit `impl Drop`.
+    #[test]
+    fn auth_entry_implements_drop_to_zeroize_its_raw_token_blob() {
+        #[expect(
+            drop_bounds,
+            reason = "deliberate: the bound is a compile-time check that AuthEntry has an \
+                      explicit `impl Drop`, not a (mistaken) attempt to detect droppability"
+        )]
+        fn assert_impls_drop<T: Drop>() {}
+        assert_impls_drop::<AuthEntry>();
+    }
 
     fn sample_claude_json(uuid: &str, email: &str) -> serde_json::Value {
         serde_json::json!({

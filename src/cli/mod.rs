@@ -2540,8 +2540,8 @@ fn inject_cached_auth_if_available(
                 eprintln!("[llmenv] auth: {} (inherited)", entry.email);
                 AuthStatus {
                     source: AuthSource::Inherited,
-                    id: Some(entry.uuid),
-                    email: Some(entry.email),
+                    id: Some(entry.uuid.clone()),
+                    email: Some(entry.email.clone()),
                 }
             }
             Err(e) => {
@@ -4348,8 +4348,8 @@ fn run_login_capture(adapter_root: &Path, current_folder: Option<&Path>) -> anyh
             Ok(Some(mut manifest)) => {
                 manifest.auth_status = crate::materialize::manifest::AuthStatus {
                     source: crate::materialize::manifest::AuthSource::Explicit,
-                    id: Some(entry.uuid),
-                    email: Some(entry.email),
+                    id: Some(entry.uuid.clone()),
+                    email: Some(entry.email.clone()),
                 };
                 manifest.write(folder)?;
             }
