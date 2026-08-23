@@ -110,29 +110,79 @@ mod tests {
         })
     }
 
-    /// A malformed/hostile endpoint claiming a response far larger than
-    /// [`MAX_RESPONSE_LEN`] must be rejected before this client allocates a
-    /// buffer of that size — never hangs waiting for bytes that never
-    /// arrive, and never returns a notice.
+    /// A valid, complete JSON response `{"notice":"<padding>"}` whose total
+    /// serialized length is exactly `len` bytes — built by construction
+    /// (fixed prefix/suffix, padding fills the rest) rather than trial and
+    /// error, so tests can hit an exact byte boundary. `len` must be at
+    /// least the 13-byte fixed overhead (`{"notice":"` + `"}`).
+    fn response_payload_of_exact_len(len: u32) -> Vec<u8> {
+        const PREFIX: &[u8] = b"{\"notice\":\"";
+        const SUFFIX: &[u8] = b"\"}";
+        let overhead = u32::try_from(PREFIX.len() + SUFFIX.len()).unwrap();
+        let padding_len = usize::try_from(len - overhead).unwrap();
+        let mut payload = Vec::with_capacity(len as usize);
+        payload.extend_from_slice(PREFIX);
+        payload.extend(std::iter::repeat_n(b'x', padding_len));
+        payload.extend_from_slice(SUFFIX);
+        assert_eq!(payload.len(), len as usize);
+        payload
+    }
+
+    /// Serve exactly one request, then send `payload` prefixed by its own
+    /// (real, matching) length — i.e. an honest response of that size, not
+    /// a length header lying about a payload that never arrives. Needed to
+    /// tell "rejected because it's oversized" apart from "failed because
+    /// the connection closed before the promised bytes showed up", which a
+    /// truncated fake response can't distinguish.
+    fn serve_one_response(
+        listener: tokio::net::UnixListener,
+        payload: Vec<u8>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut len_buf = [0u8; 4];
+            stream.read_exact(&mut len_buf).await.unwrap();
+            let request_len = u32::from_be_bytes(len_buf) as usize;
+            let mut discard = vec![0u8; request_len];
+            stream.read_exact(&mut discard).await.unwrap();
+
+            let payload_len = u32::try_from(payload.len()).unwrap();
+            stream.write_all(&payload_len.to_be_bytes()).await.unwrap();
+            stream.write_all(&payload).await.unwrap();
+        })
+    }
+
+    /// A complete, honestly-sized response of exactly [`MAX_RESPONSE_LEN`]
+    /// bytes must be accepted — the boundary itself is not oversized.
     #[tokio::test]
-    async fn rejects_a_response_claiming_an_oversized_length() {
+    async fn accepts_a_response_of_exactly_the_max_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("boundary.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let payload = response_payload_of_exact_len(MAX_RESPONSE_LEN);
+        let server = serve_one_response(listener, payload);
+
+        let notice = fetch(path.into_os_string()).await;
+        assert!(
+            notice.is_some(),
+            "an exactly-max-length response must not be rejected"
+        );
+        server.abort();
+    }
+
+    /// A complete, honestly-sized response one byte past
+    /// [`MAX_RESPONSE_LEN`] must be rejected before this client reads (or
+    /// returns) any of it — proven with a real, fully-sent oversized
+    /// payload rather than a truncated one, so a mutant that weakens the
+    /// length check can't hide behind a coincidental connection-closed
+    /// `None`.
+    #[tokio::test]
+    async fn rejects_a_response_one_byte_past_the_max_length() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("oversized.sock");
         let listener = tokio::net::UnixListener::bind(&path).unwrap();
-
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            // Consume the client's request so it isn't left write-blocked,
-            // then claim a response far past MAX_RESPONSE_LEN and stop —
-            // deliberately never sending that many bytes.
-            let mut len_buf = [0u8; 4];
-            stream.read_exact(&mut len_buf).await.unwrap();
-            let len = u32::from_be_bytes(len_buf) as usize;
-            let mut discard = vec![0u8; len];
-            stream.read_exact(&mut discard).await.unwrap();
-            let huge_len = MAX_RESPONSE_LEN + 1;
-            stream.write_all(&huge_len.to_be_bytes()).await.unwrap();
-        });
+        let payload = response_payload_of_exact_len(MAX_RESPONSE_LEN + 1);
+        let server = serve_one_response(listener, payload);
 
         let notice = fetch(path.into_os_string()).await;
         assert_eq!(notice, None);
