@@ -8,6 +8,8 @@
 //! module rather than growing `cli`'s already-largest file further. See
 //! `docs/superpowers/specs/2026-08-23-launch-mid-session-supervision-design.md`.
 
+mod socket;
+
 use std::os::unix::process::ExitStatusExt;
 
 use anyhow::Context;
