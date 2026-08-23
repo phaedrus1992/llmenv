@@ -91,29 +91,49 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
     // reactor running", the same pitfall `run_supervised`'s doc comment
     // warns about for spawning the child.
     let status = rt.block_on(async {
-        let (listener, notices, socket_path) = socket::bind(std::process::id())?;
-        let _cleanup = SocketCleanup(socket_path.clone());
-        tokio::spawn(socket::serve(listener, Arc::clone(&notices)));
-        if let Ok(Some(baseline)) = drift::current_hash(&config_path) {
-            tokio::spawn(drift::watch(
-                baseline,
-                config_path.clone(),
-                Arc::clone(&notices),
-                drift::DRIFT_CHECK_INTERVAL,
-            ));
+        // The notice channel (drift/credential-expiry warnings) is a pure
+        // add-on — a bind failure must not take down the actual engine
+        // session, so it's logged and skipped rather than propagated.
+        // `_cleanup` is bound here (not further down) so it stays alive
+        // for the whole supervised session whenever a socket exists.
+        let (socket_path, notices, _cleanup) = match socket::bind(std::process::id()) {
+            Ok((listener, notices, path)) => {
+                tokio::spawn(socket::serve(listener, Arc::clone(&notices)));
+                let cleanup = Some(SocketCleanup(path.clone()));
+                (Some(path), Some(notices), cleanup)
+            }
+            Err(e) => {
+                eprintln!(
+                    "llmenv: could not open launch's notice socket, continuing \
+                         without config-drift/credential-expiry warnings: {e:#}"
+                );
+                (None, None, None)
+            }
+        };
+
+        if let Some(notices) = &notices {
+            if let Ok(Some(baseline)) = drift::current_hash(&config_path) {
+                tokio::spawn(drift::watch(
+                    baseline,
+                    config_path.clone(),
+                    Arc::clone(notices),
+                    drift::DRIFT_CHECK_INTERVAL,
+                ));
+            }
+            if adapter.name() == "claude-code"
+                && let Ok(config) = crate::config::Config::load(&config_path)
+            {
+                let cache_dir =
+                    std::path::PathBuf::from(crate::paths::expand_tilde(&config.cache.cache_dir));
+                let adapter_root = cache_dir.join(adapter.name());
+                tokio::spawn(credential_watch::watch(
+                    adapter_root,
+                    Arc::clone(notices),
+                    credential_watch::EXPIRY_CHECK_INTERVAL,
+                ));
+            }
         }
-        if adapter.name() == "claude-code"
-            && let Ok(config) = crate::config::Config::load(&config_path)
-        {
-            let cache_dir =
-                std::path::PathBuf::from(crate::paths::expand_tilde(&config.cache.cache_dir));
-            let adapter_root = cache_dir.join(adapter.name());
-            tokio::spawn(credential_watch::watch(
-                adapter_root,
-                Arc::clone(&notices),
-                credential_watch::EXPIRY_CHECK_INTERVAL,
-            ));
-        }
+
         supervision_loop(
             EngineTarget {
                 adapter: adapter.as_ref(),
@@ -121,7 +141,7 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
                 args: &args,
             },
             &resolved,
-            &socket_path,
+            socket_path.as_deref(),
             narrow.auto_restart,
         )
         .await
@@ -156,7 +176,7 @@ struct EngineTarget<'a> {
 async fn supervision_loop(
     target: EngineTarget<'_>,
     resolved: &crate::cli::ResolvedEnv,
-    socket_path: &std::path::Path,
+    socket_path: Option<&std::path::Path>,
     auto_restart: bool,
 ) -> anyhow::Result<std::process::ExitStatus> {
     let EngineTarget {
@@ -172,7 +192,9 @@ async fn supervision_loop(
         for (key, value) in &resolved.vars {
             cmd.env(key, value);
         }
-        cmd.env("LLMENV_LAUNCH_SOCKET", socket_path);
+        if let Some(socket_path) = socket_path {
+            cmd.env("LLMENV_LAUNCH_SOCKET", socket_path);
+        }
         cmd.stdin(std::process::Stdio::inherit());
         cmd.stdout(std::process::Stdio::inherit());
         cmd.stderr(std::process::Stdio::inherit());

@@ -4,7 +4,7 @@
 //! child's stdio. See
 //! docs/superpowers/specs/2026-08-23-launch-mid-session-supervision-design.md.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -42,10 +42,20 @@ fn socket_path_in(
     pid: u32,
 ) -> anyhow::Result<PathBuf> {
     let dir = match xdg_runtime_dir {
-        Some(d) if !d.is_empty() => PathBuf::from(d).join("llmenv"),
+        // A relative value (e.g. `XDG_RUNTIME_DIR=.`) would otherwise resolve
+        // against the current working directory — typically a project
+        // checkout, not a runtime directory — putting the socket somewhere
+        // repo permissions govern instead of the runtime dir's.
+        Some(d) if !d.is_empty() && Path::new(&d).is_absolute() => PathBuf::from(d).join("llmenv"),
         _ => crate::paths::state_dir()?,
     };
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    // Owner-only: this socket carries a mid-session notice into the agent's
+    // own context, so anything able to connect and answer on it can inject
+    // arbitrary text there. `create_dir_owner_only` also self-heals an
+    // existing directory left permissive by an older llmenv version or a
+    // loose umask.
+    crate::paths::create_dir_owner_only(&dir)
+        .with_context(|| format!("creating {}", dir.display()))?;
     Ok(dir.join(format!("launch-{pid}.sock")))
 }
 
@@ -63,6 +73,15 @@ pub(crate) fn bind(pid: u32) -> anyhow::Result<(UnixListener, NoticeSlot, PathBu
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path)
         .with_context(|| format!("binding launch socket at {}", path.display()))?;
+    // `bind` creates the socket file at the process umask, which can leave
+    // it group/world-readable (0755 under a common 022 umask) even though
+    // its parent directory is now owner-only — chmod it explicitly rather
+    // than relying on the directory alone.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("hardening permissions on {}", path.display()))?;
+    }
     Ok((listener, Arc::new(Mutex::new(None)), path))
 }
 
@@ -140,6 +159,44 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = socket_path_in(Some(dir.path().as_os_str().to_owned()), 12345).unwrap();
         assert_eq!(path, dir.path().join("llmenv").join("launch-12345.sock"));
+    }
+
+    #[test]
+    fn socket_path_falls_back_to_state_dir_when_xdg_runtime_dir_is_relative() {
+        // A relative XDG_RUNTIME_DIR must not be honored — it would resolve
+        // against the current working directory (typically a project
+        // checkout) rather than a real runtime dir. Can't assert the exact
+        // fallback path without controlling `state_dir()`'s own env inputs
+        // (unsafe, forbidden), so assert the negative: the relative value
+        // is not the one used.
+        let path = socket_path_in(Some("relative/runtime/dir".into()), 12345).unwrap();
+        assert!(
+            !path.starts_with("relative/runtime/dir"),
+            "a relative XDG_RUNTIME_DIR must not be honored; got {}",
+            path.display()
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_creates_an_owner_only_directory_and_socket() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Offset from the other tests' pids in this binary (plain
+        // `std::process::id()`, `+1` in `hook_run::launch_client`'s tests)
+        // so a parallel run doesn't have two tests binding the same path.
+        let (_listener, _notices, path) = bind(std::process::id() + 2).unwrap();
+
+        let dir_mode = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o700, "socket directory must be owner-only");
+
+        let socket_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(socket_mode, 0o600, "socket file must be owner-only");
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]

@@ -18,6 +18,11 @@ use tokio::net::UnixStream;
 /// v1 `launch` design's connect-then-fall-back guess.
 const BUDGET: Duration = Duration::from_millis(50);
 
+/// Longest response this client accepts, matching `launch::socket`'s own
+/// `MAX_REQUEST_LEN` — a malformed or hostile endpoint claiming a larger
+/// length must not make this client allocate on its say-so.
+const MAX_RESPONSE_LEN: u32 = 4096;
+
 /// Check the resident `launch` process (if any) for a pending mid-session
 /// notice. Returns `None` for every failure mode — no `LLMENV_LAUNCH_SOCKET`
 /// set, no socket file, a connect/IO error, a timeout, or a malformed
@@ -46,8 +51,11 @@ async fn fetch(path: std::ffi::OsString) -> Option<String> {
 
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await.ok()?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-    let mut buf = vec![0u8; len];
+    let len = u32::from_be_bytes(len_buf);
+    if len > MAX_RESPONSE_LEN {
+        return None;
+    }
+    let mut buf = vec![0u8; len as usize];
     stream.read_exact(&mut buf).await.ok()?;
     let response: serde_json::Value = serde_json::from_slice(&buf).ok()?;
     response.get("notice")?.as_str().map(str::to_owned)
@@ -100,5 +108,34 @@ mod tests {
                 .ok()
                 .flatten()
         })
+    }
+
+    /// A malformed/hostile endpoint claiming a response far larger than
+    /// [`MAX_RESPONSE_LEN`] must be rejected before this client allocates a
+    /// buffer of that size — never hangs waiting for bytes that never
+    /// arrive, and never returns a notice.
+    #[tokio::test]
+    async fn rejects_a_response_claiming_an_oversized_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oversized.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            // Consume the client's request so it isn't left write-blocked,
+            // then claim a response far past MAX_RESPONSE_LEN and stop —
+            // deliberately never sending that many bytes.
+            let mut len_buf = [0u8; 4];
+            stream.read_exact(&mut len_buf).await.unwrap();
+            let len = u32::from_be_bytes(len_buf) as usize;
+            let mut discard = vec![0u8; len];
+            stream.read_exact(&mut discard).await.unwrap();
+            let huge_len = MAX_RESPONSE_LEN + 1;
+            stream.write_all(&huge_len.to_be_bytes()).await.unwrap();
+        });
+
+        let notice = fetch(path.into_os_string()).await;
+        assert_eq!(notice, None);
+        server.abort();
     }
 }
