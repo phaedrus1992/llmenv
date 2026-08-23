@@ -75,22 +75,75 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
     };
 
     let resolved = crate::cli::resolve_env(narrow.scope, narrow.tag, narrow.compress)?;
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build tokio runtime for launch")?;
+
+    // `UnixListener::bind` (like `tokio::process::Command::spawn`) registers
+    // with the runtime's reactor immediately, so it must run inside
+    // `block_on` too — binding before entering the runtime panics with "no
+    // reactor running", the same pitfall `run_supervised`'s doc comment
+    // warns about for spawning the child.
+    let status = rt.block_on(async {
+        let (listener, notices, socket_path) = socket::bind(std::process::id())?;
+        let _cleanup = SocketCleanup(socket_path.clone());
+        tokio::spawn(socket::serve(listener, notices));
+        supervision_loop(
+            adapter.as_ref(),
+            &bin_path,
+            &args,
+            &resolved,
+            &socket_path,
+            narrow.auto_restart,
+        )
+        .await
+    })?;
+
+    crate::cli::exit_with_status(status);
+}
+
+/// Unlinks the per-session socket on every exit path via `Drop`, including a
+/// panic unwind — the socket is the one artifact `launch` genuinely owns for
+/// its own lifetime (see design doc "Teardown").
+struct SocketCleanup(std::path::PathBuf);
+
+impl Drop for SocketCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Spawn the engine, relaunching it after a crash (up to the restart cap or
+/// until the user declines), and return the final exit status once the
+/// engine exits cleanly or the cap/decline path gives up.
+async fn supervision_loop(
+    adapter: &dyn crate::adapter::AgentAdapter,
+    bin_path: &std::path::Path,
+    args: &[String],
+    resolved: &crate::cli::ResolvedEnv,
+    socket_path: &std::path::Path,
+    auto_restart: bool,
+) -> anyhow::Result<std::process::ExitStatus> {
     let mut cap = RelaunchCap::default();
 
     loop {
-        let mut cmd = crate::cli::command_at_path(&bin_path, adapter.binary_name());
-        cmd.args(&args);
+        let mut cmd = crate::cli::command_at_path(bin_path, adapter.binary_name());
+        cmd.args(args);
         for (key, value) in &resolved.vars {
             cmd.env(key, value);
         }
+        cmd.env("LLMENV_LAUNCH_SOCKET", socket_path);
         cmd.stdin(std::process::Stdio::inherit());
         cmd.stdout(std::process::Stdio::inherit());
         cmd.stderr(std::process::Stdio::inherit());
+        let mut cmd = tokio::process::Command::from(cmd);
 
-        let status = crate::cli::run_supervised(cmd, adapter.binary_name(), None)?;
+        let status = spawn_and_supervise(&mut cmd, adapter.binary_name(), None).await?;
 
         if status.success() {
-            crate::cli::exit_with_status(status);
+            return Ok(status);
         }
 
         let reason = match status.signal() {
@@ -101,10 +154,10 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
 
         if !cap.record_and_check(std::time::Instant::now()) {
             eprintln!("llmenv: restart attempts exceeded, giving up");
-            crate::cli::exit_with_status(status);
+            return Ok(status);
         }
 
-        if narrow.auto_restart {
+        if auto_restart {
             eprintln!("llmenv: auto-restarting");
             continue;
         }
@@ -115,7 +168,7 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
         if std::io::stdin().read_line(&mut answer).unwrap_or(0) == 0
             || !answer.trim().eq_ignore_ascii_case("y")
         {
-            crate::cli::exit_with_status(status);
+            return Ok(status);
         }
     }
 }

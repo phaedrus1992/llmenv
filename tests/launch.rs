@@ -132,6 +132,24 @@ fn launch_propagates_child_exit_code() {
 }
 
 #[test]
+fn launch_sets_llmenv_launch_socket_in_child_env() {
+    let (dir, config_path) = setup_config();
+    let mut cmd = launch_cmd(dir.path(), &config_path);
+    let env_dump = dir.path().join("env.txt");
+    cmd.env("FAKE_ENGINE_ENV_DUMP", &env_dump);
+    cmd.timeout(Duration::from_secs(LAUNCH_TIMEOUT_SECS))
+        .assert()
+        .success();
+    let dumped = fs::read_to_string(&env_dump).unwrap();
+    assert!(
+        dumped
+            .lines()
+            .any(|l| l.starts_with("LLMENV_LAUNCH_SOCKET=")),
+        "child env missing LLMENV_LAUNCH_SOCKET:\n{dumped}"
+    );
+}
+
+#[test]
 fn launch_prompts_to_restart_after_a_crash() {
     let (dir, config_path) = setup_config();
     let mut cmd = launch_cmd(dir.path(), &config_path);
