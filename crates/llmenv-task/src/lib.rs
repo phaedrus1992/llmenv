@@ -180,7 +180,7 @@ fn unique_slug(dir: &Path, base_slug: &str) -> String {
 ///
 /// # Errors
 /// Returns an error when `task.slug` fails validation, or the write fails.
-pub fn save_task(state_dir: &Path, task: &Task) -> anyhow::Result<()> {
+pub(crate) fn save_task(state_dir: &Path, task: &Task) -> anyhow::Result<()> {
     if !llmenv_paths::is_valid_short_name(&task.slug) {
         anyhow::bail!("'{}' is not a valid task slug", task.slug);
     }
