@@ -10,6 +10,29 @@
 
 use anyhow::Context;
 
+const RELAUNCH_MAX_ATTEMPTS: usize = 3;
+const RELAUNCH_WINDOW: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Caps how many times `launch` will relaunch a crashing child within a
+/// rolling window, so a child that crashes on every start doesn't loop
+/// forever. Attempts older than [`RELAUNCH_WINDOW`] no longer count.
+#[derive(Debug, Default)]
+struct RelaunchCap {
+    attempts: Vec<std::time::Instant>,
+}
+
+impl RelaunchCap {
+    /// Record an attempt at `now` and report whether the cap still allows
+    /// relaunching (i.e. this attempt was the `RELAUNCH_MAX_ATTEMPTS`-th or
+    /// earlier within the window).
+    fn record_and_check(&mut self, now: std::time::Instant) -> bool {
+        self.attempts
+            .retain(|t| now.duration_since(*t) < RELAUNCH_WINDOW);
+        self.attempts.push(now);
+        self.attempts.len() <= RELAUNCH_MAX_ATTEMPTS
+    }
+}
+
 /// The scope-narrowing flags `launch` shares with `export` (#1384), bundled so
 /// [`run`] stays inside the 5-positional-param limit and so the three
 /// always travel to [`crate::cli::resolve_env`] together.
@@ -268,5 +291,35 @@ fn forward_signal(child: &tokio::process::Child, signal: rustix::process::Signal
                  The engine may keep running until it is killed directly."
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relaunch_cap_allows_up_to_the_configured_max_within_the_window() {
+        let mut cap = RelaunchCap::default();
+        let base = std::time::Instant::now();
+        assert!(cap.record_and_check(base));
+        assert!(cap.record_and_check(base + std::time::Duration::from_secs(1)));
+        assert!(cap.record_and_check(base + std::time::Duration::from_secs(2)));
+        // 4th attempt within the window exceeds the cap of 3.
+        assert!(!cap.record_and_check(base + std::time::Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn relaunch_cap_resets_once_attempts_age_out_of_the_window() {
+        let mut cap = RelaunchCap::default();
+        let base = std::time::Instant::now();
+        assert!(cap.record_and_check(base));
+        assert!(cap.record_and_check(base + std::time::Duration::from_secs(1)));
+        assert!(cap.record_and_check(base + std::time::Duration::from_secs(2)));
+        assert!(!cap.record_and_check(base + std::time::Duration::from_secs(3)));
+        // After RELAUNCH_WINDOW has passed since attempt 1, the earlier
+        // attempts have aged out and no longer count against the cap.
+        let long_after = base + RELAUNCH_WINDOW + std::time::Duration::from_secs(1);
+        assert!(cap.record_and_check(long_after));
     }
 }
