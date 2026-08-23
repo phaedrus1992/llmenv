@@ -160,6 +160,10 @@ enum Command {
         /// Compress the materialized AGENTS.md (CLAUDE.md) to reduce token cost
         #[arg(long)]
         compress: bool,
+        /// Relaunch the engine automatically after a crash, up to the
+        /// restart-attempt cap, instead of prompting
+        #[arg(long)]
+        auto_restart: bool,
         /// Engine to launch: a binary name (claude, crush, opencode) or the
         /// underscore-form engine id (claude_code)
         engine: String,
@@ -645,16 +649,18 @@ pub fn run() -> anyhow::Result<()> {
             scope,
             tag,
             compress,
+            auto_restart,
             engine,
             args,
         }) => {
-            run_launch(
+            crate::launch::run(
                 &engine,
                 args,
-                LaunchScope {
+                crate::launch::LaunchScope {
                     scope,
                     tag,
                     compress,
+                    auto_restart,
                 },
             )?;
         }
@@ -1071,9 +1077,9 @@ fn installed_adapters(config: &Config) -> impl Iterator<Item = Box<dyn AgentAdap
 /// either printed as `export` lines (`run_export`) or applied to a supervised
 /// child process (`run_launch`). Shared by both so there is exactly one
 /// resolution code path (#1056).
-struct ResolvedEnv {
+pub(crate) struct ResolvedEnv {
     /// Every variable llmenv would export, in deterministic (`BTreeMap`) order.
-    vars: std::collections::BTreeMap<String, String>,
+    pub(crate) vars: std::collections::BTreeMap<String, String>,
     /// Names of the bundles that fired, for `export --explain`'s
     /// `# source: adapter (bundles: ...)` annotation.
     firing_bundle_names: Vec<String>,
@@ -1087,7 +1093,7 @@ struct ResolvedEnv {
 /// Every variable is validated before any is returned, so a validation failure
 /// yields zero output instead of the partial output the previous inline
 /// per-print validation could leave behind.
-fn resolve_env(
+pub(crate) fn resolve_env(
     scope: Option<String>,
     tag: Option<String>,
     compress: bool,
@@ -1466,58 +1472,6 @@ fn run_export(
     Ok(())
 }
 
-/// The scope-narrowing flags `launch` shares with `export` (#1384), bundled so
-/// [`run_launch`] stays inside the 5-positional-param limit and so the three
-/// always travel to [`resolve_env`] together.
-struct LaunchScope {
-    scope: Option<String>,
-    tag: Option<String>,
-    compress: bool,
-}
-
-/// `llmenv launch <engine>`: resolve the environment the same way `export`
-/// does, then spawn `engine` as a supervised child process with that
-/// environment applied on top of the inherited one, inherited stdio, and the
-/// child's exit code propagated as `launch`'s own (see #1056).
-fn run_launch(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyhow::Result<()> {
-    let adapter = crate::adapter::adapter_for_launch_target(engine).ok_or_else(|| {
-        anyhow::anyhow!(
-            "unrecognized engine '{engine}' — expected one of: {}",
-            crate::adapter::registered_adapters()
-                .iter()
-                .map(|a| a.binary_name())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    })?;
-
-    // One resolution, used both as the "is it installed" gate and as the thing
-    // actually spawned — see `command_for_binary`. Resolving PATH directly means
-    // a negative result really is a missing engine, not an artifact of `which`
-    // being unavailable (#1382).
-    let Some(bin_path) = crate::paths::resolve_on_path(adapter.binary_name()) else {
-        anyhow::bail!(
-            "'{bin}' not found on PATH — install it before running `llmenv launch {engine}`",
-            bin = adapter.binary_name()
-        );
-    };
-
-    let resolved = resolve_env(narrow.scope, narrow.tag, narrow.compress)?;
-
-    let mut cmd = command_at_path(&bin_path, adapter.binary_name());
-    cmd.args(&args);
-    for (key, value) in &resolved.vars {
-        cmd.env(key, value);
-    }
-    cmd.stdin(std::process::Stdio::inherit());
-    cmd.stdout(std::process::Stdio::inherit());
-    cmd.stderr(std::process::Stdio::inherit());
-
-    let status = run_supervised(cmd, adapter.binary_name(), None)?;
-
-    exit_with_status(status);
-}
-
 /// A `Command` for `binary`, resolved to the absolute path it has on `PATH`.
 ///
 /// Spawning the resolved path rather than the bare name is the whole point.
@@ -1547,7 +1501,7 @@ fn command_for_binary(binary: &str) -> anyhow::Result<std::process::Command> {
 /// passing the name the user typed — so a child that inspects `argv[0]` (to pick
 /// a mode, or to print its own usage) behaves as it did when llmenv spawned the
 /// bare name.
-fn command_at_path(resolved: &Path, binary: &str) -> std::process::Command {
+pub(crate) fn command_at_path(resolved: &Path, binary: &str) -> std::process::Command {
     let mut cmd = std::process::Command::new(resolved);
     #[cfg(unix)]
     {
@@ -1595,216 +1549,11 @@ pub(crate) fn run_supervised(
         .enable_all()
         .build()
         .context("failed to build tokio runtime for child supervision")?;
-    rt.block_on(spawn_and_supervise(&mut cmd, binary, stdin_payload))
-}
-
-/// Spawn the engine and wait for it to exit, never dying on a signal itself —
-/// `launch`'s exit status must always be the engine's, not a signal it happened
-/// to receive first.
-///
-/// SIGINT and SIGTERM/SIGHUP are treated differently on purpose (#1383):
-///
-/// - **SIGINT is not forwarded.** The terminal generates it for the entire
-///   foreground process group, so the engine already has its own copy, and an
-///   agent TUI commonly reads a second interrupt as "force quit" — forwarding
-///   would turn one Ctrl-C into two.
-/// - **SIGTERM and SIGHUP are forwarded.** A terminal never generates SIGTERM,
-///   so one that arrives here came from a supervisor targeting this process by
-///   pid — `docker stop` signalling PID 1, systemd `KillMode=mixed`, a CI
-///   runner doing `kill <pid>`. The engine would otherwise never learn it
-///   should shut down, and nothing would exit until the caller's SIGKILL
-///   deadline. Both signals mean "terminate", so the duplicate a rare
-///   group-directed kill produces is harmless.
-///
-/// Either way `launch` keeps waiting afterwards rather than exiting, so the
-/// engine gets to shut down and report its own status.
-///
-/// The handlers are installed *before* the spawn on purpose. Installing them
-/// afterwards leaves a window in which a signal kills `launch` under its
-/// default disposition while the engine it just started keeps running,
-/// orphaning the child and returning a signal-derived status the caller has to
-/// interpret as the engine's.
-///
-/// Unix-only, like `launch` itself — the shipped targets are linux-musl and
-/// apple-darwin, and the whole design rests on process-group signal semantics.
-async fn spawn_and_supervise(
-    cmd: &mut tokio::process::Command,
-    binary: &str,
-    stdin_payload: Option<&[u8]>,
-) -> anyhow::Result<std::process::ExitStatus> {
-    use tokio::signal::unix::{SignalKind, signal};
-
-    let mut sigint = signal(SignalKind::interrupt()).context("failed to install SIGINT handler")?;
-    let mut sigterm =
-        signal(SignalKind::terminate()).context("failed to install SIGTERM handler")?;
-    let mut sighup = signal(SignalKind::hangup()).context("failed to install SIGHUP handler")?;
-
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("failed to spawn '{binary}'"))?;
-
-    // The write runs *inside* the select below rather than before it. Installing
-    // the handlers above replaced their default disposition, so from that point
-    // on SIGINT/SIGTERM/SIGHUP are only buffered until something calls `recv()` —
-    // nothing does until the loop starts. Awaiting the write first meant that a
-    // payload larger than the pipe buffer, sent to a child that wasn't draining
-    // it, left llmenv blocked and killable by nothing but SIGKILL.
-    let mut write = std::pin::pin!(write_stdin_payload(
-        child.stdin.take(),
+    rt.block_on(crate::launch::spawn_and_supervise(
+        &mut cmd,
+        binary,
         stdin_payload,
-        binary
-    ));
-    let mut writing = stdin_payload.is_some();
-
-    loop {
-        tokio::select! {
-            status = child.wait() => {
-                return status.context("failed to wait on child engine process");
-            }
-            result = &mut write, if writing => {
-                writing = false;
-                if let Err(e) = result {
-                    // Deliberately not fatal. A failed write means the child
-                    // closed its read end, so it has either exited already or
-                    // decided not to read — and its own exit status and stderr
-                    // explain that far better than an `EPIPE` here would. Keep
-                    // waiting and let the `child.wait()` arm report the real
-                    // outcome.
-                    //
-                    // Returning instead would also drop `child` without killing
-                    // it, and a dropped `tokio::process::Child` keeps running —
-                    // so the error path of the anti-orphaning fix would orphan the
-                    // child. `error!`, not `warn!`: llmenv's default filter is
-                    // ERROR-only, and a child that silently never received its
-                    // input is not something to leave unexplained.
-                    tracing::error!("could not send input to '{binary}': {e:#}");
-                }
-            }
-            _ = sigint.recv() => {
-                // Deliberately not forwarded — see the doc comment above.
-                tracing::debug!("launch: received SIGINT, still waiting on child");
-            }
-            _ = sigterm.recv() => {
-                forward_signal(&child, rustix::process::Signal::TERM, "SIGTERM");
-            }
-            _ = sighup.recv() => {
-                forward_signal(&child, rustix::process::Signal::HUP, "SIGHUP");
-            }
-        }
-    }
-}
-
-/// Write `payload` to `stdin` and close it, or do nothing when there's no
-/// payload.
-///
-/// Takes the handle by value so the write can live in the supervision `select!`
-/// without borrowing the `Child` the same `select!` is waiting on.
-///
-/// # Errors
-/// Returns an error when a payload was requested but no stdin pipe was opened for
-/// it, or when the write fails — including the `EPIPE` a child that exited before
-/// reading produces.
-async fn write_stdin_payload(
-    stdin: Option<tokio::process::ChildStdin>,
-    payload: Option<&[u8]>,
-    binary: &str,
-) -> anyhow::Result<()> {
-    let Some(payload) = payload else {
-        return Ok(());
-    };
-    let Some(stdin) = stdin else {
-        anyhow::bail!("'{binary}' was spawned without a stdin pipe to write to");
-    };
-    write_child_stdin(stdin, payload, binary).await
-}
-
-/// Write `payload` to the child's stdin and close the pipe.
-///
-/// Closing it is the point: `setup`'s crush handoff feeds the skill text on
-/// stdin, and crush reads until EOF — leaving the handle open would hang.
-///
-/// # Errors
-/// Returns an error when the write or the close fails. A child that exited before
-/// reading its input surfaces here as `EPIPE`, so the message says so rather than
-/// reporting a bare "broken pipe".
-async fn write_child_stdin(
-    mut stdin: tokio::process::ChildStdin,
-    payload: &[u8],
-    binary: &str,
-) -> anyhow::Result<()> {
-    use tokio::io::AsyncWriteExt;
-
-    stdin.write_all(payload).await.with_context(|| {
-        format!("writing to '{binary}' stdin — it may have exited before reading its input")
-    })?;
-    // `shutdown` flushes and closes; the `stdin` handle is then dropped, so
-    // nothing is left holding the write end open.
-    stdin
-        .shutdown()
-        .await
-        .with_context(|| format!("closing '{binary}' stdin"))
-}
-
-/// Send `signal` to the supervised engine, best-effort.
-///
-/// Goes through `rustix::process::kill_process` (a direct syscall) rather than
-/// fork+exec'ing `kill`, mirroring `consolidation::kill_process_group`. Using
-/// the `kill` binary here would reintroduce #1382's failure mode in exactly the
-/// distroless-container case this forwarding exists to fix — no `kill` on the
-/// image means no shutdown.
-///
-/// The pid can't have been recycled: `wait` has not completed (this runs from
-/// the `select!` arm that races it), so the child is unreaped and its pid is at
-/// worst a zombie's.
-///
-/// Failure is not propagated — the `child.wait()` arm is about to report the
-/// engine's real status either way — but anything other than a lost race is
-/// logged at `error!`. It has to be `error!` specifically: llmenv's default
-/// `EnvFilter` is ERROR-only, so a `warn!` here would be invisible in exactly
-/// the situation the user needs it (they ran `docker stop`, forwarding failed,
-/// and the engine is still running with no explanation anywhere).
-#[cfg(unix)]
-fn forward_signal(child: &tokio::process::Child, signal: rustix::process::Signal, name: &str) {
-    let Some(raw) = child.id() else {
-        tracing::debug!("launch: {name} arrived after the engine exited; nothing to forward");
-        return;
-    };
-    // The remaining guards are should-never-happen: tokio reports a real child
-    // pid, which is positive and fits a pid_t. If one ever fires, pid handling
-    // upstream is corrupt — a different class of problem from losing a race,
-    // and worth surfacing rather than dropping.
-    let Ok(raw) = i32::try_from(raw) else {
-        tracing::error!("launch: engine pid {raw} does not fit in a pid_t; not forwarding {name}");
-        return;
-    };
-    // Same rule as `consolidation::is_safe_kill_target`: a non-positive pid
-    // would mean "my whole process group" or "every process I may signal".
-    // `Pid::from_raw` only rejects 0, which this already excludes.
-    if raw <= 1 {
-        tracing::error!("launch: refusing to forward {name} to pid {raw}");
-        return;
-    }
-    let Some(pid) = rustix::process::Pid::from_raw(raw) else {
-        tracing::error!("launch: engine pid {raw} is not a valid pid; not forwarding {name}");
-        return;
-    };
-    match rustix::process::kill_process(pid, signal) {
-        Ok(()) => tracing::debug!("launch: forwarded {name} to the engine"),
-        // The engine exited between the pid check above and this syscall —
-        // the same benign race as the `child.id()` arm, not worth alarming.
-        Err(rustix::io::Errno::SRCH) => {
-            tracing::debug!("launch: engine exited before {name} could be forwarded");
-        }
-        // EPERM here means something (a container security profile, a seccomp
-        // filter) is blocking the signal outright, so every later forward will
-        // fail too and the engine will never shut down on request.
-        Err(e) => {
-            tracing::error!(
-                "launch: could not forward {name} to the engine: {e}. \
-                 The engine may keep running until it is killed directly."
-            );
-        }
-    }
+    ))
 }
 
 /// The exit code `launch` should exit with to mirror `status`: the child's own
@@ -1837,7 +1586,7 @@ fn exit_code_for_status(status: std::process::ExitStatus) -> i32 {
 
 /// Exit the current process mirroring the child's status — see
 /// [`exit_code_for_status`].
-fn exit_with_status(status: std::process::ExitStatus) -> ! {
+pub(crate) fn exit_with_status(status: std::process::ExitStatus) -> ! {
     std::process::exit(exit_code_for_status(status))
 }
 
@@ -2623,7 +2372,7 @@ fn write_cache_manifest(
 /// plugins exactly as `build_and_materialize` does — but without writing
 /// anything. Returns `Ok(None)` when no firing bundle has a content directory.
 /// The returned `cache_root` is the expanded cache dir (shared across adapters).
-fn build_manifest(
+pub(crate) fn build_manifest(
     config: &Config,
     config_dir: &Path,
     active: &ActiveScopes,

@@ -21,6 +21,7 @@ pub(crate) mod consolidation;
 pub mod git;
 pub mod hook_run;
 pub mod icm;
+pub(crate) mod launch;
 pub mod materialize;
 pub mod mcp;
 pub mod memory;
