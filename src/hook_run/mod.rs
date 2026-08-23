@@ -11,6 +11,7 @@ pub(crate) mod cbm_index_guard;
 pub(crate) mod cd_guard;
 pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
+mod launch_client;
 pub(crate) mod mcp_client;
 pub(crate) mod read_once;
 pub(crate) mod repeat_detect;
@@ -520,6 +521,13 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
                     return Ok(HookExit::Block);
                 }
             } else {
+                let mut text = text;
+                if let Some(notice) = launch_client::check_pending_notice() {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(&notice);
+                }
                 let out = adapter.emit_hook_context(hook_event_name, &text);
                 if !out.is_empty()
                     && let Err(e) = writeln!(std::io::stdout(), "{out}")
