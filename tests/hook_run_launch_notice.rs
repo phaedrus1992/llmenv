@@ -103,7 +103,14 @@ fn hook_run_delivers_launch_notice_joined_with_existing_context() {
 
     let socket_path = dir.path().join("launch.sock");
     let listener = UnixListener::bind(&socket_path).unwrap();
-    let server = serve_one_notice(listener, "credentials expire soon");
+    // Deliberately not joined: if the client under test never connects (e.g.
+    // a mutant that makes `check_pending_notice` return early without
+    // dialing the socket), this thread blocks in `accept()` forever. The
+    // test's own assertions below — bounded by each `hook-run` subprocess's
+    // own timeout — are what actually catches that; waiting on this thread
+    // too would just hang the test alongside it. It's reclaimed when the
+    // test binary process exits.
+    let _server = serve_one_notice(listener, "credentials expire soon");
 
     let test_file_dir = TempDir::new().unwrap();
     let file_path = test_file_dir.path().join("hook_run_launch_notice.txt");
@@ -139,8 +146,6 @@ fn hook_run_delivers_launch_notice_joined_with_existing_context() {
         .write_stdin(payload.as_str());
     let output = second.timeout(Duration::from_secs(10)).output().unwrap();
     assert!(output.status.success());
-
-    server.join().unwrap();
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     let parsed: serde_json::Value =
