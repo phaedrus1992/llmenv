@@ -16,25 +16,36 @@
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use llmenv_mcp::proxy::{
     EnsureOutcome, ensure_running, ensure_running_within, is_alive, probe_tcp,
 };
 use tempfile::tempdir;
 
-/// Serializes every test that allocates an ephemeral port. cargo runs the tests
-/// in a binary in parallel, and [`free_port`] releases its port before the test
-/// asserts the port is closed (or before the spawn callback rebinds it). A
-/// sibling test binding `127.0.0.1:0` can grab that just-freed port and flake
-/// the victim. Holding this lock across the whole body of every port-touching
-/// test removes the intra-binary race. A poisoned lock (a prior test panicked
-/// mid-body) is recovered rather than propagated — the guarded data is `()`.
-fn port_guard() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
+/// Fixed advisory-lock address shared with `src/proxy.rs`'s copy of
+/// [`port_guard`] — not used for real traffic, only its bind exclusivity.
+const NETWORK_TEST_LOCK_ADDR: &str = "127.0.0.1:47990";
+
+/// Serializes every test that allocates an ephemeral port (#1481). cargo runs
+/// the lib crate's own unit tests and this integration binary as separate,
+/// concurrent processes, so an in-process `Mutex` cannot stop one binary's
+/// test from reusing a port the other just freed (`free_port` releases its
+/// port before the test asserts the port is closed, or before the spawn
+/// callback rebinds it). Binding a fixed, otherwise unused port as an
+/// advisory lock works across the process boundary: only one bind can hold it
+/// at a time, in either binary.
+fn port_guard() -> TcpListener {
+    for _ in 0..250 {
+        if let Ok(l) = TcpListener::bind(NETWORK_TEST_LOCK_ADDR) {
+            return l;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!(
+        "could not acquire the network-test advisory lock on {NETWORK_TEST_LOCK_ADDR} after \
+         5s; is another process bound to it?"
+    );
 }
 
 /// Allocates an ephemeral TCP port by binding then dropping the listener, and

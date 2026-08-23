@@ -1020,6 +1020,36 @@ mod tests {
     use super::{Command, Path, Stdio, mcp_proxy_command_in};
     use std::os::unix::fs::PermissionsExt;
 
+    /// Fixed advisory-lock address shared with `tests/mcp_proxy.rs`'s copy of
+    /// [`port_guard`] — not used for real traffic, only its bind exclusivity.
+    const NETWORK_TEST_LOCK_ADDR: &str = "127.0.0.1:47990";
+
+    /// Serializes every test in this module (and, cross-process, every test in
+    /// `tests/mcp_proxy.rs`) that allocates an ephemeral TCP port (#1481).
+    ///
+    /// `cargo test` can run this crate's `--lib` binary and its
+    /// `tests/mcp_proxy.rs` integration binary as separate, concurrent
+    /// processes, so an in-process `Mutex` cannot stop one binary's test from
+    /// reusing a port the other just freed — a test that binds `127.0.0.1:0`
+    /// to learn a "known free" port, drops the listener, and relies on the
+    /// port staying free for the rest of its body can have that port reused
+    /// by the sibling process, so the fast-path probe then sees a stranger's
+    /// listener and misreports `AlreadyRunning`. Binding a fixed, otherwise
+    /// unused port as an advisory lock works across the process boundary:
+    /// only one bind can hold it at a time, in either binary.
+    fn port_guard() -> std::net::TcpListener {
+        for _ in 0..250 {
+            if let Ok(l) = std::net::TcpListener::bind(NETWORK_TEST_LOCK_ADDR) {
+                return l;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!(
+            "could not acquire the network-test advisory lock on \
+             {NETWORK_TEST_LOCK_ADDR} after 5s; is another process bound to it?"
+        );
+    }
+
     /// Writes an executable stub named `name` into `dir`.
     fn stub_binary(dir: &Path, name: &str) {
         let path = dir.join(name);
@@ -1199,6 +1229,7 @@ mod tests {
         use super::probe_tcp;
         use std::net::TcpListener;
 
+        let _guard = port_guard();
         // Bind an ephemeral port to act as the "proxy".
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
         let addr = listener.local_addr().expect("local_addr");
@@ -1231,6 +1262,7 @@ mod tests {
     fn wait_for_bind_times_out_while_the_child_lives_and_never_binds() {
         use super::{BindResult, wait_for_bind};
 
+        let _guard = port_guard();
         let port = {
             let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
             l.local_addr().expect("addr").port()
@@ -1261,6 +1293,7 @@ mod tests {
     fn wait_for_bind_reports_child_exit_without_waiting_out_the_budget() {
         use super::{BindResult, wait_for_bind};
 
+        let _guard = port_guard();
         let port = {
             let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
             l.local_addr().expect("addr").port()
@@ -1295,6 +1328,7 @@ mod tests {
     fn wait_for_bind_returns_promptly_once_bound() {
         use super::{BindResult, wait_for_bind};
 
+        let _guard = port_guard();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let bind = listener.local_addr().expect("addr").to_string();
         let mut child = idle_child();
@@ -1323,6 +1357,7 @@ mod tests {
     fn ensure_running_times_out_when_the_child_never_binds() {
         use super::ensure_running_within;
 
+        let _guard = port_guard();
         let port = {
             let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
             l.local_addr().expect("addr").port()
@@ -1388,6 +1423,7 @@ mod tests {
         use super::ensure_running_within;
         use std::os::unix::fs::PermissionsExt;
 
+        let _guard = port_guard();
         let port = {
             let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
             l.local_addr().expect("addr").port()
