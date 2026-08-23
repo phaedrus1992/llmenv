@@ -20,6 +20,21 @@ All three share one open question the v1 design didn't answer: `launch` doesn't
 own stdio (the child does, no pty), so it has no way to print into the running
 session or push new state into the child on its own.
 
+## Correction — v1 design vs. shipped code
+
+The v1 `launch` design doc described a per-session Unix socket
+(`LLMENV_LAUNCH_SOCKET`) and a warm-resolution mtime cache. **Neither shipped.**
+The actual `run_launch`/`spawn_and_supervise` (`src/cli/mod.rs`) only resolve
+once, spawn the child with inherited stdio, forward SIGTERM/SIGHUP, and
+propagate the exit status — no socket, no cached baseline, and `hook_run`
+makes no connection back to `launch`. This design's "mid-session notice
+channel" therefore has to build that socket and baseline tracking as new
+work, not reuse existing infrastructure. The plan below reflects this: the
+socket is scoped to exactly the one verb these three issues need
+(`pending_events`) — the `resolve`/`status`/`materialize`/`recall`/`store`/
+`log` verb set the v1 design sketched for a future warm `hook-run` path is
+still out of scope here, and remains its own future work.
+
 ## Decided direction
 
 **Two shared primitives**, covering all three issues without inventing a new
@@ -44,29 +59,39 @@ hit, `launch` prints the final error and exits nonzero instead of retrying.
 ### 2. Mid-session notice channel
 
 For the case where the child is still alive and `launch` needs to tell the
-agent something, this reuses the existing per-session socket
-(`LLMENV_LAUNCH_SOCKET`, v1 design "Per-session socket") rather than inventing
-a push mechanism:
+agent something, this introduces a minimal per-session Unix socket — new
+code, per the correction above, scoped to exactly what these three issues
+need:
 
+- At startup, `launch` binds a Unix socket at
+  `$XDG_RUNTIME_DIR/llmenv/launch-<pid>.sock` (falling back to
+  `<state_dir>/launch-<pid>.sock`), matching the path scheme the v1 design
+  had sketched, and sets `LLMENV_LAUNCH_SOCKET=<path>` in the child's
+  environment before spawning it. The socket stays bound for `launch`'s
+  entire lifetime, including across a relaunch of the child (same `launch`
+  pid, same socket) — it is unlinked only when `launch` itself finally exits.
 - `launch` sets an internal pending-notice flag (drift detected, credential
   nearing expiry) when a background check fires.
-- The engine's own `hook-run` invocations already connect to this socket on
-  effectively every turn (tool-use hook events fire for every supported
-  engine). A new verb, `pending_events`, is added to the existing verb
-  allow-list (`resolve`, `status`, `materialize`, `recall`, `store`, `log`).
-  `hook-run` calls it on every connection it already makes; if a notice is
-  pending, the flag clears (exactly-once delivery) and `hook-run` returns it.
-- `hook-run` renders the notice via the adapter's existing
+- `hook_run` invocations, which already fire as fresh subprocesses on the
+  engine's own hook events, read `LLMENV_LAUNCH_SOCKET` from their inherited
+  environment and connect with a short budget (50ms, matching the v1 design's
+  connect-then-fall-back guess). One verb exists: `pending_events`. If a
+  notice is pending, the flag clears (exactly-once delivery) and the
+  response carries it; if nothing is pending, or the socket is missing,
+  times out, or returns malformed data, `hook_run` proceeds exactly as it
+  does today — no error, no user-visible change.
+- `hook_run` renders a delivered notice via the adapter's existing
   `emit_hook_context()` (`src/adapter/mod.rs`, already implemented for Claude
   Code, Crush, OpenCode, and Codex), which places it in
-  `hookSpecificOutput.additionalContext` for the current hook event.
+  `hookSpecificOutput.additionalContext` for the current hook event — the
+  same call site (`src/hook_run/mod.rs:523`) already used to inject memory
+  context.
 
 This is best-effort, next-turn delivery, not instant — acceptable for a
-warning, not appropriate for anything time-critical. It follows the same
-degradation contract as the rest of the socket: if the socket is unavailable
-when `hook-run` checks, it skips silently and tries again on the next
-connection, exactly like the existing verbs already do when the socket is
-missing or times out.
+warning, not appropriate for anything time-critical. The degradation
+contract mirrors what the v1 design specified for its own (unshipped) socket:
+a missing, timed-out, or malformed response is silently equivalent to "no
+notice," never a user-visible error.
 
 ## Per-issue application
 
@@ -89,16 +114,27 @@ prompt.
 
 ### #1286 — config-drift watch
 
-Uses the notice channel:
+Uses the notice channel. A separate, existing mechanism
+(`should_check_stale`/`run_check_stale`, `src/hook_run/mod.rs`/`src/cli/mod.rs`)
+already warns about drift, but only once, at `SessionStart`, and only for
+Claude Code — it does not cover drift that happens *during* an already-running
+session, which is exactly this issue's concern. This design adds a second,
+`launch`-owned check:
 
-1. `launch` already tracks config mtime for its warm-resolution cache
-   (v1 design). A background task compares this on an interval, reusing that
-   comparison — no new watcher mechanism.
-2. On a change, set the pending-notice flag with the message: "llmenv config
+1. At startup, `launch` records the content hash of what it resolved
+   (`materialize::cache::hash_manifest`, the same function `run_check_stale`
+   already uses for its own comparison) as this session's baseline.
+2. A background task recomputes the current hash on an interval and compares
+   it to the baseline via `stale_status` (`src/cli/mod.rs`) — reused as-is,
+   not reimplemented.
+3. On a change, set the pending-notice flag with the message: "llmenv config
    changed since this session started; restart to pick up changes."
-3. Delivered to the agent's context on the next `hook-run` connection via
-   `emit_hook_context()`.
-4. No auto-apply. The change is surfaced only; `launch` never re-materializes
+4. Delivered to the agent's context on the next `hook_run` connection via
+   `emit_hook_context()`. Engine-agnostic — unlike the existing `SessionStart`
+   check, this one isn't limited to Claude Code, since the baseline comes from
+   what `launch` itself resolved for this session, not from
+   `CLAUDE_CONFIG_DIR`'s manifest dotfile.
+5. No auto-apply. The change is surfaced only; `launch` never re-materializes
    or restarts on its own account for a drift event.
 
 ### #1285 — auth/token refresh (scope narrowed)
@@ -167,9 +203,10 @@ immediately with a fresh restart, so the notice is the only action taken.
 1. **Graceful relaunch core** (#1284) — exit-reason detection, restart-attempt
    cap, `--auto-restart` flag, prompt path, relaunch reusing resolved
    env/materialized config.
-2. **`pending_events` socket verb** — add to the existing verb allow-list;
-   `hook-run` client-side check on every connection; exactly-once delivery
-   semantics.
+2. **Per-session socket + `pending_events` verb** — new: bind/accept loop in
+   `launch`, `LLMENV_LAUNCH_SOCKET` env propagation, teardown on `launch`
+   exit; `hook_run` client-side check on every connection (50ms budget,
+   silent skip on any failure); exactly-once delivery semantics.
 3. **Config-drift detection** (#1286) — background mtime-comparison task;
    wires into the notice channel from (2).
 4. **Credential-expiry detection and notice** (#1285, narrowed scope) —
