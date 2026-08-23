@@ -54,8 +54,8 @@ fn try_sync(
     eprintln!("[llmenv] auth: {} (session login detected)", entry.email);
     manifest.auth_status = AuthStatus {
         source: AuthSource::Inherited,
-        id: Some(entry.uuid),
-        email: Some(entry.email),
+        id: Some(entry.uuid.clone()),
+        email: Some(entry.email.clone()),
     };
     manifest.write(config_dir)?;
     Ok(())
