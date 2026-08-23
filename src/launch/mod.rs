@@ -96,18 +96,18 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
         // session, so it's logged and skipped rather than propagated.
         // `_cleanup` is bound here (not further down) so it stays alive
         // for the whole supervised session whenever a socket exists.
-        let (socket_path, notices, _cleanup) = match socket::bind(std::process::id()) {
-            Ok((listener, notices, path)) => {
-                tokio::spawn(socket::serve(listener, Arc::clone(&notices)));
+        let (socket_path, notices, token, _cleanup) = match socket::bind(std::process::id()) {
+            Ok((listener, notices, path, token)) => {
+                tokio::spawn(socket::serve(listener, Arc::clone(&notices), token.clone()));
                 let cleanup = Some(SocketCleanup(path.clone()));
-                (Some(path), Some(notices), cleanup)
+                (Some(path), Some(notices), Some(token), cleanup)
             }
             Err(e) => {
                 eprintln!(
                     "llmenv: could not open launch's notice socket, continuing \
                          without config-drift/credential-expiry warnings: {e:#}"
                 );
-                (None, None, None)
+                (None, None, None, None)
             }
         };
 
@@ -148,6 +148,10 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
             }
         }
 
+        let notice_socket = match (&socket_path, &token) {
+            (Some(path), Some(token)) => Some(NoticeSocket { path, token }),
+            _ => None,
+        };
         supervision_loop(
             EngineTarget {
                 adapter: adapter.as_ref(),
@@ -155,7 +159,7 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
                 args: &args,
             },
             &resolved,
-            socket_path.as_deref(),
+            notice_socket,
             narrow.auto_restart,
         )
         .await
@@ -188,13 +192,22 @@ struct EngineTarget<'a> {
     args: &'a [String],
 }
 
+/// The mid-session notice socket's path and shared secret (#1484), bundled
+/// since they always travel together — either both `Some` (the socket bound)
+/// or both absent — and threading them separately would push
+/// [`supervision_loop`] past its 5-positional-param limit.
+struct NoticeSocket<'a> {
+    path: &'a std::path::Path,
+    token: &'a socket::LaunchToken,
+}
+
 /// Spawn the engine, relaunching it after a crash (up to the restart cap or
 /// until the user declines), and return the final exit status once the
 /// engine exits cleanly or the cap/decline path gives up.
 async fn supervision_loop(
     target: EngineTarget<'_>,
     resolved: &crate::cli::ResolvedEnv,
-    socket_path: Option<&std::path::Path>,
+    notice_socket: Option<NoticeSocket<'_>>,
     auto_restart: bool,
 ) -> anyhow::Result<std::process::ExitStatus> {
     let EngineTarget {
@@ -210,8 +223,9 @@ async fn supervision_loop(
         for (key, value) in &resolved.vars {
             cmd.env(key, value);
         }
-        if let Some(socket_path) = socket_path {
-            cmd.env("LLMENV_LAUNCH_SOCKET", socket_path);
+        if let Some(ns) = &notice_socket {
+            cmd.env("LLMENV_LAUNCH_SOCKET", ns.path);
+            cmd.env("LLMENV_LAUNCH_TOKEN", ns.token.as_str());
         }
         cmd.stdin(std::process::Stdio::inherit());
         cmd.stdout(std::process::Stdio::inherit());

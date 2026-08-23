@@ -141,6 +141,10 @@ fn hook_run_delivers_launch_notice_joined_with_existing_context() {
     second
         .env("LLMENV_CONFIG", &config_path)
         .env("LLMENV_LAUNCH_SOCKET", &socket_path)
+        // #1484: the client now requires a token alongside the socket path;
+        // this test's hand-rolled server doesn't validate it, so any value
+        // that's actually set is enough to make the client dial the socket.
+        .env("LLMENV_LAUNCH_TOKEN", "test-token")
         .arg("hook-run")
         .arg("pre_tool_use")
         .write_stdin(payload.as_str());
