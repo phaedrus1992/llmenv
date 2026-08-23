@@ -8,6 +8,7 @@
 //! module rather than growing `cli`'s already-largest file further. See
 //! `docs/superpowers/specs/2026-08-23-launch-mid-session-supervision-design.md`.
 
+mod credential_watch;
 mod drift;
 pub(crate) mod socket;
 
@@ -99,6 +100,18 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
                 config_path.clone(),
                 Arc::clone(&notices),
                 drift::DRIFT_CHECK_INTERVAL,
+            ));
+        }
+        if adapter.name() == "claude-code"
+            && let Ok(config) = crate::config::Config::load(&config_path)
+        {
+            let cache_dir =
+                std::path::PathBuf::from(crate::paths::expand_tilde(&config.cache.cache_dir));
+            let adapter_root = cache_dir.join(adapter.name());
+            tokio::spawn(credential_watch::watch(
+                adapter_root,
+                Arc::clone(&notices),
+                credential_watch::EXPIRY_CHECK_INTERVAL,
             ));
         }
         supervision_loop(
