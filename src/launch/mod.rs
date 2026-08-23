@@ -8,9 +8,11 @@
 //! module rather than growing `cli`'s already-largest file further. See
 //! `docs/superpowers/specs/2026-08-23-launch-mid-session-supervision-design.md`.
 
+mod drift;
 pub(crate) mod socket;
 
 use std::os::unix::process::ExitStatusExt;
+use std::sync::Arc;
 
 use anyhow::Context;
 
@@ -75,6 +77,7 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
     };
 
     let resolved = crate::cli::resolve_env(narrow.scope, narrow.tag, narrow.compress)?;
+    let config_path = crate::paths::config_path()?;
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -89,11 +92,21 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
     let status = rt.block_on(async {
         let (listener, notices, socket_path) = socket::bind(std::process::id())?;
         let _cleanup = SocketCleanup(socket_path.clone());
-        tokio::spawn(socket::serve(listener, notices));
+        tokio::spawn(socket::serve(listener, Arc::clone(&notices)));
+        if let Ok(Some(baseline)) = drift::current_hash(&config_path) {
+            tokio::spawn(drift::watch(
+                baseline,
+                config_path.clone(),
+                Arc::clone(&notices),
+                drift::DRIFT_CHECK_INTERVAL,
+            ));
+        }
         supervision_loop(
-            adapter.as_ref(),
-            &bin_path,
-            &args,
+            EngineTarget {
+                adapter: adapter.as_ref(),
+                bin_path: &bin_path,
+                args: &args,
+            },
             &resolved,
             &socket_path,
             narrow.auto_restart,
@@ -115,17 +128,29 @@ impl Drop for SocketCleanup {
     }
 }
 
+/// The engine identity and invocation the supervision loop relaunches
+/// unchanged on every crash — bundled so [`supervision_loop`] stays inside
+/// the 5-positional-param limit.
+struct EngineTarget<'a> {
+    adapter: &'a dyn crate::adapter::AgentAdapter,
+    bin_path: &'a std::path::Path,
+    args: &'a [String],
+}
+
 /// Spawn the engine, relaunching it after a crash (up to the restart cap or
 /// until the user declines), and return the final exit status once the
 /// engine exits cleanly or the cap/decline path gives up.
 async fn supervision_loop(
-    adapter: &dyn crate::adapter::AgentAdapter,
-    bin_path: &std::path::Path,
-    args: &[String],
+    target: EngineTarget<'_>,
     resolved: &crate::cli::ResolvedEnv,
     socket_path: &std::path::Path,
     auto_restart: bool,
 ) -> anyhow::Result<std::process::ExitStatus> {
+    let EngineTarget {
+        adapter,
+        bin_path,
+        args,
+    } = target;
     let mut cap = RelaunchCap::default();
 
     loop {

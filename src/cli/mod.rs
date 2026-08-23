@@ -2372,7 +2372,7 @@ fn write_cache_manifest(
 /// plugins exactly as `build_and_materialize` does — but without writing
 /// anything. Returns `Ok(None)` when no firing bundle has a content directory.
 /// The returned `cache_root` is the expanded cache dir (shared across adapters).
-fn build_manifest(
+pub(crate) fn build_manifest(
     config: &Config,
     config_dir: &Path,
     active: &ActiveScopes,
