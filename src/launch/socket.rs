@@ -113,7 +113,7 @@ pub(crate) async fn serve(listener: UnixListener, notices: NoticeSlot) {
 /// inputs come from a syscall (`UnixStream::peer_cred`, `geteuid`) that
 /// can't be mocked, but the decision they feed can (same
 /// split-for-testability pattern as `socket_path_in`).
-fn is_authorized_peer(peer_uid: u32, my_uid: u32) -> bool {
+pub(crate) fn is_authorized_peer(peer_uid: u32, my_uid: u32) -> bool {
     peer_uid == my_uid
 }
 

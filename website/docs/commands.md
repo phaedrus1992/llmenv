@@ -149,8 +149,11 @@ Both notices reuse a small per-session Unix socket `launch` opens for this
 purpose (`LLMENV_LAUNCH_SOCKET` in the engine's environment) — an
 implementation detail, not something you need to set or read yourself. The
 socket's directory and file are owner-only, and `launch` also checks the
-connecting peer's uid (added in v4.0.0) and rejects anything not running as
-the same user, so another local process can't read or inject a notice.
+connecting peer's uid (added in v4.0.0) as a second, independent layer: a
+process running as a different user is rejected even if the directory/file
+permissions were somehow bypassed. This does not distinguish between
+different processes that happen to run as your own user — that is a
+separate, still-open problem.
 
 ## `regenerate`
 
