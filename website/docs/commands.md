@@ -147,7 +147,10 @@ three things while the engine is running:
 
 Both notices reuse a small per-session Unix socket `launch` opens for this
 purpose (`LLMENV_LAUNCH_SOCKET` in the engine's environment) — an
-implementation detail, not something you need to set or read yourself.
+implementation detail, not something you need to set or read yourself. The
+socket's directory and file are owner-only, and `launch` also checks the
+connecting peer's uid (added in v4.0.0) and rejects anything not running as
+the same user, so another local process can't read or inject a notice.
 
 ## `regenerate`
 
