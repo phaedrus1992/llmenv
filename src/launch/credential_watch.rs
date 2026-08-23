@@ -124,7 +124,7 @@ mod tests {
             Duration::from_millis(20),
         ));
 
-        wait_for_notice(&notices).await;
+        crate::launch::wait_for_notice(&notices).await;
         assert_eq!(
             notices.lock().await.as_deref(),
             Some(EXPIRY_NOTICE),
@@ -134,17 +134,22 @@ mod tests {
         handle.abort();
     }
 
-    /// Poll `notices` until something is queued or a generous timeout
-    /// elapses. A fixed sleep here is flaky under CI load — a slow runner
-    /// can miss even a couple of 20ms ticks, whereas polling only cares
-    /// that the notice eventually lands.
-    async fn wait_for_notice(notices: &NoticeSlot) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        while tokio::time::Instant::now() < deadline {
-            if notices.lock().await.is_some() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+    proptest::proptest! {
+        /// `is_near_expiry` must agree with the plain-arithmetic definition
+        /// of the threshold window for any timestamp/threshold combination,
+        /// not just the three fixed cases above — including the saturating
+        /// subtraction's behavior at the extremes.
+        #[test]
+        fn is_near_expiry_matches_plain_arithmetic(
+            expires_at in -1_000_000_000_000_i64..2_000_000_000_000_i64,
+            now in -1_000_000_000_000_i64..2_000_000_000_000_i64,
+            threshold_secs in 0u32..3600,
+        ) {
+            let threshold = Duration::from_secs(u64::from(threshold_secs));
+            let creds = creds_expiring_at(expires_at);
+            let threshold_ms = i64::try_from(threshold.as_millis()).unwrap_or(i64::MAX);
+            let expected = expires_at.saturating_sub(now) <= threshold_ms;
+            assert_eq!(is_near_expiry(&creds, threshold, now), expected);
         }
     }
 }

@@ -112,25 +112,39 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
         };
 
         if let Some(notices) = &notices {
-            if let Ok(Some(baseline)) = drift::current_hash(&config_path) {
-                tokio::spawn(drift::watch(
-                    baseline,
-                    config_path.clone(),
-                    Arc::clone(notices),
-                    drift::DRIFT_CHECK_INTERVAL,
-                ));
+            match drift::current_hash(&config_path) {
+                Ok(Some(baseline)) => {
+                    tokio::spawn(drift::watch(
+                        baseline,
+                        config_path.clone(),
+                        Arc::clone(notices),
+                        drift::DRIFT_CHECK_INTERVAL,
+                    ));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::debug!("launch: no drift baseline, drift watch disabled: {e:#}");
+                }
             }
-            if adapter.name() == "claude-code"
-                && let Ok(config) = crate::config::Config::load(&config_path)
-            {
-                let cache_dir =
-                    std::path::PathBuf::from(crate::paths::expand_tilde(&config.cache.cache_dir));
-                let adapter_root = cache_dir.join(adapter.name());
-                tokio::spawn(credential_watch::watch(
-                    adapter_root,
-                    Arc::clone(notices),
-                    credential_watch::EXPIRY_CHECK_INTERVAL,
-                ));
+            if adapter.name() == "claude-code" {
+                match crate::config::Config::load(&config_path) {
+                    Ok(config) => {
+                        let cache_dir = std::path::PathBuf::from(crate::paths::expand_tilde(
+                            &config.cache.cache_dir,
+                        ));
+                        let adapter_root = cache_dir.join(adapter.name());
+                        tokio::spawn(credential_watch::watch(
+                            adapter_root,
+                            Arc::clone(notices),
+                            credential_watch::EXPIRY_CHECK_INTERVAL,
+                        ));
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            "launch: could not load config, credential-expiry watch disabled: {e:#}"
+                        );
+                    }
+                }
             }
         }
 
@@ -157,7 +171,11 @@ struct SocketCleanup(std::path::PathBuf);
 
 impl Drop for SocketCleanup {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        if let Err(e) = std::fs::remove_file(&self.0)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!("launch: could not remove socket {}: {e}", self.0.display());
+        }
     }
 }
 
@@ -442,6 +460,22 @@ fn forward_signal(child: &tokio::process::Child, signal: rustix::process::Signal
     }
 }
 
+/// Poll `notices` until something is queued or a generous timeout elapses.
+/// A fixed sleep is flaky under CI load — a slow runner can miss even a
+/// couple of ticks on a short interval, whereas polling only cares that the
+/// notice eventually lands. Shared by `drift`'s and `credential_watch`'s
+/// test modules rather than duplicated in both.
+#[cfg(test)]
+async fn wait_for_notice(notices: &socket::NoticeSlot) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline {
+        if notices.lock().await.is_some() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,5 +503,36 @@ mod tests {
         // attempts have aged out and no longer count against the cap.
         let long_after = base + RELAUNCH_WINDOW + std::time::Duration::from_secs(1);
         assert!(cap.record_and_check(long_after));
+    }
+
+    proptest::proptest! {
+        /// `record_and_check`'s incremental retain-then-push must agree, at
+        /// every step of an arbitrary sequence of attempts, with an
+        /// independent full-history recount — not just the two fixed
+        /// sequences above.
+        #[test]
+        fn relaunch_cap_matches_a_full_history_recount(
+            deltas_ms in proptest::collection::vec(0u64..120_000, 1..20),
+        ) {
+            let mut cap = RelaunchCap::default();
+            let base = std::time::Instant::now();
+            let mut elapsed_ms: u64 = 0;
+            let mut history: Vec<u64> = Vec::new();
+            let window_ms = u64::try_from(RELAUNCH_WINDOW.as_millis()).unwrap_or(u64::MAX);
+
+            for delta in deltas_ms {
+                elapsed_ms += delta;
+                history.push(elapsed_ms);
+                let now = base + std::time::Duration::from_millis(elapsed_ms);
+                let actual = cap.record_and_check(now);
+
+                let count_in_window = history
+                    .iter()
+                    .filter(|&&t| elapsed_ms - t < window_ms)
+                    .count();
+                let expected = count_in_window <= RELAUNCH_MAX_ATTEMPTS;
+                assert_eq!(actual, expected);
+            }
+        }
     }
 }

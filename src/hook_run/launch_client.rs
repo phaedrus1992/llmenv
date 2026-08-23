@@ -138,4 +138,32 @@ mod tests {
         assert_eq!(notice, None);
         server.abort();
     }
+
+    proptest::proptest! {
+        /// The wire protocol (length-prefixed JSON) must round-trip an
+        /// arbitrary notice byte-for-byte through the real server
+        /// (`launch::socket::bind`/`serve`) and client (`fetch`) together —
+        /// not just prove `serde_json` itself round-trips, which was never
+        /// in question. Bounded to comfortably under both sides' 4096-byte
+        /// length cap once JSON-encoded.
+        #[test]
+        fn wire_protocol_roundtrips_arbitrary_notices(notice in "\\PC{0,200}") {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let (listener, notices, path) =
+                    crate::launch::socket::bind(std::process::id() + 1000).unwrap();
+                *notices.lock().await = Some(notice.clone());
+                let server = tokio::spawn(crate::launch::socket::serve(listener, notices));
+
+                let received = fetch(path.clone().into_os_string()).await;
+
+                server.abort();
+                let _ = std::fs::remove_file(&path);
+                assert_eq!(received, Some(notice));
+            });
+        }
+    }
 }
