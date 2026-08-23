@@ -131,6 +131,32 @@ fn launch_propagates_child_exit_code() {
         .code(7);
 }
 
+#[test]
+fn launch_prompts_to_restart_after_a_crash() {
+    let (dir, config_path) = setup_config();
+    let mut cmd = launch_cmd(dir.path(), &config_path);
+    cmd.env("FAKE_ENGINE_EXIT_CODE", "1");
+    cmd.write_stdin("n\n");
+    cmd.timeout(Duration::from_secs(LAUNCH_TIMEOUT_SECS))
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("Restart?"));
+}
+
+#[test]
+fn launch_auto_restart_relaunches_without_prompting() {
+    let (dir, config_path) = setup_config();
+    let mut cmd = launch_cmd_no_args(dir.path(), &config_path);
+    cmd.arg("--auto-restart").arg("claude");
+    cmd.env("FAKE_ENGINE_EXIT_CODE", "1");
+    // The cap (3 attempts) is hit and launch gives up, reporting the last
+    // crash's exit code rather than looping forever.
+    cmd.timeout(Duration::from_secs(LAUNCH_TIMEOUT_SECS))
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("restart attempts exceeded"));
+}
+
 /// Variable names `llmenv export` emits for the given isolated config, parsed
 /// off its `export KEY=VALUE` lines. Only the names are extracted: values are
 /// shell-quoted and some (`LLMENV_ICM_CONTEXT`) span multiple lines, so

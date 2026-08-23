@@ -160,6 +160,10 @@ enum Command {
         /// Compress the materialized AGENTS.md (CLAUDE.md) to reduce token cost
         #[arg(long)]
         compress: bool,
+        /// Relaunch the engine automatically after a crash, up to the
+        /// restart-attempt cap, instead of prompting
+        #[arg(long)]
+        auto_restart: bool,
         /// Engine to launch: a binary name (claude, crush, opencode) or the
         /// underscore-form engine id (claude_code)
         engine: String,
@@ -645,6 +649,7 @@ pub fn run() -> anyhow::Result<()> {
             scope,
             tag,
             compress,
+            auto_restart,
             engine,
             args,
         }) => {
@@ -655,6 +660,7 @@ pub fn run() -> anyhow::Result<()> {
                     scope,
                     tag,
                     compress,
+                    auto_restart,
                 },
             )?;
         }

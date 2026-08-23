@@ -8,6 +8,8 @@
 //! module rather than growing `cli`'s already-largest file further. See
 //! `docs/superpowers/specs/2026-08-23-launch-mid-session-supervision-design.md`.
 
+use std::os::unix::process::ExitStatusExt;
+
 use anyhow::Context;
 
 const RELAUNCH_MAX_ATTEMPTS: usize = 3;
@@ -40,6 +42,7 @@ pub(crate) struct LaunchScope {
     pub(crate) scope: Option<String>,
     pub(crate) tag: Option<String>,
     pub(crate) compress: bool,
+    pub(crate) auto_restart: bool,
 }
 
 /// `llmenv launch <engine>`: resolve the environment the same way `export`
@@ -70,19 +73,49 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
     };
 
     let resolved = crate::cli::resolve_env(narrow.scope, narrow.tag, narrow.compress)?;
+    let mut cap = RelaunchCap::default();
 
-    let mut cmd = crate::cli::command_at_path(&bin_path, adapter.binary_name());
-    cmd.args(&args);
-    for (key, value) in &resolved.vars {
-        cmd.env(key, value);
+    loop {
+        let mut cmd = crate::cli::command_at_path(&bin_path, adapter.binary_name());
+        cmd.args(&args);
+        for (key, value) in &resolved.vars {
+            cmd.env(key, value);
+        }
+        cmd.stdin(std::process::Stdio::inherit());
+        cmd.stdout(std::process::Stdio::inherit());
+        cmd.stderr(std::process::Stdio::inherit());
+
+        let status = crate::cli::run_supervised(cmd, adapter.binary_name(), None)?;
+
+        if status.success() {
+            crate::cli::exit_with_status(status);
+        }
+
+        let reason = match status.signal() {
+            Some(sig) => format!("terminated by signal {sig}"),
+            None => format!("exited with code {}", status.code().unwrap_or(-1)),
+        };
+        eprintln!("llmenv: engine {reason}");
+
+        if !cap.record_and_check(std::time::Instant::now()) {
+            eprintln!("llmenv: restart attempts exceeded, giving up");
+            crate::cli::exit_with_status(status);
+        }
+
+        if narrow.auto_restart {
+            eprintln!("llmenv: auto-restarting");
+            continue;
+        }
+
+        eprint!("Restart? [y/N] ");
+        std::io::Write::flush(&mut std::io::stderr()).ok();
+        let mut answer = String::new();
+        if std::io::stdin().read_line(&mut answer).unwrap_or(0) == 0
+            || !answer.trim().eq_ignore_ascii_case("y")
+        {
+            crate::cli::exit_with_status(status);
+        }
     }
-    cmd.stdin(std::process::Stdio::inherit());
-    cmd.stdout(std::process::Stdio::inherit());
-    cmd.stderr(std::process::Stdio::inherit());
-
-    let status = crate::cli::run_supervised(cmd, adapter.binary_name(), None)?;
-
-    crate::cli::exit_with_status(status);
 }
 
 /// Spawn the engine and wait for it to exit, never dying on a signal itself —
