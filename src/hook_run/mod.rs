@@ -11,6 +11,7 @@ pub(crate) mod cbm_index_guard;
 pub(crate) mod cd_guard;
 pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
+mod launch_client;
 pub(crate) mod mcp_client;
 pub(crate) mod read_once;
 pub(crate) mod repeat_detect;
@@ -422,6 +423,20 @@ pub(crate) enum HookExit {
     Block,
 }
 
+/// Append a pending `launch` mid-session notice (#1480) to `text`, joined by
+/// a newline when `text` already has content so the two don't run together.
+/// Returns `text` unchanged when there's no notice.
+fn append_pending_notice(mut text: String, notice: Option<String>) -> String {
+    let Some(notice) = notice else {
+        return text;
+    };
+    if !text.is_empty() {
+        text.push('\n');
+    }
+    text.push_str(&notice);
+    text
+}
+
 /// CLI entry. Fail-soft: a warning + empty stdout + exit 0 on any error. Returns
 /// `Ok(HookExit::Success)` even when the backend is unreachable — only an
 /// explicit deny asks the caller for a non-zero exit.
@@ -520,6 +535,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
                     return Ok(HookExit::Block);
                 }
             } else {
+                let text = append_pending_notice(text, launch_client::check_pending_notice());
                 let out = adapter.emit_hook_context(hook_event_name, &text);
                 if !out.is_empty()
                     && let Err(e) = writeln!(std::io::stdout(), "{out}")
@@ -2508,6 +2524,27 @@ fn post_session_consolidation() -> Option<std::process::Child> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn append_pending_notice_joins_with_a_newline_when_text_is_non_empty() {
+        let result = append_pending_notice(
+            "existing memory context".to_string(),
+            Some("config changed".to_string()),
+        );
+        assert_eq!(result, "existing memory context\nconfig changed");
+    }
+
+    #[test]
+    fn append_pending_notice_has_no_leading_newline_when_text_is_empty() {
+        let result = append_pending_notice(String::new(), Some("config changed".to_string()));
+        assert_eq!(result, "config changed");
+    }
+
+    #[test]
+    fn append_pending_notice_leaves_text_unchanged_when_there_is_no_notice() {
+        let result = append_pending_notice("existing memory context".to_string(), None);
+        assert_eq!(result, "existing memory context");
+    }
 
     /// Every event `from_str` accepts. Kept as strings so a new variant that
     /// forgets to round-trip is a test failure rather than a silent gap.

@@ -109,6 +109,46 @@ environment variables without launching an engine.
 
 Unix only: it relies on process-group signal semantics.
 
+### Mid-session supervision (added in v4.0.0)
+
+Since `launch` stays resident for the whole session, it also watches for
+three things while the engine is running:
+
+- **Crash/restart.** If the engine exits nonzero or by signal, `launch`
+  offers to relaunch it with the already-resolved environment — no
+  re-running the resolution pipeline. Pass `--auto-restart` to relaunch
+  automatically instead of prompting:
+
+  ```text
+  llmenv launch --auto-restart claude
+  ```
+
+  Restarts are capped at 3 attempts within a rolling 5-minute window; once
+  the cap is hit, `launch` reports the final error and exits instead of
+  looping. In a non-interactive context (a closed or piped stdin, e.g. CI),
+  a declined-by-default prompt behaves the same as answering "no."
+
+- **Config drift.** If `config.yaml` or a bundle changes while the session
+  is running, `launch` notices and surfaces a warning in the agent's own
+  context on its next turn: *"llmenv config changed since this session
+  started; restart to pick up changes."* This only warns — it never
+  re-materializes or restarts on its own account. Delivery isn't instant
+  (it lands on the next tool-use turn, not the instant the file changes),
+  and it works for any engine `launch` supports, not just Claude Code.
+
+- **Credential expiry.** If the cached Claude Code OAuth credential is
+  close to expiring (or already expired with no live refresh token),
+  `launch` surfaces a warning the same way: *"credentials expire soon; run
+  `llmenv login` if the engine reports an auth failure."* This is
+  detection and notice only — llmenv does not silently refresh the
+  credential itself; Claude Code performs its own refresh, and llmenv only
+  caches the result. Claude Code only, since it's the only engine llmenv
+  caches a credential for today.
+
+Both notices reuse a small per-session Unix socket `launch` opens for this
+purpose (`LLMENV_LAUNCH_SOCKET` in the engine's environment) — an
+implementation detail, not something you need to set or read yourself.
+
 ## `regenerate`
 
 ```text
