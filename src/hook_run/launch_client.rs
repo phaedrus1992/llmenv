@@ -43,6 +43,18 @@ pub(crate) fn check_pending_notice() -> Option<String> {
 
 async fn fetch(path: std::ffi::OsString) -> Option<String> {
     let mut stream = UnixStream::connect(path).await.ok()?;
+
+    // Symmetric to launch::socket's own peer check: refuse to trust a
+    // responder running as a different uid, in case whatever bound this
+    // path isn't the real `launch` process. Doesn't distinguish a
+    // different process at the same uid — same limitation as the
+    // server-side check, not something either side can fix alone.
+    let peer_uid = stream.peer_cred().ok()?.uid();
+    let my_uid = rustix::process::geteuid().as_raw();
+    if !crate::launch::socket::is_authorized_peer(peer_uid, my_uid) {
+        return None;
+    }
+
     let request = serde_json::json!({ "verb": "pending_events" });
     let bytes = serde_json::to_vec(&request).ok()?;
     let len: u32 = bytes.len().try_into().ok()?;

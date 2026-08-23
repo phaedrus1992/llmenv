@@ -107,7 +107,27 @@ pub(crate) async fn serve(listener: UnixListener, notices: NoticeSlot) {
     }
 }
 
+/// Whether a connecting peer with `peer_uid` is allowed to talk to this
+/// socket — it must be the same principal as this process, `my_uid`. Split
+/// out as a pure function so the comparison is unit-testable: the real
+/// inputs come from a syscall (`UnixStream::peer_cred`, `geteuid`) that
+/// can't be mocked, but the decision they feed can (same
+/// split-for-testability pattern as `socket_path_in`).
+pub(crate) fn is_authorized_peer(peer_uid: u32, my_uid: u32) -> bool {
+    peer_uid == my_uid
+}
+
 async fn handle_connection(mut stream: UnixStream, notices: NoticeSlot) -> anyhow::Result<()> {
+    let peer_uid = stream.peer_cred()?.uid();
+    let my_uid = rustix::process::geteuid().as_raw();
+    if !is_authorized_peer(peer_uid, my_uid) {
+        // Not an error — a mismatched peer is an expected, if rare, case
+        // (another tool running as a different local user probing the
+        // socket path), not a malfunction worth `warn!`.
+        tracing::debug!("launch: rejecting socket peer with uid {peer_uid} (expected {my_uid})");
+        return Ok(());
+    }
+
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf);
@@ -155,6 +175,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn is_authorized_peer_true_for_matching_uid() {
+        assert!(is_authorized_peer(1000, 1000));
+    }
+
+    #[test]
+    fn is_authorized_peer_false_for_mismatched_uid() {
+        assert!(!is_authorized_peer(1000, 1001));
+    }
+
+    #[test]
     fn socket_path_uses_xdg_runtime_dir_when_set() {
         let dir = tempfile::tempdir().unwrap();
         let path = socket_path_in(Some(dir.path().as_os_str().to_owned()), 12345).unwrap();
@@ -199,6 +229,14 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// Also the coverage for the peer-uid check accepting a legitimate
+    /// connection: `peer_cred()` reports the connecting process's real
+    /// uid, which is the same value regardless of whether the connection
+    /// comes from another task in this test binary or a genuinely separate
+    /// process — both run as this test's own uid, the case `is_authorized_peer`
+    /// must accept. A mismatched-uid rejection can't be integration-tested
+    /// without a second real uid, which CI doesn't provide; that path is
+    /// covered by `is_authorized_peer_false_for_mismatched_uid` instead.
     #[tokio::test]
     async fn pending_events_delivers_a_queued_notice_exactly_once() {
         let (listener, notices, path) = bind(std::process::id()).unwrap();
