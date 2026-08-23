@@ -28,7 +28,7 @@ pub(crate) type NoticeSlot = Arc<Mutex<Option<String>>>;
 /// # Errors
 /// Returns an error when neither `XDG_RUNTIME_DIR` nor llmenv's state dir can
 /// be resolved, or the directory can't be created.
-pub(crate) fn socket_path(pid: u32) -> anyhow::Result<PathBuf> {
+fn socket_path(pid: u32) -> anyhow::Result<PathBuf> {
     socket_path_in(std::env::var_os("XDG_RUNTIME_DIR"), pid)
 }
 

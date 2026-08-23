@@ -12,7 +12,7 @@ use crate::auth::credentials::Credentials;
 use crate::launch::socket::NoticeSlot;
 
 pub(crate) const EXPIRY_CHECK_INTERVAL: Duration = Duration::from_secs(60);
-pub(crate) const EXPIRY_WARNING_THRESHOLD: Duration = Duration::from_secs(300);
+const EXPIRY_WARNING_THRESHOLD: Duration = Duration::from_secs(300);
 
 const EXPIRY_NOTICE: &str =
     "credentials expire soon; run `llmenv login` if the engine reports an auth failure.";
@@ -20,7 +20,7 @@ const EXPIRY_NOTICE: &str =
 /// Whether `creds` expires within `threshold` of `now_unix_ms`, or has
 /// already expired. `now_unix_ms` is a parameter (not read internally) so
 /// this stays a pure function the unit tests can drive directly.
-pub(crate) fn is_near_expiry(creds: &Credentials, threshold: Duration, now_unix_ms: i64) -> bool {
+fn is_near_expiry(creds: &Credentials, threshold: Duration, now_unix_ms: i64) -> bool {
     let Some(expires_at) = creds.expires_at() else {
         return false;
     };
