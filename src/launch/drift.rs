@@ -158,7 +158,7 @@ adapter:
 
         // Same shape (same firing bundle), but its content changed.
         std::fs::write(bundle_dir.join("AGENTS.md"), "hello, world").unwrap();
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        wait_for_notice(&notices).await;
         assert_eq!(
             notices.lock().await.as_deref(),
             Some(DRIFT_NOTICE),
@@ -166,5 +166,19 @@ adapter:
         );
 
         handle.abort();
+    }
+
+    /// Poll `notices` until something is queued or a generous timeout
+    /// elapses. A fixed sleep here is flaky under CI load — a slow runner
+    /// can miss even a couple of 20ms ticks, whereas polling only cares
+    /// that the notice eventually lands.
+    async fn wait_for_notice(notices: &NoticeSlot) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            if notices.lock().await.is_some() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 }
