@@ -165,7 +165,11 @@ v4.0.0): before exchanging a request, `launch` and the connecting client
 each prove they hold the secret via an HMAC challenge-response, so a process
 pointed at the wrong socket path — say, by a poisoned `LLMENV_LAUNCH_SOCKET`
 in an engine's own settings — can't harvest the secret merely by getting a
-client to connect to it. This raises the bar rather than closing the gap
+client to connect to it. The response carrying the notice is proofed too, so
+a relay that faithfully forwards the handshake without ever learning the
+secret still can't substitute its own text for the real notice — the
+challenge-response authenticates the whole exchange, not just its first two
+messages. This raises the bar rather than closing the gap
 outright: on Linux, `/proc/<pid>/environ` is readable by the same uid by
 default, so a same-uid attacker who locates `launch`'s pid can still read
 the secret from there directly, bypassing the socket protocol entirely.
