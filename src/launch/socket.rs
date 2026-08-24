@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use hmac::{Hmac, KeyInit, Mac};
@@ -31,6 +32,15 @@ const TOKEN_BYTES: usize = 32;
 /// for the lifetime of one connection, never reused or checked against
 /// history — a much lighter bar than [`TOKEN_BYTES`]'s long-lived secret.
 const NONCE_BYTES: usize = 16;
+
+/// How long [`handle_connection`] waits for a connected peer to complete the
+/// whole handshake-and-request exchange before giving up on it. A peer that
+/// connects and then stalls (deliberately, or just a bug) would otherwise
+/// park a spawned task and its file descriptor forever — a few hundred
+/// milliseconds is generous for a local Unix socket, whose client side
+/// already budgets 50ms (`hook_run::launch_client::BUDGET`) for the entire
+/// round trip.
+const CONNECTION_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Shared mailbox: `None` means nothing pending. A background task sets
 /// `Some(text)`; the socket server takes it (clearing back to `None`) the
@@ -88,6 +98,19 @@ impl LaunchToken {
     }
 }
 
+/// Whether `candidate` has the exact shape [`LaunchToken::generate`]
+/// produces: [`TOKEN_BYTES`] `* 2` hex characters. `HmacSha256::new_from_slice`
+/// accepts a key of *any* length, including an empty string, so without this
+/// check a truncated or malformed `LLMENV_LAUNCH_TOKEN` would silently
+/// become a valid — if wrong — HMAC key rather than being rejected outright
+/// (#1487). This is a shape check only, not a defense against a caller who
+/// controls `LLMENV_LAUNCH_TOKEN` itself: a process able to set that env var
+/// to a value of its own choosing can always satisfy this check trivially,
+/// same as it could satisfy the crypto itself.
+pub(crate) fn is_well_formed_token(candidate: &str) -> bool {
+    candidate.len() == TOKEN_BYTES * 2 && hex::decode(candidate).is_ok()
+}
+
 /// Computes HMAC-SHA256 keyed by `secret` over `message`, hex-encoded for the
 /// wire. The shared primitive behind the handshake's challenge-response
 /// (#1487): both `launch` (via [`LaunchToken::as_str`]) and `hook_run` (via
@@ -110,6 +133,11 @@ pub(crate) fn hmac_hex(secret: &str, message: &[u8]) -> anyhow::Result<String> {
 /// verified in constant time via [`Mac::verify_slice`]. Returns `false` —
 /// not an error — for a malformed hex candidate or a mismatch alike: both
 /// are an invalid proof, not a malfunction worth propagating.
+///
+/// `#[must_use]`: this is a security predicate — a call site that computes
+/// it and then ignores the result would silently treat every peer as
+/// authenticated.
+#[must_use]
 pub(crate) fn verify_hmac_hex(secret: &str, message: &[u8], candidate_hex: &str) -> bool {
     let Ok(candidate) = hex::decode(candidate_hex) else {
         return false;
@@ -119,6 +147,60 @@ pub(crate) fn verify_hmac_hex(secret: &str, message: &[u8], candidate_hex: &str)
     };
     mac.update(message);
     mac.verify_slice(&candidate).is_ok()
+}
+
+/// Builds the byte message an HMAC proof binds to (#1487): `role`, then both
+/// nonces, then `extra` — each part separated by a NUL the parts themselves
+/// can't contain unescaped meaning across (hex nonces, ASCII role labels,
+/// and `extra`'s own length-implicit boundary make collisions between two
+/// different `(role, client_nonce, server_nonce, extra)` tuples producing
+/// the same bytes practically impossible).
+///
+/// The `role` label is what makes this a *domain-separated* construction:
+/// [`ServerHello::proof`] uses `"server"`, [`Request::proof`] uses
+/// `"client"`, and the notice's own proof (see `handle_connection`) uses
+/// `"response"`. Without this, all three proofs would be
+/// `HMAC(token, some nonce)` — and a peer that never learned the token could
+/// still win authentication by opening a second connection, echoing the
+/// first connection's `server_nonce` back as its *own* `ClientHello.nonce`,
+/// and replaying the server's honest reply as the first connection's own
+/// request proof (the server, asked to prove itself on connection two, ends
+/// up computing exactly the value connection one's request needed — a
+/// reflection attack, since both roles shared one undifferentiated message
+/// space). Giving each role a distinct label closes that: the server never
+/// computes a `"client"`- or `"response"`-labeled value on a peer-supplied
+/// input, only `"server"`-labeled ones, so there is no way to turn the
+/// server into an oracle for a proof it would otherwise demand.
+pub(crate) fn handshake_message(
+    role: &str,
+    client_nonce: &str,
+    server_nonce: &str,
+    extra: &[u8],
+) -> Vec<u8> {
+    let mut message = Vec::with_capacity(
+        role.len() + 1 + client_nonce.len() + 1 + server_nonce.len() + 1 + extra.len(),
+    );
+    message.extend_from_slice(role.as_bytes());
+    message.push(0);
+    message.extend_from_slice(client_nonce.as_bytes());
+    message.push(0);
+    message.extend_from_slice(server_nonce.as_bytes());
+    message.push(0);
+    message.extend_from_slice(extra);
+    message
+}
+
+/// Encodes a [`Response::notice`] as the `extra` bytes for its own proof
+/// (#1487): a discriminant byte (`0` for `None`, `1` for `Some`) followed by
+/// the text, if any — without the discriminant, `None` and `Some(String::new())`
+/// would hash identically, which is harmless here (both mean "nothing to
+/// show") but is exactly the kind of ambiguity a MAC's input encoding should
+/// not leave to chance.
+pub(crate) fn notice_bytes(notice: &Option<String>) -> Vec<u8> {
+    match notice {
+        Some(text) => std::iter::once(1).chain(text.bytes()).collect(),
+        None => vec![0],
+    }
 }
 
 /// Generates a random handshake challenge nonce (#1487): [`NONCE_BYTES`]
@@ -272,8 +354,15 @@ pub(crate) async fn serve(listener: UnixListener, notices: NoticeSlot, token: La
         let notices = Arc::clone(&notices);
         let token = token.clone();
         tokio::spawn(async move {
+            // Expected rejections (uid mismatch, invalid proof, a stalled
+            // peer) already return `Ok(())` and log their own `debug!`
+            // inside `handle_connection`/`handle_authorized_connection`. An
+            // `Err` here is something else — a malformed frame, a protocol
+            // mismatch (unknown verb), or a CSPRNG/HMAC-construction
+            // failure — worth `warn!` so it doesn't blend into the routine
+            // rejection noise at `debug!`.
             if let Err(e) = handle_connection(stream, notices, token).await {
-                tracing::debug!("launch: socket connection failed: {e:#}");
+                tracing::warn!("launch: socket connection failed: {e:#}");
             }
         });
     }
@@ -294,21 +383,9 @@ pub(crate) fn is_authorized_peer(peer_uid: u32, my_uid: u32) -> bool {
     peer_uid == my_uid
 }
 
-/// Handles one connection through the full handshake (#1487) before serving
-/// a request:
-///
-/// 1. The client sends [`ClientHello`] with a random nonce.
-/// 2. This server proves it holds [`LaunchToken`] by returning
-///    `HMAC(token, client_nonce)` in [`ServerHello`], alongside a nonce of
-///    its own.
-/// 3. The client — which independently verifies that proof before ever
-///    calling back — proves it holds the token in turn by sending
-///    `HMAC(token, server_nonce)` as [`Request::proof`].
-///
-/// The raw token never appears on the wire in either direction; only these
-/// one-way proofs of knowledge do, which is what closes the gap #1484's
-/// plain bearer token left open (a process pointed at the wrong socket path
-/// could harvest that raw token on first connection).
+/// Handles one connection: the uid check, then the handshake-and-request
+/// exchange under [`CONNECTION_TIMEOUT`] (see [`handle_authorized_connection`]
+/// for the handshake itself).
 async fn handle_connection(
     mut stream: UnixStream,
     notices: NoticeSlot,
@@ -324,20 +401,65 @@ async fn handle_connection(
         return Ok(());
     }
 
-    let hello: ClientHello = read_framed(&mut stream, MAX_MESSAGE_LEN).await?;
-    let proof = hmac_hex(token.as_str(), hello.nonce.as_bytes())?;
+    match tokio::time::timeout(
+        CONNECTION_TIMEOUT,
+        handle_authorized_connection(&mut stream, notices, token),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_elapsed) => {
+            tracing::debug!("launch: socket connection timed out after {CONNECTION_TIMEOUT:?}");
+            Ok(())
+        }
+    }
+}
+
+/// Runs the full handshake (#1487) before serving a request:
+///
+/// 1. The client sends [`ClientHello`] with a random nonce.
+/// 2. This server proves it holds [`LaunchToken`] by returning a
+///    `"server"`-labeled proof in [`ServerHello`], alongside a nonce of its
+///    own.
+/// 3. The client — which independently verifies that proof before ever
+///    calling back — proves it holds the token in turn by sending a
+///    `"client"`-labeled proof as [`Request::proof`].
+/// 4. This server answers with [`Response`], itself carrying a
+///    `"response"`-labeled proof over the notice content, so a relay that
+///    faithfully forwards steps 1-3 (without ever learning the token) still
+///    can't substitute its own text for the real notice in step 4 — the
+///    three roles are domain-separated by [`handshake_message`] precisely
+///    so none of them can be produced by asking either party to compute a
+///    *different* one (see that function's doc for the reflection attack
+///    this closes).
+///
+/// The raw token never appears on the wire in any direction; only these
+/// one-way proofs of knowledge do, which is what closes the gap #1484's
+/// plain bearer token left open (a process pointed at the wrong socket path
+/// could harvest that raw token on first connection).
+async fn handle_authorized_connection(
+    stream: &mut UnixStream,
+    notices: NoticeSlot,
+    token: LaunchToken,
+) -> anyhow::Result<()> {
+    let hello: ClientHello = read_framed(stream, MAX_MESSAGE_LEN).await?;
     let server_nonce = generate_nonce_hex()?;
+    let server_proof = hmac_hex(
+        token.as_str(),
+        &handshake_message("server", &hello.nonce, &server_nonce, &[]),
+    )?;
     write_framed(
-        &mut stream,
+        stream,
         &ServerHello {
-            proof,
+            proof: server_proof,
             nonce: server_nonce.clone(),
         },
     )
     .await?;
 
-    let request: Request = read_framed(&mut stream, MAX_MESSAGE_LEN).await?;
-    if !verify_hmac_hex(token.as_str(), server_nonce.as_bytes(), &request.proof) {
+    let request: Request = read_framed(stream, MAX_MESSAGE_LEN).await?;
+    let expected_request_message = handshake_message("client", &hello.nonce, &server_nonce, &[]);
+    if !verify_hmac_hex(token.as_str(), &expected_request_message, &request.proof) {
         // Same treatment as a uid mismatch: an expected occurrence (a stale
         // or forged proof), not a malfunction, and the client already reads
         // "connection closed with no response" as "no notice" either way.
@@ -345,17 +467,29 @@ async fn handle_connection(
         return Ok(());
     }
 
-    let response = match request.verb.as_str() {
+    let notice = match request.verb.as_str() {
         "pending_events" => {
             let mut slot = notices.lock().await;
-            Response {
-                notice: slot.take(),
-            }
+            slot.take()
         }
         other => anyhow::bail!("unknown launch socket verb: {other}"),
     };
+    let response_message = handshake_message(
+        "response",
+        &hello.nonce,
+        &server_nonce,
+        &notice_bytes(&notice),
+    );
+    let response_proof = hmac_hex(token.as_str(), &response_message)?;
 
-    write_framed(&mut stream, &response).await
+    write_framed(
+        stream,
+        &Response {
+            notice,
+            proof: response_proof,
+        },
+    )
+    .await
 }
 
 /// First message of the handshake (#1487), client → server.
@@ -370,11 +504,12 @@ struct ClientHello {
 /// Second message of the handshake (#1487), server → client.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ServerHello {
-    /// `HMAC-SHA256(token, client's nonce)`, hex-encoded — proof the server
-    /// holds [`LaunchToken`], checked by the client before it proceeds.
+    /// The `"server"`-role [`handshake_message`], HMAC'd with
+    /// [`LaunchToken`] and hex-encoded — proof the server holds it, checked
+    /// by the client before it proceeds.
     proof: String,
-    /// The server's own random nonce, folded into the client's own proof
-    /// below so a captured [`Request`] can't be replayed against a
+    /// The server's own random nonce, folded into every proof below so a
+    /// captured [`Request`] or [`Response`] can't be replayed against a
     /// different connection.
     nonce: String,
 }
@@ -382,15 +517,24 @@ struct ServerHello {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Request {
     verb: String,
-    /// `HMAC-SHA256(token, server's nonce)`, hex-encoded — proves this
-    /// request came from a process that holds [`LaunchToken`], without ever
-    /// transmitting the token itself (#1487).
+    /// The `"client"`-role [`handshake_message`], HMAC'd with
+    /// [`LaunchToken`] and hex-encoded — proves this request came from a
+    /// process that holds the token, without ever transmitting it (#1487).
     proof: String,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Response {
     notice: Option<String>,
+    /// The `"response"`-role [`handshake_message`] (bound to `notice` via
+    /// [`notice_bytes`]), HMAC'd with [`LaunchToken`] and hex-encoded —
+    /// proves this specific notice content, not just the earlier
+    /// handshake, came from a process that holds the token. Without this, a
+    /// relay that faithfully forwards `ClientHello`/`ServerHello`/`Request`
+    /// (never learning the token itself) could still substitute arbitrary
+    /// text here, since authenticating the handshake alone says nothing
+    /// about what's sent after it (#1487).
+    proof: String,
 }
 
 #[cfg(test)]
@@ -489,6 +633,88 @@ mod tests {
             let decoded: ServerHello = serde_json::from_slice(&bytes).unwrap();
             prop_assert_eq!(decoded.proof, proof);
             prop_assert_eq!(decoded.nonce, server_nonce);
+        }
+
+        /// [`Response`] must round-trip the same way, including an absent
+        /// notice.
+        #[test]
+        fn response_roundtrips_arbitrary_content(
+            notice in proptest::option::of("\\PC{0,100}"), proof in "\\PC{0,100}",
+        ) {
+            let response = Response { notice: notice.clone(), proof: proof.clone() };
+            let bytes = serde_json::to_vec(&response).unwrap();
+            let decoded: Response = serde_json::from_slice(&bytes).unwrap();
+            prop_assert_eq!(decoded.notice, notice);
+            prop_assert_eq!(decoded.proof, proof);
+        }
+
+        /// #1487: `verify_hmac_hex` must never panic on a candidate that
+        /// isn't valid hex — a wire value from an untrusted peer, which
+        /// [`hex::decode`] is only ever asked to attempt, never assumed to
+        /// succeed.
+        #[test]
+        fn verify_hmac_hex_never_panics_on_malformed_hex(
+            secret in "[0-9a-f]{64}", message in "\\PC{0,50}", candidate in "\\PC{0,200}",
+        ) {
+            let _ = verify_hmac_hex(&secret, message.as_bytes(), &candidate);
+        }
+
+        /// [`generate_nonce_hex`] must always produce valid hex of exactly
+        /// [`NONCE_BYTES`] * 2 characters — the shape both sides of the
+        /// handshake assume when treating a peer's nonce as an opaque wire
+        /// value.
+        #[test]
+        fn generate_nonce_hex_always_produces_valid_hex_of_expected_length(_unit in Just(())) {
+            let nonce = generate_nonce_hex().unwrap();
+            prop_assert_eq!(nonce.len(), NONCE_BYTES * 2);
+            prop_assert!(hex::decode(&nonce).is_ok());
+        }
+
+        /// #1487: the whole point of [`handshake_message`] — the same
+        /// `(client_nonce, server_nonce)` pair must produce a different
+        /// message for each role, which is what closes the reflection
+        /// attack `pending_events_rejects_the_two_connection_reflection_attack`
+        /// exercises end to end (the server never computes a message under
+        /// a role it wasn't asked to prove, so there is no oracle for the
+        /// role it will later verify).
+        #[test]
+        fn handshake_message_differs_by_role_for_the_same_nonces(
+            client_nonce in "\\PC{1,50}", server_nonce in "\\PC{1,50}",
+        ) {
+            let server_message = handshake_message("server", &client_nonce, &server_nonce, &[]);
+            let client_message = handshake_message("client", &client_nonce, &server_nonce, &[]);
+            let response_message = handshake_message("response", &client_nonce, &server_nonce, &[]);
+            prop_assert_ne!(&server_message, &client_message);
+            prop_assert_ne!(&server_message, &response_message);
+            prop_assert_ne!(&client_message, &response_message);
+        }
+
+        /// [`read_framed`]/[`write_framed`] must round-trip an arbitrary
+        /// [`ClientHello`] byte-for-byte through a real socket, not just
+        /// prove `serde_json` itself round-trips (already covered by
+        /// `hello_messages_roundtrip_arbitrary_content`) — this is the pair
+        /// property-test-gap-finder asked for on the framing primitive
+        /// itself, independent of any one wire type.
+        #[test]
+        fn read_framed_write_framed_roundtrip_arbitrary_client_hello(nonce in "\\PC{0,200}") {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let received_nonce = rt.block_on(async {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("roundtrip.sock");
+                let listener = UnixListener::bind(&path).unwrap();
+                let hello = ClientHello { nonce: nonce.clone() };
+
+                let server = tokio::spawn(async move {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let received: ClientHello = read_framed(&mut stream, MAX_MESSAGE_LEN).await.unwrap();
+                    received.nonce
+                });
+
+                let mut client = UnixStream::connect(&path).await.unwrap();
+                write_framed(&mut client, &hello).await.unwrap();
+                server.await.unwrap()
+            });
+            prop_assert_eq!(received_nonce, nonce);
         }
     }
 
@@ -674,6 +900,93 @@ mod tests {
         payload
     }
 
+    /// #1487: a peer that connects and then never sends `ClientHello` must
+    /// not park the spawned connection task (and its fd) forever — the
+    /// server must close the connection once [`CONNECTION_TIMEOUT`] elapses.
+    /// Observed from the client's own side: a `read` that returns `Ok(0)`
+    /// (EOF) means the server dropped its end of the stream.
+    #[tokio::test]
+    async fn handle_connection_closes_a_peer_that_never_completes_the_handshake() {
+        let (listener, notices, path, token) = bind(std::process::id() + 7).unwrap();
+        let server = tokio::spawn(serve(listener, notices, token));
+
+        let mut stream = UnixStream::connect(&path).await.unwrap();
+        // Deliberately send nothing — the server is left waiting on
+        // ClientHello.
+
+        let mut buf = [0u8; 1];
+        let result = tokio::time::timeout(CONNECTION_TIMEOUT * 3, stream.read(&mut buf)).await;
+        assert!(
+            matches!(result, Ok(Ok(0))),
+            "the server must close a stalled connection once CONNECTION_TIMEOUT \
+             elapses, got {result:?}"
+        );
+
+        server.abort();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #1487 regression: the reflection attack the initial (undifferentiated)
+    /// design was vulnerable to. Opening a second connection and echoing the
+    /// first connection's own `server_nonce` back as that second
+    /// connection's `ClientHello.nonce` makes the server sign exactly the
+    /// value the first connection's `Request.proof` needed — with zero
+    /// knowledge of the token — *unless* the two proofs are domain-separated
+    /// by role, which [`handshake_message`] does. Proves that replaying the
+    /// second connection's `ServerHello.proof` into the first connection's
+    /// request is rejected.
+    #[tokio::test]
+    async fn pending_events_rejects_the_two_connection_reflection_attack() {
+        let (listener, notices, path, token) = bind(std::process::id() + 6).unwrap();
+        *notices.lock().await = Some("config changed".to_string());
+        let server = tokio::spawn(serve(listener, notices, token));
+
+        // Connection A: start the handshake, capture its server_nonce.
+        let mut stream_a = UnixStream::connect(&path).await.unwrap();
+        write_framed(
+            &mut stream_a,
+            &ClientHello {
+                nonce: "attacker-nonce-a".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let hello_a: ServerHello = read_framed(&mut stream_a, MAX_MESSAGE_LEN).await.unwrap();
+
+        // Connection B: echo A's server_nonce as B's own ClientHello nonce,
+        // so the server signs exactly the value A's request would need
+        // under an undifferentiated (non-domain-separated) construction.
+        let mut stream_b = UnixStream::connect(&path).await.unwrap();
+        write_framed(
+            &mut stream_b,
+            &ClientHello {
+                nonce: hello_a.nonce.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let hello_b: ServerHello = read_framed(&mut stream_b, MAX_MESSAGE_LEN).await.unwrap();
+
+        // Replay B's proof as A's request proof.
+        write_framed(
+            &mut stream_a,
+            &Request {
+                verb: "pending_events".to_string(),
+                proof: hello_b.proof,
+            },
+        )
+        .await
+        .unwrap();
+        let mut len_buf = [0u8; 4];
+        assert!(
+            stream_a.read_exact(&mut len_buf).await.is_err(),
+            "the reflected proof must not be accepted as connection A's request proof"
+        );
+
+        server.abort();
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// Performs the client side of the handshake against a real `launch`
     /// socket server, for tests that only need to drive [`serve`] end to
     /// end. Skips the peer-uid check `hook_run::launch_client::fetch`
@@ -693,11 +1006,13 @@ mod tests {
         .ok()?;
 
         let hello: ServerHello = read_framed(&mut stream, MAX_MESSAGE_LEN).await.ok()?;
-        if !verify_hmac_hex(token, client_nonce.as_bytes(), &hello.proof) {
+        let expected_server_message = handshake_message("server", &client_nonce, &hello.nonce, &[]);
+        if !verify_hmac_hex(token, &expected_server_message, &hello.proof) {
             return None;
         }
 
-        let proof = hmac_hex(token, hello.nonce.as_bytes()).ok()?;
+        let request_message = handshake_message("client", &client_nonce, &hello.nonce, &[]);
+        let proof = hmac_hex(token, &request_message).ok()?;
         write_framed(
             &mut stream,
             &Request {
@@ -709,6 +1024,15 @@ mod tests {
         .ok()?;
 
         let response: Response = read_framed(&mut stream, MAX_MESSAGE_LEN).await.ok()?;
+        let response_message = handshake_message(
+            "response",
+            &client_nonce,
+            &hello.nonce,
+            &notice_bytes(&response.notice),
+        );
+        if !verify_hmac_hex(token, &response_message, &response.proof) {
+            return None;
+        }
         response.notice
     }
 }

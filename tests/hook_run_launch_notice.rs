@@ -11,9 +11,9 @@
 //!
 //! Hand-rolls a minimal server for `launch`'s wire protocol (4-byte
 //! big-endian length prefix, then JSON; a `ClientHello`/`ServerHello`
-//! HMAC challenge-response (#1487) followed by a
+//! domain-separated HMAC challenge-response (#1487) followed by a
 //! `{"verb":"pending_events","proof":...}` request and a
-//! `{"notice": ...}` response) rather than depending on
+//! `{"notice": ..., "proof": ...}` response) rather than depending on
 //! `src/launch/socket.rs` directly — that module is `pub(crate)`, not
 //! reachable from an external integration test crate.
 
@@ -28,6 +28,12 @@ use tempfile::TempDir;
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// A syntactically well-formed 64-character hex token — `hook_run`'s client
+/// now rejects anything else outright (#1487), so a short fixture string
+/// like the pre-#1487 tests used would just make this test hang instead of
+/// exercising the protocol.
+const TEST_TOKEN: &str = "ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34";
+
 /// Computes the same `HMAC-SHA256(secret, message)`, hex-encoded, that
 /// `src/launch/socket.rs`'s `hmac_hex` computes — duplicated here since that
 /// function is `pub(crate)` and unreachable from this external integration
@@ -36,6 +42,27 @@ fn hmac_hex(secret: &str, message: &[u8]) -> String {
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
     mac.update(message);
     hex::encode(mac.finalize().into_bytes())
+}
+
+/// Mirrors `src/launch/socket.rs`'s `handshake_message`: `role`, then both
+/// nonces, then `extra`, NUL-separated. Must build byte-for-byte the same
+/// message the real client/server construct, or this fixture's proofs won't
+/// verify against them.
+fn handshake_message(role: &str, client_nonce: &str, server_nonce: &str, extra: &[u8]) -> Vec<u8> {
+    let mut message = Vec::new();
+    message.extend_from_slice(role.as_bytes());
+    message.push(0);
+    message.extend_from_slice(client_nonce.as_bytes());
+    message.push(0);
+    message.extend_from_slice(server_nonce.as_bytes());
+    message.push(0);
+    message.extend_from_slice(extra);
+    message
+}
+
+/// Mirrors `src/launch/socket.rs`'s `notice_bytes`.
+fn notice_bytes(notice: &str) -> Vec<u8> {
+    std::iter::once(1).chain(notice.bytes()).collect()
 }
 
 mod support;
@@ -111,8 +138,12 @@ fn serve_one_notice(
             return;
         };
         let server_nonce = "server-nonce-fixture";
+        let server_proof = hmac_hex(
+            expected_token,
+            &handshake_message("server", client_nonce, server_nonce, &[]),
+        );
         let server_hello = serde_json::json!({
-            "proof": hmac_hex(expected_token, client_nonce.as_bytes()),
+            "proof": server_proof,
             "nonce": server_nonce,
         });
         if write_framed(&mut stream, &server_hello).is_err() {
@@ -122,12 +153,25 @@ fn serve_one_notice(
         let Some(request) = read_framed(&mut stream) else {
             return;
         };
-        let expected_proof = hmac_hex(expected_token, server_nonce.as_bytes());
-        if request.get("proof").and_then(serde_json::Value::as_str) != Some(expected_proof.as_str())
+        let expected_request_proof = hmac_hex(
+            expected_token,
+            &handshake_message("client", client_nonce, server_nonce, &[]),
+        );
+        if request.get("proof").and_then(serde_json::Value::as_str)
+            != Some(expected_request_proof.as_str())
         {
             return;
         }
-        let response = serde_json::json!({ "notice": notice });
+        let response_proof = hmac_hex(
+            expected_token,
+            &handshake_message(
+                "response",
+                client_nonce,
+                server_nonce,
+                &notice_bytes(notice),
+            ),
+        );
+        let response = serde_json::json!({ "notice": notice, "proof": response_proof });
         let _ = write_framed(&mut stream, &response);
     })
 }
@@ -166,7 +210,7 @@ fn hook_run_delivers_launch_notice_joined_with_existing_context() {
     // own timeout — are what actually catches that; waiting on this thread
     // too would just hang the test alongside it. It's reclaimed when the
     // test binary process exits.
-    let _server = serve_one_notice(listener, "credentials expire soon", "test-token");
+    let _server = serve_one_notice(listener, "credentials expire soon", TEST_TOKEN);
 
     let test_file_dir = TempDir::new().unwrap();
     let file_path = test_file_dir.path().join("hook_run_launch_notice.txt");
@@ -201,7 +245,7 @@ fn hook_run_delivers_launch_notice_joined_with_existing_context() {
         // and must send exactly this value — serve_one_notice above checks it
         // before answering, so a wrong value here would hang this test the
         // same way a client that never dials the socket would.
-        .env("LLMENV_LAUNCH_TOKEN", "test-token")
+        .env("LLMENV_LAUNCH_TOKEN", TEST_TOKEN)
         .arg("hook-run")
         .arg("pre_tool_use")
         .write_stdin(payload.as_str());

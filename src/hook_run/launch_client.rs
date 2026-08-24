@@ -15,24 +15,32 @@
 //!
 //! # Handshake (#1487)
 //! Neither side ever puts [`LaunchToken`](crate::launch::socket) on the wire
-//! in the clear:
+//! in the clear, and each of the three messages below is bound to a
+//! distinct, domain-separated role by `launch::socket::handshake_message` —
+//! see that function's doc for why an undifferentiated `HMAC(token, nonce)`
+//! for every role is a reflection attack waiting to happen:
 //! 1. This client sends a random nonce.
-//! 2. The server must prove it holds the token by returning
-//!    `HMAC(token, client_nonce)`, alongside a nonce of its own. This
-//!    client verifies that proof — using its own copy of the token from
+//! 2. The server must prove it holds the token by returning a
+//!    `"server"`-labeled proof, alongside a nonce of its own. This client
+//!    verifies that proof — using its own copy of the token from
 //!    `LLMENV_LAUNCH_TOKEN` — before doing anything else; a socket pointed
 //!    at the wrong endpoint (e.g. via a poisoned `LLMENV_LAUNCH_SOCKET`)
 //!    fails right here, before this client has revealed anything that
 //!    depends on it holding the token.
 //! 3. Only then does this client prove it holds the token in turn, sending
-//!    `HMAC(token, server_nonce)` as the request's proof.
+//!    a `"client"`-labeled proof as the request's proof.
+//! 4. The server's response itself carries a `"response"`-labeled proof
+//!    over the notice content, verified before this client returns it — so
+//!    a relay that faithfully forwards steps 1-3 without ever learning the
+//!    token still can't substitute its own text for the real notice.
 
 use std::time::Duration;
 
 use tokio::net::UnixStream;
 
 use crate::launch::socket::{
-    generate_nonce_hex, hmac_hex, is_authorized_peer, read_framed, verify_hmac_hex, write_framed,
+    generate_nonce_hex, handshake_message, hmac_hex, is_authorized_peer, is_well_formed_token,
+    notice_bytes, read_framed, verify_hmac_hex, write_framed,
 };
 
 /// Budget for the whole connect-handshake-request-response round trip,
@@ -56,6 +64,13 @@ pub(crate) fn check_pending_notice() -> Option<String> {
     // token means this process didn't inherit it from `launch`, so there is
     // nothing valid to send.
     let token = std::env::var("LLMENV_LAUNCH_TOKEN").ok()?;
+    // #1487: reject a truncated or malformed value outright rather than
+    // handing it to `HmacSha256::new_from_slice`, which accepts a key of
+    // any length (including empty) and would otherwise silently compute
+    // proofs against the wrong secret.
+    if !is_well_formed_token(&token) {
+        return None;
+    }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -92,23 +107,36 @@ struct Request {
 #[derive(serde::Deserialize)]
 struct Response {
     notice: Option<String>,
+    proof: String,
 }
 
 async fn fetch(path: std::ffi::OsString, token: String) -> Option<String> {
-    let mut stream = UnixStream::connect(path).await.ok()?;
+    let mut stream = UnixStream::connect(path)
+        .await
+        .inspect_err(|e| tracing::debug!("launch_client: connect failed: {e:#}"))
+        .ok()?;
 
     // Symmetric to launch::socket's own peer check: refuse to trust a
     // responder running as a different uid, in case whatever bound this
     // path isn't the real `launch` process. Doesn't distinguish a
     // different process at the same uid — the handshake below is what
     // covers that case (#1484, #1487).
-    let peer_uid = stream.peer_cred().ok()?.uid();
+    let peer_uid = stream
+        .peer_cred()
+        .inspect_err(|e| tracing::debug!("launch_client: peer_cred failed: {e:#}"))
+        .ok()?
+        .uid();
     let my_uid = rustix::process::geteuid().as_raw();
     if !is_authorized_peer(peer_uid, my_uid) {
+        tracing::debug!(
+            "launch_client: rejecting socket peer with uid {peer_uid} (expected {my_uid})"
+        );
         return None;
     }
 
-    let client_nonce = generate_nonce_hex().ok()?;
+    let client_nonce = generate_nonce_hex()
+        .inspect_err(|e| tracing::debug!("launch_client: generating challenge nonce failed: {e:#}"))
+        .ok()?;
     write_framed(
         &mut stream,
         &ClientHello {
@@ -116,18 +144,27 @@ async fn fetch(path: std::ffi::OsString, token: String) -> Option<String> {
         },
     )
     .await
+    .inspect_err(|e| tracing::debug!("launch_client: sending ClientHello failed: {e:#}"))
     .ok()?;
 
     // #1487: verify the responder holds the token *before* proving this
     // client holds it too — a fake endpoint that doesn't know the token
     // can't produce a valid proof here, so this client aborts without ever
     // sending anything that depends on its own copy of the secret.
-    let hello: ServerHello = read_framed(&mut stream, MAX_MESSAGE_LEN).await.ok()?;
-    if !verify_hmac_hex(&token, client_nonce.as_bytes(), &hello.proof) {
+    let hello: ServerHello = read_framed(&mut stream, MAX_MESSAGE_LEN)
+        .await
+        .inspect_err(|e| tracing::debug!("launch_client: reading ServerHello failed: {e:#}"))
+        .ok()?;
+    let expected_server_message = handshake_message("server", &client_nonce, &hello.nonce, &[]);
+    if !verify_hmac_hex(&token, &expected_server_message, &hello.proof) {
+        tracing::debug!("launch_client: server's handshake proof did not verify");
         return None;
     }
 
-    let proof = hmac_hex(&token, hello.nonce.as_bytes()).ok()?;
+    let request_message = handshake_message("client", &client_nonce, &hello.nonce, &[]);
+    let proof = hmac_hex(&token, &request_message)
+        .inspect_err(|e| tracing::debug!("launch_client: computing request proof failed: {e:#}"))
+        .ok()?;
     write_framed(
         &mut stream,
         &Request {
@@ -136,9 +173,27 @@ async fn fetch(path: std::ffi::OsString, token: String) -> Option<String> {
         },
     )
     .await
+    .inspect_err(|e| tracing::debug!("launch_client: sending Request failed: {e:#}"))
     .ok()?;
 
-    let response: Response = read_framed(&mut stream, MAX_MESSAGE_LEN).await.ok()?;
+    let response: Response = read_framed(&mut stream, MAX_MESSAGE_LEN)
+        .await
+        .inspect_err(|e| tracing::debug!("launch_client: reading Response failed: {e:#}"))
+        .ok()?;
+    // #1487: a relay that faithfully forwards everything above (without
+    // ever learning the token) could still substitute its own text here —
+    // authenticating the handshake says nothing about the payload sent
+    // after it unless the payload is proofed too.
+    let response_message = handshake_message(
+        "response",
+        &client_nonce,
+        &hello.nonce,
+        &notice_bytes(&response.notice),
+    );
+    if !verify_hmac_hex(&token, &response_message, &response.proof) {
+        tracing::debug!("launch_client: response proof did not verify");
+        return None;
+    }
     response.notice
 }
 
