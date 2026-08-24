@@ -23,30 +23,9 @@ use llmenv_mcp::proxy::{
 };
 use tempfile::tempdir;
 
-/// Fixed advisory-lock address shared with `src/proxy.rs`'s copy of
-/// [`port_guard`] — not used for real traffic, only its bind exclusivity.
-const NETWORK_TEST_LOCK_ADDR: &str = "127.0.0.1:47990";
-
-/// Serializes every test that allocates an ephemeral port (#1481). cargo runs
-/// the lib crate's own unit tests and this integration binary as separate,
-/// concurrent processes, so an in-process `Mutex` cannot stop one binary's
-/// test from reusing a port the other just freed (`free_port` releases its
-/// port before the test asserts the port is closed, or before the spawn
-/// callback rebinds it). Binding a fixed, otherwise unused port as an
-/// advisory lock works across the process boundary: only one bind can hold it
-/// at a time, in either binary.
-fn port_guard() -> TcpListener {
-    for _ in 0..250 {
-        if let Ok(l) = TcpListener::bind(NETWORK_TEST_LOCK_ADDR) {
-            return l;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    panic!(
-        "could not acquire the network-test advisory lock on {NETWORK_TEST_LOCK_ADDR} after \
-         5s; is another process bound to it?"
-    );
-}
+// #1481/#1486: shared with `src/proxy.rs`'s `#[cfg(test)]` module via
+// `include!` rather than duplicated by hand.
+include!("support/port_guard.rs");
 
 /// Allocates an ephemeral TCP port by binding then dropping the listener, and
 /// confirms the released port is actually closed before returning it.
