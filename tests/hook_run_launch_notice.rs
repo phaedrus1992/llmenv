@@ -10,17 +10,33 @@
 //! so this drives the real `llmenv hook-run` binary instead.
 //!
 //! Hand-rolls a minimal server for `launch`'s wire protocol (4-byte
-//! big-endian length prefix, then JSON; `{"verb":"pending_events"}` request,
-//! `{"notice": ...}` response) rather than depending on `src/launch/socket.rs`
-//! directly — that module is `pub(crate)`, not reachable from an external
-//! integration test crate.
+//! big-endian length prefix, then JSON; a `ClientHello`/`ServerHello`
+//! HMAC challenge-response (#1487) followed by a
+//! `{"verb":"pending_events","proof":...}` request and a
+//! `{"notice": ...}` response) rather than depending on
+//! `src/launch/socket.rs` directly — that module is `pub(crate)`, not
+//! reachable from an external integration test crate.
 
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
 use std::time::Duration;
 
+use hmac::{Hmac, KeyInit, Mac};
+use sha2::Sha256;
 use tempfile::TempDir;
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Computes the same `HMAC-SHA256(secret, message)`, hex-encoded, that
+/// `src/launch/socket.rs`'s `hmac_hex` computes — duplicated here since that
+/// function is `pub(crate)` and unreachable from this external integration
+/// test crate.
+fn hmac_hex(secret: &str, message: &[u8]) -> String {
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(message);
+    hex::encode(mac.finalize().into_bytes())
+}
 
 mod support;
 
@@ -70,9 +86,11 @@ adapter:
     )
 }
 
-/// Serve exactly one `pending_events` request with `notice`, then stop —
-/// but only if the request's `token` field matches `expected_token`. #1484:
-/// this pins the env-to-wire hop, i.e. that `hook-run` actually sends the
+/// Serve one full handshake (#1487) — read `ClientHello`, prove knowledge of
+/// `expected_token` in `ServerHello`, then read the client's own proof and
+/// answer a `pending_events` request with `notice` only if that proof also
+/// matches `expected_token`. #1484/#1487: this pins the env-to-wire hop,
+/// i.e. that `hook-run` actually sends and verifies proofs derived from the
 /// value it read from `LLMENV_LAUNCH_TOKEN`, rather than assuming it did.
 /// Runs on a background thread; the caller joins it after the hook-run
 /// invocation completes.
@@ -85,27 +103,52 @@ fn serve_one_notice(
         let Ok((mut stream, _)) = listener.accept() else {
             return;
         };
-        let mut len_buf = [0u8; 4];
-        if stream.read_exact(&mut len_buf).is_err() {
-            return;
-        }
-        let len = u32::from_be_bytes(len_buf) as usize;
-        let mut buf = vec![0u8; len];
-        if stream.read_exact(&mut buf).is_err() {
-            return;
-        }
-        let Ok(request) = serde_json::from_slice::<serde_json::Value>(&buf) else {
+
+        let Some(hello) = read_framed(&mut stream) else {
             return;
         };
-        if request.get("token").and_then(serde_json::Value::as_str) != Some(expected_token) {
+        let Some(client_nonce) = hello.get("nonce").and_then(serde_json::Value::as_str) else {
+            return;
+        };
+        let server_nonce = "server-nonce-fixture";
+        let server_hello = serde_json::json!({
+            "proof": hmac_hex(expected_token, client_nonce.as_bytes()),
+            "nonce": server_nonce,
+        });
+        if write_framed(&mut stream, &server_hello).is_err() {
+            return;
+        }
+
+        let Some(request) = read_framed(&mut stream) else {
+            return;
+        };
+        let expected_proof = hmac_hex(expected_token, server_nonce.as_bytes());
+        if request.get("proof").and_then(serde_json::Value::as_str) != Some(expected_proof.as_str())
+        {
             return;
         }
         let response = serde_json::json!({ "notice": notice });
-        let payload = serde_json::to_vec(&response).unwrap();
-        let response_len = u32::try_from(payload.len()).unwrap();
-        let _ = stream.write_all(&response_len.to_be_bytes());
-        let _ = stream.write_all(&payload);
+        let _ = write_framed(&mut stream, &response);
     })
+}
+
+fn read_framed(stream: &mut std::os::unix::net::UnixStream) -> Option<serde_json::Value> {
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf).ok()?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    let mut buf = vec![0u8; len];
+    stream.read_exact(&mut buf).ok()?;
+    serde_json::from_slice(&buf).ok()
+}
+
+fn write_framed(
+    stream: &mut std::os::unix::net::UnixStream,
+    value: &serde_json::Value,
+) -> std::io::Result<()> {
+    let payload = serde_json::to_vec(value).unwrap();
+    let len = u32::try_from(payload.len()).unwrap();
+    stream.write_all(&len.to_be_bytes())?;
+    stream.write_all(&payload)
 }
 
 #[test]

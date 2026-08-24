@@ -3,25 +3,48 @@
 //! `hook_run` invocation. See
 //! docs/superpowers/specs/2026-08-23-launch-mid-session-supervision-design.md.
 //!
-//! The wire format (`{"verb": "pending_events"}` request, `{"notice": ...}`
-//! response) is duplicated here deliberately rather than shared as a library
-//! type with `crate::launch::socket` — the two sides only need to agree on a
-//! two-field JSON shape, and sharing a type would pull `launch` into
-//! `hook_run`'s dependency graph for no real benefit.
+//! The wire *types* (`ClientHello`/`ServerHello`/`Request`/`Response`) are
+//! duplicated here deliberately rather than shared as library types with
+//! `crate::launch::socket` — the two sides only need to agree on small JSON
+//! shapes, and sharing the types would pull `launch` into `hook_run`'s
+//! dependency graph for no real benefit. The actual cryptographic and
+//! framing primitives (`hmac_hex`, `verify_hmac_hex`, `generate_nonce_hex`,
+//! `read_framed`, `write_framed`, `is_authorized_peer`) are *not*
+//! duplicated — both sides already call into `launch::socket` for those, so
+//! a fix to one side's math can't silently drift from the other's.
+//!
+//! # Handshake (#1487)
+//! Neither side ever puts [`LaunchToken`](crate::launch::socket) on the wire
+//! in the clear:
+//! 1. This client sends a random nonce.
+//! 2. The server must prove it holds the token by returning
+//!    `HMAC(token, client_nonce)`, alongside a nonce of its own. This
+//!    client verifies that proof — using its own copy of the token from
+//!    `LLMENV_LAUNCH_TOKEN` — before doing anything else; a socket pointed
+//!    at the wrong endpoint (e.g. via a poisoned `LLMENV_LAUNCH_SOCKET`)
+//!    fails right here, before this client has revealed anything that
+//!    depends on it holding the token.
+//! 3. Only then does this client prove it holds the token in turn, sending
+//!    `HMAC(token, server_nonce)` as the request's proof.
 
 use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
-/// Budget for the whole connect-request-response round trip, matching the
-/// v1 `launch` design's connect-then-fall-back guess.
+use crate::launch::socket::{
+    generate_nonce_hex, hmac_hex, is_authorized_peer, read_framed, verify_hmac_hex, write_framed,
+};
+
+/// Budget for the whole connect-handshake-request-response round trip,
+/// matching the v1 `launch` design's connect-then-fall-back guess. Two
+/// extra local round trips for the handshake (#1487) are negligible next to
+/// this budget on a Unix domain socket.
 const BUDGET: Duration = Duration::from_millis(50);
 
-/// Longest response this client accepts, matching `launch::socket`'s own
-/// `MAX_REQUEST_LEN` — a malformed or hostile endpoint claiming a larger
+/// Longest message this client accepts, matching `launch::socket`'s own
+/// `MAX_MESSAGE_LEN` — a malformed or hostile endpoint claiming a larger
 /// length must not make this client allocate on its say-so.
-const MAX_RESPONSE_LEN: u32 = 4096;
+const MAX_MESSAGE_LEN: u32 = 4096;
 
 /// Check the resident `launch` process (if any) for a pending mid-session
 /// notice. Returns `None` for every failure mode — no `LLMENV_LAUNCH_SOCKET`
@@ -45,36 +68,78 @@ pub(crate) fn check_pending_notice() -> Option<String> {
     })
 }
 
+/// First message of the handshake (#1487), sent by this client.
+#[derive(serde::Serialize)]
+struct ClientHello {
+    nonce: String,
+}
+
+/// Second message of the handshake (#1487), sent by the server.
+#[derive(serde::Deserialize)]
+struct ServerHello {
+    proof: String,
+    nonce: String,
+}
+
+/// Third message (#1487), sent by this client once it has verified
+/// [`ServerHello::proof`].
+#[derive(serde::Serialize)]
+struct Request {
+    verb: String,
+    proof: String,
+}
+
+#[derive(serde::Deserialize)]
+struct Response {
+    notice: Option<String>,
+}
+
 async fn fetch(path: std::ffi::OsString, token: String) -> Option<String> {
     let mut stream = UnixStream::connect(path).await.ok()?;
 
     // Symmetric to launch::socket's own peer check: refuse to trust a
     // responder running as a different uid, in case whatever bound this
     // path isn't the real `launch` process. Doesn't distinguish a
-    // different process at the same uid — the token below is what covers
-    // that case (#1484).
+    // different process at the same uid — the handshake below is what
+    // covers that case (#1484, #1487).
     let peer_uid = stream.peer_cred().ok()?.uid();
     let my_uid = rustix::process::geteuid().as_raw();
-    if !crate::launch::socket::is_authorized_peer(peer_uid, my_uid) {
+    if !is_authorized_peer(peer_uid, my_uid) {
         return None;
     }
 
-    let request = serde_json::json!({ "verb": "pending_events", "token": token });
-    let bytes = serde_json::to_vec(&request).ok()?;
-    let len: u32 = bytes.len().try_into().ok()?;
-    stream.write_all(&len.to_be_bytes()).await.ok()?;
-    stream.write_all(&bytes).await.ok()?;
+    let client_nonce = generate_nonce_hex().ok()?;
+    write_framed(
+        &mut stream,
+        &ClientHello {
+            nonce: client_nonce.clone(),
+        },
+    )
+    .await
+    .ok()?;
 
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).await.ok()?;
-    let len = u32::from_be_bytes(len_buf);
-    if len > MAX_RESPONSE_LEN {
+    // #1487: verify the responder holds the token *before* proving this
+    // client holds it too — a fake endpoint that doesn't know the token
+    // can't produce a valid proof here, so this client aborts without ever
+    // sending anything that depends on its own copy of the secret.
+    let hello: ServerHello = read_framed(&mut stream, MAX_MESSAGE_LEN).await.ok()?;
+    if !verify_hmac_hex(&token, client_nonce.as_bytes(), &hello.proof) {
         return None;
     }
-    let mut buf = vec![0u8; len as usize];
-    stream.read_exact(&mut buf).await.ok()?;
-    let response: serde_json::Value = serde_json::from_slice(&buf).ok()?;
-    response.get("notice")?.as_str().map(str::to_owned)
+
+    let proof = hmac_hex(&token, hello.nonce.as_bytes()).ok()?;
+    write_framed(
+        &mut stream,
+        &Request {
+            verb: "pending_events".to_string(),
+            proof,
+        },
+    )
+    .await
+    .ok()?;
+
+    let response: Response = read_framed(&mut stream, MAX_MESSAGE_LEN).await.ok()?;
+    response.notice
 }
 
 #[cfg(test)]
@@ -146,83 +211,53 @@ mod tests {
         })
     }
 
-    /// A valid, complete JSON response `{"notice":"<padding>"}` whose total
-    /// serialized length is exactly `len` bytes — built by construction
-    /// (fixed prefix/suffix, padding fills the rest) rather than trial and
-    /// error, so tests can hit an exact byte boundary. `len` must be at
-    /// least the 13-byte fixed overhead (`{"notice":"` + `"}`).
-    fn response_payload_of_exact_len(len: u32) -> Vec<u8> {
-        const PREFIX: &[u8] = b"{\"notice\":\"";
-        const SUFFIX: &[u8] = b"\"}";
-        let overhead = u32::try_from(PREFIX.len() + SUFFIX.len()).unwrap();
-        let padding_len = usize::try_from(len - overhead).unwrap();
-        let mut payload = Vec::with_capacity(len as usize);
-        payload.extend_from_slice(PREFIX);
-        payload.extend(std::iter::repeat_n(b'x', padding_len));
-        payload.extend_from_slice(SUFFIX);
-        assert_eq!(payload.len(), len as usize);
-        payload
-    }
+    /// #1487: the whole point of the challenge-response — if the responder's
+    /// proof doesn't match this client's own copy of the token, this client
+    /// must abort right after verifying `ServerHello`, *before* it ever
+    /// computes or sends its own proof. Proven with a fake server that sends
+    /// a wrong proof and then tries to read a `Request`: if the real client
+    /// aborted as intended, that read gets nothing (the connection closes),
+    /// not a `Request` a malicious endpoint could otherwise have collected.
+    ///
+    /// (Length-boundary enforcement on each framed message is covered by
+    /// `launch::socket`'s own `read_framed_*` tests, which exercise the
+    /// shared framing helper directly rather than through this protocol.)
+    #[tokio::test]
+    async fn fetch_aborts_before_sending_its_own_proof_when_the_servers_proof_is_wrong() {
+        use tokio::io::AsyncReadExt;
 
-    /// Serve exactly one request, then send `payload` prefixed by its own
-    /// (real, matching) length — i.e. an honest response of that size, not
-    /// a length header lying about a payload that never arrives. Needed to
-    /// tell "rejected because it's oversized" apart from "failed because
-    /// the connection closed before the promised bytes showed up", which a
-    /// truncated fake response can't distinguish.
-    fn serve_one_response(
-        listener: tokio::net::UnixListener,
-        payload: Vec<u8>,
-    ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fake-server.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+
+        let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let mut len_buf = [0u8; 4];
-            stream.read_exact(&mut len_buf).await.unwrap();
-            let request_len = u32::from_be_bytes(len_buf) as usize;
-            let mut discard = vec![0u8; request_len];
-            stream.read_exact(&mut discard).await.unwrap();
+            let _hello: serde_json::Value =
+                read_framed(&mut stream, MAX_MESSAGE_LEN).await.unwrap();
+            write_framed(
+                &mut stream,
+                &serde_json::json!({ "proof": "0".repeat(64), "nonce": "server-nonce" }),
+            )
+            .await
+            .unwrap();
 
-            let payload_len = u32::try_from(payload.len()).unwrap();
-            stream.write_all(&payload_len.to_be_bytes()).await.unwrap();
-            stream.write_all(&payload).await.unwrap();
-        })
-    }
+            // If the real client correctly aborted after rejecting this
+            // bogus proof, nothing more ever arrives on this stream.
+            let mut buf = [0u8; 1];
+            stream.read(&mut buf).await
+        });
 
-    /// A complete, honestly-sized response of exactly [`MAX_RESPONSE_LEN`]
-    /// bytes must be accepted — the boundary itself is not oversized.
-    #[tokio::test]
-    async fn accepts_a_response_of_exactly_the_max_length() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("boundary.sock");
-        let listener = tokio::net::UnixListener::bind(&path).unwrap();
-        let payload = response_payload_of_exact_len(MAX_RESPONSE_LEN);
-        let server = serve_one_response(listener, payload);
-
-        let notice = fetch(path.into_os_string(), "any-token".to_string()).await;
-        assert!(
-            notice.is_some(),
-            "an exactly-max-length response must not be rejected"
+        let notice = fetch(path.into_os_string(), "real-token".to_string()).await;
+        assert_eq!(
+            notice, None,
+            "a fetch against a server with an invalid proof must return None"
         );
-        server.abort();
-    }
 
-    /// A complete, honestly-sized response one byte past
-    /// [`MAX_RESPONSE_LEN`] must be rejected before this client reads (or
-    /// returns) any of it — proven with a real, fully-sent oversized
-    /// payload rather than a truncated one, so a mutant that weakens the
-    /// length check can't hide behind a coincidental connection-closed
-    /// `None`.
-    #[tokio::test]
-    async fn rejects_a_response_one_byte_past_the_max_length() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("oversized.sock");
-        let listener = tokio::net::UnixListener::bind(&path).unwrap();
-        let payload = response_payload_of_exact_len(MAX_RESPONSE_LEN + 1);
-        let server = serve_one_response(listener, payload);
-
-        let notice = fetch(path.into_os_string(), "any-token".to_string()).await;
-        assert_eq!(notice, None);
-        server.abort();
+        let read_result = server.await.unwrap();
+        assert!(
+            matches!(read_result, Ok(0) | Err(_)),
+            "the client must not send anything after rejecting the server's proof"
+        );
     }
 
     proptest::proptest! {
