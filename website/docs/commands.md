@@ -151,9 +151,17 @@ implementation detail, not something you need to set or read yourself. The
 socket's directory and file are owner-only, and `launch` also checks the
 connecting peer's uid (added in v4.0.0) as a second, independent layer: a
 process running as a different user is rejected even if the directory/file
-permissions were somehow bypassed. This does not distinguish between
-different processes that happen to run as your own user — that is a
-separate, still-open problem.
+permissions were somehow bypassed.
+
+A uid check alone cannot tell your session's own engine apart from a
+different process running as your same user, so `launch` also generates a
+per-session secret (added in v4.0.0) and requires it on every request to the
+socket. The secret is exported as `LLMENV_LAUNCH_TOKEN`, alongside
+`LLMENV_LAUNCH_SOCKET` — also not something you need to set or read
+yourself. This raises the bar rather than closing the gap outright: on
+Linux, `/proc/<pid>/environ` is readable by the same uid by default, so a
+same-uid attacker who locates `launch`'s pid can still read the token from
+there.
 
 ## `regenerate`
 
