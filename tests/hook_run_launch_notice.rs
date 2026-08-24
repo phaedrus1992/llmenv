@@ -70,10 +70,17 @@ adapter:
     )
 }
 
-/// Serve exactly one `pending_events` request with `notice`, then stop.
+/// Serve exactly one `pending_events` request with `notice`, then stop —
+/// but only if the request's `token` field matches `expected_token`. #1484:
+/// this pins the env-to-wire hop, i.e. that `hook-run` actually sends the
+/// value it read from `LLMENV_LAUNCH_TOKEN`, rather than assuming it did.
 /// Runs on a background thread; the caller joins it after the hook-run
 /// invocation completes.
-fn serve_one_notice(listener: UnixListener, notice: &'static str) -> std::thread::JoinHandle<()> {
+fn serve_one_notice(
+    listener: UnixListener,
+    notice: &'static str,
+    expected_token: &'static str,
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let Ok((mut stream, _)) = listener.accept() else {
             return;
@@ -85,6 +92,12 @@ fn serve_one_notice(listener: UnixListener, notice: &'static str) -> std::thread
         let len = u32::from_be_bytes(len_buf) as usize;
         let mut buf = vec![0u8; len];
         if stream.read_exact(&mut buf).is_err() {
+            return;
+        }
+        let Ok(request) = serde_json::from_slice::<serde_json::Value>(&buf) else {
+            return;
+        };
+        if request.get("token").and_then(serde_json::Value::as_str) != Some(expected_token) {
             return;
         }
         let response = serde_json::json!({ "notice": notice });
@@ -110,7 +123,7 @@ fn hook_run_delivers_launch_notice_joined_with_existing_context() {
     // own timeout — are what actually catches that; waiting on this thread
     // too would just hang the test alongside it. It's reclaimed when the
     // test binary process exits.
-    let _server = serve_one_notice(listener, "credentials expire soon");
+    let _server = serve_one_notice(listener, "credentials expire soon", "test-token");
 
     let test_file_dir = TempDir::new().unwrap();
     let file_path = test_file_dir.path().join("hook_run_launch_notice.txt");
@@ -141,9 +154,10 @@ fn hook_run_delivers_launch_notice_joined_with_existing_context() {
     second
         .env("LLMENV_CONFIG", &config_path)
         .env("LLMENV_LAUNCH_SOCKET", &socket_path)
-        // #1484: the client now requires a token alongside the socket path;
-        // this test's hand-rolled server doesn't validate it, so any value
-        // that's actually set is enough to make the client dial the socket.
+        // #1484: the client now requires a token alongside the socket path,
+        // and must send exactly this value — serve_one_notice above checks it
+        // before answering, so a wrong value here would hang this test the
+        // same way a client that never dials the socket would.
         .env("LLMENV_LAUNCH_TOKEN", "test-token")
         .arg("hook-run")
         .arg("pre_tool_use")
