@@ -17,10 +17,76 @@ use tokio::sync::Mutex;
 /// server allocate an unbounded buffer.
 const MAX_REQUEST_LEN: u32 = 4096;
 
+/// How many random bytes back [`LaunchToken::generate`]'s secret. 32 bytes
+/// (256 bits) is the conventional size for a bearer token meant to resist
+/// guessing, with headroom to spare against any realistic offline search.
+const TOKEN_BYTES: usize = 32;
+
 /// Shared mailbox: `None` means nothing pending. A background task sets
 /// `Some(text)`; the socket server takes it (clearing back to `None`) the
 /// first time a client asks — exactly-once delivery.
 pub(crate) type NoticeSlot = Arc<Mutex<Option<String>>>;
+
+/// Per-session shared secret (#1484) that lets [`handle_connection`] reject
+/// any process that didn't inherit it from `launch`'s own environment,
+/// closing the gap a uid check alone leaves open: a different process
+/// running as the *same* uid as `launch` still passes
+/// `peer_uid == my_uid` in [`is_authorized_peer`], so that check alone cannot
+/// tell a compromised same-uid dependency from the real engine's descendant.
+///
+/// # Known limitations
+/// - The token travels as an env var, which every descendant of the
+///   supervised engine inherits, not just `hook_run`'s own invocations — a
+///   third-party MCP server, a hook, or any other command the engine runs
+///   can read it from its own environment. This is inherent to the
+///   env-inheritance transport, not a bug: it is the same population of
+///   processes the token is meant to admit (anything spawned from the
+///   engine's own session), and there is no cheaper way to reach every
+///   `hook_run` invocation without it.
+/// - On Linux, `/proc/<pid>/environ` is readable by the same uid by default,
+///   so a same-uid attacker who knows or enumerates `launch`'s pid could
+///   still read this token that way. This raises the bar — it requires
+///   locating and reading the right pid's environ — compared to no token at
+///   all, but it is not a hard guarantee, and callers must not describe it
+///   as one.
+#[derive(Clone)]
+pub(crate) struct LaunchToken(zeroize::Zeroizing<String>);
+
+impl LaunchToken {
+    /// Generates a random token: [`TOKEN_BYTES`] bytes from the OS CSPRNG,
+    /// hex-encoded so it round-trips cleanly through an env var and JSON.
+    ///
+    /// # Errors
+    /// Returns an error if the OS CSPRNG is unavailable.
+    fn generate() -> anyhow::Result<Self> {
+        let mut bytes = zeroize::Zeroizing::new([0u8; TOKEN_BYTES]);
+        getrandom::fill(bytes.as_mut()).context("generating launch socket token")?;
+        Ok(Self(zeroize::Zeroizing::new(hex::encode(*bytes))))
+    }
+
+    /// The token's wire form, for setting `LLMENV_LAUNCH_TOKEN` on the
+    /// supervised engine's environment.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether `candidate` is this token, compared in constant time. A plain
+    /// `==` exits at the first mismatched byte, which an attacker probing the
+    /// socket could in principle use to learn the token one byte at a time
+    /// through response timing. Delegates to `constant_time_eq` rather than a
+    /// hand-rolled XOR fold — nothing in a fold like that stops the optimizer
+    /// from re-introducing an early exit, which is exactly the class of bug
+    /// dedicated constant-time crates exist to guard against.
+    fn matches(&self, candidate: &str) -> bool {
+        constant_time_eq::constant_time_eq(self.0.as_bytes(), candidate.as_bytes())
+    }
+}
+
+impl std::fmt::Debug for LaunchToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LaunchToken(<redacted>)")
+    }
+}
 
 /// Path for this `launch` invocation's per-session socket. `pid` is
 /// `launch`'s own pid, so the path is unique per session by construction.
@@ -60,12 +126,18 @@ fn socket_path_in(
 }
 
 /// Bind the per-session socket, returning the listener, the notice mailbox
-/// background tasks push into, and the bound path (for
-/// `LLMENV_LAUNCH_SOCKET` and later cleanup).
+/// background tasks push into, the bound path (for `LLMENV_LAUNCH_SOCKET` and
+/// later cleanup), and the shared secret (for `LLMENV_LAUNCH_TOKEN`, #1484).
 ///
 /// # Errors
-/// Returns an error when the path can't be resolved or the bind fails.
-pub(crate) fn bind(pid: u32) -> anyhow::Result<(UnixListener, NoticeSlot, PathBuf)> {
+/// Returns an error when the path can't be resolved, the bind fails, or the
+/// token can't be generated.
+pub(crate) fn bind(pid: u32) -> anyhow::Result<(UnixListener, NoticeSlot, PathBuf, LaunchToken)> {
+    // Generated before any filesystem state exists: a `UnixListener` doesn't
+    // unlink its socket file on drop, so if this failed after `bind` below,
+    // the caller would never receive `path` to construct its own cleanup
+    // guard from, leaking the socket file on a CSPRNG failure.
+    let token = LaunchToken::generate()?;
     let path = socket_path(pid)?;
     // A stale file at this exact path would only exist if this pid was
     // reused since a prior `launch` crashed without tearing down — remove it
@@ -82,14 +154,14 @@ pub(crate) fn bind(pid: u32) -> anyhow::Result<(UnixListener, NoticeSlot, PathBu
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("hardening permissions on {}", path.display()))?;
     }
-    Ok((listener, Arc::new(Mutex::new(None)), path))
+    Ok((listener, Arc::new(Mutex::new(None)), path, token))
 }
 
 /// Accept connections until the caller drops this future (i.e. when
 /// `launch`'s own supervision loop exits and stops polling it). Each
 /// connection is handled on its own spawned task so one slow/malformed
 /// client can't block the next.
-pub(crate) async fn serve(listener: UnixListener, notices: NoticeSlot) {
+pub(crate) async fn serve(listener: UnixListener, notices: NoticeSlot, token: LaunchToken) {
     loop {
         let (stream, _addr) = match listener.accept().await {
             Ok(pair) => pair,
@@ -99,8 +171,9 @@ pub(crate) async fn serve(listener: UnixListener, notices: NoticeSlot) {
             }
         };
         let notices = Arc::clone(&notices);
+        let token = token.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, notices).await {
+            if let Err(e) = handle_connection(stream, notices, token).await {
                 tracing::debug!("launch: socket connection failed: {e:#}");
             }
         });
@@ -113,11 +186,20 @@ pub(crate) async fn serve(listener: UnixListener, notices: NoticeSlot) {
 /// inputs come from a syscall (`UnixStream::peer_cred`, `geteuid`) that
 /// can't be mocked, but the decision they feed can (same
 /// split-for-testability pattern as `socket_path_in`).
+///
+/// This is a first, coarse layer of defense — it stops a different local
+/// user from connecting — on top of the socket's directory/file already being
+/// owner-only. It cannot by itself stop a different process running as the
+/// *same* uid; [`LaunchToken`] is the layer that closes that gap.
 pub(crate) fn is_authorized_peer(peer_uid: u32, my_uid: u32) -> bool {
     peer_uid == my_uid
 }
 
-async fn handle_connection(mut stream: UnixStream, notices: NoticeSlot) -> anyhow::Result<()> {
+async fn handle_connection(
+    mut stream: UnixStream,
+    notices: NoticeSlot,
+    token: LaunchToken,
+) -> anyhow::Result<()> {
     let peer_uid = stream.peer_cred()?.uid();
     let my_uid = rustix::process::geteuid().as_raw();
     if !is_authorized_peer(peer_uid, my_uid) {
@@ -138,6 +220,14 @@ async fn handle_connection(mut stream: UnixStream, notices: NoticeSlot) -> anyho
     let mut buf = vec![0u8; len as usize];
     stream.read_exact(&mut buf).await?;
     let request: Request = serde_json::from_slice(&buf)?;
+
+    if !token.matches(&request.token) {
+        // Same treatment as a uid mismatch: an expected occurrence (a stale
+        // or forged token), not a malfunction, and the client already reads
+        // "connection closed with no response" as "no notice" either way.
+        tracing::debug!("launch: rejecting socket request with an invalid token");
+        return Ok(());
+    }
 
     let response = match request.verb.as_str() {
         "pending_events" => {
@@ -162,6 +252,9 @@ async fn handle_connection(mut stream: UnixStream, notices: NoticeSlot) -> anyho
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Request {
     verb: String,
+    /// The shared secret from [`LaunchToken`], proving this request came from
+    /// a process that inherited it from `launch`'s own environment (#1484).
+    token: String,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -182,6 +275,56 @@ mod tests {
     #[test]
     fn is_authorized_peer_false_for_mismatched_uid() {
         assert!(!is_authorized_peer(1000, 1001));
+    }
+
+    #[test]
+    fn generate_produces_a_valid_hex_token_of_the_expected_length() {
+        let token = LaunchToken::generate().unwrap();
+        let decoded = hex::decode(token.as_str()).expect("token must be valid hex");
+        assert_eq!(decoded.len(), TOKEN_BYTES);
+    }
+
+    #[test]
+    fn generate_produces_distinct_tokens() {
+        let a = LaunchToken::generate().unwrap();
+        let b = LaunchToken::generate().unwrap();
+        assert_ne!(
+            a.as_str(),
+            b.as_str(),
+            "two generated tokens must not collide"
+        );
+    }
+
+    use proptest::prelude::*;
+
+    proptest::proptest! {
+        /// #1484: `matches` must accept exactly its own value and reject
+        /// every other candidate — the property a hand-rolled or borrowed
+        /// constant-time comparison exists to preserve.
+        #[test]
+        fn matches_accepts_its_own_value_and_rejects_others(
+            a in "[0-9a-f]{64}", b in "[0-9a-f]{64}",
+        ) {
+            let token = LaunchToken(zeroize::Zeroizing::new(a.clone()));
+            prop_assert!(token.matches(&a));
+            if a != b {
+                prop_assert!(!token.matches(&b));
+            }
+        }
+
+        /// The wire `Request` (verb + token) must round-trip arbitrary
+        /// content through JSON byte-for-byte, independent of what the
+        /// token or verb actually contain.
+        #[test]
+        fn request_roundtrips_arbitrary_verb_and_token(
+            verb in "\\PC{0,50}", token in "\\PC{0,100}",
+        ) {
+            let request = Request { verb: verb.clone(), token: token.clone() };
+            let bytes = serde_json::to_vec(&request).unwrap();
+            let decoded: Request = serde_json::from_slice(&bytes).unwrap();
+            prop_assert_eq!(decoded.verb, verb);
+            prop_assert_eq!(decoded.token, token);
+        }
     }
 
     #[test]
@@ -214,7 +357,7 @@ mod tests {
         // Offset from the other tests' pids in this binary (plain
         // `std::process::id()`, `+1` in `hook_run::launch_client`'s tests)
         // so a parallel run doesn't have two tests binding the same path.
-        let (_listener, _notices, path) = bind(std::process::id() + 2).unwrap();
+        let (_listener, _notices, path, _token) = bind(std::process::id() + 2).unwrap();
 
         let dir_mode = std::fs::metadata(path.parent().unwrap())
             .unwrap()
@@ -239,24 +382,57 @@ mod tests {
     /// covered by `is_authorized_peer_false_for_mismatched_uid` instead.
     #[tokio::test]
     async fn pending_events_delivers_a_queued_notice_exactly_once() {
-        let (listener, notices, path) = bind(std::process::id()).unwrap();
+        let (listener, notices, path, token) = bind(std::process::id()).unwrap();
         *notices.lock().await = Some("config changed".to_string());
-        let server = tokio::spawn(serve(listener, notices));
+        let server = tokio::spawn(serve(listener, notices, token.clone()));
 
-        let first = fetch(&path).await;
+        let first = fetch(&path, token.as_str()).await;
         assert_eq!(first, Some("config changed".to_string()));
 
-        let second = fetch(&path).await;
+        let second = fetch(&path, token.as_str()).await;
         assert_eq!(second, None, "a notice must not be delivered twice");
 
         server.abort();
         let _ = std::fs::remove_file(&path);
     }
 
-    async fn fetch(path: &std::path::Path) -> Option<String> {
+    /// #1484: a request with a wrong token must be rejected before it can
+    /// read the pending notice, even though the peer uid matches. Like a uid
+    /// mismatch, rejection closes the connection without writing a response
+    /// — so this asserts against that directly rather than through [`fetch`],
+    /// which assumes a response always arrives.
+    #[tokio::test]
+    async fn pending_events_rejects_a_request_with_the_wrong_token() {
+        let (listener, notices, path, token) = bind(std::process::id() + 3).unwrap();
+        *notices.lock().await = Some("config changed".to_string());
+        let server = tokio::spawn(serve(listener, notices, token));
+
+        let mut stream = UnixStream::connect(&path).await.unwrap();
+        let request = serde_json::to_vec(&Request {
+            verb: "pending_events".to_string(),
+            token: "0".repeat(64),
+        })
+        .unwrap();
+        stream
+            .write_all(&(request.len() as u32).to_be_bytes())
+            .await
+            .unwrap();
+        stream.write_all(&request).await.unwrap();
+        let mut len_buf = [0u8; 4];
+        assert!(
+            stream.read_exact(&mut len_buf).await.is_err(),
+            "a wrong token must close the connection without a response"
+        );
+
+        server.abort();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    async fn fetch(path: &std::path::Path, token: &str) -> Option<String> {
         let mut stream = UnixStream::connect(path).await.unwrap();
         let request = serde_json::to_vec(&Request {
             verb: "pending_events".to_string(),
+            token: token.to_string(),
         })
         .unwrap();
         stream

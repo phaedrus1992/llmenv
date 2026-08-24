@@ -29,33 +29,37 @@ const MAX_RESPONSE_LEN: u32 = 4096;
 /// response — this must never turn into a hook failure.
 pub(crate) fn check_pending_notice() -> Option<String> {
     let path = std::env::var_os("LLMENV_LAUNCH_SOCKET")?;
+    // #1484: required alongside the socket path — a socket with no matching
+    // token means this process didn't inherit it from `launch`, so there is
+    // nothing valid to send.
+    let token = std::env::var("LLMENV_LAUNCH_TOKEN").ok()?;
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .ok()?;
     rt.block_on(async move {
-        tokio::time::timeout(BUDGET, fetch(path))
+        tokio::time::timeout(BUDGET, fetch(path, token))
             .await
             .ok()
             .flatten()
     })
 }
 
-async fn fetch(path: std::ffi::OsString) -> Option<String> {
+async fn fetch(path: std::ffi::OsString, token: String) -> Option<String> {
     let mut stream = UnixStream::connect(path).await.ok()?;
 
     // Symmetric to launch::socket's own peer check: refuse to trust a
     // responder running as a different uid, in case whatever bound this
     // path isn't the real `launch` process. Doesn't distinguish a
-    // different process at the same uid — same limitation as the
-    // server-side check, not something either side can fix alone.
+    // different process at the same uid — the token below is what covers
+    // that case (#1484).
     let peer_uid = stream.peer_cred().ok()?.uid();
     let my_uid = rustix::process::geteuid().as_raw();
     if !crate::launch::socket::is_authorized_peer(peer_uid, my_uid) {
         return None;
     }
 
-    let request = serde_json::json!({ "verb": "pending_events" });
+    let request = serde_json::json!({ "verb": "pending_events", "token": token });
     let bytes = serde_json::to_vec(&request).ok()?;
     let len: u32 = bytes.len().try_into().ok()?;
     stream.write_all(&len.to_be_bytes()).await.ok()?;
@@ -90,32 +94,52 @@ mod tests {
 
     #[tokio::test]
     async fn delivers_a_queued_notice_from_a_real_socket() {
-        let (listener, notices, path) =
+        let (listener, notices, path, token) =
             crate::launch::socket::bind(std::process::id() + 1).unwrap();
         *notices.lock().await = Some("credentials expire soon".to_string());
-        let server = tokio::spawn(crate::launch::socket::serve(listener, notices));
+        let server = tokio::spawn(crate::launch::socket::serve(
+            listener,
+            notices,
+            token.clone(),
+        ));
 
-        let notice = tokio::task::spawn_blocking(move || fetch_with_env_override(&path))
-            .await
-            .unwrap();
+        let notice_token = token.as_str().to_string();
+        let notice =
+            tokio::task::spawn_blocking(move || fetch_with_env_override(&path, notice_token))
+                .await
+                .unwrap();
 
         assert_eq!(notice, Some("credentials expire soon".to_string()));
         server.abort();
     }
 
-    /// [`check_pending_notice`] reads `LLMENV_LAUNCH_SOCKET` from the real
-    /// process env, which this test can't safely mutate (see the module's
-    /// other test). Exercise the same connect-request-response path
-    /// directly against `path` instead, via a fresh runtime on a blocking
-    /// thread — mirroring exactly what `check_pending_notice` itself does,
-    /// minus the env lookup.
-    fn fetch_with_env_override(path: &std::path::Path) -> Option<String> {
+    /// #1484: a request carrying the wrong token must not receive the
+    /// notice, even though the peer uid check passes (same test process).
+    #[tokio::test]
+    async fn rejects_a_notice_fetch_with_the_wrong_token() {
+        let (listener, notices, path, token) =
+            crate::launch::socket::bind(std::process::id() + 5).unwrap();
+        *notices.lock().await = Some("credentials expire soon".to_string());
+        let server = tokio::spawn(crate::launch::socket::serve(listener, notices, token));
+
+        let notice = fetch(path.into_os_string(), "wrong-token".to_string()).await;
+        assert_eq!(notice, None);
+        server.abort();
+    }
+
+    /// [`check_pending_notice`] reads `LLMENV_LAUNCH_SOCKET` and
+    /// `LLMENV_LAUNCH_TOKEN` from the real process env, which this test
+    /// can't safely mutate (see the module's other test). Exercise the same
+    /// connect-request-response path directly against `path`/`token`
+    /// instead, via a fresh runtime on a blocking thread — mirroring exactly
+    /// what `check_pending_notice` itself does, minus the env lookup.
+    fn fetch_with_env_override(path: &std::path::Path, token: String) -> Option<String> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .ok()?;
         rt.block_on(async {
-            tokio::time::timeout(BUDGET, fetch(path.as_os_str().to_owned()))
+            tokio::time::timeout(BUDGET, fetch(path.as_os_str().to_owned(), token))
                 .await
                 .ok()
                 .flatten()
@@ -174,7 +198,7 @@ mod tests {
         let payload = response_payload_of_exact_len(MAX_RESPONSE_LEN);
         let server = serve_one_response(listener, payload);
 
-        let notice = fetch(path.into_os_string()).await;
+        let notice = fetch(path.into_os_string(), "any-token".to_string()).await;
         assert!(
             notice.is_some(),
             "an exactly-max-length response must not be rejected"
@@ -196,7 +220,7 @@ mod tests {
         let payload = response_payload_of_exact_len(MAX_RESPONSE_LEN + 1);
         let server = serve_one_response(listener, payload);
 
-        let notice = fetch(path.into_os_string()).await;
+        let notice = fetch(path.into_os_string(), "any-token".to_string()).await;
         assert_eq!(notice, None);
         server.abort();
     }
@@ -215,12 +239,17 @@ mod tests {
                 .build()
                 .unwrap();
             rt.block_on(async {
-                let (listener, notices, path) =
+                let (listener, notices, path, token) =
                     crate::launch::socket::bind(std::process::id() + 1000).unwrap();
                 *notices.lock().await = Some(notice.clone());
-                let server = tokio::spawn(crate::launch::socket::serve(listener, notices));
+                let server = tokio::spawn(crate::launch::socket::serve(
+                    listener,
+                    notices,
+                    token.clone(),
+                ));
 
-                let received = fetch(path.clone().into_os_string()).await;
+                let received =
+                    fetch(path.clone().into_os_string(), token.as_str().to_string()).await;
 
                 server.abort();
                 let _ = std::fs::remove_file(&path);

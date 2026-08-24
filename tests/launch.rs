@@ -149,6 +149,35 @@ fn launch_sets_llmenv_launch_socket_in_child_env() {
     );
 }
 
+/// #1484: the child must also inherit the shared secret alongside the socket
+/// path — a socket path with no token would let any same-uid process forge a
+/// notice or read a pending one.
+#[test]
+fn launch_sets_llmenv_launch_token_in_child_env() {
+    let (dir, config_path) = setup_config();
+    let mut cmd = launch_cmd(dir.path(), &config_path);
+    let env_dump = dir.path().join("env.txt");
+    cmd.env("FAKE_ENGINE_ENV_DUMP", &env_dump);
+    cmd.timeout(Duration::from_secs(LAUNCH_TIMEOUT_SECS))
+        .assert()
+        .success();
+    let dumped = fs::read_to_string(&env_dump).unwrap();
+    assert!(
+        dumped
+            .lines()
+            .any(|l| l.starts_with("LLMENV_LAUNCH_TOKEN=")),
+        "child env missing LLMENV_LAUNCH_TOKEN:\n{dumped}"
+    );
+    let token = dumped
+        .lines()
+        .find(|l| l.starts_with("LLMENV_LAUNCH_TOKEN="))
+        .unwrap();
+    assert!(
+        token.len() > "LLMENV_LAUNCH_TOKEN=".len(),
+        "token value must not be empty: {token}"
+    );
+}
+
 #[test]
 fn launch_prompts_to_restart_after_a_crash() {
     let (dir, config_path) = setup_config();
