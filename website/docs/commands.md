@@ -155,13 +155,20 @@ permissions were somehow bypassed.
 
 A uid check alone cannot tell your session's own engine apart from a
 different process running as your same user, so `launch` also generates a
-per-session secret (added in v4.0.0) and requires it on every request to the
-socket. The secret is exported as `LLMENV_LAUNCH_TOKEN`, alongside
-`LLMENV_LAUNCH_SOCKET` — also not something you need to set or read
-yourself. This raises the bar rather than closing the gap outright: on
-Linux, `/proc/<pid>/environ` is readable by the same uid by default, so a
-same-uid attacker who locates `launch`'s pid can still read the token from
-there.
+per-session secret (added in v4.0.0) and requires proof of it on every
+request to the socket. The secret is exported as `LLMENV_LAUNCH_TOKEN`,
+alongside `LLMENV_LAUNCH_SOCKET` — also not something you need to set or
+read yourself.
+
+Neither side ever puts that secret on the wire in the clear (added in
+v4.0.0): before exchanging a request, `launch` and the connecting client
+each prove they hold the secret via an HMAC challenge-response, so a process
+pointed at the wrong socket path — say, by a poisoned `LLMENV_LAUNCH_SOCKET`
+in an engine's own settings — can't harvest the secret merely by getting a
+client to connect to it. This raises the bar rather than closing the gap
+outright: on Linux, `/proc/<pid>/environ` is readable by the same uid by
+default, so a same-uid attacker who locates `launch`'s pid can still read
+the secret from there directly, bypassing the socket protocol entirely.
 
 ## `regenerate`
 
