@@ -34,12 +34,21 @@ pub(crate) type NoticeSlot = Arc<Mutex<Option<String>>>;
 /// `peer_uid == my_uid` in [`is_authorized_peer`], so that check alone cannot
 /// tell a compromised same-uid dependency from the real engine's descendant.
 ///
-/// # Known limitation
-/// On Linux, `/proc/<pid>/environ` is readable by the same uid by default, so
-/// a same-uid attacker who knows or enumerates `launch`'s pid could still
-/// read this token that way. This raises the bar — it requires locating and
-/// reading the right pid's environ — compared to no token at all, but it is
-/// not a hard guarantee, and callers must not describe it as one.
+/// # Known limitations
+/// - The token travels as an env var, which every descendant of the
+///   supervised engine inherits, not just `hook_run`'s own invocations — a
+///   third-party MCP server, a hook, or any other command the engine runs
+///   can read it from its own environment. This is inherent to the
+///   env-inheritance transport, not a bug: it is the same population of
+///   processes the token is meant to admit (anything spawned from the
+///   engine's own session), and there is no cheaper way to reach every
+///   `hook_run` invocation without it.
+/// - On Linux, `/proc/<pid>/environ` is readable by the same uid by default,
+///   so a same-uid attacker who knows or enumerates `launch`'s pid could
+///   still read this token that way. This raises the bar — it requires
+///   locating and reading the right pid's environ — compared to no token at
+///   all, but it is not a hard guarantee, and callers must not describe it
+///   as one.
 #[derive(Clone)]
 pub(crate) struct LaunchToken(zeroize::Zeroizing<String>);
 
@@ -64,16 +73,12 @@ impl LaunchToken {
     /// Whether `candidate` is this token, compared in constant time. A plain
     /// `==` exits at the first mismatched byte, which an attacker probing the
     /// socket could in principle use to learn the token one byte at a time
-    /// through response timing.
+    /// through response timing. Delegates to `constant_time_eq` rather than a
+    /// hand-rolled XOR fold — nothing in a fold like that stops the optimizer
+    /// from re-introducing an early exit, which is exactly the class of bug
+    /// dedicated constant-time crates exist to guard against.
     fn matches(&self, candidate: &str) -> bool {
-        let expected = self.0.as_bytes();
-        let actual = candidate.as_bytes();
-        expected.len() == actual.len()
-            && expected
-                .iter()
-                .zip(actual)
-                .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-                == 0
+        constant_time_eq::constant_time_eq(self.0.as_bytes(), candidate.as_bytes())
     }
 }
 
@@ -128,6 +133,11 @@ fn socket_path_in(
 /// Returns an error when the path can't be resolved, the bind fails, or the
 /// token can't be generated.
 pub(crate) fn bind(pid: u32) -> anyhow::Result<(UnixListener, NoticeSlot, PathBuf, LaunchToken)> {
+    // Generated before any filesystem state exists: a `UnixListener` doesn't
+    // unlink its socket file on drop, so if this failed after `bind` below,
+    // the caller would never receive `path` to construct its own cleanup
+    // guard from, leaking the socket file on a CSPRNG failure.
+    let token = LaunchToken::generate()?;
     let path = socket_path(pid)?;
     // A stale file at this exact path would only exist if this pid was
     // reused since a prior `launch` crashed without tearing down — remove it
@@ -144,7 +154,6 @@ pub(crate) fn bind(pid: u32) -> anyhow::Result<(UnixListener, NoticeSlot, PathBu
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("hardening permissions on {}", path.display()))?;
     }
-    let token = LaunchToken::generate()?;
     Ok((listener, Arc::new(Mutex::new(None)), path, token))
 }
 
@@ -266,6 +275,56 @@ mod tests {
     #[test]
     fn is_authorized_peer_false_for_mismatched_uid() {
         assert!(!is_authorized_peer(1000, 1001));
+    }
+
+    #[test]
+    fn generate_produces_a_valid_hex_token_of_the_expected_length() {
+        let token = LaunchToken::generate().unwrap();
+        let decoded = hex::decode(token.as_str()).expect("token must be valid hex");
+        assert_eq!(decoded.len(), TOKEN_BYTES);
+    }
+
+    #[test]
+    fn generate_produces_distinct_tokens() {
+        let a = LaunchToken::generate().unwrap();
+        let b = LaunchToken::generate().unwrap();
+        assert_ne!(
+            a.as_str(),
+            b.as_str(),
+            "two generated tokens must not collide"
+        );
+    }
+
+    use proptest::prelude::*;
+
+    proptest::proptest! {
+        /// #1484: `matches` must accept exactly its own value and reject
+        /// every other candidate — the property a hand-rolled or borrowed
+        /// constant-time comparison exists to preserve.
+        #[test]
+        fn matches_accepts_its_own_value_and_rejects_others(
+            a in "[0-9a-f]{64}", b in "[0-9a-f]{64}",
+        ) {
+            let token = LaunchToken(zeroize::Zeroizing::new(a.clone()));
+            prop_assert!(token.matches(&a));
+            if a != b {
+                prop_assert!(!token.matches(&b));
+            }
+        }
+
+        /// The wire `Request` (verb + token) must round-trip arbitrary
+        /// content through JSON byte-for-byte, independent of what the
+        /// token or verb actually contain.
+        #[test]
+        fn request_roundtrips_arbitrary_verb_and_token(
+            verb in "\\PC{0,50}", token in "\\PC{0,100}",
+        ) {
+            let request = Request { verb: verb.clone(), token: token.clone() };
+            let bytes = serde_json::to_vec(&request).unwrap();
+            let decoded: Request = serde_json::from_slice(&bytes).unwrap();
+            prop_assert_eq!(decoded.verb, verb);
+            prop_assert_eq!(decoded.token, token);
+        }
     }
 
     #[test]
