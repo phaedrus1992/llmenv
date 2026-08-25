@@ -8,10 +8,11 @@
 //! a full reindex unlinks and recreates that file, one call can silently
 //! replace an unrelated project's index with this repo's data.
 //!
-//! `CBM_ALLOWED_ROOT` doesn't help: llmenv pins it to the project root, which
-//! bounds the tree that gets *read*, not the project key that gets *written*.
-//! llmenv's default `CBM_CACHE_DIR` is one directory shared by every project,
-//! so every project a user has indexed is a reachable target.
+//! A scoping root wouldn't help here either way (llmenv no longer sets
+//! `CBM_ALLOWED_ROOT` at all — #1495): it bounds the tree that gets *read*,
+//! not the project key that gets *written*. codebase-memory-mcp's own
+//! default `CBM_CACHE_DIR` is one directory shared by every project, so
+//! every project a user has indexed is a reachable target.
 //!
 //! Re-tiering `index_repository` to `ask` was the obvious alternative and is
 //! the wrong trade: llmenv fires it on every `SessionStart`, so a prompt would
