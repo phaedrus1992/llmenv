@@ -1,0 +1,33 @@
+name: zizmor
+on:
+  push:
+    # release/** included because forward-merge-release.yml pushes directly
+    # to release branches, bypassing any PR — those pushes need scanning too.
+    branches: [main, 'release/**']
+  # No `paths:` filter: this backs a required code-scanning ruleset gate,
+  # and a workflow-level paths filter would make GitHub report no analysis
+  # at all for a PR that doesn't match it — the gate then blocks that PR
+  # forever waiting for a result that will never arrive (same failure mode
+  # ci.yml's `changes` job exists to avoid for its required status checks).
+  pull_request:
+permissions: {}
+jobs:
+  zizmor:
+    name: Run zizmor
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write # Required for upload-sarif (used by zizmor-action) to upload SARIF files.
+      contents: read         # Needed for checkout to clone the repo.
+      # No `actions: read`: only needed for private repos (per zizmor-action's
+      # own docs), and this repo is public. zizmor-action passes this job's
+      # token straight into a third-party container for online audits, so
+      # keep its scope as narrow as the security-events write upload-sarif
+      # actually requires.
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run zizmor
+        uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2

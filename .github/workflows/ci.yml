@@ -1,18 +1,6 @@
 name: ci
 on:
   pull_request:
-    paths:
-      - 'src/**'
-      - 'crates/**'
-      - 'tests/**'
-      - 'scripts/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'deny.toml'
-      - 'hawk.toml'
-      - 'CHANGELOG-*.md'
-      - 'website/docs/changelog.md'
-      - '.github/workflows/ci.yml'
 permissions:
   contents: read
 env:
@@ -20,7 +8,39 @@ env:
   # virtualized disk (os error 5, #553). Inert for steps that don't call rustup.
   RUSTUP_IO_THREADS: "1"
 jobs:
+  # test/deny/hawk are required status checks (repo ruleset). A workflow-level
+  # `paths:` filter would make GitHub report no status at all for a PR that
+  # doesn't touch these paths, leaving the required check "Pending" forever
+  # and blocking merge permanently — GitHub only treats a job-level `if:` skip
+  # as a passing "Success", not a workflow that never triggered. So this job
+  # always runs and each downstream job gates itself via `needs`/`if` instead.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'src/**'
+              - 'crates/**'
+              - 'tests/**'
+              - 'scripts/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'deny.toml'
+              - 'hawk.toml'
+              - 'CHANGELOG-*.md'
+              - 'website/docs/changelog.md'
+              - '.github/workflows/ci.yml'
   test:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -69,6 +89,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo nextest run --workspace --test-threads "$CARGO_BUILD_JOBS"
   deny:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -78,6 +100,8 @@ jobs:
         with:
           command: check
   hawk:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
