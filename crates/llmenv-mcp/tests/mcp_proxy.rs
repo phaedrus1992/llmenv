@@ -24,7 +24,10 @@ use llmenv_mcp::proxy::{
 use tempfile::tempdir;
 
 // #1481/#1486: shared with `src/proxy.rs`'s `#[cfg(test)]` module via
-// `include!` rather than duplicated by hand.
+// `include!` rather than duplicated by hand — cargo can run this crate's
+// `--lib` binary and this integration binary as separate, concurrent
+// processes, so an in-process `Mutex` alone can't stop one binary's test
+// from reusing a port the other just freed.
 include!("support/port_guard.rs");
 
 /// Allocates an ephemeral TCP port by binding then dropping the listener, and
