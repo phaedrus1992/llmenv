@@ -1387,9 +1387,9 @@ pub const WAKEUP_MAX_TOKENS_RANGE: std::ops::RangeInclusive<u32> = 20..=4000;
 /// A local, tag-activated `codebase-memory-mcp` server. Unlike `Memory`
 /// (ICM), this resolves to a **local stdio** MCP entry, not a network
 /// client — codebase-memory-mcp has no remote-serve mode. `CBM_CACHE_DIR`
-/// and `CBM_ALLOWED_ROOT` are always computed by llmenv (state dir +
-/// project root), never user-configurable, so a declared entry can't
-/// accidentally scope the indexer outside the intended project.
+/// is only set when `index_path` is explicit (#1493); `CBM_ALLOWED_ROOT` is
+/// never set (#1495) — llmenv no longer imposes scoping, deferring to
+/// codebase-memory-mcp's own default behavior.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 pub struct CodebaseMemory {
     /// Tags that activate this server, intersected with active scope tags
@@ -1397,10 +1397,11 @@ pub struct CodebaseMemory {
     #[serde(default)]
     pub when: Vec<String>,
     /// Override the index storage directory (`CBM_CACHE_DIR` env var).
-    /// Defaults to `<state_dir>/codebase-memory` when unset — a shared cache
-    /// root, matching upstream's own default (`~/.cache/codebase-memory-mcp/`
-    /// stores every project's index together; the server partitions by
-    /// project internally, the same way `list_projects` enumerates them).
+    /// Unset leaves `CBM_CACHE_DIR` unset too (#1493), so
+    /// codebase-memory-mcp falls back to its own default
+    /// (`~/.cache/codebase-memory-mcp/`) — a shared cache root the server
+    /// partitions by project internally, the same way `list_projects`
+    /// enumerates them.
     #[serde(default)]
     pub index_path: Option<String>,
     /// Per-tier permission override for the codebase-memory-mcp MCP's tools

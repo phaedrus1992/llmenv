@@ -10,6 +10,8 @@ on:
       - 'Cargo.lock'
       - 'deny.toml'
       - 'hawk.toml'
+      - 'CHANGELOG-*.md'
+      - 'website/docs/changelog.md'
       - '.github/workflows/ci.yml'
 permissions:
   contents: read
