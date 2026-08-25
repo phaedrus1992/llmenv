@@ -535,7 +535,7 @@ is an independent local process, not a shared network resource).
 features:
   codebase_memory:
     - when: [my-project]        # activates the server (same model as bundles)
-      index_path: null          # optional override; default <state_dir>/codebase-memory
+      index_path: null          # optional override; unset defers to codebase-memory-mcp's own default
 ```
 
 (added in v3.8.0) A failed `index_repository` run's stderr is captured to
@@ -547,25 +547,38 @@ output.
 | Field | Required | Notes |
 | ------- | ---------- | ------- |
 | `when` | yes | Activation tags; an entry with none is rejected at validate time |
-| `index_path` | no | Override the index storage directory; defaults to `<state_dir>/codebase-memory` |
+| `index_path` | no | Override the index storage directory; unset leaves it to codebase-memory-mcp's own default (`~/.cache/codebase-memory-mcp/`), not an llmenv-managed path — see below (changed in v3.11.1) |
 | `mcp_permissions` | no | (added in v3.10.0) Per-tier permission override for codebase-memory-mcp's tools — see [`mcp_permissions`](#featuresmcp_permissions) below |
 
-(added in v3.8.0) The default index storage directory (`<state_dir>/codebase-
-memory`) is created owner-only (`0o700`). An explicit `index_path` override
-is not: llmenv leaves its permissions exactly as its owner set them, so a
-directory intentionally shared with a `codebase-memory-mcp` process running
-under a different uid (a separate service account, or a container with a
-different uid mapping) keeps working. If you rely on this sharing, secure the
-directory yourself — llmenv won't tighten or loosen it for you.
+(added in v3.8.0; changed in v3.11.1) An explicit `index_path` override is
+created owner-only (`0o700`) the first time llmenv writes to it. Prior to
+v3.11.1, llmenv also computed and owned a default index directory
+(`<state_dir>/codebase-memory`) when `index_path` was unset; that default is
+gone — an unset `index_path` now defers entirely to codebase-memory-mcp's own
+default location, which llmenv does not create or manage permissions for. An
+`index_path` override's permissions are otherwise left exactly as its owner
+set them: a directory intentionally shared with a `codebase-memory-mcp`
+process running under a different uid (a separate service account, or a
+container with a different uid mapping) keeps working. If you rely on this
+sharing, secure the directory yourself — llmenv won't tighten or loosen it
+for you.
 
-llmenv always computes two environment variables for the launched process,
-never left to the user:
+(changed in v3.11.1) llmenv sets environment variables for the launched
+process only when there's something explicit to set:
 
-- `CBM_CACHE_DIR` — the index storage directory (`index_path`, or the default
-  above)
-- `CBM_ALLOWED_ROOT` — the current working directory, restricting
-  `index_repository` to the intended project so a misbehaving agent can't be
-  tricked into indexing/reading arbitrary paths outside it
+- `CBM_CACHE_DIR` — set to `index_path` when you configure one; otherwise
+  left unset, so `codebase-memory-mcp` falls back to its own default cache
+  location
+- `CBM_ALLOWED_ROOT` — no longer set at all. Earlier versions pinned it to
+  the current working directory to stop `index_repository` from being
+  steered outside the intended project; per explicit user direction, llmenv
+  no longer imposes that restriction — `codebase-memory-mcp` applies its own
+  default scoping instead. **This is a real security-posture change**, not
+  just cleanup: `codebase-memory-mcp` will index/read whatever path it's
+  asked to unless you restrict it yourself. If you need the tool scoped to a
+  project root, configure that directly with `codebase-memory-mcp`'s own
+  `allow-root`/config mechanism — see its docs. This is outside llmenv's
+  scope to impose.
 
 On `SessionStart`, llmenv fires a fire-and-forget
 `codebase-memory-mcp cli index_repository` call for the active project. This
@@ -598,11 +611,12 @@ Two caveats worth knowing before relying on the pre-approved tools:
 - **The pre-approved read tools are cross-project, not workspace-scoped.**
   `search_code`/`get_code_snippet` take a free-form `project` parameter and
   read straight off disk rooted at whichever indexed project that names —
-  not just the one active in the current session. With the default shared
-  `CBM_CACHE_DIR`, an agent working in project A can read source out of any
-  other project you've ever indexed, without a prompt. Set a per-project
-  `index_path` if you need to contain that (the tradeoff: codebase-memory-mcp
-  then can't cross-reference other projects for you).
+  not just the one active in the current session. `codebase-memory-mcp`'s
+  own default cache directory is shared across every project you've indexed
+  on the machine, so an agent working in project A can read source out of
+  any other project you've ever indexed, without a prompt. Set a
+  per-project `index_path` if you need to contain that (the tradeoff:
+  codebase-memory-mcp then can't cross-reference other projects for you).
 - **`delete_project`'s prompt is not a complete backstop.** `index_repository`
   (pre-approved) accepts a `name` override with no check that the name is
   already bound to a different project's root — a call naming an existing,

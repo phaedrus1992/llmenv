@@ -204,15 +204,22 @@ project, so `features.codebase_memory:` entries carry no `server_host`/`port`
 features:
   codebase_memory:
     - when: [my-project]
-      index_path: null   # optional; default <state_dir>/codebase-memory
+      index_path: null   # optional; unset defers to codebase-memory-mcp's own default
 ```
 
-llmenv always computes two environment variables when launching the server,
-never left to the user:
+(changed in v3.11.1) llmenv sets environment variables for the launched
+server only when there's something explicit to set:
 
-- `CBM_CACHE_DIR` — the index storage directory
-- `CBM_ALLOWED_ROOT` — the current working directory, so `index_repository`
-  can't be steered outside the intended project
+- `CBM_CACHE_DIR` — set to `index_path` when configured; otherwise left
+  unset so `codebase-memory-mcp` falls back to its own default cache
+  location
+- `CBM_ALLOWED_ROOT` — no longer set at all. Earlier versions pinned this to
+  the current working directory so `index_repository` couldn't be steered
+  outside the intended project; llmenv no longer imposes that restriction —
+  restricting the tool's scope is now the end user's call, made directly
+  through `codebase-memory-mcp`'s own config, not llmenv's default. See
+  [Configuration reference](./configuration.md#featurescodebase_memory) for
+  the full detail on this change.
 
 Multiple `codebase_memory` entries may be active simultaneously — each is an
 independent local process, not a shared resource like the memory backend, so
@@ -234,9 +241,10 @@ already belongs to a different repository, and a full reindex deletes and
 recreates the index file — so one call can replace an unrelated project's
 index with the current repo's data
 ([upstream #1578](https://github.com/DeusData/codebase-memory-mcp/issues/1578)).
-`CBM_ALLOWED_ROOT` doesn't prevent this: it bounds the tree that gets *read*,
-not the key that gets *written*, and the default `CBM_CACHE_DIR` is one
-directory shared by every project you've indexed.
+A scoping root — if configured — wouldn't prevent this either way: it bounds
+the tree that gets *read*, not the key that gets *written*, and
+codebase-memory-mcp's own default cache directory is one directory shared by
+every project you've indexed.
 
 When codebase-memory-mcp is active, llmenv registers a `PreToolUse` hook that
 **denies any `index_repository` call carrying a `name`**, explaining why in

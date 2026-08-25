@@ -273,24 +273,20 @@ pub(crate) fn codebase_memory_paths() -> anyhow::Result<(std::path::PathBuf, std
 /// Resolve a `CodebaseMemory` entry to a **local stdio** MCP entry. Unlike
 /// `resolve_memory` (always remote — ICM's daemon/proxy topology),
 /// codebase-memory-mcp has no remote-serve mode: it always runs as a local
-/// process per project. `CBM_CACHE_DIR` and `CBM_ALLOWED_ROOT` are always
-/// computed here, never left to the user, so a declared entry can't
-/// accidentally scope the indexer outside the intended project (#365).
+/// process per project. `CBM_CACHE_DIR` is only set when the user explicitly
+/// configures `index_path` (#1493); otherwise `codebase-memory-mcp` falls
+/// back to its own default cache location. `CBM_ALLOWED_ROOT` is never set
+/// (#1495) — restricting the tool's scope is the end user's call via
+/// `codebase-memory-mcp`'s own config, not llmenv's to impose.
 fn resolve_codebase_memory(
     cm: &CodebaseMemory,
-    project_root: &Path,
-    state_dir: &Path,
+    _project_root: &Path,
+    _state_dir: &Path,
 ) -> ResolvedMcp {
     let mut env = BTreeMap::new();
-    let cache_dir = cm
-        .index_path
-        .clone()
-        .unwrap_or_else(|| state_dir.join("codebase-memory").display().to_string());
-    env.insert("CBM_CACHE_DIR".to_string(), cache_dir);
-    env.insert(
-        "CBM_ALLOWED_ROOT".to_string(),
-        project_root.display().to_string(),
-    );
+    if let Some(index_path) = &cm.index_path {
+        env.insert("CBM_CACHE_DIR".to_string(), index_path.clone());
+    }
     ResolvedMcp {
         name: CODEBASE_MEMORY_MCP_NAME.to_string(),
         kind: ResolvedKind::Stdio {
@@ -664,13 +660,15 @@ mod tests {
             ResolvedKind::Stdio { command, args, env } => {
                 assert_eq!(command, "codebase-memory-mcp");
                 assert!(args.is_empty());
-                assert_eq!(
-                    env.get("CBM_ALLOWED_ROOT").map(String::as_str),
-                    Some("/repos/proj")
+                assert!(
+                    !env.contains_key("CBM_ALLOWED_ROOT"),
+                    "llmenv must not set CBM_ALLOWED_ROOT (#1495) — \
+                     codebase-memory-mcp applies its own default scoping"
                 );
-                assert_eq!(
-                    env.get("CBM_CACHE_DIR").map(String::as_str),
-                    Some("/state/codebase-memory")
+                assert!(
+                    !env.contains_key("CBM_CACHE_DIR"),
+                    "llmenv must not set CBM_CACHE_DIR by default (#1493) — \
+                     codebase-memory-mcp falls back to its own default cache location"
                 );
             }
             ResolvedKind::Remote { .. } => {
@@ -780,13 +778,13 @@ mod tests {
             "[\\PC]{0,40}"
         }
 
-        // #365: resolve_codebase_memory's env vars must round-trip the exact
-        // project_root / index_path text, for arbitrary path content
-        // (unicode, spaces, punctuation) — the pre-pr-review security review
-        // relies on CBM_ALLOWED_ROOT always being exactly project_root.
+        // #1495: resolve_codebase_memory must never set CBM_ALLOWED_ROOT,
+        // for arbitrary project_root content (unicode, spaces, punctuation)
+        // — llmenv no longer imposes a scoping default; that's
+        // codebase-memory-mcp's own call.
         proptest! {
             #[test]
-            fn resolve_codebase_memory_allowed_root_always_matches_project_root(
+            fn resolve_codebase_memory_never_sets_allowed_root(
                 path_str in arb_path_component()
             ) {
                 let cm = CodebaseMemory { when: vec!["proj".to_string()], index_path: None, mcp_permissions: None };
@@ -794,10 +792,7 @@ mod tests {
                 let resolved = resolve_codebase_memory(&cm, &project_root, Path::new("/state"));
                 match resolved.kind {
                     ResolvedKind::Stdio { env, .. } => {
-                        prop_assert_eq!(
-                            env.get("CBM_ALLOWED_ROOT").cloned(),
-                            Some(project_root.display().to_string())
-                        );
+                        prop_assert!(!env.contains_key("CBM_ALLOWED_ROOT"));
                     }
                     ResolvedKind::Remote { .. } => prop_assert!(false, "expected Stdio"),
                 }
