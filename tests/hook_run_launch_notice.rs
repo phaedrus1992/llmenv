@@ -10,17 +10,60 @@
 //! so this drives the real `llmenv hook-run` binary instead.
 //!
 //! Hand-rolls a minimal server for `launch`'s wire protocol (4-byte
-//! big-endian length prefix, then JSON; `{"verb":"pending_events"}` request,
-//! `{"notice": ...}` response) rather than depending on `src/launch/socket.rs`
-//! directly — that module is `pub(crate)`, not reachable from an external
-//! integration test crate.
+//! big-endian length prefix, then JSON; a `ClientHello`/`ServerHello`
+//! domain-separated HMAC challenge-response (#1487) followed by a
+//! `{"verb":"pending_events","proof":...}` request and a
+//! `{"notice": ..., "proof": ...}` response) rather than depending on
+//! `src/launch/socket.rs` directly — that module is `pub(crate)`, not
+//! reachable from an external integration test crate.
 
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
 use std::time::Duration;
 
+use hmac::{Hmac, KeyInit, Mac};
+use sha2::Sha256;
 use tempfile::TempDir;
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// A syntactically well-formed 64-character hex token — `hook_run`'s client
+/// now rejects anything else outright (#1487), so a short fixture string
+/// like the pre-#1487 tests used would just make this test hang instead of
+/// exercising the protocol.
+const TEST_TOKEN: &str = "ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34";
+
+/// Computes the same `HMAC-SHA256(secret, message)`, hex-encoded, that
+/// `src/launch/socket.rs`'s `hmac_hex` computes — duplicated here since that
+/// function is `pub(crate)` and unreachable from this external integration
+/// test crate.
+fn hmac_hex(secret: &str, message: &[u8]) -> String {
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(message);
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// Mirrors `src/launch/socket.rs`'s `handshake_message`: `role`, then both
+/// nonces, then `extra`, NUL-separated. Must build byte-for-byte the same
+/// message the real client/server construct, or this fixture's proofs won't
+/// verify against them.
+fn handshake_message(role: &str, client_nonce: &str, server_nonce: &str, extra: &[u8]) -> Vec<u8> {
+    let mut message = Vec::new();
+    message.extend_from_slice(role.as_bytes());
+    message.push(0);
+    message.extend_from_slice(client_nonce.as_bytes());
+    message.push(0);
+    message.extend_from_slice(server_nonce.as_bytes());
+    message.push(0);
+    message.extend_from_slice(extra);
+    message
+}
+
+/// Mirrors `src/launch/socket.rs`'s `notice_bytes`.
+fn notice_bytes(notice: &str) -> Vec<u8> {
+    std::iter::once(1).chain(notice.bytes()).collect()
+}
 
 mod support;
 
@@ -70,9 +113,11 @@ adapter:
     )
 }
 
-/// Serve exactly one `pending_events` request with `notice`, then stop —
-/// but only if the request's `token` field matches `expected_token`. #1484:
-/// this pins the env-to-wire hop, i.e. that `hook-run` actually sends the
+/// Serve one full handshake (#1487) — read `ClientHello`, prove knowledge of
+/// `expected_token` in `ServerHello`, then read the client's own proof and
+/// answer a `pending_events` request with `notice` only if that proof also
+/// matches `expected_token`. #1484/#1487: this pins the env-to-wire hop,
+/// i.e. that `hook-run` actually sends and verifies proofs derived from the
 /// value it read from `LLMENV_LAUNCH_TOKEN`, rather than assuming it did.
 /// Runs on a background thread; the caller joins it after the hook-run
 /// invocation completes.
@@ -85,27 +130,69 @@ fn serve_one_notice(
         let Ok((mut stream, _)) = listener.accept() else {
             return;
         };
-        let mut len_buf = [0u8; 4];
-        if stream.read_exact(&mut len_buf).is_err() {
-            return;
-        }
-        let len = u32::from_be_bytes(len_buf) as usize;
-        let mut buf = vec![0u8; len];
-        if stream.read_exact(&mut buf).is_err() {
-            return;
-        }
-        let Ok(request) = serde_json::from_slice::<serde_json::Value>(&buf) else {
+
+        let Some(hello) = read_framed(&mut stream) else {
             return;
         };
-        if request.get("token").and_then(serde_json::Value::as_str) != Some(expected_token) {
+        let Some(client_nonce) = hello.get("nonce").and_then(serde_json::Value::as_str) else {
+            return;
+        };
+        let server_nonce = "server-nonce-fixture";
+        let server_proof = hmac_hex(
+            expected_token,
+            &handshake_message("server", client_nonce, server_nonce, &[]),
+        );
+        let server_hello = serde_json::json!({
+            "proof": server_proof,
+            "nonce": server_nonce,
+        });
+        if write_framed(&mut stream, &server_hello).is_err() {
             return;
         }
-        let response = serde_json::json!({ "notice": notice });
-        let payload = serde_json::to_vec(&response).unwrap();
-        let response_len = u32::try_from(payload.len()).unwrap();
-        let _ = stream.write_all(&response_len.to_be_bytes());
-        let _ = stream.write_all(&payload);
+
+        let Some(request) = read_framed(&mut stream) else {
+            return;
+        };
+        let expected_request_proof = hmac_hex(
+            expected_token,
+            &handshake_message("client", client_nonce, server_nonce, &[]),
+        );
+        if request.get("proof").and_then(serde_json::Value::as_str)
+            != Some(expected_request_proof.as_str())
+        {
+            return;
+        }
+        let response_proof = hmac_hex(
+            expected_token,
+            &handshake_message(
+                "response",
+                client_nonce,
+                server_nonce,
+                &notice_bytes(notice),
+            ),
+        );
+        let response = serde_json::json!({ "notice": notice, "proof": response_proof });
+        let _ = write_framed(&mut stream, &response);
     })
+}
+
+fn read_framed(stream: &mut std::os::unix::net::UnixStream) -> Option<serde_json::Value> {
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf).ok()?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    let mut buf = vec![0u8; len];
+    stream.read_exact(&mut buf).ok()?;
+    serde_json::from_slice(&buf).ok()
+}
+
+fn write_framed(
+    stream: &mut std::os::unix::net::UnixStream,
+    value: &serde_json::Value,
+) -> std::io::Result<()> {
+    let payload = serde_json::to_vec(value).unwrap();
+    let len = u32::try_from(payload.len()).unwrap();
+    stream.write_all(&len.to_be_bytes())?;
+    stream.write_all(&payload)
 }
 
 #[test]
@@ -123,7 +210,7 @@ fn hook_run_delivers_launch_notice_joined_with_existing_context() {
     // own timeout — are what actually catches that; waiting on this thread
     // too would just hang the test alongside it. It's reclaimed when the
     // test binary process exits.
-    let _server = serve_one_notice(listener, "credentials expire soon", "test-token");
+    let _server = serve_one_notice(listener, "credentials expire soon", TEST_TOKEN);
 
     let test_file_dir = TempDir::new().unwrap();
     let file_path = test_file_dir.path().join("hook_run_launch_notice.txt");
@@ -158,7 +245,7 @@ fn hook_run_delivers_launch_notice_joined_with_existing_context() {
         // and must send exactly this value — serve_one_notice above checks it
         // before answering, so a wrong value here would hang this test the
         // same way a client that never dials the socket would.
-        .env("LLMENV_LAUNCH_TOKEN", "test-token")
+        .env("LLMENV_LAUNCH_TOKEN", TEST_TOKEN)
         .arg("hook-run")
         .arg("pre_tool_use")
         .write_stdin(payload.as_str());
