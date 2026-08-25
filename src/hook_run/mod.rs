@@ -2382,24 +2382,28 @@ pub(crate) fn redirect_stderr_to_detached_log(cmd: &mut std::process::Command) {
 /// Builds the `codebase-memory-mcp cli index_repository` subprocess command
 /// for `project_root`, without spawning it — kept separate so tests can
 /// assert on the command shape without launching a real process (#365).
+///
+/// `CBM_CACHE_DIR` is only set when `cm.index_path` is explicit (#1493);
+/// `CBM_ALLOWED_ROOT` is never set (#1495) — same treatment as
+/// `resolve_codebase_memory` (`src/mcp/resolve.rs`), which this mirrors so
+/// the SessionStart auto-index and the MCP server launch agree on scope.
 fn build_index_repository_command(
     project_root: &std::path::Path,
     cm: &crate::config::CodebaseMemory,
-    state_dir: &std::path::Path,
 ) -> std::process::Command {
     // repo_path must become JSON text regardless (the CLI arg is a JSON
-    // string), so this lossy step is unavoidable here — unlike the env vars
+    // string), so this lossy step is unavoidable here — unlike the env var
     // below, which can carry the raw OsStr straight through.
     let args_json =
         serde_json::json!({ "repo_path": project_root.display().to_string() }).to_string();
-    let cache_dir = codebase_memory_cache_dir(cm, state_dir);
     let mut cmd = std::process::Command::new("codebase-memory-mcp");
     cmd.args(["cli", "index_repository", &args_json])
-        .env("CBM_ALLOWED_ROOT", project_root.as_os_str())
-        .env("CBM_CACHE_DIR", cache_dir.as_os_str())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    if let Some(index_path) = &cm.index_path {
+        cmd.env("CBM_CACHE_DIR", index_path);
+    }
     cmd
 }
 
@@ -2422,7 +2426,7 @@ fn trigger_codebase_memory_index(
     cm: &crate::config::CodebaseMemory,
     state_dir: &std::path::Path,
 ) {
-    let mut cmd = build_index_repository_command(project_root, cm, state_dir);
+    let mut cmd = build_index_repository_command(project_root, cm);
     let cache_dir = codebase_memory_cache_dir(cm, state_dir);
     let log_path = cache_dir.join("index.log");
     // Only the default cache dir (under llmenv's own state tree) gets
@@ -3816,17 +3820,13 @@ mod tests {
     }
 
     #[test]
-    fn index_repository_command_sets_env_and_args() {
+    fn index_repository_command_sets_args_and_no_scoping_env() {
         let cm = crate::config::CodebaseMemory {
             when: vec!["proj".to_string()],
             index_path: None,
             mcp_permissions: None,
         };
-        let cmd = build_index_repository_command(
-            std::path::Path::new("/repos/proj"),
-            &cm,
-            std::path::Path::new("/state"),
-        );
+        let cmd = build_index_repository_command(std::path::Path::new("/repos/proj"), &cm);
         assert_eq!(cmd.get_program().to_string_lossy(), "codebase-memory-mcp");
         let args: Vec<String> = cmd
             .get_args()
@@ -3846,13 +3846,15 @@ mod tests {
                 })
             })
             .collect();
-        assert_eq!(
-            envs.get("CBM_ALLOWED_ROOT").map(String::as_str),
-            Some("/repos/proj")
+        assert!(
+            !envs.contains_key("CBM_ALLOWED_ROOT"),
+            "llmenv must not set CBM_ALLOWED_ROOT (#1495) — \
+             codebase-memory-mcp applies its own default scoping"
         );
-        assert_eq!(
-            envs.get("CBM_CACHE_DIR").map(String::as_str),
-            Some("/state/codebase-memory")
+        assert!(
+            !envs.contains_key("CBM_CACHE_DIR"),
+            "llmenv must not set CBM_CACHE_DIR by default (#1493) — \
+             codebase-memory-mcp falls back to its own default cache location"
         );
     }
 
@@ -3863,11 +3865,7 @@ mod tests {
             index_path: Some("/custom/path".to_string()),
             mcp_permissions: None,
         };
-        let cmd = build_index_repository_command(
-            std::path::Path::new("/repos/proj"),
-            &cm,
-            std::path::Path::new("/state"),
-        );
+        let cmd = build_index_repository_command(std::path::Path::new("/repos/proj"), &cm);
         let envs: std::collections::BTreeMap<String, String> = cmd
             .get_envs()
             .filter_map(|(k, v)| {
@@ -4036,11 +4034,7 @@ mod tests {
                 mcp_permissions: None,
             };
             let project_root = std::path::PathBuf::from(&path_str);
-            let cmd = build_index_repository_command(
-                &project_root,
-                &cm,
-                std::path::Path::new("/state"),
-            );
+            let cmd = build_index_repository_command(&project_root, &cm);
             let args: Vec<String> = cmd
                 .get_args()
                 .map(|a| a.to_string_lossy().to_string())
@@ -4049,6 +4043,36 @@ mod tests {
                 .expect("repo_path arg must always be valid JSON");
             let expected = project_root.display().to_string();
             proptest::prop_assert_eq!(parsed["repo_path"].as_str(), Some(expected.as_str()));
+        }
+
+        // #1493/#1495: build_index_repository_command must never set
+        // CBM_ALLOWED_ROOT, and must never set CBM_CACHE_DIR when
+        // index_path is unset — mirrors resolve_codebase_memory's contract
+        // (src/mcp/resolve.rs), for arbitrary project_root content.
+        #[test]
+        fn index_repository_command_no_scoping_env_when_index_path_none(
+            path_str in "[\\PC]{0,60}"
+        ) {
+            let cm = crate::config::CodebaseMemory {
+                when: vec!["proj".to_string()],
+                index_path: None,
+                mcp_permissions: None,
+            };
+            let project_root = std::path::PathBuf::from(&path_str);
+            let cmd = build_index_repository_command(&project_root, &cm);
+            let envs: std::collections::BTreeMap<String, String> = cmd
+                .get_envs()
+                .filter_map(|(k, v)| {
+                    v.map(|v| {
+                        (
+                            k.to_string_lossy().to_string(),
+                            v.to_string_lossy().to_string(),
+                        )
+                    })
+                })
+                .collect();
+            proptest::prop_assert!(!envs.contains_key("CBM_ALLOWED_ROOT"));
+            proptest::prop_assert!(!envs.contains_key("CBM_CACHE_DIR"));
         }
     }
 

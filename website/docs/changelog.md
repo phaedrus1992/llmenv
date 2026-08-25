@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Security
+
+- llmenv no longer overrides two of `codebase-memory-mcp`'s defaults when launching it: `CBM_CACHE_DIR` is only set when `codebase_memory[].index_path` is explicitly configured (previously defaulted to `<state_dir>/codebase-memory`, redundant since codebase-memory-mcp's own default cache is already shared per account), and `CBM_ALLOWED_ROOT` is no longer set at all. `CBM_ALLOWED_ROOT` previously pinned the tool to the project root so `index_repository` couldn't be steered outside it (#365) — that restriction is removed by explicit user direction; restricting the tool's scope is now the end user's call via codebase-memory-mcp's own config, not llmenv's default. This is a real security-posture change, not just cleanup: without configuring a restriction yourself, `codebase-memory-mcp` will act on whatever path it's asked to. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#featurescodebase_memory) (#1493, #1495)
+
 ## [3.11.0] - 2026-08-17
 
 The through-line for this release is configuration llmenv accepted but never acted on. Four `features.slippage` layers — three of them defaulting to `true` — were wired into the config schema and nothing else, so turning them on changed nothing; all four run now, along with two opt-in transcript-scan layers (#317). Most of the opencode adapter work is the same shape: a permission rule could name a key opencode has no equivalent for, overlap another pattern in a way that quietly reversed it, or carry stray whitespace that stopped it matching any tool — each rendered a rule that did nothing, and each is now either a hard render failure or a visible warning (#1328, #1344, #1345). Tags, bundles, and marketplace entries dropped for being malformed used to report at a log level the default filter discards, so a bundle that never fired left no trace anywhere; they say so out loud now (#1345). And `llmenv prune`/`llmenv regenerate` exit non-zero when they fail, instead of exiting 0 over a printed warning (#1346).

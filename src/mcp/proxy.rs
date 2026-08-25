@@ -1000,6 +1000,11 @@ mod tests {
     use super::{Command, Path, Stdio, is_executable};
     use std::os::unix::fs::PermissionsExt;
 
+    // #1494: shared with `tests/mcp_proxy.rs` via `include!` rather than
+    // duplicated by hand — an integration test can't import a lib's
+    // `#[cfg(test)]` items, so this is the only way to share it verbatim.
+    include!("../../tests/support/port_guard.rs");
+
     #[test]
     fn is_executable_true_only_for_executable_files() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1139,6 +1144,7 @@ mod tests {
         use super::probe_tcp;
         use std::net::TcpListener;
 
+        let _guard = port_guard();
         // Bind an ephemeral port to act as the "proxy".
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
         let addr = listener.local_addr().expect("local_addr");
@@ -1171,6 +1177,7 @@ mod tests {
     fn wait_for_bind_times_out_while_the_child_lives_and_never_binds() {
         use super::{BindResult, wait_for_bind};
 
+        let _guard = port_guard();
         let port = {
             let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
             l.local_addr().expect("addr").port()
@@ -1201,6 +1208,7 @@ mod tests {
     fn wait_for_bind_reports_child_exit_without_waiting_out_the_budget() {
         use super::{BindResult, wait_for_bind};
 
+        let _guard = port_guard();
         let port = {
             let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
             l.local_addr().expect("addr").port()
@@ -1235,6 +1243,7 @@ mod tests {
     fn wait_for_bind_returns_promptly_once_bound() {
         use super::{BindResult, wait_for_bind};
 
+        let _guard = port_guard();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let bind = listener.local_addr().expect("addr").to_string();
         let mut child = idle_child();
@@ -1263,6 +1272,7 @@ mod tests {
     fn ensure_running_times_out_when_the_child_never_binds() {
         use super::ensure_running_within;
 
+        let _guard = port_guard();
         let port = {
             let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
             l.local_addr().expect("addr").port()
@@ -1328,6 +1338,7 @@ mod tests {
         use super::ensure_running_within;
         use std::os::unix::fs::PermissionsExt;
 
+        let _guard = port_guard();
         let port = {
             let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
             l.local_addr().expect("addr").port()
