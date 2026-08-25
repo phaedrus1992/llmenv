@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+One change since 3.11.0, and it's a security-posture one: llmenv stops pinning two of codebase-memory-mcp's launch defaults, `CBM_CACHE_DIR` and `CBM_ALLOWED_ROOT`, leaving scope control to the tool's own defaults and whoever configures it.
+
 ### Security
 
 - llmenv no longer overrides two of `codebase-memory-mcp`'s defaults when launching it: `CBM_CACHE_DIR` is only set when `codebase_memory[].index_path` is explicitly configured (previously defaulted to `<state_dir>/codebase-memory`, redundant since codebase-memory-mcp's own default cache is already shared per account), and `CBM_ALLOWED_ROOT` is no longer set at all. `CBM_ALLOWED_ROOT` previously pinned the tool to the project root so `index_repository` couldn't be steered outside it (#365) — that restriction is removed by explicit user direction; restricting the tool's scope is now the end user's call via codebase-memory-mcp's own config, not llmenv's default. This is a real security-posture change, not just cleanup: without configuring a restriction yourself, `codebase-memory-mcp` will act on whatever path it's asked to. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#featurescodebase_memory) (#1493, #1495)
