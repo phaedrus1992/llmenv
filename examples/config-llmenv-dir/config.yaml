@@ -664,9 +664,11 @@ features:
   task_tracker:
     enabled: true
 
-  # First-class codebase-memory-mcp integration (#365): llmenv computes
-  # CBM_CACHE_DIR/CBM_ALLOWED_ROOT itself, fires an index on SessionStart, and
-  # `llmenv doctor` checks the binary is on PATH. Gated to the user-phaedrus
-  # tag so it's active for every session that selects the user scope.
+  # First-class codebase-memory-mcp integration (#365): fires an index on
+  # SessionStart, and `llmenv doctor` checks the binary is on PATH. llmenv no
+  # longer sets CBM_CACHE_DIR/CBM_ALLOWED_ROOT by default (#1493/#1495) —
+  # codebase-memory-mcp applies its own defaults unless index_path is set
+  # below. Gated to the user-phaedrus tag so it's active for every session
+  # that selects the user scope.
   codebase_memory:
     - when: [user-phaedrus]

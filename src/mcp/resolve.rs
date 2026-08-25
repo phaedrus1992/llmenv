@@ -798,6 +798,27 @@ mod tests {
                 }
             }
 
+            // #1493: resolve_codebase_memory must never set CBM_CACHE_DIR
+            // when index_path is unset, for arbitrary project_root/state_dir
+            // content — the "index_path is Some" branch already has
+            // coverage above; this covers the "None" branch symmetrically.
+            #[test]
+            fn resolve_codebase_memory_cbm_cache_dir_unset_when_index_path_none(
+                project_root_str in arb_path_component(),
+                state_dir_str in arb_path_component(),
+            ) {
+                let cm = CodebaseMemory { when: vec!["proj".to_string()], index_path: None, mcp_permissions: None };
+                let project_root = std::path::PathBuf::from(&project_root_str);
+                let state_dir = std::path::PathBuf::from(&state_dir_str);
+                let resolved = resolve_codebase_memory(&cm, &project_root, &state_dir);
+                match resolved.kind {
+                    ResolvedKind::Stdio { env, .. } => {
+                        prop_assert!(!env.contains_key("CBM_CACHE_DIR"));
+                    }
+                    ResolvedKind::Remote { .. } => prop_assert!(false, "expected Stdio"),
+                }
+            }
+
             #[test]
             fn resolve_codebase_memory_index_path_override_always_wins(
                 index_path in arb_path_component()
