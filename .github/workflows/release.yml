@@ -63,9 +63,12 @@ jobs:
       # Cache only the Cargo registry (source tarballs + index), never target/.
       # Registry entries are safe: cargo verifies each .crate file's SHA256
       # against Cargo.lock before use, so a poisoned cache entry fails loudly.
-      # Compiled objects in target/ are not re-verified after linking, so we
-      # never cache those for release builds.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      # git/db entries are bare git clones, content-addressed by git's own
+      # object hashes, so a substituted object would fail checkout at the
+      # pinned commit rather than silently succeed. Compiled objects in
+      # target/ are not re-verified after linking, so we never cache those
+      # for release builds.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 # zizmor: ignore[cache-poisoning] registry+git/db entries are content-verified before use, see comment above
         with:
           path: |
             ~/.cargo/registry/index/
