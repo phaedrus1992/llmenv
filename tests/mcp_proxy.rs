@@ -16,26 +16,19 @@
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use llmenv::mcp::proxy::{
     EnsureOutcome, ensure_running, ensure_running_within, is_alive, probe_tcp,
 };
 use tempfile::tempdir;
 
-/// Serializes every test that allocates an ephemeral port. cargo runs the tests
-/// in a binary in parallel, and [`free_port`] releases its port before the test
-/// asserts the port is closed (or before the spawn callback rebinds it). A
-/// sibling test binding `127.0.0.1:0` can grab that just-freed port and flake
-/// the victim. Holding this lock across the whole body of every port-touching
-/// test removes the intra-binary race. A poisoned lock (a prior test panicked
-/// mid-body) is recovered rather than propagated — the guarded data is `()`.
-fn port_guard() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-}
+// #1494: shared with `src/mcp/proxy.rs`'s `#[cfg(test)]` module via
+// `include!` rather than duplicated by hand — cargo can run this crate's
+// `--lib` binary and this integration binary as separate, concurrent
+// processes, so an in-process `Mutex` (the prior fix here) can't stop one
+// binary's test from reusing a port the other just freed.
+include!("support/port_guard.rs");
 
 /// Allocates an ephemeral TCP port by binding then dropping the listener, and
 /// confirms the released port is actually closed before returning it.
