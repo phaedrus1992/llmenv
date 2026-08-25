@@ -542,7 +542,9 @@ features:
 `<index_path (or its default)>/index.log` — size-bounded (rotated past 512
 KiB, one prior generation kept) and owner-only (`0o600`) — so a failing
 multi-minute index build is diagnosable instead of silently discarding its
-output.
+output. (changed in v3.11.1) This directory is llmenv's own diagnostic log
+location; see below for how it now differs from `codebase-memory-mcp`'s
+actual cache directory when `index_path` is unset.
 
 | Field | Required | Notes |
 | ------- | ---------- | ------- |
@@ -550,25 +552,28 @@ output.
 | `index_path` | no | Override the index storage directory; unset leaves it to codebase-memory-mcp's own default (`~/.cache/codebase-memory-mcp/`), not an llmenv-managed path — see below (changed in v3.11.1) |
 | `mcp_permissions` | no | (added in v3.10.0) Per-tier permission override for codebase-memory-mcp's tools — see [`mcp_permissions`](#featuresmcp_permissions) below |
 
-(added in v3.8.0; changed in v3.11.1) An explicit `index_path` override is
-created owner-only (`0o700`) the first time llmenv writes to it. Prior to
-v3.11.1, llmenv also computed and owned a default index directory
-(`<state_dir>/codebase-memory`) when `index_path` was unset; that default is
-gone — an unset `index_path` now defers entirely to codebase-memory-mcp's own
-default location, which llmenv does not create or manage permissions for. An
-`index_path` override's permissions are otherwise left exactly as its owner
-set them: a directory intentionally shared with a `codebase-memory-mcp`
-process running under a different uid (a separate service account, or a
-container with a different uid mapping) keeps working. If you rely on this
-sharing, secure the directory yourself — llmenv won't tighten or loosen it
-for you.
+(added in v3.8.0) The default log directory (`<state_dir>/codebase-memory`,
+used when `index_path` is unset) is created owner-only (`0o700`). An explicit
+`index_path` override is not: llmenv leaves its permissions exactly as its
+owner set them, so a directory intentionally shared with a
+`codebase-memory-mcp` process running under a different uid (a separate
+service account, or a container with a different uid mapping) keeps working.
+If you rely on this sharing, secure the directory yourself — llmenv won't
+tighten or loosen it for you. This permission behavior is unchanged by
+v3.11.1's `CBM_CACHE_DIR` change below — it governs llmenv's own log
+directory, not what gets handed to `codebase-memory-mcp` as its cache.
 
 (changed in v3.11.1) llmenv sets environment variables for the launched
 process only when there's something explicit to set:
 
 - `CBM_CACHE_DIR` — set to `index_path` when you configure one; otherwise
   left unset, so `codebase-memory-mcp` falls back to its own default cache
-  location
+  location. Before v3.11.1 this defaulted to `<state_dir>/codebase-memory` —
+  the same directory llmenv still uses for its own `index.log` above. That
+  directory still exists and is still where the log goes, but it's no longer
+  handed to `codebase-memory-mcp` as its cache: with `index_path` unset, the
+  actual index now lives wherever `codebase-memory-mcp` puts its own default
+  (`~/.cache/codebase-memory-mcp/`), a different location than the log.
 - `CBM_ALLOWED_ROOT` — no longer set at all. Earlier versions pinned it to
   the current working directory to stop `index_repository` from being
   steered outside the intended project; per explicit user direction, llmenv
