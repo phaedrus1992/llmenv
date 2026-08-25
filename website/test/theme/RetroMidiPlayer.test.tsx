@@ -28,7 +28,7 @@ vi.mock('soundfont-player', () => ({
   default: { instrument: instrumentMock },
 }));
 
-import RetroMidiPlayer from '../RetroMidiPlayer';
+import RetroMidiPlayer from '../../src/theme/RetroMidiPlayer';
 
 describe('RetroMidiPlayer', () => {
   beforeEach(() => {
@@ -111,5 +111,63 @@ describe('RetroMidiPlayer', () => {
 
     await screen.findByRole('button', { name: 'Play background music' });
     await waitFor(() => expect(instrumentMock).toHaveBeenCalledTimes(2));
+  });
+
+  it('logs and does not crash when the audio setup chain fails', async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: false,
+        status: 404,
+        arrayBuffer: async () => new ArrayBuffer(0),
+      })),
+    );
+
+    render(<RetroMidiPlayer />);
+
+    await waitFor(() =>
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        'llmenv-docs: MIDI theme failed to start',
+        expect.any(Error),
+      ),
+    );
+    // The button stays interactive -- a failed load doesn't crash the component.
+    expect(screen.getByRole('button', { name: 'Mute background music' })).toBeInTheDocument();
+
+    consoleErrorSpy.mockRestore();
+  });
+
+  it('falls back to enabled when localStorage.getItem throws', async () => {
+    const getItemSpy = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new Error('storage unavailable');
+    });
+
+    render(<RetroMidiPlayer />);
+
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Mute background music' })).toBeInTheDocument(),
+    );
+
+    getItemSpy.mockRestore();
+  });
+
+  it('still flips the displayed state when localStorage.setItem throws', async () => {
+    const setItemSpy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('storage unavailable');
+    });
+
+    render(<RetroMidiPlayer />);
+    const button = await screen.findByRole('button', { name: 'Mute background music' });
+
+    fireEvent.click(button);
+
+    // The preference just won't persist across visits -- the toggle itself
+    // still works even though the write failed.
+    expect(
+      await screen.findByRole('button', { name: 'Play background music' }),
+    ).toBeInTheDocument();
+
+    setItemSpy.mockRestore();
   });
 });

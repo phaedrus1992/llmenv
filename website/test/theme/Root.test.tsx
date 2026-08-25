@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 
-vi.mock('../RetroMidiPlayer', () => ({
+vi.mock('../../src/theme/RetroMidiPlayer', () => ({
   default: () => <button type="button">mock-midi-player</button>,
 }));
 
-import Root from '../Root';
+import Root from '../../src/theme/Root';
 
 describe('Root', () => {
   it('renders children alongside the retro chrome', () => {

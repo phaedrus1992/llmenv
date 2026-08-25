@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/react';
 
-import Home from '../index';
+import Home from '../../src/pages/index';
 
 describe('Home', () => {
   it('renders the site title and tagline from Docusaurus context', () => {
@@ -18,11 +18,11 @@ describe('Home', () => {
 
     expect(screen.getByRole('link', { name: 'Get Started' })).toHaveAttribute(
       'href',
-      '/docs/getting-started',
+      '/llmenv/docs/getting-started',
     );
     expect(screen.getByRole('link', { name: 'Why llmenv?' })).toHaveAttribute(
       'href',
-      '/docs/philosophy',
+      '/llmenv/docs/philosophy',
     );
   });
 

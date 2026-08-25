@@ -9,22 +9,18 @@ export default defineConfig({
       '@site': import.meta.dirname,
       // Docusaurus's own webpack resolver provides these at build time; they
       // aren't real npm packages, so Vite can't resolve them under test.
-      '@docusaurus/Link': path.resolve(import.meta.dirname, 'src/testUtils/stubs/docusaurusLink.tsx'),
+      '@docusaurus/Link': path.resolve(import.meta.dirname, 'test/stubs/docusaurusLink.tsx'),
       '@docusaurus/useDocusaurusContext': path.resolve(
         import.meta.dirname,
-        'src/testUtils/stubs/useDocusaurusContext.ts',
+        'test/stubs/useDocusaurusContext.ts',
       ),
-      '@docusaurus/useBaseUrl': path.resolve(import.meta.dirname, 'src/testUtils/stubs/useBaseUrl.ts'),
-      '@theme/Layout': path.resolve(import.meta.dirname, 'src/testUtils/stubs/themeLayout.tsx'),
+      '@docusaurus/useBaseUrl': path.resolve(import.meta.dirname, 'test/stubs/useBaseUrl.ts'),
+      '@theme/Layout': path.resolve(import.meta.dirname, 'test/stubs/themeLayout.tsx'),
     },
   },
   test: {
     environment: 'jsdom',
     globals: false,
-    setupFiles: ['./src/setupTests.ts'],
-    coverage: {
-      provider: 'v8',
-      reporter: ['text', 'json-summary'],
-    },
+    setupFiles: ['./test/setup.ts'],
   },
 });
