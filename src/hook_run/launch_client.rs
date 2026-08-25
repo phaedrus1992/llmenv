@@ -308,7 +308,13 @@ mod tests {
             "a fetch against a server with an invalid proof must return None"
         );
 
-        let read_result = server.await.unwrap();
+        // Bounded so a regression that makes `fetch` skip the connection
+        // entirely fails fast with a clear message instead of hanging until
+        // the test harness's own outer timeout kills the whole run.
+        let read_result = tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("fetch must still connect and read the server's (bogus) proof")
+            .unwrap();
         assert!(
             matches!(read_result, Ok(0) | Err(_)),
             "the client must not send anything after rejecting the server's proof"
