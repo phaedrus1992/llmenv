@@ -34,6 +34,15 @@ jobs:
       - name: install
         run: npm ci
         working-directory: website
+      - name: lint
+        run: npm run lint
+        working-directory: website
+      - name: type check
+        run: npm run typecheck
+        working-directory: website
+      - name: test
+        run: npm run test
+        working-directory: website
       - name: build
         run: npm run build
         working-directory: website
