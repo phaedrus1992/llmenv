@@ -79,20 +79,21 @@ jobs:
           command: check
   hawk:
     runs-on: ubuntu-latest
-    # rust-toolchain.toml pins channel = "stable" for the rest of the repo;
-    # rustup resolves that toolchain file for every cargo/rustc invocation in
-    # this checkout regardless of `rustup default` (set by the toolchain step
-    # below), so without this override every step here silently builds/runs
-    # against stable -- which never gets the rustc-dev/rust-src/llvm-tools
-    # components -- and hawk fails with E0463 on every rustc_private crate
-    # (#923).
-    env:
-      RUSTUP_TOOLCHAIN: "1.97"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      # id: toolchain -- rust-toolchain.toml pins channel = "stable" for the
+      # rest of the repo; rustup resolves that toolchain file for every
+      # cargo/rustc invocation in this checkout regardless of `rustup default`
+      # (set below), so later steps must force RUSTUP_TOOLCHAIN to this exact
+      # version via the `name` output, not a second hardcoded literal -- a
+      # duplicated "1.97" here previously went stale the moment Renovate
+      # bumped the `toolchain:` input below without knowing to touch a second
+      # copy, which built hawk against a toolchain missing rustc-dev/rust-src/
+      # llvm-tools and failed with E0463 on every rustc_private crate (#923).
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # master
+        id: toolchain
         with:
           toolchain: 1.97
           components: rust-src, rustc-dev, llvm-tools-preview
@@ -103,8 +104,11 @@ jobs:
       - uses: taiki-e/cache-cargo-install-action@9ee83daaa7b96a6fab930949ecf1122bba04a389  # v3.0.8
         env:
           RUSTC_BOOTSTRAP: "1"
+          RUSTUP_TOOLCHAIN: ${{ steps.toolchain.outputs.name }}
         with:
           tool: cargo-hawk@0.1.12
       # -D since #1314 cleared the 330-finding backlog from #923. The published
       # `crates/*` libs are excluded as external boundaries by the script.
       - run: bash scripts/hawk-check.sh -D warnings
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.toolchain.outputs.name }}
