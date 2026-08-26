@@ -64,13 +64,20 @@ jobs:
       # Registry entries are safe: cargo verifies each .crate file's SHA256
       # against Cargo.lock before use, so a poisoned cache entry fails loudly.
       # Compiled objects in target/ are not re-verified after linking, so we
-      # never cache those for release builds.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      # never cache those for release builds. No ~/.cargo/git/db/ here: this
+      # workspace has no git-sourced dependencies (Cargo.lock has zero
+      # `source = "git..."` entries), so caching it would add attack surface
+      # for no benefit.
+      #
+      # This exemption is valid only while `path:` below is exactly
+      # registry/index/ and registry/cache/, per the rationale above.
+      # Extending this cache to any other path (registry/src/, target/, etc.)
+      # invalidates it; see the comment above for why.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 # zizmor: ignore[cache-poisoning] registry entries are content-verified before use, see comment above
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
           key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-registry-${{ runner.os }}-
       - name: Detect CPU count
