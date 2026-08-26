@@ -181,6 +181,11 @@ jobs:
           MAJOR="${VERSION%%.*}"
           CHANGELOG="CHANGELOG-${MAJOR}.md"
 
+          if [[ ! -f "${CHANGELOG}" ]]; then
+            echo "::error::${CHANGELOG} does not exist" >&2
+            exit 1
+          fi
+
           # Catches the case where the version was bumped but the [Unreleased]
           # section was never renamed to a "## [X.Y.Z]" heading — crates.io
           # and GitHub Releases would otherwise ship with no changelog entry
@@ -294,7 +299,12 @@ jobs:
   create-release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    needs: [build-binaries]
+    # Also needs publish-crate (not just build-binaries) so a missing
+    # changelog heading (publish-crate's "Verify changelog entry exists")
+    # blocks the GitHub Release too — otherwise this job ran in parallel and
+    # published a release with a placeholder "no user-facing changes" body
+    # instead of failing, masking exactly the gap #1507 added the check for.
+    needs: [build-binaries, publish-crate]
     permissions:
       contents: write
     outputs:
@@ -324,11 +334,14 @@ jobs:
         env:
           GH_REF: ${{ github.ref }}
         run: |
-          if [[ ! "${GH_REF}" =~ ^refs/tags/v ]]; then
-            echo "Error: Not a release tag" >&2
+          VERSION="${GH_REF#refs/tags/v}"
+          # Same shape constraint as publish-crate's version step: without
+          # it, a crafted tag can smuggle path/shell metacharacters into
+          # CHANGELOG-${MAJOR}.md below (MAJOR is derived from VERSION).
+          if [[ ! "${GH_REF}" =~ ^refs/tags/v ]] || [[ ! "${VERSION}" =~ ^[0-9A-Za-z.+-]+$ ]]; then
+            echo "Error: not a valid release tag: ${GH_REF}" >&2
             exit 1
           fi
-          VERSION="${GH_REF#refs/tags/v}"
           # Detect prerelease suffix per semver (e.g., 1.0.0-rc.1, 1.0.0-beta.1).
           # Regex requires at least one identifier char after the hyphen; bare hyphens (1.0.0-) are invalid.
           if [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[a-zA-Z0-9] ]]; then
@@ -343,6 +356,7 @@ jobs:
           VERSION: ${{ steps.extract_version.outputs.version }}
           GH_REPO: ${{ github.repository }}
         run: |
+          set -euo pipefail
           # Repo splits its changelog by major version (CHANGELOG-<major>.md);
           # there is no single root CHANGELOG.md. Major is VERSION's first
           # dot-separated component, same rule as scripts/roll-changelog.sh.
