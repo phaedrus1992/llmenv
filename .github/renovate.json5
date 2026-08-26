@@ -64,6 +64,13 @@
     "enabled": true,
   },
 
+  // Every uses: line is SHA-pinned today, but that's only true because each
+  // one was pinned by hand. Without this, Renovate's own PRs for a brand-new
+  // action (not yet on a SHA) would land unpinned and the ratio would drift.
+  "github-actions": {
+    "pinDigests": true,
+  },
+
   // Package- or manager-specific rules.
   // Rules apply top-to-bottom; later rules override earlier ones for the same
   // field. So: (1) set the automerge/major policy broadly, (2) give each
