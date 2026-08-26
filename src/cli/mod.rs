@@ -1603,6 +1603,17 @@ pub(crate) fn exit_with_status(status: std::process::ExitStatus) -> ! {
 /// inherits that variable. Falls back to the configured cache root when unset
 /// (e.g. manual invocation outside a session); `StatusData::load` degrades to
 /// defaults on a missing/wrong-shape file rather than erroring.
+///
+/// The `scopes` widget is the one exception to "read the snapshot": active
+/// tags are re-evaluated live via `scope::evaluate` on every render instead
+/// of coming from the data file. The snapshot is only rewritten by `llmenv
+/// regenerate`, which also renames the cache folder itself when the active
+/// tag set changes — so a session's `CLAUDE_CONFIG_DIR` can keep pointing at
+/// a folder `regenerate` no longer writes to. Re-evaluating scope here (#1538)
+/// is the only way the statusline reflects a tag added mid-session (e.g. via
+/// `$LLMENV_EXTRA_TAGS`) without requiring a shell restart. Cheap by design —
+/// `Env::detect_for_config` skips the gateway-MAC subprocess forks whenever
+/// no network scope is configured.
 fn run_statusline_cmd(use_color: bool) -> anyhow::Result<()> {
     // A broken config must degrade to a visible error row, not to nothing
     // (#1052). Propagating here would exit non-zero with empty stdout, and the
@@ -1622,8 +1633,18 @@ fn run_statusline_cmd(use_color: bool) -> anyhow::Result<()> {
         }
     };
     let data_path = statusline_data_path_with_env(&config, &|name| std::env::var(name).ok());
+    let active = crate::scope::evaluate(
+        &config,
+        &crate::scope::matcher::Env::detect_for_config(&config),
+    );
 
-    let output = statusline::run_statusline(&config, &data_path, &mut std::io::stdin(), use_color)?;
+    let output = statusline::run_statusline(
+        &config,
+        &data_path,
+        &mut std::io::stdin(),
+        use_color,
+        &active.tags,
+    )?;
     print!("{output}");
     Ok(())
 }

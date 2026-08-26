@@ -1187,11 +1187,18 @@ per-output-type token breakdown today, so those aren't invented placeholders.
 
 #### llmenv-sourced (from `llmenv-status.json`)
 
-All nine honor `format:`.
+All nine honor `format:`. `scopes` is the one exception to "from
+`llmenv-status.json`": its tags are re-evaluated live on every render instead
+of read from the snapshot, so a tag added mid-session (e.g. via
+`$LLMENV_EXTRA_TAGS`) shows up immediately, without waiting on the next
+`llmenv regenerate` (added in v4.0.0; fixes #1538 — the materialized cache
+folder is keyed by the active tag set, so a running session's fixed
+`CLAUDE_CONFIG_DIR` could point at a folder `regenerate` no longer writes to,
+and the snapshot-only `scopes` widget stayed stale even after a regenerate).
 
 | Widget | Default `format` | Example | Placeholders |
 | -------- | ------------------- | --------- | -------------- |
-| `scopes` | `{tags}` | `dev · rust` | `tags` (tag list, joined with ` · `) |
+| `scopes` | `{tags}` | `dev · rust` | `tags` (tag list, joined with ` · `; evaluated live, not from the snapshot) |
 | `plugins` | `🔌 {total}` | `🔌 12` | `total`, `errors` |
 | `mcps` | `MCP {total}` | `MCP 12` | `total`, `errors` |
 | `icm` | `🧠 {memories}` | `🧠 142` | `memories`, `concepts` |

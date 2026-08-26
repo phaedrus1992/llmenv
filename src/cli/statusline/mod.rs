@@ -152,11 +152,20 @@ pub fn run_statusline(
     data_path: &std::path::Path,
     stdin: &mut impl Read,
     use_color: bool,
+    active_tags: &std::collections::BTreeSet<String>,
 ) -> anyhow::Result<String> {
     let mut stdin_buf = String::new();
     stdin.read_to_string(&mut stdin_buf)?;
     let engine_data: EngineData = serde_json::from_str(&stdin_buf).unwrap_or_default();
-    let status_data = StatusData::load(data_path);
+    let mut status_data = StatusData::load(data_path);
+    // The snapshot file is only rewritten by `llmenv regenerate`, so its
+    // `scopes` field goes stale the moment `$LLMENV_EXTRA_TAGS` (or any other
+    // env-driven scope input) changes mid-session (#1538). Every other widget
+    // stays snapshot-sourced; only scopes needs live data, and the caller
+    // already resolved it cheaply via `Env::detect_for_config`.
+    status_data.scopes = Some(data::ScopesData {
+        tags: active_tags.iter().cloned().collect(),
+    });
 
     let cfg = config.statusline.clone().unwrap_or_default();
     // Global colour opt-out: `statusline.style.color: false` forces plain text
@@ -229,7 +238,14 @@ mod tests {
         let stdin = br#"{"model": {"display_name": "Claude Opus 4.8"}}"#;
         let dir = tempfile::tempdir().unwrap();
         let data_path = dir.path().join("llmenv-status.json"); // missing file
-        let out = run_statusline(&config, &data_path, &mut &stdin[..], false).unwrap();
+        let out = run_statusline(
+            &config,
+            &data_path,
+            &mut &stdin[..],
+            false,
+            &std::collections::BTreeSet::new(),
+        )
+        .unwrap();
         assert!(out.contains("Opus"));
         assert!(out.contains(" │ "));
     }
@@ -246,7 +262,14 @@ mod tests {
         let stdin = br#"{"model": {"display_name": "GPT-Z"}}"#;
         let dir = tempfile::tempdir().unwrap();
         let data_path = dir.path().join("llmenv-status.json");
-        let out = run_statusline(&config, &data_path, &mut &stdin[..], false).unwrap();
+        let out = run_statusline(
+            &config,
+            &data_path,
+            &mut &stdin[..],
+            false,
+            &std::collections::BTreeSet::new(),
+        )
+        .unwrap();
         assert_eq!(out.trim_end(), "GPT-Z");
     }
 
@@ -262,7 +285,14 @@ mod tests {
         let stdin = br#"{"model": {"display_name": "GPT-Z"}}"#;
         let dir = tempfile::tempdir().unwrap();
         let data_path = dir.path().join("does-not-exist.json");
-        let out = run_statusline(&config, &data_path, &mut &stdin[..], false).unwrap();
+        let out = run_statusline(
+            &config,
+            &data_path,
+            &mut &stdin[..],
+            false,
+            &std::collections::BTreeSet::new(),
+        )
+        .unwrap();
         assert!(out.contains("GPT-Z"));
     }
 
@@ -272,7 +302,13 @@ mod tests {
         let stdin = b"not json";
         let dir = tempfile::tempdir().unwrap();
         let data_path = dir.path().join("llmenv-status.json");
-        let out = run_statusline(&config, &data_path, &mut &stdin[..], false);
+        let out = run_statusline(
+            &config,
+            &data_path,
+            &mut &stdin[..],
+            false,
+            &std::collections::BTreeSet::new(),
+        );
         assert!(out.is_ok(), "malformed stdin must degrade, not error");
     }
 
@@ -288,7 +324,14 @@ mod tests {
         let stdin = b"{}";
         let dir = tempfile::tempdir().unwrap();
         let data_path = dir.path().join("llmenv-status.json");
-        let out = run_statusline(&config, &data_path, &mut &stdin[..], false).unwrap();
+        let out = run_statusline(
+            &config,
+            &data_path,
+            &mut &stdin[..],
+            false,
+            &std::collections::BTreeSet::new(),
+        )
+        .unwrap();
         assert_eq!(out, "\n");
     }
 
@@ -325,8 +368,14 @@ mod tests {
         )
         .unwrap();
 
+        // scopes now comes from the live `active_tags` param, not the file —
+        // pass a matching set so this test still covers every other widget's
+        // file-sourced rendering path unchanged.
+        let live_tags: std::collections::BTreeSet<String> = ["dev".to_string(), "rust".to_string()]
+            .into_iter()
+            .collect();
         let stdin = b"{}";
-        let out = run_statusline(&config, &data_path, &mut &stdin[..], false).unwrap();
+        let out = run_statusline(&config, &data_path, &mut &stdin[..], false, &live_tags).unwrap();
 
         assert!(out.contains("dev · rust"), "scopes widget: {out}");
         assert!(out.contains("🔌 3"), "plugins widget: {out}");
@@ -335,6 +384,47 @@ mod tests {
         assert!(out.contains("2 KB"), "cache widget: {out}");
         assert!(out.contains("icm: 12s"), "throttle widget: {out}");
         assert!(out.contains('5'), "session_log widget: {out}");
+    }
+
+    #[test]
+    fn scopes_widget_reflects_live_tags_not_stale_snapshot() {
+        // Regression test for #1538: the snapshot file is only rewritten on
+        // `llmenv regenerate`, so a tag added mid-session (e.g. via
+        // `$LLMENV_EXTRA_TAGS`) must still show up in the statusline without
+        // requiring a regenerate.
+        let config = llmenv_config::Config {
+            statusline: Some(StatuslineConfig {
+                rows: vec!["{scopes}".to_string()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let data_path = dir.path().join("llmenv-status.json");
+        std::fs::write(
+            &data_path,
+            serde_json::json!({
+                "$schema": "llmenv-status-v1",
+                "v": 1,
+                "ts": "2026-07-17T00:00:00Z",
+                "scopes": { "tags": ["dev", "rust"] }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let live_tags: std::collections::BTreeSet<String> =
+            ["dev".to_string(), "python".to_string()]
+                .into_iter()
+                .collect();
+        let stdin = b"{}";
+        let out = run_statusline(&config, &data_path, &mut &stdin[..], false, &live_tags).unwrap();
+
+        assert!(out.contains("dev · python"), "expected live tags: {out}");
+        assert!(
+            !out.contains("rust"),
+            "must not show stale snapshot tag: {out}"
+        );
     }
 
     #[test]
@@ -351,6 +441,7 @@ mod tests {
             std::path::Path::new("/nonexistent"),
             &mut &b""[..],
             false,
+            &std::collections::BTreeSet::new(),
         )
         .unwrap();
         assert_eq!(out, "\u{26a0}\u{fe0f}\n"); // ⚠️
@@ -373,6 +464,7 @@ mod tests {
             std::path::Path::new("/nonexistent"),
             &mut &b""[..],
             false,
+            &std::collections::BTreeSet::new(),
         )
         .unwrap();
         assert_eq!(out, "\n");
@@ -447,7 +539,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let data_path = dir.path().join("llmenv-status.json");
         // use_color=true at the call site, but style.color=false must win.
-        let out = run_statusline(&config, &data_path, &mut &stdin[..], true).unwrap();
+        let out = run_statusline(
+            &config,
+            &data_path,
+            &mut &stdin[..],
+            true,
+            &std::collections::BTreeSet::new(),
+        )
+        .unwrap();
         assert!(
             !out.contains('\u{1b}'),
             "global color off must emit no ANSI: {out:?}"
@@ -469,7 +568,14 @@ mod tests {
         let stdin = b"{\"branch\": {\"name\": \"feature\\u001b[31mBAD\"}}";
         let dir = tempfile::tempdir().unwrap();
         let data_path = dir.path().join("llmenv-status.json");
-        let out = run_statusline(&config, &data_path, &mut &stdin[..], false).unwrap();
+        let out = run_statusline(
+            &config,
+            &data_path,
+            &mut &stdin[..],
+            false,
+            &std::collections::BTreeSet::new(),
+        )
+        .unwrap();
         assert!(
             !out.contains('\u{1b}'),
             "escape char leaked into output: {out:?}"
