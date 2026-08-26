@@ -16,6 +16,13 @@ concurrency:
 jobs:
   forward-merge:
     runs-on: ubuntu-latest
+    # Stops the cascade's own push from re-triggering this workflow on the
+    # target branch. Only holds while pushes go out as GITHUB_TOKEN (which
+    # both skips the anti-recursion rule and is attributed to
+    # github-actions[bot]) — a FORWARD_MERGE_PAT-authenticated push (#1504)
+    # is neither, so this guard doesn't suppress the re-trigger once the
+    # secret is set. Tracked in #1524; low-risk in practice (the re-triggered
+    # run finds everything already merged and no-ops) but not hardened.
     if: github.actor != 'github-actions[bot]'
     permissions:
       contents: write
@@ -28,15 +35,6 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
-          # GITHUB_TOKEN can never push a change that touches
-          # .github/workflows/*.yml (GitHub's own restriction, not this job's
-          # permissions). A source release branch's cascade only crosses that
-          # boundary when its own workflow files differ from a target's, but
-          # the cascade can't know that in advance, so every push uses the PAT
-          # once it's set. Falls back to the default token if the secret is
-          # unset, so the workflow keeps working (minus workflow-file pushes)
-          # before FORWARD_MERGE_PAT is added.
-          token: ${{ secrets.FORWARD_MERGE_PAT || github.token }}
 
       - name: Configure git
         run: |
@@ -79,8 +77,37 @@ jobs:
           CURRENT: ${{ steps.detect.outputs.current }}
           BRANCHES: ${{ steps.detect.outputs.branches }}
           GH_TOKEN: ${{ github.token }}
+          # Use a fine-grained PAT restricted to just this repository, with
+          # only `contents: write` + `workflows: write` — not a classic PAT.
+          # This step's env inherits into any script it calls (e.g.
+          # scripts/sync-changelog-doc.sh, during conflict auto-resolution),
+          # so a classic repo-scoped PAT would let anyone who can land a
+          # commit on release/** exfiltrate access to every repository the
+          # PAT's owner can reach, not just this one.
+          FORWARD_MERGE_PAT: ${{ secrets.FORWARD_MERGE_PAT }}
         run: |
           set -euo pipefail
+
+          # GITHUB_TOKEN can never push a change that touches
+          # .github/workflows/*.yml (GitHub's own restriction, not this job's
+          # permissions). A source release branch's cascade only crosses that
+          # boundary when its own workflow files differ from a target's, but
+          # the cascade can't know that in advance, so every push below goes
+          # through this helper. Scoped to just the push (a `-c` override for
+          # one invocation), not the whole job's git credential, per #1504 —
+          # everything else (fetch, merge, checkout) still runs as the
+          # job-scoped GITHUB_TOKEN persisted by the checkout step. Falls back
+          # to the default token if the secret is unset, so the workflow keeps
+          # working (minus workflow-file pushes) before FORWARD_MERGE_PAT is added.
+          push_with_pat() {
+            if [[ -n "${FORWARD_MERGE_PAT:-}" ]]; then
+              local auth
+              auth="$(printf 'x-access-token:%s' "$FORWARD_MERGE_PAT" | base64 -w0)"
+              git -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${auth}" push "$@"
+            else
+              git push "$@"
+            fi
+          }
 
           # Build target list: every newer release branch (semver order) + main.
           TARGETS=()
@@ -272,8 +299,23 @@ jobs:
             # release branch, with no manual step. If a target is branch-protected
             # the push is rejected; fall back to opening a PR and halt so the
             # remaining (now un-merged) targets aren't silently skipped.
+            #
+            # That fallback assumes the pushing identity CAN'T bypass branch
+            # protection — true for GITHUB_TOKEN, not guaranteed for a PAT.
+            # This repo's ruleset (covering main and release/**, requiring
+            # test/deny/hawk + CodeQL/zizmor) has an admin bypass_actor with
+            # bypass_mode "always" — an admin-owned FORWARD_MERGE_PAT would
+            # silently land past those checks instead of tripping this
+            # fallback (#1504). So once the secret is set, skip the direct
+            # push entirely and always go through the PR path below, where
+            # required checks run before a human merges it.
+            PUSH_SKIPPED=0
+            if [[ -n "${FORWARD_MERGE_PAT:-}" ]]; then
+              PUSH_SKIPPED=1
+              PUSH_RC=1
+              PUSH_STDERR=""
             # See the FETCH_RC comment above — same set -e hazard.
-            if PUSH_STDERR=$(git push origin HEAD:"$TARGET" 2>&1 >/dev/null); then
+            elif PUSH_STDERR=$(git push origin HEAD:"$TARGET" 2>&1 >/dev/null); then
               PUSH_RC=0
             else
               PUSH_RC=$?
@@ -287,19 +329,24 @@ jobs:
               git update-ref "refs/remotes/origin/$TARGET" HEAD
               SOURCE_REF="origin/$TARGET"
               SOURCE_DESC="$TARGET"
-              # A push made with GITHUB_TOKEN deliberately doesn't trigger other
-              # workflows (GitHub's anti-recursion rule), so docs.yml's `push`
-              # trigger never fires for this forward-merge even though it landed
-              # on main. Dispatch it explicitly when website/ actually changed.
+              # This branch only runs when FORWARD_MERGE_PAT is unset (the PAT
+              # case always sets PUSH_SKIPPED above), so the push here was
+              # authenticated as GITHUB_TOKEN, which deliberately doesn't
+              # trigger other workflows (GitHub's anti-recursion rule) — so
+              # docs.yml's own `push` trigger never fires for this
+              # forward-merge even though it landed on main. Dispatch it
+              # explicitly when website/ actually changed.
               if [[ "$TARGET" == "main" ]] && [[ -n "$TARGET_SHA" ]] \
                   && ! git diff --quiet "$TARGET_SHA" HEAD -- website/; then
                 echo "website/ changed on main; triggering docs deploy"
                 gh workflow run docs.yml --ref main || echo "::warning::failed to dispatch docs.yml"
               fi
             else
-              # Log the actual error so operators can distinguish protection
-              # rejections from auth/network failures.
-              if [[ -n "$PUSH_STDERR" ]]; then
+              if [[ "$PUSH_SKIPPED" -eq 1 ]]; then
+                echo "Skipping direct push to $TARGET: FORWARD_MERGE_PAT may bypass branch protection; opening a PR instead so required checks still run"
+              elif [[ -n "$PUSH_STDERR" ]]; then
+                # Log the actual error so operators can distinguish protection
+                # rejections from auth/network failures.
                 echo "::warning::push to $TARGET failed: ${PUSH_STDERR//$'\n'/ }"
               else
                 echo "::warning::push to $TARGET failed (exit $PUSH_RC; no stderr)"
@@ -313,9 +360,9 @@ jobs:
               fi
               if [[ $ls_rc -eq 0 ]]; then
                 echo "::warning::$MERGE_BRANCH already exists; not overwriting in-progress resolution"
-                echo "::error::Cascade halted: $TARGET is protected and $MERGE_BRANCH is already open"
+                echo "::error::Cascade halted: $MERGE_BRANCH is already open for $TARGET"
                 echo "::endgroup::"
-                HALTED="protected branch $TARGET"
+                HALTED="PR already open for $TARGET"
                 break
               elif [[ $ls_rc -ne 2 ]]; then
                 echo "::error::Network error checking if $MERGE_BRANCH exists (exit $ls_rc); halting cascade"
@@ -332,22 +379,26 @@ jobs:
                 HALTED="checkout failed at $TARGET"
                 break
               fi
-              if ! git push origin "$MERGE_BRANCH" --force-with-lease; then
+              if ! push_with_pat origin "$MERGE_BRANCH" --force-with-lease; then
                 echo "::error::Push to merge branch $MERGE_BRANCH failed; cannot open PR"
                 echo "::endgroup::"
-                HALTED="protected branch $TARGET"
+                HALTED="merge-branch push failed for $TARGET"
                 break
               fi
 
+              PR_BODY="Direct push to $TARGET blocked by branch protection; opening PR."
+              if [[ "$PUSH_SKIPPED" -eq 1 ]]; then
+                PR_BODY="FORWARD_MERGE_PAT is set and may bypass branch protection, so direct push was skipped; opening PR so required checks still run before merge."
+              fi
               if ! gh pr create --base "$TARGET" --head "$MERGE_BRANCH" \
                 --title "Forward-merge $SOURCE_DESC into $TARGET" \
-                --body "Direct push to $TARGET blocked by branch protection; opening PR."; then
-                echo "::error::Failed to create PR for $MERGE_BRANCH after protected-branch push was rejected"
+                --body "$PR_BODY"; then
+                echo "::error::Failed to create PR for $MERGE_BRANCH"
               else
-                echo "::error::Cascade halted: $TARGET is protected, opened PR instead"
+                echo "::error::Cascade halted: opened PR for $TARGET instead of pushing directly"
               fi
               echo "::endgroup::"
-              HALTED="protected branch $TARGET"
+              HALTED="PR opened for $TARGET"
               break
             fi
 

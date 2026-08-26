@@ -564,6 +564,177 @@ test_1381_non_version_change_bails() {
 }
 
 # ---------------------------------------------------------------------------
+# Test 10 (Issue #1504): push_with_pat scopes the PAT to just the push
+#
+# Mirrors the push_with_pat() helper in forward-merge-release.yml. Verifies
+# it authenticates with FORWARD_MERGE_PAT (via a per-invocation -c override,
+# not the job-wide persisted credential) when the secret is set, and falls
+# back to a plain `git push` (the checkout's own persisted credential) when
+# it isn't.
+# ---------------------------------------------------------------------------
+push_with_pat_block() {
+  cat <<'SHELL'
+set -euo pipefail
+
+push_with_pat() {
+  if [[ -n "${FORWARD_MERGE_PAT:-}" ]]; then
+    local auth
+    auth="$(printf 'x-access-token:%s' "$FORWARD_MERGE_PAT" | base64 -w0)"
+    git -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${auth}" push "$@"
+  else
+    git push "$@"
+  fi
+}
+
+push_with_pat origin HEAD:main
+SHELL
+}
+
+test_1504_push_with_pat_uses_pat_when_set() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+
+  # git stub: record whether -c http...extraheader was passed before "push".
+  cat > "$tmpdir/git" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1" == "-c" && "$2" == http.https://github.com/.extraheader=* && "$3" == "push" ]]; then
+  echo "PUSHED_WITH_EXTRAHEADER"
+  exit 0
+fi
+if [[ "$1" == "push" ]]; then
+  echo "PUSHED_WITHOUT_EXTRAHEADER"
+  exit 0
+fi
+exit 0
+STUB
+  chmod +x "$tmpdir/git"
+
+  local script out
+  script=$(push_with_pat_block)
+  export FORWARD_MERGE_PAT="fake-token"
+
+  out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1 || true)
+  unset FORWARD_MERGE_PAT
+  rm -rf "$tmpdir"
+
+  [[ "$out" == "PUSHED_WITH_EXTRAHEADER" ]]
+}
+
+# ---------------------------------------------------------------------------
+# Test 11 (Issue #1504): direct push to $TARGET is never attempted once
+# FORWARD_MERGE_PAT is set.
+#
+# This repo's branch-protection ruleset has an admin bypass_actor with
+# bypass_mode "always" (verified via `gh api repos/.../rulesets`), so an
+# admin-owned PAT could push straight past required checks instead of being
+# rejected the way GITHUB_TOKEN would be. Mirrors the direct-push decision at
+# forward-merge-release.yml's cascade step: once the secret is set, the
+# direct `git push origin HEAD:"$TARGET"` must never run at all — the
+# cascade must go straight to the PR path so required checks still run.
+# ---------------------------------------------------------------------------
+direct_push_decision_block() {
+  cat <<'SHELL'
+set -euo pipefail
+TARGET="main"
+PUSH_SKIPPED=0
+if [[ -n "${FORWARD_MERGE_PAT:-}" ]]; then
+  PUSH_SKIPPED=1
+  PUSH_RC=1
+  PUSH_STDERR=""
+elif PUSH_STDERR=$(git push origin HEAD:"$TARGET" 2>&1 >/dev/null); then
+  PUSH_RC=0
+else
+  PUSH_RC=$?
+fi
+if [[ $PUSH_RC -eq 0 ]]; then
+  echo "DIRECT_PUSH_SUCCEEDED"
+elif [[ "$PUSH_SKIPPED" -eq 1 ]]; then
+  echo "SKIPPED_DIRECT_PUSH_OPENING_PR"
+else
+  echo "DIRECT_PUSH_FAILED"
+fi
+SHELL
+}
+
+test_1504_direct_push_never_attempted_with_pat_set() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+
+  # Sentinel: a direct `push origin HEAD:main` call means the skip logic
+  # didn't fire — must never be reached in this test.
+  cat > "$tmpdir/git" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1" == "push" && "$2" == "origin" && "$3" == "HEAD:main" ]]; then
+  echo "::error::direct push attempted despite FORWARD_MERGE_PAT being set" >&2
+  exit 99
+fi
+exit 0
+STUB
+  chmod +x "$tmpdir/git"
+
+  local script out
+  script=$(direct_push_decision_block)
+  export FORWARD_MERGE_PAT="fake-token"
+
+  out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1 || true)
+  unset FORWARD_MERGE_PAT
+  rm -rf "$tmpdir"
+
+  [[ "$out" == "SKIPPED_DIRECT_PUSH_OPENING_PR" ]]
+}
+
+test_1504_direct_push_still_attempted_without_pat() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+
+  cat > "$tmpdir/git" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1" == "push" && "$2" == "origin" && "$3" == "HEAD:main" ]]; then
+  exit 0
+fi
+exit 0
+STUB
+  chmod +x "$tmpdir/git"
+
+  local script out
+  script=$(direct_push_decision_block)
+  unset FORWARD_MERGE_PAT
+
+  out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1 || true)
+  rm -rf "$tmpdir"
+
+  [[ "$out" == "DIRECT_PUSH_SUCCEEDED" ]]
+}
+
+test_1504_push_with_pat_falls_back_without_secret() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+
+  cat > "$tmpdir/git" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1" == "-c" ]]; then
+  echo "PUSHED_WITH_EXTRAHEADER"
+  exit 0
+fi
+if [[ "$1" == "push" ]]; then
+  echo "PUSHED_WITHOUT_EXTRAHEADER"
+  exit 0
+fi
+exit 0
+STUB
+  chmod +x "$tmpdir/git"
+
+  local script out
+  script=$(push_with_pat_block)
+  unset FORWARD_MERGE_PAT
+
+  out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1 || true)
+  rm -rf "$tmpdir"
+
+  [[ "$out" == "PUSHED_WITHOUT_EXTRAHEADER" ]]
+}
+
+# ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
 run_test "Issue #476: branch-exists guard prevents overwrite of in-progress resolution" \
@@ -592,6 +763,18 @@ run_test "Issue #1381: version-only manifest conflict keeps the target's version
 
 run_test "Issue #1381: a manifest change beyond the version bails instead of dropping it" \
   test_1381_non_version_change_bails
+
+run_test "Issue #1504: push_with_pat authenticates with the PAT when the secret is set" \
+  test_1504_push_with_pat_uses_pat_when_set
+
+run_test "Issue #1504: push_with_pat falls back to a plain push without the secret" \
+  test_1504_push_with_pat_falls_back_without_secret
+
+run_test "Issue #1504: direct push never attempted once FORWARD_MERGE_PAT is set (bypass risk)" \
+  test_1504_direct_push_never_attempted_with_pat_set
+
+run_test "Issue #1504: direct push still attempted normally without the secret" \
+  test_1504_direct_push_still_attempted_without_pat
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
