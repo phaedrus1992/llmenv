@@ -20,9 +20,14 @@ jobs:
     # target branch. Only holds while pushes go out as GITHUB_TOKEN (which
     # both skips the anti-recursion rule and is attributed to
     # github-actions[bot]) — a FORWARD_MERGE_PAT-authenticated push (#1504)
-    # is neither, so this guard doesn't suppress the re-trigger once the
-    # secret is set. Tracked in #1524; low-risk in practice (the re-triggered
-    # run finds everything already merged and no-ops) but not hardened.
+    # is neither. #1524 raised this as a gap once FORWARD_MERGE_PAT is set,
+    # but cff88a8c (#1504) closed it as a side effect: once the secret is
+    # set, a direct push to $TARGET is never attempted at all (PUSH_SKIPPED
+    # below) — push_with_pat only ever pushes to a forward-merge/* staging
+    # branch, which never matches this workflow's `release/**` trigger, so
+    # a PAT-authenticated push can no longer re-trigger this workflow.
+    # #1524 closed with that evidence; see test_1504_direct_push_never_
+    # attempted_with_pat_set in __tests__/forward-merge-release-guards.sh.
     if: github.actor != 'github-actions[bot]'
     permissions:
       contents: write
