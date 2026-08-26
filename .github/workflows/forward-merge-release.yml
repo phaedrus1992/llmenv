@@ -141,13 +141,29 @@ jobs:
           # silently no-ops, while the header stays effectively active via
           # the include. The includeIf entries themselves must be removed —
           # the same cleanup actions/checkout's own "Post Checkout" step
-          # performs at job end, just done early. This is safe to do
+          # performs at job end, just done early. Because we're doing that
+          # cleanup ourselves ahead of time, Post Checkout's own pass finds
+          # no includeIf entries left and never gets to the file-deletion
+          # step it would otherwise run, so push_with_pat also deletes the
+          # underlying credentials file itself (matched narrowly by name
+          # under $RUNNER_TEMP) to avoid orphaning it. This is safe to do
           # unconditionally here: push_with_pat's only call site is the last
           # git network operation before the cascade halts (it's followed
           # only by `gh pr create`, then `break`), so nothing downstream
           # needs the persisted GITHUB_TOKEN credential again.
           push_with_pat() {
+            # Enforces the single-call-site invariant above at runtime
+            # instead of leaving it to a comment: this exact assumption
+            # (about what's safe to tear down and when) has already been
+            # wrong once for this function (#1540). A second call in the
+            # same job would otherwise silently push with no credential at
+            # all, having already dropped it the first time.
+            if [[ "${_push_with_pat_credential_dropped:-0}" -eq 1 ]]; then
+              echo "::error::push_with_pat called more than once in this job after already dropping the persisted checkout credential -- update the caller, this function assumes a single last call"
+              exit 1
+            fi
             if [[ -n "$_forward_merge_pat" ]]; then
+              _push_with_pat_credential_dropped=1
               local auth
               auth="$(printf 'x-access-token:%s' "$_forward_merge_pat" | base64 -w0)"
               # GitHub's log scrubber masks the literal PAT value, not its
@@ -176,21 +192,60 @@ jobs:
                 echo "::error::failed to clear persisted extraheader before PAT push (git config exit $UNSET_RC): $UNSET_OUT"
                 exit 1
               fi
-              # `--get-regexp` exits 1 when nothing matches — a normal empty
-              # result (e.g. persist-credentials: false), not a failure, so
-              # `|| true` here only tolerates that specific case.
-              while IFS= read -r include_key; do
-                [[ -n "$include_key" ]] || continue
-                if INCLUDE_UNSET_OUT=$(git config --local --unset-all "$include_key" 2>&1); then
-                  INCLUDE_UNSET_RC=0
-                else
-                  INCLUDE_UNSET_RC=$?
-                fi
-                if [[ $INCLUDE_UNSET_RC -ne 0 ]]; then
-                  echo "::error::failed to remove $include_key before PAT push (git config exit $INCLUDE_UNSET_RC): $INCLUDE_UNSET_OUT"
-                  exit 1
-                fi
-              done < <(git config --local --name-only --get-regexp '^includeIf\.gitdir:' 2>/dev/null || true)
+              # `--get-regexp` exits 1 when nothing matches (e.g.
+              # persist-credentials: false) -- a normal empty result, not a
+              # failure. Anything else (e.g. exit 128 outside a git work
+              # tree) is a real failure and must halt, same reasoning as
+              # UNSET_RC above -- captured via if/else, not `2>/dev/null ||
+              # true`, which would swallow both cases identically.
+              if INCLUDE_KEYS=$(git config --local --name-only --get-regexp '^includeIf\.gitdir:' 2>&1); then
+                INCLUDE_KEYS_RC=0
+              else
+                INCLUDE_KEYS_RC=$?
+              fi
+              if [[ $INCLUDE_KEYS_RC -ne 0 && $INCLUDE_KEYS_RC -ne 1 ]]; then
+                echo "::error::failed to enumerate includeIf.gitdir entries before PAT push (git config exit $INCLUDE_KEYS_RC): $INCLUDE_KEYS"
+                exit 1
+              fi
+              if [[ $INCLUDE_KEYS_RC -eq 0 ]]; then
+                while IFS= read -r include_key; do
+                  [[ -n "$include_key" ]] || continue
+                  # Read the value (the credentials file path) before
+                  # unsetting the key -- actions/checkout's own Post
+                  # Checkout cleanup discovers that same path this same
+                  # way, then deletes the file. If we unset the key first,
+                  # Post Checkout finds no includeIf entries left and never
+                  # deletes it, orphaning it on the runner.
+                  if INCLUDE_VALUE=$(git config --local --get-all "$include_key" 2>&1); then
+                    INCLUDE_GET_RC=0
+                  else
+                    INCLUDE_GET_RC=$?
+                  fi
+                  if [[ $INCLUDE_GET_RC -ne 0 ]]; then
+                    echo "::error::failed to read $include_key before removing it (git config exit $INCLUDE_GET_RC): $INCLUDE_VALUE"
+                    exit 1
+                  fi
+                  if INCLUDE_UNSET_OUT=$(git config --local --unset-all "$include_key" 2>&1); then
+                    INCLUDE_UNSET_RC=0
+                  else
+                    INCLUDE_UNSET_RC=$?
+                  fi
+                  if [[ $INCLUDE_UNSET_RC -ne 0 ]]; then
+                    echo "::error::failed to remove $include_key before PAT push (git config exit $INCLUDE_UNSET_RC): $INCLUDE_UNSET_OUT"
+                    exit 1
+                  fi
+                  # Only delete a path that matches the file
+                  # actions/checkout itself creates under $RUNNER_TEMP --
+                  # never touch a value this job didn't create.
+                  while IFS= read -r include_value_line; do
+                    [[ -n "$include_value_line" ]] || continue
+                    if [[ -n "${RUNNER_TEMP:-}" \
+                        && "$include_value_line" == "$RUNNER_TEMP"/git-credentials-*.config ]]; then
+                      rm -f "$include_value_line"
+                    fi
+                  done <<< "$INCLUDE_VALUE"
+                done <<< "$INCLUDE_KEYS"
+              fi
               git -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${auth}" push "$@"
             else
               git push "$@"

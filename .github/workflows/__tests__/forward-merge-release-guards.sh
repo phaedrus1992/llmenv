@@ -1123,7 +1123,12 @@ _forward_merge_pat="${FORWARD_MERGE_PAT:-}"
 unset FORWARD_MERGE_PAT
 
 push_with_pat() {
+  if [[ "${_push_with_pat_credential_dropped:-0}" -eq 1 ]]; then
+    echo "::error::push_with_pat called more than once in this job after already dropping the persisted checkout credential -- update the caller, this function assumes a single last call"
+    exit 1
+  fi
   if [[ -n "$_forward_merge_pat" ]]; then
+    _push_with_pat_credential_dropped=1
     local auth
     auth="$(printf 'x-access-token:%s' "$_forward_merge_pat" | base64 -w0)"
     echo "::add-mask::$auth"
@@ -1136,18 +1141,45 @@ push_with_pat() {
       echo "::error::failed to clear persisted extraheader before PAT push (git config exit $UNSET_RC): $UNSET_OUT"
       exit 1
     fi
-    while IFS= read -r include_key; do
-      [[ -n "$include_key" ]] || continue
-      if INCLUDE_UNSET_OUT=$(git config --local --unset-all "$include_key" 2>&1); then
-        INCLUDE_UNSET_RC=0
-      else
-        INCLUDE_UNSET_RC=$?
-      fi
-      if [[ $INCLUDE_UNSET_RC -ne 0 ]]; then
-        echo "::error::failed to remove $include_key before PAT push (git config exit $INCLUDE_UNSET_RC): $INCLUDE_UNSET_OUT"
-        exit 1
-      fi
-    done < <(git config --local --name-only --get-regexp '^includeIf\.gitdir:' 2>/dev/null || true)
+    if INCLUDE_KEYS=$(git config --local --name-only --get-regexp '^includeIf\.gitdir:' 2>&1); then
+      INCLUDE_KEYS_RC=0
+    else
+      INCLUDE_KEYS_RC=$?
+    fi
+    if [[ $INCLUDE_KEYS_RC -ne 0 && $INCLUDE_KEYS_RC -ne 1 ]]; then
+      echo "::error::failed to enumerate includeIf.gitdir entries before PAT push (git config exit $INCLUDE_KEYS_RC): $INCLUDE_KEYS"
+      exit 1
+    fi
+    if [[ $INCLUDE_KEYS_RC -eq 0 ]]; then
+      while IFS= read -r include_key; do
+        [[ -n "$include_key" ]] || continue
+        if INCLUDE_VALUE=$(git config --local --get-all "$include_key" 2>&1); then
+          INCLUDE_GET_RC=0
+        else
+          INCLUDE_GET_RC=$?
+        fi
+        if [[ $INCLUDE_GET_RC -ne 0 ]]; then
+          echo "::error::failed to read $include_key before removing it (git config exit $INCLUDE_GET_RC): $INCLUDE_VALUE"
+          exit 1
+        fi
+        if INCLUDE_UNSET_OUT=$(git config --local --unset-all "$include_key" 2>&1); then
+          INCLUDE_UNSET_RC=0
+        else
+          INCLUDE_UNSET_RC=$?
+        fi
+        if [[ $INCLUDE_UNSET_RC -ne 0 ]]; then
+          echo "::error::failed to remove $include_key before PAT push (git config exit $INCLUDE_UNSET_RC): $INCLUDE_UNSET_OUT"
+          exit 1
+        fi
+        while IFS= read -r include_value_line; do
+          [[ -n "$include_value_line" ]] || continue
+          if [[ -n "${RUNNER_TEMP:-}" \
+              && "$include_value_line" == "$RUNNER_TEMP"/git-credentials-*.config ]]; then
+            rm -f "$include_value_line"
+          fi
+        done <<< "$INCLUDE_VALUE"
+      done <<< "$INCLUDE_KEYS"
+    fi
     git -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${auth}" "$@"
   else
     git "$@"
@@ -1231,6 +1263,126 @@ test_1540_push_with_pat_clears_includeif_persisted_credential() {
 }
 
 # ---------------------------------------------------------------------------
+# Test (Issue #1540 follow-up code review): the includeIf enumeration itself
+# must surface a real failure (e.g. exit 128 outside a git work tree), not
+# just the benign "no matches" case (exit 1) that a bare `2>/dev/null ||
+# true` would swallow identically.
+# ---------------------------------------------------------------------------
+test_1540_includeif_enumeration_real_failure_is_surfaced_and_halts() {
+  local tmpdir
+
+  tmpdir=$(mktemp -d)
+
+  cat > "$tmpdir/git" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1" == "config" && "$2" == "--local" && "$3" == "--unset-all" && "$4" == "http.https://github.com/.extraheader" ]]; then
+  exit 5
+fi
+if [[ "$1" == "config" && "$2" == "--local" && "$3" == "--name-only" && "$4" == "--get-regexp" ]]; then
+  echo "fatal: --local can only be used inside a git repository" >&2
+  exit 128
+fi
+echo "::error::git call reached past the enumeration failure: $*" >&2
+exit 99
+STUB
+  chmod +x "$tmpdir/git"
+
+  local script out rc
+  script=$(push_with_pat_header_block)
+  export FORWARD_MERGE_PAT="fake-pat-token"
+
+  out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1)
+  rc=$?
+  unset FORWARD_MERGE_PAT
+  rm -rf "$tmpdir"
+
+  if [[ $rc -ne 0 ]] \
+      && echo "$out" | grep -q "::error::failed to enumerate includeIf.gitdir entries before PAT push (git config exit 128)" \
+      && ! echo "$out" | grep -q "git call reached past"; then
+    return 0
+  fi
+  printf '  rc: %s\n' "$rc" >&2
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Test (Issue #1540 follow-up code review): once push_with_pat removes an
+# includeIf entry pointing at a checkout-created credentials file, it must
+# also delete that file itself — actions/checkout's own Post Checkout
+# cleanup discovers the file path only by reading the includeIf value, so
+# once the key is gone, Post Checkout has nothing left to read and would
+# otherwise leave the file orphaned on the runner.
+# ---------------------------------------------------------------------------
+test_1540_includeif_removal_deletes_the_credentials_file() {
+  local runner_temp repo credfile out file_survived
+  runner_temp=$(mktemp -d)
+  repo=$(mktemp -d)
+  credfile="$runner_temp/git-credentials-test-uuid.config"
+  printf '[http "https://github.com/"]\n\textraheader = AUTHORIZATION: basic PERSISTED_TOKEN\n' \
+    > "$credfile"
+  (
+    cd "$repo" || exit 1
+    git init -q .
+    git config user.email t@t
+    git config user.name t
+    git config commit.gpgsign false
+    git config --local "includeIf.gitdir:$repo/.git.path" "$credfile"
+  )
+
+  out=$(cd "$repo" && FORWARD_MERGE_PAT="fake-pat-token" RUNNER_TEMP="$runner_temp" \
+    bash -c "$(push_with_pat_header_block)" 2>&1)
+  file_survived=0
+  [[ -f "$credfile" ]] && file_survived=1
+  trash "$repo" 2>/dev/null || true
+  trash "$runner_temp" 2>/dev/null || true
+
+  if [[ "$file_survived" -eq 0 ]] && echo "$out" | grep -q '^AUTHORIZATION: basic'; then
+    return 0
+  fi
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  printf '  file_survived: %s\n' "$file_survived" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Test (Issue #1540 follow-up code review): a credentials file OUTSIDE
+# $RUNNER_TEMP must never be deleted — the match is deliberately narrow so
+# push_with_pat can't be tricked into removing an unrelated file.
+# ---------------------------------------------------------------------------
+test_1540_includeif_removal_does_not_delete_non_matching_files() {
+  local runner_temp repo credfile out file_survived
+  runner_temp=$(mktemp -d)
+  repo=$(mktemp -d)
+  # Deliberately outside $RUNNER_TEMP.
+  credfile=$(mktemp)
+  printf '[http "https://github.com/"]\n\textraheader = AUTHORIZATION: basic PERSISTED_TOKEN\n' \
+    > "$credfile"
+  (
+    cd "$repo" || exit 1
+    git init -q .
+    git config user.email t@t
+    git config user.name t
+    git config commit.gpgsign false
+    git config --local "includeIf.gitdir:$repo/.git.path" "$credfile"
+  )
+
+  out=$(cd "$repo" && FORWARD_MERGE_PAT="fake-pat-token" RUNNER_TEMP="$runner_temp" \
+    bash -c "$(push_with_pat_header_block)" 2>&1)
+  file_survived=0
+  [[ -f "$credfile" ]] && file_survived=1
+  trash "$repo" 2>/dev/null || true
+  trash "$runner_temp" 2>/dev/null || true
+  trash "$credfile" 2>/dev/null || true
+
+  if [[ "$file_survived" -eq 1 ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # Test (Issue #1540 code review): a real config-write failure while clearing
 # the persisted header must halt the cascade with a diagnostic, not be
 # swallowed the same way the benign "no such key" case (git config exit 5)
@@ -1304,6 +1456,40 @@ test_1540_unset_all_missing_key_is_silently_tolerated() {
 }
 
 # ---------------------------------------------------------------------------
+# Test (Issue #1540 follow-up code review): calling push_with_pat a second
+# time in the same job -- after it already dropped the persisted checkout
+# credential -- must fail loudly rather than silently push with no
+# credential at all. This enforces the single-last-call invariant the
+# surrounding comment documents but the code didn't check at runtime.
+# ---------------------------------------------------------------------------
+test_1540_push_with_pat_second_call_is_rejected() {
+  local repo out rc
+  repo=$(mktemp -d)
+  (
+    cd "$repo" || exit 1
+    git init -q .
+    git config user.email t@t
+    git config user.name t
+    git config commit.gpgsign false
+  )
+
+  local script
+  script="$(push_with_pat_header_block)
+push_with_pat config --get-all http.https://github.com/.extraheader"
+  out=$(cd "$repo" && FORWARD_MERGE_PAT="fake-pat-token" bash -c "$script" 2>&1)
+  rc=$?
+  trash "$repo" 2>/dev/null || true
+
+  if [[ $rc -ne 0 ]] \
+      && echo "$out" | grep -q "::error::push_with_pat called more than once"; then
+    return 0
+  fi
+  printf '  rc: %s\n' "$rc" >&2
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # Drift guard (Issue #1540 code review): push_with_pat_header_block above is
 # a hand-maintained mirror of push_with_pat() in forward-merge-release.yml,
 # not an extraction — if production's fix-relevant lines change without this
@@ -1319,6 +1505,9 @@ test_1540_test_mirror_matches_production_push_with_pat() {
   # shellcheck disable=SC2016 # literal grep -F patterns, not expressions to expand
   if grep -qF 'git config --local --unset-all http.https://github.com/.extraheader 2>&1' "$workflow_file" \
       && grep -qF "git config --local --name-only --get-regexp '^includeIf\\.gitdir:'" "$workflow_file" \
+      && grep -qF 'git config --local --get-all "$include_key" 2>&1' "$workflow_file" \
+      && grep -qF 'rm -f "$include_value_line"' "$workflow_file" \
+      && grep -qF '_push_with_pat_credential_dropped:-0' "$workflow_file" \
       && grep -qF 'git -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${auth}" push "$@"' "$workflow_file"; then
     return 0
   fi
@@ -1391,6 +1580,18 @@ run_test "Issue #1540: push_with_pat clears the persisted extraheader before set
 
 run_test "Issue #1540 follow-up: push_with_pat clears an includeIf-referenced persisted credential" \
   test_1540_push_with_pat_clears_includeif_persisted_credential
+
+run_test "Issue #1540 follow-up: a real includeIf enumeration failure is surfaced and halts" \
+  test_1540_includeif_enumeration_real_failure_is_surfaced_and_halts
+
+run_test "Issue #1540 follow-up: removing an includeIf entry also deletes its credentials file" \
+  test_1540_includeif_removal_deletes_the_credentials_file
+
+run_test "Issue #1540 follow-up: a non-matching credentials file is never deleted" \
+  test_1540_includeif_removal_does_not_delete_non_matching_files
+
+run_test "Issue #1540 follow-up: a second push_with_pat call in the same job is rejected" \
+  test_1540_push_with_pat_second_call_is_rejected
 
 run_test "Issue #1540: a real config-write failure while clearing the header is surfaced and halts" \
   test_1540_unset_all_real_failure_is_surfaced_and_halts
