@@ -26,8 +26,27 @@ is_excepted() {
   grep -vE '^[[:space:]]*(#|$)' "$EXCEPTIONS_FILE" | grep -qxF "$rel"
 }
 
+# Captured into a variable (not streamed via `< <(jq ...)`) so `set -e` sees
+# jq's own exit status: a process substitution's exit code is invisible to
+# the while/read loop consuming it, so a jq parse failure would otherwise run
+# the loop zero times and fall through to a false "all files pass".
+FILE_LIST="$(jq -r '
+  .data[].files[]
+  | select(.summary.lines.count > 0)
+  | "\(.summary.lines.percent)\t\(.filename)"
+' "$JSON_PATH")" || {
+  echo "::error::failed to parse ${JSON_PATH} with jq" >&2
+  exit 1
+}
+
+if [[ -z "$FILE_LIST" ]]; then
+  echo "::error::${JSON_PATH} yielded no measured files; refusing to pass vacuously" >&2
+  exit 1
+fi
+
 FAILED=0
 while IFS=$'\t' read -r pct filename; do
+  [[ -n "$filename" ]] || continue
   rel="${filename#"$REPO_ROOT"/}"
   if is_excepted "$rel"; then
     continue
@@ -36,11 +55,7 @@ while IFS=$'\t' read -r pct filename; do
     printf '::error::%s is %.2f%% line coverage, below the %s%% per-file floor\n' "$rel" "$pct" "$FLOOR"
     FAILED=1
   fi
-done < <(jq -r '
-  .data[].files[]
-  | select(.summary.lines.count > 0)
-  | "\(.summary.lines.percent)\t\(.filename)"
-' "$JSON_PATH")
+done <<< "$FILE_LIST"
 
 if [[ "$FAILED" -eq 1 ]]; then
   echo "::error::one or more files are below the per-file coverage floor (${FLOOR}%)" >&2

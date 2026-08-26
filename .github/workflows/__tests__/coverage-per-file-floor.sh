@@ -90,7 +90,8 @@ test_zero_line_files_are_ignored() {
   (cd "$repo" && git init -q .)
   json=$(cat <<JSON
 {"data":[{"files":[
-  {"filename":"$repo/src/generated.rs","summary":{"lines":{"count":0,"covered":0,"percent":0.00}}}
+  {"filename":"$repo/src/generated.rs","summary":{"lines":{"count":0,"covered":0,"percent":0.00}}},
+  {"filename":"$repo/src/a.rs","summary":{"lines":{"count":100,"covered":90,"percent":90.00}}}
 ]}]}
 JSON
 )
@@ -101,13 +102,44 @@ JSON
   rc=$?
   trash "$repo" 2>/dev/null || rm -rf "$repo"
 
-  [[ $rc -eq 0 ]]
+  [[ $rc -eq 0 ]] && ! echo "$out" | grep -q "generated.rs"
+}
+
+test_empty_report_hard_fails() {
+  local repo json
+  repo=$(mktemp -d)
+  (cd "$repo" && git init -q .)
+  json='{"data":[{"files":[]}]}'
+  printf '%s' "$json" > "$repo/coverage.json"
+
+  local out rc
+  out=$(cd "$repo" && bash "$SCRIPT" coverage.json 40 2>&1)
+  rc=$?
+  trash "$repo" 2>/dev/null || rm -rf "$repo"
+
+  [[ $rc -eq 1 ]] && echo "$out" | grep -q "yielded no measured files"
+}
+
+test_malformed_json_hard_fails() {
+  local repo
+  repo=$(mktemp -d)
+  (cd "$repo" && git init -q .)
+  printf 'not valid json {{{' > "$repo/coverage.json"
+
+  local out rc
+  out=$(cd "$repo" && bash "$SCRIPT" coverage.json 40 2>&1)
+  rc=$?
+  trash "$repo" 2>/dev/null || rm -rf "$repo"
+
+  [[ $rc -eq 1 ]] && echo "$out" | grep -q "failed to parse"
 }
 
 run_test "all files above floor passes" test_all_files_above_floor_passes
 run_test "file below floor fails with the offending path and percent" test_file_below_floor_fails
 run_test "excepted file below floor still passes" test_excepted_file_below_floor_passes
 run_test "zero-line (unmeasured) files are ignored" test_zero_line_files_are_ignored
+run_test "empty report hard-fails instead of passing vacuously" test_empty_report_hard_fails
+run_test "malformed JSON hard-fails instead of passing vacuously" test_malformed_json_hard_fails
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
