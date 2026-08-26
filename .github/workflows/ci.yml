@@ -18,6 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
+      workflow_tests: ${{ steps.filter.outputs.workflow_tests }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -38,6 +39,9 @@ jobs:
               - 'CHANGELOG-*.md'
               - 'website/docs/changelog.md'
               - '.github/workflows/ci.yml'
+            workflow_tests:
+              - '.github/workflows/**'
+              - 'scripts/**'
   test:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
@@ -136,3 +140,28 @@ jobs:
       - run: bash scripts/hawk-check.sh -D warnings
         env:
           RUSTUP_TOOLCHAIN: ${{ steps.toolchain.outputs.name }}
+  workflow-tests:
+    # Not a required status check, so unlike test/deny/hawk above this can
+    # safely gate on `needs.changes` rather than always running (#1522):
+    # neither forward-merge-release-guards.sh nor coverage-per-file-floor.sh
+    # ran anywhere in CI before this job, so a regression in the bash logic
+    # they cover shipped undetected.
+    needs: changes
+    if: needs.changes.outputs.workflow_tests == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run .github/workflows/__tests__/*.sh
+        run: |
+          set -uo pipefail
+          overall_rc=0
+          for f in .github/workflows/__tests__/*.sh; do
+            echo "::group::$f"
+            bash "$f"
+            rc=$?
+            [[ $rc -eq 0 ]] || overall_rc=1
+            echo "::endgroup::"
+          done
+          exit "$overall_rc"
