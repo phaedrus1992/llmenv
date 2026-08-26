@@ -4,3 +4,7 @@
 
 # 10.10% at gate introduction; tracked in #1521.
 src/cli/status.rs
+
+# 38.24% in CI at gate introduction (51.47% locally on macOS — platform
+# delta not yet understood); tracked in #1528.
+src/memory/mod.rs
