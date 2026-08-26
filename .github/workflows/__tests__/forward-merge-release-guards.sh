@@ -1136,6 +1136,18 @@ push_with_pat() {
       echo "::error::failed to clear persisted extraheader before PAT push (git config exit $UNSET_RC): $UNSET_OUT"
       exit 1
     fi
+    while IFS= read -r include_key; do
+      [[ -n "$include_key" ]] || continue
+      if INCLUDE_UNSET_OUT=$(git config --local --unset-all "$include_key" 2>&1); then
+        INCLUDE_UNSET_RC=0
+      else
+        INCLUDE_UNSET_RC=$?
+      fi
+      if [[ $INCLUDE_UNSET_RC -ne 0 ]]; then
+        echo "::error::failed to remove $include_key before PAT push (git config exit $INCLUDE_UNSET_RC): $INCLUDE_UNSET_OUT"
+        exit 1
+      fi
+    done < <(git config --local --name-only --get-regexp '^includeIf\.gitdir:' 2>/dev/null || true)
     git -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${auth}" "$@"
   else
     git "$@"
@@ -1165,6 +1177,50 @@ test_1540_push_with_pat_clears_persisted_header_before_setting_new() {
     bash -c "$(push_with_pat_header_block)" 2>&1)
   header_count=$(echo "$out" | grep -c '^AUTHORIZATION: basic')
   trash "$repo" 2>/dev/null || true
+
+  if [[ "$header_count" -eq 1 ]] && ! echo "$out" | grep -q "PERSISTED_TOKEN"; then
+    return 0
+  fi
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  printf '  header_count: %s\n' "$header_count" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Test (Issue #1540 follow-up): actions/checkout's persist-credentials: true
+# does NOT write the extraheader directly into .git/config — confirmed from
+# a live forward-merge run's own Checkout step log, after PR #1544's fix
+# (which only handled a directly-set extraheader) still hit the identical
+# "Duplicate header" 400 in production. The real header lives in an
+# external file, pulled in only via `includeIf.gitdir:*.path` entries in
+# .git/config. A plain `--unset-all` on the extraheader key finds nothing
+# there (exit 5) and silently no-ops while the header stays effectively
+# active via the include — this reproduces that exact shape, not just a
+# directly-set extraheader.
+# ---------------------------------------------------------------------------
+test_1540_push_with_pat_clears_includeif_persisted_credential() {
+  local repo credfile out header_count
+  repo=$(mktemp -d)
+  credfile=$(mktemp)
+  printf '[http "https://github.com/"]\n\textraheader = AUTHORIZATION: basic PERSISTED_TOKEN\n' \
+    > "$credfile"
+  (
+    cd "$repo" || exit 1
+    git init -q .
+    git config user.email t@t
+    git config user.name t
+    git config commit.gpgsign false
+    # Mirrors actions/checkout: the real header lives in an external file,
+    # referenced only via includeIf — never written directly into
+    # .git/config's own [http] section.
+    git config --local "includeIf.gitdir:$repo/.git.path" "$credfile"
+  )
+
+  out=$(cd "$repo" && FORWARD_MERGE_PAT="fake-pat-token" \
+    bash -c "$(push_with_pat_header_block)" 2>&1)
+  header_count=$(echo "$out" | grep -c '^AUTHORIZATION: basic')
+  trash "$repo" 2>/dev/null || true
+  trash "$credfile" 2>/dev/null || true
 
   if [[ "$header_count" -eq 1 ]] && ! echo "$out" | grep -q "PERSISTED_TOKEN"; then
     return 0
@@ -1262,6 +1318,7 @@ test_1540_test_mirror_matches_production_push_with_pat() {
 
   # shellcheck disable=SC2016 # literal grep -F patterns, not expressions to expand
   if grep -qF 'git config --local --unset-all http.https://github.com/.extraheader 2>&1' "$workflow_file" \
+      && grep -qF "git config --local --name-only --get-regexp '^includeIf\\.gitdir:'" "$workflow_file" \
       && grep -qF 'git -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${auth}" push "$@"' "$workflow_file"; then
     return 0
   fi
@@ -1331,6 +1388,9 @@ run_test "Issue #1532: the real sync-changelog-doc.sh regenerates changelog.md t
 
 run_test "Issue #1540: push_with_pat clears the persisted extraheader before setting its own" \
   test_1540_push_with_pat_clears_persisted_header_before_setting_new
+
+run_test "Issue #1540 follow-up: push_with_pat clears an includeIf-referenced persisted credential" \
+  test_1540_push_with_pat_clears_includeif_persisted_credential
 
 run_test "Issue #1540: a real config-write failure while clearing the header is surfaced and halts" \
   test_1540_unset_all_real_failure_is_surfaced_and_halts
