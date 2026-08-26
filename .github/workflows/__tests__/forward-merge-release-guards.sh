@@ -813,6 +813,7 @@ push_with_pat() {
   if [[ -n "$_forward_merge_pat" ]]; then
     local auth
     auth="$(printf 'x-access-token:%s' "$_forward_merge_pat" | base64 -w0)"
+    echo "::add-mask::$auth"
     git -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${auth}" push "$@"
   else
     git push "$@"
@@ -851,7 +852,7 @@ STUB
   unset FORWARD_MERGE_PAT
   rm -rf "$tmpdir"
 
-  [[ "$out" == $'NOT_LEAKED\nPUSHED_WITH_EXTRAHEADER' ]]
+  [[ "$out" == *"NOT_LEAKED"* ]] && [[ "$out" == *"::add-mask::"* ]] && [[ "$out" == *"PUSHED_WITH_EXTRAHEADER"* ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -937,6 +938,7 @@ push_with_pat() {
   if [[ -n "$_forward_merge_pat" ]]; then
     local auth
     auth="$(printf 'x-access-token:%s' "$_forward_merge_pat" | base64 -w0)"
+    echo "::add-mask::$auth"
     git -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${auth}" push "$@"
   else
     git push "$@"
@@ -974,7 +976,7 @@ STUB
   unset FORWARD_MERGE_PAT
   rm -rf "$tmpdir"
 
-  [[ "$out" == "PUSHED_WITH_EXTRAHEADER" ]]
+  [[ "$out" == *"::add-mask::"* ]] && [[ "$out" == *"PUSHED_WITH_EXTRAHEADER"* ]]
 }
 
 # ---------------------------------------------------------------------------

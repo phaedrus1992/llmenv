@@ -81,6 +81,13 @@ jobs:
         env:
           CURRENT: ${{ steps.detect.outputs.current }}
           BRANCHES: ${{ steps.detect.outputs.branches }}
+          # Deliberately left at step level, unlike FORWARD_MERGE_PAT below —
+          # any workspace code that runs still inherits GH_TOKEN via env and
+          # via the persisted checkout credential in .git/config either way,
+          # so scoping it here wouldn't contain anything. What actually
+          # closes that exposure is the #1532 fix itself: the changelog.md
+          # arm below only ever runs a pinned, already-verified copy of
+          # scripts/sync-changelog-doc.sh, never the merged tree's.
           GH_TOKEN: ${{ github.token }}
           # Use a fine-grained PAT restricted to just this repository, with
           # only `contents: write` + `workflows: write` — not a classic PAT.
@@ -118,6 +125,10 @@ jobs:
             if [[ -n "$_forward_merge_pat" ]]; then
               local auth
               auth="$(printf 'x-access-token:%s' "$_forward_merge_pat" | base64 -w0)"
+              # GitHub's log scrubber masks the literal PAT value, not its
+              # base64 encoding — register the encoded form too, so a stray
+              # git trace or `set -x` can't print a trivially-reversible copy.
+              echo "::add-mask::$auth"
               git -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${auth}" push "$@"
             else
               git push "$@"
