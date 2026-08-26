@@ -264,11 +264,20 @@ jobs:
                     echo "::error::$file: $script_path differs between $SOURCE_DESC and $TARGET; a script-logic change must be forward-merged and reviewed by hand, not auto-run" >&2
                     return 1
                   fi
-                  tmp_script=$(mktemp) || {
+                  # Materialized inside scripts/ (not /tmp) so the script's
+                  # own `cd "$(dirname "$0")/.."` still lands on the repo
+                  # root, and written from the already-verified
+                  # $target_script (not a second `git show`) so there's no
+                  # gap between what was compared and what runs.
+                  tmp_script=$(mktemp "$PWD/scripts/.sync-changelog-doc.XXXXXX") || {
                     echo "::error::$file: failed to create temp file for $script_path" >&2
                     return 1
                   }
-                  git show "HEAD:$script_path" > "$tmp_script"
+                  printf '%s\n' "$target_script" > "$tmp_script" || {
+                    echo "::error::$file: failed to write pinned copy of $script_path" >&2
+                    rm -f "$tmp_script"
+                    return 1
+                  }
                   if ! bash "$tmp_script"; then
                     echo "::error::$file: scripts/sync-changelog-doc.sh failed to regenerate the changelog" >&2
                     rm -f "$tmp_script"

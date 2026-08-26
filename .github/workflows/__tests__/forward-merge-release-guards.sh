@@ -474,11 +474,19 @@ auto_resolve_conflicts() {
           echo "::error::$file: $script_path differs between $SOURCE_DESC and $TARGET; a script-logic change must be forward-merged and reviewed by hand, not auto-run" >&2
           return 1
         fi
-        tmp_script=$(mktemp) || {
+        # Materialized inside scripts/ (not /tmp) so the script's own
+        # `cd "$(dirname "$0")/.."` still lands on the repo root. Written
+        # from the already-verified $target_script, not a second `git show`,
+        # so there's no gap between what was compared and what runs.
+        tmp_script=$(mktemp "$PWD/scripts/.sync-changelog-doc.XXXXXX") || {
           echo "::error::$file: failed to create temp file for $script_path" >&2
           return 1
         }
-        git show "HEAD:$script_path" > "$tmp_script"
+        printf '%s\n' "$target_script" > "$tmp_script" || {
+          echo "::error::$file: failed to write pinned copy of $script_path" >&2
+          rm -f "$tmp_script"
+          return 1
+        }
         if ! bash "$tmp_script"; then
           echo "::error::$file: scripts/sync-changelog-doc.sh failed to regenerate the changelog" >&2
           rm -f "$tmp_script"
@@ -847,6 +855,70 @@ STUB
 }
 
 # ---------------------------------------------------------------------------
+# Build a repo carrying the REAL, currently-committed scripts/sync-changelog-doc.sh
+# (read from this checkout, not a stub) plus a minimal CHANGELOG-1.md, so the
+# regeneration actually exercises the script's own `cd "$(dirname "$0")/.."`
+# logic. Leaves the caller inside a conflicted `git merge source` on the
+# target branch. Echoes the path.
+# ---------------------------------------------------------------------------
+make_real_changelog_script_repo() {
+  local real_script repo
+  real_script="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/scripts/sync-changelog-doc.sh"
+  repo=$(mktemp -d)
+  (
+    cd "$repo" || exit 1
+    git init -q -b target .
+    git config user.email t@t
+    git config user.name t
+    git config commit.gpgsign false
+    mkdir -p website/docs scripts
+    cp "$real_script" scripts/sync-changelog-doc.sh
+    printf '## [1.0.0] - 2026-01-01\n\n### Added\n\n- Base entry.\n' > CHANGELOG-1.md
+    printf 'base content\n' > website/docs/changelog.md
+    git add website/docs/changelog.md scripts/sync-changelog-doc.sh CHANGELOG-1.md
+    git commit -q -m base
+
+    git switch -q -c source
+    printf 'source content\n' > website/docs/changelog.md
+    git commit -q -am "source change"
+
+    git switch -q target
+    printf 'target content\n' > website/docs/changelog.md
+    git commit -q -am "target change"
+
+    git merge --no-commit --no-ff source >/dev/null 2>&1 || true
+  )
+  printf '%s\n' "$repo"
+}
+
+# ---------------------------------------------------------------------------
+# Test (Issue #1532): the real scripts/sync-changelog-doc.sh actually
+# regenerates website/docs/changelog.md when run through the pinned-copy
+# path — not just a stub that happens to exit 0.
+#
+# The real script does `cd "$(dirname "$0")/.."`, so a pinned copy materialized
+# outside the repo (e.g. a plain `mktemp` under /tmp) resolves that cd to the
+# wrong directory and the script dies before it ever touches changelog.md —
+# exactly the regression the stub-based tests above can't see.
+# ---------------------------------------------------------------------------
+test_1532_real_script_regenerates_changelog() {
+  local repo out regenerated
+  repo=$(make_real_changelog_script_repo)
+
+  out=$(cd "$repo" && SOURCE_REF=source TARGET=main SOURCE_DESC=release/4.x \
+    bash -c "$(resolve_block)" 2>&1 || true)
+  regenerated=$(cat "$repo/website/docs/changelog.md" 2>/dev/null || echo "MISSING")
+  trash "$repo" 2>/dev/null || true
+
+  if [[ "$out" == *RESOLVED* ]] && [[ "$regenerated" == *"1.0.0"* ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  printf '  changelog.md: %s\n' "${regenerated//$'\n'/ | }" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # Test 10 (Issue #1504): push_with_pat scopes the PAT to just the push
 #
 # Mirrors the push_with_pat() helper in forward-merge-release.yml. Verifies
@@ -1077,6 +1149,9 @@ run_test "Issue #1532: a differing scripts/sync-changelog-doc.sh bails instead o
 
 run_test "Issue #1532: FORWARD_MERGE_PAT is not inherited by a spawned subprocess" \
   test_1532_forward_merge_pat_not_inherited_by_subprocess
+
+run_test "Issue #1532: the real sync-changelog-doc.sh regenerates changelog.md through the pinned-copy path" \
+  test_1532_real_script_regenerates_changelog
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
