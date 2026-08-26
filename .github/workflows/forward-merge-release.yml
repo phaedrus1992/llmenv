@@ -142,7 +142,27 @@ jobs:
               # base64 encoding — register the encoded form too, so a stray
               # git trace or `set -x` can't print a trivially-reversible copy.
               echo "::add-mask::$auth"
-              git config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+              # Only "no such key" (git config exit 5) is expected here —
+              # persist-credentials: true always writes this entry, so this
+              # branch is defensive. A bare `|| true` would also swallow a
+              # real config-write failure (e.g. exit 128 outside a git work
+              # tree, exit 255 if .git/config can't be locked), leaving the
+              # persisted header in place and silently reproducing this same
+              # 400 with no trace of why.
+              # `if ! VAR=$(cmd); then RC=$?; fi` would be wrong here: with
+              # the `!` negation, `$?` inside the `then` block reflects the
+              # negated condition (always 0), not cmd's real exit code — see
+              # the FETCH_RC/PUSH_RC pattern above for why this if/else form
+              # is used instead.
+              if UNSET_OUT=$(git config --local --unset-all http.https://github.com/.extraheader 2>&1); then
+                UNSET_RC=0
+              else
+                UNSET_RC=$?
+              fi
+              if [[ $UNSET_RC -ne 0 && $UNSET_RC -ne 5 ]]; then
+                echo "::error::failed to clear persisted extraheader before PAT push (git config exit $UNSET_RC): $UNSET_OUT"
+                exit 1
+              fi
               git -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${auth}" push "$@"
             else
               git push "$@"
