@@ -110,6 +110,12 @@ fn current_timestamp() -> String {
 /// Fail-fast resolver: a resolve error means at least one configured plugin
 /// reference is broken. There's no per-plugin error accumulation today, so
 /// this reports "1 error, 0 known-good" rather than fabricating a count.
+///
+/// Also called from the statusline's live-render path (#1547), same hot-path
+/// contract as `collect_icm`/`collect_tasks`/`collect_session_log` above —
+/// `debug` (not `warn`), since a broken plugin reference here is a config
+/// problem already reported loudly by `regenerate`'s own resolve, not a new
+/// failure worth repeating on every render.
 pub(crate) fn collect_plugins(
     config: &Config,
     active_tags: &BTreeSet<String>,
@@ -119,10 +125,13 @@ pub(crate) fn collect_plugins(
             total: resolved.plugins.len() as u64,
             errors: 0,
         }),
-        Err(_) => Some(CountData {
-            total: 0,
-            errors: 1,
-        }),
+        Err(e) => {
+            tracing::debug!("plugin resolution failed (non-fatal): {e}");
+            Some(CountData {
+                total: 0,
+                errors: 1,
+            })
+        }
     }
 }
 
