@@ -46,9 +46,17 @@ jobs:
       # Print the per-file summary to the job log and fail if total line
       # coverage drops below the baseline minus tolerance. Baseline at the
       # time this landed was 65.12%; see issue #57. No external service.
-      - run: cargo llvm-cov report --summary-only --fail-under-lines 64
+      #
+      # `cargo llvm-cov report` (the non-deprecated way to regenerate a report
+      # from already-collected profile data) does not accept --workspace at
+      # all in cargo-llvm-cov 0.8.4 and silently reports only the root
+      # package — reintroducing #1465 despite the flag already being on the
+      # collection step above. --no-run is deprecated in favor of `report`,
+      # but --workspace still works there and it still reuses the profile
+      # data instead of re-running tests (confirmed: ~3s, not the full suite).
+      - run: cargo llvm-cov --workspace --all-features --no-run --summary-only --fail-under-lines 64
       # Aggregate coverage lets one well-covered file compensate for a poorly
       # covered one (#1508); this gate catches that by holding every file to
       # the same floor individually, mirroring vitest's coverage.thresholds.perFile.
-      - run: cargo llvm-cov report --json --output-path coverage.json
+      - run: cargo llvm-cov --workspace --all-features --no-run --json --output-path coverage.json
       - run: scripts/coverage-per-file-floor.sh coverage.json 40
