@@ -1096,6 +1096,180 @@ STUB
 }
 
 # ---------------------------------------------------------------------------
+# Test (Issue #1540): push_with_pat's PAT header must not collide with the
+# persisted GITHUB_TOKEN extraheader that actions/checkout's
+# persist-credentials: true step already wrote into .git/config.
+#
+# http.extraheader is a multi-valued git config key: a `-c` override on the
+# command line adds a value alongside a persisted one, it does not replace
+# it. Verified directly against real git (not a stub) below, since this is a
+# property of git's own config layering, not of this workflow's logic — an
+# empty `-c key=` override does NOT unset a persisted value either, it adds
+# a third, empty entry. Before the fix, invoking push_with_pat while a
+# persisted extraheader value exists leaves BOTH values in effect, and
+# GitHub's server rejects the resulting double `Authorization` header with a
+# 400 ("Duplicate header"). The fix must remove the persisted local-config
+# entry before setting the PAT's own header via -c, so exactly one
+# Authorization header is in effect.
+#
+# This mirrors push_with_pat with its trailing git subcommand parameterized
+# (production hardcodes `push`) so the test can inspect the resulting git
+# config state via `config --get-all` instead of needing a real remote push.
+# ---------------------------------------------------------------------------
+push_with_pat_header_block() {
+  cat <<'SHELL'
+set -euo pipefail
+_forward_merge_pat="${FORWARD_MERGE_PAT:-}"
+unset FORWARD_MERGE_PAT
+
+push_with_pat() {
+  if [[ -n "$_forward_merge_pat" ]]; then
+    local auth
+    auth="$(printf 'x-access-token:%s' "$_forward_merge_pat" | base64 -w0)"
+    echo "::add-mask::$auth"
+    if UNSET_OUT=$(git config --local --unset-all http.https://github.com/.extraheader 2>&1); then
+      UNSET_RC=0
+    else
+      UNSET_RC=$?
+    fi
+    if [[ $UNSET_RC -ne 0 && $UNSET_RC -ne 5 ]]; then
+      echo "::error::failed to clear persisted extraheader before PAT push (git config exit $UNSET_RC): $UNSET_OUT"
+      exit 1
+    fi
+    git -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${auth}" "$@"
+  else
+    git "$@"
+  fi
+}
+
+push_with_pat config --get-all http.https://github.com/.extraheader
+SHELL
+}
+
+test_1540_push_with_pat_clears_persisted_header_before_setting_new() {
+  local repo out header_count
+  repo=$(mktemp -d)
+  (
+    cd "$repo" || exit 1
+    git init -q .
+    git config user.email t@t
+    git config user.name t
+    git config commit.gpgsign false
+    # Simulate actions/checkout's persist-credentials: true, which writes a
+    # persistent extraheader entry into .git/config for the whole job.
+    git config --local --add http.https://github.com/.extraheader \
+      "AUTHORIZATION: basic PERSISTED_TOKEN"
+  )
+
+  out=$(cd "$repo" && FORWARD_MERGE_PAT="fake-pat-token" \
+    bash -c "$(push_with_pat_header_block)" 2>&1)
+  header_count=$(echo "$out" | grep -c '^AUTHORIZATION: basic')
+  trash "$repo" 2>/dev/null || true
+
+  if [[ "$header_count" -eq 1 ]] && ! echo "$out" | grep -q "PERSISTED_TOKEN"; then
+    return 0
+  fi
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  printf '  header_count: %s\n' "$header_count" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Test (Issue #1540 code review): a real config-write failure while clearing
+# the persisted header must halt the cascade with a diagnostic, not be
+# swallowed the same way the benign "no such key" case (git config exit 5)
+# is. A bare `|| true` on the unset would hide this and silently reproduce
+# the same "Duplicate header" 400, with no trace of the real cause.
+# ---------------------------------------------------------------------------
+test_1540_unset_all_real_failure_is_surfaced_and_halts() {
+  local tmpdir
+
+  tmpdir=$(mktemp -d)
+
+  # git stub: unset-all fails with a non-5 exit code (e.g. a config-file
+  # lock failure). Any git call reached afterward is a sentinel failure —
+  # the branching must halt before it.
+  cat > "$tmpdir/git" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1" == "config" && "$2" == "--local" && "$3" == "--unset-all" ]]; then
+  echo "error: could not lock config file .git/config: Permission denied" >&2
+  exit 255
+fi
+echo "::error::git call reached past the unset-all failure: $*" >&2
+exit 99
+STUB
+  chmod +x "$tmpdir/git"
+
+  local script out rc
+  script=$(push_with_pat_header_block)
+  export FORWARD_MERGE_PAT="fake-pat-token"
+
+  out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1)
+  rc=$?
+  unset FORWARD_MERGE_PAT
+  rm -rf "$tmpdir"
+
+  if [[ $rc -ne 0 ]] \
+      && echo "$out" | grep -q "::error::failed to clear persisted extraheader before PAT push (git config exit 255)" \
+      && ! echo "$out" | grep -q "git call reached past"; then
+    return 0
+  fi
+  printf '  rc: %s\n' "$rc" >&2
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Test (Issue #1540 code review): the benign "no such key" case (git config
+# exit 5 — no persisted header at all) must NOT be treated as an error; the
+# PAT push proceeds normally.
+# ---------------------------------------------------------------------------
+test_1540_unset_all_missing_key_is_silently_tolerated() {
+  local repo out
+  repo=$(mktemp -d)
+  (
+    cd "$repo" || exit 1
+    git init -q .
+    git config user.email t@t
+    git config user.name t
+    git config commit.gpgsign false
+    # Deliberately no persisted extraheader entry.
+  )
+
+  out=$(cd "$repo" && FORWARD_MERGE_PAT="fake-pat-token" \
+    bash -c "$(push_with_pat_header_block)" 2>&1)
+  trash "$repo" 2>/dev/null || true
+
+  if echo "$out" | grep -q "^AUTHORIZATION: basic" && ! echo "$out" | grep -q "::error::"; then
+    return 0
+  fi
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Drift guard (Issue #1540 code review): push_with_pat_header_block above is
+# a hand-maintained mirror of push_with_pat() in forward-merge-release.yml,
+# not an extraction — if production's fix-relevant lines change without this
+# mirror being updated, the tests above would keep passing against stale
+# logic and silently stop covering the real workflow. Assert the exact fixed
+# lines are still present in production so a future edit there fails loudly
+# here instead of drifting unnoticed.
+# ---------------------------------------------------------------------------
+test_1540_test_mirror_matches_production_push_with_pat() {
+  local workflow_file
+  workflow_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/forward-merge-release.yml"
+
+  # shellcheck disable=SC2016 # literal grep -F patterns, not expressions to expand
+  if grep -qF 'git config --local --unset-all http.https://github.com/.extraheader 2>&1' "$workflow_file" \
+      && grep -qF 'git -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${auth}" push "$@"' "$workflow_file"; then
+    return 0
+  fi
+  echo "  production's push_with_pat() no longer matches the lines this file mirrors — update push_with_pat_header_block and push_with_pat_block above" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
 run_test "Issue #476: branch-exists guard prevents overwrite of in-progress resolution" \
@@ -1154,6 +1328,18 @@ run_test "Issue #1532: FORWARD_MERGE_PAT is not inherited by a spawned subproces
 
 run_test "Issue #1532: the real sync-changelog-doc.sh regenerates changelog.md through the pinned-copy path" \
   test_1532_real_script_regenerates_changelog
+
+run_test "Issue #1540: push_with_pat clears the persisted extraheader before setting its own" \
+  test_1540_push_with_pat_clears_persisted_header_before_setting_new
+
+run_test "Issue #1540: a real config-write failure while clearing the header is surfaced and halts" \
+  test_1540_unset_all_real_failure_is_surfaced_and_halts
+
+run_test "Issue #1540: the benign no-such-key case is silently tolerated" \
+  test_1540_unset_all_missing_key_is_silently_tolerated
+
+run_test "Issue #1540: the test mirror still matches production's push_with_pat()" \
+  test_1540_test_mirror_matches_production_push_with_pat
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
