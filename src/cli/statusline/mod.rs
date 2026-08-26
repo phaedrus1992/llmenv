@@ -173,15 +173,35 @@ pub fn run_statusline(
     // whatever the snapshot already has, not a full scope re-evaluation
     // (which would add an unbounded content-scope directory walk and an
     // untimed network-scope subprocess fork to every render).
-    let mut tags: std::collections::BTreeSet<String> = status_data
+    let original_tags: std::collections::BTreeSet<String> = status_data
         .scopes
         .as_ref()
         .map(|s| s.tags.iter().cloned().collect())
         .unwrap_or_default();
+    let mut tags = original_tags.clone();
     tags.extend(live_extra_tags.iter().cloned());
     status_data.scopes = Some(data::ScopesData {
-        tags: tags.into_iter().collect(),
+        tags: tags.iter().cloned().collect(),
     });
+
+    // #1547: `plugins`, `mcps`, and `throttle` are also tag-gated and only
+    // recomputed at `regenerate` time, same root cause as #1538. `plugins`
+    // resolves purely from top-level `config` (no merged-manifest input,
+    // unlike `mcps`'s bundle-contributed servers or `throttle`'s merged
+    // throttle list) — cheap enough to re-run against the live tag set on
+    // every render instead of trusting a possibly-stale snapshot count.
+    status_data.plugins = crate::materialize::collect_plugins(config, &tags);
+
+    // `mcps`/`throttle` can't cheaply live-refresh: their resolvers need the
+    // merged manifest's bundle-contributed data, which isn't available from
+    // `config` alone at render time without rebuilding it (the expensive
+    // work `regenerate` does). A live tag not already in the snapshot means
+    // the tag set active when they were last resolved may no longer match,
+    // so flag them stale instead of silently showing a possibly-wrong count.
+    // Only detects additions, same asymmetric limitation as the `scopes`
+    // union above — a tag *removed* from `$LLMENV_EXTRA_TAGS` since the last
+    // regenerate isn't detectable from the snapshot alone.
+    let tags_drifted = live_extra_tags.iter().any(|t| !original_tags.contains(t));
 
     let cfg = config.statusline.clone().unwrap_or_default();
     // Global colour opt-out: `statusline.style.color: false` forces plain text
@@ -211,7 +231,14 @@ pub fn run_statusline(
                     let widget_cfg = cfg.widgets.get(&name);
                     let resolved = render_engine_widget(&name, &engine_data, widget_cfg, use_color)
                         .or_else(|| {
-                            render_llmenv_widget(&name, &status_data, widget_cfg, &icons, use_color)
+                            render_llmenv_widget(
+                                &name,
+                                &status_data,
+                                widget_cfg,
+                                &icons,
+                                use_color,
+                                tags_drifted,
+                            )
                         });
                     // `None` from both renderers means `name` isn't a
                     // recognized widget at all (typo, or a renamed/removed
@@ -353,7 +380,20 @@ mod tests {
 
     #[test]
     fn renders_llmenv_widgets_from_real_data_file() {
+        // `plugins` is live-recomputed from `config` on every render (#1547),
+        // not read from the snapshot below — so `config` must declare a
+        // collection that resolves to the same count the snapshot's stale
+        // `plugins.total: 3` claims, gated on a tag already in the snapshot.
         let config = llmenv_config::Config {
+            marketplace: vec![llmenv_config::Marketplace {
+                name: "mk".into(),
+                source: "https://example.com/mk".into(),
+            }],
+            plugin_collection: vec![llmenv_config::PluginCollection {
+                name: "core".into(),
+                when: vec!["rust".into()],
+                plugins: vec!["mk:one".into(), "mk:two".into(), "mk:three".into()],
+            }],
             statusline: Some(StatuslineConfig {
                 rows: vec![
                     "{scopes} {plugins} {mcps} {icm} {cache} {config_stale} {throttle} {session_log}"
@@ -447,6 +487,187 @@ mod tests {
         .unwrap();
 
         assert!(out.contains("dev · python · rust"), "expected union: {out}");
+    }
+
+    #[test]
+    fn plugins_widget_recomputes_live_when_tags_drift() {
+        // Regression coverage for #1547: unlike mcps/throttle (which need the
+        // merged manifest's bundle-contributed data, unavailable at render
+        // time), `plugins` resolves entirely from top-level `config` — cheap
+        // enough to re-run against the live tag set on every render instead
+        // of trusting a possibly-stale snapshot count.
+        let config = llmenv_config::Config {
+            marketplace: vec![llmenv_config::Marketplace {
+                name: "mk".into(),
+                source: "https://example.com/mk".into(),
+            }],
+            plugin_collection: vec![llmenv_config::PluginCollection {
+                name: "core".into(),
+                when: vec!["python".into()],
+                plugins: vec!["mk:one".into()],
+            }],
+            statusline: Some(StatuslineConfig {
+                rows: vec!["{plugins}".to_string()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let data_path = dir.path().join("llmenv-status.json");
+        std::fs::write(
+            &data_path,
+            serde_json::json!({
+                "$schema": "llmenv-status-v1", "v": 1, "ts": "x",
+                "scopes": { "tags": ["dev"] },
+                "plugins": { "total": 0, "errors": 0 }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // Simulates `$LLMENV_EXTRA_TAGS=python` being exported after the
+        // snapshot above was written by the last `llmenv regenerate` — the
+        // stored `plugins.total: 0` predates the collection becoming active.
+        let live_extra_tags: std::collections::BTreeSet<String> =
+            ["python".to_string()].into_iter().collect();
+        let stdin = b"{}";
+        let out = run_statusline(
+            &config,
+            &data_path,
+            &mut &stdin[..],
+            false,
+            &live_extra_tags,
+        )
+        .unwrap();
+
+        assert!(
+            out.contains("\u{1f50c} 1"), // 🔌 1
+            "expected live-refreshed plugin count: {out}"
+        );
+    }
+
+    #[test]
+    fn mcps_widget_shows_stale_indicator_when_tags_drift() {
+        // #1547: mcps can't cheaply live-refresh (its bundle-contributed
+        // servers need the merged manifest, unavailable at render time), so
+        // a tag-set drift since the last regenerate must surface as a
+        // visible staleness marker instead of a silently wrong count.
+        let config = llmenv_config::Config {
+            statusline: Some(StatuslineConfig {
+                rows: vec!["{mcps}".to_string()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let data_path = dir.path().join("llmenv-status.json");
+        std::fs::write(
+            &data_path,
+            serde_json::json!({
+                "$schema": "llmenv-status-v1", "v": 1, "ts": "x",
+                "scopes": { "tags": ["dev"] },
+                "mcps": { "total": 2, "errors": 0 }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let live_extra_tags: std::collections::BTreeSet<String> =
+            ["python".to_string()].into_iter().collect();
+        let stdin = b"{}";
+        let out = run_statusline(
+            &config,
+            &data_path,
+            &mut &stdin[..],
+            false,
+            &live_extra_tags,
+        )
+        .unwrap();
+
+        assert!(out.contains("MCP 2"), "expected snapshot count kept: {out}");
+        assert!(
+            out.contains('~'), // default icon set glyph for config_stale
+            "expected stale marker when tags drifted: {out}"
+        );
+    }
+
+    #[test]
+    fn mcps_widget_has_no_stale_indicator_when_tags_unchanged() {
+        let config = llmenv_config::Config {
+            statusline: Some(StatuslineConfig {
+                rows: vec!["{mcps}".to_string()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let data_path = dir.path().join("llmenv-status.json");
+        std::fs::write(
+            &data_path,
+            serde_json::json!({
+                "$schema": "llmenv-status-v1", "v": 1, "ts": "x",
+                "scopes": { "tags": ["dev"] },
+                "mcps": { "total": 2, "errors": 0 }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let stdin = b"{}";
+        let out = run_statusline(
+            &config,
+            &data_path,
+            &mut &stdin[..],
+            false,
+            &std::collections::BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(out.trim_end(), "MCP 2", "no stale marker without drift");
+    }
+
+    #[test]
+    fn throttle_widget_shows_stale_indicator_when_tags_drift() {
+        let config = llmenv_config::Config {
+            statusline: Some(StatuslineConfig {
+                rows: vec!["{throttle}".to_string()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let data_path = dir.path().join("llmenv-status.json");
+        std::fs::write(
+            &data_path,
+            serde_json::json!({
+                "$schema": "llmenv-status-v1", "v": 1, "ts": "x",
+                "scopes": { "tags": ["dev"] },
+                "throttle": { "backend": "icm", "cooldown_secs": 45 }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let live_extra_tags: std::collections::BTreeSet<String> =
+            ["python".to_string()].into_iter().collect();
+        let stdin = b"{}";
+        let out = run_statusline(
+            &config,
+            &data_path,
+            &mut &stdin[..],
+            false,
+            &live_extra_tags,
+        )
+        .unwrap();
+
+        assert!(
+            out.contains("icm: 45s"),
+            "expected snapshot value kept: {out}"
+        );
+        assert!(
+            out.contains('~'), // default icon set glyph for config_stale
+            "expected stale marker when tags drifted: {out}"
+        );
     }
 
     #[test]

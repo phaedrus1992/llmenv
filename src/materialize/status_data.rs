@@ -110,7 +110,10 @@ fn current_timestamp() -> String {
 /// Fail-fast resolver: a resolve error means at least one configured plugin
 /// reference is broken. There's no per-plugin error accumulation today, so
 /// this reports "1 error, 0 known-good" rather than fabricating a count.
-fn collect_plugins(config: &Config, active_tags: &BTreeSet<String>) -> Option<CountData> {
+pub(crate) fn collect_plugins(
+    config: &Config,
+    active_tags: &BTreeSet<String>,
+) -> Option<CountData> {
     match crate::plugins::resolve::resolve_plugins(config, active_tags) {
         Ok(resolved) => Some(CountData {
             total: resolved.plugins.len() as u64,

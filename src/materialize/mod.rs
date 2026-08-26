@@ -6,7 +6,7 @@ pub(crate) mod schema_gen;
 pub mod state;
 mod status_data;
 
-pub(crate) use status_data::{ConfigStaleInputs, collect_status_data};
+pub(crate) use status_data::{ConfigStaleInputs, collect_plugins, collect_status_data};
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
