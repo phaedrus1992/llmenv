@@ -28,6 +28,15 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
+          # GITHUB_TOKEN can never push a change that touches
+          # .github/workflows/*.yml (GitHub's own restriction, not this job's
+          # permissions). A source release branch's cascade only crosses that
+          # boundary when its own workflow files differ from a target's, but
+          # the cascade can't know that in advance, so every push uses the PAT
+          # once it's set. Falls back to the default token if the secret is
+          # unset, so the workflow keeps working (minus workflow-file pushes)
+          # before FORWARD_MERGE_PAT is added.
+          token: ${{ secrets.FORWARD_MERGE_PAT || github.token }}
 
       - name: Configure git
         run: |
