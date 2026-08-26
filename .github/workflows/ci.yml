@@ -14,6 +14,14 @@ jobs:
   # and blocking merge permanently — GitHub only treats a job-level `if:` skip
   # as a passing "Success", not a workflow that never triggered. So this job
   # always runs and each downstream job gates itself via `needs`/`if` instead.
+  #
+  # `test` must NOT use a matrix (#1536): a matrix job skipped via a
+  # top-level `if:` is skipped *before* matrix expansion, so GitHub reports
+  # the bare job name ("test"), never the matrix-expanded required-check
+  # name ("test (ubuntu-latest)"). That required check then never receives
+  # any status at all and blocks merge forever — unlike `deny`/`hawk` below,
+  # which aren't matrixed and correctly report their skip under their exact
+  # required-check name.
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -45,11 +53,7 @@ jobs:
   test:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -72,7 +76,7 @@ jobs:
             ~/.rustup/update-hashes
             ~/.rustup/settings.toml
           # Keep toolchain + components in the key in sync with the step below.
-          key: &rustup-cache-key rustup-${{ matrix.os }}-${{ hashFiles('rust-toolchain.toml') }}
+          key: &rustup-cache-key rustup-ubuntu-latest-${{ hashFiles('rust-toolchain.toml') }}
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # master
         with:
           toolchain: 1.97
