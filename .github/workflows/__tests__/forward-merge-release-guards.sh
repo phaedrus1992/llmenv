@@ -447,7 +447,11 @@ version_only_change() {
 }
 
 auto_resolve_conflicts() {
-  local file
+  local file conflicted_files remaining
+  conflicted_files="$(git diff --name-only --diff-filter=U)" || {
+    echo "::error::failed to list conflicted files" >&2
+    return 1
+  }
   while IFS= read -r file; do
     [[ -n "$file" ]] || continue
     case "$file" in
@@ -471,8 +475,12 @@ auto_resolve_conflicts() {
         return 1
         ;;
     esac
-  done < <(git diff --name-only --diff-filter=U)
-  [[ -z "$(git diff --name-only --diff-filter=U)" ]]
+  done <<< "$conflicted_files"
+  remaining="$(git diff --name-only --diff-filter=U)" || {
+    echo "::error::failed to verify remaining conflicts" >&2
+    return 1
+  }
+  [[ -z "$remaining" ]]
 }
 
 if auto_resolve_conflicts; then
@@ -557,6 +565,46 @@ test_1381_non_version_change_bails() {
   trash "$repo" 2>/dev/null || true
 
   if [[ "$out" == *BAILED* ]] && [[ "$out" == *"more than version numbers"* ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Test (Issue #1525): a `git diff` failure inside auto_resolve_conflicts
+# fails loudly instead of being read as "no conflicted files left".
+#
+# The old code streamed `git diff --name-only --diff-filter=U` straight into
+# a `while read ... done < <(...)` and re-ran the same command bare in the
+# closing `[[ -z "$(...)" ]]` check. Either form hides a `git diff` failure
+# under `set -e`: a process substitution's exit status is invisible to the
+# consuming loop, and a bare `$(...)` failure still yields an empty string
+# that reads as "nothing left" — so a transient failure would report
+# RESOLVED with a real conflict left unprocessed in the tree.
+# ---------------------------------------------------------------------------
+test_1525_auto_resolve_conflicts_fails_on_git_diff_failure() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+
+  cat > "$tmpdir/git" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1" == "diff" && "$2" == "--name-only" && "$3" == "--diff-filter=U" ]]; then
+  exit 1
+fi
+exit 0
+STUB
+  chmod +x "$tmpdir/git"
+
+  local script out
+  script=$(resolve_block)
+  export SOURCE_REF=source TARGET=main SOURCE_DESC=release/4.x
+
+  out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1 || true)
+  unset SOURCE_REF TARGET SOURCE_DESC
+  rm -rf "$tmpdir"
+
+  if [[ "$out" == *BAILED* ]] && [[ "$out" == *"failed to list conflicted files"* ]]; then
     return 0
   fi
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
@@ -763,6 +811,9 @@ run_test "Issue #1381: version-only manifest conflict keeps the target's version
 
 run_test "Issue #1381: a manifest change beyond the version bails instead of dropping it" \
   test_1381_non_version_change_bails
+
+run_test "Issue #1525: a git diff failure inside auto_resolve_conflicts fails loudly" \
+  test_1525_auto_resolve_conflicts_fails_on_git_diff_failure
 
 run_test "Issue #1504: push_with_pat authenticates with the PAT when the secret is set" \
   test_1504_push_with_pat_uses_pat_when_set

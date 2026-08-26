@@ -200,7 +200,16 @@ jobs:
           #     manifests *and* its Cargo.lock leaves the pair mutually
           #     consistent, so no `cargo` run is needed to repair the lock.
           auto_resolve_conflicts() {
-            local file
+            local file conflicted_files remaining
+            # Captured to a variable (not streamed via `< <(git diff ...)`) so
+            # `set -e` sees a `git diff` failure: a process substitution's
+            # exit status is invisible to the while/read loop consuming it, so
+            # a transient `git diff` failure would otherwise run the loop zero
+            # times and fall through to the closing re-check below.
+            conflicted_files="$(git diff --name-only --diff-filter=U)" || {
+              echo "::error::failed to list conflicted files" >&2
+              return 1
+            }
             while IFS= read -r file; do
               [[ -n "$file" ]] || continue
               case "$file" in
@@ -224,8 +233,14 @@ jobs:
                   return 1
                   ;;
               esac
-            done < <(git diff --name-only --diff-filter=U)
-            [[ -z "$(git diff --name-only --diff-filter=U)" ]]
+            done <<< "$conflicted_files"
+            # Same capture-first reasoning as above: this re-check must not
+            # silently read as "nothing left" just because `git diff` failed.
+            remaining="$(git diff --name-only --diff-filter=U)" || {
+              echo "::error::failed to verify remaining conflicts" >&2
+              return 1
+            }
+            [[ -z "$remaining" ]]
           }
 
           for TARGET in "${TARGETS[@]}"; do

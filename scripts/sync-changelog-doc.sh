@@ -30,6 +30,22 @@ FRONTMATTER
 # so the combined output has only one preamble.
 #
 # Discovers CHANGELOG-N.md files dynamically — no hardcoded list.
+#
+# Captured to a temp file (not streamed via `< <(find | sort)`) so `set -e`
+# sees a `find` or `sort` failure: a process substitution's exit status is
+# invisible to the while/read loop consuming it, so either command failing
+# would otherwise run the loop over whatever partial output happened to
+# exist and silently regenerate an incomplete changelog. A temp file (not a
+# plain variable) because the list is NUL-delimited, and bash string
+# variables can't hold embedded NUL bytes.
+CHANGELOG_LIST="$(mktemp)"
+trap 'rm -f "$CHANGELOG_LIST"' EXIT
+if ! find . -maxdepth 1 -name 'CHANGELOG-*.md' -print0 \
+    | sort -t- -k2 -n -r -z > "$CHANGELOG_LIST"; then
+  echo "::error::failed to list CHANGELOG-*.md files" >&2
+  exit 1
+fi
+
 first=true
 while IFS= read -r -d '' f; do
   f="${f#./}"
@@ -63,6 +79,6 @@ while IFS= read -r -d '' f; do
       s/\n+$/\n/;
     ' "$f" >> website/docs/changelog.md
   fi
-done < <(find . -maxdepth 1 -name 'CHANGELOG-*.md' -print0 | sort -t- -k2 -n -r -z)
+done < "$CHANGELOG_LIST"
 
 echo "Done. website/docs/changelog.md regenerated."
