@@ -84,14 +84,24 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           # Use a fine-grained PAT restricted to just this repository, with
           # only `contents: write` + `workflows: write` — not a classic PAT.
-          # This step's env inherits into any script it calls (e.g.
-          # scripts/sync-changelog-doc.sh, during conflict auto-resolution),
-          # so a classic repo-scoped PAT would let anyone who can land a
-          # commit on release/** exfiltrate access to every repository the
-          # PAT's owner can reach, not just this one.
+          # A classic repo-scoped PAT would let anyone who can land a commit
+          # on release/** exfiltrate access to every repository the PAT's
+          # owner can reach, not just this one — captured into a local
+          # variable and removed from this step's own env below (#1532) so it
+          # can't inherit into any script the cascade calls (e.g.
+          # scripts/sync-changelog-doc.sh, during conflict auto-resolution).
           FORWARD_MERGE_PAT: ${{ secrets.FORWARD_MERGE_PAT }}
         run: |
           set -euo pipefail
+
+          # #1532: capture the PAT into a local (non-exported) shell variable,
+          # then unset it from this process's own environment immediately —
+          # only push_with_pat, which reads the local variable directly,
+          # still has access. Any subprocess this step spawns from here on
+          # (bash scripts/sync-changelog-doc.sh included) no longer inherits
+          # it.
+          _forward_merge_pat="${FORWARD_MERGE_PAT:-}"
+          unset FORWARD_MERGE_PAT
 
           # GITHUB_TOKEN can never push a change that touches
           # .github/workflows/*.yml (GitHub's own restriction, not this job's
@@ -105,9 +115,9 @@ jobs:
           # to the default token if the secret is unset, so the workflow keeps
           # working (minus workflow-file pushes) before FORWARD_MERGE_PAT is added.
           push_with_pat() {
-            if [[ -n "${FORWARD_MERGE_PAT:-}" ]]; then
+            if [[ -n "$_forward_merge_pat" ]]; then
               local auth
-              auth="$(printf 'x-access-token:%s' "$FORWARD_MERGE_PAT" | base64 -w0)"
+              auth="$(printf 'x-access-token:%s' "$_forward_merge_pat" | base64 -w0)"
               git -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${auth}" push "$@"
             else
               git push "$@"
@@ -230,10 +240,41 @@ jobs:
                     echo "::error::$file: git checkout --ours failed" >&2
                     return 1
                   }
-                  bash scripts/sync-changelog-doc.sh || {
-                    echo "::error::$file: scripts/sync-changelog-doc.sh failed to regenerate the changelog" >&2
+                  # #1532: never run the merged working tree's copy of this
+                  # script — scripts/sync-changelog-doc.sh isn't itself
+                  # conflicted (only changelog.md is), so a source-branch
+                  # commit that edits the script would merge in silently and
+                  # then execute here with FORWARD_MERGE_PAT/GH_TOKEN in env.
+                  # Diff the source's copy against the target's own (HEAD,
+                  # i.e. before this merge) instead: identical means it's
+                  # safe to run the target's already-reviewed copy; any
+                  # difference means the script's logic changed as part of
+                  # this release and must be forward-merged and reconciled by
+                  # a human, not auto-run blind.
+                  local script_path="scripts/sync-changelog-doc.sh" target_script source_script tmp_script
+                  target_script=$(git show "HEAD:$script_path" 2>/dev/null) || {
+                    echo "::error::$file: failed to read $TARGET's copy of $script_path" >&2
                     return 1
                   }
+                  source_script=$(git show "$SOURCE_REF:$script_path" 2>/dev/null) || {
+                    echo "::error::$file: failed to read $SOURCE_DESC's copy of $script_path" >&2
+                    return 1
+                  }
+                  if [[ "$target_script" != "$source_script" ]]; then
+                    echo "::error::$file: $script_path differs between $SOURCE_DESC and $TARGET; a script-logic change must be forward-merged and reviewed by hand, not auto-run" >&2
+                    return 1
+                  fi
+                  tmp_script=$(mktemp) || {
+                    echo "::error::$file: failed to create temp file for $script_path" >&2
+                    return 1
+                  }
+                  git show "HEAD:$script_path" > "$tmp_script"
+                  if ! bash "$tmp_script"; then
+                    echo "::error::$file: scripts/sync-changelog-doc.sh failed to regenerate the changelog" >&2
+                    rm -f "$tmp_script"
+                    return 1
+                  fi
+                  rm -f "$tmp_script"
                   git add -- "$file"
                   ;;
                 Cargo.toml | Cargo.lock | crates/*/Cargo.toml)
@@ -348,7 +389,7 @@ jobs:
             # push entirely and always go through the PR path below, where
             # required checks run before a human merges it.
             PUSH_SKIPPED=0
-            if [[ -n "${FORWARD_MERGE_PAT:-}" ]]; then
+            if [[ -n "$_forward_merge_pat" ]]; then
               PUSH_SKIPPED=1
               PUSH_RC=1
               PUSH_STDERR=""
