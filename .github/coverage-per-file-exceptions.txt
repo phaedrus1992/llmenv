@@ -1,0 +1,10 @@
+# Files grandfathered below coverage-per-file-floor.sh's floor at the time
+# the gate was added (#1508). One relative path per line. Remove a line once
+# its file clears the floor; don't add new lines without a follow-up issue.
+
+# 10.10% at gate introduction; tracked in #1521.
+src/cli/status.rs
+
+# 38.24% in CI at gate introduction (51.47% locally on macOS — platform
+# delta not yet understood); tracked in #1528.
+src/memory/mod.rs
