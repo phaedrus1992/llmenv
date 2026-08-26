@@ -143,6 +143,13 @@ fn default_style(name: &str) -> &'static str {
 /// silently — unlike a *recognized* widget with nothing to show (e.g. `pr`
 /// with no open PR), which still renders empty.
 ///
+/// `live_extra_tags` must already be validated — the caller is expected to
+/// have run it through `matcher::extra_tags_from_env` (or equivalently
+/// `matcher::sanitize_tags`), the same charset/length/count checks every
+/// other tag source in this crate goes through. This function does not
+/// re-validate it; `render_scopes` only strips control characters before
+/// display, not the tag charset.
+///
 /// # Errors
 ///
 /// Returns an error if `stdin` cannot be read (not for malformed JSON on it,
@@ -152,19 +159,28 @@ pub fn run_statusline(
     data_path: &std::path::Path,
     stdin: &mut impl Read,
     use_color: bool,
-    active_tags: &std::collections::BTreeSet<String>,
+    live_extra_tags: &std::collections::BTreeSet<String>,
 ) -> anyhow::Result<String> {
     let mut stdin_buf = String::new();
     stdin.read_to_string(&mut stdin_buf)?;
     let engine_data: EngineData = serde_json::from_str(&stdin_buf).unwrap_or_default();
     let mut status_data = StatusData::load(data_path);
     // The snapshot file is only rewritten by `llmenv regenerate`, so its
-    // `scopes` field goes stale the moment `$LLMENV_EXTRA_TAGS` (or any other
-    // env-driven scope input) changes mid-session (#1538). Every other widget
-    // stays snapshot-sourced; only scopes needs live data, and the caller
-    // already resolved it cheaply via `Env::detect_for_config`.
+    // `scopes` field goes stale the moment `$LLMENV_EXTRA_TAGS` changes
+    // mid-session (#1538). Every other tag source (host/user/os/network/
+    // project/content scopes) only changes on a `regenerate` anyway, so only
+    // `$LLMENV_EXTRA_TAGS` needs to be re-read live here — unioned onto
+    // whatever the snapshot already has, not a full scope re-evaluation
+    // (which would add an unbounded content-scope directory walk and an
+    // untimed network-scope subprocess fork to every render).
+    let mut tags: std::collections::BTreeSet<String> = status_data
+        .scopes
+        .as_ref()
+        .map(|s| s.tags.iter().cloned().collect())
+        .unwrap_or_default();
+    tags.extend(live_extra_tags.iter().cloned());
     status_data.scopes = Some(data::ScopesData {
-        tags: active_tags.iter().cloned().collect(),
+        tags: tags.into_iter().collect(),
     });
 
     let cfg = config.statusline.clone().unwrap_or_default();
@@ -368,14 +384,15 @@ mod tests {
         )
         .unwrap();
 
-        // scopes now comes from the live `active_tags` param, not the file —
-        // pass a matching set so this test still covers every other widget's
-        // file-sourced rendering path unchanged.
-        let live_tags: std::collections::BTreeSet<String> = ["dev".to_string(), "rust".to_string()]
-            .into_iter()
-            .collect();
         let stdin = b"{}";
-        let out = run_statusline(&config, &data_path, &mut &stdin[..], false, &live_tags).unwrap();
+        let out = run_statusline(
+            &config,
+            &data_path,
+            &mut &stdin[..],
+            false,
+            &std::collections::BTreeSet::new(),
+        )
+        .unwrap();
 
         assert!(out.contains("dev · rust"), "scopes widget: {out}");
         assert!(out.contains("🔌 3"), "plugins widget: {out}");
@@ -387,11 +404,13 @@ mod tests {
     }
 
     #[test]
-    fn scopes_widget_reflects_live_tags_not_stale_snapshot() {
+    fn scopes_widget_unions_live_extra_tags_onto_stale_snapshot() {
         // Regression test for #1538: the snapshot file is only rewritten on
-        // `llmenv regenerate`, so a tag added mid-session (e.g. via
-        // `$LLMENV_EXTRA_TAGS`) must still show up in the statusline without
-        // requiring a regenerate.
+        // `llmenv regenerate`, so a tag added mid-session via
+        // `$LLMENV_EXTRA_TAGS` must still show up in the statusline without
+        // requiring a regenerate — unioned onto whatever the snapshot's last
+        // regenerate already wrote (host/user/other scope tags), not a full
+        // replacement of them.
         let config = llmenv_config::Config {
             statusline: Some(StatuslineConfig {
                 rows: vec!["{scopes}".to_string()],
@@ -413,18 +432,21 @@ mod tests {
         )
         .unwrap();
 
-        let live_tags: std::collections::BTreeSet<String> =
-            ["dev".to_string(), "python".to_string()]
-                .into_iter()
-                .collect();
+        // Simulates `$LLMENV_EXTRA_TAGS=python` being exported after the
+        // snapshot above was written by the last `llmenv regenerate`.
+        let live_extra_tags: std::collections::BTreeSet<String> =
+            ["python".to_string()].into_iter().collect();
         let stdin = b"{}";
-        let out = run_statusline(&config, &data_path, &mut &stdin[..], false, &live_tags).unwrap();
+        let out = run_statusline(
+            &config,
+            &data_path,
+            &mut &stdin[..],
+            false,
+            &live_extra_tags,
+        )
+        .unwrap();
 
-        assert!(out.contains("dev · python"), "expected live tags: {out}");
-        assert!(
-            !out.contains("rust"),
-            "must not show stale snapshot tag: {out}"
-        );
+        assert!(out.contains("dev · python · rust"), "expected union: {out}");
     }
 
     #[test]
