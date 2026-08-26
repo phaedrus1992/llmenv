@@ -156,14 +156,25 @@ impl Env {
                 .flatten(),
             home,
             os: std::env::consts::OS.to_string(),
-            extra_tags: match std::env::var("LLMENV_EXTRA_TAGS") {
-                Ok(raw) => parse_extra_tags(&raw),
-                Err(std::env::VarError::NotPresent) => Vec::new(),
-                Err(std::env::VarError::NotUnicode(_)) => {
-                    tracing::warn!("$LLMENV_EXTRA_TAGS is not valid UTF-8; extra tags disabled");
-                    Vec::new()
-                }
-            },
+            extra_tags: extra_tags_from_env(),
+        }
+    }
+}
+
+/// Read and validate `$LLMENV_EXTRA_TAGS` from the process environment.
+/// Pulled out of [`Env::detect_fresh`] so callers that need only this one
+/// env-derived tag source — not a full [`Env::detect`] — can read it without
+/// paying for hostname/cwd/gateway-MAC detection (#1538: the statusline
+/// re-reads this live on every render, and a full `Env::detect` would also
+/// fork `route`/`arp` whenever a network scope is configured).
+#[must_use]
+pub fn extra_tags_from_env() -> Vec<String> {
+    match std::env::var("LLMENV_EXTRA_TAGS") {
+        Ok(raw) => parse_extra_tags(&raw),
+        Err(std::env::VarError::NotPresent) => Vec::new(),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            tracing::warn!("$LLMENV_EXTRA_TAGS is not valid UTF-8; extra tags disabled");
+            Vec::new()
         }
     }
 }
