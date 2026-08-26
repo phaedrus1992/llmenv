@@ -461,10 +461,38 @@ auto_resolve_conflicts() {
           echo "::error::$file: git checkout --ours failed" >&2
           return 1
         }
-        bash scripts/sync-changelog-doc.sh || {
-          echo "::error::$file: scripts/sync-changelog-doc.sh failed to regenerate the changelog" >&2
+        local script_path="scripts/sync-changelog-doc.sh" target_script source_script tmp_script
+        target_script=$(git show "HEAD:$script_path" 2>/dev/null) || {
+          echo "::error::$file: failed to read $TARGET's copy of $script_path" >&2
           return 1
         }
+        source_script=$(git show "$SOURCE_REF:$script_path" 2>/dev/null) || {
+          echo "::error::$file: failed to read $SOURCE_DESC's copy of $script_path" >&2
+          return 1
+        }
+        if [[ "$target_script" != "$source_script" ]]; then
+          echo "::error::$file: $script_path differs between $SOURCE_DESC and $TARGET; a script-logic change must be forward-merged and reviewed by hand, not auto-run" >&2
+          return 1
+        fi
+        # Materialized inside scripts/ (not /tmp) so the script's own
+        # `cd "$(dirname "$0")/.."` still lands on the repo root. Written
+        # from the already-verified $target_script, not a second `git show`,
+        # so there's no gap between what was compared and what runs.
+        tmp_script=$(mktemp "$PWD/scripts/.sync-changelog-doc.XXXXXX") || {
+          echo "::error::$file: failed to create temp file for $script_path" >&2
+          return 1
+        }
+        printf '%s\n' "$target_script" > "$tmp_script" || {
+          echo "::error::$file: failed to write pinned copy of $script_path" >&2
+          rm -f "$tmp_script"
+          return 1
+        }
+        if ! bash "$tmp_script"; then
+          echo "::error::$file: scripts/sync-changelog-doc.sh failed to regenerate the changelog" >&2
+          rm -f "$tmp_script"
+          return 1
+        fi
+        rm -f "$tmp_script"
         git add -- "$file"
         ;;
       Cargo.toml | Cargo.lock | crates/*/Cargo.toml)
@@ -629,9 +657,10 @@ make_changelog_conflict_repo() {
     git config user.email t@t
     git config user.name t
     git config commit.gpgsign false
-    mkdir -p website/docs
+    mkdir -p website/docs scripts
     printf 'base content\n' > website/docs/changelog.md
-    git add website/docs/changelog.md
+    printf 'exit 1\n' > scripts/sync-changelog-doc.sh
+    git add website/docs/changelog.md scripts/sync-changelog-doc.sh
     git commit -q -m base
 
     git switch -q -c source
@@ -643,13 +672,6 @@ make_changelog_conflict_repo() {
     git commit -q -am "target change"
 
     git merge --no-commit --no-ff source >/dev/null 2>&1 || true
-
-    mkdir -p scripts
-    cat > scripts/sync-changelog-doc.sh <<'SH'
-#!/usr/bin/env bash
-exit 1
-SH
-    chmod +x scripts/sync-changelog-doc.sh
   )
   printf '%s\n' "$repo"
 }
@@ -683,6 +705,221 @@ test_1525_changelog_regeneration_failure_bails() {
 }
 
 # ---------------------------------------------------------------------------
+# Build a repo where target and source both carry scripts/sync-changelog-doc.sh
+# (with the given, possibly differing, content) plus a changelog.md conflict.
+# Only target commits touch changelog.md and only source commits touch the
+# script, so the script itself never conflicts — it merges silently, which is
+# exactly the Issue #1532 scenario. Leaves the caller inside a conflicted
+# `git merge source` on the target branch. Echoes the path.
+# ---------------------------------------------------------------------------
+make_changelog_script_repo() {
+  local target_script="$1" source_script="$2" repo
+  repo=$(mktemp -d)
+  (
+    cd "$repo" || exit 1
+    git init -q -b target .
+    git config user.email t@t
+    git config user.name t
+    git config commit.gpgsign false
+    mkdir -p website/docs scripts
+    printf 'base content\n' > website/docs/changelog.md
+    printf '%s\n' "$target_script" > scripts/sync-changelog-doc.sh
+    git add website/docs/changelog.md scripts/sync-changelog-doc.sh
+    git commit -q -m base
+
+    git switch -q -c source
+    printf 'source content\n' > website/docs/changelog.md
+    printf '%s\n' "$source_script" > scripts/sync-changelog-doc.sh
+    git commit -q -am "source change"
+
+    git switch -q target
+    printf 'target content\n' > website/docs/changelog.md
+    git commit -q -am "target change"
+
+    git merge --no-commit --no-ff source >/dev/null 2>&1 || true
+  )
+  printf '%s\n' "$repo"
+}
+
+# ---------------------------------------------------------------------------
+# Test (Issue #1532): identical script on source and target runs the target's
+# pinned copy of scripts/sync-changelog-doc.sh.
+# ---------------------------------------------------------------------------
+test_1532_identical_script_runs_target_copy() {
+  local repo out marker
+  repo=$(make_changelog_script_repo \
+    'echo "TARGET_SCRIPT_RAN" > ran-marker.txt' \
+    'echo "TARGET_SCRIPT_RAN" > ran-marker.txt')
+
+  out=$(cd "$repo" && SOURCE_REF=source TARGET=main SOURCE_DESC=release/4.x \
+    bash -c "$(resolve_block)" 2>&1 || true)
+  marker=$(cat "$repo/ran-marker.txt" 2>/dev/null || echo "MISSING")
+  trash "$repo" 2>/dev/null || true
+
+  if [[ "$out" == *RESOLVED* ]] && [[ "$marker" == "TARGET_SCRIPT_RAN" ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  printf '  marker: %s\n' "$marker" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Test (Issue #1532): a scripts/sync-changelog-doc.sh that differs between
+# source and target bails instead of running either copy.
+#
+# Before fix: the script file isn't itself conflicted (only changelog.md is),
+# so the merge silently resolves it to the source's copy, and that untrusted
+# copy runs with FORWARD_MERGE_PAT/GH_TOKEN in env → SOURCE_SCRIPT_RAN, FAIL.
+# After fix: source and target copies are diffed explicitly; a mismatch bails
+# before either runs → BAILED, no marker file, PASS.
+# ---------------------------------------------------------------------------
+test_1532_differing_script_bails() {
+  local repo out marker_exists
+  repo=$(make_changelog_script_repo \
+    'echo "TARGET_SCRIPT_RAN" > ran-marker.txt' \
+    'echo "SOURCE_SCRIPT_RAN" > ran-marker.txt')
+
+  out=$(cd "$repo" && SOURCE_REF=source TARGET=main SOURCE_DESC=release/4.x \
+    bash -c "$(resolve_block)" 2>&1 || true)
+  [[ -f "$repo/ran-marker.txt" ]] && marker_exists=1 || marker_exists=0
+  trash "$repo" 2>/dev/null || true
+
+  if [[ "$out" == *BAILED* ]] && [[ "$out" == *"differs between"* ]] && [[ "$marker_exists" -eq 0 ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  printf '  marker_exists: %s\n' "$marker_exists" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Test (Issue #1532): FORWARD_MERGE_PAT must not be inherited by any
+# subprocess the cascade step spawns (e.g. sync-changelog-doc.sh); only
+# push_with_pat, via a captured local variable, still has access.
+#
+# Before fix: FORWARD_MERGE_PAT stays in the step's own env for its whole
+# duration, so a spawned subprocess inherits it → LEAKED, FAIL.
+# After fix: it's captured into a local variable and unset immediately →
+# NOT_LEAKED, and push_with_pat still authenticates via the local var, PASS.
+# ---------------------------------------------------------------------------
+pat_scope_block() {
+  cat <<'SHELL'
+set -euo pipefail
+_forward_merge_pat="${FORWARD_MERGE_PAT:-}"
+unset FORWARD_MERGE_PAT
+
+push_with_pat() {
+  if [[ -n "$_forward_merge_pat" ]]; then
+    local auth
+    auth="$(printf 'x-access-token:%s' "$_forward_merge_pat" | base64 -w0)"
+    echo "::add-mask::$auth"
+    git -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${auth}" push "$@"
+  else
+    git push "$@"
+  fi
+}
+
+bash -c 'if [[ -n "${FORWARD_MERGE_PAT:-}" ]]; then echo "LEAKED"; else echo "NOT_LEAKED"; fi'
+
+push_with_pat origin HEAD:main
+SHELL
+}
+
+test_1532_forward_merge_pat_not_inherited_by_subprocess() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+
+  cat > "$tmpdir/git" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1" == "-c" && "$2" == http.https://github.com/.extraheader=* && "$3" == "push" ]]; then
+  echo "PUSHED_WITH_EXTRAHEADER"
+  exit 0
+fi
+if [[ "$1" == "push" ]]; then
+  echo "PUSHED_WITHOUT_EXTRAHEADER"
+  exit 0
+fi
+exit 0
+STUB
+  chmod +x "$tmpdir/git"
+
+  local script out
+  script=$(pat_scope_block)
+  export FORWARD_MERGE_PAT="fake-token"
+
+  out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1 || true)
+  unset FORWARD_MERGE_PAT
+  rm -rf "$tmpdir"
+
+  [[ "$out" == *"NOT_LEAKED"* ]] && [[ "$out" == *"::add-mask::"* ]] && [[ "$out" == *"PUSHED_WITH_EXTRAHEADER"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Build a repo carrying the REAL, currently-committed scripts/sync-changelog-doc.sh
+# (read from this checkout, not a stub) plus a minimal CHANGELOG-1.md, so the
+# regeneration actually exercises the script's own `cd "$(dirname "$0")/.."`
+# logic. Leaves the caller inside a conflicted `git merge source` on the
+# target branch. Echoes the path.
+# ---------------------------------------------------------------------------
+make_real_changelog_script_repo() {
+  local real_script repo
+  real_script="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/scripts/sync-changelog-doc.sh"
+  repo=$(mktemp -d)
+  (
+    cd "$repo" || exit 1
+    git init -q -b target .
+    git config user.email t@t
+    git config user.name t
+    git config commit.gpgsign false
+    mkdir -p website/docs scripts
+    cp "$real_script" scripts/sync-changelog-doc.sh
+    printf '## [1.0.0] - 2026-01-01\n\n### Added\n\n- Base entry.\n' > CHANGELOG-1.md
+    printf 'base content\n' > website/docs/changelog.md
+    git add website/docs/changelog.md scripts/sync-changelog-doc.sh CHANGELOG-1.md
+    git commit -q -m base
+
+    git switch -q -c source
+    printf 'source content\n' > website/docs/changelog.md
+    git commit -q -am "source change"
+
+    git switch -q target
+    printf 'target content\n' > website/docs/changelog.md
+    git commit -q -am "target change"
+
+    git merge --no-commit --no-ff source >/dev/null 2>&1 || true
+  )
+  printf '%s\n' "$repo"
+}
+
+# ---------------------------------------------------------------------------
+# Test (Issue #1532): the real scripts/sync-changelog-doc.sh actually
+# regenerates website/docs/changelog.md when run through the pinned-copy
+# path — not just a stub that happens to exit 0.
+#
+# The real script does `cd "$(dirname "$0")/.."`, so a pinned copy materialized
+# outside the repo (e.g. a plain `mktemp` under /tmp) resolves that cd to the
+# wrong directory and the script dies before it ever touches changelog.md —
+# exactly the regression the stub-based tests above can't see.
+# ---------------------------------------------------------------------------
+test_1532_real_script_regenerates_changelog() {
+  local repo out regenerated
+  repo=$(make_real_changelog_script_repo)
+
+  out=$(cd "$repo" && SOURCE_REF=source TARGET=main SOURCE_DESC=release/4.x \
+    bash -c "$(resolve_block)" 2>&1 || true)
+  regenerated=$(cat "$repo/website/docs/changelog.md" 2>/dev/null || echo "MISSING")
+  trash "$repo" 2>/dev/null || true
+
+  if [[ "$out" == *RESOLVED* ]] && [[ "$regenerated" == *"1.0.0"* ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  printf '  changelog.md: %s\n' "${regenerated//$'\n'/ | }" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # Test 10 (Issue #1504): push_with_pat scopes the PAT to just the push
 #
 # Mirrors the push_with_pat() helper in forward-merge-release.yml. Verifies
@@ -694,11 +931,14 @@ test_1525_changelog_regeneration_failure_bails() {
 push_with_pat_block() {
   cat <<'SHELL'
 set -euo pipefail
+_forward_merge_pat="${FORWARD_MERGE_PAT:-}"
+unset FORWARD_MERGE_PAT
 
 push_with_pat() {
-  if [[ -n "${FORWARD_MERGE_PAT:-}" ]]; then
+  if [[ -n "$_forward_merge_pat" ]]; then
     local auth
-    auth="$(printf 'x-access-token:%s' "$FORWARD_MERGE_PAT" | base64 -w0)"
+    auth="$(printf 'x-access-token:%s' "$_forward_merge_pat" | base64 -w0)"
+    echo "::add-mask::$auth"
     git -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${auth}" push "$@"
   else
     git push "$@"
@@ -736,7 +976,7 @@ STUB
   unset FORWARD_MERGE_PAT
   rm -rf "$tmpdir"
 
-  [[ "$out" == "PUSHED_WITH_EXTRAHEADER" ]]
+  [[ "$out" == *"::add-mask::"* ]] && [[ "$out" == *"PUSHED_WITH_EXTRAHEADER"* ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -754,9 +994,11 @@ STUB
 direct_push_decision_block() {
   cat <<'SHELL'
 set -euo pipefail
+_forward_merge_pat="${FORWARD_MERGE_PAT:-}"
+unset FORWARD_MERGE_PAT
 TARGET="main"
 PUSH_SKIPPED=0
-if [[ -n "${FORWARD_MERGE_PAT:-}" ]]; then
+if [[ -n "$_forward_merge_pat" ]]; then
   PUSH_SKIPPED=1
   PUSH_RC=1
   PUSH_STDERR=""
@@ -900,6 +1142,18 @@ run_test "Issue #1504: direct push never attempted once FORWARD_MERGE_PAT is set
 
 run_test "Issue #1504: direct push still attempted normally without the secret" \
   test_1504_direct_push_still_attempted_without_pat
+
+run_test "Issue #1532: identical scripts/sync-changelog-doc.sh runs the target's pinned copy" \
+  test_1532_identical_script_runs_target_copy
+
+run_test "Issue #1532: a differing scripts/sync-changelog-doc.sh bails instead of running either copy" \
+  test_1532_differing_script_bails
+
+run_test "Issue #1532: FORWARD_MERGE_PAT is not inherited by a spawned subprocess" \
+  test_1532_forward_merge_pat_not_inherited_by_subprocess
+
+run_test "Issue #1532: the real sync-changelog-doc.sh regenerates changelog.md through the pinned-copy path" \
+  test_1532_real_script_regenerates_changelog
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
