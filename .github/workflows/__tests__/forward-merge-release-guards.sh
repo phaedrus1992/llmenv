@@ -1096,6 +1096,77 @@ STUB
 }
 
 # ---------------------------------------------------------------------------
+# Test (Issue #1540): push_with_pat's PAT header must not collide with the
+# persisted GITHUB_TOKEN extraheader that actions/checkout's
+# persist-credentials: true step already wrote into .git/config.
+#
+# http.extraheader is a multi-valued git config key: a `-c` override on the
+# command line adds a value alongside a persisted one, it does not replace
+# it. Verified directly against real git (not a stub) below, since this is a
+# property of git's own config layering, not of this workflow's logic — an
+# empty `-c key=` override does NOT unset a persisted value either, it adds
+# a third, empty entry. Before the fix, invoking push_with_pat while a
+# persisted extraheader value exists leaves BOTH values in effect, and
+# GitHub's server rejects the resulting double `Authorization` header with a
+# 400 ("Duplicate header"). The fix must remove the persisted local-config
+# entry before setting the PAT's own header via -c, so exactly one
+# Authorization header is in effect.
+#
+# This mirrors push_with_pat with its trailing git subcommand parameterized
+# (production hardcodes `push`) so the test can inspect the resulting git
+# config state via `config --get-all` instead of needing a real remote push.
+# ---------------------------------------------------------------------------
+push_with_pat_header_block() {
+  cat <<'SHELL'
+set -euo pipefail
+_forward_merge_pat="${FORWARD_MERGE_PAT:-}"
+unset FORWARD_MERGE_PAT
+
+push_with_pat() {
+  if [[ -n "$_forward_merge_pat" ]]; then
+    local auth
+    auth="$(printf 'x-access-token:%s' "$_forward_merge_pat" | base64 -w0)"
+    echo "::add-mask::$auth"
+    git config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+    git -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${auth}" "$@"
+  else
+    git "$@"
+  fi
+}
+
+push_with_pat config --get-all http.https://github.com/.extraheader
+SHELL
+}
+
+test_1540_push_with_pat_clears_persisted_header_before_setting_new() {
+  local repo out header_count
+  repo=$(mktemp -d)
+  (
+    cd "$repo" || exit 1
+    git init -q .
+    git config user.email t@t
+    git config user.name t
+    git config commit.gpgsign false
+    # Simulate actions/checkout's persist-credentials: true, which writes a
+    # persistent extraheader entry into .git/config for the whole job.
+    git config --local --add http.https://github.com/.extraheader \
+      "AUTHORIZATION: basic PERSISTED_TOKEN"
+  )
+
+  out=$(cd "$repo" && FORWARD_MERGE_PAT="fake-pat-token" \
+    bash -c "$(push_with_pat_header_block)" 2>&1)
+  header_count=$(echo "$out" | grep -c '^AUTHORIZATION: basic')
+  trash "$repo" 2>/dev/null || true
+
+  if [[ "$header_count" -eq 1 ]] && ! echo "$out" | grep -q "PERSISTED_TOKEN"; then
+    return 0
+  fi
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  printf '  header_count: %s\n' "$header_count" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
 run_test "Issue #476: branch-exists guard prevents overwrite of in-progress resolution" \
@@ -1154,6 +1225,9 @@ run_test "Issue #1532: FORWARD_MERGE_PAT is not inherited by a spawned subproces
 
 run_test "Issue #1532: the real sync-changelog-doc.sh regenerates changelog.md through the pinned-copy path" \
   test_1532_real_script_regenerates_changelog
+
+run_test "Issue #1540: push_with_pat clears the persisted extraheader before setting its own" \
+  test_1540_push_with_pat_clears_persisted_header_before_setting_new
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

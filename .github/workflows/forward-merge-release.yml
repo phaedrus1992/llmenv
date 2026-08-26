@@ -121,6 +121,19 @@ jobs:
           # job-scoped GITHUB_TOKEN persisted by the checkout step. Falls back
           # to the default token if the secret is unset, so the workflow keeps
           # working (minus workflow-file pushes) before FORWARD_MERGE_PAT is added.
+          #
+          # #1540: `http.extraheader` is a multi-valued git config key, so a
+          # `-c` override does NOT replace the persisted header the checkout
+          # step wrote into .git/config — it adds alongside it, and GitHub
+          # rejects the resulting double `Authorization` header with a 400.
+          # An empty `-c key=` override doesn't unset it either (proven
+          # against real git in __tests__/forward-merge-release-guards.sh) —
+          # it just adds a third, empty value. The persisted entry must be
+          # removed from the file-based config directly. This is safe to do
+          # unconditionally here: push_with_pat's only call site is the last
+          # git network operation before the cascade halts (it's followed
+          # only by `gh pr create`, then `break`), so nothing downstream
+          # needs the persisted GITHUB_TOKEN header again.
           push_with_pat() {
             if [[ -n "$_forward_merge_pat" ]]; then
               local auth
@@ -129,6 +142,7 @@ jobs:
               # base64 encoding — register the encoded form too, so a stray
               # git trace or `set -x` can't print a trivially-reversible copy.
               echo "::add-mask::$auth"
+              git config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
               git -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${auth}" push "$@"
             else
               git push "$@"
