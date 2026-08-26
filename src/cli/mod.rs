@@ -1603,6 +1603,20 @@ pub(crate) fn exit_with_status(status: std::process::ExitStatus) -> ! {
 /// inherits that variable. Falls back to the configured cache root when unset
 /// (e.g. manual invocation outside a session); `StatusData::load` degrades to
 /// defaults on a missing/wrong-shape file rather than erroring.
+///
+/// The `scopes` widget is the one partial exception to "read the snapshot":
+/// `$LLMENV_EXTRA_TAGS` is re-read live on every render and unioned onto
+/// whatever the snapshot already has. The snapshot is only rewritten by
+/// `llmenv regenerate`, which also renames the cache folder itself when the
+/// active tag set changes — so a session's `CLAUDE_CONFIG_DIR` can keep
+/// pointing at a folder `regenerate` no longer writes to, and re-running
+/// `regenerate` mid-session doesn't fix a statusline already pinned to the
+/// old folder. Re-reading just this one env var (#1538) is the narrowest fix
+/// that covers it: unlike a full `scope::evaluate`, it never walks content
+/// scopes or forks the network-scope gateway-MAC subprocess, so every other
+/// tag source (host/user/os/network/project/content scopes) stays
+/// snapshot-sourced and only refreshes on the next regenerate, same as
+/// before.
 fn run_statusline_cmd(use_color: bool) -> anyhow::Result<()> {
     // A broken config must degrade to a visible error row, not to nothing
     // (#1052). Propagating here would exit non-zero with empty stdout, and the
@@ -1622,8 +1636,18 @@ fn run_statusline_cmd(use_color: bool) -> anyhow::Result<()> {
         }
     };
     let data_path = statusline_data_path_with_env(&config, &|name| std::env::var(name).ok());
+    let live_extra_tags: std::collections::BTreeSet<String> =
+        crate::scope::matcher::extra_tags_from_env()
+            .into_iter()
+            .collect();
 
-    let output = statusline::run_statusline(&config, &data_path, &mut std::io::stdin(), use_color)?;
+    let output = statusline::run_statusline(
+        &config,
+        &data_path,
+        &mut std::io::stdin(),
+        use_color,
+        &live_extra_tags,
+    )?;
     print!("{output}");
     Ok(())
 }
