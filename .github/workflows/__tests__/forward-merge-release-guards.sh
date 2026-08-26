@@ -447,14 +447,24 @@ version_only_change() {
 }
 
 auto_resolve_conflicts() {
-  local file
+  local file conflicted_files remaining
+  conflicted_files="$(git diff --name-only --diff-filter=U)" || {
+    echo "::error::failed to list conflicted files" >&2
+    return 1
+  }
   while IFS= read -r file; do
     [[ -n "$file" ]] || continue
     case "$file" in
       website/docs/changelog.md)
         echo "  $file: regenerating from the merged CHANGELOG-*.md sources"
-        git checkout --ours -- "$file"
-        bash scripts/sync-changelog-doc.sh
+        git checkout --ours -- "$file" || {
+          echo "::error::$file: git checkout --ours failed" >&2
+          return 1
+        }
+        bash scripts/sync-changelog-doc.sh || {
+          echo "::error::$file: scripts/sync-changelog-doc.sh failed to regenerate the changelog" >&2
+          return 1
+        }
         git add -- "$file"
         ;;
       Cargo.toml | Cargo.lock | crates/*/Cargo.toml)
@@ -471,8 +481,12 @@ auto_resolve_conflicts() {
         return 1
         ;;
     esac
-  done < <(git diff --name-only --diff-filter=U)
-  [[ -z "$(git diff --name-only --diff-filter=U)" ]]
+  done <<< "$conflicted_files"
+  remaining="$(git diff --name-only --diff-filter=U)" || {
+    echo "::error::failed to verify remaining conflicts" >&2
+    return 1
+  }
+  [[ -z "$remaining" ]]
 }
 
 if auto_resolve_conflicts; then
@@ -557,6 +571,111 @@ test_1381_non_version_change_bails() {
   trash "$repo" 2>/dev/null || true
 
   if [[ "$out" == *BAILED* ]] && [[ "$out" == *"more than version numbers"* ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Test (Issue #1525): a `git diff` failure inside auto_resolve_conflicts
+# fails loudly instead of being read as "no conflicted files left".
+#
+# The old code streamed `git diff --name-only --diff-filter=U` straight into
+# a `while read ... done < <(...)` and re-ran the same command bare in the
+# closing `[[ -z "$(...)" ]]` check. Either form hides a `git diff` failure
+# under `set -e`: a process substitution's exit status is invisible to the
+# consuming loop, and a bare `$(...)` failure still yields an empty string
+# that reads as "nothing left" — so a transient failure would report
+# RESOLVED with a real conflict left unprocessed in the tree.
+# ---------------------------------------------------------------------------
+test_1525_auto_resolve_conflicts_fails_on_git_diff_failure() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+
+  cat > "$tmpdir/git" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1" == "diff" && "$2" == "--name-only" && "$3" == "--diff-filter=U" ]]; then
+  exit 1
+fi
+exit 0
+STUB
+  chmod +x "$tmpdir/git"
+
+  local script out
+  script=$(resolve_block)
+  export SOURCE_REF=source TARGET=main SOURCE_DESC=release/4.x
+
+  out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1 || true)
+  unset SOURCE_REF TARGET SOURCE_DESC
+  rm -rf "$tmpdir"
+
+  if [[ "$out" == *BAILED* ]] && [[ "$out" == *"failed to list conflicted files"* ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# Build a repo with a website/docs/changelog.md conflict, plus a stub
+# scripts/sync-changelog-doc.sh that always fails. Leaves the caller inside a
+# conflicted `git merge source` on the target branch. Echoes the path.
+make_changelog_conflict_repo() {
+  local repo
+  repo=$(mktemp -d)
+  (
+    cd "$repo" || exit 1
+    git init -q -b target .
+    git config user.email t@t
+    git config user.name t
+    git config commit.gpgsign false
+    mkdir -p website/docs
+    printf 'base content\n' > website/docs/changelog.md
+    git add website/docs/changelog.md
+    git commit -q -m base
+
+    git switch -q -c source
+    printf 'source content\n' > website/docs/changelog.md
+    git commit -q -am "source change"
+
+    git switch -q target
+    printf 'target content\n' > website/docs/changelog.md
+    git commit -q -am "target change"
+
+    git merge --no-commit --no-ff source >/dev/null 2>&1 || true
+
+    mkdir -p scripts
+    cat > scripts/sync-changelog-doc.sh <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+    chmod +x scripts/sync-changelog-doc.sh
+  )
+  printf '%s\n' "$repo"
+}
+
+# ---------------------------------------------------------------------------
+# Test (Issue #1525): a scripts/sync-changelog-doc.sh failure inside the
+# changelog case-branch bails instead of reporting resolved.
+#
+# auto_resolve_conflicts is invoked as `if auto_resolve_conflicts; then` —
+# bash suppresses `set -e` for the whole body of a function called as part of
+# an if/while condition, so an unchecked failure wouldn't abort; it would
+# just fall through to `git add`, staging whatever the failed regeneration
+# left behind, and the function's return status would reflect only that
+# `git add`'s (successful) exit code, reporting RESOLVED. Both git checkout
+# --ours and bash scripts/sync-changelog-doc.sh in that branch must be
+# checked explicitly.
+# ---------------------------------------------------------------------------
+test_1525_changelog_regeneration_failure_bails() {
+  local repo out
+  repo=$(make_changelog_conflict_repo)
+
+  out=$(cd "$repo" && SOURCE_REF=source TARGET=main SOURCE_DESC=release/4.x \
+    bash -c "$(resolve_block)" 2>&1 || true)
+  trash "$repo" 2>/dev/null || true
+
+  if [[ "$out" == *BAILED* ]] && [[ "$out" == *"failed to regenerate the changelog"* ]]; then
     return 0
   fi
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
@@ -763,6 +882,12 @@ run_test "Issue #1381: version-only manifest conflict keeps the target's version
 
 run_test "Issue #1381: a manifest change beyond the version bails instead of dropping it" \
   test_1381_non_version_change_bails
+
+run_test "Issue #1525: a git diff failure inside auto_resolve_conflicts fails loudly" \
+  test_1525_auto_resolve_conflicts_fails_on_git_diff_failure
+
+run_test "Issue #1525: a sync-changelog-doc.sh failure in the changelog branch bails" \
+  test_1525_changelog_regeneration_failure_bails
 
 run_test "Issue #1504: push_with_pat authenticates with the PAT when the secret is set" \
   test_1504_push_with_pat_uses_pat_when_set

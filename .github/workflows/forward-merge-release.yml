@@ -20,9 +20,14 @@ jobs:
     # target branch. Only holds while pushes go out as GITHUB_TOKEN (which
     # both skips the anti-recursion rule and is attributed to
     # github-actions[bot]) — a FORWARD_MERGE_PAT-authenticated push (#1504)
-    # is neither, so this guard doesn't suppress the re-trigger once the
-    # secret is set. Tracked in #1524; low-risk in practice (the re-triggered
-    # run finds everything already merged and no-ops) but not hardened.
+    # is neither. #1524 raised this as a gap once FORWARD_MERGE_PAT is set,
+    # but cff88a8c (#1504) closed it as a side effect: once the secret is
+    # set, a direct push to $TARGET is never attempted at all (PUSH_SKIPPED
+    # below) — push_with_pat only ever pushes to a forward-merge/* staging
+    # branch, which never matches this workflow's `release/**` trigger, so
+    # a PAT-authenticated push can no longer re-trigger this workflow.
+    # #1524 closed with that evidence; see test_1504_direct_push_never_
+    # attempted_with_pat_set in __tests__/forward-merge-release-guards.sh.
     if: github.actor != 'github-actions[bot]'
     permissions:
       contents: write
@@ -195,14 +200,40 @@ jobs:
           #     manifests *and* its Cargo.lock leaves the pair mutually
           #     consistent, so no `cargo` run is needed to repair the lock.
           auto_resolve_conflicts() {
-            local file
+            local file conflicted_files remaining
+            # Captured to a variable, with an explicit `|| { ...; return 1; }`
+            # handler — not streamed via `< <(git diff ...)`, and not relying
+            # on `set -e` to catch a bare failure, since this whole function
+            # is called as `if auto_resolve_conflicts; then` below, and bash
+            # suppresses `set -e` for a function's entire body when it's
+            # called as part of an if/while condition. A process
+            # substitution's exit status is also invisible to the while/read
+            # loop consuming it. Either way, an unchecked `git diff` failure
+            # would run the loop zero times and fall through to the closing
+            # re-check below.
+            conflicted_files="$(git diff --name-only --diff-filter=U)" || {
+              echo "::error::failed to list conflicted files" >&2
+              return 1
+            }
             while IFS= read -r file; do
               [[ -n "$file" ]] || continue
               case "$file" in
                 website/docs/changelog.md)
                   echo "  $file: regenerating from the merged CHANGELOG-*.md sources"
-                  git checkout --ours -- "$file"
-                  bash scripts/sync-changelog-doc.sh
+                  # auto_resolve_conflicts is called as `if auto_resolve_conflicts;
+                  # then ...`, and bash suppresses `set -e` for the whole body of a
+                  # function called as part of an if/while condition — an
+                  # unchecked failure here wouldn't abort, it would just fall
+                  # through to `git add`, staging whatever sync-changelog-doc.sh
+                  # left behind. Check both explicitly instead.
+                  git checkout --ours -- "$file" || {
+                    echo "::error::$file: git checkout --ours failed" >&2
+                    return 1
+                  }
+                  bash scripts/sync-changelog-doc.sh || {
+                    echo "::error::$file: scripts/sync-changelog-doc.sh failed to regenerate the changelog" >&2
+                    return 1
+                  }
                   git add -- "$file"
                   ;;
                 Cargo.toml | Cargo.lock | crates/*/Cargo.toml)
@@ -219,8 +250,15 @@ jobs:
                   return 1
                   ;;
               esac
-            done < <(git diff --name-only --diff-filter=U)
-            [[ -z "$(git diff --name-only --diff-filter=U)" ]]
+            done <<< "$conflicted_files"
+            # Same explicit-handler reasoning as above: this re-check must
+            # not silently read as "nothing left" just because `git diff`
+            # failed — `set -e` can't catch that here either.
+            remaining="$(git diff --name-only --diff-filter=U)" || {
+              echo "::error::failed to verify remaining conflicts" >&2
+              return 1
+            }
+            [[ -z "$remaining" ]]
           }
 
           for TARGET in "${TARGETS[@]}"; do
