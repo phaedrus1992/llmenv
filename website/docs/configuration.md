@@ -1212,6 +1212,11 @@ Every other tag source — host, user, OS, network, project, and content
 scopes — still only refreshes on the next `regenerate`, same as every other
 widget in this table.
 
+A custom `format:` for `mcps` or `throttle` must include `{stale_icon}` to
+keep this protection — like every other widget, a custom `format` fully
+replaces the default rather than appending to it, so a format that omits the
+placeholder renders the count with no staleness indication at all.
+
 | Widget | Default `format` | Example | Placeholders |
 | -------- | ------------------- | --------- | -------------- |
 | `scopes` | `{tags}` | `dev · rust` | `tags` (tag list, joined with ` · `; `$LLMENV_EXTRA_TAGS` is live, every other source is from the snapshot) |
