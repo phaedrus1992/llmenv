@@ -110,6 +110,45 @@ run_test "sync-changelog-doc: concatenates CHANGELOG-*.md newest-version-first" 
 run_test "sync-changelog-doc: a find/sort failure fails the script instead of silently succeeding" \
   test_sort_failure_fails_loudly
 
+# The output is built in a temp file and moved into place only on success
+# (rather than truncating website/docs/changelog.md up front), so a failure
+# never leaves the real file corrupted — it's left exactly as it was before
+# the run.
+test_sort_failure_leaves_existing_output_untouched() {
+  local repo
+  repo=$(make_scratch_repo)
+  cat > "$repo/CHANGELOG-1.md" <<'MD'
+# Changelog
+
+## [Unreleased]
+
+- v1 entry
+MD
+  printf 'previously generated content\n' > "$repo/website/docs/changelog.md"
+
+  local fakebin
+  fakebin=$(mktemp -d)
+  cat > "$fakebin/sort" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/sort"
+
+  local doc
+  (cd "$repo" && DRY_RUN=false PATH="$fakebin:$PATH" bash scripts/sync-changelog-doc.sh) >/dev/null 2>&1
+  doc=$(cat "$repo/website/docs/changelog.md" 2>/dev/null || true)
+  trash "$repo" "$fakebin" 2>/dev/null || rm -rf "$repo" "$fakebin"
+
+  if [[ "$doc" == "previously generated content" ]]; then
+    return 0
+  fi
+  printf '  expected the pre-existing file untouched, got: %s\n' "$doc" >&2
+  return 1
+}
+
+run_test "sync-changelog-doc: a find/sort failure leaves the existing changelog.md untouched" \
+  test_sort_failure_leaves_existing_output_untouched
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

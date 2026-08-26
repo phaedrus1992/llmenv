@@ -201,11 +201,16 @@ jobs:
           #     consistent, so no `cargo` run is needed to repair the lock.
           auto_resolve_conflicts() {
             local file conflicted_files remaining
-            # Captured to a variable (not streamed via `< <(git diff ...)`) so
-            # `set -e` sees a `git diff` failure: a process substitution's
-            # exit status is invisible to the while/read loop consuming it, so
-            # a transient `git diff` failure would otherwise run the loop zero
-            # times and fall through to the closing re-check below.
+            # Captured to a variable, with an explicit `|| { ...; return 1; }`
+            # handler — not streamed via `< <(git diff ...)`, and not relying
+            # on `set -e` to catch a bare failure, since this whole function
+            # is called as `if auto_resolve_conflicts; then` below, and bash
+            # suppresses `set -e` for a function's entire body when it's
+            # called as part of an if/while condition. A process
+            # substitution's exit status is also invisible to the while/read
+            # loop consuming it. Either way, an unchecked `git diff` failure
+            # would run the loop zero times and fall through to the closing
+            # re-check below.
             conflicted_files="$(git diff --name-only --diff-filter=U)" || {
               echo "::error::failed to list conflicted files" >&2
               return 1
@@ -215,8 +220,20 @@ jobs:
               case "$file" in
                 website/docs/changelog.md)
                   echo "  $file: regenerating from the merged CHANGELOG-*.md sources"
-                  git checkout --ours -- "$file"
-                  bash scripts/sync-changelog-doc.sh
+                  # auto_resolve_conflicts is called as `if auto_resolve_conflicts;
+                  # then ...`, and bash suppresses `set -e` for the whole body of a
+                  # function called as part of an if/while condition — an
+                  # unchecked failure here wouldn't abort, it would just fall
+                  # through to `git add`, staging whatever sync-changelog-doc.sh
+                  # left behind. Check both explicitly instead.
+                  git checkout --ours -- "$file" || {
+                    echo "::error::$file: git checkout --ours failed" >&2
+                    return 1
+                  }
+                  bash scripts/sync-changelog-doc.sh || {
+                    echo "::error::$file: scripts/sync-changelog-doc.sh failed to regenerate the changelog" >&2
+                    return 1
+                  }
                   git add -- "$file"
                   ;;
                 Cargo.toml | Cargo.lock | crates/*/Cargo.toml)
@@ -234,8 +251,9 @@ jobs:
                   ;;
               esac
             done <<< "$conflicted_files"
-            # Same capture-first reasoning as above: this re-check must not
-            # silently read as "nothing left" just because `git diff` failed.
+            # Same explicit-handler reasoning as above: this re-check must
+            # not silently read as "nothing left" just because `git diff`
+            # failed — `set -e` can't catch that here either.
             remaining="$(git diff --name-only --diff-filter=U)" || {
               echo "::error::failed to verify remaining conflicts" >&2
               return 1
