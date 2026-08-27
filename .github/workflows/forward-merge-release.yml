@@ -252,6 +252,39 @@ jobs:
             fi
           }
 
+          # GitHub sometimes gates this PR's `pull_request`-triggered runs
+          # behind an `action_required` manual-approval check -- normally a
+          # fork-PR-only safety gate, but observed firing on this same-repo,
+          # non-first-time-contributor PR too (#1564; GitHub-side root cause
+          # not confirmed, and reproduction is intermittent -- most cascades
+          # that open a PR don't hit it). The entire reason this cascade opens
+          # a PR instead of pushing directly is so required checks run before
+          # merge, so a run stuck on that gate with nobody watching silently
+          # defeats the point. Poll briefly for a run against $1 (a commit
+          # SHA) sitting in that state and approve it.
+          #
+          # Never halts the cascade on failure: an approval miss here still
+          # leaves the PR in place for a human (or a later poll, e.g. the next
+          # push to this branch re-running this same check) to approve
+          # manually, so a warning is the right severity, not an error.
+          approve_pending_runs() {
+            local sha="$1" ids id
+            for _ in 1 2 3 4 5 6; do
+              ids=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${sha}" \
+                --jq '.workflow_runs[] | select(.conclusion == "action_required") | .id' 2>/dev/null) || ids=""
+              if [[ -n "$ids" ]]; then
+                while IFS= read -r id; do
+                  [[ -n "$id" ]] || continue
+                  echo "Approving action_required run $id for $sha"
+                  gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runs/${id}/approve" >/dev/null 2>&1 \
+                    || echo "::warning::failed to approve run $id for $sha -- approve it manually"
+                done <<< "$ids"
+                return 0
+              fi
+              sleep 10
+            done
+          }
+
           # Build target list: every newer release branch (semver order) + main.
           TARGETS=()
           FOUND=0
@@ -595,6 +628,7 @@ jobs:
                 HALTED="checkout failed at $TARGET"
                 break
               fi
+              MERGE_SHA=$(git rev-parse HEAD)
               if ! push_with_pat origin "$MERGE_BRANCH" --force-with-lease; then
                 echo "::error::Push to merge branch $MERGE_BRANCH failed; cannot open PR"
                 echo "::endgroup::"
@@ -612,6 +646,7 @@ jobs:
                 echo "::error::Failed to create PR for $MERGE_BRANCH"
               else
                 echo "::error::Cascade halted: opened PR for $TARGET instead of pushing directly"
+                approve_pending_runs "$MERGE_SHA"
               fi
               echo "::endgroup::"
               HALTED="PR opened for $TARGET"
