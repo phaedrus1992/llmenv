@@ -2403,21 +2403,34 @@ fn run_check_stale(use_color: bool, auto_fix: bool) -> anyhow::Result<()> {
                 .map(|m| m.content_hash)
         });
 
-    if let StaleStatus::Stale { .. } = stale_status(booted.as_deref(), &current) {
-        let materialize_ctx = MaterializeContext {
-            config: &config,
-            config_dir: &config_dir,
-            active: &active,
-            firing: &firing,
-        };
-        match build_and_materialize(&ClaudeCodeAdapter, materialize_ctx, false) {
-            Ok(Some((cache_path, _))) => {
-                eprintln!("✓ Config refreshed at {}", cache_path.display());
+    match stale_status(booted.as_deref(), &current) {
+        StaleStatus::Stale { .. } => {
+            let materialize_ctx = MaterializeContext {
+                config: &config,
+                config_dir: &config_dir,
+                active: &active,
+                firing: &firing,
+            };
+            match build_and_materialize(&ClaudeCodeAdapter, materialize_ctx, false) {
+                Ok(Some((cache_path, _))) => {
+                    eprintln!("✓ Config refreshed at {}", cache_path.display());
+                }
+                Ok(None) => {
+                    eprintln!("✓ Config up-to-date (no content directory)");
+                }
+                Err(e) => return Err(e).context("auto-fix: re-materialization failed"),
             }
-            Ok(None) => {
-                eprintln!("✓ Config up-to-date (no content directory)");
-            }
-            Err(e) => return Err(e).context("auto-fix: re-materialization failed"),
+        }
+        StaleStatus::Fresh => {}
+        // No booted hash to compare against: llmenv didn't boot this agent
+        // (CLAUDE_CONFIG_DIR unset, or the folder predates the manifest
+        // dotfile). Not drift, so don't nag — but trace it so "the hook ran but
+        // said nothing" is distinguishable from a silent no-op on real drift.
+        StaleStatus::Unknown => {
+            tracing::debug!(
+                "check-stale: no booted manifest hash to compare against; \
+                 drift detection skipped (current hash would be {current})"
+            );
         }
     }
     Ok(())
