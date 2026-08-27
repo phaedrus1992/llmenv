@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.11.1] - 2026-08-25
+
 One change since 3.11.0, and it's a security-posture one: llmenv stops pinning two of codebase-memory-mcp's launch defaults, `CBM_CACHE_DIR` and `CBM_ALLOWED_ROOT`, leaving scope control to the tool's own defaults and whoever configures it.
 
 ### Security
@@ -874,7 +876,8 @@ the rc.1 and rc.2 sections below.
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.11.0...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.11.1...HEAD
+[3.11.1]: https://github.com/phaedrus1992/llmenv/compare/v3.11.0...v3.11.1
 [3.11.0]: https://github.com/phaedrus1992/llmenv/compare/v3.10.0...v3.11.0
 [3.10.0]: https://github.com/phaedrus1992/llmenv/compare/v3.9.0...v3.10.0
 [3.9.0]: https://github.com/phaedrus1992/llmenv/compare/v3.8.0...v3.9.0
