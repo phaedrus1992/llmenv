@@ -170,9 +170,15 @@ Install `prek` from <https://github.com/j178/prek> if you don't have it.
 
 ### Faster local builds (optional)
 
-CI uses [`sccache`](https://github.com/mozilla/sccache) (a compiler cache) and the
-[`mold`](https://github.com/rui314/mold) linker to speed up `cargo build`. Both are
-opt-in for local development — set them up once per machine:
+CI's `hawk` job uses [`sccache`](https://github.com/mozilla/sccache) (a compiler
+cache) to speed up its `cargo` build — measured to help there since that job has no
+other build cache. `test`'s existing `target/` cache already makes most of its
+builds near-instant, so adding sccache there measurably made it *slower* (extra
+per-invocation overhead with nothing left to cache) and it was dropped from that
+job. Both `sccache` and the [`mold`](https://github.com/rui314/mold) linker are
+still worth trying for local development, where the tradeoffs differ (no
+persistent `target/` cache across a `cargo clean` or a toolchain switch) — set
+them up once per machine:
 
 ```bash
 # sccache (all platforms)
