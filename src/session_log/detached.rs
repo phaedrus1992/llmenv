@@ -110,7 +110,7 @@ fn run_record_inner(payload_json: &str) -> anyhow::Result<()> {
     let config_dir = config_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
-    let url = crate::hook_run::memory_url(&config, config_dir, &active)?.into_url()?;
+    let url = crate::memory::memory_url(&config, config_dir, &active)?.into_url()?;
     let client = McpHttpClient::new(url, RECORD_TIMEOUT)
         .map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))?;
 
