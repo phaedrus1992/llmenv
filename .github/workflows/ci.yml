@@ -20,12 +20,15 @@ env:
   # virtualized disk (os error 5, #553). Inert for steps that don't call rustup.
   RUSTUP_IO_THREADS: "1"
 jobs:
+  # `test` must NOT use a matrix (#1536): the repo ruleset's required status
+  # check is named literally "test", but a matrixed job always reports under
+  # the expanded name ("test (ubuntu-latest)") -- a single-value matrix here
+  # was never buying anything (only ubuntu-latest ever ran) and left the
+  # required check permanently "pending", blocking every PR from merging.
+  # Already fixed this way on release/4.x/main; backported here because it
+  # was never applied to this branch's copy.
   test:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -48,7 +51,7 @@ jobs:
             ~/.rustup/update-hashes
             ~/.rustup/settings.toml
           # Keep toolchain + components in the key in sync with the step below.
-          key: &rustup-cache-key rustup-${{ matrix.os }}-${{ hashFiles('rust-toolchain.toml') }}
+          key: &rustup-cache-key rustup-ubuntu-latest-${{ hashFiles('rust-toolchain.toml') }}
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # master
         with:
           toolchain: stable
