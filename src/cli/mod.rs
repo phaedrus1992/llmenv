@@ -2537,7 +2537,7 @@ pub(crate) fn build_manifest(
         Err(e) => tracing::warn!("failed to compute merge signature for cache: {e}"),
     }
 
-    let resolved = crate::plugins::resolve::resolve_plugins(config, &host_tags)
+    let resolved = crate::plugins::resolve::resolve_plugins(config, &host_tags, true)
         .context("resolving plugins")?;
     manifest.plugins = sync_plugin_payloads(&cache_root, resolved.plugins);
     // `remote_sync = false` means "don't touch the network", not "ignore the

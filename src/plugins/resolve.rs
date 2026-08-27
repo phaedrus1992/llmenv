@@ -83,12 +83,18 @@ pub enum ResolveError {
 /// when `features.context_mode.enabled` (#490). Mutates `plugins`/`seen_plugin`/
 /// `referenced` in place; returns whether the synthetic marketplace must be
 /// appended (true only when the user did not declare a `context-mode` marketplace).
-/// Warns when the user also declared the plugin manually (redundant).
+///
+/// Logs when the user also declared the plugin manually (redundant) — at
+/// `warn!` when `warn_on_redundant` (an interactive, user-invoked caller like
+/// `regenerate`), or `debug!` otherwise (a hot-path caller like the
+/// statusline, which would otherwise repeat the warning on every render;
+/// #1551).
 fn inject_context_mode(
     config: &Config,
     plugins: &mut Vec<ResolvedPlugin>,
     seen_plugin: &mut HashSet<(String, String)>,
     referenced: &mut HashSet<String>,
+    warn_on_redundant: bool,
 ) -> bool {
     // Built-in context-mode feature (#490): inject the canonical marketplace +
     // plugin when enabled, unless the user already declared it (user wins on
@@ -117,14 +123,17 @@ fn inject_context_mode(
     } else {
         // The user manually declared context-mode:context-mode in a
         // plugin-collection AND enabled features.context_mode. The built-in
-        // already wires it — the manual entry is redundant. Warn so the user
+        // already wires it — the manual entry is redundant. Note so the user
         // can drop it (harmless, but confusing config drift otherwise).
-        tracing::warn!(
-            "features.context_mode is enabled and you also declared \
+        const MSG: &str = "features.context_mode is enabled and you also declared \
              'context-mode:context-mode' in a plugin-collection — the \
              built-in feature wires context-mode automatically, so the manual \
-             plugin-collection entry is redundant and can be removed."
-        );
+             plugin-collection entry is redundant and can be removed.";
+        if warn_on_redundant {
+            tracing::warn!("{MSG}");
+        } else {
+            tracing::debug!("{MSG}");
+        }
     }
     // The built-in marketplace is emitted from config.marketplace below only
     // if the user declared it. If they didn't, we must add it ourselves.
@@ -143,6 +152,12 @@ fn inject_context_mode(
 /// of marketplaces referenced by the resolved plugins is collected in
 /// marketplace declaration order.
 ///
+/// `warn_on_redundant` controls the log level for a redundant manual
+/// `context-mode:context-mode` declaration (see [`inject_context_mode`]) —
+/// pass `true` from an interactive, user-invoked caller (`regenerate`) and
+/// `false` from a hot-path caller that runs on every invocation (the
+/// statusline; #1551).
+///
 /// # Errors
 /// Returns the first [`ResolveError`]: a malformed `marketplace:plugin` string,
 /// or a plugin referencing a marketplace not declared at the top level.
@@ -151,6 +166,7 @@ fn inject_context_mode(
 pub(crate) fn resolve_plugins(
     config: &Config,
     active_tags: &BTreeSet<String>,
+    warn_on_redundant: bool,
 ) -> Result<ResolvedPlugins, ResolveError> {
     let by_name: std::collections::HashMap<&str, &Marketplace> = config
         .marketplace
@@ -194,8 +210,13 @@ pub(crate) fn resolve_plugins(
         }
     }
 
-    let inject_builtin_marketplace =
-        inject_context_mode(config, &mut plugins, &mut seen_plugin, &mut referenced);
+    let inject_builtin_marketplace = inject_context_mode(
+        config,
+        &mut plugins,
+        &mut seen_plugin,
+        &mut referenced,
+        warn_on_redundant,
+    );
 
     // Emit referenced marketplaces in config declaration order so output is
     // stable and diff-friendly regardless of plugin discovery order.
@@ -267,7 +288,7 @@ mod tests {
                 collection("rust", &["rust"], &["dev-commons:rust-tooling"]),
             ],
         );
-        let resolved = resolve_plugins(&cfg, &tags(&["user-x"])).unwrap();
+        let resolved = resolve_plugins(&cfg, &tags(&["user-x"]), true).unwrap();
         assert_eq!(resolved.plugins.len(), 1);
         assert_eq!(resolved.plugins[0].marketplace, "superpowers");
         assert_eq!(resolved.plugins[0].plugin, "caveman");
@@ -316,11 +337,11 @@ mod tests {
 
         // With the full active tag union, the project tags would select it —
         // proves the tags are what gate the collection.
-        let with_all = resolve_plugins(&cfg, &active.tags).unwrap();
+        let with_all = resolve_plugins(&cfg, &active.tags, true).unwrap();
         assert_eq!(with_all.plugins.len(), 1, "full tags should select it");
 
         // The host-cache path resolves with non_project_tags and must drop it.
-        let host = resolve_plugins(&cfg, &active.non_project_tags()).unwrap();
+        let host = resolve_plugins(&cfg, &active.non_project_tags(), true).unwrap();
         assert!(
             host.plugins.is_empty(),
             "project-only collection leaked into host resolution: {:?}",
@@ -337,7 +358,7 @@ mod tests {
                 collection("extra", &["t"], &["dev-commons:nbl-dev"]),
             ],
         );
-        let resolved = resolve_plugins(&cfg, &tags(&["t"])).unwrap();
+        let resolved = resolve_plugins(&cfg, &tags(&["t"]), true).unwrap();
         assert_eq!(resolved.plugins.len(), 3);
         assert_eq!(resolved.marketplaces.len(), 2);
     }
@@ -351,7 +372,7 @@ mod tests {
                 collection("b", &["t"], &["superpowers:caveman"]),
             ],
         );
-        let resolved = resolve_plugins(&cfg, &tags(&["t"])).unwrap();
+        let resolved = resolve_plugins(&cfg, &tags(&["t"]), true).unwrap();
         assert_eq!(resolved.plugins.len(), 1);
         // First collection wins for provenance.
         assert_eq!(resolved.plugins[0].collection, "a");
@@ -363,7 +384,7 @@ mod tests {
             vec![mkt("zeta"), mkt("alpha")],
             vec![collection("c", &["t"], &["alpha:one", "zeta:two"])],
         );
-        let resolved = resolve_plugins(&cfg, &tags(&["t"])).unwrap();
+        let resolved = resolve_plugins(&cfg, &tags(&["t"]), true).unwrap();
         // Declaration order (zeta then alpha), not plugin-reference order.
         assert_eq!(resolved.marketplaces[0].name, "zeta");
         assert_eq!(resolved.marketplaces[1].name, "alpha");
@@ -375,7 +396,7 @@ mod tests {
             vec![mkt("used"), mkt("unused")],
             vec![collection("c", &["t"], &["used:p"])],
         );
-        let resolved = resolve_plugins(&cfg, &tags(&["t"])).unwrap();
+        let resolved = resolve_plugins(&cfg, &tags(&["t"]), true).unwrap();
         assert_eq!(resolved.marketplaces.len(), 1);
         assert_eq!(resolved.marketplaces[0].name, "used");
     }
@@ -386,7 +407,7 @@ mod tests {
             vec![mkt("m")],
             vec![collection("c", &["t"], &["noseparator"])],
         );
-        let err = resolve_plugins(&cfg, &tags(&["t"])).unwrap_err();
+        let err = resolve_plugins(&cfg, &tags(&["t"]), true).unwrap_err();
         assert!(matches!(err, ResolveError::InvalidPluginRef { .. }));
     }
 
@@ -396,7 +417,7 @@ mod tests {
             vec![mkt("known")],
             vec![collection("c", &["t"], &["ghost:p"])],
         );
-        let err = resolve_plugins(&cfg, &tags(&["t"])).unwrap_err();
+        let err = resolve_plugins(&cfg, &tags(&["t"]), true).unwrap_err();
         assert_eq!(
             err,
             ResolveError::UnknownMarketplace {
@@ -410,7 +431,7 @@ mod tests {
     #[test]
     fn no_active_tags_resolves_empty() {
         let cfg = config_with(vec![mkt("m")], vec![collection("c", &["t"], &["m:p"])]);
-        let resolved = resolve_plugins(&cfg, &tags(&["other"])).unwrap();
+        let resolved = resolve_plugins(&cfg, &tags(&["other"]), true).unwrap();
         assert!(resolved.plugins.is_empty());
         assert!(resolved.marketplaces.is_empty());
     }
@@ -427,7 +448,7 @@ mod tests {
             }),
             ..Config::default()
         };
-        let resolved = resolve_plugins(&cfg, &tags(&[])).unwrap();
+        let resolved = resolve_plugins(&cfg, &tags(&[]), true).unwrap();
         assert!(
             resolved
                 .plugins
@@ -446,7 +467,7 @@ mod tests {
     #[test]
     fn context_mode_disabled_injects_nothing() {
         let cfg = Config::default();
-        let resolved = resolve_plugins(&cfg, &tags(&[])).unwrap();
+        let resolved = resolve_plugins(&cfg, &tags(&[]), true).unwrap();
         assert!(
             !resolved
                 .plugins
@@ -478,7 +499,7 @@ mod tests {
             }),
             ..Config::default()
         };
-        let resolved = resolve_plugins(&cfg, &tags(&["t"])).unwrap();
+        let resolved = resolve_plugins(&cfg, &tags(&["t"]), true).unwrap();
         let cm: Vec<_> = resolved
             .plugins
             .iter()
@@ -521,7 +542,7 @@ mod tests {
             }),
             ..Config::default()
         };
-        let resolved = resolve_plugins(&cfg, &tags(&["t"])).unwrap();
+        let resolved = resolve_plugins(&cfg, &tags(&["t"]), true).unwrap();
         assert_eq!(
             resolved
                 .plugins
@@ -529,6 +550,63 @@ mod tests {
                 .filter(|p| p.marketplace == "context-mode")
                 .count(),
             1
+        );
+    }
+
+    fn redundant_context_mode_declaration_config() -> Config {
+        Config {
+            marketplace: vec![Marketplace {
+                name: "context-mode".into(),
+                source: "https://github.com/myfork/context-mode".into(),
+            }],
+            plugin_collection: vec![crate::config::PluginCollection {
+                name: "core".into(),
+                when: vec!["t".into()],
+                plugins: vec!["context-mode:context-mode".into()],
+            }],
+            features: Some(crate::config::Features {
+                context_mode: Some(crate::config::ContextMode {
+                    enabled: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Config::default()
+        }
+    }
+
+    // #1551: regenerate is an interactive, user-invoked action — it should
+    // still warn so the user notices the redundant declaration and can drop
+    // it.
+    #[test]
+    fn redundant_context_mode_declaration_warns_on_the_regenerate_path() {
+        let cfg = redundant_context_mode_declaration_config();
+        let logs = crate::test_log_capture::capture_logs(|| {
+            resolve_plugins(&cfg, &tags(&["t"]), true).unwrap();
+        });
+        assert!(
+            logs.contains("WARN"),
+            "regenerate path must warn on a redundant context-mode declaration, got: {logs}"
+        );
+    }
+
+    // #1551: the statusline hot path runs on every `llmenv statusline`
+    // invocation, not just `regenerate` — warning here would spam a user who
+    // has raised their log level, on every render, for a config problem
+    // `regenerate` already reported once.
+    #[test]
+    fn redundant_context_mode_declaration_is_quiet_on_the_statusline_hot_path() {
+        let cfg = redundant_context_mode_declaration_config();
+        let logs = crate::test_log_capture::capture_logs(|| {
+            resolve_plugins(&cfg, &tags(&["t"]), false).unwrap();
+        });
+        assert!(
+            !logs.contains("WARN"),
+            "statusline hot path must not warn on every render, got: {logs}"
+        );
+        assert!(
+            logs.contains("DEBUG"),
+            "statusline hot path should still log at debug level, got: {logs}"
         );
     }
 
@@ -551,7 +629,7 @@ mod tests {
             }),
             ..Config::default()
         };
-        let resolved = resolve_plugins(&cfg, &tags(&[])).unwrap();
+        let resolved = resolve_plugins(&cfg, &tags(&[]), true).unwrap();
         assert_eq!(
             resolved
                 .plugins
@@ -623,7 +701,7 @@ mod tests {
             // the active set.
             #[test]
             fn every_plugin_from_active_collection((cfg, active) in arb_config_and_tags()) {
-                let resolved = resolve_plugins(&cfg, &active).expect("resolve");
+                let resolved = resolve_plugins(&cfg, &active, true).expect("resolve");
                 for p in &resolved.plugins {
                     let col = cfg
                         .plugin_collection
@@ -637,7 +715,7 @@ mod tests {
             // No duplicate (marketplace, plugin) pairs in the output.
             #[test]
             fn output_has_no_duplicate_plugins((cfg, active) in arb_config_and_tags()) {
-                let resolved = resolve_plugins(&cfg, &active).expect("resolve");
+                let resolved = resolve_plugins(&cfg, &active, true).expect("resolve");
                 let mut seen = HashSet::new();
                 for p in &resolved.plugins {
                     prop_assert!(seen.insert((p.marketplace.clone(), p.plugin.clone())));
@@ -650,7 +728,7 @@ mod tests {
             fn no_duplicate_plugins_with_cm_injection(
                 (cfg, active, _cm) in arb_config_tags_cm()
             ) {
-                let resolved = resolve_plugins(&cfg, &active).expect("resolve");
+                let resolved = resolve_plugins(&cfg, &active, true).expect("resolve");
                 let mut seen = HashSet::new();
                 for p in &resolved.plugins {
                     prop_assert!(seen.insert((p.marketplace.clone(), p.plugin.clone())));
@@ -660,8 +738,8 @@ mod tests {
             // Resolution is a pure function of (config, tags).
             #[test]
             fn resolution_is_deterministic((cfg, active) in arb_config_and_tags()) {
-                let a = resolve_plugins(&cfg, &active).expect("resolve");
-                let b = resolve_plugins(&cfg, &active).expect("resolve");
+                let a = resolve_plugins(&cfg, &active, true).expect("resolve");
+                let b = resolve_plugins(&cfg, &active, true).expect("resolve");
                 prop_assert_eq!(a, b);
             }
         }
