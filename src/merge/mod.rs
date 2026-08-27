@@ -199,7 +199,7 @@ pub(crate) fn merge_signature(
     native: &BTreeMap<String, serde_yaml::Value>,
     bundles: &[BundleRef],
 ) -> anyhow::Result<String> {
-    use crate::materialize::cache::update_len_prefixed;
+    use llmenv_util::update_len_prefixed;
     use sha2::{Digest, Sha256};
 
     let mut h = Sha256::new();

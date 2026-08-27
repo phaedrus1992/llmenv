@@ -26,7 +26,7 @@
 use std::process::Stdio;
 use std::time::Duration;
 
-use crate::hook_run::mcp_client::McpHttpClient;
+use llmenv_mcp::mcp_client::McpHttpClient;
 
 /// Hard timeout for the LLM backend call.
 const LLM_TIMEOUT: Duration = Duration::from_secs(120);

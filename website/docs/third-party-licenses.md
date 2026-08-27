@@ -886,7 +886,7 @@ Used by:
 ## ISC License (ISC)
 
 Used by:
-- [rustls-webpki 0.103.14](https://github.com/rustls/webpki)
+- [rustls-webpki 0.103.15](https://github.com/rustls/webpki)
 
 ```
 Except as otherwise noted, this project is licensed under the following
@@ -1133,7 +1133,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [cc 1.4.3](https://github.com/rust-lang/cc-rs)
+- [cc 1.4.4](https://github.com/rust-lang/cc-rs)
 - [cfg-if 1.0.4](https://github.com/rust-lang/cfg-if)
 - [cmake 0.1.58](https://github.com/rust-lang/cmake-rs)
 - [filetime 0.2.29](https://github.com/alexcrichton/filetime)
@@ -1316,7 +1316,7 @@ Used by:
 - [bitflags 2.13.1](https://github.com/bitflags/bitflags)
 - [getopts 0.2.24](https://github.com/rust-lang/getopts)
 - [glob 0.3.4](https://github.com/rust-lang/glob)
-- [log 0.4.33](https://github.com/rust-lang/log)
+- [log 0.4.34](https://github.com/rust-lang/log)
 - [num-traits 0.2.19](https://github.com/rust-num/num-traits)
 - [regex-automata 0.4.18](https://github.com/rust-lang/regex)
 - [regex-syntax 0.8.11](https://github.com/rust-lang/regex)
@@ -1473,7 +1473,7 @@ THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [either 1.17.0](https://github.com/rayon-rs/either)
+- [either 1.18.0](https://github.com/rayon-rs/either)
 - [itertools 0.13.0](https://github.com/rust-itertools/itertools)
 
 ```
@@ -2256,7 +2256,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [h2 0.4.16](https://github.com/hyperium/h2)
+- [h2 0.4.19](https://github.com/hyperium/h2)
 
 ```
 Copyright (c) 2017 h2 authors
@@ -3917,6 +3917,7 @@ Used by:
 - [jni-macros 0.22.4](https://github.com/jni-rs/jni-rs)
 - [jni-sys-macros 0.4.1](https://github.com/jni-rs/jni-sys)
 - [jni 0.22.4](https://github.com/jni-rs/jni-rs)
+- [mutants 0.0.4](https://github.com/sourcefrog/cargo-mutants)
 - [plotters-backend 0.3.7](https://github.com/plotters-rs/plotters)
 - [plotters-svg 0.3.7](https://github.com/plotters-rs/plotters.git)
 - [plotters 0.3.7](https://github.com/plotters-rs/plotters)
@@ -4083,8 +4084,8 @@ Used by:
 - [portable-atomic 1.15.0](https://github.com/taiki-e/portable-atomic)
 - [proc-macro2 1.0.107](https://github.com/dtolnay/proc-macro2)
 - [quote 1.0.47](https://github.com/dtolnay/quote)
-- [ref-cast-impl 1.0.26](https://github.com/dtolnay/ref-cast)
-- [ref-cast 1.0.26](https://github.com/dtolnay/ref-cast)
+- [ref-cast-impl 1.0.27](https://github.com/dtolnay/ref-cast)
+- [ref-cast 1.0.27](https://github.com/dtolnay/ref-cast)
 - [rustix 1.1.4](https://github.com/bytecodealliance/rustix)
 - [rustversion 1.0.23](https://github.com/dtolnay/rustversion)
 - [semver 1.0.28](https://github.com/dtolnay/semver)
@@ -4095,7 +4096,7 @@ Used by:
 - [serde_json 1.0.151](https://github.com/serde-rs/json)
 - [simd_cesu8 1.2.0](https://github.com/seancroach/simd_cesu8)
 - [syn 2.0.119](https://github.com/dtolnay/syn)
-- [syn 3.0.3](https://github.com/dtolnay/syn)
+- [syn 3.0.4](https://github.com/dtolnay/syn)
 - [thiserror-impl 2.0.20](https://github.com/dtolnay/thiserror)
 - [thiserror 2.0.20](https://github.com/dtolnay/thiserror)
 - [unicode-ident 1.0.24](https://github.com/dtolnay/unicode-ident)
@@ -4347,7 +4348,7 @@ SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [combine 4.6.7](https://github.com/Marwes/combine)
+- [combine 4.6.8](https://github.com/Marwes/combine)
 
 ```
 The MIT License (MIT)
@@ -5213,7 +5214,7 @@ Used by:
 - [icu_normalizer_data 2.3.0](https://github.com/unicode-org/icu4x)
 - [icu_properties 2.3.0](https://github.com/unicode-org/icu4x)
 - [icu_properties_data 2.3.0](https://github.com/unicode-org/icu4x)
-- [icu_provider 2.3.0](https://github.com/unicode-org/icu4x)
+- [icu_provider 2.3.1](https://github.com/unicode-org/icu4x)
 - [litemap 0.8.3](https://github.com/unicode-org/icu4x)
 - [potential_utf 0.1.6](https://github.com/unicode-org/icu4x)
 - [tinystr 0.8.4](https://github.com/unicode-org/icu4x)
@@ -5223,8 +5224,8 @@ Used by:
 - [zerofrom-derive 0.1.7](https://github.com/unicode-org/icu4x)
 - [zerofrom 0.1.8](https://github.com/unicode-org/icu4x)
 - [zerotrie 0.2.5](https://github.com/unicode-org/icu4x)
-- [zerovec-derive 0.11.4](https://github.com/unicode-org/icu4x)
-- [zerovec 0.11.7](https://github.com/unicode-org/icu4x)
+- [zerovec-derive 0.11.6](https://github.com/unicode-org/icu4x)
+- [zerovec 0.11.8](https://github.com/unicode-org/icu4x)
 
 ```
 UNICODE LICENSE V3

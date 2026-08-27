@@ -1,11 +1,15 @@
+pub(crate) mod build_manifest;
 pub mod cache;
 pub(crate) mod inherit;
 pub mod manifest;
 pub(crate) mod merge_cache;
 pub(crate) mod schema_gen;
+pub mod stale;
 pub mod state;
-mod status_data;
+pub(crate) mod status_data;
 
+pub(crate) use build_manifest::build_manifest;
+pub use stale::{StaleStatus, stale_status};
 pub(crate) use status_data::{ConfigStaleInputs, collect_plugins, collect_status_data};
 
 use std::collections::BTreeSet;

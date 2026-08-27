@@ -96,7 +96,7 @@ fn link_durable_dir(name: &str, state_dir: &Path, config_dir: &Path) -> anyhow::
     // 0o700, not create_dir_all's 0o777&~umask: both callers' directories hold
     // sensitive content (project paths and transcripts; session logs) that
     // shouldn't be group/world-readable.
-    crate::adapter::skills::create_dir_owner_only(&target)
+    crate::paths::create_dir_owner_only(&target)
         .with_context(|| format!("creating durable dir {}", target.display()))?;
     let link = config_dir.join(name);
     if clear_link_site(&link, &target)? {
@@ -848,7 +848,7 @@ fn attach_store(_target: &Path, _link: &Path) -> anyhow::Result<()> {
 /// than a fix to this function. Severity is low: it requires winning a race as
 /// the same user, who can already read these files.
 fn move_dir_newest_wins(src: &Path, dst: &Path) -> anyhow::Result<()> {
-    crate::adapter::skills::create_dir_owner_only(dst)
+    crate::paths::create_dir_owner_only(dst)
         .with_context(|| format!("creating {}", dst.display()))?;
     // `create_dir_owner_only`/`create_dir_all` is a no-op (success) when `dst`
     // already resolves through a symlink to an existing directory — it never

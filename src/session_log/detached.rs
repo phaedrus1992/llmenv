@@ -14,9 +14,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::hook_run::mcp_client::McpHttpClient;
 use crate::session_log::dispatch;
 use crate::session_log::event::SessionLogEvent;
+use llmenv_mcp::mcp_client::McpHttpClient;
 
 /// Per-call network timeout for the detached child's transcript record call.
 const RECORD_TIMEOUT: Duration = Duration::from_secs(5);
@@ -60,9 +60,9 @@ pub(crate) fn spawn_record(session_id: &str, ev: &SessionLogEvent) -> Option<Chi
     cmd.arg("session-log-record")
         .stdin(Stdio::piped())
         .stdout(Stdio::null());
-    crate::hook_run::redirect_stderr_to_detached_log(
+    crate::session_log::redirect_stderr_to_detached_log(
         &mut cmd,
-        crate::hook_run::detached_child_log_path,
+        crate::session_log::detached_child_log_path,
     );
     crate::mcp::proxy::detach_process_group(&mut cmd);
     let Ok(mut child) = cmd.spawn() else {
@@ -110,7 +110,7 @@ fn run_record_inner(payload_json: &str) -> anyhow::Result<()> {
     let config_dir = config_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
-    let url = crate::hook_run::memory_url(&config, config_dir, &active)?.into_url()?;
+    let url = crate::memory::memory_url(&config, config_dir, &active)?.into_url()?;
     let client = McpHttpClient::new(url, RECORD_TIMEOUT)
         .map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))?;
 

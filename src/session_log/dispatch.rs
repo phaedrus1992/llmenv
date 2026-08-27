@@ -3,11 +3,11 @@
 
 use serde_json::Value;
 
-use crate::hook_run::mcp_client::McpHttpClient;
 use crate::session_log::event::SessionLogEvent;
 use crate::session_log::transcript::{
     RECORD_TOOL, SHOW_TOOL, START_TOOL, record_args, show_session_args, start_session_args,
 };
+use llmenv_mcp::mcp_client::McpHttpClient;
 
 /// Start a transcript session; returns its id (the tool's text result, trimmed).
 ///

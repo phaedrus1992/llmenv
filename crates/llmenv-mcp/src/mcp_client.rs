@@ -20,7 +20,7 @@ use url::{Host, Url};
 /// inside a private network — that would itself be a sign of a misconfigured
 /// or hijacked endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SsrfPolicy {
+pub enum SsrfPolicy {
     /// Reject loopback, private (RFC 1918 / ULA), link-local, unspecified, and
     /// broadcast addresses. For endpoints expected to be public internet
     /// services.
@@ -105,7 +105,10 @@ impl McpHttpClient {
     ///
     /// # Errors
     /// Returns an error if the URL is invalid, uses an unsupported scheme, or
-    /// points to a private/loopback IP address (SSRF protection).
+    /// points to a link-local, unspecified, or broadcast address (SSRF
+    /// protection). Loopback and private-range addresses are allowed — this
+    /// client is used to reach llmenv's own ICM backend, which is expected
+    /// to run on loopback or the operator's LAN.
     pub fn new(url: String, timeout: Duration) -> anyhow::Result<Self> {
         // Resolve and SSRF-validate up front, then pin reqwest to exactly the
         // vetted addresses. Pinning closes the DNS-rebinding TOCTOU: reqwest never
@@ -129,9 +132,9 @@ impl McpHttpClient {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-util"))]
     /// Build a client for testing, skipping SSRF validation.
-    pub(crate) fn test_new(url: String, timeout: Duration) -> anyhow::Result<Self> {
+    pub fn test_new(url: String, timeout: Duration) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(timeout)
             .build()
@@ -478,7 +481,7 @@ fn is_unique_local_v6(v6: &std::net::Ipv6Addr) -> bool {
 /// Returns an error for an unparseable URL, an unsupported scheme, a missing
 /// host, a DNS resolution failure or timeout, or any resolved/literal address
 /// blocked under the given `policy`.
-pub(crate) fn validate_url_production(
+pub fn validate_url_production(
     url: &str,
     policy: SsrfPolicy,
     timeout: Duration,

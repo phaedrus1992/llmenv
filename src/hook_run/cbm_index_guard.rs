@@ -24,9 +24,7 @@
 //! Stateless, like `cd_guard`: the decision comes from the current call's
 //! arguments alone.
 
-/// Tool name this guard fires on. Callers register a `PreToolUse` matcher for
-/// exactly this string, so the guard costs one anchored regex when idle.
-pub(crate) const INDEX_REPOSITORY_TOOL: &str = "mcp__codebase-memory-mcp__index_repository";
+use llmenv_mcp::resolve::INDEX_REPOSITORY_TOOL;
 
 /// Handle a `PreToolUse` event for codebase-memory-mcp's `index_repository`.
 /// Returns a `__DENY__:`-prefixed reason when the call carries a `name`
