@@ -280,14 +280,14 @@ mod tests {
     fn recall_tag(tag: &str) -> Action {
         Action::RecallTag(TagRecallQuery {
             tag: tag.to_string(),
-            keyword: tag_keyword(tag),
+            keyword: tag_keyword(tag).unwrap(),
         })
     }
 
     fn recall_bundle(bundle: &str) -> Action {
         Action::RecallBundle(BundleRecallQuery {
             bundle: bundle.to_string(),
-            keyword: bundle_keyword(bundle),
+            keyword: bundle_keyword(bundle).unwrap(),
         })
     }
 
@@ -367,7 +367,7 @@ mod tests {
             prop_assert_eq!(obj.len(), 3, "exactly query/project/keyword");
             prop_assert_eq!(&obj["query"], &serde_json::json!(tag));
             prop_assert_eq!(&obj["project"], &serde_json::json!(""));
-            prop_assert_eq!(&obj["keyword"], &serde_json::json!(tag_keyword(&tag)));
+            prop_assert_eq!(&obj["keyword"], &serde_json::json!(tag_keyword(&tag).unwrap()));
         }
 
         // RecallBundle arguments are always exactly {query, project, keyword} with
@@ -379,7 +379,7 @@ mod tests {
             prop_assert_eq!(obj.len(), 3, "exactly query/project/keyword");
             prop_assert_eq!(&obj["query"], &serde_json::json!(bundle));
             prop_assert_eq!(&obj["project"], &serde_json::json!(""));
-            prop_assert_eq!(&obj["keyword"], &serde_json::json!(bundle_keyword(&bundle)));
+            prop_assert_eq!(&obj["keyword"], &serde_json::json!(bundle_keyword(&bundle).unwrap()));
         }
     }
 

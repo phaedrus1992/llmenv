@@ -72,7 +72,7 @@ pub fn tag_recall_queries(tags: &[String]) -> anyhow::Result<Vec<TagRecallQuery>
             debug!(tag = %tag, "tag recall query created");
             Ok(TagRecallQuery {
                 tag: tag.clone(),
-                keyword: action::tag_keyword(tag),
+                keyword: action::tag_keyword(tag)?,
             })
         })
         .collect()
@@ -121,7 +121,7 @@ pub fn bundle_recall_queries(bundles: &[String]) -> anyhow::Result<Vec<BundleRec
             debug!(bundle = %bundle, "bundle recall query created");
             Ok(BundleRecallQuery {
                 bundle: bundle.clone(),
-                keyword: action::bundle_keyword(bundle),
+                keyword: action::bundle_keyword(bundle)?,
             })
         })
         .collect()
