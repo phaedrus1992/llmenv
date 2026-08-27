@@ -7,16 +7,38 @@ use llmenv_config::Config;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+/// A tag or bundle name failed [`tag_keyword`]/[`bundle_keyword`]'s charset
+/// check before a recall-query keyword could be built from it.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum KeywordError {
+    #[error("tag '{0}' contains invalid characters (only alphanumeric, -, _ allowed, non-empty)")]
+    InvalidTag(String),
+    #[error(
+        "bundle '{0}' contains invalid characters (only alphanumeric, -, _ allowed, non-empty)"
+    )]
+    InvalidBundle(String),
+}
+
 /// The keyword prefix under which tag-scoped memory is stored and recalled.
 /// A memory written for tag `work-vpn` carries keyword `llmenv-tag:work-vpn`;
 /// recalling that keyword (project-unfiltered) surfaces it from any project.
 const TAG_KEYWORD_PREFIX: &str = "llmenv-tag:";
 
-/// The `llmenv-tag:<tag>` keyword for a tag. The tag is assumed pre-validated
-/// (see `hook_run::validate_tag`) so it contains no recall-query metacharacters.
-#[must_use]
-pub fn tag_keyword(tag: &str) -> String {
-    format!("{TAG_KEYWORD_PREFIX}{tag}")
+/// The `llmenv-tag:<tag>` keyword for a tag.
+///
+/// Enforces the charset check in-crate (via [`matcher::is_valid_tag_charset`])
+/// rather than trusting the caller to have validated the tag first, so an
+/// unvalidated call is a runtime error here instead of a silent recall-query
+/// injection risk.
+///
+/// # Errors
+/// Returns [`KeywordError::InvalidTag`] if `tag` is empty or contains a
+/// character outside `[a-zA-Z0-9_-]`.
+pub fn tag_keyword(tag: &str) -> Result<String, KeywordError> {
+    if !matcher::is_valid_tag_charset(tag) {
+        return Err(KeywordError::InvalidTag(tag.to_string()));
+    }
+    Ok(format!("{TAG_KEYWORD_PREFIX}{tag}"))
 }
 
 /// The keyword prefix under which bundle-scoped memory is stored and recalled.
@@ -24,37 +46,76 @@ pub fn tag_keyword(tag: &str) -> String {
 /// recalling that keyword (project-unfiltered) surfaces it from any project.
 const BUNDLE_KEYWORD_PREFIX: &str = "llmenv-bundle:";
 
-/// The `llmenv-bundle:<bundle>` keyword for a bundle. The bundle name is
-/// assumed pre-validated (see `hook_run::validate_bundle`) so it contains no
-/// recall-query metacharacters.
-#[must_use]
-pub fn bundle_keyword(bundle: &str) -> String {
-    format!("{BUNDLE_KEYWORD_PREFIX}{bundle}")
+/// The `llmenv-bundle:<bundle>` keyword for a bundle.
+///
+/// Enforces the charset check in-crate (via [`matcher::is_valid_tag_charset`])
+/// rather than trusting the caller to have validated the bundle name first, so
+/// an unvalidated call is a runtime error here instead of a silent
+/// recall-query injection risk.
+///
+/// # Errors
+/// Returns [`KeywordError::InvalidBundle`] if `bundle` is empty or contains a
+/// character outside `[a-zA-Z0-9_-]`.
+pub fn bundle_keyword(bundle: &str) -> Result<String, KeywordError> {
+    if !matcher::is_valid_tag_charset(bundle) {
+        return Err(KeywordError::InvalidBundle(bundle.to_string()));
+    }
+    Ok(format!("{BUNDLE_KEYWORD_PREFIX}{bundle}"))
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod keyword_tests {
     use super::*;
     use proptest::prelude::*;
 
     #[test]
     fn tag_keyword_prefixes_tag() {
-        assert_eq!(tag_keyword("work-vpn"), "llmenv-tag:work-vpn");
-        assert_eq!(tag_keyword("rust"), "llmenv-tag:rust");
+        assert_eq!(tag_keyword("work-vpn").unwrap(), "llmenv-tag:work-vpn");
+        assert_eq!(tag_keyword("rust").unwrap(), "llmenv-tag:rust");
     }
 
     #[test]
     fn bundle_keyword_prefixes_bundle() {
-        assert_eq!(bundle_keyword("base"), "llmenv-bundle:base");
+        assert_eq!(bundle_keyword("base").unwrap(), "llmenv-bundle:base");
         assert_eq!(
-            bundle_keyword("rust-defaults"),
+            bundle_keyword("rust-defaults").unwrap(),
             "llmenv-bundle:rust-defaults"
         );
     }
 
-    /// A tag accepted by `hook_run::validate_tag`.
+    #[test]
+    fn tag_keyword_rejects_empty_tag() {
+        assert!(matches!(tag_keyword(""), Err(KeywordError::InvalidTag(t)) if t.is_empty()));
+    }
+
+    #[test]
+    fn tag_keyword_rejects_query_injection_characters() {
+        assert!(tag_keyword("tag with space").is_err());
+        assert!(tag_keyword("tag:colon").is_err());
+        assert!(tag_keyword("tag\"quote").is_err());
+    }
+
+    #[test]
+    fn bundle_keyword_rejects_empty_bundle() {
+        assert!(matches!(bundle_keyword(""), Err(KeywordError::InvalidBundle(b)) if b.is_empty()));
+    }
+
+    #[test]
+    fn bundle_keyword_rejects_query_injection_characters() {
+        assert!(bundle_keyword("bundle with space").is_err());
+        assert!(bundle_keyword("bundle:colon").is_err());
+    }
+
+    /// A tag accepted by [`tag_keyword`]'s charset check.
     fn valid_tag() -> impl Strategy<Value = String> {
         "[a-zA-Z0-9_-]{1,24}"
+    }
+
+    /// A string guaranteed to fail [`is_valid_tag_charset`] — non-empty but
+    /// containing at least one character outside the allowed charset.
+    fn invalid_tag() -> impl Strategy<Value = String> {
+        "[a-zA-Z0-9_-]{0,12}[^a-zA-Z0-9_-][a-zA-Z0-9_-]{0,12}"
     }
 
     proptest! {
@@ -62,7 +123,7 @@ mod keyword_tests {
         // the keyword is `llmenv-tag:` + the unmodified tag for any valid input.
         #[test]
         fn prop_tag_keyword_is_prefix_plus_tag(tag in valid_tag()) {
-            let kw = tag_keyword(&tag);
+            let kw = tag_keyword(&tag).unwrap();
             prop_assert_eq!(&kw, &format!("{TAG_KEYWORD_PREFIX}{tag}"));
             prop_assert!(kw.starts_with(TAG_KEYWORD_PREFIX));
             prop_assert_eq!(&kw[TAG_KEYWORD_PREFIX.len()..], tag.as_str());
@@ -72,10 +133,22 @@ mod keyword_tests {
         // name exactly — the keyword is `llmenv-bundle:` + the unmodified bundle.
         #[test]
         fn prop_bundle_keyword_is_prefix_plus_bundle(bundle in valid_tag()) {
-            let kw = bundle_keyword(&bundle);
+            let kw = bundle_keyword(&bundle).unwrap();
             prop_assert_eq!(&kw, &format!("{BUNDLE_KEYWORD_PREFIX}{bundle}"));
             prop_assert!(kw.starts_with(BUNDLE_KEYWORD_PREFIX));
             prop_assert_eq!(&kw[BUNDLE_KEYWORD_PREFIX.len()..], bundle.as_str());
+        }
+
+        // Any string containing a charset-violating character is rejected,
+        // regardless of what else surrounds it.
+        #[test]
+        fn prop_tag_keyword_rejects_invalid_charset(tag in invalid_tag()) {
+            prop_assert!(tag_keyword(&tag).is_err());
+        }
+
+        #[test]
+        fn prop_bundle_keyword_rejects_invalid_charset(bundle in invalid_tag()) {
+            prop_assert!(bundle_keyword(&bundle).is_err());
         }
     }
 }
