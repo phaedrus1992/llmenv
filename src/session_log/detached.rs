@@ -14,9 +14,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::hook_run::mcp_client::McpHttpClient;
 use crate::session_log::dispatch;
 use crate::session_log::event::SessionLogEvent;
+use llmenv_mcp::mcp_client::McpHttpClient;
 
 /// Per-call network timeout for the detached child's transcript record call.
 const RECORD_TIMEOUT: Duration = Duration::from_secs(5);

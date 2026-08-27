@@ -4,8 +4,8 @@
 use serde_json::{Value, json};
 use tracing::{debug, warn};
 
-use crate::hook_run::mcp_client::McpHttpClient;
 use crate::hook_run::{BundleRecallQuery, TagRecallQuery};
+use llmenv_mcp::mcp_client::McpHttpClient;
 
 /// The keyword prefix under which tag-scoped memory is stored and recalled.
 /// A memory written for tag `work-vpn` carries keyword `llmenv-tag:work-vpn`;

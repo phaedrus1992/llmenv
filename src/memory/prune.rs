@@ -22,7 +22,7 @@
 
 use std::time::Duration;
 
-use crate::hook_run::mcp_client::McpHttpClient;
+use llmenv_mcp::mcp_client::McpHttpClient;
 
 /// CLI timeout — longer than hook timeout since users are waiting.
 const CLI_TIMEOUT: Duration = Duration::from_secs(10);

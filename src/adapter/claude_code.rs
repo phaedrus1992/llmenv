@@ -1480,10 +1480,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         .iter()
         .any(|m| m.name == crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME)
     {
-        pre_tool_use_matchers.push(format!(
-            "^{}$",
-            crate::hook_run::cbm_index_guard::INDEX_REPOSITORY_TOOL
-        ));
+        pre_tool_use_matchers.push(format!("^{}$", llmenv_mcp::resolve::INDEX_REPOSITORY_TOOL));
     }
 
     // #985: redirect Claude Code's built-in task tools to the `llmenv task`
@@ -3774,10 +3771,7 @@ mod tests {
     #[test]
     fn index_repository_guard_is_registered_when_codebase_memory_is_wired() {
         let settings = render_settings_for_test(&cbm_manifest_without_session_log());
-        let expected = format!(
-            "^{}$",
-            crate::hook_run::cbm_index_guard::INDEX_REPOSITORY_TOOL
-        );
+        let expected = format!("^{}$", llmenv_mcp::resolve::INDEX_REPOSITORY_TOOL);
         assert!(
             hook_matchers_for(&settings, "PreToolUse").contains(&expected),
             "expected {expected} among {:?}",

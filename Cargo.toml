@@ -29,6 +29,7 @@ globset = "=0.4.20"
 walkdir = "=2.5.0"
 sha2 = "=0.11.0"
 anstyle = "=1.0.14"
+url = "=2.5.8"
 humantime = "=2.4.0"
 # Hostname via the uname(2) syscall instead of spawning the `hostname` binary on
 # every hook-run ("system" enables uname). "process" enables kill_process_group
@@ -97,7 +98,7 @@ glob = "=0.3.4"
 globset = { workspace = true }
 schemars = "=1.2.2"
 reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "json", "blocking"] }
-url = "=2.5.8"
+url = { workspace = true }
 rustix = { workspace = true }
 tempfile = "=3.27.0"
 pulldown-cmark = { workspace = true }
@@ -118,6 +119,9 @@ filetime = "=0.2.29"
 # own tests, without pulling proptest into llmenv-util's default (non-test)
 # dependency graph.
 llmenv-util = { path = "crates/llmenv-util", version = "4.0.0-alpha.1", features = ["test-util"] }
+# Enables McpHttpClient::test_new for this crate's own tests — see
+# llmenv-mcp's `test-util` feature doc comment.
+llmenv-mcp = { path = "crates/llmenv-mcp", version = "4.0.0-alpha.1", features = ["test-util"] }
 
 [profile.release]
 lto = true

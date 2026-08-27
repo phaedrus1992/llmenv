@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use crate::hook_run::mcp_client::McpHttpClient;
+use llmenv_mcp::mcp_client::McpHttpClient;
 
 /// Per-call network timeout for the detached child's ICM memory store call.
 const STORE_TIMEOUT: Duration = Duration::from_secs(5);

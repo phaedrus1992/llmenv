@@ -12,7 +12,6 @@ pub(crate) mod cd_guard;
 pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
 mod launch_client;
-pub(crate) mod mcp_client;
 pub(crate) mod read_once;
 pub(crate) mod repeat_detect;
 mod session_state;
@@ -30,7 +29,7 @@ use std::collections::HashMap;
 
 use action::Action;
 use anyhow::Context as _;
-use mcp_client::McpHttpClient;
+use llmenv_mcp::mcp_client::McpHttpClient;
 use serde_json::json;
 use tracing::{debug, error, warn};
 
@@ -3685,7 +3684,7 @@ mod tests {
 
     fn index_repository_clobber_payload() -> serde_json::Value {
         serde_json::json!({
-            "tool_name": crate::hook_run::cbm_index_guard::INDEX_REPOSITORY_TOOL,
+            "tool_name": llmenv_mcp::resolve::INDEX_REPOSITORY_TOOL,
             "tool_input": { "repo_path": "/repo", "name": "some-other-project" },
         })
     }
@@ -3747,7 +3746,7 @@ mod tests {
         let state_dir = tempfile::tempdir().expect("test");
         let text = resolve_pre_tool_decision(
             &serde_json::json!({
-                "tool_name": crate::hook_run::cbm_index_guard::INDEX_REPOSITORY_TOOL,
+                "tool_name": llmenv_mcp::resolve::INDEX_REPOSITORY_TOOL,
                 "tool_input": { "repo_path": "/repo" },
             }),
             Some("plain"),

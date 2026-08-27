@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use crate::consolidation;
-use crate::hook_run::mcp_client::McpHttpClient;
+use llmenv_mcp::mcp_client::McpHttpClient;
 
 /// Per-call network timeout for the detached child's consolidation MCP calls.
 const CONSOLIDATION_TIMEOUT: Duration = Duration::from_secs(30);

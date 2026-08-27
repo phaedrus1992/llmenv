@@ -1398,9 +1398,14 @@ dependencies = [
  "llmenv-config",
  "llmenv-paths",
  "proptest",
+ "reqwest",
+ "serde_json",
  "tempfile",
  "thiserror",
+ "tokio",
  "tracing",
+ "url",
+ "wiremock",
 ]
 
 [[package]]
