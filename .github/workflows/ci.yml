@@ -111,10 +111,20 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
+    env:
+      # This job has no Swatinem/rust-cache step, so unlike `test` above it
+      # must set CARGO_INCREMENTAL itself — sccache requires incremental
+      # compilation off to cache effectively (#1463).
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c  # v0.0.11
+        with:
+          version: "v0.17.0"
       # id: toolchain -- rust-toolchain.toml pins channel = "stable" for the
       # rest of the repo; rustup resolves that toolchain file for every
       # cargo/rustc invocation in this checkout regardless of `rustup default`
