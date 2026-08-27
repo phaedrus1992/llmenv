@@ -1702,7 +1702,7 @@ fn scope_session_event(ctx: &ScopeContext) -> SessionLogEvent {
 /// excluded: this list is the *explicitly requested* set, which is what makes a
 /// useful recall keyword.
 fn recall_bundle_names(active: &crate::scope::ActiveScopes) -> Vec<String> {
-    let disabled = crate::cli::marker_disabled_bundle_names(active);
+    let disabled = crate::bundle_select::marker_disabled_bundle_names(active);
     active
         .scopes
         .iter()
@@ -1892,14 +1892,14 @@ pub(crate) fn memory_url(
         .unwrap_or_default();
 
     // Collect bundle-contributed memory and host entries. Bundle selection goes
-    // through `cli::firing_bundles` — the same selector `build_manifest` uses —
+    // through `bundle_select::firing_bundles` — the same selector `build_manifest` uses —
     // so `disable_bundles` suppression can't drift between hook-run's live
     // resolution and the materialized manifest (#1125). The `tag_filter` must
     // stay `None`: it exists for the CLI's `--tag` flag, and narrowing endpoint
     // resolution by one tag would drop the memory backend for a live session.
-    let firing = crate::cli::firing_bundles(&config.bundle, active, None);
+    let firing = crate::bundle_select::firing_bundles(&config.bundle, active, None);
 
-    let bundle_refs = crate::cli::build_bundle_refs(config_dir, active, &firing);
+    let bundle_refs = crate::bundle_select::build_bundle_refs(config_dir, active, &firing);
     let (bundle_memory, bundle_host) = resolve_bundle_memory_host(config, &bundle_refs)?;
 
     let mut all_memory: Vec<crate::config::Memory> = top_memory
@@ -2050,18 +2050,18 @@ fn suppressed_bundle_capabilities(
     config_dir: &std::path::Path,
     active: &crate::scope::ActiveScopes,
 ) -> Vec<(String, crate::config::Capabilities)> {
-    let disabled = crate::cli::marker_disabled_bundle_names(active);
+    let disabled = crate::bundle_select::marker_disabled_bundle_names(active);
     if disabled.is_empty() {
         return Vec::new();
     }
-    let manually_enabled = crate::cli::marker_enabled_bundle_names(active);
+    let manually_enabled = crate::bundle_select::marker_enabled_bundle_names(active);
     let would_fire: Vec<&crate::config::Bundle> = config
         .bundle
         .iter()
         .filter(|b| disabled.contains(&b.name))
-        .filter(|b| crate::cli::tag_or_marker_selected(b, active, &manually_enabled))
+        .filter(|b| crate::bundle_select::tag_or_marker_selected(b, active, &manually_enabled))
         .collect();
-    crate::cli::build_bundle_refs(config_dir, active, &would_fire)
+    crate::bundle_select::build_bundle_refs(config_dir, active, &would_fire)
         .into_iter()
         .filter_map(|r| {
             crate::merge::read_bundle_yaml(&r.path, &r.name)
@@ -2895,10 +2895,11 @@ mod tests {
 
         // Seed the persisted cache under the exact key `memory_url` will
         // independently recompute for this config/bundle set — derived via
-        // `crate::cli::build_bundle_refs`, the same ref-builder `memory_url`
+        // `crate::bundle_select::build_bundle_refs`, the same ref-builder `memory_url`
         // itself calls, so this test can't drift from production behavior.
-        let firing = crate::cli::firing_bundles(&config.bundle, &active, None);
-        let bundle_refs = crate::cli::build_bundle_refs(config_root.path(), &active, &firing);
+        let firing = crate::bundle_select::firing_bundles(&config.bundle, &active, None);
+        let bundle_refs =
+            crate::bundle_select::build_bundle_refs(config_root.path(), &active, &firing);
         let key = crate::merge::merge_signature(&config.capabilities, &config.native, &bundle_refs)
             .expect("test");
         let persisted_memory = vec![crate::config::Memory {

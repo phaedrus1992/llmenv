@@ -1,9 +1,12 @@
 use crate::adapter::AgentAdapter;
 use crate::adapter::claude_code::ClaudeCodeAdapter;
 use crate::adapter::codex::CodexAdapter;
+pub(crate) use crate::bundle_select::{
+    build_bundle_refs, firing_bundles, marker_disabled_bundle_names, marker_enabled_bundle_names,
+};
 use crate::config::{Bundle, Config};
 use crate::git;
-use crate::merge::{BundleRef, MergedManifest};
+use crate::merge::MergedManifest;
 use crate::paths;
 use crate::scope::ActiveScopes;
 use anyhow::Context;
@@ -3063,98 +3066,6 @@ fn sync_plugin_payloads(
         .collect()
 }
 
-/// Resolve firing bundles to on-disk `BundleRef`s in scope precedence order
-/// (network → host → user → content → project), then unscoped tags in
-/// declaration order. Bundles with no content directory under
-/// `<config_dir>/bundles/<name>/` are dropped silently — tag-only bundles (no
-/// content directory) are valid.
-///
-/// `content` sits between `user` and `project` (#845): it's an environment
-/// signal like network/host/user (file patterns incidentally present under
-/// the cwd, not authored intent — see [`ActiveScopes::non_project_tags`]'s
-/// own network/host/user/content grouping), but more specific than a bare
-/// user-level match since it's derived from the actual project's file layout.
-/// An explicit `.llmenv.yaml` (`project`) still outranks it — deliberately
-/// authored project config beats an incidental glob match.
-///
-/// `pub(crate)`: also called by `hook_run::memory_url`, which needs the same
-/// scope-kind precedence assignment as `regenerate`/`export` — a bundle firing
-/// via a `host`/`user`/`network`/`content` scope must get the same rank in
-/// both places, or a persisted merge-cache entry keyed on that precedence
-/// (`merge_signature`) would never match hook-run's own recomputation (#920).
-pub(crate) fn build_bundle_refs(
-    config_dir: &Path,
-    active: &ActiveScopes,
-    firing: &[&Bundle],
-) -> Vec<BundleRef> {
-    const PRECEDENCE: &[&str] = &["network", "host", "user", "content", "project"];
-
-    let bundles_dir = config_dir.join("bundles");
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut refs: Vec<BundleRef> = Vec::new();
-
-    let push_ref =
-        |name: &str, precedence: u8, refs: &mut Vec<BundleRef>, seen: &mut BTreeSet<String>| {
-            if seen.contains(name) {
-                return;
-            }
-            if crate::paths::is_unsafe_join_target(name) {
-                tracing::warn!("rejecting bundle name with traversal/absolute path: {name}");
-                return;
-            }
-            let path = bundles_dir.join(name);
-            if !path.exists() {
-                // Stays at `warn!` (which the default `EnvFilter` drops)
-                // because a content-less bundle is a documented, valid
-                // configuration and this runs on every hook event — promoting
-                // it would make a legitimate setup log an error continuously.
-                // The one place it silently changed an outcome, memory-endpoint
-                // resolution, names the skipped bundles itself instead
-                // (`hook_run::MemoryEndpoint::NotDeclared`, #1133).
-                tracing::warn!(
-                    "bundle '{}' has no content directory at {}; \
-                     skipping (tag-only bundle, or missing/deleted directory)",
-                    name,
-                    path.display()
-                );
-                return;
-            }
-            seen.insert(name.to_owned());
-            refs.push(BundleRef {
-                name: name.to_owned(),
-                path,
-                precedence,
-            });
-        };
-
-    for (tier, kind) in PRECEDENCE.iter().enumerate() {
-        // Earlier tiers (network) outrank later ones (project) for scalar
-        // capability resolution, matching the placement-precedence order.
-        // `tier` ranges 0..PRECEDENCE.len() (4), so the rank is 1..=4 — always
-        // in u8 range. try_from over `as` so a future PRECEDENCE growth past 255
-        // tiers fails loudly instead of silently wrapping.
-        let precedence = u8::try_from(PRECEDENCE.len() - tier).unwrap_or(u8::MAX);
-        // Tags emitted by scopes of this kind.
-        let kind_tags: BTreeSet<&str> = active
-            .scopes
-            .iter()
-            .filter(|s| s.kind == *kind)
-            .flat_map(|s| s.tags.iter().map(String::as_str))
-            .collect();
-        for bundle in firing {
-            if bundle.when.iter().any(|t| kind_tags.contains(t.as_str())) {
-                push_ref(&bundle.name, precedence, &mut refs, &mut seen);
-            }
-        }
-    }
-    // Any firing bundle not already placed (shouldn't happen — every firing
-    // bundle has at least one tag in active.tags — but defensive). Lowest rank.
-    for bundle in firing {
-        push_ref(&bundle.name, 0, &mut refs, &mut seen);
-    }
-    refs
-}
-
 fn emit_hook_guards() {
     // Guard 1: skip in non-interactive shells (no 'i' in $-) — e.g. subshells
     // spawned by Claude Code's Bash tool have no prompt and should never render.
@@ -4381,80 +4292,6 @@ fn all_consumed_tags(config: &Config) -> HashSet<String> {
         .collect()
 }
 
-/// Bundle names referenced via marker `enable_bundles` in the currently
-/// active scopes.
-///
-/// `pub(crate)`: also called by `hook_run`, which must apply the same
-/// "would this bundle have fired?" rule when attributing a suppressed one.
-pub(crate) fn marker_enabled_bundle_names(active: &ActiveScopes) -> HashSet<String> {
-    active
-        .scopes
-        .iter()
-        .flat_map(|s| s.enable_bundles.iter().cloned())
-        .collect()
-}
-
-/// Bundle names any active scope disables via marker `disable_bundles`
-/// (#194). Currently populated only by the project marker; see
-/// `ActiveScope::disable_bundles`.
-///
-/// `pub(crate)`: also called by `hook_run`, whose recall-keyword/context-chunk
-/// bundle list must honor the same suppression rule.
-pub(crate) fn marker_disabled_bundle_names(active: &ActiveScopes) -> HashSet<String> {
-    active
-        .scopes
-        .iter()
-        .flat_map(|s| s.disable_bundles.iter().cloned())
-        .collect()
-}
-
-/// Whether `bundle` would be selected by tag intersection or explicit
-/// `enable_bundles`, ignoring `disable_bundles` entirely — the shared "would
-/// this fire" core. `firing_bundles` layers the `disable_bundles` subtraction
-/// (and its own, CLI-only `--tag` narrowing) on top; `hook_run::
-/// suppressed_bundle_capabilities` needs the inverse (only bundles
-/// disable_bundles turns off) and reimplemented this same predicate
-/// separately until #1141 factored it out here so the two selection rules
-/// can't drift apart. Deliberately 3-param, not 4: the `--tag` flag is a
-/// display-only narrowing orthogonal to "would this fire," not part of the
-/// rule itself, so it stays a separate filter stage in `firing_bundles`
-/// rather than a dummy `None` every non-CLI caller has to pass.
-pub(crate) fn tag_or_marker_selected(
-    bundle: &Bundle,
-    active: &ActiveScopes,
-    manually_enabled: &HashSet<String>,
-) -> bool {
-    bundle.when.iter().any(|bt| active.tags.contains(bt)) || manually_enabled.contains(&bundle.name)
-}
-
-/// Compute the bundles that fire for `active`: tag intersection OR
-/// `enable_bundles`, minus anything any scope disables via `disable_bundles`
-/// (#194) — disable always wins, including within the same scope that also
-/// enables it (there's no cross-scope precedence question today since
-/// `enable_bundles`/`disable_bundles` are only populated for project scopes,
-/// the highest-precedence scope kind; a disable from project always beats a
-/// lower scope's tag-firing or enable simply by being the final subtraction).
-/// `tag_filter` (the CLI `--tag` flag) additionally gates a bundle's `when`
-/// list when present. Shared by every call site that needs "what bundles are
-/// actually selected" so the suppression rule can't drift between them.
-///
-/// `pub(crate)`: also called by `hook_run::memory_url`, which resolves the ICM
-/// memory endpoint from the same bundle set the materialized manifest uses.
-pub(crate) fn firing_bundles<'a>(
-    bundles: &'a [Bundle],
-    active: &ActiveScopes,
-    tag_filter: Option<&str>,
-) -> Vec<&'a Bundle> {
-    let manually_enabled = marker_enabled_bundle_names(active);
-    let disabled = marker_disabled_bundle_names(active);
-    bundles
-        .iter()
-        .filter(|b| !disabled.contains(&b.name))
-        .filter(|b| tag_filter.is_none_or(|t| b.when.iter().any(|w| w == t)))
-        .filter(|b| tag_or_marker_selected(b, active, &manually_enabled))
-        .collect()
-}
-
 /// True if a tag looks like it's sourced from a marker (e.g., `lang-*` tags).
 /// Only tags with the `lang-` prefix are considered marker-sourced, since that
 /// prefix is enforced by the marker system itself. Exact-string matches like
@@ -5333,103 +5170,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn firing_bundles_tag_matched_bundle_fires() {
-        let bundles = vec![bundle("rust-dev", &["rust"])];
-        let active = active(vec![active_scope("user", &["rust"], &[], &[])]);
-        let firing = firing_bundles(&bundles, &active, None);
-        assert_eq!(
-            firing.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
-            vec!["rust-dev"]
-        );
-    }
-
-    #[test]
-    fn firing_bundles_manually_enabled_bundle_fires_without_matching_tag() {
-        let bundles = vec![bundle("github-issues", &[])];
-        let active = active(vec![active_scope("project", &[], &["github-issues"], &[])]);
-        let firing = firing_bundles(&bundles, &active, None);
-        assert_eq!(
-            firing.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
-            vec!["github-issues"]
-        );
-    }
-
-    // ===== Tests for build_bundle_refs precedence (#845) =====
-
-    /// Creates an empty content directory for `name` under `config_dir/bundles/`
-    /// — `build_bundle_refs` silently drops any bundle without one.
-    fn with_bundle_dir(config_dir: &std::path::Path, name: &str) {
-        std::fs::create_dir_all(config_dir.join("bundles").join(name)).expect("test");
-    }
-
-    #[test]
-    fn build_bundle_refs_orders_by_scope_precedence() {
-        let tmp = tempfile::tempdir().unwrap();
-        for name in ["net-b", "host-b", "user-b", "content-b", "project-b"] {
-            with_bundle_dir(tmp.path(), name);
-        }
-        let bundles = vec![
-            bundle("net-b", &["t-net"]),
-            bundle("host-b", &["t-host"]),
-            bundle("user-b", &["t-user"]),
-            bundle("content-b", &["t-content"]),
-            bundle("project-b", &["t-project"]),
-        ];
-        let active = active(vec![
-            active_scope("network", &["t-net"], &[], &[]),
-            active_scope("host", &["t-host"], &[], &[]),
-            active_scope("user", &["t-user"], &[], &[]),
-            active_scope("content", &["t-content"], &[], &[]),
-            active_scope("project", &["t-project"], &[], &[]),
-        ]);
-        let firing = firing_bundles(&bundles, &active, None);
-        let refs = build_bundle_refs(tmp.path(), &active, &firing);
-        let ranks: std::collections::BTreeMap<&str, u8> = refs
-            .iter()
-            .map(|r| (r.name.as_str(), r.precedence))
-            .collect();
-        assert!(
-            ranks["net-b"] > ranks["host-b"]
-                && ranks["host-b"] > ranks["user-b"]
-                && ranks["user-b"] > ranks["content-b"]
-                && ranks["content-b"] > ranks["project-b"],
-            "expected network > host > user > content > project, got {ranks:?}"
-        );
-    }
-
-    #[test]
-    fn build_bundle_refs_content_scope_is_not_lowest_rank() {
-        // Regression for #845: content used to fall through PRECEDENCE's
-        // catch-all (rank 0) because it wasn't listed at all, ranking below
-        // every other scope kind regardless of specificity.
-        let tmp = tempfile::tempdir().unwrap();
-        with_bundle_dir(tmp.path(), "content-only");
-        let bundles = vec![bundle("content-only", &["t-content"])];
-        let active = active(vec![active_scope("content", &["t-content"], &[], &[])]);
-        let firing = firing_bundles(&bundles, &active, None);
-        let refs = build_bundle_refs(tmp.path(), &active, &firing);
-        assert_eq!(refs.len(), 1);
-        assert!(
-            refs[0].precedence > 0,
-            "a content-only-fired bundle must not land in the catch-all lowest rank: {refs:?}"
-        );
-    }
-
-    #[test]
-    fn build_bundle_refs_unmatched_enable_bundles_falls_to_catch_all() {
-        // A bundle fired only via `enable_bundles` (no scope's tags cover it)
-        // has no tier to place into and lands in the defensive catch-all.
-        let tmp = tempfile::tempdir().unwrap();
-        with_bundle_dir(tmp.path(), "manual-b");
-        let bundles = vec![bundle("manual-b", &[])];
-        let active = active(vec![active_scope("project", &[], &["manual-b"], &[])]);
-        let firing = firing_bundles(&bundles, &active, None);
-        let refs = build_bundle_refs(tmp.path(), &active, &firing);
-        assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].precedence, 0);
-    }
-
     // ===== Tests for statusline_data_path_with_env (#836) =====
 
     #[test]
@@ -5976,50 +5716,6 @@ mod tests {
     }
 
     #[test]
-    fn firing_bundles_disable_suppresses_tag_matched_bundle() {
-        // #194 motivating example: a lower-precedence scope's tag turns on
-        // "yaks"; the project scope disables it.
-        let bundles = vec![bundle("yaks", &["task-tracking"])];
-        let active = active(vec![
-            active_scope("user", &["task-tracking"], &[], &[]),
-            active_scope("project", &[], &[], &["yaks"]),
-        ]);
-        let firing = firing_bundles(&bundles, &active, None);
-        assert!(
-            firing.is_empty(),
-            "disable must suppress tag-firing: {firing:?}"
-        );
-    }
-
-    #[test]
-    fn firing_bundles_disable_suppresses_manually_enabled_bundle() {
-        let bundles = vec![bundle("yaks", &[])];
-        let active = active(vec![active_scope("project", &[], &["yaks"], &["yaks"])]);
-        let firing = firing_bundles(&bundles, &active, None);
-        assert!(
-            firing.is_empty(),
-            "same-scope disable must beat same-scope enable: {firing:?}"
-        );
-    }
-
-    #[test]
-    fn firing_bundles_disable_does_not_affect_unrelated_bundles() {
-        let bundles = vec![
-            bundle("yaks", &["task-tracking"]),
-            bundle("rust-dev", &["rust"]),
-        ];
-        let active = active(vec![
-            active_scope("user", &["task-tracking", "rust"], &[], &[]),
-            active_scope("project", &[], &[], &["yaks"]),
-        ]);
-        let firing = firing_bundles(&bundles, &active, None);
-        assert_eq!(
-            firing.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
-            vec!["rust-dev"]
-        );
-    }
-
-    #[test]
     fn installed_adapters_skips_engines_in_disabled_engines() {
         // #562: disabling every registered engine must empty the iterator
         // regardless of which binaries happen to be on this machine's PATH.
@@ -6085,17 +5781,6 @@ mod tests {
         };
         let count = installed_adapters(&config).count();
         let _ = count;
-    }
-
-    #[test]
-    fn firing_bundles_tag_filter_still_applies_alongside_disable() {
-        let bundles = vec![bundle("a", &["x"]), bundle("b", &["y"])];
-        let active = active(vec![active_scope("user", &["x", "y"], &[], &[])]);
-        let firing = firing_bundles(&bundles, &active, Some("x"));
-        assert_eq!(
-            firing.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
-            vec!["a"]
-        );
     }
 
     #[test]
