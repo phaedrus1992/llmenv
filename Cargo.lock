@@ -1449,6 +1449,7 @@ dependencies = [
 name = "llmenv-util"
 version = "4.0.0-alpha.1"
 dependencies = [
+ "anstyle",
  "proptest",
  "serde_json",
  "serde_yaml_ng",
