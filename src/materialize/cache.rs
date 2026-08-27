@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime};
 use tracing;
 
 use anyhow::Context as _;
+use llmenv_util::update_len_prefixed;
 use sha2::{Digest, Sha256};
 
 use crate::config::HashingMode;
@@ -188,15 +189,6 @@ pub fn hash_manifest(m: &MergedManifest) -> anyhow::Result<String> {
     hash_native_capability_map(&mut h, &m.capabilities.native_mcp)?;
     hash_native_capability_map(&mut h, &m.capabilities.native_model_providers)?;
     Ok(hex::encode(h.finalize()))
-}
-
-/// `pub(crate)`: shared length-prefix hashing convention, also used by
-/// `merge::merge_signature` (#920) — length-prefixing every field before its
-/// bytes so concatenation can't ambiguate boundaries, same rationale as
-/// [`hash_manifest`].
-pub(crate) fn update_len_prefixed(h: &mut Sha256, data: &[u8]) {
-    h.update((data.len() as u64).to_le_bytes());
-    h.update(data);
 }
 
 /// Hash a per-engine YAML map (e.g. `capabilities.native_hooks`) into `h`.

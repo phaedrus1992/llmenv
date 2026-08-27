@@ -1,5 +1,15 @@
 //! Small shared helpers with no better home.
 
+use sha2::{Digest, Sha256};
+
+/// Shared length-prefix hashing convention: length-prefix every field before
+/// its bytes so concatenation can't ambiguate boundaries. Used by
+/// `materialize::cache::hash_manifest` and `merge::merge_signature` (#920).
+pub fn update_len_prefixed(h: &mut Sha256, data: &[u8]) {
+    h.update((data.len() as u64).to_le_bytes());
+    h.update(data);
+}
+
 /// Stable dedup preserving first-seen order. Lists here are small (permission
 /// rules, hooks, plugin ids), so the quadratic scan is fine and avoids
 /// requiring `Hash`/`Ord` on every element type.
