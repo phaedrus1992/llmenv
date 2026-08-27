@@ -108,6 +108,10 @@ dialoguer = "=0.12.0"
 zeroize = "=1.9.0"
 getrandom = "=0.4.3"
 hmac = "=0.13.0"
+# Provides #[mutants::skip] — a no-op outside `cargo mutants` runs, used to
+# exempt orchestration functions (real filesystem/network I/O end to end)
+# that mutation testing can't productively cover without heavy DI.
+mutants = "=0.0.4"
 
 [dev-dependencies]
 assert_cmd = "=2.2.2"

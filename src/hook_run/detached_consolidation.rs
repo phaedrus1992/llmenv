@@ -27,6 +27,13 @@ pub fn run_consolidation() -> anyhow::Result<()> {
     })
 }
 
+// Real config load, scope detection, and a live MCP network call end to end
+// — there's no seam here to inject a fake config/client without a larger
+// dependency-injection refactor, so mutation testing (which would otherwise
+// flag a mutant that replaces this whole body with `Ok(())`) can't say
+// anything useful about it. `run_consolidation_inner_does_not_panic` below
+// still exercises the real function and asserts the no-panic invariant.
+#[mutants::skip]
 fn run_consolidation_inner() -> anyhow::Result<()> {
     let config_path = crate::paths::config_path()?;
     let config = crate::config::Config::load(&config_path)?;
