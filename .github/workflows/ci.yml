@@ -55,25 +55,33 @@ jobs:
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     env:
-      # sccache caches individual compilation units across jobs/branches, on
-      # top of (not instead of) Swatinem/rust-cache's target/ cache below —
-      # Swatinem/rust-cache already sets CARGO_INCREMENTAL=0, which sccache
-      # requires (incremental artifacts aren't cacheable the way sccache
-      # expects), so the two compose without extra config (#1463).
+      # sccache caches individual compilation units, on top of (not instead
+      # of) Swatinem/rust-cache's target/ cache below — the two overlap
+      # least here since `hawk` builds the same source under a different
+      # toolchain/RUSTFLAGS, so treat any cross-job reuse as a bonus, not
+      # the point. Swatinem/rust-cache already sets CARGO_INCREMENTAL=0,
+      # which sccache requires (incremental artifacts aren't cacheable the
+      # way sccache expects); `test` still sets it explicitly below rather
+      # than relying on that default (#1463).
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
+      CARGO_INCREMENTAL: "0"
       # mold is markedly faster than GNU ld for this workspace's link step;
       # ubuntu-latest's gcc (13.x) recognizes `mold` as a built-in -fuse-ld
       # value once the `mold` apt package (which ships /usr/bin/ld.mold) is
-      # installed below (#1463).
+      # installed below (#1463). NOTE: this replaces rather than merges with
+      # any `rustflags` a future .cargo/config.toml might add — if one is
+      # added, fold the mold flag into it instead of leaving both in place.
       RUSTFLAGS: -C link-arg=-fuse-ld=mold
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - name: Install mold
-        run: sudo apt-get update && sudo apt-get install -y mold
+        run: sudo apt-get update && sudo apt-get install --quiet --no-install-recommends -y mold
       - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c  # v0.0.11
+        with:
+          version: "v0.17.0"
       # Cache the rustup toolchain itself — Swatinem/rust-cache below only
       # covers ~/.cargo and target/. A hit lets rustup skip the component
       # download that intermittently fails on macos runners with
@@ -139,6 +147,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c  # v0.0.11
+        with:
+          version: "v0.17.0"
       # id: toolchain -- rust-toolchain.toml pins channel = "stable" for the
       # rest of the repo; rustup resolves that toolchain file for every
       # cargo/rustc invocation in this checkout regardless of `rustup default`
