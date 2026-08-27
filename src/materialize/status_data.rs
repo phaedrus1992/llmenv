@@ -120,7 +120,7 @@ pub(crate) fn collect_plugins(
     config: &Config,
     active_tags: &BTreeSet<String>,
 ) -> Option<CountData> {
-    match crate::plugins::resolve::resolve_plugins(config, active_tags) {
+    match crate::plugins::resolve::resolve_plugins(config, active_tags, false) {
         Ok(resolved) => Some(CountData {
             total: resolved.plugins.len() as u64,
             errors: 0,
