@@ -7,30 +7,7 @@ use tracing::{debug, warn};
 use crate::hook_run::{BundleRecallQuery, TagRecallQuery};
 use llmenv_mcp::mcp_client::McpHttpClient;
 
-/// The keyword prefix under which tag-scoped memory is stored and recalled.
-/// A memory written for tag `work-vpn` carries keyword `llmenv-tag:work-vpn`;
-/// recalling that keyword (project-unfiltered) surfaces it from any project.
-pub const TAG_KEYWORD_PREFIX: &str = "llmenv-tag:";
-
-/// The `llmenv-tag:<tag>` keyword for a tag. The tag is assumed pre-validated
-/// (see `hook_run::validate_tag`) so it contains no recall-query metacharacters.
-#[must_use]
-pub fn tag_keyword(tag: &str) -> String {
-    format!("{TAG_KEYWORD_PREFIX}{tag}")
-}
-
-/// The keyword prefix under which bundle-scoped memory is stored and recalled.
-/// A memory written for bundle `base` carries keyword `llmenv-bundle:base`;
-/// recalling that keyword (project-unfiltered) surfaces it from any project.
-pub const BUNDLE_KEYWORD_PREFIX: &str = "llmenv-bundle:";
-
-/// The `llmenv-bundle:<bundle>` keyword for a bundle. The bundle name is
-/// assumed pre-validated (see `hook_run::validate_bundle`) so it contains no
-/// recall-query metacharacters.
-#[must_use]
-pub fn bundle_keyword(bundle: &str) -> String {
-    format!("{BUNDLE_KEYWORD_PREFIX}{bundle}")
-}
+pub use llmenv_scope::{bundle_keyword, tag_keyword};
 
 /// Internal: parse an `<!-- llmenv-<prefix>: X -->` HTML comment marker.
 fn parse_marker<'a>(chunk: &'a str, prefix: &'a str) -> Option<&'a str> {
@@ -300,12 +277,6 @@ mod tests {
         assert_eq!(args["topic"], serde_json::json!("llmenv-scope-context"));
     }
 
-    #[test]
-    fn tag_keyword_prefixes_tag() {
-        assert_eq!(tag_keyword("work-vpn"), "llmenv-tag:work-vpn");
-        assert_eq!(tag_keyword("rust"), "llmenv-tag:rust");
-    }
-
     fn recall_tag(tag: &str) -> Action {
         Action::RecallTag(TagRecallQuery {
             tag: tag.to_string(),
@@ -323,15 +294,6 @@ mod tests {
     #[test]
     fn recall_tag_tool_is_memory_recall() {
         assert_eq!(recall_tag("work-vpn").tool_name(), "icm_memory_recall");
-    }
-
-    #[test]
-    fn bundle_keyword_prefixes_bundle() {
-        assert_eq!(bundle_keyword("base"), "llmenv-bundle:base");
-        assert_eq!(
-            bundle_keyword("rust-defaults"),
-            "llmenv-bundle:rust-defaults"
-        );
     }
 
     #[test]
@@ -395,16 +357,6 @@ mod tests {
     }
 
     proptest! {
-        // tag_keyword always prepends the prefix and preserves the tag exactly —
-        // the keyword is `llmenv-tag:` + the unmodified tag for any valid input.
-        #[test]
-        fn prop_tag_keyword_is_prefix_plus_tag(tag in valid_tag()) {
-            let kw = tag_keyword(&tag);
-            prop_assert_eq!(&kw, &format!("{TAG_KEYWORD_PREFIX}{tag}"));
-            prop_assert!(kw.starts_with(TAG_KEYWORD_PREFIX));
-            prop_assert_eq!(&kw[TAG_KEYWORD_PREFIX.len()..], tag.as_str());
-        }
-
         // RecallTag arguments are always exactly {query, project, keyword} with
         // query == tag, project == "" (cross-project), keyword == tag_keyword(tag).
         // The shape can't silently gain/lose a field or mis-bind a value.
@@ -416,16 +368,6 @@ mod tests {
             prop_assert_eq!(&obj["query"], &serde_json::json!(tag));
             prop_assert_eq!(&obj["project"], &serde_json::json!(""));
             prop_assert_eq!(&obj["keyword"], &serde_json::json!(tag_keyword(&tag)));
-        }
-
-        // bundle_keyword always prepends the bundle prefix and preserves the bundle
-        // name exactly — the keyword is `llmenv-bundle:` + the unmodified bundle.
-        #[test]
-        fn prop_bundle_keyword_is_prefix_plus_bundle(bundle in valid_tag()) {
-            let kw = bundle_keyword(&bundle);
-            prop_assert_eq!(&kw, &format!("{BUNDLE_KEYWORD_PREFIX}{bundle}"));
-            prop_assert!(kw.starts_with(BUNDLE_KEYWORD_PREFIX));
-            prop_assert_eq!(&kw[BUNDLE_KEYWORD_PREFIX.len()..], bundle.as_str());
         }
 
         // RecallBundle arguments are always exactly {query, project, keyword} with
