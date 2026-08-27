@@ -31,6 +31,8 @@ sha2 = "=0.11.0"
 anstyle = "=1.0.14"
 url = "=2.5.8"
 humantime = "=2.4.0"
+tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "sync", "signal", "net", "time"] }
+reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "json", "blocking"] }
 # Hostname via the uname(2) syscall instead of spawning the `hostname` binary on
 # every hook-run ("system" enables uname). "process" enables kill_process_group
 # for #1165's consolidation-timeout group-kill: a direct syscall instead of
@@ -82,7 +84,7 @@ serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 serde_yaml = { package = "serde_yaml_ng", version = "=0.10.0" }
 toml = { workspace = true }
-tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "sync", "signal", "net", "time"] }
+tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "json"] }
 thiserror = "=2.0.20"
@@ -97,7 +99,7 @@ anstyle = { workspace = true }
 glob = "=0.3.4"
 globset = { workspace = true }
 schemars = "=1.2.2"
-reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "json", "blocking"] }
+reqwest = { workspace = true }
 url = { workspace = true }
 rustix = { workspace = true }
 tempfile = "=3.27.0"
