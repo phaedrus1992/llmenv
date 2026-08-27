@@ -7,6 +7,79 @@ use llmenv_config::Config;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+/// The keyword prefix under which tag-scoped memory is stored and recalled.
+/// A memory written for tag `work-vpn` carries keyword `llmenv-tag:work-vpn`;
+/// recalling that keyword (project-unfiltered) surfaces it from any project.
+const TAG_KEYWORD_PREFIX: &str = "llmenv-tag:";
+
+/// The `llmenv-tag:<tag>` keyword for a tag. The tag is assumed pre-validated
+/// (see `hook_run::validate_tag`) so it contains no recall-query metacharacters.
+#[must_use]
+pub fn tag_keyword(tag: &str) -> String {
+    format!("{TAG_KEYWORD_PREFIX}{tag}")
+}
+
+/// The keyword prefix under which bundle-scoped memory is stored and recalled.
+/// A memory written for bundle `base` carries keyword `llmenv-bundle:base`;
+/// recalling that keyword (project-unfiltered) surfaces it from any project.
+const BUNDLE_KEYWORD_PREFIX: &str = "llmenv-bundle:";
+
+/// The `llmenv-bundle:<bundle>` keyword for a bundle. The bundle name is
+/// assumed pre-validated (see `hook_run::validate_bundle`) so it contains no
+/// recall-query metacharacters.
+#[must_use]
+pub fn bundle_keyword(bundle: &str) -> String {
+    format!("{BUNDLE_KEYWORD_PREFIX}{bundle}")
+}
+
+#[cfg(test)]
+mod keyword_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[test]
+    fn tag_keyword_prefixes_tag() {
+        assert_eq!(tag_keyword("work-vpn"), "llmenv-tag:work-vpn");
+        assert_eq!(tag_keyword("rust"), "llmenv-tag:rust");
+    }
+
+    #[test]
+    fn bundle_keyword_prefixes_bundle() {
+        assert_eq!(bundle_keyword("base"), "llmenv-bundle:base");
+        assert_eq!(
+            bundle_keyword("rust-defaults"),
+            "llmenv-bundle:rust-defaults"
+        );
+    }
+
+    /// A tag accepted by `hook_run::validate_tag`.
+    fn valid_tag() -> impl Strategy<Value = String> {
+        "[a-zA-Z0-9_-]{1,24}"
+    }
+
+    proptest! {
+        // tag_keyword always prepends the prefix and preserves the tag exactly —
+        // the keyword is `llmenv-tag:` + the unmodified tag for any valid input.
+        #[test]
+        fn prop_tag_keyword_is_prefix_plus_tag(tag in valid_tag()) {
+            let kw = tag_keyword(&tag);
+            prop_assert_eq!(&kw, &format!("{TAG_KEYWORD_PREFIX}{tag}"));
+            prop_assert!(kw.starts_with(TAG_KEYWORD_PREFIX));
+            prop_assert_eq!(&kw[TAG_KEYWORD_PREFIX.len()..], tag.as_str());
+        }
+
+        // bundle_keyword always prepends the bundle prefix and preserves the bundle
+        // name exactly — the keyword is `llmenv-bundle:` + the unmodified bundle.
+        #[test]
+        fn prop_bundle_keyword_is_prefix_plus_bundle(bundle in valid_tag()) {
+            let kw = bundle_keyword(&bundle);
+            prop_assert_eq!(&kw, &format!("{BUNDLE_KEYWORD_PREFIX}{bundle}"));
+            prop_assert!(kw.starts_with(BUNDLE_KEYWORD_PREFIX));
+            prop_assert_eq!(&kw[BUNDLE_KEYWORD_PREFIX.len()..], bundle.as_str());
+        }
+    }
+}
+
 /// Run a scope-detection command and capture its stdout.
 ///
 /// Returns `None` on spawn error, non-zero exit, or non-UTF-8 output. These

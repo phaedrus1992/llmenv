@@ -1,5 +1,195 @@
 //! Small shared helpers with no better home.
 
+use anstyle::{AnsiColor, Color, Style};
+use sha2::{Digest, Sha256};
+
+/// Shared length-prefix hashing convention: length-prefix every field before
+/// its bytes so concatenation can't ambiguate boundaries. Used by
+/// `materialize::cache::hash_manifest` and `merge::merge_signature` (#920).
+pub fn update_len_prefixed(h: &mut Sha256, data: &[u8]) {
+    h.update((data.len() as u64).to_le_bytes());
+    h.update(data);
+}
+
+/// Wrap text in an ANSI style when `use_color` is set, else return it plain.
+/// `pub`, not `pub(crate)`: `cli::style`'s remaining doctor/marker functions
+/// call this from a different crate after this move.
+pub fn paint(text: &str, color: AnsiColor, use_color: bool) -> String {
+    if use_color {
+        let style = Style::new().fg_color(Some(Color::Ansi(color)));
+        format!("{style}{text}{style:#}")
+    } else {
+        text.to_string()
+    }
+}
+
+/// Format a doctor "warning" symbol (⚠) with optional yellow color.
+pub fn doctor_warning(use_color: bool) -> String {
+    paint("⚠", AnsiColor::Yellow, use_color)
+}
+
+/// Color mode: auto-detect, always on, or always off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorMode {
+    /// Auto-detect based on stdout TTY and NO_COLOR env var
+    Auto,
+    /// Force colors on
+    Always,
+    /// Force colors off
+    Never,
+}
+
+/// Determine whether to emit colors based on flags, env vars, and TTY state.
+pub fn should_use_color(mode: Option<ColorMode>, is_tty: bool) -> bool {
+    should_use_color_with_env(mode, is_tty, &|name| std::env::var(name).ok())
+}
+
+fn should_use_color_with_env<F>(mode: Option<ColorMode>, is_tty: bool, get_env: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let effective_mode = mode.unwrap_or(ColorMode::Auto);
+    match effective_mode {
+        ColorMode::Always => true,
+        ColorMode::Never => false,
+        ColorMode::Auto => {
+            if get_env("NO_COLOR").is_some() {
+                return false;
+            }
+            if get_env("CLICOLOR_FORCE")
+                .filter(|v| !v.is_empty())
+                .is_some()
+            {
+                return true;
+            }
+            is_tty
+        }
+    }
+}
+
+#[cfg(test)]
+mod color_tests {
+    use super::*;
+
+    #[test]
+    fn test_should_use_color_always_mode() {
+        assert!(should_use_color(Some(ColorMode::Always), false));
+        assert!(should_use_color(Some(ColorMode::Always), true));
+    }
+
+    #[test]
+    fn test_should_use_color_never_mode() {
+        assert!(!should_use_color(Some(ColorMode::Never), false));
+        assert!(!should_use_color(Some(ColorMode::Never), true));
+    }
+
+    #[test]
+    fn test_should_use_color_auto_respects_tty() {
+        assert!(!should_use_color(Some(ColorMode::Auto), false));
+    }
+
+    #[test]
+    fn test_should_use_color_auto_with_tty_isolated() {
+        let no_env = |_name: &str| -> Option<String> { None };
+        assert!(!should_use_color_with_env(
+            Some(ColorMode::Auto),
+            false,
+            &no_env
+        ));
+        assert!(should_use_color_with_env(
+            Some(ColorMode::Auto),
+            true,
+            &no_env
+        ));
+    }
+
+    #[test]
+    fn test_should_use_color_no_color_overrides() {
+        let no_color_env = |name: &str| -> Option<String> {
+            match name {
+                "NO_COLOR" => Some("1".to_string()),
+                _ => None,
+            }
+        };
+        assert!(!should_use_color_with_env(
+            Some(ColorMode::Auto),
+            true,
+            &no_color_env
+        ));
+    }
+
+    #[test]
+    fn test_should_use_color_no_color_empty_string() {
+        let no_color_empty_env = |name: &str| -> Option<String> {
+            match name {
+                "NO_COLOR" => Some(String::new()),
+                _ => None,
+            }
+        };
+        assert!(!should_use_color_with_env(
+            Some(ColorMode::Auto),
+            true,
+            &no_color_empty_env
+        ));
+    }
+
+    #[test]
+    fn test_should_use_color_clicolor_force_overrides() {
+        let force_env = |name: &str| -> Option<String> {
+            match name {
+                "CLICOLOR_FORCE" => Some("1".to_string()),
+                _ => None,
+            }
+        };
+        assert!(should_use_color_with_env(
+            Some(ColorMode::Auto),
+            false,
+            &force_env
+        ));
+    }
+
+    #[test]
+    fn test_should_use_color_clicolor_force_empty_string_does_not_force() {
+        let empty_force_env = |name: &str| -> Option<String> {
+            match name {
+                "CLICOLOR_FORCE" => Some(String::new()),
+                _ => None,
+            }
+        };
+        assert!(!should_use_color_with_env(
+            Some(ColorMode::Auto),
+            false,
+            &empty_force_env
+        ));
+    }
+
+    #[test]
+    fn test_should_use_color_no_color_takes_precedence_over_clicolor_force() {
+        let both_env = |name: &str| -> Option<String> {
+            match name {
+                "NO_COLOR" => Some("1".to_string()),
+                "CLICOLOR_FORCE" => Some("1".to_string()),
+                _ => None,
+            }
+        };
+        assert!(!should_use_color_with_env(
+            Some(ColorMode::Auto),
+            true,
+            &both_env
+        ));
+    }
+
+    #[test]
+    fn doctor_warning_plain_when_no_color() {
+        assert_eq!(doctor_warning(false), "⚠");
+    }
+
+    #[test]
+    fn doctor_warning_colored_contains_escape_code() {
+        assert!(doctor_warning(true).contains('\u{1b}'));
+    }
+}
+
 /// Stable dedup preserving first-seen order. Lists here are small (permission
 /// rules, hooks, plugin ids), so the quadratic scan is fine and avoids
 /// requiring `Hash`/`Ord` on every element type.

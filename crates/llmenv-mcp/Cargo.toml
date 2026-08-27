@@ -16,7 +16,19 @@ llmenv-paths = { path = "../llmenv-paths", version = "4.0.0-alpha.1" }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+serde_json = { workspace = true }
+url = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = { workspace = true }
+wiremock = "=0.6.5"
+
+[features]
+# Exposes `McpHttpClient::test_new` to other workspace crates' dev-dependencies
+# (mirrors llmenv-util's `test-util` feature, #1281) — `#[cfg(test)]` alone
+# only compiles within this crate's own test target, so a downstream crate's
+# tests never see it without this escape hatch.
+test-util = []

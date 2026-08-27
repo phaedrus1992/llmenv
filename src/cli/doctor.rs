@@ -298,7 +298,7 @@ fn memory_orphaned_by_disable_bundles(
     if declares_active_memory(&config.features) || declares_active_memory(&bundle_caps.features) {
         return Vec::new();
     }
-    crate::hook_run::suppressed_memory_bundles(config, config_dir, active)
+    crate::memory::suppressed_memory_bundles(config, config_dir, active)
 }
 
 /// Check whether a host address string is a loopback / local-only address.

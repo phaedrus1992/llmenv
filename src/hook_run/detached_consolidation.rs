@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use crate::consolidation;
-use crate::hook_run::mcp_client::McpHttpClient;
+use llmenv_mcp::mcp_client::McpHttpClient;
 
 /// Per-call network timeout for the detached child's consolidation MCP calls.
 const CONSOLIDATION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -27,6 +27,13 @@ pub fn run_consolidation() -> anyhow::Result<()> {
     })
 }
 
+// Real config load, scope detection, and a live MCP network call end to end
+// — there's no seam here to inject a fake config/client without a larger
+// dependency-injection refactor, so mutation testing (which would otherwise
+// flag a mutant that replaces this whole body with `Ok(())`) can't say
+// anything useful about it. `run_consolidation_inner_does_not_panic` below
+// still exercises the real function and asserts the no-panic invariant.
+#[mutants::skip]
 fn run_consolidation_inner() -> anyhow::Result<()> {
     let config_path = crate::paths::config_path()?;
     let config = crate::config::Config::load(&config_path)?;
@@ -35,7 +42,7 @@ fn run_consolidation_inner() -> anyhow::Result<()> {
     let config_dir = config_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
-    let url = crate::hook_run::memory_url(&config, config_dir, &active)?.into_url()?;
+    let url = crate::memory::memory_url(&config, config_dir, &active)?.into_url()?;
     let client = McpHttpClient::new(url, CONSOLIDATION_TIMEOUT)
         .map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))?;
 

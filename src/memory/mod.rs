@@ -7,11 +7,14 @@
 //! - `prune`  — TTL-based memory forgetting (R4)
 
 pub mod prune;
+pub mod resolve;
 
 use std::path::Path;
 use std::time::Duration;
 
-use crate::hook_run::mcp_client::McpHttpClient;
+use llmenv_mcp::mcp_client::McpHttpClient;
+
+pub(crate) use resolve::{MemoryEndpoint, memory_url, suppressed_memory_bundles};
 
 /// CLI timeout — longer than hook timeout since users are waiting.
 const CLI_TIMEOUT: Duration = Duration::from_secs(10);
@@ -28,7 +31,7 @@ fn connect_with_timeout(timeout: Duration) -> anyhow::Result<McpHttpClient> {
         .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
     let env = crate::scope::matcher::Env::detect();
     let active = crate::scope::evaluate(&config, &env);
-    let url = crate::hook_run::memory_url(&config, config_dir, &active)?.into_url()?;
+    let url = memory_url(&config, config_dir, &active)?.into_url()?;
     McpHttpClient::new(url, timeout).map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))
 }
 

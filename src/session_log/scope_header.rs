@@ -3,7 +3,7 @@
 //! session by the scope that produced it. Tokens reuse the existing keyword
 //! helpers so the encoding never drifts.
 
-use crate::hook_run::action::{bundle_keyword, tag_keyword};
+use llmenv_scope::{bundle_keyword, tag_keyword};
 
 /// The active llmenv scope at session start.
 #[derive(Debug, Clone)]
