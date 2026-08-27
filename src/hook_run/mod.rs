@@ -487,7 +487,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
         // A hook's stderr is piped to the agent, never a terminal, so colors
         // would only add escape codes to the model's context.
         let use_color = crate::cli::should_use_color(None, false);
-        if let Err(e) = crate::cli::run_check_stale(use_color, false) {
+        if let Err(e) = crate::materialize::stale::report_if_stale(use_color) {
             // Visible, not `tracing::debug!`: the default `EnvFilter` is
             // `ERROR`, so a debug line here would mean the user silently loses
             // drift detection with no way to notice (#1345's lesson).

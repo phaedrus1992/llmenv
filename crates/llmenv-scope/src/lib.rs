@@ -10,7 +10,7 @@ use std::path::PathBuf;
 /// The keyword prefix under which tag-scoped memory is stored and recalled.
 /// A memory written for tag `work-vpn` carries keyword `llmenv-tag:work-vpn`;
 /// recalling that keyword (project-unfiltered) surfaces it from any project.
-pub const TAG_KEYWORD_PREFIX: &str = "llmenv-tag:";
+const TAG_KEYWORD_PREFIX: &str = "llmenv-tag:";
 
 /// The `llmenv-tag:<tag>` keyword for a tag. The tag is assumed pre-validated
 /// (see `hook_run::validate_tag`) so it contains no recall-query metacharacters.
@@ -22,7 +22,7 @@ pub fn tag_keyword(tag: &str) -> String {
 /// The keyword prefix under which bundle-scoped memory is stored and recalled.
 /// A memory written for bundle `base` carries keyword `llmenv-bundle:base`;
 /// recalling that keyword (project-unfiltered) surfaces it from any project.
-pub const BUNDLE_KEYWORD_PREFIX: &str = "llmenv-bundle:";
+const BUNDLE_KEYWORD_PREFIX: &str = "llmenv-bundle:";
 
 /// The `llmenv-bundle:<bundle>` keyword for a bundle. The bundle name is
 /// assumed pre-validated (see `hook_run::validate_bundle`) so it contains no
