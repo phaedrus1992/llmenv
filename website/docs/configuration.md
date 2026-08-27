@@ -1187,27 +1187,45 @@ per-output-type token breakdown today, so those aren't invented placeholders.
 
 #### llmenv-sourced (from `llmenv-status.json`)
 
-All nine honor `format:`. `scopes` is a partial exception to "from
-`llmenv-status.json`": `$LLMENV_EXTRA_TAGS` is re-read live on every render
-and unioned onto the snapshot's tags, so a tag added via that env var
-mid-session shows up immediately, without waiting on the next `llmenv
-regenerate` (added in v4.0.0; fixes #1538 — the materialized cache folder is
-keyed by the active tag set, so a running session's fixed `CLAUDE_CONFIG_DIR`
-could point at a folder `regenerate` no longer writes to, and the
-snapshot-only `scopes` widget stayed stale even after a regenerate). Every
-other tag source — host, user, OS, network, project, and content scopes —
-still only refreshes on the next `regenerate`, same as every other widget in
-this table.
+All nine honor `format:`. `scopes`, `plugins`, `mcps`, and `throttle` are
+partial exceptions to "from `llmenv-status.json`" — all four are tag-gated,
+and the snapshot is only rewritten by `llmenv regenerate`, so each needed its
+own fix for the same root cause: a tag added via `$LLMENV_EXTRA_TAGS`
+mid-session doesn't take effect until a regenerate, and even a regenerate
+doesn't help within the same shell, since the materialized cache folder is
+keyed by the active tag set and a running session's fixed `CLAUDE_CONFIG_DIR`
+stays pointed at the folder `regenerate` no longer writes to.
+
+- `scopes` re-reads `$LLMENV_EXTRA_TAGS` live on every render and unions it
+  onto the snapshot's tags (added in v4.0.0; fixes #1538).
+- `plugins` resolves entirely from top-level config (no merged-manifest
+  input), so it recomputes live on every render against the same unioned tag
+  set `scopes` uses (added in v4.0.0; fixes #1547).
+- `mcps` and `throttle` need the merged manifest's bundle-contributed data to
+  re-resolve, which isn't available at render time without rebuilding it —
+  the work `regenerate` does. Instead, each appends a staleness marker
+  (`{stale_icon}`, gear emoji by default) whenever a live tag isn't already
+  in the snapshot, so a possibly-wrong count is flagged rather than shown
+  silently (added in v4.0.0; fixes #1547).
+
+Every other tag source — host, user, OS, network, project, and content
+scopes — still only refreshes on the next `regenerate`, same as every other
+widget in this table.
+
+A custom `format:` for `mcps` or `throttle` must include `{stale_icon}` to
+keep this protection — like every other widget, a custom `format` fully
+replaces the default rather than appending to it, so a format that omits the
+placeholder renders the count with no staleness indication at all.
 
 | Widget | Default `format` | Example | Placeholders |
 | -------- | ------------------- | --------- | -------------- |
 | `scopes` | `{tags}` | `dev · rust` | `tags` (tag list, joined with ` · `; `$LLMENV_EXTRA_TAGS` is live, every other source is from the snapshot) |
-| `plugins` | `🔌 {total}` | `🔌 12` | `total`, `errors` |
-| `mcps` | `MCP {total}` | `MCP 12` | `total`, `errors` |
+| `plugins` | `🔌 {total}` | `🔌 12` | `total`, `errors` (fully live-recomputed, not snapshot-sourced) |
+| `mcps` | `MCP {total}{stale_icon}` | `MCP 12` / `MCP 12 ⚙️` | `total`, `errors` (both snapshot-sourced), `stale_icon` (empty unless a live tag has drifted from the snapshot, resolves from the icon set like `config_stale`'s) |
 | `icm` | `🧠 {memories}` | `🧠 142` | `memories`, `concepts` |
 | `cache` | `{prunable}` | `15 MB` | `prunable` (humanized), `prunable_raw` (bytes) |
 | `config_stale` | `{stale_icon} stale` | `⚙️ stale` | `stale_icon` (resolves from the icon set, gear emoji by default — a `statusline.icons.config_stale` override applies even without a custom `format`). Config out of date — relaunch to reload. Renders empty when the config isn't stale — there's no "fresh" variant |
-| `throttle` | `{raw}` | `umans: 45s` | `raw` (`"<backend>: <cooldown_secs>s"`), `cooldown_secs`, `reason` (the backend name) |
+| `throttle` | `{raw}{stale_icon}` | `umans: 45s` / `umans: 45s ⚙️` | `raw` (`"<backend>: <cooldown_secs>s"`, snapshot-sourced), `cooldown_secs`, `reason` (the backend name), `stale_icon` (same drift check as `mcps`'s) |
 | `session_log` | `{icon} {entries}` | `📝 8` | `icon`, `entries` |
 | `tasks` | `☑ {done}/{total}` (summed across the current project's open sessions, #905); renders empty when no session is open for this project | `☑ 2/5` | `done`, `total` (summed across every session open for the current project), `current` (title of the task currently `wip`/`waiting` among those sessions; empty when none). The default doesn't show `current` — combine it yourself, e.g. `format: "{done}/{total} — {current}"` |
 

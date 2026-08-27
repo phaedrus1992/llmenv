@@ -12,20 +12,40 @@ pub fn render_llmenv_widget(
     cfg: Option<&llmenv_config::WidgetConfig>,
     icons: &BTreeMap<String, String>,
     use_color: bool,
+    tags_drifted: bool,
 ) -> Option<String> {
     let raw = match name {
         "scopes" => render_scopes(data, cfg),
         "plugins" => render_plugins(data, cfg),
-        "mcps" => render_mcps(data, cfg),
+        "mcps" => render_mcps(data, cfg, icons, tags_drifted),
         "icm" => render_icm(data, cfg),
         "cache" => render_cache(data, cfg),
         "config_stale" => render_config_stale(data, cfg, icons),
-        "throttle" => render_throttle(data, cfg),
+        "throttle" => render_throttle(data, cfg, icons, tags_drifted),
         "session_log" => render_session_log(data, cfg, icons),
         "tasks" => render_tasks(data, cfg),
         _ => return None,
     };
     Some(super::finish(name, raw, cfg, None, use_color))
+}
+
+/// Suffix appended to `mcps`/`throttle` when the live active tag set has
+/// drifted from the snapshot's since the last `regenerate` (#1547) — these
+/// two widgets need the merged manifest to re-resolve (unlike `plugins`,
+/// which live-refreshes instead, see `run_statusline`), so a drift can only
+/// be flagged, not corrected, here. Empty when not drifted, so the default
+/// format costs nothing in the common case. Reuses the `config_stale` icon:
+/// to the user both mean the same thing — "this may not reflect the current
+/// session, relaunch/regenerate to refresh."
+fn stale_suffix(tags_drifted: bool, icons: &BTreeMap<String, String>) -> String {
+    if !tags_drifted {
+        return String::new();
+    }
+    let icon = icons
+        .get("config_stale")
+        .cloned()
+        .unwrap_or_else(|| "\u{2699}\u{fe0f}".to_string()); // ⚙️
+    format!(" {icon}")
 }
 
 fn render_scopes(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
@@ -58,16 +78,22 @@ fn render_plugins(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) 
         .replace("{errors}", &plugins.errors.to_string())
 }
 
-fn render_mcps(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
+fn render_mcps(
+    data: &StatusData,
+    cfg: Option<&llmenv_config::WidgetConfig>,
+    icons: &BTreeMap<String, String>,
+    tags_drifted: bool,
+) -> String {
     let Some(mcps) = &data.mcps else {
         return String::new();
     };
     let format = cfg
         .and_then(|c| c.format.as_deref())
-        .unwrap_or("MCP {total}");
+        .unwrap_or("MCP {total}{stale_icon}");
     format
         .replace("{total}", &mcps.total.to_string())
         .replace("{errors}", &mcps.errors.to_string())
+        .replace("{stale_icon}", &stale_suffix(tags_drifted, icons))
 }
 
 fn render_icm(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
@@ -134,17 +160,25 @@ fn render_config_stale(
     format.replace("{stale_icon}", &icon)
 }
 
-fn render_throttle(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
+fn render_throttle(
+    data: &StatusData,
+    cfg: Option<&llmenv_config::WidgetConfig>,
+    icons: &BTreeMap<String, String>,
+    tags_drifted: bool,
+) -> String {
     let Some(throttle) = &data.throttle else {
         return String::new();
     };
     let backend = super::sanitize(&throttle.backend); // untrusted (config)
     let raw = format!("{}: {}s", backend, throttle.cooldown_secs);
-    let format = cfg.and_then(|c| c.format.as_deref()).unwrap_or("{raw}");
+    let format = cfg
+        .and_then(|c| c.format.as_deref())
+        .unwrap_or("{raw}{stale_icon}");
     format
         .replace("{raw}", &raw)
         .replace("{cooldown_secs}", &throttle.cooldown_secs.to_string())
         .replace("{reason}", &backend)
+        .replace("{stale_icon}", &stale_suffix(tags_drifted, icons))
 }
 
 fn render_session_log(
@@ -219,7 +253,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let out = render_llmenv_widget("scopes", &data, None, &icons(), false).unwrap();
+        let out = render_llmenv_widget("scopes", &data, None, &icons(), false, false).unwrap();
         assert_eq!(out, "dev · rust");
     }
 
@@ -232,7 +266,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let out = render_llmenv_widget("plugins", &data, None, &icons(), false).unwrap();
+        let out = render_llmenv_widget("plugins", &data, None, &icons(), false, false).unwrap();
         assert_eq!(out, "🔌 12");
     }
 
@@ -245,7 +279,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let out = render_llmenv_widget("icm", &data, None, &icons(), false).unwrap();
+        let out = render_llmenv_widget("icm", &data, None, &icons(), false, false).unwrap();
         assert_eq!(out, "🧠 142");
     }
 
@@ -257,7 +291,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let out = render_llmenv_widget("cache", &data, None, &icons(), false).unwrap();
+        let out = render_llmenv_widget("cache", &data, None, &icons(), false, false).unwrap();
         assert_eq!(out, "15 MB");
     }
 
@@ -270,8 +304,8 @@ mod tests {
             config_stale: Some(true),
             ..Default::default()
         };
-        let out =
-            render_llmenv_widget("config_stale", &data, None, &BTreeMap::new(), false).unwrap();
+        let out = render_llmenv_widget("config_stale", &data, None, &BTreeMap::new(), false, false)
+            .unwrap();
         assert_eq!(out, "\u{2699}\u{fe0f} stale"); // ⚙️ stale (default)
     }
 
@@ -284,7 +318,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let out = render_llmenv_widget("mcps", &data, None, &icons(), false).unwrap();
+        let out = render_llmenv_widget("mcps", &data, None, &icons(), false, false).unwrap();
         assert_eq!(out, "MCP 7");
     }
 
@@ -297,8 +331,47 @@ mod tests {
             }),
             ..Default::default()
         };
-        let out = render_llmenv_widget("throttle", &data, None, &icons(), false).unwrap();
+        let out = render_llmenv_widget("throttle", &data, None, &icons(), false, false).unwrap();
         assert_eq!(out, "icm: 45s");
+    }
+
+    #[test]
+    fn renders_mcps_total_with_stale_marker_when_tags_drifted() {
+        let data = StatusData {
+            mcps: Some(CountData {
+                total: 7,
+                errors: 0,
+            }),
+            ..Default::default()
+        };
+        let out = render_llmenv_widget("mcps", &data, None, &icons(), false, true).unwrap();
+        assert_eq!(out, "MCP 7 ◌");
+    }
+
+    #[test]
+    fn renders_throttle_with_stale_marker_when_tags_drifted() {
+        let data = StatusData {
+            throttle: Some(ThrottleData {
+                backend: "icm".to_string(),
+                cooldown_secs: 45,
+            }),
+            ..Default::default()
+        };
+        let out = render_llmenv_widget("throttle", &data, None, &icons(), false, true).unwrap();
+        assert_eq!(out, "icm: 45s ◌");
+    }
+
+    #[test]
+    fn stale_icon_placeholder_falls_back_when_icon_missing() {
+        let data = StatusData {
+            mcps: Some(CountData {
+                total: 7,
+                errors: 0,
+            }),
+            ..Default::default()
+        };
+        let out = render_llmenv_widget("mcps", &data, None, &BTreeMap::new(), false, true).unwrap();
+        assert_eq!(out, "MCP 7 \u{2699}\u{fe0f}"); // ⚙️ (default, no icon-set override)
     }
 
     #[test]
@@ -307,7 +380,7 @@ mod tests {
             session_log: Some(8),
             ..Default::default()
         };
-        let out = render_llmenv_widget("session_log", &data, None, &icons(), false).unwrap();
+        let out = render_llmenv_widget("session_log", &data, None, &icons(), false, false).unwrap();
         assert_eq!(out, "📝 8");
     }
 
@@ -317,7 +390,7 @@ mod tests {
             scopes: Some(ScopesData { tags: vec![] }),
             ..Default::default()
         };
-        let out = render_llmenv_widget("scopes", &data, None, &icons(), false).unwrap();
+        let out = render_llmenv_widget("scopes", &data, None, &icons(), false, false).unwrap();
         assert_eq!(out, "");
     }
 
@@ -330,7 +403,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            render_llmenv_widget("cache", &data, None, &icons(), false).unwrap(),
+            render_llmenv_widget("cache", &data, None, &icons(), false, false).unwrap(),
             "2 KB"
         );
 
@@ -341,7 +414,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            render_llmenv_widget("cache", &data, None, &icons(), false).unwrap(),
+            render_llmenv_widget("cache", &data, None, &icons(), false, false).unwrap(),
             "512 B"
         );
     }
@@ -352,7 +425,8 @@ mod tests {
             config_stale: Some(false),
             ..Default::default()
         };
-        let out = render_llmenv_widget("config_stale", &data, None, &icons(), false).unwrap();
+        let out =
+            render_llmenv_widget("config_stale", &data, None, &icons(), false, false).unwrap();
         assert_eq!(out, "");
     }
 
@@ -369,8 +443,15 @@ mod tests {
             ..Default::default()
         };
         let empty_icons = BTreeMap::new();
-        let out =
-            render_llmenv_widget("config_stale", &data, Some(&cfg), &empty_icons, false).unwrap();
+        let out = render_llmenv_widget(
+            "config_stale",
+            &data,
+            Some(&cfg),
+            &empty_icons,
+            false,
+            false,
+        )
+        .unwrap();
         assert_eq!(out, "\u{2699}\u{fe0f}"); // ⚙️
     }
 
@@ -386,7 +467,8 @@ mod tests {
             format: Some("tags={tags}".to_string()),
             ..Default::default()
         };
-        let out = render_llmenv_widget("scopes", &data, Some(&cfg), &icons(), false).unwrap();
+        let out =
+            render_llmenv_widget("scopes", &data, Some(&cfg), &icons(), false, false).unwrap();
         assert_eq!(out, "tags=dev");
     }
 
@@ -403,7 +485,8 @@ mod tests {
             format: Some("{total}/{errors}".to_string()),
             ..Default::default()
         };
-        let out = render_llmenv_widget("plugins", &data, Some(&cfg), &icons(), false).unwrap();
+        let out =
+            render_llmenv_widget("plugins", &data, Some(&cfg), &icons(), false, false).unwrap();
         assert_eq!(out, "3/1");
     }
 
@@ -420,7 +503,7 @@ mod tests {
             format: Some("{total}/{errors}".to_string()),
             ..Default::default()
         };
-        let out = render_llmenv_widget("mcps", &data, Some(&cfg), &icons(), false).unwrap();
+        let out = render_llmenv_widget("mcps", &data, Some(&cfg), &icons(), false, false).unwrap();
         assert_eq!(out, "5/2");
     }
 
@@ -437,7 +520,7 @@ mod tests {
             format: Some("{memories}c{concepts}".to_string()),
             ..Default::default()
         };
-        let out = render_llmenv_widget("icm", &data, Some(&cfg), &icons(), false).unwrap();
+        let out = render_llmenv_widget("icm", &data, Some(&cfg), &icons(), false, false).unwrap();
         assert_eq!(out, "10c4");
     }
 
@@ -453,7 +536,7 @@ mod tests {
             format: Some("{prunable} ({prunable_raw}B)".to_string()),
             ..Default::default()
         };
-        let out = render_llmenv_widget("cache", &data, Some(&cfg), &icons(), false).unwrap();
+        let out = render_llmenv_widget("cache", &data, Some(&cfg), &icons(), false, false).unwrap();
         assert_eq!(out, "2 KB (2048B)");
     }
 
@@ -467,7 +550,8 @@ mod tests {
             format: Some("STALE:{stale_icon}".to_string()),
             ..Default::default()
         };
-        let out = render_llmenv_widget("config_stale", &data, Some(&cfg), &icons(), false).unwrap();
+        let out = render_llmenv_widget("config_stale", &data, Some(&cfg), &icons(), false, false)
+            .unwrap();
         assert_eq!(out, "STALE:◌");
     }
 
@@ -484,7 +568,8 @@ mod tests {
             format: Some("{reason} for {cooldown_secs}s".to_string()),
             ..Default::default()
         };
-        let out = render_llmenv_widget("throttle", &data, Some(&cfg), &icons(), false).unwrap();
+        let out =
+            render_llmenv_widget("throttle", &data, Some(&cfg), &icons(), false, false).unwrap();
         assert_eq!(out, "icm for 45s");
     }
 
@@ -498,7 +583,8 @@ mod tests {
             format: Some("entries={entries}".to_string()),
             ..Default::default()
         };
-        let out = render_llmenv_widget("session_log", &data, Some(&cfg), &icons(), false).unwrap();
+        let out =
+            render_llmenv_widget("session_log", &data, Some(&cfg), &icons(), false, false).unwrap();
         assert_eq!(out, "entries=8");
     }
 
@@ -511,7 +597,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let out = render_llmenv_widget("tasks", &data, None, &icons(), false).unwrap();
+        let out = render_llmenv_widget("tasks", &data, None, &icons(), false, false).unwrap();
         assert_eq!(out, "");
     }
 
@@ -524,7 +610,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let out = render_llmenv_widget("tasks", &data, None, &icons(), false).unwrap();
+        let out = render_llmenv_widget("tasks", &data, None, &icons(), false, false).unwrap();
         assert_eq!(out, "\u{2611} 2/5");
     }
 
@@ -541,7 +627,7 @@ mod tests {
             format: Some("{done}/{total} - {current}".to_string()),
             ..Default::default()
         };
-        let out = render_llmenv_widget("tasks", &data, Some(&cfg), &icons(), false).unwrap();
+        let out = render_llmenv_widget("tasks", &data, Some(&cfg), &icons(), false, false).unwrap();
         assert_eq!(out, "2/5 - Ship the release");
     }
 
@@ -558,7 +644,7 @@ mod tests {
             format: Some("[{current}]".to_string()),
             ..Default::default()
         };
-        let out = render_llmenv_widget("tasks", &data, Some(&cfg), &icons(), false).unwrap();
+        let out = render_llmenv_widget("tasks", &data, Some(&cfg), &icons(), false, false).unwrap();
         assert_eq!(out, "[]");
     }
 
@@ -575,7 +661,7 @@ mod tests {
             format: Some("{current}".to_string()),
             ..Default::default()
         };
-        let out = render_llmenv_widget("tasks", &data, Some(&cfg), &icons(), false).unwrap();
+        let out = render_llmenv_widget("tasks", &data, Some(&cfg), &icons(), false, false).unwrap();
         assert_eq!(out, "evil[31mtitle");
     }
 
@@ -594,7 +680,7 @@ mod tests {
             "tasks",
         ] {
             assert_eq!(
-                render_llmenv_widget(name, &data, None, &icons(), false).unwrap(),
+                render_llmenv_widget(name, &data, None, &icons(), false, false).unwrap(),
                 "",
                 "widget {name} should render empty on missing data"
             );
@@ -604,8 +690,15 @@ mod tests {
     #[test]
     fn unknown_widget_renders_none() {
         assert!(
-            render_llmenv_widget("not_real", &StatusData::default(), None, &icons(), false)
-                .is_none()
+            render_llmenv_widget(
+                "not_real",
+                &StatusData::default(),
+                None,
+                &icons(),
+                false,
+                false
+            )
+            .is_none()
         );
     }
 
@@ -647,11 +740,14 @@ mod tests {
     const LLMENV_WIDGET_PLACEHOLDERS: &[(&str, &[&str])] = &[
         ("scopes", &["tags"]),
         ("plugins", &["total", "errors"]),
-        ("mcps", &["total", "errors"]),
+        ("mcps", &["total", "errors", "stale_icon"]),
         ("icm", &["memories", "concepts"]),
         ("cache", &["prunable", "prunable_raw"]),
         ("config_stale", &["stale_icon"]),
-        ("throttle", &["raw", "cooldown_secs", "reason"]),
+        (
+            "throttle",
+            &["raw", "cooldown_secs", "reason", "stale_icon"],
+        ),
         ("session_log", &["icon", "entries"]),
         ("tasks", &["done", "total", "current"]),
     ];
@@ -669,7 +765,7 @@ mod tests {
                 format: Some(format),
                 ..Default::default()
             };
-            let _ = render_llmenv_widget(name, &full_status_data(), Some(&cfg), &icons(), false);
+            let _ = render_llmenv_widget(name, &full_status_data(), Some(&cfg), &icons(), false, false);
         }
 
         /// Every placeholder a widget declares (present in its default format
@@ -691,7 +787,7 @@ mod tests {
                     ..Default::default()
                 };
                 let out =
-                    render_llmenv_widget(name, &data, Some(&cfg), &icons(), false).unwrap();
+                    render_llmenv_widget(name, &data, Some(&cfg), &icons(), false, false).unwrap();
                 for p in *placeholders {
                     let token = format!("{{{p}}}");
                     prop_assert!(
