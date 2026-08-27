@@ -168,6 +168,39 @@ prek install --hook-type pre-commit --hook-type pre-push
 
 Install `prek` from <https://github.com/j178/prek> if you don't have it.
 
+### Faster local builds (optional)
+
+CI's `hawk` job uses [`sccache`](https://github.com/mozilla/sccache) (a compiler
+cache) to speed up its `cargo` build — measured to help there since that job has no
+other build cache. `test`'s existing `target/` cache already makes most of its
+builds near-instant, so adding sccache there measurably made it *slower* (extra
+per-invocation overhead with nothing left to cache) and it was dropped from that
+job. Both `sccache` and the [`mold`](https://github.com/rui314/mold) linker are
+still worth trying for local development, where the tradeoffs differ (no
+persistent `target/` cache across a `cargo clean` or a toolchain switch) — set
+them up once per machine:
+
+```bash
+# sccache (all platforms)
+cargo install sccache --locked   # or: brew install sccache
+export RUSTC_WRAPPER=sccache     # add to your shell profile to make it stick
+```
+
+```bash
+# Linux: install mold from your distro's package manager, then point cargo at it
+sudo apt-get install mold        # Debian/Ubuntu; other distros ship it too
+export RUSTFLAGS="-C link-arg=-fuse-ld=mold"
+```
+
+```bash
+# macOS: mold doesn't support macOS; use lld instead
+brew install lld
+export RUSTFLAGS="-C link-arg=-fuse-ld=$(brew --prefix lld)/bin/ld64.lld"
+```
+
+Both env vars only affect `cargo`/`rustc` invocations — nothing else changes on
+your system. Skip either one if you'd rather not install the tool.
+
 ## Releases
 
 llmenv follows [Semantic Versioning](https://semver.org/) and a
