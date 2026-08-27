@@ -124,8 +124,23 @@ fn smoke_statusline_custom_row_template() {
 
 #[test]
 fn smoke_statusline_renders_llmenv_widgets_from_data_file() {
-    let (dir, config_path) = setup_config(&config_with_rows(
-        "    - \"{scopes} {plugins} {mcps} {config_stale}\"",
+    // `plugins` is live-recomputed from config on every render (#1547), not
+    // read from the snapshot below — config must declare a collection that
+    // resolves to the same count the snapshot's stale `plugins.total: 3`
+    // claims, gated on a tag already in the snapshot.
+    let (dir, config_path) = setup_config(&format!(
+        "{}\n{}",
+        config_with_rows("    - \"{scopes} {plugins} {mcps} {config_stale}\""),
+        r#"
+marketplace:
+  - name: mk
+    source: "https://example.com/mk"
+
+plugin-collection:
+  - name: core
+    when: [rust]
+    plugins: ["mk:one", "mk:two", "mk:three"]
+"#
     ));
     let data_dir = TempDir::new().unwrap();
     fs::write(
