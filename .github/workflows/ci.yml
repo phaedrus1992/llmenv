@@ -51,7 +51,7 @@ jobs:
           key: &rustup-cache-key rustup-${{ matrix.os }}-${{ hashFiles('rust-toolchain.toml') }}
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # master
         with:
-          toolchain: 1.97
+          toolchain: stable
           components: rustfmt, clippy
       - run: rustc --version && cargo fmt --version && cargo clippy --version
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
@@ -84,29 +84,36 @@ jobs:
         with:
           persist-credentials: false
       # id: toolchain -- rust-toolchain.toml pins channel = "stable" for the
-      # rest of the repo; rustup resolves that toolchain file for every
-      # cargo/rustc invocation in this checkout regardless of `rustup default`
-      # (set below), so later steps must force RUSTUP_TOOLCHAIN to this exact
-      # version via the `name` output, not a second hardcoded literal -- a
-      # duplicated "1.97" here previously went stale the moment Renovate
-      # bumped the `toolchain:` input below without knowing to touch a second
-      # copy, which built hawk against a toolchain missing rustc-dev/rust-src/
-      # llvm-tools and failed with E0463 on every rustc_private crate (#923).
+      # rest of the repo, but doesn't declare the rust-src/rustc-dev/
+      # llvm-tools-preview components hawk needs, so this step installs its
+      # own toolchain instance with them and later steps force
+      # RUSTUP_TOOLCHAIN to it via the `name` output (not a second hardcoded
+      # literal) so the two can't drift apart.
+      #
+      # `toolchain: stable` here (not an exact version) is deliberate (#1584):
+      # cargo-hawk links rustc_private internals that aren't semver-stable
+      # across Rust releases, and each cargo-hawk release is built against
+      # whatever Rust version was current stable when its maintainers cut it.
+      # Pinning this toolchain to an exact version while the cargo-hawk
+      # install below tracks latest (or vice versa) reintroduces exactly the
+      # frozen-pin-vs-moving-tool mismatch #1584 fixed -- both must float
+      # together so a Rust release and hawk's next release stay in lockstep.
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # master
         id: toolchain
         with:
-          toolchain: 1.97
+          toolchain: stable
           components: rust-src, rustc-dev, llvm-tools-preview
       # Hawk uses rustc_private and must build against the exact toolchain
-      # above (with rust-src/rustc-dev/llvm-tools-preview, per its install docs);
-      # RUSTC_BOOTSTRAP=1 is required because `cargo install` ignores this
-      # repo's cargo config (#923).
+      # above (with rust-src/rustc-dev/llvm-tools-preview, per its install
+      # docs); RUSTC_BOOTSTRAP=1 is required because `cargo install` ignores
+      # this repo's cargo config (#923). No `@version` pin on cargo-hawk
+      # itself (#1584) -- see the toolchain step's comment above for why.
       - uses: taiki-e/cache-cargo-install-action@9ee83daaa7b96a6fab930949ecf1122bba04a389  # v3.0.8
         env:
           RUSTC_BOOTSTRAP: "1"
           RUSTUP_TOOLCHAIN: ${{ steps.toolchain.outputs.name }}
         with:
-          tool: cargo-hawk@0.1.12
+          tool: cargo-hawk
       # -D since #1314 cleared the 330-finding backlog from #923. The published
       # `crates/*` libs are excluded as external boundaries by the script.
       - run: bash scripts/hawk-check.sh -D warnings
