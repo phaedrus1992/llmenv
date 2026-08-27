@@ -1344,6 +1344,7 @@ dependencies = [
  "llmenv-scope",
  "llmenv-task",
  "llmenv-util",
+ "mutants",
  "predicates",
  "proptest",
  "pulldown-cmark",
@@ -1398,9 +1399,14 @@ dependencies = [
  "llmenv-config",
  "llmenv-paths",
  "proptest",
+ "reqwest",
+ "serde_json",
  "tempfile",
  "thiserror",
+ "tokio",
  "tracing",
+ "url",
+ "wiremock",
 ]
 
 [[package]]
@@ -1424,6 +1430,7 @@ dependencies = [
  "serde",
  "serde_yaml_ng",
  "tempfile",
+ "thiserror",
  "tracing",
  "walkdir",
 ]
@@ -1449,9 +1456,11 @@ dependencies = [
 name = "llmenv-util"
 version = "5.0.0-alpha.1"
 dependencies = [
+ "anstyle",
  "proptest",
  "serde_json",
  "serde_yaml_ng",
+ "sha2",
 ]
 
 [[package]]
@@ -1491,6 +1500,12 @@ dependencies = [
  "wasi",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "mutants"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "add0ac067452ff1aca8c5002111bd6b1c895baee6e45fcbc44e0193aea17be56"
 
 [[package]]
 name = "normalize-line-endings"

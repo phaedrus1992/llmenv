@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use crate::hook_run::mcp_client::McpHttpClient;
+use llmenv_mcp::mcp_client::McpHttpClient;
 
 /// Per-call network timeout for the detached child's ICM memory store call.
 const STORE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -38,7 +38,7 @@ fn run_icm_store_inner(payload_json: &str) -> anyhow::Result<()> {
     let config_dir = config_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
-    let url = crate::hook_run::memory_url(&config, config_dir, &active)?.into_url()?;
+    let url = crate::memory::memory_url(&config, config_dir, &active)?.into_url()?;
     let client = McpHttpClient::new(url, STORE_TIMEOUT)
         .map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))?;
 

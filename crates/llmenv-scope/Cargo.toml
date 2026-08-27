@@ -17,6 +17,7 @@ serde_yaml = { workspace = true }
 globset = { workspace = true }
 walkdir = { workspace = true }
 tracing = { workspace = true }
+thiserror = { workspace = true }
 # uname(2) for hostname detection — same reasoning as the main crate's own
 # use of rustix for this (see src/scope/matcher.rs's original comment).
 # The workspace-level feature set (fs, process, system) is broader than this

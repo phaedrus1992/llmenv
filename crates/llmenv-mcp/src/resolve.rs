@@ -78,6 +78,10 @@ pub use llmenv_config::MEMORY_MCP_NAME;
 /// config.
 pub const CODEBASE_MEMORY_MCP_NAME: &str = "codebase-memory-mcp";
 
+/// Tool name for the codebase-memory MCP's repository-indexing tool, as it
+/// appears in a hook's `tool_name` field.
+pub const INDEX_REPOSITORY_TOOL: &str = "mcp__codebase-memory-mcp__index_repository";
+
 /// Errors raised while resolving MCP config for the active host.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ResolveError {

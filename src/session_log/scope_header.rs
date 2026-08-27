@@ -3,7 +3,7 @@
 //! session by the scope that produced it. Tokens reuse the existing keyword
 //! helpers so the encoding never drifts.
 
-use crate::hook_run::action::{bundle_keyword, tag_keyword};
+use llmenv_scope::{bundle_keyword, tag_keyword};
 
 /// The active llmenv scope at session start.
 #[derive(Debug, Clone)]
@@ -26,10 +26,18 @@ pub(crate) fn scope_header_content(ctx: &ScopeContext) -> String {
         parts.push(format!("project:{p}"));
     }
     for t in &ctx.tags {
-        parts.push(tag_keyword(t));
+        match tag_keyword(t) {
+            Ok(kw) => parts.push(kw),
+            Err(e) => tracing::warn!(tag = %t, error = %e, "skipping invalid tag in scope header"),
+        }
     }
     for b in &ctx.bundles {
-        parts.push(bundle_keyword(b));
+        match bundle_keyword(b) {
+            Ok(kw) => parts.push(kw),
+            Err(e) => {
+                tracing::warn!(bundle = %b, error = %e, "skipping invalid bundle in scope header");
+            }
+        }
     }
     parts.join(" ")
 }
@@ -72,6 +80,23 @@ mod tests {
         assert!(c.contains("llmenv-tag:work-vpn"));
         assert!(c.contains("llmenv-bundle:base"));
         assert!(c.contains("llmenv"), "project name present");
+    }
+
+    #[test]
+    fn content_skips_invalid_tag_and_bundle_without_panicking() {
+        let c = scope_header_content(&ScopeContext {
+            tags: vec!["rust".into(), "has space".into()],
+            bundles: vec!["base".into(), "bad:bundle".into()],
+            project: None,
+            cwd: "/".into(),
+            adapter: "claude_code".into(),
+            llmenv_version: "3.0.0".into(),
+            claude_code_version: String::new(),
+        });
+        assert!(c.contains("llmenv-tag:rust"));
+        assert!(c.contains("llmenv-bundle:base"));
+        assert!(!c.contains("has space"));
+        assert!(!c.contains("bad:bundle"));
     }
 
     #[test]

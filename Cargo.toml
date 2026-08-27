@@ -28,7 +28,11 @@ tempfile = "=3.27.0"
 globset = "=0.4.20"
 walkdir = "=2.5.0"
 sha2 = "=0.11.0"
+anstyle = "=1.0.14"
+url = "=2.5.8"
 humantime = "=2.4.0"
+tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "sync", "signal", "net", "time"] }
+reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "json", "blocking"] }
 # Hostname via the uname(2) syscall instead of spawning the `hostname` binary on
 # every hook-run ("system" enables uname). "process" enables kill_process_group
 # for #1165's consolidation-timeout group-kill: a direct syscall instead of
@@ -80,7 +84,7 @@ serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 serde_yaml = { package = "serde_yaml_ng", version = "=0.10.0" }
 toml = { workspace = true }
-tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "sync", "signal", "net", "time"] }
+tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "json"] }
 thiserror = "=2.0.20"
@@ -91,12 +95,12 @@ sha2 = { workspace = true }
 hex = "=0.4.3"
 humantime = { workspace = true }
 jiff = { version = "=0.2.35", default-features = false, features = ["std"] }
-anstyle = "=1.0.14"
+anstyle = { workspace = true }
 glob = "=0.3.4"
 globset = { workspace = true }
 schemars = "=1.2.2"
-reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "json", "blocking"] }
-url = "=2.5.8"
+reqwest = { workspace = true }
+url = { workspace = true }
 rustix = { workspace = true }
 tempfile = "=3.27.0"
 pulldown-cmark = { workspace = true }
@@ -104,6 +108,10 @@ dialoguer = "=0.12.0"
 zeroize = "=1.9.0"
 getrandom = "=0.4.3"
 hmac = "=0.13.0"
+# Provides #[mutants::skip] — a no-op outside `cargo mutants` runs, used to
+# exempt orchestration functions (real filesystem/network I/O end to end)
+# that mutation testing can't productively cover without heavy DI.
+mutants = "=0.0.4"
 
 [dev-dependencies]
 assert_cmd = "=2.2.2"
@@ -117,6 +125,9 @@ filetime = "=0.2.29"
 # own tests, without pulling proptest into llmenv-util's default (non-test)
 # dependency graph.
 llmenv-util = { path = "crates/llmenv-util", version = "5.0.0-alpha.1", features = ["test-util"] }
+# Enables McpHttpClient::test_new for this crate's own tests — see
+# llmenv-mcp's `test-util` feature doc comment.
+llmenv-mcp = { path = "crates/llmenv-mcp", version = "5.0.0-alpha.1", features = ["test-util"] }
 
 [profile.release]
 lto = true

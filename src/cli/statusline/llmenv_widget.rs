@@ -231,7 +231,7 @@ fn render_tasks(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) ->
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::cli::statusline::data::{
+    use crate::materialize::status_data::{
         CacheData, CountData, IcmData, ScopesData, SessionProgress, StatusData, TasksData,
         ThrottleData,
     };
