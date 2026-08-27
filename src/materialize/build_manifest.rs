@@ -477,6 +477,134 @@ mod tests {
         assert_eq!(concat_dedup(vec![1, 2], vec![2, 3]), vec![1, 2, 3]);
     }
 
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            // Idempotence: re-running dedup over its own output changes nothing.
+            #[test]
+            fn prop_concat_dedup_idempotent(
+                lead in prop::collection::vec(0i32..8, 0..6),
+                rest in prop::collection::vec(0i32..8, 0..6),
+            ) {
+                let once = concat_dedup(lead, rest);
+                let twice = concat_dedup(once.clone(), Vec::new());
+                prop_assert_eq!(once, twice);
+            }
+
+            // No duplicates: every element in the output is unique.
+            #[test]
+            fn prop_concat_dedup_no_duplicates(
+                lead in prop::collection::vec(0i32..8, 0..6),
+                rest in prop::collection::vec(0i32..8, 0..6),
+            ) {
+                let out = concat_dedup(lead, rest);
+                let mut seen = out.clone();
+                crate::util::dedup(&mut seen);
+                prop_assert_eq!(seen.len(), out.len());
+            }
+
+            // First-seen-order preservation: `lead`'s own relative order survives
+            // first, followed by any `rest` elements not already in `lead`.
+            #[test]
+            fn prop_concat_dedup_preserves_first_seen_order(
+                lead in prop::collection::vec(0i32..8, 0..6),
+                rest in prop::collection::vec(0i32..8, 0..6),
+            ) {
+                let mut expected = lead.clone();
+                expected.extend(rest.clone());
+                crate::util::dedup(&mut expected);
+                let out = concat_dedup(lead, rest);
+                prop_assert_eq!(out, expected);
+            }
+        }
+
+        /// A `Memory` entry distinguished only by `server_host` — the rest of the
+        /// (large, mostly-defaulted) struct isn't relevant to fold/dedup behavior.
+        fn memory(host: &str) -> crate::config::Memory {
+            serde_json::from_value(serde_json::json!({
+                "server_host": host,
+                "port": 1,
+            }))
+            .expect("minimal Memory json must deserialize")
+        }
+
+        fn arb_hosts() -> impl Strategy<Value = Vec<String>> {
+            prop::collection::vec("[a-c]", 0..4)
+        }
+
+        fn features_with_memory(hosts: &[String]) -> crate::config::Features {
+            crate::config::Features {
+                memory: hosts.iter().map(|h| memory(h)).collect(),
+                ..Default::default()
+            }
+        }
+
+        proptest! {
+            // root's scalar wins over merged's regardless of either value —
+            // task_tracker.enabled is the representative scalar field.
+            #[test]
+            fn prop_fold_root_features_root_scalar_wins(
+                root_enabled in any::<bool>(),
+                merged_enabled in any::<bool>(),
+            ) {
+                let root = crate::config::Features {
+                    task_tracker: Some(crate::config::TaskTracker {
+                        enabled: root_enabled,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                let merged = crate::config::Features {
+                    task_tracker: Some(crate::config::TaskTracker {
+                        enabled: merged_enabled,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                let out = fold_root_features(Some(&root), Some(merged)).expect("features present");
+                prop_assert_eq!(out.task_tracker.expect("task_tracker present").enabled, root_enabled);
+            }
+
+            // The folded `memory` list carries no duplicate entries, however the
+            // root/merged inputs overlap.
+            #[test]
+            fn prop_fold_root_features_no_duplicates_in_lists(
+                root_hosts in arb_hosts(),
+                merged_hosts in arb_hosts(),
+            ) {
+                let root = features_with_memory(&root_hosts);
+                let merged = features_with_memory(&merged_hosts);
+                let out = fold_root_features(Some(&root), Some(merged)).expect("features present");
+                let mut seen = out.memory.clone();
+                crate::util::dedup(&mut seen);
+                prop_assert_eq!(seen.len(), out.memory.len(), "duplicate memory entries: {:?}", out.memory);
+            }
+
+            // Idempotence: folding the same root a second time over the result is
+            // a no-op, for both the scalar and the list fields.
+            #[test]
+            fn prop_fold_root_features_idempotent(
+                root_hosts in arb_hosts(),
+                merged_hosts in arb_hosts(),
+                root_enabled in any::<bool>(),
+            ) {
+                let root = crate::config::Features {
+                    task_tracker: Some(crate::config::TaskTracker {
+                        enabled: root_enabled,
+                        ..Default::default()
+                    }),
+                    ..features_with_memory(&root_hosts)
+                };
+                let merged = features_with_memory(&merged_hosts);
+                let once = fold_root_features(Some(&root), Some(merged)).expect("features present");
+                let twice = fold_root_features(Some(&root), Some(once.clone())).expect("features present");
+                prop_assert_eq!(once, twice);
+            }
+        }
+    }
+
     // #281: marketplace sync failure must not silently drop CLAUDE_CONFIG_DIR.
 
     fn marketplace_config(name: &str, source: &str) -> Config {

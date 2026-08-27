@@ -344,4 +344,132 @@ mod tests {
             vec!["a"]
         );
     }
+
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+        use std::collections::HashSet;
+
+        fn ident() -> impl Strategy<Value = String> {
+            "[a-z][a-z0-9-]{0,8}"
+        }
+
+        proptest! {
+            // Precedence ordering holds for arbitrary (distinct) bundle/tag names,
+            // not just the fixed example names in the unit test above.
+            #[test]
+            fn prop_build_bundle_refs_orders_by_scope_precedence(
+                net in ident(), host in ident(), user in ident(),
+                content in ident(), project in ident(),
+                tnet in ident(), thost in ident(), tuser in ident(),
+                tcontent in ident(), tproject in ident(),
+            ) {
+                let names = [net.as_str(), host.as_str(), user.as_str(), content.as_str(), project.as_str()];
+                prop_assume!(names.iter().collect::<HashSet<_>>().len() == 5);
+                let tags = [tnet.as_str(), thost.as_str(), tuser.as_str(), tcontent.as_str(), tproject.as_str()];
+                prop_assume!(tags.iter().collect::<HashSet<_>>().len() == 5);
+
+                let tmp = tempfile::tempdir().unwrap();
+                for name in names {
+                    with_bundle_dir(tmp.path(), name);
+                }
+                let bundles = vec![
+                    bundle(&net, &[tnet.as_str()]),
+                    bundle(&host, &[thost.as_str()]),
+                    bundle(&user, &[tuser.as_str()]),
+                    bundle(&content, &[tcontent.as_str()]),
+                    bundle(&project, &[tproject.as_str()]),
+                ];
+                let active = active(vec![
+                    active_scope("network", &[tnet.as_str()], &[], &[]),
+                    active_scope("host", &[thost.as_str()], &[], &[]),
+                    active_scope("user", &[tuser.as_str()], &[], &[]),
+                    active_scope("content", &[tcontent.as_str()], &[], &[]),
+                    active_scope("project", &[tproject.as_str()], &[], &[]),
+                ]);
+                let firing = firing_bundles(&bundles, &active, None);
+                let refs = build_bundle_refs(tmp.path(), &active, &firing);
+                let ranks: std::collections::BTreeMap<&str, u8> = refs
+                    .iter()
+                    .map(|r| (r.name.as_str(), r.precedence))
+                    .collect();
+                prop_assert!(
+                    ranks[net.as_str()] > ranks[host.as_str()]
+                        && ranks[host.as_str()] > ranks[user.as_str()]
+                        && ranks[user.as_str()] > ranks[content.as_str()]
+                        && ranks[content.as_str()] > ranks[project.as_str()],
+                    "expected network > host > user > content > project, got {ranks:?}"
+                );
+            }
+        }
+
+        proptest! {
+            // firing_bundles's three defining rules hold for arbitrary bundle
+            // sets: a disabled bundle never appears, a bundle appears iff it's
+            // tag-matched or manually enabled (and not disabled), and repeating
+            // the call with the same inputs is a no-op (deterministic/idempotent).
+            #[test]
+            fn prop_firing_bundles_respects_disable_and_enable_rules(
+                specs in prop::collection::vec(
+                    (prop::collection::vec("[x-z]", 0..2), any::<bool>(), any::<bool>()),
+                    0..6,
+                ),
+                active_tags in prop::collection::vec("[x-z]", 0..3),
+            ) {
+                let bundles: Vec<Bundle> = specs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (when, _, _))| {
+                        let when_refs: Vec<&str> = when.iter().map(String::as_str).collect();
+                        bundle(&format!("b{i}"), &when_refs)
+                    })
+                    .collect();
+                let enabled_names: Vec<&str> = specs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (_, enabled, _))| *enabled)
+                    .map(|(i, _)| bundles[i].name.as_str())
+                    .collect();
+                let disabled_names: Vec<&str> = specs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (_, _, disabled))| *disabled)
+                    .map(|(i, _)| bundles[i].name.as_str())
+                    .collect();
+                let active_tag_refs: Vec<&str> = active_tags.iter().map(String::as_str).collect();
+                let active = active(vec![
+                    active_scope("user", &active_tag_refs, &enabled_names, &[]),
+                    active_scope("project", &[], &[], &disabled_names),
+                ]);
+                let active_tag_set: HashSet<&str> = active_tag_refs.iter().copied().collect();
+                let enabled_set: HashSet<&str> = enabled_names.iter().copied().collect();
+                let disabled_set: HashSet<&str> = disabled_names.iter().copied().collect();
+
+                let firing = firing_bundles(&bundles, &active, None);
+                let firing_names: HashSet<&str> = firing.iter().map(|b| b.name.as_str()).collect();
+
+                for name in &disabled_set {
+                    prop_assert!(
+                        !firing_names.contains(name),
+                        "disabled bundle {name} appeared in firing set"
+                    );
+                }
+                for b in &bundles {
+                    let tag_matched = b.when.iter().any(|t| active_tag_set.contains(t.as_str()));
+                    let should_fire = (tag_matched || enabled_set.contains(b.name.as_str()))
+                        && !disabled_set.contains(b.name.as_str());
+                    prop_assert_eq!(
+                        firing_names.contains(b.name.as_str()),
+                        should_fire,
+                        "bundle {} fire mismatch",
+                        b.name
+                    );
+                }
+
+                let firing2 = firing_bundles(&bundles, &active, None);
+                let firing2_names: HashSet<&str> = firing2.iter().map(|b| b.name.as_str()).collect();
+                prop_assert_eq!(firing_names, firing2_names, "firing_bundles must be deterministic/idempotent");
+            }
+        }
+    }
 }
