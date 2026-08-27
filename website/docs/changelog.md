@@ -89,6 +89,8 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 
 ## [Unreleased] - ReleaseDate
 
+## [3.11.1] - 2026-08-25
+
 One change since 3.11.0, and it's a security-posture one: llmenv stops pinning two of codebase-memory-mcp's launch defaults, `CBM_CACHE_DIR` and `CBM_ALLOWED_ROOT`, leaving scope control to the tool's own defaults and whoever configures it.
 
 ### Security
