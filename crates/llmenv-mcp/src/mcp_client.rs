@@ -105,7 +105,10 @@ impl McpHttpClient {
     ///
     /// # Errors
     /// Returns an error if the URL is invalid, uses an unsupported scheme, or
-    /// points to a private/loopback IP address (SSRF protection).
+    /// points to a link-local, unspecified, or broadcast address (SSRF
+    /// protection). Loopback and private-range addresses are allowed — this
+    /// client is used to reach llmenv's own ICM backend, which is expected
+    /// to run on loopback or the operator's LAN.
     pub fn new(url: String, timeout: Duration) -> anyhow::Result<Self> {
         // Resolve and SSRF-validate up front, then pin reqwest to exactly the
         // vetted addresses. Pinning closes the DNS-rebinding TOCTOU: reqwest never
