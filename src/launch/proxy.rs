@@ -200,7 +200,25 @@ pub(crate) async fn serve(
     rules: std::sync::Arc<Vec<ProxyRule>>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
-    let client = reqwest::Client::new();
+    // Redirects disabled deliberately: reqwest's default policy follows up
+    // to 10 redirects and only strips `authorization`/`cookie`/`cookie2`/
+    // `proxy-authorization`/`www-authenticate` on a cross-host hop — not
+    // Anthropic's `x-api-key`. A malicious or misconfigured upstream (the
+    // chained-through corporate gateway this proxy explicitly supports)
+    // could otherwise redirect the API key to an attacker-controlled host.
+    // A forwarding proxy should hand a 3xx straight back, not follow it.
+    let client = match reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                "launch proxy: could not build forwarding client, proxy disabled for this session: {e}"
+            );
+            return;
+        }
+    };
     loop {
         tokio::select! {
             accepted = listener.accept() => {
@@ -260,17 +278,49 @@ async fn handle(
     let mut headers = parts.headers.clone();
     apply_rules(&rules, &mut headers, &mut json_body);
 
-    let Ok(target_url) = upstream.join(parts.uri.path()) else {
-        return Ok(error_response("could not build upstream URL"));
-    };
-    let mut builder = client.request(reqwest_method(&parts.method), target_url);
+    let incoming_path = parts.uri.path();
+    // `Url::join` treats a path starting with `//` as a network-path
+    // reference (RFC 3986 §4.2) and replaces the whole authority with
+    // whatever follows — a request line of `POST //evil.example/v1/messages`
+    // would silently redirect the proxy's own outbound HTTPS request to an
+    // attacker-chosen host. Reject it outright rather than joining.
+    if incoming_path.starts_with("//") {
+        return Ok(error_response(
+            "request path must not start with '//' (would override the upstream host)",
+        ));
+    }
+    // `Url::join` also replaces the base URL's own path entirely for a
+    // path-absolute reference, dropping any prefix the upstream already had
+    // (e.g. a chained corporate gateway at `https://gw.example.com/anthropic`
+    // would lose `/anthropic`). Concatenate instead, and carry the query
+    // string across separately — `Uri::path()` never includes it.
+    let mut target_url = upstream.clone();
+    target_url.set_path(&format!(
+        "{}{incoming_path}",
+        upstream.path().trim_end_matches('/')
+    ));
+    target_url.set_query(parts.uri.query());
+
+    let mut builder = client.request(reqwest_method(&parts.method), target_url.clone());
     for (name, value) in &headers {
         // `host` doesn't belong on the forwarded request (reqwest derives it
         // from the target URL); `content-length` is stale once the body has
         // been rewritten — reqwest recomputes it from the actual body set
         // below, and forwarding the original value here would corrupt the
-        // request wiremock/the real Anthropic API receives.
-        if name == http::header::HOST || name == http::header::CONTENT_LENGTH {
+        // request wiremock/the real Anthropic API receives. The rest are
+        // hop-by-hop headers (RFC 9110 §7.6.1) an intermediary must not
+        // forward — most importantly `transfer-encoding`, which forwarded
+        // alongside a body this proxy just re-serialized (with its own,
+        // correct `content-length`) is the classic request-smuggling shape.
+        if name == http::header::HOST
+            || name == http::header::CONTENT_LENGTH
+            || name == http::header::CONNECTION
+            || name == http::header::TRANSFER_ENCODING
+            || name == http::header::TE
+            || name == http::header::UPGRADE
+            || name == http::header::PROXY_AUTHORIZATION
+            || name.as_str().eq_ignore_ascii_case("keep-alive")
+        {
             continue;
         }
         if let Ok(v) = value.to_str() {
@@ -289,7 +339,15 @@ async fn handle(
 
     let upstream_resp = match builder.send().await {
         Ok(r) => r,
-        Err(e) => return Ok(bad_gateway(&format!("upstream request failed: {e}"))),
+        Err(e) => {
+            // `reqwest::Error`'s `Display` embeds the request URL verbatim,
+            // userinfo included — an `ANTHROPIC_BASE_URL` with an embedded
+            // credential (a corporate gateway, e.g. `https://user:pass@gw/`)
+            // would otherwise leak that credential into both this warning
+            // and the 502 body handed back to any local caller.
+            tracing::warn!("launch proxy: upstream request failed: {}", e.without_url());
+            return Ok(bad_gateway("upstream request failed"));
+        }
     };
 
     let status = upstream_resp.status();
@@ -503,5 +561,132 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 200);
         assert_eq!(resp.text().await.unwrap(), "ok");
+    }
+
+    /// A request path starting with `//` must never be forwarded — `Url::join`
+    /// treats it as a network-path reference and would replace the upstream
+    /// host with whatever follows, letting a local caller redirect the
+    /// proxy's outbound HTTPS request to an arbitrary host.
+    #[tokio::test]
+    async fn proxy_rejects_double_slash_path() {
+        let upstream = wiremock::MockServer::start().await;
+        // No mock mounted: if the rejection ever regressed and the request
+        // were forwarded to `upstream` unmodified (rather than hijacked to
+        // some other host), this would still fail loudly with wiremock's own
+        // "no matching mock" 404 rather than silently succeeding.
+        let rules = std::sync::Arc::new(Vec::new());
+        let (listener, addr) = bind().await.unwrap();
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let upstream_url: url::Url = upstream.uri().parse().unwrap();
+        tokio::spawn(serve(listener, upstream_url, rules, rx));
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{addr}//evil.example.com/v1/messages"))
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
+    }
+
+    /// The proxy must never follow a redirect itself — Anthropic's `x-api-key`
+    /// header isn't in reqwest's default cross-host redirect strip list, so
+    /// auto-following would leak it to whatever host a 3xx points at.
+    #[tokio::test]
+    async fn proxy_does_not_follow_redirects() {
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(302)
+                    .insert_header("location", "https://attacker.example/steal"),
+            )
+            .mount(&upstream)
+            .await;
+
+        let rules = std::sync::Arc::new(Vec::new());
+        let (listener, addr) = bind().await.unwrap();
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let upstream_url: url::Url = upstream.uri().parse().unwrap();
+        tokio::spawn(serve(listener, upstream_url, rules, rx));
+
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let resp = client
+            .post(format!("http://{addr}/v1/messages"))
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 302);
+        assert_eq!(
+            resp.headers().get("location").unwrap(),
+            "https://attacker.example/steal"
+        );
+    }
+
+    /// A chained upstream's own path prefix (e.g. a corporate gateway at
+    /// `.../anthropic`) must survive, and the request's query string must
+    /// not be silently dropped.
+    #[tokio::test]
+    async fn proxy_preserves_upstream_base_path_and_query_string() {
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/anthropic/v1/messages"))
+            .and(wiremock::matchers::query_param("beta", "true"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("ok"))
+            .mount(&upstream)
+            .await;
+
+        let rules = std::sync::Arc::new(Vec::new());
+        let (listener, addr) = bind().await.unwrap();
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let upstream_url: url::Url = format!("{}/anthropic", upstream.uri()).parse().unwrap();
+        tokio::spawn(serve(listener, upstream_url, rules, rx));
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{addr}/v1/messages?beta=true"))
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    /// Hop-by-hop headers (RFC 9110 §7.6.1) must not reach the upstream —
+    /// forwarding `transfer-encoding` alongside a body this proxy already
+    /// re-serialized with its own `content-length` is a request-smuggling
+    /// shape.
+    #[tokio::test]
+    async fn proxy_strips_hop_by_hop_headers() {
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .mount(&upstream)
+            .await;
+
+        let rules = std::sync::Arc::new(Vec::new());
+        let (listener, addr) = bind().await.unwrap();
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let upstream_url: url::Url = upstream.uri().parse().unwrap();
+        tokio::spawn(serve(listener, upstream_url, rules, rx));
+
+        let client = reqwest::Client::new();
+        client
+            .post(format!("http://{addr}/v1/messages"))
+            .header("connection", "keep-alive")
+            .header("transfer-encoding", "chunked")
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+
+        let received = upstream.received_requests().await.unwrap();
+        assert_eq!(received.len(), 1);
+        assert!(!received[0].headers.contains_key("connection"));
+        assert!(!received[0].headers.contains_key("transfer-encoding"));
     }
 }
