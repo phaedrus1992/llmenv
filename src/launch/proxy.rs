@@ -252,6 +252,13 @@ type ProxyResponse = hyper::Response<
     http_body_util::combinators::BoxBody<hyper::body::Bytes, std::convert::Infallible>,
 >;
 
+/// Request-body cap: `body.collect()` buffers the whole body in memory before
+/// it can be rewritten, so an unbounded body is an unbounded allocation. 64
+/// MiB comfortably covers any realistic Claude Code request (Anthropic's
+/// largest context window is ~200K tokens, well under a tenth of this in
+/// bytes) while still bounding a single request's worst case.
+const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
+
 async fn handle(
     req: hyper::Request<hyper::body::Incoming>,
     client: reqwest::Client,
@@ -259,7 +266,8 @@ async fn handle(
     rules: std::sync::Arc<Vec<ProxyRule>>,
 ) -> Result<ProxyResponse, std::convert::Infallible> {
     let (parts, body) = req.into_parts();
-    let body_bytes = match body.collect().await {
+    let limited = http_body_util::Limited::new(body, MAX_REQUEST_BODY_BYTES);
+    let body_bytes = match limited.collect().await {
         Ok(collected) => collected.to_bytes(),
         Err(e) => return Ok(error_response(&format!("reading request body: {e}"))),
     };
