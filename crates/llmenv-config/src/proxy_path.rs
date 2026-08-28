@@ -271,6 +271,24 @@ mod tests {
         assert_eq!(v, json!({}));
     }
 
+    #[test]
+    fn remove_path_deletes_existing_array_index_and_reports_true() {
+        let mut v = json!({"system": ["a", "b", "c"]});
+        let segs = parse_path("system[1]").unwrap();
+        assert!(remove_path(&mut v, &segs));
+        assert_eq!(v, json!({"system": ["a", "c"]}));
+    }
+
+    #[test]
+    fn remove_path_is_noop_on_out_of_bounds_index_and_reports_false() {
+        let mut v = json!({"system": ["a", "b"]});
+        // Exactly `arr.len()` — the boundary the guard must reject, not just
+        // an index far past the end.
+        let segs = parse_path("system[2]").unwrap();
+        assert!(!remove_path(&mut v, &segs));
+        assert_eq!(v, json!({"system": ["a", "b"]}));
+    }
+
     /// One `key[idx][idx]...` group — at least a key or an index, since an
     /// empty group (bare `.`) is invalid per `parse_path`'s grammar.
     fn segment_group_strategy() -> impl Strategy<Value = String> {

@@ -2773,6 +2773,11 @@ rules:
         assert!(!features.is_empty());
     }
 
+    #[test]
+    fn features_default_is_empty() {
+        assert!(Features::default().is_empty());
+    }
+
     // #505: MCP field parity — new optional fields
 
     /// A McpServer with all new fields set survives YAML and JSON round-trips with

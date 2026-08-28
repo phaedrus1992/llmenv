@@ -4420,4 +4420,49 @@ mod tests {
             Err(ValidateError::InvalidProxyPath(_))
         ));
     }
+
+    #[test]
+    fn validate_accepts_proxy_path_index_at_the_boundary() {
+        let cfg = Config {
+            features: Some(Features {
+                launch_proxy: Some(LaunchProxy {
+                    enabled: true,
+                    rules: vec![ProxyRule {
+                        when: vec![],
+                        target: ProxyTarget::Body {
+                            path: format!("system[{MAX_PROXY_PATH_INDEX}].text"),
+                        },
+                        op: ProxyOp::Remove,
+                    }],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_proxy_path_index_one_past_the_boundary() {
+        let cfg = Config {
+            features: Some(Features {
+                launch_proxy: Some(LaunchProxy {
+                    enabled: true,
+                    rules: vec![ProxyRule {
+                        when: vec![],
+                        target: ProxyTarget::Body {
+                            path: format!("system[{}].text", MAX_PROXY_PATH_INDEX + 1),
+                        },
+                        op: ProxyOp::Remove,
+                    }],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::InvalidProxyPath(_))
+        ));
+    }
 }
