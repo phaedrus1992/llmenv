@@ -219,6 +219,19 @@ the proxy fails open, never blocking a request over a stale rule.
 Response bodies always stream back unmodified; only the outbound request is
 rewritten.
 
+**Peer-auth token (added in v4.0.0).** Binding to `127.0.0.1` blocks
+off-host access, but not a different local user on the same host: once the
+proxy's port is known — read from the engine's own environment, from
+`/proc/<pid>/environ`, or from `lsof` — any local process could otherwise
+drive requests through it. `launch` closes that gap the same way it already
+does for the notice socket: it generates a per-session token and requires it
+as a header (`x-llmenv-launch-proxy-token`) on every request, rejecting a
+missing or wrong one with `401`. The token is injected via
+`ANTHROPIC_CUSTOM_HEADERS` — appended to any value already set there, never
+overwriting it — so Claude Code sends it on every request without llmenv
+needing its own client-side change. The header never reaches the real
+upstream; the proxy strips it before forwarding.
+
 ## `regenerate`
 
 ```text

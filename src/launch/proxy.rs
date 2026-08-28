@@ -186,29 +186,69 @@ fn strip_pattern(pattern: &str, is_regex: bool, text: &str) -> String {
     }
 }
 
+/// Header carrying the per-session peer-auth token (#1632), required on
+/// every request the proxy accepts. `pub(crate)` so `src/launch/mod.rs` can
+/// inject the same name into `ANTHROPIC_CUSTOM_HEADERS` without the string
+/// literal drifting between the two sites.
+pub(crate) const PEER_AUTH_HEADER: &str = "x-llmenv-launch-proxy-token";
+
 /// Bind the local proxy listener on an OS-assigned ephemeral port, loopback
-/// only.
+/// only, and generate this session's peer-auth token (#1632) — see
+/// `peer_authorized` for why loopback binding alone isn't enough.
 ///
 /// # Errors
-/// Returns an error when the bind fails.
-pub(crate) async fn bind() -> anyhow::Result<(tokio::net::TcpListener, std::net::SocketAddr)> {
+/// Returns an error when the bind fails or the token can't be generated.
+pub(crate) async fn bind() -> anyhow::Result<(
+    tokio::net::TcpListener,
+    std::net::SocketAddr,
+    crate::launch::socket::LaunchToken,
+)> {
+    let token = crate::launch::socket::LaunchToken::generate()
+        .context("generating launch proxy peer-auth token")?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .context("binding launch proxy listener")?;
     let addr = listener
         .local_addr()
         .context("reading launch proxy listener address")?;
-    Ok((listener, addr))
+    Ok((listener, addr, token))
+}
+
+/// Whether `headers` carries the exact [`PEER_AUTH_HEADER`] value `token`
+/// expects. `127.0.0.1:0` blocks off-host access but not a different local
+/// user on the same host (#1632) — this token closes that gap the same way
+/// `socket.rs`'s `LaunchToken` closes it for the notice socket, just without
+/// a full HMAC handshake: a static header value is all a stateless
+/// `ANTHROPIC_CUSTOM_HEADERS` env var can carry, so there's no live
+/// challenge-response to layer on top the way the socket's bidirectional
+/// protocol allows.
+fn peer_authorized(headers: &http::HeaderMap, token: &crate::launch::socket::LaunchToken) -> bool {
+    let Some(value) = headers.get(PEER_AUTH_HEADER).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    constant_time_eq(value.as_bytes(), token.as_str().as_bytes())
+}
+
+/// Constant-time byte equality: a mismatch takes the same time regardless of
+/// where the first differing byte falls, so a same-host attacker probing the
+/// proxy can't use timing to narrow down the token. Mirrors the property
+/// `socket.rs`'s HMAC-based `verify_hmac_hex` already gives that module.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// Accept connections until `shutdown` reports `true` (set when the
 /// supervised engine exits — see `src/launch/mod.rs`). Each request is
-/// rewritten per `rules`, forwarded to `upstream`, and the response streamed
-/// back unmodified.
+/// checked against `token` (#1632), rewritten per `rules`, forwarded to
+/// `upstream`, and the response streamed back unmodified.
 pub(crate) async fn serve(
     listener: tokio::net::TcpListener,
     upstream: url::Url,
     rules: std::sync::Arc<Vec<ProxyRule>>,
+    token: crate::launch::socket::LaunchToken,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     // Redirects disabled deliberately: reqwest's default policy follows up
@@ -238,9 +278,16 @@ pub(crate) async fn serve(
                 let client = client.clone();
                 let upstream = upstream.clone();
                 let rules = std::sync::Arc::clone(&rules);
+                let token = token.clone();
                 tokio::spawn(async move {
                     let service = hyper::service::service_fn(move |req| {
-                        handle(req, client.clone(), upstream.clone(), std::sync::Arc::clone(&rules))
+                        handle(
+                            req,
+                            client.clone(),
+                            upstream.clone(),
+                            std::sync::Arc::clone(&rules),
+                            token.clone(),
+                        )
                     });
                     if let Err(e) = hyper::server::conn::http1::Builder::new()
                         .serve_connection(io, service)
@@ -275,8 +322,14 @@ async fn handle(
     client: reqwest::Client,
     upstream: url::Url,
     rules: std::sync::Arc<Vec<ProxyRule>>,
+    token: crate::launch::socket::LaunchToken,
 ) -> Result<ProxyResponse, std::convert::Infallible> {
     let (parts, body) = req.into_parts();
+    if !peer_authorized(&parts.headers, &token) {
+        return Ok(unauthorized(
+            "missing or invalid launch proxy peer-auth token",
+        ));
+    }
     let limited = http_body_util::Limited::new(body, MAX_REQUEST_BODY_BYTES);
     let body_bytes = match limited.collect().await {
         Ok(collected) => collected.to_bytes(),
@@ -341,6 +394,7 @@ async fn handle(
             || name == http::header::UPGRADE
             || name == http::header::PROXY_AUTHORIZATION
             || name.as_str().eq_ignore_ascii_case("keep-alive")
+            || name.as_str().eq_ignore_ascii_case(PEER_AUTH_HEADER)
         {
             continue;
         }
@@ -401,6 +455,10 @@ async fn handle(
 
 fn error_response(msg: &str) -> ProxyResponse {
     response_with_status(hyper::StatusCode::BAD_REQUEST, msg)
+}
+
+fn unauthorized(msg: &str) -> ProxyResponse {
+    response_with_status(hyper::StatusCode::UNAUTHORIZED, msg)
 }
 
 fn bad_gateway(msg: &str) -> ProxyResponse {
@@ -563,14 +621,15 @@ mod tests {
                 value: json!({"type": "disabled"}),
             },
         )]);
-        let (listener, addr) = bind().await.unwrap();
+        let (listener, addr, token) = bind().await.unwrap();
         let (_tx, rx) = tokio::sync::watch::channel(false);
         let upstream_url: url::Url = upstream.uri().parse().unwrap();
-        tokio::spawn(serve(listener, upstream_url, rules, rx));
+        tokio::spawn(serve(listener, upstream_url, rules, token.clone(), rx));
 
         let client = reqwest::Client::new();
         let resp = client
             .post(format!("http://{addr}/v1/messages"))
+            .header(PEER_AUTH_HEADER, token.as_str())
             .json(&json!({"model": "claude-x"}))
             .send()
             .await
@@ -592,14 +651,15 @@ mod tests {
         // some other host), this would still fail loudly with wiremock's own
         // "no matching mock" 404 rather than silently succeeding.
         let rules = std::sync::Arc::new(Vec::new());
-        let (listener, addr) = bind().await.unwrap();
+        let (listener, addr, token) = bind().await.unwrap();
         let (_tx, rx) = tokio::sync::watch::channel(false);
         let upstream_url: url::Url = upstream.uri().parse().unwrap();
-        tokio::spawn(serve(listener, upstream_url, rules, rx));
+        tokio::spawn(serve(listener, upstream_url, rules, token.clone(), rx));
 
         let client = reqwest::Client::new();
         let resp = client
             .post(format!("http://{addr}//evil.example.com/v1/messages"))
+            .header(PEER_AUTH_HEADER, token.as_str())
             .json(&json!({}))
             .send()
             .await
@@ -623,10 +683,10 @@ mod tests {
             .await;
 
         let rules = std::sync::Arc::new(Vec::new());
-        let (listener, addr) = bind().await.unwrap();
+        let (listener, addr, token) = bind().await.unwrap();
         let (_tx, rx) = tokio::sync::watch::channel(false);
         let upstream_url: url::Url = upstream.uri().parse().unwrap();
-        tokio::spawn(serve(listener, upstream_url, rules, rx));
+        tokio::spawn(serve(listener, upstream_url, rules, token.clone(), rx));
 
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -634,6 +694,7 @@ mod tests {
             .unwrap();
         let resp = client
             .post(format!("http://{addr}/v1/messages"))
+            .header(PEER_AUTH_HEADER, token.as_str())
             .json(&json!({}))
             .send()
             .await
@@ -660,14 +721,15 @@ mod tests {
             .await;
 
         let rules = std::sync::Arc::new(Vec::new());
-        let (listener, addr) = bind().await.unwrap();
+        let (listener, addr, token) = bind().await.unwrap();
         let (_tx, rx) = tokio::sync::watch::channel(false);
         let upstream_url: url::Url = format!("{}/anthropic", upstream.uri()).parse().unwrap();
-        tokio::spawn(serve(listener, upstream_url, rules, rx));
+        tokio::spawn(serve(listener, upstream_url, rules, token.clone(), rx));
 
         let client = reqwest::Client::new();
         let resp = client
             .post(format!("http://{addr}/v1/messages?beta=true"))
+            .header(PEER_AUTH_HEADER, token.as_str())
             .json(&json!({}))
             .send()
             .await
@@ -689,14 +751,15 @@ mod tests {
             .await;
 
         let rules = std::sync::Arc::new(Vec::new());
-        let (listener, addr) = bind().await.unwrap();
+        let (listener, addr, token) = bind().await.unwrap();
         let (_tx, rx) = tokio::sync::watch::channel(false);
         let upstream_url: url::Url = upstream.uri().parse().unwrap();
-        tokio::spawn(serve(listener, upstream_url, rules, rx));
+        tokio::spawn(serve(listener, upstream_url, rules, token.clone(), rx));
 
         let client = reqwest::Client::new();
         client
             .post(format!("http://{addr}/v1/messages"))
+            .header(PEER_AUTH_HEADER, token.as_str())
             .header("connection", "keep-alive")
             .header("transfer-encoding", "chunked")
             .json(&json!({}))
@@ -708,6 +771,60 @@ mod tests {
         assert_eq!(received.len(), 1);
         assert!(!received[0].headers.contains_key("connection"));
         assert!(!received[0].headers.contains_key("transfer-encoding"));
+        assert!(
+            !received[0].headers.contains_key(PEER_AUTH_HEADER),
+            "the proxy's own peer-auth header must never reach the real upstream"
+        );
+    }
+
+    /// #1632: a request with no peer-auth header at all must be rejected —
+    /// loopback binding alone stops off-host access but not a different local
+    /// user on the same host.
+    #[tokio::test]
+    async fn proxy_rejects_missing_peer_auth_token() {
+        let _guard = llmenv_util::testkit::port_guard();
+        let upstream = wiremock::MockServer::start().await;
+        // No mock mounted: a regression that forwards an unauthenticated
+        // request should fail loudly (wiremock's "no matching mock" 404),
+        // not silently succeed.
+        let rules = std::sync::Arc::new(Vec::new());
+        let (listener, addr, token) = bind().await.unwrap();
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let upstream_url: url::Url = upstream.uri().parse().unwrap();
+        tokio::spawn(serve(listener, upstream_url, rules, token, rx));
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{addr}/v1/messages"))
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401);
+    }
+
+    /// #1632: a request bearing the wrong token must be rejected the same way
+    /// as a missing one — a same-host attacker who guesses or brute-forces a
+    /// value must not be told "close" via a different status code.
+    #[tokio::test]
+    async fn proxy_rejects_wrong_peer_auth_token() {
+        let _guard = llmenv_util::testkit::port_guard();
+        let upstream = wiremock::MockServer::start().await;
+        let rules = std::sync::Arc::new(Vec::new());
+        let (listener, addr, token) = bind().await.unwrap();
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let upstream_url: url::Url = upstream.uri().parse().unwrap();
+        tokio::spawn(serve(listener, upstream_url, rules, token, rx));
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{addr}/v1/messages"))
+            .header(PEER_AUTH_HEADER, "0".repeat(64))
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401);
     }
 
     /// A small, bounded-depth arbitrary JSON value generator — request
@@ -762,6 +879,18 @@ mod tests {
             let bytes = serde_json::to_vec(&body).unwrap();
             let round_tripped: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             prop_assert_eq!(round_tripped, body);
+        }
+
+        /// #1632: `constant_time_eq` must agree with native slice equality
+        /// for every input — its only reason to exist is *how* it reaches
+        /// that answer (branch-free over the compared bytes), never a
+        /// different answer.
+        #[test]
+        fn constant_time_eq_matches_native_equality(
+            a in proptest::collection::vec(any::<u8>(), 0..64),
+            b in proptest::collection::vec(any::<u8>(), 0..64),
+        ) {
+            prop_assert_eq!(constant_time_eq(&a, &b), a == b);
         }
     }
 }

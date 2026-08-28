@@ -13,6 +13,7 @@ mod drift;
 pub(crate) mod proxy;
 pub(crate) mod socket;
 
+use std::collections::BTreeMap;
 use std::os::unix::process::ExitStatusExt;
 use std::sync::Arc;
 
@@ -39,6 +40,21 @@ impl RelaunchCap {
         self.attempts.push(now);
         self.attempts.len() <= RELAUNCH_MAX_ATTEMPTS
     }
+}
+
+/// Appends `name: value` to `vars`'s `ANTHROPIC_CUSTOM_HEADERS` entry
+/// (newline-separated, per Claude Code's own format for that variable)
+/// rather than overwriting it — an existing value came from the user's own
+/// config (e.g. a corporate gateway's tracking header) and must survive
+/// alongside the launch proxy's own peer-auth header (#1632).
+fn append_custom_header(vars: &mut BTreeMap<String, String>, name: &str, value: &str) {
+    let line = format!("{name}: {value}");
+    vars.entry("ANTHROPIC_CUSTOM_HEADERS".to_string())
+        .and_modify(|existing| {
+            existing.push('\n');
+            existing.push_str(&line);
+        })
+        .or_insert(line);
 }
 
 /// The scope-narrowing flags `launch` shares with `export` (#1384), bundled so
@@ -126,7 +142,7 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
                         .filter(|p| p.enabled && adapter.name() == "claude-code");
                     match launch_proxy {
                         Some(launch_proxy) => match proxy::bind().await {
-                            Ok((listener, addr)) => {
+                            Ok((listener, addr, proxy_token)) => {
                                 let upstream_str = resolved
                                     .vars
                                     .get("ANTHROPIC_BASE_URL")
@@ -136,10 +152,21 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
                                     Ok(upstream) => {
                                         let rules = Arc::new(launch_proxy.rules.clone());
                                         let (tx, rx) = tokio::sync::watch::channel(false);
-                                        tokio::spawn(proxy::serve(listener, upstream, rules, rx));
+                                        tokio::spawn(proxy::serve(
+                                            listener,
+                                            upstream,
+                                            rules,
+                                            proxy_token.clone(),
+                                            rx,
+                                        ));
                                         resolved.vars.insert(
                                             "ANTHROPIC_BASE_URL".to_string(),
                                             format!("http://{addr}"),
+                                        );
+                                        append_custom_header(
+                                            &mut resolved.vars,
+                                            proxy::PEER_AUTH_HEADER,
+                                            proxy_token.as_str(),
                                         );
                                         Some(tx)
                                     }
@@ -556,6 +583,30 @@ async fn wait_for_notice(notices: &socket::NoticeSlot) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn append_custom_header_inserts_a_fresh_entry_when_absent() {
+        let mut vars = BTreeMap::new();
+        append_custom_header(&mut vars, "x-llmenv-launch-proxy-token", "abc123");
+        assert_eq!(
+            vars.get("ANTHROPIC_CUSTOM_HEADERS").map(String::as_str),
+            Some("x-llmenv-launch-proxy-token: abc123")
+        );
+    }
+
+    #[test]
+    fn append_custom_header_preserves_an_existing_value_newline_separated() {
+        let mut vars = BTreeMap::new();
+        vars.insert(
+            "ANTHROPIC_CUSTOM_HEADERS".to_string(),
+            "X-Corp-Gateway-Id: gw-1".to_string(),
+        );
+        append_custom_header(&mut vars, "x-llmenv-launch-proxy-token", "abc123");
+        assert_eq!(
+            vars.get("ANTHROPIC_CUSTOM_HEADERS").map(String::as_str),
+            Some("X-Corp-Gateway-Id: gw-1\nx-llmenv-launch-proxy-token: abc123")
+        );
+    }
 
     #[test]
     fn relaunch_cap_allows_up_to_the_configured_max_within_the_window() {
