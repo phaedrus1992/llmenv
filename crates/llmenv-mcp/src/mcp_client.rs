@@ -538,6 +538,13 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    // #1576: `MockServer::start()` binds a real ephemeral TCP port, same as
+    // `proxy.rs`'s own network tests — sharing `port_guard()` (see its own doc
+    // comment) closes the gap where this module's mock servers raced those
+    // tests' bind-then-probe checks for a just-freed port under full-suite
+    // parallel execution.
+    include!("../tests/support/port_guard.rs");
+
     #[test]
     fn emit_mcp_call_trace_never_panics_without_env_var() {
         emit_mcp_call_trace("icm_memory_recall", Duration::from_micros(2340));
@@ -545,6 +552,7 @@ mod tests {
 
     #[tokio::test]
     async fn call_tool_returns_text_content() {
+        let _guard = port_guard();
         let server = MockServer::start().await;
         // MCP tools/call response: result.content[0].text
         let body = serde_json::json!({
@@ -592,6 +600,7 @@ mod tests {
         // the initialize handshake was added, every real call failed this way —
         // masked in practice by the (also buggy) SSRF loopback block, which
         // rejected the URL before any request was ever sent.
+        let _guard = port_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/"))
@@ -651,6 +660,7 @@ mod tests {
                     "jsonrpc": "2.0", "id": 0, "result": { "protocolVersion": "2025-06-18" }
                 }))
         };
+        let _guard = port_guard();
         let server = MockServer::start().await;
         // First initialize hands out the session the cache starts with.
         Mock::given(method("POST"))
@@ -698,6 +708,7 @@ mod tests {
     /// genuinely down would loop forever instead of surfacing a failure.
     #[tokio::test]
     async fn call_tool_gives_up_after_second_stale_session_rejection() {
+        let _guard = port_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(JsonRpcMethod("initialize"))
@@ -973,6 +984,7 @@ mod tests {
 
     #[tokio::test]
     async fn call_tool_errors_on_jsonrpc_error() {
+        let _guard = port_guard();
         let server = MockServer::start().await;
         let body = serde_json::json!({
             "jsonrpc": "2.0",

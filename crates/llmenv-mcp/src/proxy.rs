@@ -1392,6 +1392,15 @@ mod tests {
 
     // #1186: the pidfile's parent directory must be owner-only from creation,
     // matching every other state-dir creation site in the codebase.
+    //
+    // #1576: this test flaked once under `cargo test --workspace --lib`
+    // because `mcp_client.rs`'s wiremock-based tests bind a real ephemeral TCP
+    // port via `MockServer::start()` without going through `port_guard()`,
+    // racing this test's own bind-then-probe for a just-freed port. Fixed at
+    // the source by having those tests take `port_guard()` too. This also
+    // stops discarding the `Result`: previously any unexpected outcome (an
+    // early "already running" return, say) was silently ignored and surfaced
+    // later as an unrelated `metadata()` panic instead of a clear assertion.
     #[cfg(unix)]
     #[test]
     fn ensure_running_creates_pidfile_parent_dir_owner_only() {
@@ -1407,7 +1416,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let pid_path = dir.path().join("nested").join("mcp-proxy.pid");
 
-        let _ = ensure_running_within(&bind, &pid_path, |_| Err(anyhow::anyhow!("no spawn")), 50);
+        let result =
+            ensure_running_within(&bind, &pid_path, |_| Err(anyhow::anyhow!("no spawn")), 50);
+        let err = result.expect_err("must fail: spawn always errors");
+        assert!(
+            err.to_string().contains("no spawn"),
+            "must fail via the injected spawn error, not an earlier step, got: {err}"
+        );
 
         let parent = pid_path.parent().expect("parent");
         let mode = std::fs::metadata(parent)
