@@ -13,6 +13,7 @@ mod drift;
 pub(crate) mod proxy;
 pub(crate) mod socket;
 
+use std::collections::BTreeMap;
 use std::os::unix::process::ExitStatusExt;
 use std::sync::Arc;
 
@@ -39,6 +40,27 @@ impl RelaunchCap {
         self.attempts.push(now);
         self.attempts.len() <= RELAUNCH_MAX_ATTEMPTS
     }
+}
+
+/// Appends `name: value` to `vars`'s `ANTHROPIC_CUSTOM_HEADERS` entry
+/// (newline-separated, per Claude Code's own format for that variable)
+/// rather than overwriting it — an existing value came from the user's own
+/// config (e.g. a corporate gateway's tracking header) and must survive
+/// alongside the launch proxy's own peer-auth header (#1632).
+///
+/// `name`/`value` must not themselves contain `\r`/`\n` — this crate's own
+/// call site only ever passes a hardcoded header name and a hex-encoded
+/// [`crate::launch::socket::LaunchToken`], neither of which can, so this
+/// isn't validated here; it would be defending against an input this
+/// function's only caller cannot produce.
+fn append_custom_header(vars: &mut BTreeMap<String, String>, name: &str, value: &str) {
+    let line = format!("{name}: {value}");
+    vars.entry("ANTHROPIC_CUSTOM_HEADERS".to_string())
+        .and_modify(|existing| {
+            existing.push('\n');
+            existing.push_str(&line);
+        })
+        .or_insert(line);
 }
 
 /// The scope-narrowing flags `launch` shares with `export` (#1384), bundled so
@@ -126,7 +148,7 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
                         .filter(|p| p.enabled && adapter.name() == "claude-code");
                     match launch_proxy {
                         Some(launch_proxy) => match proxy::bind().await {
-                            Ok((listener, addr)) => {
+                            Ok((listener, addr, proxy_token)) => {
                                 let upstream_str = resolved
                                     .vars
                                     .get("ANTHROPIC_BASE_URL")
@@ -136,10 +158,21 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
                                     Ok(upstream) => {
                                         let rules = Arc::new(launch_proxy.rules.clone());
                                         let (tx, rx) = tokio::sync::watch::channel(false);
-                                        tokio::spawn(proxy::serve(listener, upstream, rules, rx));
+                                        tokio::spawn(proxy::serve(
+                                            listener,
+                                            upstream,
+                                            rules,
+                                            proxy_token.clone(),
+                                            rx,
+                                        ));
                                         resolved.vars.insert(
                                             "ANTHROPIC_BASE_URL".to_string(),
                                             format!("http://{addr}"),
+                                        );
+                                        append_custom_header(
+                                            &mut resolved.vars,
+                                            proxy::PEER_AUTH_HEADER,
+                                            proxy_token.as_str(),
                                         );
                                         Some(tx)
                                     }
@@ -556,6 +589,31 @@ async fn wait_for_notice(notices: &socket::NoticeSlot) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    #[test]
+    fn append_custom_header_inserts_a_fresh_entry_when_absent() {
+        let mut vars = BTreeMap::new();
+        append_custom_header(&mut vars, "x-llmenv-launch-proxy-token", "abc123");
+        assert_eq!(
+            vars.get("ANTHROPIC_CUSTOM_HEADERS").map(String::as_str),
+            Some("x-llmenv-launch-proxy-token: abc123")
+        );
+    }
+
+    #[test]
+    fn append_custom_header_preserves_an_existing_value_newline_separated() {
+        let mut vars = BTreeMap::new();
+        vars.insert(
+            "ANTHROPIC_CUSTOM_HEADERS".to_string(),
+            "X-Corp-Gateway-Id: gw-1".to_string(),
+        );
+        append_custom_header(&mut vars, "x-llmenv-launch-proxy-token", "abc123");
+        assert_eq!(
+            vars.get("ANTHROPIC_CUSTOM_HEADERS").map(String::as_str),
+            Some("X-Corp-Gateway-Id: gw-1\nx-llmenv-launch-proxy-token: abc123")
+        );
+    }
 
     #[test]
     fn relaunch_cap_allows_up_to_the_configured_max_within_the_window() {
@@ -610,6 +668,30 @@ mod tests {
                 let expected = count_in_window <= RELAUNCH_MAX_ATTEMPTS;
                 assert_eq!(actual, expected);
             }
+        }
+
+        /// #1632: `append_custom_header` must never overwrite a pre-existing
+        /// `ANTHROPIC_CUSTOM_HEADERS` value — the appended result must always
+        /// equal the original value plus a newline plus the new line, for an
+        /// arbitrary existing value and an arbitrary name/value pair, not
+        /// just the two hand-picked examples above.
+        #[test]
+        fn append_custom_header_preserves_arbitrary_existing_value(
+            existing in proptest::option::of("[ -~]{0,40}"),
+            name in "[-A-Za-z]{1,20}",
+            value in "[ -~]{0,40}",
+        ) {
+            let mut vars = BTreeMap::new();
+            if let Some(existing) = &existing {
+                vars.insert("ANTHROPIC_CUSTOM_HEADERS".to_string(), existing.clone());
+            }
+            append_custom_header(&mut vars, &name, &value);
+
+            let expected = match &existing {
+                Some(existing) => format!("{existing}\n{name}: {value}"),
+                None => format!("{name}: {value}"),
+            };
+            prop_assert_eq!(vars.get("ANTHROPIC_CUSTOM_HEADERS").cloned(), Some(expected));
         }
     }
 }

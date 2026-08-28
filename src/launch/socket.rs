@@ -82,10 +82,13 @@ pub(crate) struct LaunchToken(zeroize::Zeroizing<String>);
 impl LaunchToken {
     /// Generates a random token: [`TOKEN_BYTES`] bytes from the OS CSPRNG,
     /// hex-encoded so it round-trips cleanly through an env var and JSON.
+    /// `pub(crate)` (not just used by this module's own [`bind`]) since the
+    /// launch proxy (#1632) reuses this same generator for its own,
+    /// independent peer-auth secret rather than duplicating it.
     ///
     /// # Errors
     /// Returns an error if the OS CSPRNG is unavailable.
-    fn generate() -> anyhow::Result<Self> {
+    pub(crate) fn generate() -> anyhow::Result<Self> {
         let mut bytes = zeroize::Zeroizing::new([0u8; TOKEN_BYTES]);
         getrandom::fill(bytes.as_mut()).context("generating launch socket token")?;
         Ok(Self(zeroize::Zeroizing::new(hex::encode(*bytes))))
