@@ -5,10 +5,11 @@ use thiserror::Error;
 #[cfg(test)]
 use super::{
     Bundle, Cache, Capabilities, ContentMatch, ContentScope, ContextMode, Features, Hook,
-    HookHandler, HookHandlerKind, HostEntry, HostMatch, HostScope, Marketplace,
+    HookHandler, HookHandlerKind, HostEntry, HostMatch, HostScope, LaunchProxy, Marketplace,
     McpPermissionAction, McpPermissions, McpServer, McpTransport, Memory, NativePermissionRules,
     NetworkMatch, NetworkScope, PermissionMode, PermissionPreset, Permissions, PluginCollection,
-    Scopes, Throttle, UserMatch, UserScope,
+    ProxyCheck, ProxyCondition, ProxyConditionTarget, ProxyOp, ProxyRule, ProxyTarget, Scopes,
+    Throttle, UserMatch, UserScope,
 };
 
 #[derive(Debug, Error)]
@@ -27,6 +28,10 @@ pub enum ValidateError {
     InvalidMACAddress(String),
     #[error("invalid hostname: {0}")]
     InvalidHostname(String),
+    #[error("launch_proxy rule has an invalid JSON path: {0}")]
+    InvalidProxyPath(String),
+    #[error("launch_proxy rule has an invalid regex pattern: {0}")]
+    InvalidProxyRegex(String),
     #[error("cache_dir contains path traversal components: {0}")]
     CacheDirTraversal(String),
     #[error("cache_retention_hours must be > 0")]
@@ -271,6 +276,32 @@ fn is_valid_hostname(hostname: &str) -> bool {
     })
 }
 
+/// Array-index segments in a `launch_proxy` JSON-path-lite are bounded to
+/// keep a typo'd config from allocating an unreasonably large array. A
+/// request body has no legitimate use for an index anywhere near this —
+/// `set_path` (`crates/llmenv-config/src/proxy_path.rs`) resizes the target
+/// array up to `index + 1` elements, so an unbounded index is a multi-GB
+/// allocation (or, past `usize::MAX - 1`, an overflow) an attacker-free typo
+/// in the user's own config can trigger.
+const MAX_PROXY_PATH_INDEX: usize = 10_000;
+
+/// Validate a `launch_proxy` JSON-path-lite string: it must parse, and every
+/// array-index segment must stay within [`MAX_PROXY_PATH_INDEX`].
+fn validate_proxy_path(path: &str) -> Result<(), ValidateError> {
+    let segments = crate::proxy_path::parse_path(path)
+        .map_err(|e| ValidateError::InvalidProxyPath(format!("{path}: {e}")))?;
+    for segment in &segments {
+        if let crate::proxy_path::PathSegment::Index(i) = segment
+            && *i > MAX_PROXY_PATH_INDEX
+        {
+            return Err(ValidateError::InvalidProxyPath(format!(
+                "{path}: index {i} exceeds the maximum of {MAX_PROXY_PATH_INDEX}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Validate a single `capabilities.env` key: not a reserved adapter/state var,
 /// not in the LLMENV_* namespace. Returns an error with the given `context`
 /// label (e.g. `"config.yaml: capabilities"` or `"bundle 'foo'"`) on failure.
@@ -469,6 +500,40 @@ impl Config {
         self.validate_plugins()?;
         self.validate_state()?;
         self.validate_permissions()?;
+        self.validate_launch_proxy()?;
+        Ok(())
+    }
+
+    fn validate_launch_proxy(&self) -> Result<(), ValidateError> {
+        let Some(proxy) = self.features.as_ref().and_then(|f| f.launch_proxy.as_ref()) else {
+            return Ok(());
+        };
+        for rule in &proxy.rules {
+            if let super::ProxyTarget::Body { path } = &rule.target {
+                validate_proxy_path(path)?;
+            }
+            if let super::ProxyOp::Strip {
+                pattern,
+                regex: true,
+            } = &rule.op
+            {
+                regex::Regex::new(pattern)
+                    .map_err(|e| ValidateError::InvalidProxyRegex(format!("{pattern}: {e}")))?;
+            }
+            for cond in &rule.when {
+                if let super::ProxyConditionTarget::Body { path: Some(path) } = &cond.target {
+                    validate_proxy_path(path)?;
+                }
+                if let super::ProxyCheck::Matches {
+                    pattern,
+                    regex: true,
+                } = &cond.check
+                {
+                    regex::Regex::new(pattern)
+                        .map_err(|e| ValidateError::InvalidProxyRegex(format!("{pattern}: {e}")))?;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1455,6 +1520,7 @@ mod tests {
                                 task_tracker: None,
                                 codebase_memory,
                                 cd_guard: None,
+                                launch_proxy: None,
                             })
                         },
                         marketplace,
@@ -1815,6 +1881,7 @@ mod tests {
                 task_tracker: None,
                 codebase_memory: vec![],
                 cd_guard: None,
+                launch_proxy: None,
             }),
             marketplace: vec![],
             plugin_collection: vec![],
@@ -1884,6 +1951,7 @@ mod tests {
                 task_tracker: None,
                 codebase_memory: vec![],
                 cd_guard: None,
+                launch_proxy: None,
             }),
             marketplace: vec![],
             plugin_collection: vec![],
@@ -2020,6 +2088,7 @@ mod tests {
                 task_tracker: None,
                 codebase_memory,
                 cd_guard: None,
+                launch_proxy: None,
             }),
             marketplace: vec![],
             plugin_collection: vec![],
@@ -4245,5 +4314,155 @@ mod tests {
             bundle_origin: None,
         });
         assert!(cfg.validate().is_ok());
+    }
+
+    // #1289: launch_proxy
+    #[test]
+    fn validate_rejects_bad_json_path() {
+        let cfg = Config {
+            features: Some(Features {
+                launch_proxy: Some(LaunchProxy {
+                    enabled: true,
+                    rules: vec![ProxyRule {
+                        when: vec![],
+                        target: ProxyTarget::Body {
+                            path: "system[[.text".into(), // malformed: unmatched bracket
+                        },
+                        op: ProxyOp::Remove,
+                    }],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::InvalidProxyPath(_))
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_bad_regex() {
+        let cfg = Config {
+            features: Some(Features {
+                launch_proxy: Some(LaunchProxy {
+                    enabled: true,
+                    rules: vec![ProxyRule {
+                        when: vec![],
+                        target: ProxyTarget::Body {
+                            path: "system[0].text".into(),
+                        },
+                        op: ProxyOp::Strip {
+                            pattern: "(unclosed".into(),
+                            regex: true,
+                        },
+                    }],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::InvalidProxyRegex(_))
+        ));
+    }
+
+    #[test]
+    fn validate_accepts_well_formed_launch_proxy() {
+        let cfg = Config {
+            features: Some(Features {
+                launch_proxy: Some(LaunchProxy {
+                    enabled: true,
+                    rules: vec![ProxyRule {
+                        when: vec![ProxyCondition {
+                            target: ProxyConditionTarget::Body { path: None },
+                            check: ProxyCheck::Matches {
+                                pattern: "security monitor".into(),
+                                regex: false,
+                            },
+                        }],
+                        target: ProxyTarget::Body {
+                            path: "thinking".into(),
+                        },
+                        op: ProxyOp::Set {
+                            value: serde_json::json!({"type": "disabled"}),
+                        },
+                    }],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_oversized_proxy_path_index() {
+        let cfg = Config {
+            features: Some(Features {
+                launch_proxy: Some(LaunchProxy {
+                    enabled: true,
+                    rules: vec![ProxyRule {
+                        when: vec![],
+                        target: ProxyTarget::Body {
+                            path: "system[4000000000].text".into(),
+                        },
+                        op: ProxyOp::Remove,
+                    }],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::InvalidProxyPath(_))
+        ));
+    }
+
+    #[test]
+    fn validate_accepts_proxy_path_index_at_the_boundary() {
+        let cfg = Config {
+            features: Some(Features {
+                launch_proxy: Some(LaunchProxy {
+                    enabled: true,
+                    rules: vec![ProxyRule {
+                        when: vec![],
+                        target: ProxyTarget::Body {
+                            path: format!("system[{MAX_PROXY_PATH_INDEX}].text"),
+                        },
+                        op: ProxyOp::Remove,
+                    }],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_proxy_path_index_one_past_the_boundary() {
+        let cfg = Config {
+            features: Some(Features {
+                launch_proxy: Some(LaunchProxy {
+                    enabled: true,
+                    rules: vec![ProxyRule {
+                        when: vec![],
+                        target: ProxyTarget::Body {
+                            path: format!("system[{}].text", MAX_PROXY_PATH_INDEX + 1),
+                        },
+                        op: ProxyOp::Remove,
+                    }],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::InvalidProxyPath(_))
+        ));
     }
 }

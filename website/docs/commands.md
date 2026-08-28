@@ -174,6 +174,51 @@ outright: on Linux, `/proc/<pid>/environ` is readable by the same uid by
 default, so a same-uid attacker who locates `launch`'s pid can still read
 the secret from there directly, bypassing the socket protocol entirely.
 
+### API proxy (`features.launch_proxy`)
+
+(added in v4.0.0)
+
+`llmenv launch claude_code` can start a local HTTP proxy for the session that
+rewrites outbound Anthropic API requests before they leave the machine —
+useful for trimming Claude Code's injected system prompt, or conditionally
+setting a field the request would otherwise omit. Claude Code and the SDK it
+runs on both already respect `ANTHROPIC_BASE_URL`, so no TLS interception is
+needed: `launch` binds a loopback proxy on an ephemeral port, points the
+child's `ANTHROPIC_BASE_URL` at it, and forwards every request through
+(rewritten) to the real upstream. If `ANTHROPIC_BASE_URL` was already set
+before `launch` ran (a corporate gateway, for example), the proxy chains
+through that address instead of `https://api.anthropic.com` — it never
+clobbers an existing override.
+
+Enable it in `config.yaml`, Claude Code only, off by default:
+
+```yaml
+features:
+  launch_proxy:
+    enabled: true
+    rules:
+      - target: body
+        path: "system[0].text"
+        op:
+          kind: strip
+          pattern: "verbose boilerplate.*"
+          regex: true
+```
+
+Each rule has an optional `when` list — zero or more AND-combined conditions
+(`kind: missing`/`present`/`equals`/`matches`, targeting either a header by
+`name` or a JSON-path-lite `path` into the request body) that gate whether
+the rule fires — and an `op`: `kind: set` (upserts the target, creating it if
+the request didn't include it at all — e.g. adding a `thinking` block Claude
+Code left out), `kind: remove` (no-op if already absent), or `kind: strip`
+(regex or substring removal from a string value, also no-op if absent). A
+rule whose target no longer exists because Claude Code's request shape
+changed is skipped with a logged warning rather than breaking the session —
+the proxy fails open, never blocking a request over a stale rule.
+
+Response bodies always stream back unmodified; only the outbound request is
+rewritten.
+
 ## `regenerate`
 
 ```text
