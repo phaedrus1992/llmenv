@@ -70,8 +70,13 @@ impl Config {
     /// Returns an error if the file can't be read, isn't valid YAML, or fails
     /// schema validation.
     pub fn load(path: &Path) -> anyhow::Result<Self> {
-        let expanded = llmenv_paths::expand_tilde(&path.to_string_lossy());
-        let path = Path::new(&expanded);
+        let expanded;
+        let path: &Path = if path.starts_with("~") {
+            expanded = llmenv_paths::expand_tilde(&path.to_string_lossy());
+            Path::new(&expanded)
+        } else {
+            path
+        };
         let s = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config file: {}", path.display()))?;
         let cfg: Self = serde_yaml::from_str(&s)
@@ -227,6 +232,25 @@ mod tests {
 
         let tilde_path = std::path::PathBuf::from(format!("~/{dir_name}/config.yaml"));
         assert!(Config::load(&tilde_path).is_ok());
+    }
+
+    // Invalid-UTF-8 filenames are legal on Linux (raw byte paths) but
+    // rejected outright by macOS/APFS ("Illegal byte sequence"), so this can
+    // only run on Linux.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn load_passes_non_tilde_path_through_byte_exact() {
+        // A non-tilde path must never go through a `to_string_lossy` round
+        // trip: that would mangle invalid-UTF-8 bytes into U+FFFD and read
+        // the wrong file.
+        use std::os::unix::ffi::OsStrExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let name = std::ffi::OsStr::from_bytes(b"co\xffnfig.yaml");
+        let p = tmp.path().join(name);
+        std::fs::write(&p, "cache: {}\n").unwrap();
+
+        assert!(Config::load(&p).is_ok());
     }
 
     #[test]
