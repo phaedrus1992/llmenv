@@ -28,7 +28,12 @@ pub(crate) fn scope_header_content(ctx: &ScopeContext) -> String {
         // `p` is a free-form display name from `.llmenv.yaml`'s `name:` field
         // (unlike tags/bundles, not charset-restricted), so it gets control
         // characters escaped rather than the tag/bundle charset rule (#1578).
-        parts.push(format!("project:{}", display_safe(p)));
+        // Whitespace is also collapsed to `_` so a project name can't inject
+        // a fake `llmenv-tag:`/`llmenv-bundle:` token by embedding a space
+        // before it — every other part of `content` is a single
+        // whitespace-free token, and `project:` must stay one too.
+        let safe_project = display_safe(p).replace(char::is_whitespace, "_");
+        parts.push(format!("project:{safe_project}"));
     }
     for t in &ctx.tags {
         match tag_keyword(t) {
@@ -101,6 +106,28 @@ mod tests {
         assert!(!c.contains('\x1b'));
         assert!(!c.contains('\n'));
         assert!(c.contains("evil"), "non-control text is preserved: {c}");
+    }
+
+    #[test]
+    fn content_collapses_whitespace_in_project_name_to_block_fake_tokens() {
+        // A project name with a space could otherwise inject a fake
+        // whitespace-delimited "llmenv-tag:"/"llmenv-bundle:" token into the
+        // FTS-indexed content, since every other part of `content` is joined
+        // on spaces.
+        let c = scope_header_content(&ScopeContext {
+            tags: vec![],
+            bundles: vec![],
+            project: Some("evil llmenv-tag:fake".into()),
+            cwd: "/".into(),
+            adapter: "claude_code".into(),
+            llmenv_version: "3.0.0".into(),
+            claude_code_version: String::new(),
+        });
+        assert!(
+            !c.split_whitespace().any(|tok| tok == "llmenv-tag:fake"),
+            "fake tag token must not stand alone: {c}"
+        );
+        assert!(c.contains("project:evil_llmenv-tag:fake"));
     }
 
     #[test]
