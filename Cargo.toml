@@ -32,7 +32,9 @@ anstyle = "=1.0.14"
 url = "=2.5.8"
 humantime = "=2.4.0"
 tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "sync", "signal", "net", "time"] }
-reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "json", "blocking"] }
+# "stream" enables Response::bytes_stream(), used by the launch proxy (#1289)
+# to stream the upstream response back without buffering it.
+reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "json", "blocking", "stream"] }
 # Hostname via the uname(2) syscall instead of spawning the `hostname` binary on
 # every hook-run ("system" enables uname). "process" enables kill_process_group
 # for #1165's consolidation-timeout group-kill: a direct syscall instead of
@@ -40,6 +42,15 @@ reqwest = { version = "=0.13.4", default-features = false, features = ["rustls",
 # reaped pid could be recycled before the group-kill fires. rustix is already
 # in the tree transitively. No unsafe.
 rustix = { version = "=1.1.4", features = ["fs", "process", "system"] }
+# hyper/hyper-util/http-body-util/http/futures-util/regex are already present
+# transitively via reqwest — promoted to direct deps here for the launch
+# proxy's (#1289) HTTP server, not new additions to the dependency tree.
+hyper = { version = "=1.11.1", features = ["server", "http1"] }
+hyper-util = { version = "=0.1.20", features = ["tokio"] }
+http-body-util = "=0.1.5"
+http = "=1.5.0"
+futures-util = "=0.3.34"
+regex = "=1.13.1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -102,6 +113,12 @@ schemars = "=1.2.2"
 reqwest = { workspace = true }
 url = { workspace = true }
 rustix = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+http = { workspace = true }
+futures-util = { workspace = true }
+regex = { workspace = true }
 tempfile = "=3.27.0"
 pulldown-cmark = { workspace = true }
 dialoguer = "=0.12.0"
