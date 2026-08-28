@@ -920,6 +920,214 @@ test_1532_real_script_regenerates_changelog() {
 }
 
 # ---------------------------------------------------------------------------
+# Build a repo with `target` and `source` branches whose
+# scripts/sync-changelog-doc.sh content is given by the caller, with no
+# changelog.md at all -- so merging source into target never conflicts.
+# Exercises the #1534 gap: an unconditional script-integrity check must
+# catch a script change on a clean merge, not only inside a changelog.md
+# conflict. A `refs/remotes/origin/target` ref is created manually (no real
+# remote) so the check's own `origin/$TARGET` naming can be exercised as-is.
+# ---------------------------------------------------------------------------
+make_script_only_change_repo() {
+  local target_script="$1" source_script="$2" repo
+  repo=$(mktemp -d)
+  (
+    cd "$repo" || exit 1
+    git init -q -b target .
+    git config user.email t@t
+    git config user.name t
+    git config commit.gpgsign false
+    mkdir -p scripts
+    printf '%s\n' "$target_script" > scripts/sync-changelog-doc.sh
+    git add scripts/sync-changelog-doc.sh
+    git commit -q -m base
+
+    git switch -q -c source
+    printf '%s\n' "$source_script" > scripts/sync-changelog-doc.sh
+    git commit -q -am "source change" --allow-empty
+
+    git switch -q target
+    git update-ref refs/remotes/origin/target refs/heads/target
+  )
+  printf '%s\n' "$repo"
+}
+
+# Build a repo where the script exists on `source` but not `target` (e.g. a
+# script being introduced for the first time by this push). This asymmetric
+# case must now HALT -- treating it as a skip (the pre-fix behavior) was the
+# exact #1534 bypass, just entered via introduction instead of modification.
+make_script_added_only_on_source_repo() {
+  local repo
+  repo=$(mktemp -d)
+  (
+    cd "$repo" || exit 1
+    git init -q -b target .
+    git config user.email t@t
+    git config user.name t
+    git config commit.gpgsign false
+    printf 'placeholder\n' > README.md
+    git add README.md
+    git commit -q -m base
+
+    git switch -q -c source
+    mkdir -p scripts
+    printf 'echo hi\n' > scripts/sync-changelog-doc.sh
+    git add scripts/sync-changelog-doc.sh
+    git commit -q -am "add script"
+
+    git switch -q target
+    git update-ref refs/remotes/origin/target refs/heads/target
+  )
+  printf '%s\n' "$repo"
+}
+
+# Build a repo where NEITHER branch carries scripts/sync-changelog-doc.sh at
+# all (e.g. an older release line predating the script's introduction on
+# both sides) -- the guard must still skip cleanly in this, the only
+# legitimate no-file case.
+make_script_missing_on_both_sides_repo() {
+  local repo
+  repo=$(mktemp -d)
+  (
+    cd "$repo" || exit 1
+    git init -q -b target .
+    git config user.email t@t
+    git config user.name t
+    git config commit.gpgsign false
+    printf 'placeholder\n' > README.md
+    git add README.md
+    git commit -q -m base
+
+    git switch -q -c source
+    printf 'source change\n' >> README.md
+    git commit -q -am "source change"
+
+    git switch -q target
+    git update-ref refs/remotes/origin/target refs/heads/target
+  )
+  printf '%s\n' "$repo"
+}
+
+# Mirrors the per-target script-integrity guard added to
+# forward-merge-release.yml's per-target loop (#1534, hardened further by a
+# #1543 follow-up review): runs before the merge attempt, for every target,
+# regardless of whether this push conflicts on changelog.md at all. Only
+# skips when NEITHER side carries the script; an asymmetric case (added or
+# removed by this push) halts, since that's exactly as dangerous as a
+# same-side content change. Reads use 2>/dev/null, not 2>&1, so stderr never
+# folds into the value compared for equality. Callers export SOURCE_REF,
+# TARGET, SOURCE_DESC.
+script_integrity_guard_block() {
+  cat <<'SHELL'
+set -euo pipefail
+SYNC_SCRIPT_PATH="scripts/sync-changelog-doc.sh"
+TARGET_HAS_SCRIPT=0
+SOURCE_HAS_SCRIPT=0
+git cat-file -e "origin/$TARGET:$SYNC_SCRIPT_PATH" 2>/dev/null && TARGET_HAS_SCRIPT=1
+git cat-file -e "$SOURCE_REF:$SYNC_SCRIPT_PATH" 2>/dev/null && SOURCE_HAS_SCRIPT=1
+if [[ "$TARGET_HAS_SCRIPT" -eq 1 || "$SOURCE_HAS_SCRIPT" -eq 1 ]]; then
+  if [[ "$TARGET_HAS_SCRIPT" -ne "$SOURCE_HAS_SCRIPT" ]]; then
+    echo "::error::$SYNC_SCRIPT_PATH exists on only one of $SOURCE_DESC/$TARGET; a script addition or removal must be forward-merged and reviewed by hand, not auto-run"
+    exit 1
+  fi
+  SCRIPT_TARGET=$(git show "origin/$TARGET:$SYNC_SCRIPT_PATH" 2>/dev/null) || {
+    echo "::error::failed to read $TARGET's copy of $SYNC_SCRIPT_PATH"
+    exit 1
+  }
+  SCRIPT_SOURCE=$(git show "$SOURCE_REF:$SYNC_SCRIPT_PATH" 2>/dev/null) || {
+    echo "::error::failed to read $SOURCE_DESC's copy of $SYNC_SCRIPT_PATH"
+    exit 1
+  }
+  if [[ "$SCRIPT_TARGET" != "$SCRIPT_SOURCE" ]]; then
+    echo "::error::$SYNC_SCRIPT_PATH differs between $SOURCE_DESC and $TARGET; a script-logic change must be forward-merged and reviewed by hand, not auto-run"
+    exit 1
+  fi
+fi
+echo "PASSED_INTEGRITY_CHECK"
+SHELL
+}
+
+test_1534_script_only_change_without_conflict_is_caught() {
+  local repo out
+  repo=$(make_script_only_change_repo 'echo target' 'echo source')
+
+  out=$(cd "$repo" && SOURCE_REF=source TARGET=target SOURCE_DESC=release/4.x \
+    bash -c "$(script_integrity_guard_block)" 2>&1 || true)
+  trash "$repo" 2>/dev/null || true
+
+  if [[ "$out" == *"differs between"* ]] && [[ "$out" != *PASSED_INTEGRITY_CHECK* ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_1534_identical_script_without_conflict_proceeds() {
+  local repo out
+  repo=$(make_script_only_change_repo 'echo same' 'echo same')
+
+  out=$(cd "$repo" && SOURCE_REF=source TARGET=target SOURCE_DESC=release/4.x \
+    bash -c "$(script_integrity_guard_block)" 2>&1 || true)
+  trash "$repo" 2>/dev/null || true
+
+  if [[ "$out" == *PASSED_INTEGRITY_CHECK* ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_1534_script_added_only_on_source_halts() {
+  local repo out
+  repo=$(make_script_added_only_on_source_repo)
+
+  out=$(cd "$repo" && SOURCE_REF=source TARGET=target SOURCE_DESC=release/4.x \
+    bash -c "$(script_integrity_guard_block)" 2>&1 || true)
+  trash "$repo" 2>/dev/null || true
+
+  if [[ "$out" == *"exists on only one of"* ]] && [[ "$out" != *PASSED_INTEGRITY_CHECK* ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_1534_script_missing_on_both_sides_skips_check() {
+  local repo out
+  repo=$(make_script_missing_on_both_sides_repo)
+
+  out=$(cd "$repo" && SOURCE_REF=source TARGET=target SOURCE_DESC=release/4.x \
+    bash -c "$(script_integrity_guard_block)" 2>&1 || true)
+  trash "$repo" 2>/dev/null || true
+
+  if [[ "$out" == *PASSED_INTEGRITY_CHECK* ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# Drift guard: script_integrity_guard_block above is a hand-maintained
+# mirror of the per-target loop's script-integrity check in
+# forward-merge-release.yml, not an extraction -- assert the exact lines
+# are still present in production so a future edit there fails loudly here
+# instead of drifting unnoticed.
+test_1534_test_mirror_matches_production_script_integrity_guard() {
+  local workflow_file
+  workflow_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/forward-merge-release.yml"
+
+  # shellcheck disable=SC2016 # literal grep -F patterns, not expressions to expand
+  if grep -qF 'git cat-file -e "origin/$TARGET:$SYNC_SCRIPT_PATH" 2>/dev/null && TARGET_HAS_SCRIPT=1' "$workflow_file" \
+      && grep -qF 'git cat-file -e "$SOURCE_REF:$SYNC_SCRIPT_PATH" 2>/dev/null && SOURCE_HAS_SCRIPT=1' "$workflow_file" \
+      && grep -qF '$SYNC_SCRIPT_PATH exists on only one of $SOURCE_DESC/$TARGET; a script addition or removal must be forward-merged and reviewed by hand, not auto-run' "$workflow_file" \
+      && grep -qF '$SYNC_SCRIPT_PATH differs between $SOURCE_DESC and $TARGET; a script-logic change must be forward-merged and reviewed by hand, not auto-run' "$workflow_file"; then
+    return 0
+  fi
+  echo "  production's per-target script-integrity guard no longer matches the lines this file mirrors -- update script_integrity_guard_block above" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # Test 10 (Issue #1504): push_with_pat scopes the PAT to just the push
 #
 # Mirrors the push_with_pat() helper in forward-merge-release.yml. Verifies
@@ -1721,6 +1929,139 @@ test_1564_test_mirror_matches_production_approve_pending_runs() {
 }
 
 # ---------------------------------------------------------------------------
+# Issue #1543: auto_resolve_conflicts' file_display sanitization.
+#
+# $file inside auto_resolve_conflicts' per-file loop is an arbitrary path
+# from the conflicting merge -- an attacker who can land a commit on
+# release/** controls it (e.g. a crate directory matching
+# `crates/*/Cargo.toml`, or any path falling into the no-auto-resolution
+# case). GitHub Actions' `::add-mask::` (used elsewhere in this same job to
+# mask the PAT in push_with_pat) can be bypassed by an injected
+# `::stop-commands::` sequence in log output. Strip any `::` from the copy
+# used in the loop's own echo/error lines so they can never be used to
+# smuggle one in.
+# ---------------------------------------------------------------------------
+file_display_sanitize_block() {
+  cat <<'SHELL'
+file="$1"
+file_display="${file//::/  }"
+printf '%s\n' "$file_display"
+SHELL
+}
+
+test_1543_stop_commands_sequence_stripped_from_display() {
+  local out
+  out=$(bash -c "$(file_display_sanitize_block)" _ 'crates/evil::stop-commands::MARKER/Cargo.toml')
+
+  if [[ "$out" != *"::stop-commands::"* ]] && [[ "$out" == *"crates/evil"* ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "$out" >&2
+  return 1
+}
+
+test_1543_normal_filename_unchanged() {
+  local out
+  out=$(bash -c "$(file_display_sanitize_block)" _ 'website/docs/changelog.md')
+
+  if [[ "$out" == "website/docs/changelog.md" ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "$out" >&2
+  return 1
+}
+
+# Drift guard: file_display_sanitize_block above mirrors the sanitization
+# expression added to auto_resolve_conflicts in forward-merge-release.yml,
+# and its three call sites (changelog.md, Cargo.toml/lock, and the
+# no-auto-resolution fallback) must all use the sanitized copy in their log
+# output, not the raw path.
+test_1543_test_mirror_matches_production_file_display_sanitization() {
+  local workflow_file count
+  workflow_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/forward-merge-release.yml"
+
+  # shellcheck disable=SC2016 # literal grep -F patterns, not expressions to expand
+  count=$(grep -c 'file_display="${file//::/  }"' "$workflow_file")
+  # shellcheck disable=SC2016 # literal grep -F patterns, not expressions to expand
+  if [[ "$count" -eq 1 ]] \
+      && grep -qF '"  $file_display: regenerating from the merged CHANGELOG-*.md sources"' "$workflow_file" \
+      && grep -qF "\"  \$file_display: keeping \$TARGET's own version\"" "$workflow_file" \
+      && grep -qF '"::error::$file_display: conflict has no auto-resolution rule"' "$workflow_file"; then
+    return 0
+  fi
+  echo "  production's file_display sanitization no longer matches the lines this file mirrors -- update auto_resolve_conflicts and file_display_sanitize_block" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Issue #1543 follow-up: git's own merge output (not this workflow's echo
+# lines) also leaks an attacker-controlled conflicting path. Verified
+# against real git: "Auto-merging <path>" and "CONFLICT (content): Merge
+# conflict in <path>" both print to STDOUT, unsanitized, even under the
+# `2>/dev/null` the trial merge used before this fix -- before
+# auto_resolve_conflicts' own file_display sanitization ever runs. Both
+# merge invocations must fully suppress their own output (>/dev/null 2>&1),
+# since only their exit status is used.
+# ---------------------------------------------------------------------------
+make_merge_stdout_leak_repo() {
+  local repo
+  repo=$(mktemp -d)
+  (
+    cd "$repo" || exit 1
+    git init -q -b target .
+    git config user.email t@t
+    git config user.name t
+    git config commit.gpgsign false
+    printf 'base\n' > 'conflict::stop-commands::marker.txt'
+    git add .
+    git commit -q -m base
+
+    git switch -q -c source
+    printf 'source change\n' > 'conflict::stop-commands::marker.txt'
+    git commit -q -am "source"
+
+    git switch -q target
+    printf 'target change\n' > 'conflict::stop-commands::marker.txt'
+    git commit -q -am "target"
+  )
+  printf '%s\n' "$repo"
+}
+
+test_1543_git_merge_stdout_suppressed_on_conflict() {
+  local repo out rc
+  repo=$(make_merge_stdout_leak_repo)
+
+  out=$(cd "$repo" && git merge --no-commit --no-ff source >/dev/null 2>&1)
+  rc=$?
+  (cd "$repo" && git merge --abort 2>/dev/null || true)
+  trash "$repo" 2>/dev/null || true
+
+  if [[ -z "$out" ]] && [[ "$rc" -ne 0 ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  printf '  rc: %s\n' "$rc" >&2
+  return 1
+}
+
+# Drift guard: both git-merge invocations in the per-target loop must fully
+# suppress their own stdout+stderr, not just stderr -- a bare `2>/dev/null`
+# (the pre-fix form) still lets git's own conflict/auto-merge messages
+# print an attacker-controlled path to STDOUT unsanitized.
+test_1543_test_mirror_matches_production_merge_output_suppression() {
+  local workflow_file
+  workflow_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/forward-merge-release.yml"
+
+  # shellcheck disable=SC2016 # literal grep -F patterns, not expressions to expand
+  if grep -qF 'git merge --no-commit --no-ff "$SOURCE_REF" >/dev/null 2>&1' "$workflow_file" \
+      && grep -qF 'git merge --no-edit "$SOURCE_REF" >/dev/null 2>&1' "$workflow_file"; then
+    return 0
+  fi
+  echo "  production's merge invocations no longer fully suppress their own output -- update forward-merge-release.yml (both must use >/dev/null 2>&1, not a bare 2>/dev/null)" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
 run_test "Issue #476: branch-exists guard prevents overwrite of in-progress resolution" \
@@ -1755,6 +2096,21 @@ run_test "Issue #1525: a git diff failure inside auto_resolve_conflicts fails lo
 
 run_test "Issue #1525: a sync-changelog-doc.sh failure in the changelog branch bails" \
   test_1525_changelog_regeneration_failure_bails
+
+run_test "Issue #1534: a script-only change with no changelog.md conflict is caught" \
+  test_1534_script_only_change_without_conflict_is_caught
+
+run_test "Issue #1534: an identical script with no conflict proceeds" \
+  test_1534_identical_script_without_conflict_proceeds
+
+run_test "Issue #1534: a script added on only one side halts instead of skipping" \
+  test_1534_script_added_only_on_source_halts
+
+run_test "Issue #1534: a script missing on both sides skips the check" \
+  test_1534_script_missing_on_both_sides_skips_check
+
+run_test "Issue #1534: the test mirror still matches production's script-integrity guard" \
+  test_1534_test_mirror_matches_production_script_integrity_guard
 
 run_test "Issue #1504: push_with_pat authenticates with the PAT when the secret is set" \
   test_1504_push_with_pat_uses_pat_when_set
@@ -1817,6 +2173,17 @@ run_test "Issue #1564: an approve failure is a warning, not a halt" \
   test_1564_an_approve_failure_is_a_warning_not_a_halt
 run_test "Issue #1564: the test mirror still matches production's approve_pending_runs()" \
   test_1564_test_mirror_matches_production_approve_pending_runs
+
+run_test "Issue #1543: a stop-commands sequence in a filename is stripped from log display" \
+  test_1543_stop_commands_sequence_stripped_from_display
+run_test "Issue #1543: a normal filename is left unchanged" \
+  test_1543_normal_filename_unchanged
+run_test "Issue #1543: the test mirror still matches production's file_display sanitization" \
+  test_1543_test_mirror_matches_production_file_display_sanitization
+run_test "Issue #1543 follow-up: git merge's own conflict output is fully suppressed" \
+  test_1543_git_merge_stdout_suppressed_on_conflict
+run_test "Issue #1543 follow-up: the test mirror still matches production's merge output suppression" \
+  test_1543_test_mirror_matches_production_merge_output_suppression
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

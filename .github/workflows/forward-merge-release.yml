@@ -388,9 +388,20 @@ jobs:
             }
             while IFS= read -r file; do
               [[ -n "$file" ]] || continue
+              # #1543: $file is an arbitrary path from the conflicting merge
+              # -- an attacker who can land a commit on release/** controls
+              # it (e.g. a crate directory matching `crates/*/Cargo.toml`,
+              # or any path falling into the no-auto-resolution case below).
+              # GitHub Actions' `::add-mask::` (used elsewhere in this job to
+              # mask the PAT in push_with_pat) can be bypassed by an injected
+              # `::stop-commands::` sequence in log output -- strip any `::`
+              # from the copy used in this loop's own echo/error lines so
+              # they can never be used to smuggle one in. Git operations
+              # below still use the raw, unsanitized $file.
+              local file_display="${file//::/  }"
               case "$file" in
                 website/docs/changelog.md)
-                  echo "  $file: regenerating from the merged CHANGELOG-*.md sources"
+                  echo "  $file_display: regenerating from the merged CHANGELOG-*.md sources"
                   # auto_resolve_conflicts is called as `if auto_resolve_conflicts;
                   # then ...`, and bash suppresses `set -e` for the whole body of a
                   # function called as part of an if/while condition — an
@@ -449,15 +460,15 @@ jobs:
                   ;;
                 Cargo.toml | Cargo.lock | crates/*/Cargo.toml)
                   if ! version_only_change "$file"; then
-                    echo "::error::$file: $SOURCE_DESC changed more than version numbers here, so keeping $TARGET's copy could drop real changes"
+                    echo "::error::$file_display: $SOURCE_DESC changed more than version numbers here, so keeping $TARGET's copy could drop real changes"
                     return 1
                   fi
-                  echo "  $file: keeping $TARGET's own version"
+                  echo "  $file_display: keeping $TARGET's own version"
                   git checkout --ours -- "$file"
                   git add -- "$file"
                   ;;
                 *)
-                  echo "::error::$file: conflict has no auto-resolution rule"
+                  echo "::error::$file_display: conflict has no auto-resolution rule"
                   return 1
                   ;;
               esac
@@ -511,7 +522,78 @@ jobs:
 
             MERGE_BRANCH="forward-merge/$SOURCE_DESC-to-$TARGET"
 
-            if ! git merge --no-commit --no-ff "$SOURCE_REF" 2>/dev/null; then
+            # #1534: the changelog.md conflict-arm's script-integrity check
+            # further down (inside auto_resolve_conflicts) only ever ran
+            # when the push happened to ALSO conflict on changelog.md --
+            # that arm's own entry condition. A source commit that changes
+            # only scripts/sync-changelog-doc.sh (not changelog.md) produces
+            # a clean, non-conflicting merge, so the gate never ran at all
+            # for that push -- the script's new content landed in $TARGET
+            # unverified. A later cascade that does conflict on changelog.md
+            # would then compare $TARGET's already-compromised copy against
+            # $SOURCE_REF's identical (attacker's) copy and pass trivially.
+            # Anchor the check to $TARGET's own pre-merge copy and run it
+            # for every target on every push, independent of whether this
+            # merge conflicts at all. Skipped when either side lacks the
+            # file (e.g. an older release line predating the script).
+            SYNC_SCRIPT_PATH="scripts/sync-changelog-doc.sh"
+            TARGET_HAS_SCRIPT=0
+            SOURCE_HAS_SCRIPT=0
+            git cat-file -e "origin/$TARGET:$SYNC_SCRIPT_PATH" 2>/dev/null && TARGET_HAS_SCRIPT=1
+            git cat-file -e "$SOURCE_REF:$SYNC_SCRIPT_PATH" 2>/dev/null && SOURCE_HAS_SCRIPT=1
+            # A script that exists on only ONE side (introduced or removed by
+            # this push) is exactly as dangerous as one that differs on both
+            # sides -- an attacker introducing scripts/sync-changelog-doc.sh
+            # for the first time bypassed this whole check before this fix,
+            # since the original `both sides must have it` AND-condition
+            # skipped the comparison entirely for that case, letting the new
+            # (unreviewed) script land in $TARGET unverified -- the same
+            # #1534 bypass, just entered via introduction instead of
+            # modification. Only skip when NEITHER side has it.
+            if [[ "$TARGET_HAS_SCRIPT" -eq 1 || "$SOURCE_HAS_SCRIPT" -eq 1 ]]; then
+              if [[ "$TARGET_HAS_SCRIPT" -ne "$SOURCE_HAS_SCRIPT" ]]; then
+                echo "::error::$SYNC_SCRIPT_PATH exists on only one of $SOURCE_DESC/$TARGET; a script addition or removal must be forward-merged and reviewed by hand, not auto-run"
+                echo "::endgroup::"
+                HALTED="script integrity check failed at $TARGET"
+                break
+              fi
+              # 2>/dev/null, not 2>&1 -- stderr must never fold into the value
+              # used for the exact-match comparison below (incidental git
+              # advice/hint output differing between the two reads could
+              # otherwise produce a false "differs" verdict); only the
+              # failure-handler's own message needs to say something went
+              # wrong, not reproduce git's stderr text.
+              SCRIPT_TARGET=$(git show "origin/$TARGET:$SYNC_SCRIPT_PATH" 2>/dev/null) || {
+                echo "::error::failed to read $TARGET's copy of $SYNC_SCRIPT_PATH"
+                echo "::endgroup::"
+                HALTED="script read failed at $TARGET"
+                break
+              }
+              SCRIPT_SOURCE=$(git show "$SOURCE_REF:$SYNC_SCRIPT_PATH" 2>/dev/null) || {
+                echo "::error::failed to read $SOURCE_DESC's copy of $SYNC_SCRIPT_PATH"
+                echo "::endgroup::"
+                HALTED="script read failed at $TARGET"
+                break
+              }
+              if [[ "$SCRIPT_TARGET" != "$SCRIPT_SOURCE" ]]; then
+                echo "::error::$SYNC_SCRIPT_PATH differs between $SOURCE_DESC and $TARGET; a script-logic change must be forward-merged and reviewed by hand, not auto-run"
+                echo "::endgroup::"
+                HALTED="script integrity check failed at $TARGET"
+                break
+              fi
+            fi
+
+            # #1543 follow-up: git's own merge output (not this workflow's
+            # echo lines) prints the conflicting/auto-merged path verbatim --
+            # "Auto-merging <path>" and "CONFLICT (content): Merge conflict
+            # in <path>" both go to STDOUT, so the earlier `2>/dev/null` here
+            # left them unsanitized and unsuppressed. Verified against real
+            # git: a path containing `::stop-commands::` is echoed raw by
+            # git itself, before auto_resolve_conflicts' own file_display
+            # sanitization ever runs. Neither invocation's own text output is
+            # used below (only the exit status is), so both are safe to
+            # fully suppress.
+            if ! git merge --no-commit --no-ff "$SOURCE_REF" >/dev/null 2>&1; then
               echo "Conflicts; attempting auto-resolution:"
               if auto_resolve_conflicts; then
                 git commit --no-edit
@@ -535,7 +617,11 @@ jobs:
                 break
               fi
               git checkout -q "origin/$TARGET"
-              if ! git merge --no-edit "$SOURCE_REF"; then
+              # Same reasoning as the trial merge above: this real merge
+              # commit is only reached once the trial merge already proved
+              # there's no conflict, but git still prints an "Auto-merging
+              # <path>" line per three-way-merged file, unsanitized.
+              if ! git merge --no-edit "$SOURCE_REF" >/dev/null 2>&1; then
                 echo "::error::Failed to merge $SOURCE_DESC into $TARGET"
                 echo "::endgroup::"
                 HALTED="merge failed at $TARGET"
