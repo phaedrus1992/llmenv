@@ -47,6 +47,12 @@ impl RelaunchCap {
 /// rather than overwriting it — an existing value came from the user's own
 /// config (e.g. a corporate gateway's tracking header) and must survive
 /// alongside the launch proxy's own peer-auth header (#1632).
+///
+/// `name`/`value` must not themselves contain `\r`/`\n` — this crate's own
+/// call site only ever passes a hardcoded header name and a hex-encoded
+/// [`crate::launch::socket::LaunchToken`], neither of which can, so this
+/// isn't validated here; it would be defending against an input this
+/// function's only caller cannot produce.
 fn append_custom_header(vars: &mut BTreeMap<String, String>, name: &str, value: &str) {
     let line = format!("{name}: {value}");
     vars.entry("ANTHROPIC_CUSTOM_HEADERS".to_string())
@@ -583,6 +589,7 @@ async fn wait_for_notice(notices: &socket::NoticeSlot) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn append_custom_header_inserts_a_fresh_entry_when_absent() {
@@ -661,6 +668,30 @@ mod tests {
                 let expected = count_in_window <= RELAUNCH_MAX_ATTEMPTS;
                 assert_eq!(actual, expected);
             }
+        }
+
+        /// #1632: `append_custom_header` must never overwrite a pre-existing
+        /// `ANTHROPIC_CUSTOM_HEADERS` value — the appended result must always
+        /// equal the original value plus a newline plus the new line, for an
+        /// arbitrary existing value and an arbitrary name/value pair, not
+        /// just the two hand-picked examples above.
+        #[test]
+        fn append_custom_header_preserves_arbitrary_existing_value(
+            existing in proptest::option::of("[ -~]{0,40}"),
+            name in "[-A-Za-z]{1,20}",
+            value in "[ -~]{0,40}",
+        ) {
+            let mut vars = BTreeMap::new();
+            if let Some(existing) = &existing {
+                vars.insert("ANTHROPIC_CUSTOM_HEADERS".to_string(), existing.clone());
+            }
+            append_custom_header(&mut vars, &name, &value);
+
+            let expected = match &existing {
+                Some(existing) => format!("{existing}\n{name}: {value}"),
+                None => format!("{name}: {value}"),
+            };
+            prop_assert_eq!(vars.get("ANTHROPIC_CUSTOM_HEADERS").cloned(), Some(expected));
         }
     }
 }

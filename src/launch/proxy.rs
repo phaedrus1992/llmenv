@@ -232,12 +232,19 @@ fn peer_authorized(headers: &http::HeaderMap, token: &crate::launch::socket::Lau
 /// Constant-time byte equality: a mismatch takes the same time regardless of
 /// where the first differing byte falls, so a same-host attacker probing the
 /// proxy can't use timing to narrow down the token. Mirrors the property
-/// `socket.rs`'s HMAC-based `verify_hmac_hex` already gives that module.
+/// `socket.rs`'s HMAC-based `verify_hmac_hex` already gives that module. The
+/// length check leaks nothing secret — both the token and any candidate are
+/// always exactly `TOKEN_BYTES * 2` hex characters, a length the attacker
+/// already knows. `std::hint::black_box` on the accumulator is the barrier:
+/// without it, nothing stops an optimizer from proving the fold's result
+/// equals a plain `a == b` and replacing it with one, since the fold itself
+/// has no other observable effect.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    let diff = a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y));
+    std::hint::black_box(diff) == 0
 }
 
 /// Accept connections until `shutdown` reports `true` (set when the
@@ -827,6 +834,27 @@ mod tests {
         assert_eq!(resp.status(), 401);
     }
 
+    /// #1632: `peer_authorized` must accept exactly the header value that
+    /// matches the token and reject any candidate that doesn't, for an
+    /// arbitrary hex-shaped candidate — not just the two hand-picked
+    /// examples (`proxy_rejects_missing_peer_auth_token` /
+    /// `proxy_rejects_wrong_peer_auth_token`) that exercise this indirectly
+    /// over HTTP.
+    #[test]
+    fn peer_authorized_accepts_the_token_and_rejects_any_other_candidate() {
+        let token = crate::launch::socket::LaunchToken::generate().unwrap();
+        let mut correct_headers = http::HeaderMap::new();
+        correct_headers.insert(PEER_AUTH_HEADER, token.as_str().parse().unwrap());
+        assert!(peer_authorized(&correct_headers, &token));
+
+        let empty_headers = http::HeaderMap::new();
+        assert!(!peer_authorized(&empty_headers, &token));
+
+        let mut wrong_headers = http::HeaderMap::new();
+        wrong_headers.insert(PEER_AUTH_HEADER, "0".repeat(64).parse().unwrap());
+        assert!(!peer_authorized(&wrong_headers, &token));
+    }
+
     /// A small, bounded-depth arbitrary JSON value generator — request
     /// bodies come from Claude Code (semi-trusted), so `apply_rules` needs
     /// to survive whatever shape shows up, not just the hand-picked example
@@ -891,6 +919,20 @@ mod tests {
             b in proptest::collection::vec(any::<u8>(), 0..64),
         ) {
             prop_assert_eq!(constant_time_eq(&a, &b), a == b);
+        }
+
+        /// #1632: `peer_authorized` must agree with plain string equality
+        /// against the token for an arbitrary candidate header value — it
+        /// delegates to `constant_time_eq` only for *how* it decides, never
+        /// for a different answer than a direct comparison would give.
+        #[test]
+        fn peer_authorized_matches_plain_equality_for_arbitrary_candidates(
+            candidate in "[0-9a-f]{0,80}",
+        ) {
+            let token = crate::launch::socket::LaunchToken::generate().unwrap();
+            let mut headers = http::HeaderMap::new();
+            headers.insert(PEER_AUTH_HEADER, candidate.parse().unwrap());
+            prop_assert_eq!(peer_authorized(&headers, &token), candidate == token.as_str());
         }
     }
 }

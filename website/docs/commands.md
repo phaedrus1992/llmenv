@@ -232,6 +232,17 @@ overwriting it — so Claude Code sends it on every request without llmenv
 needing its own client-side change. The header never reaches the real
 upstream; the proxy strips it before forwarding.
 
+Unlike the notice socket's secret, this token has no challenge-response
+handshake layered on top: `ANTHROPIC_CUSTOM_HEADERS` carries one fixed value
+for the whole session, so there is no live per-request proof to exchange, only
+a static bearer credential. It is also inherited by every process the engine
+spawns, not just Claude Code's own requests — the same limitation the notice
+socket's `LLMENV_LAUNCH_TOKEN` has, and for the same reason: an env var
+reaches every descendant, not a chosen subset. And on Linux,
+`/proc/<pid>/environ` is readable by the same uid by default, so a same-uid
+attacker who locates the engine's pid can still read the token from there
+directly.
+
 ## `regenerate`
 
 ```text
