@@ -543,6 +543,7 @@ mod tests {
 
     #[tokio::test]
     async fn proxy_forwards_rewritten_request_and_streams_response() {
+        let _guard = llmenv_util::testkit::port_guard();
         let upstream = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .and(wiremock::matchers::path("/v1/messages"))
@@ -584,6 +585,7 @@ mod tests {
     /// proxy's outbound HTTPS request to an arbitrary host.
     #[tokio::test]
     async fn proxy_rejects_double_slash_path() {
+        let _guard = llmenv_util::testkit::port_guard();
         let upstream = wiremock::MockServer::start().await;
         // No mock mounted: if the rejection ever regressed and the request
         // were forwarded to `upstream` unmodified (rather than hijacked to
@@ -610,6 +612,7 @@ mod tests {
     /// auto-following would leak it to whatever host a 3xx points at.
     #[tokio::test]
     async fn proxy_does_not_follow_redirects() {
+        let _guard = llmenv_util::testkit::port_guard();
         let upstream = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .respond_with(
@@ -647,6 +650,7 @@ mod tests {
     /// not be silently dropped.
     #[tokio::test]
     async fn proxy_preserves_upstream_base_path_and_query_string() {
+        let _guard = llmenv_util::testkit::port_guard();
         let upstream = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .and(wiremock::matchers::path("/anthropic/v1/messages"))
@@ -677,6 +681,7 @@ mod tests {
     /// shape.
     #[tokio::test]
     async fn proxy_strips_hop_by_hop_headers() {
+        let _guard = llmenv_util::testkit::port_guard();
         let upstream = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .respond_with(wiremock::ResponseTemplate::new(200))
