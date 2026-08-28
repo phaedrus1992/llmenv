@@ -4700,6 +4700,7 @@ mod session_log_tests {
     async fn ensure_transcript_session_creates_and_correlates_when_none_recorded() {
         let state_dir = tempfile::tempdir().unwrap();
         let state_path = state_dir.path().join("transcript-sessions.json");
+        let _guard = llmenv_util::testkit::port_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(
@@ -4739,6 +4740,7 @@ mod session_log_tests {
         let state_dir = tempfile::tempdir().unwrap();
         let state_path = state_dir.path().join("transcript-sessions.json");
         state::record_session_at(&state_path, "claude-2", "icm-sess-2").unwrap();
+        let _guard = llmenv_util::testkit::port_guard();
         let server = MockServer::start().await;
         // Only `initialize` and the `icm_transcript_show` verification call
         // are mocked. If `ensure_transcript_session` fell through to
@@ -4793,6 +4795,7 @@ mod session_log_tests {
         let state_path = state_dir.path().join("transcript-sessions.json");
         state::record_session_at(&state_path, "claude-5", "icm-sess-5").unwrap();
         // No mock mounted at all: any HTTP call here would fail the request.
+        let _guard = llmenv_util::testkit::port_guard();
         let server = MockServer::start().await;
         let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
         let cfg = SessionLog {
@@ -4828,6 +4831,7 @@ mod session_log_tests {
         let state_dir = tempfile::tempdir().unwrap();
         let state_path = state_dir.path().join("transcript-sessions.json");
         state::record_session_at(&state_path, "claude-4", "icm-stale").unwrap();
+        let _guard = llmenv_util::testkit::port_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(body_string_contains("initialize"))

@@ -538,12 +538,12 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    // #1576: `MockServer::start()` binds a real ephemeral TCP port, same as
-    // `proxy.rs`'s own network tests — sharing `port_guard()` (see its own doc
-    // comment) closes the gap where this module's mock servers raced those
-    // tests' bind-then-probe checks for a just-freed port under full-suite
-    // parallel execution.
-    include!("../tests/support/port_guard.rs");
+    // #1576/#1610: `MockServer::start()` binds a real ephemeral TCP port,
+    // same as `proxy.rs`'s own network tests — sharing `port_guard()` (now in
+    // `llmenv_util::testkit`, see its doc comment) closes the gap where this
+    // module's mock servers raced those tests' bind-then-probe checks for a
+    // just-freed port under full-suite parallel execution.
+    use llmenv_util::testkit::port_guard;
 
     #[test]
     fn emit_mcp_call_trace_never_panics_without_env_var() {

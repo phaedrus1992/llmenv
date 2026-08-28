@@ -1398,6 +1398,7 @@ dependencies = [
  "anyhow",
  "llmenv-config",
  "llmenv-paths",
+ "llmenv-util",
  "proptest",
  "reqwest",
  "serde_json",
