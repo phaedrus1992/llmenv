@@ -12,11 +12,7 @@ use llmenv_config::{
 /// `when` clause whose conditions don't all match is skipped. Application
 /// failures (missing `Remove`/`Strip` target) are logged and skipped, never
 /// fatal — see the design spec's Error handling section.
-pub(crate) fn apply_rules(
-    rules: &[ProxyRule],
-    headers: &mut http::HeaderMap,
-    body: &mut serde_json::Value,
-) {
+fn apply_rules(rules: &[ProxyRule], headers: &mut http::HeaderMap, body: &mut serde_json::Value) {
     for rule in rules {
         if !rule
             .when
