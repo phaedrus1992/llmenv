@@ -10,6 +10,7 @@
 
 mod credential_watch;
 mod drift;
+pub(crate) mod proxy;
 pub(crate) mod socket;
 
 use std::os::unix::process::ExitStatusExt;
