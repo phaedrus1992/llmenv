@@ -5,6 +5,8 @@
 
 use llmenv_scope::{bundle_keyword, tag_keyword};
 
+use crate::util::display_safe;
+
 /// The active llmenv scope at session start.
 #[derive(Debug, Clone)]
 pub struct ScopeContext {
@@ -23,7 +25,10 @@ pub struct ScopeContext {
 pub(crate) fn scope_header_content(ctx: &ScopeContext) -> String {
     let mut parts: Vec<String> = vec!["llmenv session".to_string()];
     if let Some(p) = &ctx.project {
-        parts.push(format!("project:{p}"));
+        // `p` is a free-form display name from `.llmenv.yaml`'s `name:` field
+        // (unlike tags/bundles, not charset-restricted), so it gets control
+        // characters escaped rather than the tag/bundle charset rule (#1578).
+        parts.push(format!("project:{}", display_safe(p)));
     }
     for t in &ctx.tags {
         match tag_keyword(t) {
@@ -80,6 +85,22 @@ mod tests {
         assert!(c.contains("llmenv-tag:work-vpn"));
         assert!(c.contains("llmenv-bundle:base"));
         assert!(c.contains("llmenv"), "project name present");
+    }
+
+    #[test]
+    fn content_escapes_control_characters_in_project_name() {
+        let c = scope_header_content(&ScopeContext {
+            tags: vec![],
+            bundles: vec![],
+            project: Some("evil\x1b[2Kname\ninjected".into()),
+            cwd: "/".into(),
+            adapter: "claude_code".into(),
+            llmenv_version: "3.0.0".into(),
+            claude_code_version: String::new(),
+        });
+        assert!(!c.contains('\x1b'));
+        assert!(!c.contains('\n'));
+        assert!(c.contains("evil"), "non-control text is preserved: {c}");
     }
 
     #[test]
