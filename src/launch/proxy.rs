@@ -5,10 +5,13 @@
     not(test),
     expect(
         dead_code,
-        reason = "apply_rules has no production caller until the proxy's HTTP handler is added"
+        reason = "bind/serve have no production caller until src/launch/mod.rs wires them into run()"
     )
 )]
 
+use anyhow::Context;
+use futures_util::StreamExt;
+use http_body_util::BodyExt;
 use llmenv_config::{
     ProxyCheck, ProxyCondition, ProxyConditionTarget, ProxyOp, ProxyRule, ProxyTarget,
 };
@@ -180,6 +183,176 @@ fn strip_pattern(pattern: &str, is_regex: bool, text: &str) -> String {
     }
 }
 
+/// Bind the local proxy listener on an OS-assigned ephemeral port, loopback
+/// only.
+///
+/// # Errors
+/// Returns an error when the bind fails.
+pub(crate) async fn bind() -> anyhow::Result<(tokio::net::TcpListener, std::net::SocketAddr)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("binding launch proxy listener")?;
+    let addr = listener
+        .local_addr()
+        .context("reading launch proxy listener address")?;
+    Ok((listener, addr))
+}
+
+/// Accept connections until `shutdown` reports `true` (set when the
+/// supervised engine exits — see `src/launch/mod.rs`). Each request is
+/// rewritten per `rules`, forwarded to `upstream`, and the response streamed
+/// back unmodified.
+pub(crate) async fn serve(
+    listener: tokio::net::TcpListener,
+    upstream: url::Url,
+    rules: std::sync::Arc<Vec<ProxyRule>>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    let client = reqwest::Client::new();
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let Ok((stream, _)) = accepted else { continue };
+                let io = hyper_util::rt::TokioIo::new(stream);
+                let client = client.clone();
+                let upstream = upstream.clone();
+                let rules = std::sync::Arc::clone(&rules);
+                tokio::spawn(async move {
+                    let service = hyper::service::service_fn(move |req| {
+                        handle(req, client.clone(), upstream.clone(), std::sync::Arc::clone(&rules))
+                    });
+                    if let Err(e) = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(io, service)
+                        .await
+                    {
+                        tracing::debug!("launch proxy: connection error: {e}");
+                    }
+                });
+            }
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+type ProxyResponse = hyper::Response<
+    http_body_util::combinators::BoxBody<hyper::body::Bytes, std::convert::Infallible>,
+>;
+
+async fn handle(
+    req: hyper::Request<hyper::body::Incoming>,
+    client: reqwest::Client,
+    upstream: url::Url,
+    rules: std::sync::Arc<Vec<ProxyRule>>,
+) -> Result<ProxyResponse, std::convert::Infallible> {
+    let (parts, body) = req.into_parts();
+    let body_bytes = match body.collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(e) => return Ok(error_response(&format!("reading request body: {e}"))),
+    };
+    let mut json_body: serde_json::Value = if body_bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        match serde_json::from_slice(&body_bytes) {
+            Ok(v) => v,
+            Err(e) => {
+                return Ok(error_response(&format!(
+                    "request body was not valid JSON: {e}"
+                )));
+            }
+        }
+    };
+    let mut headers = parts.headers.clone();
+    apply_rules(&rules, &mut headers, &mut json_body);
+
+    let Ok(target_url) = upstream.join(parts.uri.path()) else {
+        return Ok(error_response("could not build upstream URL"));
+    };
+    let mut builder = client.request(reqwest_method(&parts.method), target_url);
+    for (name, value) in &headers {
+        // `host` doesn't belong on the forwarded request (reqwest derives it
+        // from the target URL); `content-length` is stale once the body has
+        // been rewritten — reqwest recomputes it from the actual body set
+        // below, and forwarding the original value here would corrupt the
+        // request wiremock/the real Anthropic API receives.
+        if name == http::header::HOST || name == http::header::CONTENT_LENGTH {
+            continue;
+        }
+        if let Ok(v) = value.to_str() {
+            builder = builder.header(name.as_str(), v);
+        }
+    }
+    let outgoing = match serde_json::to_vec(&json_body) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return Ok(error_response(&format!(
+                "re-serializing rewritten body: {e}"
+            )));
+        }
+    };
+    builder = builder.body(outgoing);
+
+    let upstream_resp = match builder.send().await {
+        Ok(r) => r,
+        Err(e) => return Ok(bad_gateway(&format!("upstream request failed: {e}"))),
+    };
+
+    let status = upstream_resp.status();
+    let resp_headers = upstream_resp.headers().clone();
+    let stream = upstream_resp.bytes_stream().filter_map(|chunk| {
+        std::future::ready(match chunk {
+            Ok(bytes) => Some(Ok::<_, std::convert::Infallible>(hyper::body::Frame::data(
+                bytes,
+            ))),
+            Err(e) => {
+                tracing::debug!("launch proxy: upstream stream error: {e}");
+                None
+            }
+        })
+    });
+    let body = http_body_util::BodyExt::boxed(http_body_util::StreamBody::new(stream));
+
+    let mut response = hyper::Response::new(body);
+    *response.status_mut() =
+        hyper::StatusCode::from_u16(status.as_u16()).unwrap_or(hyper::StatusCode::BAD_GATEWAY);
+    for (name, value) in &resp_headers {
+        if let (Ok(name), Ok(value)) = (
+            hyper::header::HeaderName::from_bytes(name.as_str().as_bytes()),
+            hyper::header::HeaderValue::from_bytes(value.as_bytes()),
+        ) {
+            response.headers_mut().insert(name, value);
+        }
+    }
+    Ok(response)
+}
+
+fn reqwest_method(method: &hyper::Method) -> reqwest::Method {
+    reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::POST)
+}
+
+fn error_response(msg: &str) -> ProxyResponse {
+    tracing::warn!("launch proxy: {msg}");
+    let body = http_body_util::Full::new(hyper::body::Bytes::from(msg.to_string()))
+        .map_err(|never: std::convert::Infallible| match never {})
+        .boxed();
+    let mut resp = hyper::Response::new(body);
+    *resp.status_mut() = hyper::StatusCode::BAD_REQUEST;
+    resp
+}
+
+fn bad_gateway(msg: &str) -> ProxyResponse {
+    tracing::warn!("launch proxy: {msg}");
+    let body = http_body_util::Full::new(hyper::body::Bytes::from(msg.to_string()))
+        .map_err(|never: std::convert::Infallible| match never {})
+        .boxed();
+    let mut resp = hyper::Response::new(body);
+    *resp.status_mut() = hyper::StatusCode::BAD_GATEWAY;
+    resp
+}
+
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
@@ -301,5 +474,42 @@ mod tests {
         let mut body = json!({"system": [{"text": "keep this. boilerplate stuff to cut"}]});
         apply_rules(&rules, &mut headers, &mut body);
         assert_eq!(body["system"][0]["text"], "keep this. ");
+    }
+
+    #[tokio::test]
+    async fn proxy_forwards_rewritten_request_and_streams_response() {
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1/messages"))
+            .and(wiremock::matchers::body_partial_json(
+                json!({"thinking": {"type": "disabled"}}),
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("ok"))
+            .mount(&upstream)
+            .await;
+
+        let rules = std::sync::Arc::new(vec![rule(
+            vec![],
+            ProxyTarget::Body {
+                path: "thinking".into(),
+            },
+            ProxyOp::Set {
+                value: json!({"type": "disabled"}),
+            },
+        )]);
+        let (listener, addr) = bind().await.unwrap();
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let upstream_url: url::Url = upstream.uri().parse().unwrap();
+        tokio::spawn(serve(listener, upstream_url, rules, rx));
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{addr}/v1/messages"))
+            .json(&json!({"model": "claude-x"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.text().await.unwrap(), "ok");
     }
 }
