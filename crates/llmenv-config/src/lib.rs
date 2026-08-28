@@ -62,21 +62,16 @@ impl Config {
         self.session_log.clone().unwrap_or_default()
     }
 
-    /// Load and validate a config from an **already-expanded** path.
-    ///
-    /// `load` does not perform tilde (`~`) expansion — the caller is
-    /// responsible for expanding `~`/`~user` (e.g. via `llmenv_paths`) before
-    /// calling. A `debug_assert` guards this contract in debug builds.
+    /// Load and validate a config, expanding a leading `~`/`~/` internally
+    /// (via `llmenv_paths::expand_tilde`) so callers don't need to expand the
+    /// path themselves first.
     ///
     /// # Errors
     /// Returns an error if the file can't be read, isn't valid YAML, or fails
     /// schema validation.
     pub fn load(path: &Path) -> anyhow::Result<Self> {
-        debug_assert!(
-            !path.starts_with("~"),
-            "Config::load expects an expanded path; got tilde-prefixed {}",
-            path.display()
-        );
+        let expanded = llmenv_paths::expand_tilde(&path.to_string_lossy());
+        let path = Path::new(&expanded);
         let s = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config file: {}", path.display()))?;
         let cfg: Self = serde_yaml::from_str(&s)
@@ -221,9 +216,17 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "expanded path")]
-    fn load_rejects_tilde_path_in_debug() {
-        let _ = Config::load(Path::new("~/.config/llmenv/config.yaml"));
+    fn load_expands_tilde_prefixed_path_internally() {
+        let home = std::env::var("HOME").unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("llmenv-config-tilde-test-")
+            .tempdir_in(&home)
+            .unwrap();
+        let dir_name = tmp.path().file_name().unwrap().to_str().unwrap();
+        std::fs::write(tmp.path().join("config.yaml"), "cache: {}\n").unwrap();
+
+        let tilde_path = std::path::PathBuf::from(format!("~/{dir_name}/config.yaml"));
+        assert!(Config::load(&tilde_path).is_ok());
     }
 
     #[test]
