@@ -388,9 +388,20 @@ jobs:
             }
             while IFS= read -r file; do
               [[ -n "$file" ]] || continue
+              # #1543: $file is an arbitrary path from the conflicting merge
+              # -- an attacker who can land a commit on release/** controls
+              # it (e.g. a crate directory matching `crates/*/Cargo.toml`,
+              # or any path falling into the no-auto-resolution case below).
+              # GitHub Actions' `::add-mask::` (used elsewhere in this job to
+              # mask the PAT in push_with_pat) can be bypassed by an injected
+              # `::stop-commands::` sequence in log output -- strip any `::`
+              # from the copy used in this loop's own echo/error lines so
+              # they can never be used to smuggle one in. Git operations
+              # below still use the raw, unsanitized $file.
+              local file_display="${file//::/  }"
               case "$file" in
                 website/docs/changelog.md)
-                  echo "  $file: regenerating from the merged CHANGELOG-*.md sources"
+                  echo "  $file_display: regenerating from the merged CHANGELOG-*.md sources"
                   # auto_resolve_conflicts is called as `if auto_resolve_conflicts;
                   # then ...`, and bash suppresses `set -e` for the whole body of a
                   # function called as part of an if/while condition — an
@@ -449,15 +460,15 @@ jobs:
                   ;;
                 Cargo.toml | Cargo.lock | crates/*/Cargo.toml)
                   if ! version_only_change "$file"; then
-                    echo "::error::$file: $SOURCE_DESC changed more than version numbers here, so keeping $TARGET's copy could drop real changes"
+                    echo "::error::$file_display: $SOURCE_DESC changed more than version numbers here, so keeping $TARGET's copy could drop real changes"
                     return 1
                   fi
-                  echo "  $file: keeping $TARGET's own version"
+                  echo "  $file_display: keeping $TARGET's own version"
                   git checkout --ours -- "$file"
                   git add -- "$file"
                   ;;
                 *)
-                  echo "::error::$file: conflict has no auto-resolution rule"
+                  echo "::error::$file_display: conflict has no auto-resolution rule"
                   return 1
                   ;;
               esac
@@ -510,6 +521,43 @@ jobs:
             git checkout -q "origin/$TARGET"
 
             MERGE_BRANCH="forward-merge/$SOURCE_DESC-to-$TARGET"
+
+            # #1534: the changelog.md conflict-arm's script-integrity check
+            # further down (inside auto_resolve_conflicts) only ever ran
+            # when the push happened to ALSO conflict on changelog.md --
+            # that arm's own entry condition. A source commit that changes
+            # only scripts/sync-changelog-doc.sh (not changelog.md) produces
+            # a clean, non-conflicting merge, so the gate never ran at all
+            # for that push -- the script's new content landed in $TARGET
+            # unverified. A later cascade that does conflict on changelog.md
+            # would then compare $TARGET's already-compromised copy against
+            # $SOURCE_REF's identical (attacker's) copy and pass trivially.
+            # Anchor the check to $TARGET's own pre-merge copy and run it
+            # for every target on every push, independent of whether this
+            # merge conflicts at all. Skipped when either side lacks the
+            # file (e.g. an older release line predating the script).
+            SYNC_SCRIPT_PATH="scripts/sync-changelog-doc.sh"
+            if git cat-file -e "origin/$TARGET:$SYNC_SCRIPT_PATH" 2>/dev/null \
+                && git cat-file -e "$SOURCE_REF:$SYNC_SCRIPT_PATH" 2>/dev/null; then
+              SCRIPT_TARGET=$(git show "origin/$TARGET:$SYNC_SCRIPT_PATH" 2>&1) || {
+                echo "::error::failed to read $TARGET's copy of $SYNC_SCRIPT_PATH: $SCRIPT_TARGET"
+                echo "::endgroup::"
+                HALTED="script read failed at $TARGET"
+                break
+              }
+              SCRIPT_SOURCE=$(git show "$SOURCE_REF:$SYNC_SCRIPT_PATH" 2>&1) || {
+                echo "::error::failed to read $SOURCE_DESC's copy of $SYNC_SCRIPT_PATH: $SCRIPT_SOURCE"
+                echo "::endgroup::"
+                HALTED="script read failed at $TARGET"
+                break
+              }
+              if [[ "$SCRIPT_TARGET" != "$SCRIPT_SOURCE" ]]; then
+                echo "::error::$SYNC_SCRIPT_PATH differs between $SOURCE_DESC and $TARGET; a script-logic change must be forward-merged and reviewed by hand, not auto-run"
+                echo "::endgroup::"
+                HALTED="script integrity check failed at $TARGET"
+                break
+              fi
+            fi
 
             if ! git merge --no-commit --no-ff "$SOURCE_REF" 2>/dev/null; then
               echo "Conflicts; attempting auto-resolution:"
