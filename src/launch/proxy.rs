@@ -1,14 +1,6 @@
 //! Local API-proxy mode for `llmenv launch claude_code` (#1289). See
 //! `docs/superpowers/specs/2026-08-28-launch-api-proxy-design.md`.
 
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "bind/serve have no production caller until src/launch/mod.rs wires them into run()"
-    )
-)]
-
 use anyhow::Context;
 use futures_util::StreamExt;
 use http_body_util::BodyExt;

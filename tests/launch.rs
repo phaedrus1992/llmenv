@@ -820,3 +820,54 @@ fn launch_errors_when_binary_not_on_path() {
         .failure()
         .stderr(predicates::str::contains("not found on PATH"));
 }
+
+/// #1289: when `features.launch_proxy.enabled` is set, `launch` must rewrite
+/// `ANTHROPIC_BASE_URL` in the child's env to point at the local proxy
+/// instead of leaving whatever upstream value was already there. The
+/// rewrite-rule behavior itself (headers/body mutated correctly) is covered
+/// end-to-end by `src/launch/proxy.rs`'s own `proxy_forwards_rewritten_request_and_streams_response`
+/// test — this test only needs to confirm the env got rewired.
+#[test]
+fn launch_proxy_rewrites_anthropic_base_url_in_child_env() {
+    let (dir, config_path) = setup_config();
+    let mut config = fs::read_to_string(&config_path).unwrap();
+    config.push_str(
+        r#"
+features:
+  launch_proxy:
+    enabled: true
+    rules:
+      - target: body
+        path: "thinking"
+        op:
+          kind: set
+          value:
+            type: disabled
+"#,
+    );
+    fs::write(&config_path, config).unwrap();
+
+    let mut cmd = launch_cmd(dir.path(), &config_path);
+    let original_upstream = "http://original-upstream.invalid";
+    cmd.env("ANTHROPIC_BASE_URL", original_upstream);
+    let env_dump = dir.path().join("env.txt");
+    cmd.env("FAKE_ENGINE_ENV_DUMP", &env_dump);
+    cmd.timeout(Duration::from_secs(LAUNCH_TIMEOUT_SECS))
+        .assert()
+        .success();
+
+    let dumped = fs::read_to_string(&env_dump).unwrap();
+    let base_url_line = dumped
+        .lines()
+        .find(|l| l.starts_with("ANTHROPIC_BASE_URL="))
+        .expect("ANTHROPIC_BASE_URL should be set in the child's env");
+    assert_ne!(
+        base_url_line,
+        format!("ANTHROPIC_BASE_URL={original_upstream}"),
+        "ANTHROPIC_BASE_URL should be rewritten to the local proxy, not left as the original upstream: {dumped}"
+    );
+    assert!(
+        base_url_line.starts_with("ANTHROPIC_BASE_URL=http://127.0.0.1:"),
+        "expected a loopback proxy address, got: {base_url_line}"
+    );
+}
