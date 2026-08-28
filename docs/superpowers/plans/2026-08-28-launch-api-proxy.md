@@ -1705,6 +1705,58 @@ git commit -m "docs: document features.launch_proxy (#1289)"
 
 ---
 
+## Execution Correction (discovered during Task 2)
+
+`ProxyOp::Set(serde_json::Value)` and `ProxyCheck::Equals(serde_json::Value)`
+as written in this plan are **tuple variants** on an **externally-tagged**
+enum. `serde_yaml_ng` (this repo's YAML deserializer) cannot deserialize a
+data-carrying externally-tagged enum variant from a plain YAML map — it
+requires a YAML `!tag`, which `config.yaml` never uses. Verified with a
+minimal repro against the real dependency (not guessed): externally-tagged
+`Matches { pattern, regex }` failed with `"invalid type: map, expected a YAML
+tag starting with '!'"`; switching both enums to internal tagging
+(`#[serde(tag = "kind", rename_all = "snake_case")]`) and wrapping the tuple
+payload in a named field fixed it.
+
+**The actual, corrected shapes** (already implemented in Task 2, committed):
+
+```rust
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProxyOp {
+    Set { value: serde_json::Value },
+    Remove,
+    Strip { pattern: String, regex: bool },
+}
+
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProxyCheck {
+    Missing,
+    Present,
+    Equals { value: serde_json::Value },
+    Matches { pattern: String, regex: bool },
+}
+```
+
+Every later task in this plan (3, 5, 6, 8) that constructs, matches, or
+writes YAML for `ProxyOp::Set(...)`/`ProxyCheck::Equals(...)` as a tuple
+variant, or writes `check: present`/`check: missing` as a bare scalar, or
+`op: { set: ... }`/`check: { matches: ... }` without a `kind:` discriminator,
+is stale — apply the corrected shape above instead:
+
+- Rust construction: `ProxyOp::Set(x)` → `ProxyOp::Set { value: x }`;
+  `ProxyCheck::Equals(x)` → `ProxyCheck::Equals { value: x }`. Match arms:
+  `ProxyOp::Set(v) => ...` → `ProxyOp::Set { value: v } => ...` (same for
+  `ProxyCheck::Equals`).
+- YAML: `check: present` → `check: { kind: present }`; `check: missing` →
+  `check: { kind: missing }`; `check: { matches: { pattern: P, regex: R } }`
+  → `check: { kind: matches, pattern: P, regex: R }`; `op: { set: V } }` →
+  `op: { kind: set, value: V }`; `op: { strip: { pattern: P, regex: R } }` →
+  `op: { kind: strip, pattern: P, regex: R }`; `op: remove` stays a bare
+  string (`Remove` is still a unit variant, and internally-tagged unit
+  variants under `serde_yaml_ng` still need the map form: `op: { kind:
+  remove }` — not a bare string; verify this the same way if it matters to a
+  later task's test).
+
 ## Self-Review Notes (for the executor)
 
 - **Task ordering:** Task 4 must land before Task 3's tests can pass (see the

@@ -74,15 +74,15 @@ features:
     enabled: true
     rules:
       - when:
-          - { target: header, name: "x-billing-header", check: present }
-          - { target: body, path: "system[0].text", check: { matches: "security monitor", regex: false } }
-          - { target: body, path: "thinking", check: missing }
+          - { target: header, name: "x-billing-header", check: { kind: present } }
+          - { target: body, path: "system[0].text", check: { kind: matches, pattern: "security monitor", regex: false } }
+          - { target: body, path: "thinking", check: { kind: missing } }
         target: body
         path: "thinking"
-        op: { set: { type: "disabled" } }
+        op: { kind: set, value: { type: "disabled" } }
       - target: body
         path: "system[0].text"
-        op: { strip: { pattern: "verbose boilerplate.*", regex: true } }
+        op: { kind: strip, pattern: "verbose boilerplate.*", regex: true }
 ```
 
 ### Rule shape
@@ -93,16 +93,23 @@ Rule {
     target: Header | Body,
     path: String,           // JSON-path-lite (dot + bracket index); ignored for Header target, name used instead
     name: String,           // header name; used only when target == Header
-    op: Set(json value) | Remove | Strip { pattern: String, regex: bool },
+    op: Set { value: json value } | Remove | Strip { pattern: String, regex: bool },  // internally tagged (`kind`) — see note below
 }
 
 Condition {
     target: Header | Body,
     path: Option<String>,   // Body only; omitted = whole serialized body
     name: Option<String>,   // Header only
-    check: Missing | Present | Equals(value) | Matches { pattern: String, regex: bool },
+    check: Missing | Present | Equals { value } | Matches { pattern: String, regex: bool },  // internally tagged (`kind`)
 }
 ```
+
+**Why internally tagged:** `serde_yaml_ng` (this repo's YAML deserializer)
+cannot deserialize a data-carrying, externally-tagged enum variant from a
+plain YAML map — that representation requires a YAML `!tag`, which
+`config.yaml` never uses. `Op`/`Check` are tagged on a `kind` field instead
+(e.g. `{ kind: set, value: ... }`), matching `Rule`/`Condition`'s own
+`target` tag, which was already internally tagged for the same reason.
 
 ### Op semantics
 

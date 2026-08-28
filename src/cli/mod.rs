@@ -5557,6 +5557,7 @@ mod tests {
                 task_tracker: None,
                 codebase_memory: vec![],
                 cd_guard: None,
+                launch_proxy: None,
             }),
             host,
             ..Config::default()
