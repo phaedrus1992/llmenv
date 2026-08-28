@@ -1,3 +1,4 @@
+mod proxy_path;
 mod schema;
 mod template;
 mod validate;
@@ -23,6 +24,7 @@ pub const CONTEXT_MODE_DATA_ENV: &str = "CONTEXT_MODE_DATA_DIR";
 /// Durable-state subdir name for context-mode's store.
 pub const CONTEXT_MODE_STATE_SUBDIR: &str = "context-mode";
 
+pub use proxy_path::{PathParseError, PathSegment, get_path, parse_path, remove_path, set_path};
 pub use schema::{
     Bundle, Cache, Capabilities, CdGuard, CodebaseMemory, Config, ConsolidationBackend,
     ConsolidationConfig, ContentMatch, ContentScope, ContextMode, EnvVar, Features, FileSinkConfig,
