@@ -27,7 +27,7 @@ tempfile = { workspace = true }
 wiremock = "=0.6.5"
 # Enables the shared `port_guard()` cross-process test lock (#1610) — see
 # llmenv-util's `test-util` feature doc comment.
-llmenv-util = { path = "../llmenv-util", version = "4.0.0-alpha.1", features = [
+llmenv-util = { path = "../llmenv-util", version = "5.0.0-alpha.1", features = [
     "test-util",
 ] }
 
