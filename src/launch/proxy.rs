@@ -86,7 +86,15 @@ fn check_matches_str(check: &ProxyCheck, value: Option<&str>) -> bool {
 
 fn matches_pattern(pattern: &str, is_regex: bool, text: &str) -> bool {
     if is_regex {
-        regex::Regex::new(pattern).is_ok_and(|re| re.is_match(text))
+        match regex::Regex::new(pattern) {
+            Ok(re) => re.is_match(text),
+            Err(e) => {
+                tracing::warn!(
+                    "launch proxy: invalid regex '{pattern}' in a when condition, treating as no match: {e}"
+                );
+                false
+            }
+        }
     } else {
         text.contains(pattern)
     }
@@ -125,8 +133,15 @@ fn apply_op(rule: &ProxyRule, headers: &mut http::HeaderMap, body: &mut serde_js
                 return;
             };
             let stripped = strip_pattern(pattern, *regex, current);
-            if let Ok(value) = http::HeaderValue::try_from(stripped) {
-                headers.insert(header_name, value);
+            match http::HeaderValue::try_from(stripped) {
+                Ok(value) => {
+                    headers.insert(header_name, value);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "launch proxy: strip rule produced an invalid value for header '{name}', leaving it unchanged: {e}"
+                    );
+                }
             }
         }
         (ProxyTarget::Body { path }, op) => apply_body_op(path, op, body),
@@ -309,7 +324,9 @@ async fn handle(
     ));
     target_url.set_query(parts.uri.query());
 
-    let mut builder = client.request(reqwest_method(&parts.method), target_url.clone());
+    // `hyper::Method` is a direct re-export of `http::Method` — the same
+    // type reqwest uses — so this needs no conversion.
+    let mut builder = client.request(parts.method.clone(), target_url.clone());
     for (name, value) in &headers {
         // `host` doesn't belong on the forwarded request (reqwest derives it
         // from the target URL); `content-length` is stale once the body has
@@ -366,48 +383,41 @@ async fn handle(
                 bytes,
             ))),
             Err(e) => {
-                tracing::debug!("launch proxy: upstream stream error: {e}");
+                // The client already got a 2xx status and part of the body
+                // by this point — the response is truncated, not merely
+                // slow, and that's worth more than debug-level visibility.
+                tracing::warn!("launch proxy: upstream response stream interrupted: {e}");
                 None
             }
         })
     });
     let body = http_body_util::BodyExt::boxed(http_body_util::StreamBody::new(stream));
 
+    // `reqwest::StatusCode` and `reqwest::header::HeaderMap` are direct
+    // re-exports of the same `http` crate types hyper uses (reqwest's
+    // `lib.rs` has `pub use http::{StatusCode, Version}` and `pub use
+    // http::header`), so both assign with no conversion and no fallback.
     let mut response = hyper::Response::new(body);
-    *response.status_mut() =
-        hyper::StatusCode::from_u16(status.as_u16()).unwrap_or(hyper::StatusCode::BAD_GATEWAY);
-    for (name, value) in &resp_headers {
-        if let (Ok(name), Ok(value)) = (
-            hyper::header::HeaderName::from_bytes(name.as_str().as_bytes()),
-            hyper::header::HeaderValue::from_bytes(value.as_bytes()),
-        ) {
-            response.headers_mut().insert(name, value);
-        }
-    }
+    *response.status_mut() = status;
+    *response.headers_mut() = resp_headers;
     Ok(response)
 }
 
-fn reqwest_method(method: &hyper::Method) -> reqwest::Method {
-    reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::POST)
-}
-
 fn error_response(msg: &str) -> ProxyResponse {
-    tracing::warn!("launch proxy: {msg}");
-    let body = http_body_util::Full::new(hyper::body::Bytes::from(msg.to_string()))
-        .map_err(|never: std::convert::Infallible| match never {})
-        .boxed();
-    let mut resp = hyper::Response::new(body);
-    *resp.status_mut() = hyper::StatusCode::BAD_REQUEST;
-    resp
+    response_with_status(hyper::StatusCode::BAD_REQUEST, msg)
 }
 
 fn bad_gateway(msg: &str) -> ProxyResponse {
+    response_with_status(hyper::StatusCode::BAD_GATEWAY, msg)
+}
+
+fn response_with_status(status: hyper::StatusCode, msg: &str) -> ProxyResponse {
     tracing::warn!("launch proxy: {msg}");
     let body = http_body_util::Full::new(hyper::body::Bytes::from(msg.to_string()))
         .map_err(|never: std::convert::Infallible| match never {})
         .boxed();
     let mut resp = hyper::Response::new(body);
-    *resp.status_mut() = hyper::StatusCode::BAD_GATEWAY;
+    *resp.status_mut() = status;
     resp
 }
 
