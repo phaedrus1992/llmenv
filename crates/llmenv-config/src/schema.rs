@@ -63,6 +63,10 @@ pub struct Features {
     /// default, like `repeat_detect`.
     #[serde(default)]
     pub cd_guard: Option<CdGuard>,
+    /// Local API-proxy mode for `llmenv launch claude_code` (#1289). Off by
+    /// default.
+    #[serde(default)]
+    pub launch_proxy: Option<LaunchProxy>,
 }
 
 /// Self-upgrade configuration, nested under `features.upgrade`.
@@ -638,6 +642,7 @@ impl Features {
             && self.upgrade.is_none()
             && self.task_tracker.is_none()
             && self.cd_guard.is_none()
+            && self.launch_proxy.is_none()
     }
 }
 
@@ -1122,6 +1127,98 @@ impl Default for CdGuard {
 
 const fn default_cd_guard_enabled() -> bool {
     true
+}
+
+/// Local API-proxy mode for `llmenv launch claude_code` (#1289). Rewrites
+/// outbound request headers/body per declarative rules before forwarding to
+/// the upstream Anthropic API (or an existing `ANTHROPIC_BASE_URL`, chained
+/// through rather than clobbered). Off by default — this touches live API
+/// traffic and prompt content, unlike `repeat_detect`/`cd_guard`'s
+/// lower-stakes on-by-default guardrails.
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchProxy {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub rules: Vec<ProxyRule>,
+}
+
+/// One rewrite rule: fires when every condition in `when` matches (or
+/// always, if `when` is empty), then applies `op` to the field named by
+/// `target`.
+// `deny_unknown_fields` is deliberately absent: serde does not support
+// combining it with `#[serde(flatten)]` (the flattened field's own
+// unknown-field rejection is what applies instead).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ProxyRule {
+    #[serde(default)]
+    pub when: Vec<ProxyCondition>,
+    #[serde(flatten)]
+    pub target: ProxyTarget,
+    pub op: ProxyOp,
+}
+
+/// What a rule's `op` (or a condition's `check`) applies to: a request
+/// header by name, or a JSON-path-lite location in the parsed request body.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "target", rename_all = "snake_case")]
+pub enum ProxyTarget {
+    Header { name: String },
+    Body { path: String },
+}
+
+/// One AND-ed condition gating a [`ProxyRule`]. `Body { path: None }`
+/// matches against the whole serialized request body (only meaningful with
+/// `check: Matches`).
+// See `ProxyRule`'s comment: `deny_unknown_fields` + `flatten` is unsupported.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ProxyCondition {
+    #[serde(flatten)]
+    pub target: ProxyConditionTarget,
+    pub check: ProxyCheck,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "target", rename_all = "snake_case")]
+pub enum ProxyConditionTarget {
+    Header {
+        name: String,
+    },
+    Body {
+        #[serde(default)]
+        path: Option<String>,
+    },
+}
+
+/// `Set` upserts (creates the path/header if missing) — required so a rule
+/// can add a field Claude Code's own request omits entirely (e.g.
+/// `thinking` on the auto-mode classifier request, which never sends one).
+/// `Remove` and `Strip` are no-op-if-the-target-is-absent (see the
+/// launch-proxy design spec's Error handling section).
+///
+/// Internally tagged (`kind`), not the default external tagging — a tuple
+/// variant like `Set(serde_json::Value)` (needed so the value can be any
+/// JSON shape, not just an object) can't round-trip through `serde_yaml_ng`
+/// as an externally-tagged map; that representation requires a YAML `!tag`.
+/// Wrapping the payload in a named `value` field keeps every variant a map,
+/// which YAML deserializes without ambiguity.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProxyOp {
+    Set { value: serde_json::Value },
+    Remove,
+    Strip { pattern: String, regex: bool },
+}
+
+/// See [`ProxyOp`]'s doc comment for why this is internally tagged.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProxyCheck {
+    Missing,
+    Present,
+    Equals { value: serde_json::Value },
+    Matches { pattern: String, regex: bool },
 }
 
 /// SlippageControl: guardrails against model behavior drift.
@@ -2614,6 +2711,71 @@ force_for_plugin: true
             let back: CdGuard = serde_json::from_str(&json).unwrap();
             prop_assert_eq!(original, back);
         }
+    }
+
+    // #1289: launch_proxy
+    #[test]
+    fn launch_proxy_round_trips_through_yaml() {
+        let yaml = r#"
+enabled: true
+rules:
+  - when:
+      - target: header
+        name: "x-billing-header"
+        check:
+          kind: present
+      - target: body
+        path: "system[0].text"
+        check:
+          kind: matches
+          pattern: "security monitor"
+          regex: false
+      - target: body
+        path: "thinking"
+        check:
+          kind: missing
+    target: body
+    path: "thinking"
+    op:
+      kind: set
+      value:
+        type: disabled
+  - target: body
+    path: "system[0].text"
+    op:
+      kind: strip
+      pattern: "verbose boilerplate.*"
+      regex: true
+"#;
+        let parsed: LaunchProxy = serde_yaml::from_str(yaml).unwrap();
+        assert!(parsed.enabled);
+        assert_eq!(parsed.rules.len(), 2);
+        assert_eq!(parsed.rules[0].when.len(), 3);
+        match &parsed.rules[0].target {
+            ProxyTarget::Body { path } => assert_eq!(path, "thinking"),
+            ProxyTarget::Header { .. } => panic!("expected Body target"),
+        }
+        match &parsed.rules[0].op {
+            ProxyOp::Set { value } => assert_eq!(value["type"], "disabled"),
+            _ => panic!("expected Set op"),
+        }
+    }
+
+    #[test]
+    fn features_with_only_launch_proxy_set_is_not_empty() {
+        let features = Features {
+            launch_proxy: Some(LaunchProxy {
+                enabled: true,
+                rules: vec![],
+            }),
+            ..Default::default()
+        };
+        assert!(!features.is_empty());
+    }
+
+    #[test]
+    fn features_default_is_empty() {
+        assert!(Features::default().is_empty());
     }
 
     // #505: MCP field parity — new optional fields

@@ -166,6 +166,9 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     let cd_guard = highest_precedence(contributors, "cd_guard", |c| {
         c.features.as_ref()?.cd_guard.as_ref()
     })?;
+    let launch_proxy = highest_precedence(contributors, "launch_proxy", |c| {
+        c.features.as_ref()?.launch_proxy.as_ref()
+    })?;
 
     let features = Some(Features {
         memory,
@@ -178,6 +181,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         task_tracker,
         codebase_memory,
         cd_guard,
+        launch_proxy,
     })
     .filter(|f| !f.is_empty());
 
@@ -2000,6 +2004,7 @@ mod tests {
                     task_tracker: None,
                     codebase_memory: vec![],
                     cd_guard: None,
+                    launch_proxy: None,
                 }),
                 ..Default::default()
             }
@@ -2042,6 +2047,7 @@ mod tests {
                     task_tracker: None,
                     codebase_memory: vec![],
                     cd_guard: None,
+                    launch_proxy: None,
                 }),
                 ..Default::default()
             }
