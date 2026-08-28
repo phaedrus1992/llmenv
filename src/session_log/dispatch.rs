@@ -102,6 +102,7 @@ mod tests {
 
     #[tokio::test]
     async fn start_session_parses_returned_id() {
+        let _guard = llmenv_util::testkit::port_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(200).set_body_json(text_result("sess-42")))
@@ -122,6 +123,7 @@ mod tests {
     #[tokio::test]
     async fn start_session_extracts_session_id_from_json_object() {
         // ICM returns `{"session_id":"..."}`, not a bare ULID.
+        let _guard = llmenv_util::testkit::port_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(200).set_body_json(text_result(
@@ -143,6 +145,7 @@ mod tests {
 
     #[tokio::test]
     async fn start_session_rejects_id_with_whitespace() {
+        let _guard = llmenv_util::testkit::port_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(200).set_body_json(text_result("sess 42")))
@@ -162,6 +165,7 @@ mod tests {
 
     #[tokio::test]
     async fn start_session_rejects_id_with_control_character() {
+        let _guard = llmenv_util::testkit::port_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(200).set_body_json(text_result("sess\x0042")))
@@ -183,6 +187,7 @@ mod tests {
     async fn start_session_rejects_non_ascii_id() {
         // Zero-width space (U+200B): not caught by is_whitespace()/is_control(),
         // but is_ascii() rejects it.
+        let _guard = llmenv_util::testkit::port_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(200).set_body_json(text_result("sess\u{200B}42")))
@@ -202,6 +207,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_posts_without_error() {
+        let _guard = llmenv_util::testkit::port_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(200).set_body_json(text_result("ok")))
@@ -225,6 +231,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_session_succeeds_when_icm_returns_the_session() {
+        let _guard = llmenv_util::testkit::port_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(200).set_body_json(text_result("[]")))
@@ -236,6 +243,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_session_errors_when_icm_reports_a_jsonrpc_error() {
+        let _guard = llmenv_util::testkit::port_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({

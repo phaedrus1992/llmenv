@@ -25,6 +25,11 @@ tokio = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 wiremock = "=0.6.5"
+# Enables the shared `port_guard()` cross-process test lock (#1610) — see
+# llmenv-util's `test-util` feature doc comment.
+llmenv-util = { path = "../llmenv-util", version = "5.0.0-alpha.1", features = [
+    "test-util",
+] }
 
 [features]
 # Exposes `McpHttpClient::test_new` to other workspace crates' dev-dependencies

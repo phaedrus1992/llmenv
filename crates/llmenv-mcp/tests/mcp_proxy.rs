@@ -23,12 +23,13 @@ use llmenv_mcp::proxy::{
 };
 use tempfile::tempdir;
 
-// #1481/#1486: shared with `src/proxy.rs`'s `#[cfg(test)]` module via
-// `include!` rather than duplicated by hand — cargo can run this crate's
+// #1481/#1486/#1610: `port_guard()` lives in `llmenv_util::testkit` so it can
+// be shared with `src/proxy.rs`'s `#[cfg(test)]` module and, via the
+// `test-util` feature, the main `llmenv` crate — cargo can run this crate's
 // `--lib` binary and this integration binary as separate, concurrent
 // processes, so an in-process `Mutex` alone can't stop one binary's test
 // from reusing a port the other just freed.
-include!("support/port_guard.rs");
+use llmenv_util::testkit::port_guard;
 
 /// Allocates an ephemeral TCP port by binding then dropping the listener, and
 /// confirms the released port is actually closed before returning it.
