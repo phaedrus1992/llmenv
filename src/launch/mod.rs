@@ -10,6 +10,7 @@
 
 mod credential_watch;
 mod drift;
+pub(crate) mod proxy;
 pub(crate) mod socket;
 
 use std::os::unix::process::ExitStatusExt;
@@ -77,7 +78,7 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
         );
     };
 
-    let resolved = crate::cli::resolve_env(narrow.scope, narrow.tag, narrow.compress)?;
+    let mut resolved = crate::cli::resolve_env(narrow.scope, narrow.tag, narrow.compress)?;
     let config_path = crate::paths::config_path()?;
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -110,6 +111,64 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
                 (None, None, None, None)
             }
         };
+
+        let proxy_shutdown_tx: Option<tokio::sync::watch::Sender<bool>> =
+            match crate::config::Config::load(&config_path) {
+                Ok(config) => {
+                    // Claude Code only for now (#1289's approved design
+                    // scope — `ANTHROPIC_BASE_URL` is Claude Code/Anthropic-
+                    // SDK specific); same gating pattern as the credential-
+                    // watch wiring below (`adapter.name() == "claude-code"`).
+                    let launch_proxy = config
+                        .features
+                        .as_ref()
+                        .and_then(|f| f.launch_proxy.as_ref())
+                        .filter(|p| p.enabled && adapter.name() == "claude-code");
+                    match launch_proxy {
+                        Some(launch_proxy) => match proxy::bind().await {
+                            Ok((listener, addr)) => {
+                                let upstream_str = resolved
+                                    .vars
+                                    .get("ANTHROPIC_BASE_URL")
+                                    .cloned()
+                                    .unwrap_or_else(|| "https://api.anthropic.com".to_string());
+                                match upstream_str.parse::<url::Url>() {
+                                    Ok(upstream) => {
+                                        let rules = Arc::new(launch_proxy.rules.clone());
+                                        let (tx, rx) = tokio::sync::watch::channel(false);
+                                        tokio::spawn(proxy::serve(listener, upstream, rules, rx));
+                                        resolved.vars.insert(
+                                            "ANTHROPIC_BASE_URL".to_string(),
+                                            format!("http://{addr}"),
+                                        );
+                                        Some(tx)
+                                    }
+                                    Err(e) => {
+                                        eprintln!(
+                                            "llmenv: could not parse existing ANTHROPIC_BASE_URL \
+                                             '{upstream_str}', launch proxy disabled for this \
+                                             session: {e}"
+                                        );
+                                        None
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "llmenv: could not start launch proxy, continuing without \
+                                     request rewriting: {e:#}"
+                                );
+                                None
+                            }
+                        },
+                        None => None,
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("launch: could not load config, launch proxy disabled: {e:#}");
+                    None
+                }
+            };
 
         if let Some(notices) = &notices {
             match drift::current_hash(&config_path) {
@@ -152,7 +211,7 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
             (Some(path), Some(token)) => Some(NoticeSocket { path, token }),
             _ => None,
         };
-        supervision_loop(
+        let result = supervision_loop(
             EngineTarget {
                 adapter: adapter.as_ref(),
                 bin_path: &bin_path,
@@ -162,7 +221,11 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
             notice_socket,
             narrow.auto_restart,
         )
-        .await
+        .await;
+        if let Some(tx) = proxy_shutdown_tx {
+            let _ = tx.send(true);
+        }
+        result
     })?;
 
     crate::cli::exit_with_status(status);

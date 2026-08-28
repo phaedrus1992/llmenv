@@ -384,6 +384,7 @@ fn fold_root_features(
         slippage,
         task_tracker,
         cd_guard,
+        launch_proxy,
     } = root.clone();
     let mut out = merged.unwrap_or_default();
 
@@ -399,6 +400,7 @@ fn fold_root_features(
     out.slippage = slippage.or(out.slippage);
     out.task_tracker = task_tracker.or(out.task_tracker);
     out.cd_guard = cd_guard.or(out.cd_guard);
+    out.launch_proxy = launch_proxy.or(out.launch_proxy);
 
     Some(out)
 }

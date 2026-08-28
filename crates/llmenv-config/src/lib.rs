@@ -1,3 +1,4 @@
+mod proxy_path;
 mod schema;
 mod template;
 mod validate;
@@ -23,18 +24,20 @@ pub const CONTEXT_MODE_DATA_ENV: &str = "CONTEXT_MODE_DATA_DIR";
 /// Durable-state subdir name for context-mode's store.
 pub const CONTEXT_MODE_STATE_SUBDIR: &str = "context-mode";
 
+pub use proxy_path::{PathParseError, PathSegment, get_path, parse_path, remove_path, set_path};
 pub use schema::{
     Bundle, Cache, Capabilities, CdGuard, CodebaseMemory, Config, ConsolidationBackend,
     ConsolidationConfig, ContentMatch, ContentScope, ContextMode, EnvVar, Features, FileSinkConfig,
     HashingMode, Hook, HookHandler, HookHandlerKind, HostEntry, HostMatch, HostScope, IconSet,
-    ImportanceLevel, InitConfig, LogLevel, LspServer, Marketplace, MarketplaceSource,
+    ImportanceLevel, InitConfig, LaunchProxy, LogLevel, LspServer, Marketplace, MarketplaceSource,
     McpPermissionAction, McpPermissions, McpServer, McpTransport, Memory, MemoryType, ModelCost,
     ModelProvider, ModelRef, ModelSource, NativePermissionRules, NetworkMatch, NetworkScope,
     OFFICIAL_MARKETPLACE_OWNER, OutputStyle, PermissionMode, PermissionPreset, PermissionRule,
-    Permissions, PluginCollection, RESERVED_OFFICIAL_MARKETPLACES, ReadOnce, ReadOnceMode,
-    RepeatDetect, Scopes, SessionLog, SkillSource, SlippageControl, StateConfig, StateTool,
-    StatuslineConfig, StatuslineStyle, TaskTracker, Throttle, TranscriptSinkConfig, UpgradeConfig,
-    UpgradeTrack, UserMatch, UserScope, WAKEUP_MAX_TOKENS_RANGE, WidgetConfig, classify_source,
+    Permissions, PluginCollection, ProxyCheck, ProxyCondition, ProxyConditionTarget, ProxyOp,
+    ProxyRule, ProxyTarget, RESERVED_OFFICIAL_MARKETPLACES, ReadOnce, ReadOnceMode, RepeatDetect,
+    Scopes, SessionLog, SkillSource, SlippageControl, StateConfig, StateTool, StatuslineConfig,
+    StatuslineStyle, TaskTracker, Throttle, TranscriptSinkConfig, UpgradeConfig, UpgradeTrack,
+    UserMatch, UserScope, WAKEUP_MAX_TOKENS_RANGE, WidgetConfig, classify_source,
     github_owner_repo, is_reserved_official_marketplace, split_plugin_ref,
 };
 pub use template::generate_template;
