@@ -276,6 +276,32 @@ fn is_valid_hostname(hostname: &str) -> bool {
     })
 }
 
+/// Array-index segments in a `launch_proxy` JSON-path-lite are bounded to
+/// keep a typo'd config from allocating an unreasonably large array. A
+/// request body has no legitimate use for an index anywhere near this —
+/// `set_path` (`crates/llmenv-config/src/proxy_path.rs`) resizes the target
+/// array up to `index + 1` elements, so an unbounded index is a multi-GB
+/// allocation (or, past `usize::MAX - 1`, an overflow) an attacker-free typo
+/// in the user's own config can trigger.
+const MAX_PROXY_PATH_INDEX: usize = 10_000;
+
+/// Validate a `launch_proxy` JSON-path-lite string: it must parse, and every
+/// array-index segment must stay within [`MAX_PROXY_PATH_INDEX`].
+fn validate_proxy_path(path: &str) -> Result<(), ValidateError> {
+    let segments = crate::proxy_path::parse_path(path)
+        .map_err(|e| ValidateError::InvalidProxyPath(format!("{path}: {e}")))?;
+    for segment in &segments {
+        if let crate::proxy_path::PathSegment::Index(i) = segment
+            && *i > MAX_PROXY_PATH_INDEX
+        {
+            return Err(ValidateError::InvalidProxyPath(format!(
+                "{path}: index {i} exceeds the maximum of {MAX_PROXY_PATH_INDEX}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Validate a single `capabilities.env` key: not a reserved adapter/state var,
 /// not in the LLMENV_* namespace. Returns an error with the given `context`
 /// label (e.g. `"config.yaml: capabilities"` or `"bundle 'foo'"`) on failure.
@@ -484,8 +510,7 @@ impl Config {
         };
         for rule in &proxy.rules {
             if let super::ProxyTarget::Body { path } = &rule.target {
-                crate::proxy_path::parse_path(path)
-                    .map_err(|e| ValidateError::InvalidProxyPath(format!("{path}: {e}")))?;
+                validate_proxy_path(path)?;
             }
             if let super::ProxyOp::Strip {
                 pattern,
@@ -497,8 +522,7 @@ impl Config {
             }
             for cond in &rule.when {
                 if let super::ProxyConditionTarget::Body { path: Some(path) } = &cond.target {
-                    crate::proxy_path::parse_path(path)
-                        .map_err(|e| ValidateError::InvalidProxyPath(format!("{path}: {e}")))?;
+                    validate_proxy_path(path)?;
                 }
                 if let super::ProxyCheck::Matches {
                     pattern,
@@ -4371,5 +4395,29 @@ mod tests {
             ..Default::default()
         };
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_oversized_proxy_path_index() {
+        let cfg = Config {
+            features: Some(Features {
+                launch_proxy: Some(LaunchProxy {
+                    enabled: true,
+                    rules: vec![ProxyRule {
+                        when: vec![],
+                        target: ProxyTarget::Body {
+                            path: "system[4000000000].text".into(),
+                        },
+                        op: ProxyOp::Remove,
+                    }],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::InvalidProxyPath(_))
+        ));
     }
 }
