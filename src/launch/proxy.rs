@@ -425,6 +425,7 @@ fn response_with_status(status: hyper::StatusCode, msg: &str) -> ProxyResponse {
 #[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use serde_json::json;
 
     fn rule(when: Vec<ProxyCondition>, target: ProxyTarget, op: ProxyOp) -> ProxyRule {
@@ -706,5 +707,60 @@ mod tests {
         assert_eq!(received.len(), 1);
         assert!(!received[0].headers.contains_key("connection"));
         assert!(!received[0].headers.contains_key("transfer-encoding"));
+    }
+
+    /// A small, bounded-depth arbitrary JSON value generator — request
+    /// bodies come from Claude Code (semi-trusted), so `apply_rules` needs
+    /// to survive whatever shape shows up, not just the hand-picked example
+    /// bodies the other tests use.
+    fn arbitrary_json_value_strategy() -> impl Strategy<Value = serde_json::Value> {
+        let leaf = prop_oneof![
+            Just(serde_json::Value::Null),
+            proptest::bool::ANY.prop_map(serde_json::Value::Bool),
+            (-1000i64..1000).prop_map(|n| serde_json::json!(n)),
+            "[a-z]{0,8}".prop_map(serde_json::Value::String),
+        ];
+        leaf.prop_recursive(3, 20, 5, |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..4).prop_map(serde_json::Value::Array),
+                proptest::collection::hash_map("[a-z]{1,5}", inner, 0..4)
+                    .prop_map(|m| serde_json::Value::Object(m.into_iter().collect())),
+            ]
+        })
+    }
+
+    proptest::proptest! {
+        /// `apply_rules` must never panic regardless of the request body's
+        /// shape, and its output must always still be valid, round-trippable
+        /// JSON — exercises `set`/`strip`/`remove` together against paths
+        /// that may or may not exist in a given generated body.
+        #[test]
+        fn apply_rules_never_panics_and_output_stays_valid_json(
+            mut body in arbitrary_json_value_strategy(),
+        ) {
+            let rules = vec![
+                rule(
+                    vec![],
+                    ProxyTarget::Body { path: "thinking".into() },
+                    ProxyOp::Set { value: json!({"type": "disabled"}) },
+                ),
+                rule(
+                    vec![],
+                    ProxyTarget::Body { path: "system[0].text".into() },
+                    ProxyOp::Strip { pattern: "x".into(), regex: false },
+                ),
+                rule(
+                    vec![],
+                    ProxyTarget::Body { path: "a.b.c".into() },
+                    ProxyOp::Remove,
+                ),
+            ];
+            let mut headers = http::HeaderMap::new();
+            apply_rules(&rules, &mut headers, &mut body);
+
+            let bytes = serde_json::to_vec(&body).unwrap();
+            let round_tripped: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            prop_assert_eq!(round_tripped, body);
+        }
     }
 }

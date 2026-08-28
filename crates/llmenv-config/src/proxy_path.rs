@@ -271,6 +271,31 @@ mod tests {
         assert_eq!(v, json!({}));
     }
 
+    /// One `key[idx][idx]...` group — at least a key or an index, since an
+    /// empty group (bare `.`) is invalid per `parse_path`'s grammar.
+    fn segment_group_strategy() -> impl Strategy<Value = String> {
+        (
+            proptest::option::of("[a-z]{1,5}"),
+            proptest::collection::vec(0u16..20, 0..3),
+        )
+            .prop_filter_map("group needs a key or at least one index", |(key, idxs)| {
+                if key.is_none() && idxs.is_empty() {
+                    None
+                } else {
+                    let idx_part: String = idxs.iter().map(|i| format!("[{i}]")).collect();
+                    Some(format!("{}{idx_part}", key.unwrap_or_default()))
+                }
+            })
+    }
+
+    /// A dot-joined sequence of 1-3 groups, e.g. `a[3].b[0][1]` — exercises
+    /// mixed key/index multi-segment paths, not just the single-key case
+    /// [`set_then_get_round_trips_for_any_key_path`] below covers.
+    fn multi_segment_path_strategy() -> impl Strategy<Value = String> {
+        proptest::collection::vec(segment_group_strategy(), 1..3)
+            .prop_map(|groups| groups.join("."))
+    }
+
     proptest::proptest! {
         #[test]
         fn set_then_get_round_trips_for_any_key_path(
@@ -281,6 +306,37 @@ mod tests {
             let segs = parse_path(&key).unwrap();
             set_path(&mut v, &segs, serde_json::json!(n));
             prop_assert_eq!(get_path(&v, &segs), Some(&serde_json::json!(n)));
+        }
+
+        /// `parse_path` must never panic on arbitrary input — every failure
+        /// mode is a real `Err`, since paths ultimately come from user
+        /// config.yaml (trusted-but-fallible) and request bodies (semi-trusted).
+        #[test]
+        fn parse_path_never_panics(s in ".*") {
+            let _ = parse_path(&s);
+        }
+
+        #[test]
+        fn set_then_get_round_trips_for_multi_segment_paths(
+            path in multi_segment_path_strategy(),
+            n in 1i64..1000,
+        ) {
+            let mut v = serde_json::json!({});
+            let segs = parse_path(&path).unwrap();
+            set_path(&mut v, &segs, serde_json::json!(n));
+            prop_assert_eq!(get_path(&v, &segs), Some(&serde_json::json!(n)));
+        }
+
+        #[test]
+        fn remove_then_get_returns_none_for_multi_segment_paths(
+            path in multi_segment_path_strategy(),
+            n in 1i64..1000,
+        ) {
+            let mut v = serde_json::json!({});
+            let segs = parse_path(&path).unwrap();
+            set_path(&mut v, &segs, serde_json::json!(n));
+            prop_assert!(remove_path(&mut v, &segs));
+            prop_assert_eq!(get_path(&v, &segs), None);
         }
     }
 }
