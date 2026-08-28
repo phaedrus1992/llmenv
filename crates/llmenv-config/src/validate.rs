@@ -5,10 +5,11 @@ use thiserror::Error;
 #[cfg(test)]
 use super::{
     Bundle, Cache, Capabilities, ContentMatch, ContentScope, ContextMode, Features, Hook,
-    HookHandler, HookHandlerKind, HostEntry, HostMatch, HostScope, Marketplace,
+    HookHandler, HookHandlerKind, HostEntry, HostMatch, HostScope, LaunchProxy, Marketplace,
     McpPermissionAction, McpPermissions, McpServer, McpTransport, Memory, NativePermissionRules,
     NetworkMatch, NetworkScope, PermissionMode, PermissionPreset, Permissions, PluginCollection,
-    Scopes, Throttle, UserMatch, UserScope,
+    ProxyCheck, ProxyCondition, ProxyConditionTarget, ProxyOp, ProxyRule, ProxyTarget, Scopes,
+    Throttle, UserMatch, UserScope,
 };
 
 #[derive(Debug, Error)]
@@ -27,6 +28,10 @@ pub enum ValidateError {
     InvalidMACAddress(String),
     #[error("invalid hostname: {0}")]
     InvalidHostname(String),
+    #[error("launch_proxy rule has an invalid JSON path: {0}")]
+    InvalidProxyPath(String),
+    #[error("launch_proxy rule has an invalid regex pattern: {0}")]
+    InvalidProxyRegex(String),
     #[error("cache_dir contains path traversal components: {0}")]
     CacheDirTraversal(String),
     #[error("cache_retention_hours must be > 0")]
@@ -469,6 +474,42 @@ impl Config {
         self.validate_plugins()?;
         self.validate_state()?;
         self.validate_permissions()?;
+        self.validate_launch_proxy()?;
+        Ok(())
+    }
+
+    fn validate_launch_proxy(&self) -> Result<(), ValidateError> {
+        let Some(proxy) = self.features.as_ref().and_then(|f| f.launch_proxy.as_ref()) else {
+            return Ok(());
+        };
+        for rule in &proxy.rules {
+            if let super::ProxyTarget::Body { path } = &rule.target {
+                crate::proxy_path::parse_path(path)
+                    .map_err(|e| ValidateError::InvalidProxyPath(format!("{path}: {e}")))?;
+            }
+            if let super::ProxyOp::Strip {
+                pattern,
+                regex: true,
+            } = &rule.op
+            {
+                regex::Regex::new(pattern)
+                    .map_err(|e| ValidateError::InvalidProxyRegex(format!("{pattern}: {e}")))?;
+            }
+            for cond in &rule.when {
+                if let super::ProxyConditionTarget::Body { path: Some(path) } = &cond.target {
+                    crate::proxy_path::parse_path(path)
+                        .map_err(|e| ValidateError::InvalidProxyPath(format!("{path}: {e}")))?;
+                }
+                if let super::ProxyCheck::Matches {
+                    pattern,
+                    regex: true,
+                } = &cond.check
+                {
+                    regex::Regex::new(pattern)
+                        .map_err(|e| ValidateError::InvalidProxyRegex(format!("{pattern}: {e}")))?;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -4248,6 +4289,87 @@ mod tests {
             },
             bundle_origin: None,
         });
+        assert!(cfg.validate().is_ok());
+    }
+
+    // #1289: launch_proxy
+    #[test]
+    fn validate_rejects_bad_json_path() {
+        let cfg = Config {
+            features: Some(Features {
+                launch_proxy: Some(LaunchProxy {
+                    enabled: true,
+                    rules: vec![ProxyRule {
+                        when: vec![],
+                        target: ProxyTarget::Body {
+                            path: "system[[.text".into(), // malformed: unmatched bracket
+                        },
+                        op: ProxyOp::Remove,
+                    }],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::InvalidProxyPath(_))
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_bad_regex() {
+        let cfg = Config {
+            features: Some(Features {
+                launch_proxy: Some(LaunchProxy {
+                    enabled: true,
+                    rules: vec![ProxyRule {
+                        when: vec![],
+                        target: ProxyTarget::Body {
+                            path: "system[0].text".into(),
+                        },
+                        op: ProxyOp::Strip {
+                            pattern: "(unclosed".into(),
+                            regex: true,
+                        },
+                    }],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::InvalidProxyRegex(_))
+        ));
+    }
+
+    #[test]
+    fn validate_accepts_well_formed_launch_proxy() {
+        let cfg = Config {
+            features: Some(Features {
+                launch_proxy: Some(LaunchProxy {
+                    enabled: true,
+                    rules: vec![ProxyRule {
+                        when: vec![ProxyCondition {
+                            target: ProxyConditionTarget::Body { path: None },
+                            check: ProxyCheck::Matches {
+                                pattern: "security monitor".into(),
+                                regex: false,
+                            },
+                        }],
+                        target: ProxyTarget::Body {
+                            path: "thinking".into(),
+                        },
+                        op: ProxyOp::Set {
+                            value: serde_json::json!({"type": "disabled"}),
+                        },
+                    }],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
         assert!(cfg.validate().is_ok());
     }
 }
