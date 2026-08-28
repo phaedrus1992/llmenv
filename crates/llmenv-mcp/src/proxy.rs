@@ -1020,10 +1020,10 @@ mod tests {
     use super::{Command, Path, Stdio, mcp_proxy_command_in};
     use std::os::unix::fs::PermissionsExt;
 
-    // #1481/#1486: shared with `tests/mcp_proxy.rs` via `include!` rather than
-    // duplicated by hand — an integration test can't import a lib's
-    // `#[cfg(test)]` items, so this is the only way to share it verbatim.
-    include!("../tests/support/port_guard.rs");
+    // #1481/#1486/#1610: `port_guard()` lives in `llmenv_util::testkit` so it
+    // can be shared with `tests/mcp_proxy.rs` and, via the `test-util`
+    // feature, the main `llmenv` crate — see llmenv-util's doc comment.
+    use llmenv_util::testkit::port_guard;
 
     /// Writes an executable stub named `name` into `dir`.
     fn stub_binary(dir: &Path, name: &str) {

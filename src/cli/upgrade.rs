@@ -647,6 +647,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_latest_release_success() {
+        let _guard = llmenv_util::testkit::port_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(wiremock::matchers::path(
@@ -680,6 +681,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_latest_release_http_error() {
+        let _guard = llmenv_util::testkit::port_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(wiremock::matchers::path(
@@ -701,6 +703,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_beta_release_skips_draft() {
+        let _guard = llmenv_util::testkit::port_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(wiremock::matchers::path(
@@ -743,6 +746,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_beta_all_drafts_returns_error() {
+        let _guard = llmenv_util::testkit::port_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(wiremock::matchers::path(
@@ -1003,6 +1007,7 @@ d014cffae3326ad537b149d025f0b9c3826a91694b1c8b5717fb1f7cc8c5eea8  llmenv-macos-x
     /// there is nothing to verify against.
     #[tokio::test]
     async fn fetch_expected_sha256_errors_when_the_platform_is_not_listed() {
+        let _guard = llmenv_util::testkit::port_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200).set_body_string(SAMPLE_CHECKSUMS))
@@ -1042,6 +1047,7 @@ d014cffae3326ad537b149d025f0b9c3826a91694b1c8b5717fb1f7cc8c5eea8  llmenv-macos-x
     /// which then can't produce a valid entry.
     #[tokio::test]
     async fn fetch_expected_sha256_refuses_an_oversized_checksums_file() {
+        let _guard = llmenv_util::testkit::port_guard();
         let server = MockServer::start().await;
         let huge = "x".repeat(usize::try_from(MAX_CHECKSUMS_BYTES).unwrap() + 1);
         Mock::given(method("GET"))
@@ -1074,6 +1080,7 @@ d014cffae3326ad537b149d025f0b9c3826a91694b1c8b5717fb1f7cc8c5eea8  llmenv-macos-x
 
     #[tokio::test]
     async fn fetch_expected_sha256_returns_the_published_hash() {
+        let _guard = llmenv_util::testkit::port_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200).set_body_string(SAMPLE_CHECKSUMS))
@@ -1145,6 +1152,7 @@ d014cffae3326ad537b149d025f0b9c3826a91694b1c8b5717fb1f7cc8c5eea8  llmenv-macos-x
 
     #[tokio::test]
     async fn download_binary_success() {
+        let _guard = llmenv_util::testkit::port_guard();
         let server = MockServer::start().await;
         let body = b"fake binary content";
         Mock::given(method("GET"))
@@ -1170,6 +1178,7 @@ d014cffae3326ad537b149d025f0b9c3826a91694b1c8b5717fb1f7cc8c5eea8  llmenv-macos-x
 
     #[tokio::test]
     async fn download_binary_http_error() {
+        let _guard = llmenv_util::testkit::port_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(wiremock::matchers::path("/binary"))
