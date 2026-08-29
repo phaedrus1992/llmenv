@@ -2062,6 +2062,226 @@ test_1543_test_mirror_matches_production_merge_output_suppression() {
 }
 
 # ---------------------------------------------------------------------------
+# Issue #1675: "Determine source branch" step — mirrors forward-merge-
+# release.yml's step of the same name. A push-triggered run treats the
+# pushed branch as the source, same as before. A pull_request-triggered
+# retry (a merged forward-merge/<source>-to-<target> PR) has no pushed
+# branch to read — the source is parsed out of the PR's own head ref name.
+# Callers export EVENT_NAME PUSHED_REF PR_HEAD_REF.
+# ---------------------------------------------------------------------------
+determine_source_branch_block() {
+  cat <<'SHELL'
+set -euo pipefail
+if [[ "$EVENT_NAME" == "push" ]]; then
+  echo "ref=$PUSHED_REF"
+else
+  rest="${PR_HEAD_REF#forward-merge/}"
+  source_branch="${rest%-to-*}"
+  if [[ ! "$source_branch" =~ ^(release/[0-9]+\.x|main)$ ]]; then
+    echo "::error::could not parse a valid source branch out of forward-merge PR head ref '$PR_HEAD_REF' (expected forward-merge/<source>-to-<target>, source one of release/X.x or main)"
+    exit 1
+  fi
+  echo "ref=$source_branch"
+fi
+SHELL
+}
+
+test_1675_push_event_uses_pushed_branch_as_source() {
+  local out
+  out=$(EVENT_NAME="push" PUSHED_REF="release/4.x" PR_HEAD_REF="" \
+    bash -c "$(determine_source_branch_block)" 2>&1)
+
+  if [[ "$out" == "ref=release/4.x" ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "$out" >&2
+  return 1
+}
+
+test_1675_merged_pr_event_parses_source_from_head_ref() {
+  local out
+  out=$(EVENT_NAME="pull_request" PUSHED_REF="" \
+    PR_HEAD_REF="forward-merge/release/4.x-to-main" \
+    bash -c "$(determine_source_branch_block)" 2>&1)
+
+  if [[ "$out" == "ref=release/4.x" ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "$out" >&2
+  return 1
+}
+
+test_1675_merged_pr_event_parses_source_between_two_release_lines() {
+  local out
+  out=$(EVENT_NAME="pull_request" PUSHED_REF="" \
+    PR_HEAD_REF="forward-merge/release/3.x-to-release/4.x" \
+    bash -c "$(determine_source_branch_block)" 2>&1)
+
+  if [[ "$out" == "ref=release/3.x" ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "$out" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Issue #1675 review follow-up (silent-failure-hunter / security-audit /
+# variant-bug-hunter, converging on the same gap): a head ref that passes the
+# job-level `startsWith(head.ref, 'forward-merge/')` check but isn't shaped
+# forward-merge/<source>-to-<target> must fail loudly, not silently produce
+# an empty or wrong ref. An empty `ref:` reaching actions/checkout falls back
+# to the triggering event's own ref (the PR's base branch for a closed
+# pull_request) with no error at all -- exactly the silent wrong-branch
+# checkout these three findings each reproduced independently.
+# ---------------------------------------------------------------------------
+test_1675_empty_source_after_prefix_strip_fails_loudly() {
+  local out rc
+  out=$(EVENT_NAME="pull_request" PUSHED_REF="" \
+    PR_HEAD_REF="forward-merge/-to-main" \
+    bash -c "$(determine_source_branch_block)" 2>&1)
+  rc=$?
+
+  if [[ $rc -ne 0 ]] && echo "$out" | grep -q "::error::could not parse a valid source branch"; then
+    return 0
+  fi
+  printf '  out: %s\n' "$out" >&2
+  printf '  rc: %s\n' "$rc" >&2
+  return 1
+}
+
+test_1675_missing_to_separator_fails_loudly() {
+  local out rc
+  out=$(EVENT_NAME="pull_request" PUSHED_REF="" \
+    PR_HEAD_REF="forward-merge/onlysourcename" \
+    bash -c "$(determine_source_branch_block)" 2>&1)
+  rc=$?
+
+  if [[ $rc -ne 0 ]] && echo "$out" | grep -q "::error::could not parse a valid source branch"; then
+    return 0
+  fi
+  printf '  out: %s\n' "$out" >&2
+  printf '  rc: %s\n' "$rc" >&2
+  return 1
+}
+
+test_1675_multiple_to_separators_fails_loudly() {
+  local out rc
+  out=$(EVENT_NAME="pull_request" PUSHED_REF="" \
+    PR_HEAD_REF="forward-merge/release/4.x-to-release/5.x-to-main" \
+    bash -c "$(determine_source_branch_block)" 2>&1)
+  rc=$?
+
+  if [[ $rc -ne 0 ]] && echo "$out" | grep -q "::error::could not parse a valid source branch"; then
+    return 0
+  fi
+  printf '  out: %s\n' "$out" >&2
+  printf '  rc: %s\n' "$rc" >&2
+  return 1
+}
+
+test_1675_arbitrary_ref_embedded_in_head_fails_loudly() {
+  local out rc
+  out=$(EVENT_NAME="pull_request" PUSHED_REF="" \
+    PR_HEAD_REF="forward-merge/refs/pull/999/head-to-x" \
+    bash -c "$(determine_source_branch_block)" 2>&1)
+  rc=$?
+
+  if [[ $rc -ne 0 ]] && echo "$out" | grep -q "::error::could not parse a valid source branch"; then
+    return 0
+  fi
+  printf '  out: %s\n' "$out" >&2
+  printf '  rc: %s\n' "$rc" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Issue #1675: the job-level `if:` gate that admits a pull_request retry only
+# for a merged PR whose head is one of this workflow's own forward-merge/*
+# staging branches. Mirrored here as a bash predicate over the same three
+# inputs GitHub Actions' expression evaluates (actor, merged, head ref) — not
+# a run of the real expression engine, since that only runs inside GitHub
+# Actions itself.
+# ---------------------------------------------------------------------------
+job_admits_run() {
+  local actor="$1" event_name="$2" merged="$3" head_ref="$4" \
+    head_repo="${5:-owner/repo}" base_repo="${6:-owner/repo}" base_ref="${7:-main}"
+  [[ "$actor" != "github-actions[bot]" ]] || return 1
+  [[ "$event_name" == "push" ]] && return 0
+  [[ "$merged" == "true" ]] || return 1
+  [[ "$head_ref" == forward-merge/* ]] || return 1
+  [[ "$head_repo" == "$base_repo" ]] || return 1
+  [[ "$base_ref" == release/* || "$base_ref" == "main" ]] || return 1
+  return 0
+}
+
+test_1675_job_admits_push_from_a_human() {
+  job_admits_run "a-human" "push" "" ""
+}
+
+test_1675_job_rejects_push_from_the_bot() {
+  ! job_admits_run "github-actions[bot]" "push" "" ""
+}
+
+test_1675_job_admits_a_merged_forward_merge_pr() {
+  job_admits_run "a-human" "pull_request" "true" "forward-merge/release/4.x-to-main"
+}
+
+test_1675_job_rejects_an_unmerged_closed_forward_merge_pr() {
+  ! job_admits_run "a-human" "pull_request" "false" "forward-merge/release/4.x-to-main"
+}
+
+test_1675_job_rejects_a_merged_pr_that_is_not_a_forward_merge_branch() {
+  ! job_admits_run "a-human" "pull_request" "true" "some-unrelated-branch"
+}
+
+# ---------------------------------------------------------------------------
+# Issue #1675 review follow-up (security-audit): branch-name prefix alone is
+# not proof of provenance -- a fork PR can name its own head branch anything,
+# including a string starting with "forward-merge/". Blast radius is capped
+# today by GitHub withholding write tokens/secrets from a `pull_request` run
+# on a fork PR regardless, but the job's own `if:` gate should not rely on
+# that alone; it must also check the head repo matches this repo, and that
+# the PR targeted a real release/main line rather than an arbitrary branch.
+# ---------------------------------------------------------------------------
+test_1675_job_rejects_a_merged_pr_from_a_fork_with_matching_branch_name() {
+  ! job_admits_run "a-human" "pull_request" "true" "forward-merge/release/4.x-to-main" \
+    "attacker/repo" "owner/repo" "main"
+}
+
+test_1675_job_rejects_a_merged_same_repo_pr_targeting_an_unrelated_branch() {
+  ! job_admits_run "a-human" "pull_request" "true" "forward-merge/release/4.x-to-main" \
+    "owner/repo" "owner/repo" "some-feature-branch"
+}
+
+test_1675_job_admits_a_merged_same_repo_pr_targeting_a_release_branch() {
+  job_admits_run "a-human" "pull_request" "true" "forward-merge/release/3.x-to-release/4.x" \
+    "owner/repo" "owner/repo" "release/4.x"
+}
+
+# Drift guard: determine_source_branch_block and job_admits_run above are
+# hand-maintained mirrors of forward-merge-release.yml's "Determine source
+# branch" step and job-level `if:` gate, not an extraction — assert the
+# exact lines are still present in production so a future edit there fails
+# loudly here instead of drifting unnoticed.
+test_1675_test_mirror_matches_production_source_branch_retry() {
+  local workflow_file
+  workflow_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/forward-merge-release.yml"
+
+  # shellcheck disable=SC2016 # literal grep -F patterns, not expressions to expand
+  if grep -qF "rest=\"\${PR_HEAD_REF#forward-merge/}\"" "$workflow_file" \
+      && grep -qF 'source_branch="${rest%-to-*}"' "$workflow_file" \
+      && grep -qF "startsWith(github.event.pull_request.head.ref, 'forward-merge/')" "$workflow_file" \
+      && grep -qF 'github.event.pull_request.merged == true' "$workflow_file" \
+      && grep -qF 'github.event.pull_request.head.repo.full_name == github.repository' "$workflow_file" \
+      && grep -qF "startsWith(github.event.pull_request.base.ref, 'release/')" "$workflow_file" \
+      && grep -qF 'if [[ ! "$source_branch" =~ ^(release/[0-9]+\.x|main)$ ]]; then' "$workflow_file"; then
+    return 0
+  fi
+  echo "  production's source-branch retry logic no longer matches the lines this file mirrors -- update determine_source_branch_block/job_admits_run above" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
 run_test "Issue #476: branch-exists guard prevents overwrite of in-progress resolution" \
@@ -2184,6 +2404,39 @@ run_test "Issue #1543 follow-up: git merge's own conflict output is fully suppre
   test_1543_git_merge_stdout_suppressed_on_conflict
 run_test "Issue #1543 follow-up: the test mirror still matches production's merge output suppression" \
   test_1543_test_mirror_matches_production_merge_output_suppression
+
+run_test "Issue #1675: a push event uses the pushed branch as the source" \
+  test_1675_push_event_uses_pushed_branch_as_source
+run_test "Issue #1675: a merged forward-merge PR parses its source from the head ref" \
+  test_1675_merged_pr_event_parses_source_from_head_ref
+run_test "Issue #1675: parsing works between two release lines, not just release->main" \
+  test_1675_merged_pr_event_parses_source_between_two_release_lines
+run_test "Issue #1675 review follow-up: an empty source after prefix-strip fails loudly" \
+  test_1675_empty_source_after_prefix_strip_fails_loudly
+run_test "Issue #1675 review follow-up: a missing -to- separator fails loudly" \
+  test_1675_missing_to_separator_fails_loudly
+run_test "Issue #1675 review follow-up: multiple -to- separators fail loudly" \
+  test_1675_multiple_to_separators_fails_loudly
+run_test "Issue #1675 review follow-up: an arbitrary ref embedded in the head fails loudly" \
+  test_1675_arbitrary_ref_embedded_in_head_fails_loudly
+run_test "Issue #1675: the job admits a push from a human" \
+  test_1675_job_admits_push_from_a_human
+run_test "Issue #1675: the job rejects a push attributed to the bot" \
+  test_1675_job_rejects_push_from_the_bot
+run_test "Issue #1675: the job admits a merged forward-merge PR" \
+  test_1675_job_admits_a_merged_forward_merge_pr
+run_test "Issue #1675: the job rejects an unmerged closed forward-merge PR" \
+  test_1675_job_rejects_an_unmerged_closed_forward_merge_pr
+run_test "Issue #1675: the job rejects a merged PR that isn't a forward-merge branch" \
+  test_1675_job_rejects_a_merged_pr_that_is_not_a_forward_merge_branch
+run_test "Issue #1675 review follow-up: the job rejects a fork PR with a matching branch name" \
+  test_1675_job_rejects_a_merged_pr_from_a_fork_with_matching_branch_name
+run_test "Issue #1675 review follow-up: the job rejects a same-repo PR targeting an unrelated branch" \
+  test_1675_job_rejects_a_merged_same_repo_pr_targeting_an_unrelated_branch
+run_test "Issue #1675 review follow-up: the job admits a same-repo PR targeting a release branch" \
+  test_1675_job_admits_a_merged_same_repo_pr_targeting_a_release_branch
+run_test "Issue #1675: the test mirror still matches production's source-branch retry logic" \
+  test_1675_test_mirror_matches_production_source_branch_retry
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
