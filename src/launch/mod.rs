@@ -390,9 +390,21 @@ async fn supervision_loop(
 
     loop {
         let mut cmd = match sandbox {
-            // Env forwarding and mounts land in #1650 — a sandboxed launch
-            // in this cut only gets the container invocation itself.
-            Some(spec) => sandbox::container_command(spec, adapter.binary_name(), args),
+            Some(spec) => {
+                let project_dir = std::env::current_dir()
+                    .context("resolving the project directory to mount into the sandbox")?;
+                let ssh_auth_sock = std::env::var_os("SSH_AUTH_SOCK").map(std::path::PathBuf::from);
+                sandbox::container_command(
+                    spec,
+                    sandbox::ContainerInputs {
+                        binary_name: adapter.binary_name(),
+                        args,
+                        vars: &resolved.vars,
+                        project_dir: &project_dir,
+                        ssh_auth_sock: ssh_auth_sock.as_deref(),
+                    },
+                )
+            }
             None => {
                 let mut cmd = crate::cli::command_at_path(bin_path, adapter.binary_name());
                 cmd.args(args);

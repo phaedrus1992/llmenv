@@ -79,21 +79,67 @@ pub(crate) struct SandboxSpec {
     pub(crate) image: String,
 }
 
+/// In-container path the project tree is mounted at (#1650) — the
+/// devcontainer convention the design doc calls out.
+pub(crate) const WORKSPACE_PATH: &str = "/workspace";
+
+/// In-container path the host's `SSH_AUTH_SOCK` is mounted at (#1650), when
+/// present. Namespaced under `llmenv-` so it can't collide with a path the
+/// image itself already uses.
+pub(crate) const SSH_AUTH_SOCK_PATH: &str = "/run/llmenv-ssh-agent.sock";
+
+/// Everything [`container_command`] needs besides the resolved
+/// [`SandboxSpec`] — bundled so the function stays inside the
+/// 5-positional-param limit.
+pub(crate) struct ContainerInputs<'a> {
+    pub(crate) binary_name: &'a str,
+    pub(crate) args: &'a [String],
+    /// The resolved/materialized env (#1650) — passed via repeated `-e
+    /// KEY=VALUE` flags. `docker run`'s child is a fresh container
+    /// namespace, so nothing set on the `docker`/`podman` CLI process's own
+    /// environment reaches it automatically; this is deliberately not a live
+    /// mount of `~/.config/llmenv` — the container gets the already-resolved
+    /// result, not the source config tree.
+    pub(crate) vars: &'a std::collections::BTreeMap<String, String>,
+    /// Host directory bind-mounted read-write at [`WORKSPACE_PATH`].
+    pub(crate) project_dir: &'a std::path::Path,
+    /// Host `SSH_AUTH_SOCK`, if the launching shell has one running. Mounted
+    /// read-only at [`SSH_AUTH_SOCK_PATH`] so the container can push over
+    /// git without ever holding a private key.
+    pub(crate) ssh_auth_sock: Option<&'a std::path::Path>,
+}
+
 /// Build the container invocation for a sandboxed launch (#1080):
-/// `<runtime> run --rm <image> <binary_name> <args>`.
+/// `<runtime> run --rm` plus the project/SSH mounts and resolved env
+/// (#1650), then `<image> <binary_name> <args>`.
 ///
-/// Mounts and env forwarding are later issues (#1650, #1651) — this covers
-/// the exec path only (#1649). The image is trusted to already carry
-/// `binary_name` on its own `PATH`; llmenv does not yet copy the host's
-/// resolved engine binary into the container (that's #1653's job).
+/// The image is trusted to already carry `binary_name` on its own `PATH`;
+/// llmenv does not yet copy the host's resolved engine binary into the
+/// container (that's #1653's job). The icebreaker-sealed credential swap
+/// (#1651) happens in the caller, on `inputs.vars`, before this is called.
 pub(crate) fn container_command(
     spec: &SandboxSpec,
-    binary_name: &str,
-    args: &[String],
+    inputs: ContainerInputs<'_>,
 ) -> std::process::Command {
     let mut cmd = std::process::Command::new(spec.runtime.binary_name());
-    cmd.arg("run").arg("--rm").arg(&spec.image).arg(binary_name);
-    cmd.args(args);
+    cmd.arg("run").arg("--rm");
+    cmd.arg("-v").arg(format!(
+        "{}:{WORKSPACE_PATH}:rw",
+        inputs.project_dir.display()
+    ));
+    cmd.arg("-w").arg(WORKSPACE_PATH);
+    if let Some(sock) = inputs.ssh_auth_sock {
+        cmd.arg("-v")
+            .arg(format!("{}:{SSH_AUTH_SOCK_PATH}:ro", sock.display()));
+        cmd.arg("-e")
+            .arg(format!("SSH_AUTH_SOCK={SSH_AUTH_SOCK_PATH}"));
+    }
+    for (key, value) in inputs.vars {
+        cmd.arg("-e").arg(format!("{key}={value}"));
+    }
+    cmd.arg(&spec.image);
+    cmd.arg(inputs.binary_name);
+    cmd.args(inputs.args);
     cmd
 }
 
@@ -195,23 +241,87 @@ mod tests {
     }
 
     #[test]
-    fn container_command_builds_run_rm_image_binary_args() {
+    fn container_command_builds_run_rm_workspace_mount_and_image_binary_args() {
         let spec = SandboxSpec {
             runtime: ContainerRuntime::Podman,
             image: "registry.example.com/sandbox:latest".to_string(),
         };
-        let cmd = container_command(&spec, "claude", &["--foo".to_string(), "bar".to_string()]);
+        let args = vec!["--foo".to_string(), "bar".to_string()];
+        let vars = std::collections::BTreeMap::new();
+        let project_dir = std::path::Path::new("/home/user/project");
+        let cmd = container_command(
+            &spec,
+            ContainerInputs {
+                binary_name: "claude",
+                args: &args,
+                vars: &vars,
+                project_dir,
+                ssh_auth_sock: None,
+            },
+        );
         assert_eq!(cmd.get_program(), "podman");
         assert_eq!(
             command_args(&cmd),
             vec![
                 "run",
                 "--rm",
+                "-v",
+                "/home/user/project:/workspace:rw",
+                "-w",
+                "/workspace",
                 "registry.example.com/sandbox:latest",
                 "claude",
                 "--foo",
                 "bar",
             ]
         );
+    }
+
+    #[test]
+    fn container_command_mounts_ssh_auth_sock_read_only_when_present() {
+        let spec = SandboxSpec {
+            runtime: ContainerRuntime::Docker,
+            image: "img".to_string(),
+        };
+        let args = Vec::new();
+        let vars = std::collections::BTreeMap::new();
+        let project_dir = std::path::Path::new("/proj");
+        let ssh_sock = std::path::Path::new("/tmp/ssh-XXXX/agent.1");
+        let cmd = container_command(
+            &spec,
+            ContainerInputs {
+                binary_name: "claude",
+                args: &args,
+                vars: &vars,
+                project_dir,
+                ssh_auth_sock: Some(ssh_sock),
+            },
+        );
+        let args = command_args(&cmd);
+        assert!(args.contains(&"/tmp/ssh-XXXX/agent.1:/run/llmenv-ssh-agent.sock:ro".to_string()));
+        assert!(args.contains(&"SSH_AUTH_SOCK=/run/llmenv-ssh-agent.sock".to_string()));
+    }
+
+    #[test]
+    fn container_command_forwards_resolved_vars_as_e_flags() {
+        let spec = SandboxSpec {
+            runtime: ContainerRuntime::Docker,
+            image: "img".to_string(),
+        };
+        let args = Vec::new();
+        let mut vars = std::collections::BTreeMap::new();
+        vars.insert("FOO".to_string(), "bar".to_string());
+        let project_dir = std::path::Path::new("/proj");
+        let cmd = container_command(
+            &spec,
+            ContainerInputs {
+                binary_name: "claude",
+                args: &args,
+                vars: &vars,
+                project_dir,
+                ssh_auth_sock: None,
+            },
+        );
+        assert!(command_args(&cmd).contains(&"FOO=bar".to_string()));
     }
 }
