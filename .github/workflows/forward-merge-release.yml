@@ -4,13 +4,28 @@ on:
   push:
     branches:
       - 'release/**'
+  # #1675: a push-triggered run that finds forward-merge/<source>-to-<target>
+  # already open halts instead of retrying (see the ls-remote guard below).
+  # Once that PR finally merges, nothing re-fires — every commit that piled
+  # up on the source branch during the wait already fired-and-halted once,
+  # and `push` never sees them again. Re-run the same cascade from its
+  # source branch once the blocking PR clears.
+  pull_request:
+    types: [closed]
 
 # Default to read-only; the job that needs write declares it explicitly.
 permissions:
   contents: read
 
 concurrency:
-  group: forward-merge-${{ github.ref }}
+  # #1675: a pull_request-triggered retry groups on its own head ref (the
+  # forward-merge/<source>-to-<target> branch name), not github.ref (which
+  # for a pull_request event is the synthetic refs/pull/<n>/merge ref, never
+  # equal to the push-triggered group for the same source branch). The two
+  # trigger types don't need to serialize against each other: push-triggered
+  # cascades already go through the PR path once FORWARD_MERGE_PAT is set,
+  # so a stray concurrent run costs wasted CI time, not a corrupted push.
+  group: forward-merge-${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -28,16 +43,48 @@ jobs:
     # a PAT-authenticated push can no longer re-trigger this workflow.
     # #1524 closed with that evidence; see test_1504_direct_push_never_
     # attempted_with_pat_set in __tests__/forward-merge-release-guards.sh.
-    if: github.actor != 'github-actions[bot]'
+    #
+    # #1675: the second half of the OR admits only a merged PR whose head is
+    # one of this workflow's own forward-merge/* staging branches — never an
+    # arbitrary closed PR.
+    if: >-
+      github.actor != 'github-actions[bot]' &&
+      (github.event_name == 'push' ||
+       (github.event.pull_request.merged == true &&
+        startsWith(github.event.pull_request.head.ref, 'forward-merge/')))
     permissions:
       contents: write
       pull-requests: write
       issues: write
       actions: write
     steps:
+      # #1675: for a push, the branch that was pushed IS the cascade's
+      # source. For a merged forward-merge/* PR, that branch (and its PR)
+      # are gone — the source is encoded in its own name,
+      # forward-merge/<source>-to-<target>, with the `-to-` separator safe
+      # to split on because neither a release branch nor `main` ever
+      # contains one. Re-check out that source so the rest of this job runs
+      # unchanged, exactly as if it had just been pushed again.
+      - name: Determine source branch
+        id: source
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSHED_REF: ${{ github.ref_name }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            echo "ref=$PUSHED_REF" >> "$GITHUB_OUTPUT"
+          else
+            rest="${PR_HEAD_REF#forward-merge/}"
+            source_branch="${rest%-to-*}"
+            echo "ref=$source_branch" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ steps.source.outputs.ref }}
           fetch-depth: 0
           persist-credentials: true
 
