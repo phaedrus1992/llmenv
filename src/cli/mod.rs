@@ -128,6 +128,14 @@ enum Command {
         /// restart-attempt cap, instead of prompting
         #[arg(long)]
         auto_restart: bool,
+        /// Run the engine in a sandbox container, overriding
+        /// features.sandbox.enabled for this invocation
+        #[arg(long, conflicts_with = "no_container")]
+        container: bool,
+        /// Run the engine directly on the host, overriding
+        /// features.sandbox.enabled for this invocation
+        #[arg(long)]
+        no_container: bool,
         /// Engine to launch: a binary name (claude, crush, opencode) or the
         /// underscore-form engine id (claude_code)
         engine: String,
@@ -614,9 +622,20 @@ pub fn run() -> anyhow::Result<()> {
             tag,
             compress,
             auto_restart,
+            container,
+            no_container,
             engine,
             args,
         }) => {
+            // clap's `conflicts_with` on `container` already rejects passing
+            // both flags, so exactly one of these two bools is ever true.
+            let container_override = if container {
+                Some(true)
+            } else if no_container {
+                Some(false)
+            } else {
+                None
+            };
             crate::launch::run(
                 &engine,
                 args,
@@ -625,6 +644,7 @@ pub fn run() -> anyhow::Result<()> {
                     tag,
                     compress,
                     auto_restart,
+                    container_override,
                 },
             )?;
         }
@@ -5558,6 +5578,7 @@ mod tests {
                 codebase_memory: vec![],
                 cd_guard: None,
                 launch_proxy: None,
+                sandbox: None,
             }),
             host,
             ..Config::default()
