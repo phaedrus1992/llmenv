@@ -81,6 +81,19 @@ fn first_credential_shaped_var(vars: &BTreeMap<String, String>) -> Option<&str> 
         .map(String::as_str)
 }
 
+/// Whether a sandboxed launch will actually bind-mount the host's running
+/// SSH agent into the container (#1687) — true exactly when
+/// `forward_ssh_agent` is enabled *and* a host `SSH_AUTH_SOCK` exists to
+/// mount. Split out so this is testable without mutating the process's real
+/// `SSH_AUTH_SOCK` env var, mirroring `sandbox::resolve_runtime_in_path_list`'s
+/// rationale for the same pattern.
+fn ssh_agent_will_be_mounted(
+    forward_ssh_agent: bool,
+    ssh_auth_sock: Option<&std::ffi::OsStr>,
+) -> bool {
+    forward_ssh_agent && ssh_auth_sock.is_some()
+}
+
 /// Appends `name: value` to `vars`'s `ANTHROPIC_CUSTOM_HEADERS` entry
 /// (newline-separated, per Claude Code's own format for that variable)
 /// rather than overwriting it — an existing value came from the user's own
@@ -204,6 +217,26 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
                 "llmenv: sandbox mode is active and '{var}' looks like a credential that \
                  will be forwarded into the container unsealed — icebreaker only seals \
                  ANTHROPIC_API_KEY, and only for Claude Code"
+            );
+        }
+
+        // #1687: the SSH-agent socket is a live signing oracle for the
+        // launching user's identity, not a reduced-privilege view of it —
+        // give the same launch-time notice #1669 gives an unsealed
+        // credential, rather than only documenting the exposure. Printed
+        // once here (not inside `supervision_loop`'s relaunch loop, which
+        // recomputes the same condition per attempt to decide the actual
+        // mount) so a crash-looping engine doesn't spam the notice.
+        if let Some(spec) = &sandbox_spec
+            && ssh_agent_will_be_mounted(
+                spec.forward_ssh_agent,
+                std::env::var_os("SSH_AUTH_SOCK").as_deref(),
+            )
+        {
+            eprintln!(
+                "llmenv: sandbox mode is active and forwarding the host's running SSH agent \
+                 (SSH_AUTH_SOCK) into the container as a live signing oracle for this identity \
+                 — set features.sandbox.forward_ssh_agent: false to opt out"
             );
         }
 
@@ -1056,6 +1089,29 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!spec.forward_ssh_agent);
+    }
+
+    // #1687: ssh_agent_will_be_mounted
+    #[test]
+    fn ssh_agent_will_be_mounted_when_forwarding_enabled_and_a_host_socket_exists() {
+        let sock = std::ffi::OsStr::new("/tmp/ssh-agent.sock");
+        assert!(ssh_agent_will_be_mounted(true, Some(sock)));
+    }
+
+    #[test]
+    fn ssh_agent_will_be_mounted_is_false_when_forwarding_disabled() {
+        let sock = std::ffi::OsStr::new("/tmp/ssh-agent.sock");
+        assert!(!ssh_agent_will_be_mounted(false, Some(sock)));
+    }
+
+    #[test]
+    fn ssh_agent_will_be_mounted_is_false_when_no_host_socket_exists() {
+        assert!(!ssh_agent_will_be_mounted(true, None));
+    }
+
+    #[test]
+    fn ssh_agent_will_be_mounted_is_false_when_neither_condition_holds() {
+        assert!(!ssh_agent_will_be_mounted(false, None));
     }
 
     #[test]
