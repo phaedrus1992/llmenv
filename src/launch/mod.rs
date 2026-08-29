@@ -46,17 +46,37 @@ impl RelaunchCap {
 
 /// Suffixes that mark an env var name as credential-shaped for the #1669
 /// heuristic — a variable icebreaker doesn't seal but is still likely to
-/// carry a live secret into the container as-is.
-const CREDENTIAL_VAR_SUFFIXES: &[&str] = &["_API_KEY", "_TOKEN", "_SECRET"];
+/// carry a live secret into the container as-is. Matched case-insensitively
+/// against the uppercased key, so a lowercase-convention var still matches.
+const CREDENTIAL_VAR_SUFFIXES: &[&str] = &[
+    "_API_KEY",
+    "_ACCESS_KEY",
+    "_TOKEN",
+    "_SECRET",
+    "_PASSWORD",
+    "_PASSWD",
+    "_PAT",
+    "_CREDENTIALS",
+    "_PRIVATE_KEY",
+];
+
+/// Bare (no-prefix) names that are themselves credential-shaped — a suffix
+/// check alone misses a var named exactly `TOKEN` or `SECRET`, with nothing
+/// preceding it for `_TOKEN`/`_SECRET` to match against.
+const CREDENTIAL_VAR_NAMES: &[&str] = &["TOKEN", "SECRET", "PASSWORD", "API_KEY"];
 
 /// The first key in `vars` that looks like it carries a credential (#1669),
 /// by name only — never inspects the value. `None` when nothing matches.
+/// This is a heuristic, not an exhaustive credential scanner: it names one
+/// example to alert on, not every match.
 fn first_credential_shaped_var(vars: &BTreeMap<String, String>) -> Option<&str> {
     vars.keys()
         .find(|key| {
+            let upper = key.to_ascii_uppercase();
             CREDENTIAL_VAR_SUFFIXES
                 .iter()
-                .any(|suffix| key.ends_with(suffix))
+                .any(|suffix| upper.ends_with(suffix))
+                || CREDENTIAL_VAR_NAMES.contains(&upper.as_str())
         })
         .map(String::as_str)
 }
@@ -168,21 +188,22 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
         };
         let container_vars = icebreaker_session.as_ref().map(|s| &s.container_vars);
 
-        // #1669: icebreaker only seals a credential for Claude Code — any
-        // other engine still gets a raw credential-shaped var forwarded into
-        // the container as-is (via the env-file, not argv, so it isn't
-        // world-readable, but the container itself gets the real value with
-        // no sealing). Warn so this doesn't silently undercut sandbox mode's
-        // credential-containment pitch for a user who doesn't read the fine
-        // print.
+        // #1669: icebreaker only seals `ANTHROPIC_API_KEY` — any other
+        // credential-shaped var (present regardless of engine, and still
+        // present in `container_vars` even for a sealed Claude Code session)
+        // is forwarded into the container as-is (via the env-file, not argv,
+        // so it isn't world-readable, but the container itself gets the real
+        // value with no sealing). Check the vars actually written to the
+        // container, not just whether an icebreaker session exists — a
+        // session sealing `ANTHROPIC_API_KEY` says nothing about any other
+        // credential-shaped var riding alongside it.
         if sandbox_spec.is_some()
-            && icebreaker_session.is_none()
-            && let Some(var) = first_credential_shaped_var(&resolved.vars)
+            && let Some(var) = first_credential_shaped_var(container_vars.unwrap_or(&resolved.vars))
         {
             eprintln!(
-                "llmenv: sandbox mode is active and '{var}' looks like a credential, but \
-                 icebreaker only seals credentials for Claude Code — {engine} will receive \
-                 the raw value unsealed inside the container"
+                "llmenv: sandbox mode is active and '{var}' looks like a credential that \
+                 will be forwarded into the container unsealed — icebreaker only seals \
+                 ANTHROPIC_API_KEY, and only for Claude Code"
             );
         }
 
@@ -823,6 +844,30 @@ mod tests {
         assert_eq!(first_credential_shaped_var(&BTreeMap::new()), None);
     }
 
+    #[test]
+    fn first_credential_shaped_var_finds_an_access_key_suffix() {
+        let mut vars = BTreeMap::new();
+        vars.insert("AWS_SECRET_ACCESS_KEY".to_string(), "abc".to_string());
+        assert_eq!(
+            first_credential_shaped_var(&vars),
+            Some("AWS_SECRET_ACCESS_KEY")
+        );
+    }
+
+    #[test]
+    fn first_credential_shaped_var_finds_a_bare_credential_name() {
+        let mut vars = BTreeMap::new();
+        vars.insert("TOKEN".to_string(), "abc".to_string());
+        assert_eq!(first_credential_shaped_var(&vars), Some("TOKEN"));
+    }
+
+    #[test]
+    fn first_credential_shaped_var_matches_case_insensitively() {
+        let mut vars = BTreeMap::new();
+        vars.insert("openai_api_key".to_string(), "sk-abc".to_string());
+        assert_eq!(first_credential_shaped_var(&vars), Some("openai_api_key"));
+    }
+
     proptest::proptest! {
         #[test]
         fn prop_first_credential_shaped_var_matches_only_configured_suffixes(
@@ -841,7 +886,8 @@ mod tests {
             key in "[A-Z_]{1,15}",
         ) {
             let has_suffix = CREDENTIAL_VAR_SUFFIXES.iter().any(|s| key.ends_with(s));
-            proptest::prop_assume!(!has_suffix);
+            let is_bare_name = CREDENTIAL_VAR_NAMES.contains(&key.as_str());
+            proptest::prop_assume!(!has_suffix && !is_bare_name);
             let mut vars = BTreeMap::new();
             vars.insert(key, "value".to_string());
             proptest::prop_assert_eq!(first_credential_shaped_var(&vars), None);
