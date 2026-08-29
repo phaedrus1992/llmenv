@@ -81,6 +81,26 @@ fn first_credential_shaped_var(vars: &BTreeMap<String, String>) -> Option<&str> 
         .map(String::as_str)
 }
 
+/// Resolves whether — and to what — a sandboxed launch's host `SSH_AUTH_SOCK`
+/// should be mounted (#1671/#1687): `Some` only when `forward_ssh_agent` is
+/// enabled *and* the launching shell has an agent socket running.
+///
+/// Resolved once, outside `supervision_loop`'s relaunch loop, so every
+/// relaunch attempt sees the exact value the launch-time notice was computed
+/// from — recomputing per attempt let the notice and the actual mount
+/// silently drift apart if `SSH_AUTH_SOCK` changed mid-session (flagged by
+/// #1687's pre-pr-review). Split out so this is testable without mutating
+/// the process's real `SSH_AUTH_SOCK` env var, mirroring
+/// `sandbox::resolve_runtime_in_path_list`'s rationale for the same pattern.
+fn resolve_ssh_auth_sock(
+    forward_ssh_agent: bool,
+    ssh_auth_sock_var: Option<&std::ffi::OsStr>,
+) -> Option<std::path::PathBuf> {
+    forward_ssh_agent
+        .then(|| ssh_auth_sock_var.map(std::path::PathBuf::from))
+        .flatten()
+}
+
 /// Appends `name: value` to `vars`'s `ANTHROPIC_CUSTOM_HEADERS` entry
 /// (newline-separated, per Claude Code's own format for that variable)
 /// rather than overwriting it — an existing value came from the user's own
@@ -146,6 +166,24 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
     let mut resolved = crate::cli::resolve_env(narrow.scope, narrow.tag, narrow.compress)?;
     let config_path = crate::paths::config_path()?;
     let sandbox_spec = resolve_sandbox_spec(&config_path, narrow.container_override)?;
+    let ssh_auth_sock = sandbox_spec.as_ref().and_then(|spec| {
+        resolve_ssh_auth_sock(
+            spec.forward_ssh_agent,
+            std::env::var_os("SSH_AUTH_SOCK").as_deref(),
+        )
+    });
+    // #1687: the SSH-agent socket is a live signing oracle for the launching
+    // user's identity, not a reduced-privilege view of it — give the same
+    // launch-time notice #1669 gives an unsealed credential, rather than only
+    // documenting the exposure.
+    if ssh_auth_sock.is_some() {
+        eprintln!(
+            "llmenv: sandbox mode is active. It will mount the host's SSH agent socket \
+             (SSH_AUTH_SOCK) into the container. This gives the container full access to \
+             sign with your SSH identity. Set features.sandbox.forward_ssh_agent to false \
+             to turn this off."
+        );
+    }
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -345,6 +383,7 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
                 args: &args,
                 sandbox: sandbox_spec.as_ref(),
                 container_vars,
+                ssh_auth_sock: ssh_auth_sock.as_deref(),
             },
             &resolved,
             notice_socket,
@@ -390,6 +429,11 @@ struct EngineTarget<'a> {
     /// falls back to the ordinary resolved vars otherwise. Unused when
     /// `sandbox` is `None`.
     container_vars: Option<&'a BTreeMap<String, String>>,
+    /// Host `SSH_AUTH_SOCK` to bind-mount into the container, resolved once
+    /// by [`resolve_ssh_auth_sock`] before this struct is built (#1687) —
+    /// the same value the launch-time notice was computed from. Unused when
+    /// `sandbox` is `None`.
+    ssh_auth_sock: Option<&'a std::path::Path>,
 }
 
 /// Decide whether `narrow`'s launch runs sandboxed, and if so, resolve the
@@ -491,6 +535,7 @@ async fn supervision_loop(
         args,
         sandbox,
         container_vars,
+        ssh_auth_sock,
     } = target;
     let mut cap = RelaunchCap::default();
 
@@ -503,14 +548,6 @@ async fn supervision_loop(
             Some(spec) => {
                 let project_dir = std::env::current_dir()
                     .context("resolving the project directory to mount into the sandbox")?;
-                // #1671: an explicit opt-out means the sandbox never sees the
-                // host's SSH-agent socket, even when one is running — the
-                // socket is a live signing oracle for that identity, not a
-                // reduced-privilege view of it.
-                let ssh_auth_sock = spec
-                    .forward_ssh_agent
-                    .then(|| std::env::var_os("SSH_AUTH_SOCK").map(std::path::PathBuf::from))
-                    .flatten();
                 let (cmd, guard) = sandbox::container_command(
                     spec,
                     sandbox::ContainerInputs {
@@ -518,7 +555,7 @@ async fn supervision_loop(
                         args,
                         vars: container_vars.unwrap_or(&resolved.vars),
                         project_dir: &project_dir,
-                        ssh_auth_sock: ssh_auth_sock.as_deref(),
+                        ssh_auth_sock,
                     },
                 )?;
                 (cmd, Some(guard))
@@ -1056,6 +1093,32 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!spec.forward_ssh_agent);
+    }
+
+    // #1687: resolve_ssh_auth_sock
+    #[test]
+    fn resolve_ssh_auth_sock_returns_the_socket_when_forwarding_enabled_and_a_host_socket_exists() {
+        let sock = std::ffi::OsStr::new("/tmp/ssh-agent.sock");
+        assert_eq!(
+            resolve_ssh_auth_sock(true, Some(sock)),
+            Some(std::path::PathBuf::from("/tmp/ssh-agent.sock"))
+        );
+    }
+
+    #[test]
+    fn resolve_ssh_auth_sock_is_none_when_forwarding_disabled() {
+        let sock = std::ffi::OsStr::new("/tmp/ssh-agent.sock");
+        assert_eq!(resolve_ssh_auth_sock(false, Some(sock)), None);
+    }
+
+    #[test]
+    fn resolve_ssh_auth_sock_is_none_when_no_host_socket_exists() {
+        assert_eq!(resolve_ssh_auth_sock(true, None), None);
+    }
+
+    #[test]
+    fn resolve_ssh_auth_sock_is_none_when_neither_condition_holds() {
+        assert_eq!(resolve_ssh_auth_sock(false, None), None);
     }
 
     #[test]
