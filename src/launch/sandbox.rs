@@ -81,12 +81,12 @@ pub(crate) struct SandboxSpec {
 
 /// In-container path the project tree is mounted at (#1650) — the
 /// devcontainer convention the design doc calls out.
-pub(crate) const WORKSPACE_PATH: &str = "/workspace";
+const WORKSPACE_PATH: &str = "/workspace";
 
 /// In-container path the host's `SSH_AUTH_SOCK` is mounted at (#1650), when
 /// present. Namespaced under `llmenv-` so it can't collide with a path the
 /// image itself already uses.
-pub(crate) const SSH_AUTH_SOCK_PATH: &str = "/run/llmenv-ssh-agent.sock";
+const SSH_AUTH_SOCK_PATH: &str = "/run/llmenv-ssh-agent.sock";
 
 /// Everything [`container_command`] needs besides the resolved
 /// [`SandboxSpec`] — bundled so the function stays inside the
