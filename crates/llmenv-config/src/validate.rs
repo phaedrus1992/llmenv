@@ -213,6 +213,12 @@ pub enum ValidateError {
     HookCommandMissingCommand { event: String },
     #[error("hook '{event}' has type: mcp_tool but no tool")]
     HookMcpToolMissingTool { event: String },
+    #[error("features.sandbox.image is blank")]
+    SandboxImageBlank,
+    #[error(
+        "features.sandbox.image '{0}' starts with '-', which a container engine would parse as a flag rather than an image reference"
+    )]
+    SandboxImageLooksLikeFlag(String),
 }
 
 /// A state-tool subdir must be a single safe path component: non-empty, not
@@ -501,6 +507,25 @@ impl Config {
         self.validate_state()?;
         self.validate_permissions()?;
         self.validate_launch_proxy()?;
+        self.validate_sandbox()?;
+        Ok(())
+    }
+
+    fn validate_sandbox(&self) -> Result<(), ValidateError> {
+        let Some(image) = self
+            .features
+            .as_ref()
+            .and_then(|f| f.sandbox.as_ref())
+            .and_then(|s| s.image.as_ref())
+        else {
+            return Ok(());
+        };
+        if image.trim().is_empty() {
+            return Err(ValidateError::SandboxImageBlank);
+        }
+        if image.starts_with('-') {
+            return Err(ValidateError::SandboxImageLooksLikeFlag(image.clone()));
+        }
         Ok(())
     }
 
@@ -1521,6 +1546,7 @@ mod tests {
                                 codebase_memory,
                                 cd_guard: None,
                                 launch_proxy: None,
+                                sandbox: None,
                             })
                         },
                         marketplace,
@@ -1882,6 +1908,7 @@ mod tests {
                 codebase_memory: vec![],
                 cd_guard: None,
                 launch_proxy: None,
+                sandbox: None,
             }),
             marketplace: vec![],
             plugin_collection: vec![],
@@ -1952,6 +1979,7 @@ mod tests {
                 codebase_memory: vec![],
                 cd_guard: None,
                 launch_proxy: None,
+                sandbox: None,
             }),
             marketplace: vec![],
             plugin_collection: vec![],
@@ -2089,6 +2117,7 @@ mod tests {
                 codebase_memory,
                 cd_guard: None,
                 launch_proxy: None,
+                sandbox: None,
             }),
             marketplace: vec![],
             plugin_collection: vec![],
@@ -4395,6 +4424,72 @@ mod tests {
             ..Default::default()
         };
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_well_formed_sandbox() {
+        let cfg = Config {
+            features: Some(Features {
+                sandbox: Some(crate::Sandbox {
+                    enabled: true,
+                    runtime: crate::SandboxRuntime::Auto,
+                    image: Some("registry.example.com/sandbox:latest".to_string()),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_sandbox_with_no_image() {
+        let cfg = Config {
+            features: Some(Features {
+                sandbox: Some(crate::Sandbox::default()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_blank_sandbox_image() {
+        let cfg = Config {
+            features: Some(Features {
+                sandbox: Some(crate::Sandbox {
+                    enabled: true,
+                    runtime: crate::SandboxRuntime::Auto,
+                    image: Some("   ".to_string()),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::SandboxImageBlank)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_sandbox_image_starting_with_dash() {
+        let cfg = Config {
+            features: Some(Features {
+                sandbox: Some(crate::Sandbox {
+                    enabled: true,
+                    runtime: crate::SandboxRuntime::Auto,
+                    image: Some("--privileged".to_string()),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(matches!(
+            cfg.validate(),
+            Err(ValidateError::SandboxImageLooksLikeFlag(_))
+        ));
     }
 
     #[test]

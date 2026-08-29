@@ -243,6 +243,88 @@ reaches every descendant, not a chosen subset. And on Linux,
 attacker who locates the engine's pid can still read the token from there
 directly.
 
+### Sandbox (`features.sandbox`)
+
+(added in v4.0.0)
+
+`llmenv launch <engine>` can run the engine in a container instead of
+directly on the host, so a bad delete, a force-push, or an exfiltrated
+token lands in a throwaway container rather than on your machine. This
+first cut covers the core exec path — config, container spawn, mounts, and
+(Claude Code) credential protection; a published default image, `llmenv
+doctor` checks, and further docs are still to come
+([#1653](https://github.com/phaedrus1992/llmenv/issues/1653),
+[#1654](https://github.com/phaedrus1992/llmenv/issues/1654)).
+
+Enable it in `config.yaml`, off by default:
+
+```yaml
+features:
+  sandbox:
+    enabled: false        # opt-in
+    runtime: auto          # auto | docker | podman
+    image: null            # required today — see below
+```
+
+`runtime: auto` probes `PATH` for `podman` first, then `docker`; `docker`/
+`podman` force one. `--container`/`--no-container` on `llmenv launch`
+override `features.sandbox.enabled` for one invocation without touching
+config:
+
+```text
+llmenv launch --container claude
+```
+
+**`image` must be set explicitly for now.** llmenv doesn't yet publish its
+own default sandbox image ([#1653](https://github.com/phaedrus1992/llmenv/issues/1653)) —
+until it does, sandbox mode needs a user-supplied image with the target
+engine binary already on its own `PATH`; llmenv does not copy the host's
+engine binary into the container in this cut.
+
+When active, `launch` runs `<runtime> run --rm <image> <engine> <args>`
+(wrapped by the same crash/restart supervision as a host launch) with:
+
+- The project tree (the launching directory) bind-mounted read-write at
+  `/workspace`, set as the container's working directory.
+- `SSH_AUTH_SOCK` bind-mounted read-only, when the host has one running, so
+  the container never holds the private key file itself. This still hands the
+  container a live signing oracle for that SSH identity — anything the key
+  could sign (pushing to any repo it has access to, authenticating to any host
+  that trusts it), not a scoped-down view of it. Treat sandbox mode as
+  isolating the *filesystem and host process*, not the reach of an already-
+  running SSH agent.
+- The resolved/materialized environment written to an owner-only temp file
+  and passed via `--env-file` (not `-e KEY=VALUE`, which would put every
+  value — including a sealed credential — into `docker`/`podman`'s own argv,
+  readable by any local user via `/proc/<pid>/cmdline`) — not a live mount of
+  `~/.config/llmenv`, so the container gets the already-resolved result, never
+  the source config tree.
+- Baseline hardening on the `run` invocation: `--cap-drop=ALL`,
+  `--security-opt=no-new-privileges`, and `--user <uid>:<gid>` (plus
+  `--userns=keep-id` on podman) so the container runs as the launching user
+  rather than the image's default (often root), and files it creates in
+  `/workspace` land owned by that user on the host.
+
+**Credential protection (Claude Code, API-key auth only).** If
+`ANTHROPIC_API_KEY` is present in the resolved environment, `launch` spawns
+[icebreaker](https://github.com/windowlickers/icebreaker) (a sealed-token
+proxy) as a host subprocess for the session, seals the raw key into a
+short-lived token, and gives the container a sealed token plus a local
+proxy address instead of the key itself — the container never holds the raw
+credential. This needs `icebreaker` on `PATH`; sandbox mode fails to start
+rather than launch with no or an unsealed credential when a key is present
+and `icebreaker` is missing. An OAuth-authenticated Claude Code session
+isn't covered yet — the cached credential is a local file, not an env var
+([#1662](https://github.com/phaedrus1992/llmenv/issues/1662)). A non-Claude-
+Code engine gets any raw credential in the resolved environment forwarded
+into the container as-is, with no sealing
+([#1669](https://github.com/phaedrus1992/llmenv/issues/1669)).
+
+`features.sandbox` and `features.launch_proxy` cannot both be enabled for the
+same Claude Code launch yet — icebreaker's proxy already owns the container's
+outbound traffic, so `launch_proxy`'s rewrite rules would never apply.
+`launch` fails fast naming both features rather than silently picking one.
+
 ## `regenerate`
 
 ```text

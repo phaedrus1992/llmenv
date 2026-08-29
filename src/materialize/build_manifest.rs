@@ -385,6 +385,7 @@ fn fold_root_features(
         task_tracker,
         cd_guard,
         launch_proxy,
+        sandbox,
     } = root.clone();
     let mut out = merged.unwrap_or_default();
 
@@ -401,6 +402,7 @@ fn fold_root_features(
     out.task_tracker = task_tracker.or(out.task_tracker);
     out.cd_guard = cd_guard.or(out.cd_guard);
     out.launch_proxy = launch_proxy.or(out.launch_proxy);
+    out.sandbox = sandbox.or(out.sandbox);
 
     Some(out)
 }
