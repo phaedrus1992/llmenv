@@ -261,9 +261,10 @@ Enable it in `config.yaml`, off by default:
 ```yaml
 features:
   sandbox:
-    enabled: false        # opt-in
-    runtime: auto          # auto | docker | podman
-    image: null            # required today — see below
+    enabled: false            # opt-in
+    runtime: auto              # auto | docker | podman
+    image: null                # required today — see below
+    forward_ssh_agent: true    # (added in v4.0.0) bind-mount SSH_AUTH_SOCK in
 ```
 
 `runtime: auto` probes `PATH` for `podman` first, then `docker`; `docker`/
@@ -292,7 +293,9 @@ When active, `launch` runs `<runtime> run --rm <image> <engine> <args>`
   could sign (pushing to any repo it has access to, authenticating to any host
   that trusts it), not a scoped-down view of it. Treat sandbox mode as
   isolating the *filesystem and host process*, not the reach of an already-
-  running SSH agent.
+  running SSH agent. Set `features.sandbox.forward_ssh_agent: false` to skip
+  this mount entirely and keep the filesystem/host isolation without the SSH
+  reach (added in v4.0.0).
 - The resolved/materialized environment written to an owner-only temp file
   and passed via `--env-file` (not `-e KEY=VALUE`, which would put every
   value — including a sealed credential — into `docker`/`podman`'s own argv,
@@ -316,9 +319,10 @@ rather than launch with no or an unsealed credential when a key is present
 and `icebreaker` is missing. An OAuth-authenticated Claude Code session
 isn't covered yet — the cached credential is a local file, not an env var
 ([#1662](https://github.com/phaedrus1992/llmenv/issues/1662)). A non-Claude-
-Code engine gets any raw credential in the resolved environment forwarded
-into the container as-is, with no sealing
-([#1669](https://github.com/phaedrus1992/llmenv/issues/1669)).
+Code engine still gets any raw credential in the resolved environment
+forwarded into the container as-is, with no sealing — `launch` warns on
+stderr when this happens (added in v4.0.0), naming the credential-shaped
+variable so the gap isn't silent.
 
 `features.sandbox` and `features.launch_proxy` cannot both be enabled for the
 same Claude Code launch yet — icebreaker's proxy already owns the container's

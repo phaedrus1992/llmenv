@@ -1153,7 +1153,7 @@ pub struct LaunchProxy {
 /// instead of directly on the host. Off by default — this changes the
 /// process the engine runs as, unlike `repeat_detect`/`cd_guard`'s
 /// lower-stakes on-by-default guardrails.
-#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Sandbox {
     #[serde(default)]
@@ -1165,6 +1165,28 @@ pub struct Sandbox {
     /// sandbox mode requires the user to supply their own image here.
     #[serde(default)]
     pub image: Option<String>,
+    /// Bind-mount the host's `SSH_AUTH_SOCK` into the container when one is
+    /// running (#1671). Defaults to `true`, matching the accepted design and
+    /// today's unconditional behavior — set to `false` to keep the sandbox's
+    /// filesystem/host isolation without also handing the container a live
+    /// SSH-agent signing oracle.
+    #[serde(default = "default_forward_ssh_agent")]
+    pub forward_ssh_agent: bool,
+}
+
+impl Default for Sandbox {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            runtime: SandboxRuntime::default(),
+            image: None,
+            forward_ssh_agent: default_forward_ssh_agent(),
+        }
+    }
+}
+
+const fn default_forward_ssh_agent() -> bool {
+    true
 }
 
 /// Which container engine [`Sandbox`] uses. `Auto` probes `PATH` for `podman`
@@ -2821,6 +2843,7 @@ rules:
 enabled: true
 runtime: podman
 image: "registry.example.com/llmenv/sandbox:latest"
+forward_ssh_agent: false
 "#;
         let parsed: Sandbox = serde_yaml::from_str(yaml).unwrap();
         assert!(parsed.enabled);
@@ -2829,6 +2852,7 @@ image: "registry.example.com/llmenv/sandbox:latest"
             parsed.image.as_deref(),
             Some("registry.example.com/llmenv/sandbox:latest")
         );
+        assert!(!parsed.forward_ssh_agent);
     }
 
     #[test]
@@ -2837,6 +2861,21 @@ image: "registry.example.com/llmenv/sandbox:latest"
         assert!(!parsed.enabled);
         assert_eq!(parsed.runtime, SandboxRuntime::Auto);
         assert_eq!(parsed.image, None);
+        assert!(parsed.forward_ssh_agent);
+    }
+
+    // #1671: forward_ssh_agent opt-out
+    #[test]
+    fn sandbox_forward_ssh_agent_defaults_true_when_field_absent() {
+        let parsed: Sandbox = serde_yaml::from_str("enabled: true\n").unwrap();
+        assert!(parsed.forward_ssh_agent);
+    }
+
+    #[test]
+    fn sandbox_forward_ssh_agent_respects_explicit_false() {
+        let parsed: Sandbox =
+            serde_yaml::from_str("enabled: true\nforward_ssh_agent: false\n").unwrap();
+        assert!(!parsed.forward_ssh_agent);
     }
 
     #[test]
@@ -2874,8 +2913,9 @@ image: "registry.example.com/llmenv/sandbox:latest"
             enabled in proptest::bool::ANY,
             runtime in arbitrary_sandbox_runtime_strategy(),
             image in proptest::option::of("[a-z0-9./:-]{0,40}"),
+            forward_ssh_agent in proptest::bool::ANY,
         ) {
-            let original = Sandbox { enabled, runtime, image };
+            let original = Sandbox { enabled, runtime, image, forward_ssh_agent };
             let json = serde_json::to_string(&original).unwrap();
             let back: Sandbox = serde_json::from_str(&json).unwrap();
             prop_assert_eq!(&original, &back);

@@ -80,6 +80,10 @@ pub(crate) fn requested_binaries(configured: &SandboxRuntime) -> &'static str {
 pub(crate) struct SandboxSpec {
     pub(crate) runtime: ContainerRuntime,
     pub(crate) image: String,
+    /// Mirrors `llmenv_config::Sandbox::forward_ssh_agent` (#1671) — whether
+    /// the caller should forward the host's `SSH_AUTH_SOCK` into the
+    /// container at all.
+    pub(crate) forward_ssh_agent: bool,
 }
 
 /// In-container path the project tree is mounted at (#1650) — the
@@ -339,6 +343,7 @@ mod tests {
         let spec = SandboxSpec {
             runtime: ContainerRuntime::Podman,
             image: "registry.example.com/sandbox:latest".to_string(),
+            forward_ssh_agent: true,
         };
         let args = vec!["--foo".to_string(), "bar".to_string()];
         let vars = BTreeMap::new();
@@ -381,6 +386,7 @@ mod tests {
         let spec = SandboxSpec {
             runtime: ContainerRuntime::Docker,
             image: "img".to_string(),
+            forward_ssh_agent: true,
         };
         let args = Vec::new();
         let vars = BTreeMap::new();
@@ -412,6 +418,7 @@ mod tests {
         let spec = SandboxSpec {
             runtime: ContainerRuntime::Docker,
             image: "img".to_string(),
+            forward_ssh_agent: true,
         };
         let args = Vec::new();
         let mut vars = BTreeMap::new();
@@ -482,6 +489,7 @@ mod tests {
             let spec = SandboxSpec {
                 runtime: ContainerRuntime::Docker,
                 image: image.clone(),
+                forward_ssh_agent: true,
             };
             let project_dir = std::path::Path::new("/proj");
             let (cmd, _guard) = container_command(

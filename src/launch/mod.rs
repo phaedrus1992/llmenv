@@ -44,6 +44,23 @@ impl RelaunchCap {
     }
 }
 
+/// Suffixes that mark an env var name as credential-shaped for the #1669
+/// heuristic — a variable icebreaker doesn't seal but is still likely to
+/// carry a live secret into the container as-is.
+const CREDENTIAL_VAR_SUFFIXES: &[&str] = &["_API_KEY", "_TOKEN", "_SECRET"];
+
+/// The first key in `vars` that looks like it carries a credential (#1669),
+/// by name only — never inspects the value. `None` when nothing matches.
+fn first_credential_shaped_var(vars: &BTreeMap<String, String>) -> Option<&str> {
+    vars.keys()
+        .find(|key| {
+            CREDENTIAL_VAR_SUFFIXES
+                .iter()
+                .any(|suffix| key.ends_with(suffix))
+        })
+        .map(String::as_str)
+}
+
 /// Appends `name: value` to `vars`'s `ANTHROPIC_CUSTOM_HEADERS` entry
 /// (newline-separated, per Claude Code's own format for that variable)
 /// rather than overwriting it — an existing value came from the user's own
@@ -150,6 +167,24 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
             None
         };
         let container_vars = icebreaker_session.as_ref().map(|s| &s.container_vars);
+
+        // #1669: icebreaker only seals a credential for Claude Code — any
+        // other engine still gets a raw credential-shaped var forwarded into
+        // the container as-is (via the env-file, not argv, so it isn't
+        // world-readable, but the container itself gets the real value with
+        // no sealing). Warn so this doesn't silently undercut sandbox mode's
+        // credential-containment pitch for a user who doesn't read the fine
+        // print.
+        if sandbox_spec.is_some()
+            && icebreaker_session.is_none()
+            && let Some(var) = first_credential_shaped_var(&resolved.vars)
+        {
+            eprintln!(
+                "llmenv: sandbox mode is active and '{var}' looks like a credential, but \
+                 icebreaker only seals credentials for Claude Code — {engine} will receive \
+                 the raw value unsealed inside the container"
+            );
+        }
 
         // A container using icebreaker's sealed-token proxy has its outbound
         // traffic routed there directly (see `icebreaker.rs`'s module doc
@@ -404,7 +439,11 @@ fn build_sandbox_spec(
              an image must be configured explicitly"
         );
     };
-    Ok(Some(sandbox::SandboxSpec { runtime, image }))
+    Ok(Some(sandbox::SandboxSpec {
+        runtime,
+        image,
+        forward_ssh_agent: sandbox_config.forward_ssh_agent,
+    }))
 }
 
 /// The mid-session notice socket's path and shared secret (#1484), bundled
@@ -443,7 +482,14 @@ async fn supervision_loop(
             Some(spec) => {
                 let project_dir = std::env::current_dir()
                     .context("resolving the project directory to mount into the sandbox")?;
-                let ssh_auth_sock = std::env::var_os("SSH_AUTH_SOCK").map(std::path::PathBuf::from);
+                // #1671: an explicit opt-out means the sandbox never sees the
+                // host's SSH-agent socket, even when one is running — the
+                // socket is a live signing oracle for that identity, not a
+                // reduced-privilege view of it.
+                let ssh_auth_sock = spec
+                    .forward_ssh_agent
+                    .then(|| std::env::var_os("SSH_AUTH_SOCK").map(std::path::PathBuf::from))
+                    .flatten();
                 let (cmd, guard) = sandbox::container_command(
                     spec,
                     sandbox::ContainerInputs {
@@ -742,6 +788,66 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    // #1669: first_credential_shaped_var
+    #[test]
+    fn first_credential_shaped_var_finds_an_api_key_suffix() {
+        let mut vars = BTreeMap::new();
+        vars.insert("OPENAI_API_KEY".to_string(), "sk-abc".to_string());
+        assert_eq!(first_credential_shaped_var(&vars), Some("OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn first_credential_shaped_var_finds_a_token_suffix() {
+        let mut vars = BTreeMap::new();
+        vars.insert("GH_TOKEN".to_string(), "ghp_abc".to_string());
+        assert_eq!(first_credential_shaped_var(&vars), Some("GH_TOKEN"));
+    }
+
+    #[test]
+    fn first_credential_shaped_var_finds_a_secret_suffix() {
+        let mut vars = BTreeMap::new();
+        vars.insert("CLIENT_SECRET".to_string(), "shh".to_string());
+        assert_eq!(first_credential_shaped_var(&vars), Some("CLIENT_SECRET"));
+    }
+
+    #[test]
+    fn first_credential_shaped_var_returns_none_when_nothing_matches() {
+        let mut vars = BTreeMap::new();
+        vars.insert("PATH".to_string(), "/usr/bin".to_string());
+        vars.insert("EDITOR".to_string(), "vim".to_string());
+        assert_eq!(first_credential_shaped_var(&vars), None);
+    }
+
+    #[test]
+    fn first_credential_shaped_var_returns_none_for_empty_vars() {
+        assert_eq!(first_credential_shaped_var(&BTreeMap::new()), None);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn prop_first_credential_shaped_var_matches_only_configured_suffixes(
+            prefix in "[A-Z_]{0,10}",
+            suffix_idx in 0..CREDENTIAL_VAR_SUFFIXES.len(),
+            value in ".{0,10}",
+        ) {
+            let key = format!("{prefix}{}", CREDENTIAL_VAR_SUFFIXES[suffix_idx]);
+            let mut vars = BTreeMap::new();
+            vars.insert(key.clone(), value);
+            proptest::prop_assert_eq!(first_credential_shaped_var(&vars), Some(key.as_str()));
+        }
+
+        #[test]
+        fn prop_first_credential_shaped_var_ignores_names_with_no_matching_suffix(
+            key in "[A-Z_]{1,15}",
+        ) {
+            let has_suffix = CREDENTIAL_VAR_SUFFIXES.iter().any(|s| key.ends_with(s));
+            proptest::prop_assume!(!has_suffix);
+            let mut vars = BTreeMap::new();
+            vars.insert(key, "value".to_string());
+            proptest::prop_assert_eq!(first_credential_shaped_var(&vars), None);
+        }
+    }
+
     #[test]
     fn append_custom_header_inserts_a_fresh_entry_when_absent() {
         let mut vars = BTreeMap::new();
@@ -869,6 +975,7 @@ mod tests {
             enabled: true,
             runtime: SandboxRuntime::Auto,
             image: Some("img".to_string()),
+            ..Default::default()
         };
         let result = build_sandbox_spec(Some(config), Some(false), always_podman).unwrap();
         assert!(result.is_none());
@@ -880,12 +987,29 @@ mod tests {
             enabled: true,
             runtime: SandboxRuntime::Auto,
             image: Some("registry.example.com/img:latest".to_string()),
+            ..Default::default()
         };
         let spec = build_sandbox_spec(Some(config), None, always_podman)
             .unwrap()
             .unwrap();
         assert_eq!(spec.runtime, sandbox::ContainerRuntime::Podman);
         assert_eq!(spec.image, "registry.example.com/img:latest");
+        assert!(spec.forward_ssh_agent);
+    }
+
+    // #1671: forward_ssh_agent opt-out plumbs through to the resolved spec.
+    #[test]
+    fn build_sandbox_spec_carries_forward_ssh_agent_opt_out_from_config() {
+        let config = Sandbox {
+            enabled: true,
+            runtime: SandboxRuntime::Auto,
+            image: Some("img".to_string()),
+            forward_ssh_agent: false,
+        };
+        let spec = build_sandbox_spec(Some(config), None, always_podman)
+            .unwrap()
+            .unwrap();
+        assert!(!spec.forward_ssh_agent);
     }
 
     #[test]
@@ -900,6 +1024,7 @@ mod tests {
             enabled: true,
             runtime: SandboxRuntime::Docker,
             image: Some("img".to_string()),
+            ..Default::default()
         };
         let err = build_sandbox_spec(Some(config), None, never_found).unwrap_err();
         assert!(err.to_string().contains("docker"));
@@ -917,6 +1042,7 @@ mod tests {
                 enabled: configured_enabled,
                 runtime: SandboxRuntime::Auto,
                 image: image_present.then(|| "img".to_string()),
+                ..Default::default()
             };
             let resolver = move |_: &SandboxRuntime| {
                 runtime_found.then_some(sandbox::ContainerRuntime::Podman)
