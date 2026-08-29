@@ -44,14 +44,24 @@ jobs:
     # #1524 closed with that evidence; see test_1504_direct_push_never_
     # attempted_with_pat_set in __tests__/forward-merge-release-guards.sh.
     #
-    # #1675: the second half of the OR admits only a merged PR whose head is
-    # one of this workflow's own forward-merge/* staging branches — never an
-    # arbitrary closed PR.
+    # #1675: the second half of the OR admits only a merged, same-repo PR
+    # whose head is one of this workflow's own forward-merge/* staging
+    # branches, opened against a release/main target — never an arbitrary
+    # closed PR, and never a fork PR that merely names its own branch to
+    # match the prefix. A fork PR can't reach this job's write permissions
+    # or FORWARD_MERGE_PAT today regardless (this is `pull_request`, not
+    # `pull_request_target`, so GitHub itself withholds both from a
+    # fork-headed run) — the repo/base check is defense in depth against
+    # that platform default ever being loosened, not the only thing
+    # stopping it.
     if: >-
       github.actor != 'github-actions[bot]' &&
       (github.event_name == 'push' ||
        (github.event.pull_request.merged == true &&
-        startsWith(github.event.pull_request.head.ref, 'forward-merge/')))
+        startsWith(github.event.pull_request.head.ref, 'forward-merge/') &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        (startsWith(github.event.pull_request.base.ref, 'release/') ||
+         github.event.pull_request.base.ref == 'main')))
     permissions:
       contents: write
       pull-requests: write
@@ -65,6 +75,19 @@ jobs:
       # to split on because neither a release branch nor `main` ever
       # contains one. Re-check out that source so the rest of this job runs
       # unchanged, exactly as if it had just been pushed again.
+      #
+      # The parsed result feeds straight into the next step's `ref:` input,
+      # so it must never reach actions/checkout unvalidated: an empty or
+      # malformed parse (a head ref that passes the job-level prefix check
+      # above but isn't shaped forward-merge/<source>-to-<target> — no
+      # separator, more than one, or nothing either side of it) is not a
+      # theoretical case to shrug off. actions/checkout treats an empty
+      # `ref:` as unset and falls back to the triggering event's own ref,
+      # which for a closed pull_request is its *base* branch — so the job
+      # would silently check out and, if that base happens to be a real
+      # release/X.x line, run the whole cascade against the wrong branch
+      # with no error anywhere. Validate against the only two shapes a real
+      # cascade source ever has and fail loudly on anything else.
       - name: Determine source branch
         id: source
         env:
@@ -78,6 +101,10 @@ jobs:
           else
             rest="${PR_HEAD_REF#forward-merge/}"
             source_branch="${rest%-to-*}"
+            if [[ ! "$source_branch" =~ ^(release/[0-9]+\.x|main)$ ]]; then
+              echo "::error::could not parse a valid source branch out of forward-merge PR head ref '$PR_HEAD_REF' (expected forward-merge/<source>-to-<target>, source one of release/X.x or main)"
+              exit 1
+            fi
             echo "ref=$source_branch" >> "$GITHUB_OUTPUT"
           fi
 
