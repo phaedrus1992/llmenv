@@ -169,6 +169,9 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     let launch_proxy = highest_precedence(contributors, "launch_proxy", |c| {
         c.features.as_ref()?.launch_proxy.as_ref()
     })?;
+    let sandbox = highest_precedence(contributors, "sandbox", |c| {
+        c.features.as_ref()?.sandbox.as_ref()
+    })?;
 
     let features = Some(Features {
         memory,
@@ -182,6 +185,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         codebase_memory,
         cd_guard,
         launch_proxy,
+        sandbox,
     })
     .filter(|f| !f.is_empty());
 
@@ -2005,6 +2009,7 @@ mod tests {
                     codebase_memory: vec![],
                     cd_guard: None,
                     launch_proxy: None,
+                    sandbox: None,
                 }),
                 ..Default::default()
             }
@@ -2048,6 +2053,7 @@ mod tests {
                     codebase_memory: vec![],
                     cd_guard: None,
                     launch_proxy: None,
+                    sandbox: None,
                 }),
                 ..Default::default()
             }

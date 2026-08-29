@@ -67,6 +67,10 @@ pub struct Features {
     /// default.
     #[serde(default)]
     pub launch_proxy: Option<LaunchProxy>,
+    /// Sandboxed `llmenv launch` (#1080): run the engine in a container
+    /// instead of directly on the host. Off by default.
+    #[serde(default)]
+    pub sandbox: Option<Sandbox>,
 }
 
 /// Self-upgrade configuration, nested under `features.upgrade`.
@@ -643,6 +647,7 @@ impl Features {
             && self.task_tracker.is_none()
             && self.cd_guard.is_none()
             && self.launch_proxy.is_none()
+            && self.sandbox.is_none()
     }
 }
 
@@ -1142,6 +1147,37 @@ pub struct LaunchProxy {
     pub enabled: bool,
     #[serde(default)]
     pub rules: Vec<ProxyRule>,
+}
+
+/// Sandboxed `llmenv launch` (#1080): run the engine inside a container
+/// instead of directly on the host. Off by default — this changes the
+/// process the engine runs as, unlike `repeat_detect`/`cd_guard`'s
+/// lower-stakes on-by-default guardrails.
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Sandbox {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub runtime: SandboxRuntime,
+    /// Container image to run the engine in. `None` means llmenv's published
+    /// default image (not yet built — see #1653); until that ships, `enabled`
+    /// sandbox mode requires the user to supply their own image here.
+    #[serde(default)]
+    pub image: Option<String>,
+}
+
+/// Which container engine [`Sandbox`] uses. `Auto` probes `PATH` for `podman`
+/// then `docker`; the other two variants force one without probing (a launch
+/// with the forced engine missing from `PATH` fails at spawn time, the same
+/// way a missing configured engine binary does today).
+#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxRuntime {
+    #[default]
+    Auto,
+    Docker,
+    Podman,
 }
 
 /// One rewrite rule: fires when every condition in `when` matches (or
@@ -2776,6 +2812,77 @@ rules:
     #[test]
     fn features_default_is_empty() {
         assert!(Features::default().is_empty());
+    }
+
+    // #1648: sandbox
+    #[test]
+    fn sandbox_round_trips_through_yaml() {
+        let yaml = r#"
+enabled: true
+runtime: podman
+image: "registry.example.com/llmenv/sandbox:latest"
+"#;
+        let parsed: Sandbox = serde_yaml::from_str(yaml).unwrap();
+        assert!(parsed.enabled);
+        assert_eq!(parsed.runtime, SandboxRuntime::Podman);
+        assert_eq!(
+            parsed.image.as_deref(),
+            Some("registry.example.com/llmenv/sandbox:latest")
+        );
+    }
+
+    #[test]
+    fn sandbox_defaults_are_disabled_auto_runtime_no_image() {
+        let parsed: Sandbox = serde_yaml::from_str("{}").unwrap();
+        assert!(!parsed.enabled);
+        assert_eq!(parsed.runtime, SandboxRuntime::Auto);
+        assert_eq!(parsed.image, None);
+    }
+
+    #[test]
+    fn sandbox_rejects_unknown_fields() {
+        let yaml = "enabled: true\nbogus: true\n";
+        assert!(serde_yaml::from_str::<Sandbox>(yaml).is_err());
+    }
+
+    #[test]
+    fn sandbox_rejects_unknown_runtime() {
+        let yaml = "runtime: bogus\n";
+        assert!(serde_yaml::from_str::<Sandbox>(yaml).is_err());
+    }
+
+    #[test]
+    fn features_with_only_sandbox_set_is_not_empty() {
+        let features = Features {
+            sandbox: Some(Sandbox::default()),
+            ..Default::default()
+        };
+        assert!(!features.is_empty());
+    }
+
+    fn arbitrary_sandbox_runtime_strategy() -> impl Strategy<Value = SandboxRuntime> {
+        prop_oneof![
+            Just(SandboxRuntime::Auto),
+            Just(SandboxRuntime::Docker),
+            Just(SandboxRuntime::Podman),
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn prop_sandbox_json_yaml_roundtrip(
+            enabled in proptest::bool::ANY,
+            runtime in arbitrary_sandbox_runtime_strategy(),
+            image in proptest::option::of("[a-z0-9./:-]{0,40}"),
+        ) {
+            let original = Sandbox { enabled, runtime, image };
+            let json = serde_json::to_string(&original).unwrap();
+            let back: Sandbox = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(&original, &back);
+            let yaml = serde_yaml::to_string(&original).unwrap();
+            let back: Sandbox = serde_yaml::from_str(&yaml).unwrap();
+            prop_assert_eq!(original, back);
+        }
     }
 
     // #505: MCP field parity — new optional fields
