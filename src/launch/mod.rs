@@ -178,9 +178,10 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
     // documenting the exposure.
     if ssh_auth_sock.is_some() {
         eprintln!(
-            "llmenv: sandbox mode is active and forwarding the host's running SSH agent \
-             (SSH_AUTH_SOCK) into the container as a live signing oracle for this identity \
-             — set features.sandbox.forward_ssh_agent: false to opt out"
+            "llmenv: sandbox mode is active. It will mount the host's SSH agent socket \
+             (SSH_AUTH_SOCK) into the container. This gives the container full access to \
+             sign with your SSH identity. Set features.sandbox.forward_ssh_agent to false \
+             to turn this off."
         );
     }
 

@@ -295,9 +295,8 @@ When active, `launch` runs `<runtime> run --rm <image> <engine> <args>`
   isolating the *filesystem and host process*, not the reach of an already-
   running SSH agent. Set `features.sandbox.forward_ssh_agent: false` to skip
   this mount entirely and keep the filesystem/host isolation without the SSH
-  reach (added in v4.0.0). `launch` prints a one-line stderr notice at launch
-  time whenever this mount actually happens, naming the opt-out (added in
-  v4.0.0).
+  reach (added in v4.0.0). `launch` prints a one-line stderr notice each time
+  this mount happens. The notice names the opt-out (added in v4.0.0).
 - The resolved/materialized environment written to an owner-only temp file
   and passed via `--env-file` (not `-e KEY=VALUE`, which would put every
   value — including a sealed credential — into `docker`/`podman`'s own argv,
