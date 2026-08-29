@@ -10,7 +10,9 @@
 
 mod credential_watch;
 mod drift;
+mod icebreaker;
 pub(crate) mod proxy;
+pub(crate) mod sandbox;
 pub(crate) mod socket;
 
 use std::collections::BTreeMap;
@@ -71,6 +73,10 @@ pub(crate) struct LaunchScope {
     pub(crate) tag: Option<String>,
     pub(crate) compress: bool,
     pub(crate) auto_restart: bool,
+    /// `--container`/`--no-container` (#1080): overrides
+    /// `features.sandbox.enabled` for this invocation. `None` means "use the
+    /// config value".
+    pub(crate) container_override: Option<bool>,
 }
 
 /// `llmenv launch <engine>`: resolve the environment the same way `export`
@@ -102,6 +108,7 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
 
     let mut resolved = crate::cli::resolve_env(narrow.scope, narrow.tag, narrow.compress)?;
     let config_path = crate::paths::config_path()?;
+    let sandbox_spec = resolve_sandbox_spec(&config_path, narrow.container_override)?;
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -133,6 +140,37 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
                 (None, None, None, None)
             }
         };
+
+        // icebreaker (#1651) only matters for a sandboxed launch — it exists
+        // to keep the raw credential out of the container, so a host launch
+        // has nothing for it to protect.
+        let icebreaker_session = if let Some(spec) = &sandbox_spec {
+            icebreaker::prepare(adapter.name(), spec.runtime, &resolved.vars).await?
+        } else {
+            None
+        };
+        let container_vars = icebreaker_session.as_ref().map(|s| &s.container_vars);
+
+        // A container using icebreaker's sealed-token proxy has its outbound
+        // traffic routed there directly (see `icebreaker.rs`'s module doc
+        // comment) — launch_proxy's own rewrite rules would never see it,
+        // silently no-op'd rather than applied. Reject the combination
+        // explicitly instead of picking one winner behind the user's back.
+        if icebreaker_session.is_some() {
+            let launch_proxy_enabled = crate::config::Config::load(&config_path)
+                .ok()
+                .and_then(|c| c.features)
+                .and_then(|f| f.launch_proxy)
+                .is_some_and(|p| p.enabled);
+            if launch_proxy_enabled {
+                anyhow::bail!(
+                    "features.sandbox and features.launch_proxy cannot both be enabled for the \
+                     same Claude Code launch yet — icebreaker's sealed-token proxy already owns \
+                     the container's outbound traffic, so launch_proxy's rewrite rules would \
+                     never apply"
+                );
+            }
+        }
 
         let proxy_shutdown_tx: Option<tokio::sync::watch::Sender<bool>> =
             match crate::config::Config::load(&config_path) {
@@ -249,6 +287,8 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
                 adapter: adapter.as_ref(),
                 bin_path: &bin_path,
                 args: &args,
+                sandbox: sandbox_spec.as_ref(),
+                container_vars,
             },
             &resolved,
             notice_socket,
@@ -286,6 +326,85 @@ struct EngineTarget<'a> {
     adapter: &'a dyn crate::adapter::AgentAdapter,
     bin_path: &'a std::path::Path,
     args: &'a [String],
+    /// `Some` when this launch runs the engine in a container (#1080)
+    /// instead of directly on the host.
+    sandbox: Option<&'a sandbox::SandboxSpec>,
+    /// Env vars to forward into the container in place of the plain resolved
+    /// ones (#1651) — `Some` only once icebreaker has sealed a credential;
+    /// falls back to the ordinary resolved vars otherwise. Unused when
+    /// `sandbox` is `None`.
+    container_vars: Option<&'a BTreeMap<String, String>>,
+}
+
+/// Decide whether `narrow`'s launch runs sandboxed, and if so, resolve the
+/// concrete container runtime + image.
+///
+/// `override_enabled` is `--container`/`--no-container` (`None` means "use
+/// `features.sandbox.enabled`"). A config load failure is tolerated the same
+/// way [`run`]'s `launch_proxy` gating tolerates one — sandboxing is treated
+/// as disabled rather than failing the launch — unless the override
+/// explicitly forces sandboxing on, in which case there is no config to fall
+/// back to and the launch must fail rather than silently run unsandboxed.
+/// Unlike `launch_proxy` (a convenience feature), this downgrade is printed
+/// to stderr rather than only logged at `debug!`: sandboxing is a containment
+/// boundary, so silently falling back to an unsandboxed host launch needs to
+/// be visible by default, not opt-in via a log filter the user doesn't know
+/// to enable.
+///
+/// # Errors
+/// Bails when sandboxing is active and either no configured container
+/// runtime is found on `PATH`, or no image is configured — llmenv does not
+/// yet publish a default sandbox image (#1653), so one must be set
+/// explicitly via `features.sandbox.image` until it does.
+fn resolve_sandbox_spec(
+    config_path: &std::path::Path,
+    override_enabled: Option<bool>,
+) -> anyhow::Result<Option<sandbox::SandboxSpec>> {
+    let sandbox_config = match crate::config::Config::load(config_path) {
+        Ok(config) => config.features.and_then(|f| f.sandbox),
+        Err(e) => {
+            if override_enabled == Some(true) {
+                return Err(e.context("--container requires a loadable config"));
+            }
+            eprintln!(
+                "llmenv: could not load config, sandbox mode disabled for this launch: {e:#}"
+            );
+            None
+        }
+    };
+    build_sandbox_spec(sandbox_config, override_enabled, sandbox::resolve_runtime)
+}
+
+/// [`resolve_sandbox_spec`]'s decision logic once the config has already been
+/// loaded (or a load failure already handled). Split out, with the runtime
+/// probe passed in as `resolve_runtime`, so this is unit-testable without
+/// touching the filesystem or the process's real `PATH` — production always
+/// passes [`sandbox::resolve_runtime`]; `sandbox::resolve_runtime`'s own tests
+/// already cover the `PATH`-probing behavior itself.
+fn build_sandbox_spec(
+    sandbox_config: Option<llmenv_config::Sandbox>,
+    override_enabled: Option<bool>,
+    resolve_runtime: impl Fn(&llmenv_config::SandboxRuntime) -> Option<sandbox::ContainerRuntime>,
+) -> anyhow::Result<Option<sandbox::SandboxSpec>> {
+    let configured_enabled = sandbox_config.as_ref().is_some_and(|s| s.enabled);
+    if !override_enabled.unwrap_or(configured_enabled) {
+        return Ok(None);
+    }
+    let sandbox_config = sandbox_config.unwrap_or_default();
+    let Some(runtime) = resolve_runtime(&sandbox_config.runtime) else {
+        anyhow::bail!(
+            "sandbox mode is enabled but none of [{}] were found on PATH",
+            sandbox::requested_binaries(&sandbox_config.runtime)
+        );
+    };
+    let Some(image) = sandbox_config.image else {
+        anyhow::bail!(
+            "sandbox mode is enabled but features.sandbox.image is unset — \
+             llmenv does not yet publish a default sandbox image (#1653), so \
+             an image must be configured explicitly"
+        );
+    };
+    Ok(Some(sandbox::SandboxSpec { runtime, image }))
 }
 
 /// The mid-session notice socket's path and shared secret (#1484), bundled
@@ -310,25 +429,56 @@ async fn supervision_loop(
         adapter,
         bin_path,
         args,
+        sandbox,
+        container_vars,
     } = target;
     let mut cap = RelaunchCap::default();
 
     loop {
-        let mut cmd = crate::cli::command_at_path(bin_path, adapter.binary_name());
-        cmd.args(args);
-        for (key, value) in &resolved.vars {
-            cmd.env(key, value);
-        }
-        if let Some(ns) = &notice_socket {
-            cmd.env("LLMENV_LAUNCH_SOCKET", ns.path);
-            cmd.env("LLMENV_LAUNCH_TOKEN", ns.token.as_str());
-        }
+        // `_env_file_guard` must stay alive at least until `spawn_and_supervise`
+        // returns — it deletes the sandbox env file on drop, and dropping it
+        // before the container reads its env would race the file out from
+        // under `docker`/`podman`.
+        let (mut cmd, _env_file_guard) = match sandbox {
+            Some(spec) => {
+                let project_dir = std::env::current_dir()
+                    .context("resolving the project directory to mount into the sandbox")?;
+                let ssh_auth_sock = std::env::var_os("SSH_AUTH_SOCK").map(std::path::PathBuf::from);
+                let (cmd, guard) = sandbox::container_command(
+                    spec,
+                    sandbox::ContainerInputs {
+                        binary_name: adapter.binary_name(),
+                        args,
+                        vars: container_vars.unwrap_or(&resolved.vars),
+                        project_dir: &project_dir,
+                        ssh_auth_sock: ssh_auth_sock.as_deref(),
+                    },
+                )?;
+                (cmd, Some(guard))
+            }
+            None => {
+                let mut cmd = crate::cli::command_at_path(bin_path, adapter.binary_name());
+                cmd.args(args);
+                for (key, value) in &resolved.vars {
+                    cmd.env(key, value);
+                }
+                if let Some(ns) = &notice_socket {
+                    cmd.env("LLMENV_LAUNCH_SOCKET", ns.path);
+                    cmd.env("LLMENV_LAUNCH_TOKEN", ns.token.as_str());
+                }
+                (cmd, None)
+            }
+        };
         cmd.stdin(std::process::Stdio::inherit());
         cmd.stdout(std::process::Stdio::inherit());
         cmd.stderr(std::process::Stdio::inherit());
         let mut cmd = tokio::process::Command::from(cmd);
 
-        let status = spawn_and_supervise(&mut cmd, adapter.binary_name(), None).await?;
+        let spawned_binary_name = match sandbox {
+            Some(spec) => spec.runtime.binary_name(),
+            None => adapter.binary_name(),
+        };
+        let status = spawn_and_supervise(&mut cmd, spawned_binary_name, None).await?;
 
         if status.success() {
             return Ok(status);
@@ -587,6 +737,7 @@ async fn wait_for_notice(notices: &socket::NoticeSlot) {
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
     use proptest::prelude::*;
@@ -692,6 +843,94 @@ mod tests {
                 None => format!("{name}: {value}"),
             };
             prop_assert_eq!(vars.get("ANTHROPIC_CUSTOM_HEADERS").cloned(), Some(expected));
+        }
+    }
+
+    // #1649: build_sandbox_spec
+    use llmenv_config::{Sandbox, SandboxRuntime};
+
+    fn always_podman(_: &SandboxRuntime) -> Option<sandbox::ContainerRuntime> {
+        Some(sandbox::ContainerRuntime::Podman)
+    }
+
+    fn never_found(_: &SandboxRuntime) -> Option<sandbox::ContainerRuntime> {
+        None
+    }
+
+    #[test]
+    fn build_sandbox_spec_returns_none_when_neither_config_nor_override_enable_it() {
+        let result = build_sandbox_spec(None, None, always_podman).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn build_sandbox_spec_returns_none_when_override_forces_it_off() {
+        let config = Sandbox {
+            enabled: true,
+            runtime: SandboxRuntime::Auto,
+            image: Some("img".to_string()),
+        };
+        let result = build_sandbox_spec(Some(config), Some(false), always_podman).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn build_sandbox_spec_uses_config_enabled_and_image_when_no_override() {
+        let config = Sandbox {
+            enabled: true,
+            runtime: SandboxRuntime::Auto,
+            image: Some("registry.example.com/img:latest".to_string()),
+        };
+        let spec = build_sandbox_spec(Some(config), None, always_podman)
+            .unwrap()
+            .unwrap();
+        assert_eq!(spec.runtime, sandbox::ContainerRuntime::Podman);
+        assert_eq!(spec.image, "registry.example.com/img:latest");
+    }
+
+    #[test]
+    fn build_sandbox_spec_override_enables_it_even_when_config_is_absent_but_image_missing_fails() {
+        let err = build_sandbox_spec(None, Some(true), always_podman).unwrap_err();
+        assert!(err.to_string().contains("features.sandbox.image is unset"));
+    }
+
+    #[test]
+    fn build_sandbox_spec_fails_when_no_runtime_is_found_on_path() {
+        let config = Sandbox {
+            enabled: true,
+            runtime: SandboxRuntime::Docker,
+            image: Some("img".to_string()),
+        };
+        let err = build_sandbox_spec(Some(config), None, never_found).unwrap_err();
+        assert!(err.to_string().contains("docker"));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn prop_build_sandbox_spec_decision_matches_override_precedence(
+            configured_enabled in proptest::bool::ANY,
+            override_enabled in proptest::option::of(proptest::bool::ANY),
+            image_present in proptest::bool::ANY,
+            runtime_found in proptest::bool::ANY,
+        ) {
+            let config = Sandbox {
+                enabled: configured_enabled,
+                runtime: SandboxRuntime::Auto,
+                image: image_present.then(|| "img".to_string()),
+            };
+            let resolver = move |_: &SandboxRuntime| {
+                runtime_found.then_some(sandbox::ContainerRuntime::Podman)
+            };
+            let result = build_sandbox_spec(Some(config), override_enabled, resolver);
+
+            let effective_enabled = override_enabled.unwrap_or(configured_enabled);
+            if !effective_enabled {
+                proptest::prop_assert!(matches!(result, Ok(None)));
+            } else if !runtime_found || !image_present {
+                proptest::prop_assert!(result.is_err());
+            } else {
+                proptest::prop_assert!(matches!(result, Ok(Some(_))));
+            }
         }
     }
 }
