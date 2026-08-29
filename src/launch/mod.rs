@@ -10,6 +10,7 @@
 
 mod credential_watch;
 mod drift;
+mod icebreaker;
 pub(crate) mod proxy;
 pub(crate) mod sandbox;
 pub(crate) mod socket;
@@ -140,6 +141,16 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
             }
         };
 
+        // icebreaker (#1651) only matters for a sandboxed launch — it exists
+        // to keep the raw credential out of the container, so a host launch
+        // has nothing for it to protect.
+        let icebreaker_session = if sandbox_spec.is_some() {
+            icebreaker::prepare(adapter.name(), &resolved.vars).await?
+        } else {
+            None
+        };
+        let container_vars = icebreaker_session.as_ref().map(|s| &s.container_vars);
+
         let proxy_shutdown_tx: Option<tokio::sync::watch::Sender<bool>> =
             match crate::config::Config::load(&config_path) {
                 Ok(config) => {
@@ -256,6 +267,7 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
                 bin_path: &bin_path,
                 args: &args,
                 sandbox: sandbox_spec.as_ref(),
+                container_vars,
             },
             &resolved,
             notice_socket,
@@ -296,6 +308,11 @@ struct EngineTarget<'a> {
     /// `Some` when this launch runs the engine in a container (#1080)
     /// instead of directly on the host.
     sandbox: Option<&'a sandbox::SandboxSpec>,
+    /// Env vars to forward into the container in place of the plain resolved
+    /// ones (#1651) — `Some` only once icebreaker has sealed a credential;
+    /// falls back to the ordinary resolved vars otherwise. Unused when
+    /// `sandbox` is `None`.
+    container_vars: Option<&'a BTreeMap<String, String>>,
 }
 
 /// Decide whether `narrow`'s launch runs sandboxed, and if so, resolve the
@@ -385,6 +402,7 @@ async fn supervision_loop(
         bin_path,
         args,
         sandbox,
+        container_vars,
     } = target;
     let mut cap = RelaunchCap::default();
 
@@ -399,7 +417,7 @@ async fn supervision_loop(
                     sandbox::ContainerInputs {
                         binary_name: adapter.binary_name(),
                         args,
-                        vars: &resolved.vars,
+                        vars: container_vars.unwrap_or(&resolved.vars),
                         project_dir: &project_dir,
                         ssh_auth_sock: ssh_auth_sock.as_deref(),
                     },
