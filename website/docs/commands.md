@@ -287,10 +287,23 @@ When active, `launch` runs `<runtime> run --rm <image> <engine> <args>`
 - The project tree (the launching directory) bind-mounted read-write at
   `/workspace`, set as the container's working directory.
 - `SSH_AUTH_SOCK` bind-mounted read-only, when the host has one running, so
-  the container can push over git without ever holding a private key.
-- The resolved/materialized environment forwarded as `-e KEY=VALUE` flags —
-  not a live mount of `~/.config/llmenv`, so the container gets the already-
-  resolved result, never the source config tree.
+  the container never holds the private key file itself. This still hands the
+  container a live signing oracle for that SSH identity — anything the key
+  could sign (pushing to any repo it has access to, authenticating to any host
+  that trusts it), not a scoped-down view of it. Treat sandbox mode as
+  isolating the *filesystem and host process*, not the reach of an already-
+  running SSH agent.
+- The resolved/materialized environment written to an owner-only temp file
+  and passed via `--env-file` (not `-e KEY=VALUE`, which would put every
+  value — including a sealed credential — into `docker`/`podman`'s own argv,
+  readable by any local user via `/proc/<pid>/cmdline`) — not a live mount of
+  `~/.config/llmenv`, so the container gets the already-resolved result, never
+  the source config tree.
+- Baseline hardening on the `run` invocation: `--cap-drop=ALL`,
+  `--security-opt=no-new-privileges`, and `--user <uid>:<gid>` (plus
+  `--userns=keep-id` on podman) so the container runs as the launching user
+  rather than the image's default (often root), and files it creates in
+  `/workspace` land owned by that user on the host.
 
 **Credential protection (Claude Code, API-key auth only).** If
 `ANTHROPIC_API_KEY` is present in the resolved environment, `launch` spawns
@@ -302,7 +315,15 @@ credential. This needs `icebreaker` on `PATH`; sandbox mode fails to start
 rather than launch with no or an unsealed credential when a key is present
 and `icebreaker` is missing. An OAuth-authenticated Claude Code session
 isn't covered yet — the cached credential is a local file, not an env var
-([#1662](https://github.com/phaedrus1992/llmenv/issues/1662)).
+([#1662](https://github.com/phaedrus1992/llmenv/issues/1662)). A non-Claude-
+Code engine gets any raw credential in the resolved environment forwarded
+into the container as-is, with no sealing
+([#1669](https://github.com/phaedrus1992/llmenv/issues/1669)).
+
+`features.sandbox` and `features.launch_proxy` cannot both be enabled for the
+same Claude Code launch yet — icebreaker's proxy already owns the container's
+outbound traffic, so `launch_proxy`'s rewrite rules would never apply.
+`launch` fails fast naming both features rather than silently picking one.
 
 ## `regenerate`
 

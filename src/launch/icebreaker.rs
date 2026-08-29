@@ -25,6 +25,8 @@ use std::collections::BTreeMap;
 
 use anyhow::Context;
 
+use super::sandbox::ContainerRuntime;
+
 /// The credential env var this integration protects: Anthropic's documented
 /// API-key env var. Scoped to Claude Code only, matching `launch_proxy`'s own
 /// scoping (`adapter.name() == "claude-code"`).
@@ -54,8 +56,12 @@ struct IcebreakerServer {
 
 impl Drop for IcebreakerServer {
     fn drop(&mut self) {
+        // `error!`, not `warn!`: llmenv's default `EnvFilter` is ERROR-only
+        // (see `forward_signal`'s doc comment in `mod.rs`), and a failure
+        // here means the process holding the session's sealed-token keypair
+        // may keep running past the end of the launch, orphaned.
         if let Err(e) = self.child.start_kill() {
-            tracing::warn!("launch: could not stop icebreaker server: {e}");
+            tracing::error!("launch: could not stop icebreaker server, it may keep running: {e}");
         }
     }
 }
@@ -83,6 +89,7 @@ pub(crate) struct IcebreakerSession {
 /// rather than starting it with no or an unsealed credential.
 pub(crate) async fn prepare(
     adapter_name: &str,
+    runtime: ContainerRuntime,
     resolved_vars: &BTreeMap<String, String>,
 ) -> anyhow::Result<Option<IcebreakerSession>> {
     if adapter_name != "claude-code" {
@@ -101,27 +108,49 @@ pub(crate) async fn prepare(
 
     let authority = upstream_authority(resolved_vars)?;
     let key_id = format!("llmenv-{}", std::process::id());
-    let keypair = run_keygen(&icebreaker_bin, &key_id)?;
+    let keypair = run_keygen(icebreaker_bin.clone(), key_id.clone()).await?;
     let port = reserve_ephemeral_port()?;
     let child = spawn_server(&icebreaker_bin, port, &keypair.secret, &key_id).await?;
-    let server = IcebreakerServer { child };
-    wait_ready(port, READY_TIMEOUT).await?;
+    let mut server = IcebreakerServer { child };
+    wait_ready(&mut server.child, port, READY_TIMEOUT).await?;
 
     let sealed = run_seal(
-        &icebreaker_bin,
-        &SealParams {
-            secret,
-            allowed_hosts: &authority,
-            public_key: &keypair.public,
-            key_id: &key_id,
+        icebreaker_bin,
+        SealParams {
+            secret: secret.clone(),
+            allowed_hosts: authority.clone(),
+            public_key: keypair.public,
+            key_id,
             expires_in_secs: TOKEN_LIFETIME_SECS,
         },
-    )?;
-    let container_vars = build_container_vars(resolved_vars, port, &authority, &sealed);
+    )
+    .await?;
+    let container_vars = build_container_vars(
+        resolved_vars,
+        gateway_host(runtime),
+        port,
+        &authority,
+        &sealed,
+    );
     Ok(Some(IcebreakerSession {
         _server: server,
         container_vars,
     }))
+}
+
+/// The hostname a container uses to reach the host's loopback, from inside
+/// its own network namespace — `127.0.0.1` inside the container is the
+/// container itself, not the host where icebreaker listens. Docker requires
+/// `--add-host=host.docker.internal:host-gateway` on the `run` invocation for
+/// this to resolve on Linux (`sandbox::container_command` adds it); recent
+/// rootless Podman resolves `host.containers.internal` without an equivalent
+/// flag. Unverified against a running container on either engine — see this
+/// module's doc comment.
+fn gateway_host(runtime: ContainerRuntime) -> &'static str {
+    match runtime {
+        ContainerRuntime::Docker => "host.docker.internal",
+        ContainerRuntime::Podman => "host.containers.internal",
+    }
 }
 
 /// Extract the authority (`host[:port]`) icebreaker should allow and receive
@@ -152,6 +181,7 @@ fn upstream_authority(resolved_vars: &BTreeMap<String, String>) -> anyhow::Resul
 /// injects its own peer-auth header (`super::append_custom_header`).
 fn build_container_vars(
     resolved_vars: &BTreeMap<String, String>,
+    gateway_host: &str,
     icebreaker_port: u16,
     upstream_authority: &str,
     sealed_token: &str,
@@ -160,7 +190,7 @@ fn build_container_vars(
     vars.remove(CREDENTIAL_VAR);
     vars.insert(
         "ANTHROPIC_BASE_URL".to_string(),
-        format!("http://127.0.0.1:{icebreaker_port}"),
+        format!("http://{gateway_host}:{icebreaker_port}"),
     );
     super::append_custom_header(&mut vars, "Host", upstream_authority);
     super::append_custom_header(&mut vars, "X-Tokenizer-Token", sealed_token);
@@ -203,57 +233,85 @@ fn parse_keygen_output(stdout: &str) -> anyhow::Result<Keypair> {
     Ok(Keypair { secret, public })
 }
 
-fn run_keygen(icebreaker_bin: &std::path::Path, key_id: &str) -> anyhow::Result<Keypair> {
-    let output = std::process::Command::new(icebreaker_bin)
-        .args(["keygen", "--format", "base64", "--key-id", key_id])
-        .output()
-        .context("running `icebreaker keygen`")?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "`icebreaker keygen` failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    parse_keygen_output(&String::from_utf8_lossy(&output.stdout))
+/// Both blocking subprocess calls below run on a `spawn_blocking` thread with
+/// this bound — `run()`'s tokio runtime is single-threaded (`mod.rs`'s
+/// `Builder::new_current_thread()`), so an unbounded `icebreaker
+/// keygen`/`seal` hang (a wedged lock file, a broken build) would otherwise
+/// block the entire launch indefinitely with no diagnostic, unlike
+/// `wait_ready`'s already-bounded poll a few lines below.
+const SUBPROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+async fn run_keygen(icebreaker_bin: std::path::PathBuf, key_id: String) -> anyhow::Result<Keypair> {
+    let joined = tokio::time::timeout(
+        SUBPROCESS_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            let output = std::process::Command::new(&icebreaker_bin)
+                .args(["keygen", "--format", "base64", "--key-id", &key_id])
+                .output()
+                .context("running `icebreaker keygen`")?;
+            if !output.status.success() {
+                anyhow::bail!(
+                    "`icebreaker keygen` failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            parse_keygen_output(&String::from_utf8_lossy(&output.stdout))
+        }),
+    )
+    .await
+    .context("`icebreaker keygen` timed out")?;
+    joined.context("`icebreaker keygen` task panicked")?
 }
 
-struct SealParams<'a> {
-    secret: &'a str,
-    allowed_hosts: &'a str,
-    public_key: &'a str,
-    key_id: &'a str,
+struct SealParams {
+    secret: String,
+    allowed_hosts: String,
+    public_key: String,
+    key_id: String,
     expires_in_secs: u64,
 }
 
-fn run_seal(icebreaker_bin: &std::path::Path, params: &SealParams<'_>) -> anyhow::Result<String> {
-    let expires_in = params.expires_in_secs.to_string();
-    let output = std::process::Command::new(icebreaker_bin)
-        .args([
-            "seal",
-            "--secret",
-            params.secret,
-            "--allowed-hosts",
-            params.allowed_hosts,
-            "--header",
-            CREDENTIAL_HEADER,
-            "--public-key",
-            params.public_key,
-            "--key-id",
-            params.key_id,
-            "--expires-in",
-            &expires_in,
-        ])
-        .output()
-        .context("running `icebreaker seal`")?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "`icebreaker seal` failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    value_after_header(&String::from_utf8_lossy(&output.stdout), "Sealed token:").ok_or_else(|| {
-        anyhow::anyhow!("could not find the sealed token in `icebreaker seal` output")
-    })
+async fn run_seal(
+    icebreaker_bin: std::path::PathBuf,
+    params: SealParams,
+) -> anyhow::Result<String> {
+    let joined = tokio::time::timeout(
+        SUBPROCESS_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            let expires_in = params.expires_in_secs.to_string();
+            let output = std::process::Command::new(&icebreaker_bin)
+                .args([
+                    "seal",
+                    "--secret",
+                    &params.secret,
+                    "--allowed-hosts",
+                    &params.allowed_hosts,
+                    "--header",
+                    CREDENTIAL_HEADER,
+                    "--public-key",
+                    &params.public_key,
+                    "--key-id",
+                    &params.key_id,
+                    "--expires-in",
+                    &expires_in,
+                ])
+                .output()
+                .context("running `icebreaker seal`")?;
+            if !output.status.success() {
+                anyhow::bail!(
+                    "`icebreaker seal` failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            value_after_header(&String::from_utf8_lossy(&output.stdout), "Sealed token:")
+                .ok_or_else(|| {
+                    anyhow::anyhow!("could not find the sealed token in `icebreaker seal` output")
+                })
+        }),
+    )
+    .await
+    .context("`icebreaker seal` timed out")?;
+    joined.context("`icebreaker seal` task panicked")?
 }
 
 async fn spawn_server(
@@ -270,13 +328,18 @@ async fn spawn_server(
         "127.0.0.1",
         "--port",
         &port_str,
-        "--secret-key",
-        secret_key,
         "--key-id",
         key_id,
         "--health-enabled",
         "false",
     ]);
+    // The keypair secret goes through the env, not argv: `icebreaker serve`
+    // documents `ICEBREAKER_SECRET_KEY` as an equivalent to `--secret-key`,
+    // and argv is world-readable via `/proc/<pid>/cmdline` on Linux (any
+    // local uid, not just the same one) for as long as this process runs —
+    // which, unlike the short-lived `seal` subprocess below, is the whole
+    // sandboxed session.
+    cmd.env("ICEBREAKER_SECRET_KEY", secret_key);
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::null());
     cmd.stderr(std::process::Stdio::piped());
@@ -289,19 +352,43 @@ async fn spawn_server(
 
 /// Forwards each line of icebreaker's stderr to `tracing::debug!` rather than
 /// discarding it or inheriting it — inheriting would interleave icebreaker's
-/// own logs with the supervised engine's stdio.
+/// own logs with the supervised engine's stdio. Stops (and says so) on the
+/// first read error rather than silently exiting the loop.
 async fn forward_stderr_to_tracing(stderr: tokio::process::ChildStderr) {
     use tokio::io::AsyncBufReadExt;
     let mut lines = tokio::io::BufReader::new(stderr).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        tracing::debug!("icebreaker: {line}");
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => tracing::debug!("icebreaker: {line}"),
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!("icebreaker: stderr forwarding stopped: {e}");
+                return;
+            }
+        }
     }
 }
 
 /// Poll-connects to `port` until something accepts or `timeout` elapses.
-async fn wait_ready(port: u16, timeout: std::time::Duration) -> anyhow::Result<()> {
+///
+/// Also checks `child` hasn't already exited on each poll — otherwise a
+/// connect success only proves *something* is listening on the released
+/// port, not that it's the icebreaker process this call is waiting on (the
+/// reservation in [`reserve_ephemeral_port`] has a TOCTOU window another
+/// local process could win).
+async fn wait_ready(
+    child: &mut tokio::process::Child,
+    port: u16,
+    timeout: std::time::Duration,
+) -> anyhow::Result<()> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
+        if let Some(status) = child
+            .try_wait()
+            .context("checking whether icebreaker is still running")?
+        {
+            anyhow::bail!("icebreaker exited before it started listening: {status}");
+        }
         if tokio::net::TcpStream::connect(("127.0.0.1", port))
             .await
             .is_ok()
@@ -319,6 +406,7 @@ async fn wait_ready(port: u16, timeout: std::time::Duration) -> anyhow::Result<(
 #[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn parse_keygen_output_extracts_secret_and_public_keys() {
@@ -376,8 +464,13 @@ mod tests {
         vars.insert(CREDENTIAL_VAR.to_string(), "sk-raw-secret".to_string());
         vars.insert("OTHER_VAR".to_string(), "kept".to_string());
 
-        let container_vars =
-            build_container_vars(&vars, 4321, "api.anthropic.com", "Tokenizer abc");
+        let container_vars = build_container_vars(
+            &vars,
+            "host.docker.internal",
+            4321,
+            "api.anthropic.com",
+            "Tokenizer abc",
+        );
 
         assert!(!container_vars.contains_key(CREDENTIAL_VAR));
         assert_eq!(
@@ -386,7 +479,7 @@ mod tests {
         );
         assert_eq!(
             container_vars.get("ANTHROPIC_BASE_URL").map(String::as_str),
-            Some("http://127.0.0.1:4321")
+            Some("http://host.docker.internal:4321")
         );
         let headers = container_vars
             .get("ANTHROPIC_CUSTOM_HEADERS")
@@ -400,20 +493,130 @@ mod tests {
     async fn prepare_returns_none_for_a_non_claude_code_adapter() {
         let mut vars = BTreeMap::new();
         vars.insert(CREDENTIAL_VAR.to_string(), "sk-raw-secret".to_string());
-        let result = prepare("crush", &vars).await.unwrap();
+        let result = prepare("crush", ContainerRuntime::Docker, &vars)
+            .await
+            .unwrap();
         assert!(result.is_none());
     }
 
     #[tokio::test]
     async fn prepare_returns_none_when_no_credential_is_present() {
         let vars = BTreeMap::new();
-        let result = prepare("claude-code", &vars).await.unwrap();
+        let result = prepare("claude-code", ContainerRuntime::Docker, &vars)
+            .await
+            .unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn gateway_host_differs_by_runtime() {
+        assert_eq!(
+            gateway_host(ContainerRuntime::Docker),
+            "host.docker.internal"
+        );
+        assert_eq!(
+            gateway_host(ContainerRuntime::Podman),
+            "host.containers.internal"
+        );
     }
 
     #[test]
     fn reserve_ephemeral_port_returns_a_usable_port() {
         let port = reserve_ephemeral_port().unwrap();
         assert!(port > 0);
+    }
+
+    proptest! {
+        /// Excludes the default ports (80/443) from the range: `url::Url`
+        /// omits a port matching the scheme default from `Url::port()`, which
+        /// would make the extracted authority disagree with the input port
+        /// for no reason related to this function's own correctness.
+        #[test]
+        fn prop_upstream_authority_extracts_host_and_optional_port(
+            host in "[a-z][a-z0-9-]{0,15}(\\.[a-z][a-z0-9-]{0,15}){0,3}",
+            port in proptest::option::of(1024u16..=65535),
+            scheme in prop_oneof![Just("http"), Just("https")],
+        ) {
+            let mut vars = BTreeMap::new();
+            let url = match port {
+                Some(p) => format!("{scheme}://{host}:{p}/anthropic"),
+                None => format!("{scheme}://{host}/anthropic"),
+            };
+            vars.insert("ANTHROPIC_BASE_URL".to_string(), url);
+            let authority = upstream_authority(&vars).unwrap();
+            let expected = match port {
+                Some(p) => format!("{host}:{p}"),
+                None => host.clone(),
+            };
+            prop_assert_eq!(authority, expected);
+        }
+
+        #[test]
+        fn prop_upstream_authority_never_panics_on_arbitrary_input(base_url in ".{0,60}") {
+            let mut vars = BTreeMap::new();
+            vars.insert("ANTHROPIC_BASE_URL".to_string(), base_url);
+            let _ = upstream_authority(&vars);
+        }
+
+        #[test]
+        fn prop_value_after_header_never_panics_on_arbitrary_input(
+            text in ".{0,200}",
+            header in ".{0,50}",
+        ) {
+            let _ = value_after_header(&text, &header);
+        }
+
+        #[test]
+        fn prop_parse_keygen_output_roundtrips_arbitrary_keys(
+            secret in "[A-Za-z0-9+/=]{1,60}",
+            public in "[A-Za-z0-9+/=]{1,60}",
+        ) {
+            let stdout = format!(
+                "Generated keypair for key ID: primary\n\n\
+                 Secret key (keep private):\n  {secret}\n\n\
+                 Public key (safe to share):\n  {public}\n\n"
+            );
+            let keypair = parse_keygen_output(&stdout).unwrap();
+            prop_assert_eq!(keypair.secret, secret);
+            prop_assert_eq!(keypair.public, public);
+        }
+
+        #[test]
+        fn prop_build_container_vars_drops_credential_preserves_others_and_injects_headers(
+            mut vars in proptest::collection::btree_map("[A-Z_]{1,10}", "[a-zA-Z0-9]{0,20}", 0..5),
+            include_credential in proptest::bool::ANY,
+            gateway in prop_oneof![Just("host.docker.internal"), Just("host.containers.internal")],
+            port in any::<u16>(),
+            authority in "[a-z.]{1,20}",
+            token in "[A-Za-z0-9 ]{1,20}",
+        ) {
+            if include_credential {
+                vars.insert(CREDENTIAL_VAR.to_string(), "raw-secret".to_string());
+            }
+            let other_vars_before: BTreeMap<_, _> = vars
+                .iter()
+                .filter(|(k, _)| k.as_str() != CREDENTIAL_VAR)
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+
+            let result = build_container_vars(&vars, gateway, port, &authority, &token);
+
+            prop_assert!(!result.contains_key(CREDENTIAL_VAR));
+            for (k, v) in &other_vars_before {
+                prop_assert_eq!(result.get(k), Some(v));
+            }
+            prop_assert_eq!(
+                result.get("ANTHROPIC_BASE_URL").cloned(),
+                Some(format!("http://{gateway}:{port}"))
+            );
+            let headers = result
+                .get("ANTHROPIC_CUSTOM_HEADERS")
+                .cloned()
+                .unwrap_or_default();
+            let expected_host_header = format!("Host: {}", authority);
+            let expected_token_header = format!("X-Tokenizer-Token: {}", token);
+            prop_assert!(headers.contains(&expected_host_header));
+            prop_assert!(headers.contains(&expected_token_header));
+        }
     }
 }

@@ -2860,6 +2860,31 @@ image: "registry.example.com/llmenv/sandbox:latest"
         assert!(!features.is_empty());
     }
 
+    fn arbitrary_sandbox_runtime_strategy() -> impl Strategy<Value = SandboxRuntime> {
+        prop_oneof![
+            Just(SandboxRuntime::Auto),
+            Just(SandboxRuntime::Docker),
+            Just(SandboxRuntime::Podman),
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn prop_sandbox_json_yaml_roundtrip(
+            enabled in proptest::bool::ANY,
+            runtime in arbitrary_sandbox_runtime_strategy(),
+            image in proptest::option::of("[a-z0-9./:-]{0,40}"),
+        ) {
+            let original = Sandbox { enabled, runtime, image };
+            let json = serde_json::to_string(&original).unwrap();
+            let back: Sandbox = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(&original, &back);
+            let yaml = serde_yaml::to_string(&original).unwrap();
+            let back: Sandbox = serde_yaml::from_str(&yaml).unwrap();
+            prop_assert_eq!(original, back);
+        }
+    }
+
     // #505: MCP field parity — new optional fields
 
     /// A McpServer with all new fields set survives YAML and JSON round-trips with

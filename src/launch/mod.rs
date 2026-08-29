@@ -144,12 +144,33 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
         // icebreaker (#1651) only matters for a sandboxed launch — it exists
         // to keep the raw credential out of the container, so a host launch
         // has nothing for it to protect.
-        let icebreaker_session = if sandbox_spec.is_some() {
-            icebreaker::prepare(adapter.name(), &resolved.vars).await?
+        let icebreaker_session = if let Some(spec) = &sandbox_spec {
+            icebreaker::prepare(adapter.name(), spec.runtime, &resolved.vars).await?
         } else {
             None
         };
         let container_vars = icebreaker_session.as_ref().map(|s| &s.container_vars);
+
+        // A container using icebreaker's sealed-token proxy has its outbound
+        // traffic routed there directly (see `icebreaker.rs`'s module doc
+        // comment) — launch_proxy's own rewrite rules would never see it,
+        // silently no-op'd rather than applied. Reject the combination
+        // explicitly instead of picking one winner behind the user's back.
+        if icebreaker_session.is_some() {
+            let launch_proxy_enabled = crate::config::Config::load(&config_path)
+                .ok()
+                .and_then(|c| c.features)
+                .and_then(|f| f.launch_proxy)
+                .is_some_and(|p| p.enabled);
+            if launch_proxy_enabled {
+                anyhow::bail!(
+                    "features.sandbox and features.launch_proxy cannot both be enabled for the \
+                     same Claude Code launch yet — icebreaker's sealed-token proxy already owns \
+                     the container's outbound traffic, so launch_proxy's rewrite rules would \
+                     never apply"
+                );
+            }
+        }
 
         let proxy_shutdown_tx: Option<tokio::sync::watch::Sender<bool>> =
             match crate::config::Config::load(&config_path) {
@@ -324,6 +345,11 @@ struct EngineTarget<'a> {
 /// as disabled rather than failing the launch — unless the override
 /// explicitly forces sandboxing on, in which case there is no config to fall
 /// back to and the launch must fail rather than silently run unsandboxed.
+/// Unlike `launch_proxy` (a convenience feature), this downgrade is printed
+/// to stderr rather than only logged at `debug!`: sandboxing is a containment
+/// boundary, so silently falling back to an unsandboxed host launch needs to
+/// be visible by default, not opt-in via a log filter the user doesn't know
+/// to enable.
 ///
 /// # Errors
 /// Bails when sandboxing is active and either no configured container
@@ -340,7 +366,9 @@ fn resolve_sandbox_spec(
             if override_enabled == Some(true) {
                 return Err(e.context("--container requires a loadable config"));
             }
-            tracing::debug!("launch: could not load config, sandbox disabled: {e:#}");
+            eprintln!(
+                "llmenv: could not load config, sandbox mode disabled for this launch: {e:#}"
+            );
             None
         }
     };
@@ -407,12 +435,16 @@ async fn supervision_loop(
     let mut cap = RelaunchCap::default();
 
     loop {
-        let mut cmd = match sandbox {
+        // `_env_file_guard` must stay alive at least until `spawn_and_supervise`
+        // returns — it deletes the sandbox env file on drop, and dropping it
+        // before the container reads its env would race the file out from
+        // under `docker`/`podman`.
+        let (mut cmd, _env_file_guard) = match sandbox {
             Some(spec) => {
                 let project_dir = std::env::current_dir()
                     .context("resolving the project directory to mount into the sandbox")?;
                 let ssh_auth_sock = std::env::var_os("SSH_AUTH_SOCK").map(std::path::PathBuf::from);
-                sandbox::container_command(
+                let (cmd, guard) = sandbox::container_command(
                     spec,
                     sandbox::ContainerInputs {
                         binary_name: adapter.binary_name(),
@@ -421,7 +453,8 @@ async fn supervision_loop(
                         project_dir: &project_dir,
                         ssh_auth_sock: ssh_auth_sock.as_deref(),
                     },
-                )
+                )?;
+                (cmd, Some(guard))
             }
             None => {
                 let mut cmd = crate::cli::command_at_path(bin_path, adapter.binary_name());
@@ -433,7 +466,7 @@ async fn supervision_loop(
                     cmd.env("LLMENV_LAUNCH_SOCKET", ns.path);
                     cmd.env("LLMENV_LAUNCH_TOKEN", ns.token.as_str());
                 }
-                cmd
+                (cmd, None)
             }
         };
         cmd.stdin(std::process::Stdio::inherit());
@@ -870,5 +903,34 @@ mod tests {
         };
         let err = build_sandbox_spec(Some(config), None, never_found).unwrap_err();
         assert!(err.to_string().contains("docker"));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn prop_build_sandbox_spec_decision_matches_override_precedence(
+            configured_enabled in proptest::bool::ANY,
+            override_enabled in proptest::option::of(proptest::bool::ANY),
+            image_present in proptest::bool::ANY,
+            runtime_found in proptest::bool::ANY,
+        ) {
+            let config = Sandbox {
+                enabled: configured_enabled,
+                runtime: SandboxRuntime::Auto,
+                image: image_present.then(|| "img".to_string()),
+            };
+            let resolver = move |_: &SandboxRuntime| {
+                runtime_found.then_some(sandbox::ContainerRuntime::Podman)
+            };
+            let result = build_sandbox_spec(Some(config), override_enabled, resolver);
+
+            let effective_enabled = override_enabled.unwrap_or(configured_enabled);
+            if !effective_enabled {
+                proptest::prop_assert!(matches!(result, Ok(None)));
+            } else if !runtime_found || !image_present {
+                proptest::prop_assert!(result.is_err());
+            } else {
+                proptest::prop_assert!(matches!(result, Ok(Some(_))));
+            }
+        }
     }
 }
