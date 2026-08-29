@@ -4434,6 +4434,7 @@ mod tests {
                     enabled: true,
                     runtime: crate::SandboxRuntime::Auto,
                     image: Some("registry.example.com/sandbox:latest".to_string()),
+                    ..Default::default()
                 }),
                 ..Default::default()
             }),
@@ -4462,6 +4463,7 @@ mod tests {
                     enabled: true,
                     runtime: crate::SandboxRuntime::Auto,
                     image: Some("   ".to_string()),
+                    ..Default::default()
                 }),
                 ..Default::default()
             }),
@@ -4481,6 +4483,7 @@ mod tests {
                     enabled: true,
                     runtime: crate::SandboxRuntime::Auto,
                     image: Some("--privileged".to_string()),
+                    ..Default::default()
                 }),
                 ..Default::default()
             }),
