@@ -311,18 +311,24 @@ Dockerfile base-image bump or a manual rebuild (added in v4.0.0,
   manage). Verify an image with:
 
   ```text
+  IDENTITY='^https://github\.com/phaedrus1992/llmenv/\.github/workflows/sandbox-image\.yml@refs/heads/(main|release/.+)$'
   cosign verify ghcr.io/phaedrus1992/llmenv-sandbox@<digest> \
-    --certificate-identity-regexp 'https://github.com/phaedrus1992/llmenv/.github/workflows/sandbox-image.yml@.*' \
+    --certificate-identity-regexp "$IDENTITY" \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com
   ```
 
 - Before running a pulled sandbox image, `launch` verifies its
-  build-provenance attestation with `gh attestation verify`. This needs `gh`
-  (the GitHub CLI) on `PATH`; a machine with no `gh` installed, or no
-  network path to GitHub, still launches — `launch` prints a one-line
+  build-provenance attestation with `gh attestation verify`, pinned to the
+  same workflow (`--signer-workflow`). This needs `gh` (the GitHub CLI) on
+  `PATH`; a machine with no `gh` installed, no network path to GitHub, or
+  one that reaches GitHub but gets an inconclusive answer (rate limiting,
+  a registry/API outage), still launches — `launch` prints a one-line
   stderr notice and skips verification rather than blocking. Only a `gh`
-  that *reached* GitHub and reported a failed verification blocks the
-  launch.
+  that reached a definitive answer and reported the image failed
+  verification blocks the launch. This check only ever runs against
+  llmenv's own published sandbox image — a `features.sandbox.image`
+  override to any other image skips it, since that image was never
+  attested by this repo in the first place.
 
 When active, `launch` runs `<runtime> run --rm <image> <engine> <args>`
 (wrapped by the same crash/restart supervision as a host launch) with:
