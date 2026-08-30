@@ -267,6 +267,19 @@ pub(crate) fn container_command(
             dir.display(),
             dir.display(),
         ));
+        // #1652 pre-pr-review P0: the directory mount above exposes
+        // `.credentials.json` — Claude Code's plaintext OAuth/API-key token
+        // store on Linux, and on macOS whenever the keychain backend is
+        // disabled (`src/auth/credentials.rs`'s `CREDENTIALS_FILE`). That
+        // file is Claude Code's own runtime secret, never something llmenv
+        // wrote for the container to read — mask it with a `/dev/null`
+        // overlay (an always-empty file at that path) so the mounted
+        // directory carries mcpServers/skills/plugins/settings without also
+        // handing the container a live credential.
+        cmd.arg("--mount").arg(format!(
+            "type=bind,source=/dev/null,target={},readonly",
+            dir.join(".credentials.json").display(),
+        ));
         // Overlay-mounted AFTER the directory mount so it shadows the real
         // file at the same path inside the container — mount order matters
         // here, both engines apply mounts in the order given.
@@ -571,6 +584,37 @@ mod tests {
     }
 
     #[test]
+    fn container_command_masks_credentials_json_with_dev_null_when_config_dir_mounted() {
+        let spec = SandboxSpec {
+            runtime: ContainerRuntime::Docker,
+            image: "img".to_string(),
+            forward_ssh_agent: true,
+        };
+        let args = Vec::new();
+        let vars = BTreeMap::new();
+        let project_dir = std::path::Path::new("/proj");
+        let config_dir = std::path::Path::new("/home/user/.cache/llmenv/claude-code/abc123");
+        let (cmd, _guard) = container_command(
+            &spec,
+            ContainerInputs {
+                bin_path: std::path::Path::new("/usr/local/bin/claude"),
+                args: &args,
+                vars: &vars,
+                project_dir,
+                ssh_auth_sock: None,
+                config_dir: Some(config_dir),
+                patched_claude_json: None,
+            },
+        )
+        .unwrap();
+        let cmd_args = command_args(&cmd);
+        assert!(cmd_args.contains(&format!(
+            "type=bind,source=/dev/null,target={}/.credentials.json,readonly",
+            config_dir.display()
+        )));
+    }
+
+    #[test]
     fn container_command_overlays_patched_claude_json_over_the_config_dir_mount() {
         let spec = SandboxSpec {
             runtime: ContainerRuntime::Docker,
@@ -628,6 +672,7 @@ mod tests {
         .unwrap();
         let cmd_args = command_args(&cmd);
         assert!(!cmd_args.iter().any(|a| a.contains(".claude.json")));
+        assert!(!cmd_args.iter().any(|a| a.contains(".credentials.json")));
     }
 
     proptest! {
