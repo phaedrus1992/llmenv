@@ -1,179 +1,215 @@
 {
-  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "config:recommended",
-    ":configMigration",
-    ":semanticCommits",
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+  extends: [
+    'config:recommended',
+    ':configMigration',
+    ':semanticCommits',
   ],
-
-  // General settings
-  // Enabled for visibility into per-base pending/rate-limited updates — which
-  // updates are queued behind the concurrency limit, and why they're held.
-  "dependencyDashboard": true,
-  "assigneesFromCodeOwners": true,
-  // Track main plus every maintained release line (release/1.x, release/2.x, …).
-  // Anchored so it excludes the transient forward-merge/release/* branches.
-  "baseBranchPatterns": ["main", "/^release\\/.+$/"],
-  // `main` and every active release/* line each raise their own grouped PRs
-  // (rust crates, npm, actions, pre-commit, …). This limit is global, not
-  // per-base, so the old cap of 5 let a full main queue starve the release
-  // branches entirely. Raise both limits to fit multiple active base lines.
-  "branchConcurrentLimit": 20,
-  "prConcurrentLimit": 20,
-  "internalChecksFilter": "strict",
-  "labels": ["dependencies"],
-  "minimumReleaseAge": "3 days",
-
-  // Open PRs immediately. "not-pending" would defer PR creation until branch
-  // checks finish, but CI here triggers on pull_request (not branch push), so a
-  // branchless PR never gets checks — "not-pending" then stalls every PR until
-  // the ~25h prNotPendingHours fallback. Immediate lets the PR open and trigger
-  // its own pull_request CI.
-  "prCreation": "immediate",
-  "prHourlyLimit": 0,
-  "rangeStrategy": "bump",
-  "rebaseWhen": "behind-base-branch",
-  "semanticCommitType": "chore",
-  "semanticCommitScope": "deps",
-
-  // Rust crate updates
+  dependencyDashboard: true,
+  assigneesFromCodeOwners: true,
+  baseBranchPatterns: [
+    'main',
+    '/^release\\/.+$/',
+  ],
+  branchConcurrentLimit: 20,
+  prConcurrentLimit: 20,
+  internalChecksFilter: 'strict',
+  labels: [
+    'dependencies',
+  ],
+  minimumReleaseAge: '3 days',
+  prCreation: 'immediate',
+  prHourlyLimit: 0,
+  rangeStrategy: 'bump',
+  rebaseWhen: 'behind-base-branch',
+  semanticCommitType: 'chore',
+  semanticCommitScope: 'deps',
   postUpdateOptions: [
     'cargoLockPackages',
   ],
-
-  // vulnerabilityAlerts (below) only remediates dependencies Renovate has
-  // extracted from a manifest (package.json/Cargo.toml) — it can't attach a
-  // fix to a purely transitive/indirect dependency that's only pinned in the
-  // lockfile, even though that's exactly what most GitHub security alerts
-  // turn out to be (e.g. postcss/svgo/brace-expansion pulled in by Docusaurus,
-  // quinn-proto pulled in by quinn). A periodic full lockfile regen bumps
-  // those transitive versions to the latest one already permitted by their
-  // parents' existing semver ranges, which is where most of these fixes live.
-  // Default schedule is "before 4am on monday" — every other update in this
-  // repo runs on Renovate's normal cadence with no schedule restriction, so
-  // an unset schedule here would leave transitive security fixes waiting up
-  // to a week behind everything else. Empty schedule matches that cadence.
-  "lockFileMaintenance": {
-    "enabled": true,
-    "schedule": [],
+  lockFileMaintenance: {
+    enabled: true,
+    schedule: [],
   },
-
-  // The pre-commit manager is disabled by default; .pre-commit-config.yaml
-  // exists in this repo, so opt in to keep hook versions updated too.
-  "pre-commit": {
-    "enabled": true,
+  'pre-commit': {
+    enabled: true,
   },
-
-  // Every uses: line is SHA-pinned today, but that's only true because each
-  // one was pinned by hand. Without this, Renovate's own PRs for a brand-new
-  // action (not yet on a SHA) would land unpinned and the ratio would drift.
-  "github-actions": {
-    "pinDigests": true,
+  'github-actions': {
+    pinDigests: true,
   },
-
-  // Package- or manager-specific rules.
-  // Rules apply top-to-bottom; later rules override earlier ones for the same
-  // field. So: (1) set the automerge/major policy broadly, (2) give each
-  // ecosystem its own grouped PR, (3) let the finer sub-groups below carve
-  // specific package families out of their ecosystem group.
-  "packageRules": [
+  customManagers: [
     {
-      // release/1.x and release/2.x are maintenance lines: no routine dependency
-      // churn, only security fixes. Disabling normal updates here still leaves
-      // vulnerabilityAlerts (a separate remediation path) free to open security
-      // PRs against these branches. main and release/3.x keep full updates.
-      "description": "Maintenance release lines get security fixes only",
-      "matchBaseBranches": ["release/1.x", "release/2.x"],
-      "enabled": false,
-    },
-    {
-      "description": "Automerge every non-major update once its branch is green",
-      "matchUpdateTypes": ["minor", "patch", "pin", "digest", "lockFileMaintenance"],
-      "automerge": true,
-    },
-    {
-      "description": "Major updates: one PR each, reviewed and merged by hand",
-      "matchUpdateTypes": ["major"],
-      "groupName": null,
-      "automerge": false,
-    },
-    {
-      // A Cargo `"1.2.3"` requirement is a caret range (`^1.2.3`), so
-      // `cargo update` pulls the newest in-range patch — which under
-      // `minimumReleaseAge` can be newer than the version Renovate targets,
-      // making the Cargo.lock artifact update disagree with the PR and fail
-      // (renovate #41624: Renovate can't force an exact version to the package
-      // manager). Pinning to exact versions keeps cargo and Renovate in
-      // agreement and matches this repo's no-caret convention.
-      "description": "Pin Rust crate versions to exact",
-      "matchManagers": ["cargo"],
-      "rangeStrategy": "pin",
-    },
-    {
-      "description": "All non-major Rust crate updates in one PR",
-      "matchManagers": ["cargo"],
-      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
-      "groupName": "rust crates",
-      "groupSlug": "rust-crates",
-    },
-    {
-      "description": "All non-major npm updates in one PR",
-      "matchManagers": ["npm"],
-      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
-      "groupName": "npm packages",
-      "groupSlug": "npm-packages",
-    },
-    {
-      "description": "All non-major pre-commit hook updates in one PR",
-      "matchManagers": ["pre-commit"],
-      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
-      "groupName": "pre-commit hooks",
-      "groupSlug": "pre-commit",
-    },
-    {
-      "description": "Group non-major GitHub Actions updates",
-      "matchManagers": ["github-actions"],
-      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
-      "groupName": "non-major GitHub Actions",
-      "groupSlug": "github-actions-non-major",
-    },
-    {
-      "description": "Group Docusaurus package updates together (co-versioned; must move as a unit)",
-      "groupName": "docusaurus",
-      "groupSlug": "docusaurus",
-      "matchManagers": ["npm"],
-      "matchPackageNames": ["/^@docusaurus\//", "@easyops-cn/docusaurus-search-local"],
-    },
-    {
-      "description": "Group React package updates together",
-      "groupName": "react",
-      "groupSlug": "react",
-      "matchManagers": ["npm"],
-      "matchPackageNames": ["/^react/", "/^@mdx-js\//", "prism-react-renderer"],
-    },
-    {
-      "groupName": "group Rust Serde package updates together",
-      "groupSlug": "rust-serde",
-      "matchManagers": ["cargo"],
-      "matchPackageNames": ["/^serde/"],
-      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
-    },
-    {
-      "groupName": "group Rust Tokio package updates together",
-      "groupSlug": "rust-tokio",
-      "matchManagers": ["cargo"],
-      "matchPackageNames": ["/^tokio/"],
-      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      customType: 'regex',
+      description: "Track DEFAULT_SANDBOX_IMAGE's digest pin in src/launch/mod.rs",
+      managerFilePatterns: [
+        '/^src/launch/mod\\.rs$/',
+      ],
+      matchStrings: [
+        '// renovate: datasource=(?<datasource>.*?) depName=(?<depName>.*?) currentValue=(?<currentValue>.*?) versioning=(?<versioning>.*?)\\n.*?@(?<currentDigest>sha256:[a-f0-9]+)"',
+      ],
     },
   ],
-
-  // CVE fixes: vulnerabilityAlerts defaults already give us separate PRs
-  // (groupName: null), no release-age delay (minimumReleaseAge: null), and
-  // immediate creation (prCreation: "immediate"). Security PRs also bypass
-  // branchConcurrentLimit/prConcurrentLimit, so prPriority would be moot.
-  // All we need is the shared "security" label.
-  "vulnerabilityAlerts": {
-    "enabled": true,
-    "labels": ["dependencies", "security"],
+  packageRules: [
+    {
+      description: 'Maintenance release lines get security fixes only',
+      matchBaseBranches: [
+        'release/1.x',
+        'release/2.x',
+      ],
+      enabled: false,
+    },
+    {
+      description: 'Automerge every non-major update once its branch is green',
+      matchUpdateTypes: [
+        'minor',
+        'patch',
+        'pin',
+        'digest',
+        'lockFileMaintenance',
+      ],
+      automerge: true,
+    },
+    {
+      description: 'Sandbox image digest pin always needs manual review',
+      matchManagers: [
+        'custom.regex',
+      ],
+      automerge: false,
+    },
+    {
+      description: 'Major updates: one PR each, reviewed and merged by hand',
+      matchUpdateTypes: [
+        'major',
+      ],
+      groupName: null,
+      automerge: false,
+    },
+    {
+      description: 'Pin Rust crate versions to exact',
+      matchManagers: [
+        'cargo',
+      ],
+      rangeStrategy: 'pin',
+    },
+    {
+      description: 'All non-major Rust crate updates in one PR',
+      matchManagers: [
+        'cargo',
+      ],
+      matchUpdateTypes: [
+        'minor',
+        'patch',
+        'pin',
+        'digest',
+      ],
+      groupName: 'rust crates',
+      groupSlug: 'rust-crates',
+    },
+    {
+      description: 'All non-major npm updates in one PR',
+      matchManagers: [
+        'npm',
+      ],
+      matchUpdateTypes: [
+        'minor',
+        'patch',
+        'pin',
+        'digest',
+      ],
+      groupName: 'npm packages',
+      groupSlug: 'npm-packages',
+    },
+    {
+      description: 'All non-major pre-commit hook updates in one PR',
+      matchManagers: [
+        'pre-commit',
+      ],
+      matchUpdateTypes: [
+        'minor',
+        'patch',
+        'pin',
+        'digest',
+      ],
+      groupName: 'pre-commit hooks',
+      groupSlug: 'pre-commit',
+    },
+    {
+      description: 'Group non-major GitHub Actions updates',
+      matchManagers: [
+        'github-actions',
+      ],
+      matchUpdateTypes: [
+        'minor',
+        'patch',
+        'pin',
+        'digest',
+      ],
+      groupName: 'non-major GitHub Actions',
+      groupSlug: 'github-actions-non-major',
+    },
+    {
+      description: 'Group Docusaurus package updates together (co-versioned; must move as a unit)',
+      groupName: 'docusaurus',
+      groupSlug: 'docusaurus',
+      matchManagers: [
+        'npm',
+      ],
+      matchPackageNames: [
+        '/^@docusaurus//',
+        '@easyops-cn/docusaurus-search-local',
+      ],
+    },
+    {
+      description: 'Group React package updates together',
+      groupName: 'react',
+      groupSlug: 'react',
+      matchManagers: [
+        'npm',
+      ],
+      matchPackageNames: [
+        '/^react/',
+        '/^@mdx-js//',
+        'prism-react-renderer',
+      ],
+    },
+    {
+      groupName: 'group Rust Serde package updates together',
+      groupSlug: 'rust-serde',
+      matchManagers: [
+        'cargo',
+      ],
+      matchPackageNames: [
+        '/^serde/',
+      ],
+      matchUpdateTypes: [
+        'minor',
+        'patch',
+        'pin',
+        'digest',
+      ],
+    },
+    {
+      groupName: 'group Rust Tokio package updates together',
+      groupSlug: 'rust-tokio',
+      matchManagers: [
+        'cargo',
+      ],
+      matchPackageNames: [
+        '/^tokio/',
+      ],
+      matchUpdateTypes: [
+        'minor',
+        'patch',
+        'pin',
+        'digest',
+      ],
+    },
+  ],
+  vulnerabilityAlerts: {
+    enabled: true,
+    labels: [
+      'dependencies',
+      'security',
+    ],
   },
 }
