@@ -290,7 +290,45 @@ content digest, not a mutable tag (added in v4.0.0,
 [#1704](https://github.com/phaedrus1992/llmenv/issues/1704)) — a mutable tag
 could otherwise be repointed by anyone with GHCR push access, or drift
 underneath the build on a registry-side change with no corresponding change
-in this repo.
+in this repo. A Renovate custom manager keeps the pin current across a
+Dockerfile base-image bump or a manual rebuild (added in v4.0.0,
+[#1725](https://github.com/phaedrus1992/llmenv/issues/1725)).
+
+**Supply-chain hardening on the published image** (added in v4.0.0,
+[#1719](https://github.com/phaedrus1992/llmenv/issues/1719),
+[#1721](https://github.com/phaedrus1992/llmenv/issues/1721),
+[#1722](https://github.com/phaedrus1992/llmenv/issues/1722),
+[#1723](https://github.com/phaedrus1992/llmenv/issues/1723)):
+
+- `sandbox-image.yml` runs a Trivy vulnerability scan and fails the build on
+  a HIGH/CRITICAL finding; a specific finding is suppressed only via a
+  reviewed entry in `docker/sandbox/.trivyignore`, never a blanket severity
+  drop.
+- The workflow generates and attaches an SPDX SBOM to the published image,
+  alongside the build-provenance attestation it already produced.
+- The workflow signs the published image with keyless cosign (Sigstore,
+  via the workflow's own GitHub Actions identity — no key material to
+  manage). Verify an image with:
+
+  ```text
+  IDENTITY='^https://github\.com/phaedrus1992/llmenv/\.github/workflows/sandbox-image\.yml@refs/heads/(main|release/.+)$'
+  cosign verify ghcr.io/phaedrus1992/llmenv-sandbox@<digest> \
+    --certificate-identity-regexp "$IDENTITY" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com
+  ```
+
+- Before running a pulled sandbox image, `launch` verifies its
+  build-provenance attestation with `gh attestation verify`, pinned to the
+  same workflow (`--signer-workflow`). This needs `gh` (the GitHub CLI) on
+  `PATH`; a machine with no `gh` installed, no network path to GitHub, or
+  one that reaches GitHub but gets an inconclusive answer (rate limiting,
+  a registry/API outage), still launches — `launch` prints a one-line
+  stderr notice and skips verification rather than blocking. Only a `gh`
+  that reached a definitive answer and reported the image failed
+  verification blocks the launch. This check only ever runs against
+  llmenv's own published sandbox image — a `features.sandbox.image`
+  override to any other image skips it, since that image was never
+  attested by this repo in the first place.
 
 When active, `launch` runs `<runtime> run --rm <image> <engine> <args>`
 (wrapped by the same crash/restart supervision as a host launch) with:

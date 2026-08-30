@@ -71,6 +71,25 @@
     "pinDigests": true,
   },
 
+  // src/launch/mod.rs pins DEFAULT_SANDBOX_IMAGE by content digest (#1703),
+  // not the mutable `v1` tag docker/sandbox/Dockerfile's own FROM line
+  // already tracks via the dockerfile manager. Without this, a Dockerfile
+  // base-image bump (or a manual rebuild) republishes `v1` with a new digest
+  // and nothing here notices (#1725) — the `// renovate:` comment
+  // immediately above the pinned line carries the depName/currentValue this
+  // manager needs, since the pin has no tag of its own to read a version
+  // from.
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Track DEFAULT_SANDBOX_IMAGE's digest pin in src/launch/mod.rs",
+      "fileMatch": ["^src/launch/mod\\.rs$"],
+      "matchStrings": [
+        "// renovate: datasource=(?<datasource>.*?) depName=(?<depName>.*?) currentValue=(?<currentValue>.*?) versioning=(?<versioning>.*?)\\n.*?@(?<currentDigest>sha256:[a-f0-9]+)\"",
+      ],
+    },
+  ],
+
   // Package- or manager-specific rules.
   // Rules apply top-to-bottom; later rules override earlier ones for the same
   // field. So: (1) set the automerge/major policy broadly, (2) give each
@@ -90,6 +109,15 @@
       "description": "Automerge every non-major update once its branch is green",
       "matchUpdateTypes": ["minor", "patch", "pin", "digest", "lockFileMaintenance"],
       "automerge": true,
+    },
+    {
+      // Carve the sandbox image digest pin (#1725's customManagers entry,
+      // above) back out of the automerge rule just above. A digest bump
+      // here means the published sandbox image changed — worth a human
+      // look before it lands, unlike a routine dependency version bump.
+      "description": "Sandbox image digest pin always needs manual review",
+      "matchManagers": ["custom.regex"],
+      "automerge": false,
     },
     {
       "description": "Major updates: one PR each, reviewed and merged by hand",
