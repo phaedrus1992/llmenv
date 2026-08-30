@@ -249,12 +249,9 @@ directly.
 
 `llmenv launch <engine>` can run the engine in a container instead of
 directly on the host, so a bad delete, a force-push, or an exfiltrated
-token lands in a throwaway container rather than on your machine. This
-first cut covers the core exec path — config, container spawn, mounts, and
-(Claude Code) credential protection; a published default image, `llmenv
-doctor` checks, and further docs are still to come
-([#1653](https://github.com/phaedrus1992/llmenv/issues/1653),
-[#1654](https://github.com/phaedrus1992/llmenv/issues/1654)).
+token lands in a throwaway container rather than on your machine. `llmenv
+doctor` checks for this feature are still to come
+([#1654](https://github.com/phaedrus1992/llmenv/issues/1654)).
 
 Enable it in `config.yaml`, off by default:
 
@@ -263,7 +260,7 @@ features:
   sandbox:
     enabled: false            # opt-in
     runtime: auto              # auto | docker | podman
-    image: null                # required today — see below
+    image: null                # null = llmenv's published default image
     forward_ssh_agent: true    # (added in v4.0.0) bind-mount SSH_AUTH_SOCK in
 ```
 
@@ -276,11 +273,17 @@ config:
 llmenv launch --container claude
 ```
 
-**`image` must be set explicitly for now.** llmenv doesn't yet publish its
-own default sandbox image ([#1653](https://github.com/phaedrus1992/llmenv/issues/1653)) —
-until it does, sandbox mode needs a user-supplied image with the target
-engine binary already on its own `PATH`; llmenv does not copy the host's
-engine binary into the container in this cut.
+**`image: null` uses llmenv's published default sandbox image** (added in
+v4.0.0, [#1653](https://github.com/phaedrus1992/llmenv/issues/1653)) —
+`ghcr.io/phaedrus1992/llmenv-sandbox`, built from
+[`docker/sandbox/Dockerfile`](https://github.com/phaedrus1992/llmenv/blob/main/docker/sandbox/Dockerfile)
+and published by `.github/workflows/sandbox-image.yml`. It's deliberately
+minimal — just enough libc and CA certificates to exec an engine binary,
+with no engine baked in, so it doesn't go stale on every engine release.
+Set `features.sandbox.image` to any other image to override the default;
+llmenv bind-mounts the resolved host engine binary read-only into the
+container at its own path and execs it directly, so any image with a
+compatible libc works, regardless of what's on its own `PATH`.
 
 When active, `launch` runs `<runtime> run --rm <image> <engine> <args>`
 (wrapped by the same crash/restart supervision as a host launch) with:

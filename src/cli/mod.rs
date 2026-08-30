@@ -15,7 +15,7 @@ use clap::{Parser, Subcommand};
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
-mod doctor;
+pub(crate) mod doctor;
 mod setup;
 mod status;
 pub(crate) mod statusline;

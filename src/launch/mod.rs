@@ -8,6 +8,7 @@
 //! module rather than growing `cli`'s already-largest file further. See
 //! `docs/superpowers/specs/2026-08-23-launch-mid-session-supervision-design.md`.
 
+mod config_mount;
 mod credential_watch;
 mod drift;
 mod icebreaker;
@@ -226,6 +227,27 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
         };
         let container_vars = icebreaker_session.as_ref().map(|s| &s.container_vars);
 
+        // #1652: mounts the materialized config directory (mcpServers,
+        // skills, plugins, settings) into the container, with ICM's URL
+        // rewritten off loopback when needed — resolved once here, like
+        // icebreaker_session above, so it stays fixed across relaunches.
+        let config_mount = match &sandbox_spec {
+            Some(spec) => config_mount::prepare(
+                adapter.name(),
+                spec.runtime,
+                resolved
+                    .vars
+                    .get("CLAUDE_CONFIG_DIR")
+                    .map(std::path::Path::new),
+            )?,
+            None => None,
+        };
+        let config_dir = config_mount.as_ref().map(|m| m.config_dir.as_path());
+        let patched_claude_json = config_mount
+            .as_ref()
+            .and_then(|m| m.patched_claude_json.as_ref())
+            .map(|g| g.path());
+
         // #1669: icebreaker only seals `ANTHROPIC_API_KEY` — any other
         // credential-shaped var (present regardless of engine, and still
         // present in `container_vars` even for a sealed Claude Code session)
@@ -384,6 +406,8 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
                 sandbox: sandbox_spec.as_ref(),
                 container_vars,
                 ssh_auth_sock: ssh_auth_sock.as_deref(),
+                config_dir,
+                patched_claude_json,
             },
             &resolved,
             notice_socket,
@@ -434,7 +458,27 @@ struct EngineTarget<'a> {
     /// the same value the launch-time notice was computed from. Unused when
     /// `sandbox` is `None`.
     ssh_auth_sock: Option<&'a std::path::Path>,
+    /// Materialized config directory to bind-mount into the container
+    /// (#1652), resolved once alongside `icebreaker_session` before this
+    /// struct is built. Unused when `sandbox` is `None`.
+    config_dir: Option<&'a std::path::Path>,
+    /// Patched `.claude.json` overlay path (#1652), when ICM's URL needed
+    /// rewriting. Unused when `sandbox` is `None`.
+    patched_claude_json: Option<&'a std::path::Path>,
 }
+
+/// llmenv's published default sandbox image (#1653): minimal libc + CA
+/// certificates only, no engine binaries baked in (see
+/// `docker/sandbox/Dockerfile` and `.github/workflows/sandbox-image.yml`).
+/// The version tag is bumped in lockstep with `docker/sandbox/VERSION` —
+/// both change together whenever the image definition changes.
+/// `features.sandbox.image` overrides this default with any user-supplied
+/// image.
+///
+/// This is a mutable tag, not a content digest (pre-pr-review P1, #1653) —
+/// pinning by digest isn't possible until the workflow that publishes this
+/// image has actually run at least once; tracked as a follow-up, #1703.
+const DEFAULT_SANDBOX_IMAGE: &str = "ghcr.io/phaedrus1992/llmenv-sandbox:v1";
 
 /// Decide whether `narrow`'s launch runs sandboxed, and if so, resolve the
 /// concrete container runtime + image.
@@ -452,10 +496,9 @@ struct EngineTarget<'a> {
 /// to enable.
 ///
 /// # Errors
-/// Bails when sandboxing is active and either no configured container
-/// runtime is found on `PATH`, or no image is configured — llmenv does not
-/// yet publish a default sandbox image (#1653), so one must be set
-/// explicitly via `features.sandbox.image` until it does.
+/// Bails when sandboxing is active and no configured container runtime is
+/// found on `PATH`. An unset `features.sandbox.image` no longer bails
+/// (#1653) — it falls back to [`DEFAULT_SANDBOX_IMAGE`].
 fn resolve_sandbox_spec(
     config_path: &std::path::Path,
     override_enabled: Option<bool>,
@@ -497,12 +540,19 @@ fn build_sandbox_spec(
             sandbox::requested_binaries(&sandbox_config.runtime)
         );
     };
-    let Some(image) = sandbox_config.image else {
-        anyhow::bail!(
-            "sandbox mode is enabled but features.sandbox.image is unset — \
-             llmenv does not yet publish a default sandbox image (#1653), so \
-             an image must be configured explicitly"
-        );
+    let image = match sandbox_config.image {
+        Some(image) => image,
+        None => {
+            // pre-pr-review P1 (#1653): sandboxing is a containment boundary
+            // (see this function's own doc comment) — silently substituting
+            // an image the user never configured needs the same visibility
+            // as the config-load-failure fallback above, not just a debug log.
+            eprintln!(
+                "llmenv: sandbox mode is active with no features.sandbox.image configured — \
+                 using llmenv's published default, {DEFAULT_SANDBOX_IMAGE}"
+            );
+            DEFAULT_SANDBOX_IMAGE.to_string()
+        }
     };
     Ok(Some(sandbox::SandboxSpec {
         runtime,
@@ -536,6 +586,8 @@ async fn supervision_loop(
         sandbox,
         container_vars,
         ssh_auth_sock,
+        config_dir,
+        patched_claude_json,
     } = target;
     let mut cap = RelaunchCap::default();
 
@@ -551,11 +603,13 @@ async fn supervision_loop(
                 let (cmd, guard) = sandbox::container_command(
                     spec,
                     sandbox::ContainerInputs {
-                        binary_name: adapter.binary_name(),
+                        bin_path,
                         args,
                         vars: container_vars.unwrap_or(&resolved.vars),
                         project_dir: &project_dir,
                         ssh_auth_sock,
+                        config_dir,
+                        patched_claude_json,
                     },
                 )?;
                 (cmd, Some(guard))
@@ -1122,9 +1176,11 @@ mod tests {
     }
 
     #[test]
-    fn build_sandbox_spec_override_enables_it_even_when_config_is_absent_but_image_missing_fails() {
-        let err = build_sandbox_spec(None, Some(true), always_podman).unwrap_err();
-        assert!(err.to_string().contains("features.sandbox.image is unset"));
+    fn build_sandbox_spec_falls_back_to_default_image_when_unset() {
+        let spec = build_sandbox_spec(None, Some(true), always_podman)
+            .unwrap()
+            .unwrap();
+        assert_eq!(spec.image, DEFAULT_SANDBOX_IMAGE);
     }
 
     #[test]
@@ -1161,10 +1217,16 @@ mod tests {
             let effective_enabled = override_enabled.unwrap_or(configured_enabled);
             if !effective_enabled {
                 proptest::prop_assert!(matches!(result, Ok(None)));
-            } else if !runtime_found || !image_present {
+            } else if !runtime_found {
                 proptest::prop_assert!(result.is_err());
             } else {
-                proptest::prop_assert!(matches!(result, Ok(Some(_))));
+                let spec = result.unwrap().unwrap();
+                let expected_image = if image_present {
+                    "img"
+                } else {
+                    DEFAULT_SANDBOX_IMAGE
+                };
+                proptest::prop_assert_eq!(spec.image, expected_image);
             }
         }
     }
