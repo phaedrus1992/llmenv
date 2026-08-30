@@ -8,6 +8,7 @@
 //! module rather than growing `cli`'s already-largest file further. See
 //! `docs/superpowers/specs/2026-08-23-launch-mid-session-supervision-design.md`.
 
+mod attestation;
 mod config_mount;
 mod credential_watch;
 mod drift;
@@ -529,7 +530,11 @@ fn resolve_sandbox_spec(
             None
         }
     };
-    build_sandbox_spec(sandbox_config, override_enabled, sandbox::resolve_runtime)
+    let spec = build_sandbox_spec(sandbox_config, override_enabled, sandbox::resolve_runtime)?;
+    if let Some(spec) = &spec {
+        attestation::verify_before_run(&spec.image)?;
+    }
+    Ok(spec)
 }
 
 /// [`resolve_sandbox_spec`]'s decision logic once the config has already been
