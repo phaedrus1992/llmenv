@@ -86,10 +86,27 @@ pub(crate) fn prepare(
     };
 
     let claude_json_path = config_dir.join(CLAUDE_JSON_FILE);
-    let patched_claude_json = match patch_claude_json_loopback_urls(
-        &claude_json_path,
-        super::sandbox::gateway_host(runtime),
-    )? {
+    let patched =
+        patch_claude_json_loopback_urls(&claude_json_path, super::sandbox::gateway_host(runtime))?;
+    // pre-pr-review P1 (#1652): a rewritten URL is only reachable if the
+    // rewritten server actually accepts connections arriving via the
+    // container's bridge/gateway interface, not just its own loopback —
+    // e.g. ICM's mcp-proxy defaults to `listen_host: 127.0.0.1`
+    // (`llmenv_config::Memory::default`), which does NOT satisfy that on
+    // native Linux Docker/Podman (only Docker Desktop's host.docker.internal
+    // is documented to reach a loopback-only host service). This is the
+    // same open question `icebreaker.rs`'s own module doc already flags for
+    // its credential proxy ("confirm this end-to-end before relying on it
+    // in production") — tracked, not re-solved here, see #1702.
+    if patched.is_some() {
+        tracing::debug!(
+            "launch: rewrote a loopback mcpServers URL to {} for the sandboxed container — this \
+             only actually connects if the rewritten server accepts connections on a \
+             non-loopback interface (see #1702)",
+            super::sandbox::gateway_host(runtime)
+        );
+    }
+    let patched_claude_json = match patched {
         Some(patched_bytes) => Some(write_patched_claude_json(&patched_bytes)?),
         None => None,
     };

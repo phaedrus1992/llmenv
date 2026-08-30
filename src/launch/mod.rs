@@ -474,6 +474,10 @@ struct EngineTarget<'a> {
 /// both change together whenever the image definition changes.
 /// `features.sandbox.image` overrides this default with any user-supplied
 /// image.
+///
+/// This is a mutable tag, not a content digest (pre-pr-review P1, #1653) —
+/// pinning by digest isn't possible until the workflow that publishes this
+/// image has actually run at least once; tracked as a follow-up, #1703.
 const DEFAULT_SANDBOX_IMAGE: &str = "ghcr.io/phaedrus1992/llmenv-sandbox:v1";
 
 /// Decide whether `narrow`'s launch runs sandboxed, and if so, resolve the
@@ -536,9 +540,20 @@ fn build_sandbox_spec(
             sandbox::requested_binaries(&sandbox_config.runtime)
         );
     };
-    let image = sandbox_config
-        .image
-        .unwrap_or_else(|| DEFAULT_SANDBOX_IMAGE.to_string());
+    let image = match sandbox_config.image {
+        Some(image) => image,
+        None => {
+            // pre-pr-review P1 (#1653): sandboxing is a containment boundary
+            // (see this function's own doc comment) — silently substituting
+            // an image the user never configured needs the same visibility
+            // as the config-load-failure fallback above, not just a debug log.
+            eprintln!(
+                "llmenv: sandbox mode is active with no features.sandbox.image configured — \
+                 using llmenv's published default, {DEFAULT_SANDBOX_IMAGE}"
+            );
+            DEFAULT_SANDBOX_IMAGE.to_string()
+        }
+    };
     Ok(Some(sandbox::SandboxSpec {
         runtime,
         image,
