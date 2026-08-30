@@ -470,15 +470,22 @@ struct EngineTarget<'a> {
 /// llmenv's published default sandbox image (#1653): minimal libc + CA
 /// certificates only, no engine binaries baked in (see
 /// `docker/sandbox/Dockerfile` and `.github/workflows/sandbox-image.yml`).
-/// The version tag is bumped in lockstep with `docker/sandbox/VERSION` —
-/// both change together whenever the image definition changes.
 /// `features.sandbox.image` overrides this default with any user-supplied
 /// image.
 ///
-/// This is a mutable tag, not a content digest (pre-pr-review P1, #1653) —
-/// pinning by digest isn't possible until the workflow that publishes this
-/// image has actually run at least once; tracked as a follow-up, #1703.
-const DEFAULT_SANDBOX_IMAGE: &str = "ghcr.io/phaedrus1992/llmenv-sandbox:v1";
+/// Pinned by content digest, not the mutable `:v1` tag (#1703) — a mutable
+/// tag lets anyone who can push to `main`/`release/*` and trigger
+/// `sandbox-image.yml` (or who compromises GHCR push credentials) silently
+/// repoint what every unconfigured sandboxed launch pulls.
+///
+/// To re-pin after an intentional rebuild (bumping `docker/sandbox/VERSION`
+/// and pushing to a branch `sandbox-image.yml` builds from): once the
+/// workflow has published the new image, resolve its digest with
+/// `docker pull ghcr.io/phaedrus1992/llmenv-sandbox:vN && docker inspect
+/// ghcr.io/phaedrus1992/llmenv-sandbox:vN --format
+/// '{{index .RepoDigests 0}}'` (or read `steps.build.outputs.digest` from
+/// the workflow run) and update the digest below to match.
+const DEFAULT_SANDBOX_IMAGE: &str = "ghcr.io/phaedrus1992/llmenv-sandbox@sha256:68d87335b359f375c223131dd1c218f2cb153f7d98379f542989abcdce75a79c";
 
 /// Decide whether `narrow`'s launch runs sandboxed, and if so, resolve the
 /// concrete container runtime + image.
@@ -1173,6 +1180,15 @@ mod tests {
     #[test]
     fn resolve_ssh_auth_sock_is_none_when_neither_condition_holds() {
         assert_eq!(resolve_ssh_auth_sock(false, None), None);
+    }
+
+    #[test]
+    fn default_sandbox_image_is_pinned_by_digest_not_a_mutable_tag() {
+        assert!(
+            DEFAULT_SANDBOX_IMAGE.contains("@sha256:"),
+            "DEFAULT_SANDBOX_IMAGE must pin a content digest, not a mutable tag: \
+             {DEFAULT_SANDBOX_IMAGE}"
+        );
     }
 
     #[test]
