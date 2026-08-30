@@ -283,7 +283,14 @@ with no engine baked in, so it doesn't go stale on every engine release.
 Set `features.sandbox.image` to any other image to override the default;
 llmenv bind-mounts the resolved host engine binary read-only into the
 container at its own path and execs it directly, so any image with a
-compatible libc works, regardless of what's on its own `PATH`.
+compatible libc works, regardless of what's on its own `PATH`. The default
+image reference and the Dockerfile's own base image are both pinned by
+content digest, not a mutable tag (added in v4.0.0,
+[#1703](https://github.com/phaedrus1992/llmenv/issues/1703),
+[#1704](https://github.com/phaedrus1992/llmenv/issues/1704)) — a mutable tag
+could otherwise be repointed by anyone with GHCR push access, or drift
+underneath the build on a registry-side change with no corresponding change
+in this repo.
 
 When active, `launch` runs `<runtime> run --rm <image> <engine> <args>`
 (wrapped by the same crash/restart supervision as a host launch) with:
@@ -300,12 +307,17 @@ When active, `launch` runs `<runtime> run --rm <image> <engine> <args>`
   this mount entirely and keep the filesystem/host isolation without the SSH
   reach (added in v4.0.0). `launch` prints a one-line stderr notice each time
   this mount happens. The notice names the opt-out (added in v4.0.0).
-- The resolved/materialized environment written to an owner-only temp file
-  and passed via `--env-file` (not `-e KEY=VALUE`, which would put every
-  value — including a sealed credential — into `docker`/`podman`'s own argv,
-  readable by any local user via `/proc/<pid>/cmdline`) — not a live mount of
+- The resolved/materialized environment written to an owner-only file and
+  passed via `--env-file` (not `-e KEY=VALUE`, which would put every value —
+  including a sealed credential — into `docker`/`podman`'s own argv, readable
+  by any local user via `/proc/<pid>/cmdline`) — not a live mount of
   `~/.config/llmenv`, so the container gets the already-resolved result, never
-  the source config tree.
+  the source config tree. This file (and the patched `.claude.json` overlay
+  used to reach a loopback ICM server from inside the container) lives under
+  an owner-only subdirectory of llmenv's own state dir, not the shared OS temp
+  dir (added in v4.0.0, [#1705](https://github.com/phaedrus1992/llmenv/issues/1705)),
+  and is swept on the next sandboxed launch if a prior one crashed before
+  cleaning up.
 - Baseline hardening on the `run` invocation: `--cap-drop=ALL`,
   `--security-opt=no-new-privileges`, and `--user <uid>:<gid>` (plus
   `--userns=keep-id` on podman) so the container runs as the launching user

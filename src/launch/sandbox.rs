@@ -176,6 +176,161 @@ impl Drop for EnvFileGuard {
 /// tests call it within the same test binary (sharing one pid) in parallel.
 static ENV_FILE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Fallback staleness threshold for [`sweep_stale`]'s should-never-happen
+/// case: a name that matches [`SANDBOX_TMP_PREFIX`] but not either known
+/// filename shape, so no pid can be extracted to check liveness against.
+/// Real entries are swept by liveness, not age (see [`sweep_stale`]'s doc
+/// comment for why age alone is unsafe here) — a live sandboxed launch
+/// routinely runs far longer than this.
+const STALE_TEMP_FILE_AFTER: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Runs [`sweep_stale`] at most once per process — every sandboxed launch
+/// calls [`sandbox_tmp_dir`] at least once (via [`write_env_file`]), so this
+/// still sweeps once per launch without re-scanning the directory on every
+/// relaunch within the same session.
+static SWEEP_DONE: std::sync::Once = std::sync::Once::new();
+
+/// Owner-only subdirectory of llmenv's own state dir where sandbox launch
+/// temp files (env files, patched config overlays) are written, replacing
+/// the shared OS temp dir (#1705): a world-writable shared directory is a
+/// worse home for files that can carry a sealed credential's headers or a
+/// copy of `.claude.json` including any `mcpServers` auth headers/tokens,
+/// even though each file is already written owner-only itself.
+pub(crate) fn sandbox_tmp_dir() -> anyhow::Result<std::path::PathBuf> {
+    prepare_sandbox_tmp_dir(&crate::paths::state_dir()?.join("sandbox-tmp"))
+}
+
+/// [`sandbox_tmp_dir`] against an explicit path — split out so the
+/// symlink guard is testable without depending on the real state dir.
+fn prepare_sandbox_tmp_dir(dir: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    // pre-pr-review P2 (#1705): `create_dir_owner_only`'s recursive
+    // `DirBuilder` succeeds through a pre-existing symlink, and its
+    // follow-up `set_permissions` chmods through one too — a symlink planted
+    // here (same-uid write access to the state dir, outside this feature's
+    // stated "different local user" threat model, but cheap to close) would
+    // otherwise turn `sweep_stale` into an unfiltered reaper of whatever
+    // directory it points at.
+    anyhow::ensure!(
+        !std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()),
+        "{} is a symlink — refusing to use it as llmenv's sandbox temp dir",
+        dir.display()
+    );
+    crate::paths::create_dir_owner_only(dir)
+        .with_context(|| format!("creating {}", dir.display()))?;
+    SWEEP_DONE.call_once(|| sweep_stale(dir, STALE_TEMP_FILE_AFTER));
+    Ok(dir.to_path_buf())
+}
+
+/// Filename prefix every sandbox temp file is written with
+/// ([`write_env_file`]'s `llmenv-sandbox-<pid>-<n>.env`,
+/// `config_mount::write_patched_claude_json`'s
+/// `llmenv-sandbox-claude-json-<pid>-<n>`) — [`sweep_stale`] never considers
+/// an entry without it, so a symlink or stray file dropped into the same
+/// directory by something else is never touched.
+const SANDBOX_TMP_PREFIX: &str = "llmenv-sandbox-";
+
+/// Extract the pid embedded in a sandbox temp file's name — the digits
+/// between the last two `-` separators, ignoring a trailing `.env` (present
+/// on [`write_env_file`]'s output, absent on
+/// `config_mount::write_patched_claude_json`'s). `None` for anything that
+/// doesn't match either shape.
+fn pid_from_sandbox_tmp_name(name: &str) -> Option<u32> {
+    let stem = name.strip_suffix(".env").unwrap_or(name);
+    let (rest, _counter) = stem.rsplit_once('-')?;
+    let (_, pid) = rest.rsplit_once('-')?;
+    pid.parse().ok()
+}
+
+/// Whether `pid` still names a live process — `kill(pid, 0)`, which checks
+/// existence without signaling it. A permission error still means the
+/// process exists (just one this process can't signal); only "no such
+/// process" means it's actually gone. Fails closed (reports alive) on an
+/// unrepresentable pid or any other error, so a doubtful case is left for a
+/// later sweep rather than reaped now.
+fn process_is_alive(pid: u32) -> bool {
+    let Ok(raw) = i32::try_from(pid) else {
+        return true;
+    };
+    let Some(pid) = rustix::process::Pid::from_raw(raw) else {
+        return true;
+    };
+    !matches!(
+        rustix::process::test_kill_process(pid),
+        Err(rustix::io::Errno::SRCH)
+    )
+}
+
+/// Remove every entry directly inside `dir` that [`SANDBOX_TMP_PREFIX`]
+/// identifies as llmenv's own and whose embedded pid is no longer running —
+/// a crashed launch's `EnvFileGuard`/`PatchedFileGuard` never runs its
+/// `Drop`, so its temp file would otherwise sit in `dir` forever.
+///
+/// Liveness, not age, decides staleness (pre-pr-review P1/P2, #1705): the
+/// patched `.claude.json` overlay stays bind-mounted for a session's whole
+/// lifetime, which routinely exceeds any fixed age threshold, so aging it
+/// out would delete a live session's bind-mount source out from under it —
+/// the next crash-relaunch would then fail with a missing mount source
+/// instead of restarting. `stale_after` is only a fallback for the
+/// should-never-happen case of a name matching the prefix but not either
+/// known shape.
+///
+/// Best-effort: a scan, stat, or removal failure is logged and skipped
+/// rather than failing the launch this sweep happens to run inside of.
+fn sweep_stale(dir: &std::path::Path, stale_after: std::time::Duration) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!(
+                "launch: could not scan {} for stale sandbox temp files: {e}",
+                dir.display()
+            );
+            return;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                tracing::warn!(
+                    "launch: could not read a directory entry while sweeping {}: {e}",
+                    dir.display()
+                );
+                continue;
+            }
+        };
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue; // non-UTF8 name: llmenv never writes one, so not ours to touch.
+        };
+        if !name.starts_with(SANDBOX_TMP_PREFIX) {
+            continue;
+        }
+        let is_stale = match pid_from_sandbox_tmp_name(&name) {
+            Some(pid) => !process_is_alive(pid),
+            None => {
+                let stat = entry.metadata().and_then(|m| m.modified());
+                let Ok(modified) = stat else {
+                    tracing::warn!(
+                        "launch: could not stat sandbox temp file {name} while sweeping"
+                    );
+                    continue;
+                };
+                std::time::SystemTime::now()
+                    .duration_since(modified)
+                    .is_ok_and(|age| age >= stale_after)
+            }
+        };
+        if is_stale
+            && let Err(e) = std::fs::remove_file(entry.path())
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                "launch: could not remove stale sandbox temp file {}: {e}",
+                entry.path().display()
+            );
+        }
+    }
+}
+
 /// Rejects a path that would break `--mount`'s comma-delimited `key=value`
 /// option string: `,`/`=` have no escaping in that format, so either would
 /// silently splice in an extra mount option or key rather than surviving as
@@ -210,7 +365,7 @@ fn write_env_file(vars: &BTreeMap<String, String>) -> anyhow::Result<EnvFileGuar
         content.push('\n');
     }
     let n = ENV_FILE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("llmenv-sandbox-{}-{n}.env", std::process::id()));
+    let path = sandbox_tmp_dir()?.join(format!("llmenv-sandbox-{}-{n}.env", std::process::id()));
     crate::paths::write_owner_only(&path, content.as_bytes())
         .context("writing the sandbox env file")?;
     Ok(EnvFileGuard(path))
@@ -644,6 +799,149 @@ mod tests {
             "the raw value must not appear in argv"
         );
         assert_eq!(read_env_file(&cmd_args), "FOO=bar\n");
+    }
+
+    #[test]
+    fn write_env_file_writes_under_llmenv_state_dir_not_the_shared_os_temp_dir() {
+        let mut vars = BTreeMap::new();
+        vars.insert("FOO".to_string(), "bar".to_string());
+        let guard = write_env_file(&vars).unwrap();
+        let state_dir = crate::paths::state_dir().unwrap();
+        assert!(
+            guard.0.starts_with(&state_dir),
+            "env file {} must live under llmenv's own state dir {}",
+            guard.0.display(),
+            state_dir.display()
+        );
+        assert!(
+            !guard.0.starts_with(std::env::temp_dir()),
+            "env file {} must not live in the shared OS temp dir",
+            guard.0.display()
+        );
+    }
+
+    /// Spawn and immediately reap a child, returning a pid guaranteed dead at
+    /// the moment this returns — used to test the sweep's liveness check
+    /// without depending on a pid that just happens to be free.
+    fn dead_pid() -> u32 {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    }
+
+    #[test]
+    fn pid_from_sandbox_tmp_name_parses_the_env_file_shape() {
+        assert_eq!(
+            pid_from_sandbox_tmp_name("llmenv-sandbox-1234-5.env"),
+            Some(1234)
+        );
+    }
+
+    #[test]
+    fn pid_from_sandbox_tmp_name_parses_the_patched_claude_json_shape() {
+        assert_eq!(
+            pid_from_sandbox_tmp_name("llmenv-sandbox-claude-json-1234-5"),
+            Some(1234)
+        );
+    }
+
+    #[test]
+    fn pid_from_sandbox_tmp_name_returns_none_for_an_unparseable_shape() {
+        assert_eq!(pid_from_sandbox_tmp_name("llmenv-sandbox-not-a-pid"), None);
+    }
+
+    #[test]
+    fn process_is_alive_is_true_for_the_current_process() {
+        assert!(process_is_alive(std::process::id()));
+    }
+
+    #[test]
+    fn process_is_alive_is_false_for_a_reaped_child() {
+        assert!(!process_is_alive(dead_pid()));
+    }
+
+    #[test]
+    fn sweep_stale_removes_a_dead_pids_file_even_when_freshly_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join(format!("llmenv-sandbox-{}-0.env", dead_pid()));
+        std::fs::write(&path, b"x").unwrap();
+
+        sweep_stale(dir.path(), std::time::Duration::from_secs(3600));
+
+        assert!(
+            !path.exists(),
+            "a dead pid's file must be swept regardless of age"
+        );
+    }
+
+    #[test]
+    fn sweep_stale_keeps_a_live_pids_file_even_when_old() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join(format!("llmenv-sandbox-{}-0.env", std::process::id()));
+        std::fs::write(&path, b"x").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+        filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(old)).unwrap();
+
+        sweep_stale(dir.path(), std::time::Duration::from_secs(3600));
+
+        assert!(
+            path.exists(),
+            "a live session's file must never be swept just for being old \
+             (its patched claude.json can stay bind-mounted for the whole session)"
+        );
+    }
+
+    #[test]
+    fn sweep_stale_never_touches_an_entry_outside_its_own_naming_convention() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("not-llmenvs-file.txt");
+        std::fs::write(&path, b"x").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+        filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(old)).unwrap();
+
+        sweep_stale(dir.path(), std::time::Duration::from_secs(3600));
+
+        assert!(path.exists(), "an unrelated file must never be swept");
+    }
+
+    #[test]
+    fn sweep_stale_falls_back_to_age_when_the_pid_segment_is_unparseable() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join("llmenv-sandbox-not-a-pid-shape");
+        let fresh = dir.path().join("llmenv-sandbox-also-not-a-pid-shape");
+        std::fs::write(&stale, b"x").unwrap();
+        std::fs::write(&fresh, b"y").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+        filetime::set_file_mtime(&stale, filetime::FileTime::from_system_time(old)).unwrap();
+
+        sweep_stale(dir.path(), std::time::Duration::from_secs(3600));
+
+        assert!(
+            !stale.exists(),
+            "an unparseable-shape file past the age threshold is swept"
+        );
+        assert!(
+            fresh.exists(),
+            "an unparseable-shape file within the age threshold is kept"
+        );
+    }
+
+    #[test]
+    fn sandbox_tmp_dir_refuses_a_symlinked_target() {
+        let base = tempfile::tempdir().unwrap();
+        let real_target = base.path().join("real");
+        std::fs::create_dir(&real_target).unwrap();
+        let link = base.path().join("sandbox-tmp");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real_target, &link).unwrap();
+
+        let err = prepare_sandbox_tmp_dir(&link).unwrap_err();
+        assert!(err.to_string().contains("symlink"));
     }
 
     #[test]
