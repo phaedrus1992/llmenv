@@ -1,0 +1,11 @@
+# Trivy findings suppressed for the published sandbox image
+# (.github/workflows/sandbox-image.yml, #1721).
+#
+# Every entry here must be reviewed, not a blanket severity drop. Trivy's
+# ignorefile format takes only an ID, optionally followed by an expiry —
+# it does not support a trailing reason on the same line — so put the
+# reason on the comment line directly above the entry:
+#   # <one-line reason this CVE is a false positive or unfixable here, with an expiry so it gets re-checked>
+#   CVE-2026-XXXXX exp:2026-12-31
+#
+# Empty today — no findings have been suppressed yet.
