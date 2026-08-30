@@ -111,6 +111,15 @@
       "automerge": true,
     },
     {
+      // Carve the sandbox image digest pin (#1725's customManagers entry,
+      // above) back out of the automerge rule just above. A digest bump
+      // here means the published sandbox image changed — worth a human
+      // look before it lands, unlike a routine dependency version bump.
+      "description": "Sandbox image digest pin always needs manual review",
+      "matchManagers": ["custom.regex"],
+      "automerge": false,
+    },
+    {
       "description": "Major updates: one PR each, reviewed and merged by hand",
       "matchUpdateTypes": ["major"],
       "groupName": null,
