@@ -36,7 +36,13 @@ jobs:
 
       - name: read image version
         id: version
-        run: echo "version=v$(cat docker/sandbox/VERSION)" >> "$GITHUB_OUTPUT"
+        run: |
+          raw="$(cat docker/sandbox/VERSION)"
+          if [[ ! "$raw" =~ ^[0-9]+$ ]]; then
+            echo "docker/sandbox/VERSION must be a single integer, got: $raw" >&2
+            exit 1
+          fi
+          echo "version=v$raw" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8  # v4.2.0
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
