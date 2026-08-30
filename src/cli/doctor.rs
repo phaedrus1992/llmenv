@@ -302,7 +302,12 @@ fn memory_orphaned_by_disable_bundles(
 }
 
 /// Check whether a host address string is a loopback / local-only address.
-fn is_local_addr(addr: &str) -> bool {
+///
+/// Shared with `launch::config_mount` (#1652 pre-pr-review) — a sandboxed
+/// container needs the identical "is this address unreachable under this
+/// name from outside the host" judgment when deciding whether an
+/// `mcpServers` URL needs rewriting to the container gateway host.
+pub(crate) fn is_local_addr(addr: &str) -> bool {
     matches!(addr, "localhost" | "0.0.0.0" | "::" | "::0")
         || addr
             .parse::<std::net::IpAddr>()

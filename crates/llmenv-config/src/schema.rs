@@ -1161,8 +1161,8 @@ pub struct Sandbox {
     #[serde(default)]
     pub runtime: SandboxRuntime,
     /// Container image to run the engine in. `None` means llmenv's published
-    /// default image (not yet built — see #1653); until that ships, `enabled`
-    /// sandbox mode requires the user to supply their own image here.
+    /// default sandbox image (#1653, `ghcr.io/phaedrus1992/llmenv-sandbox`) —
+    /// minimal libc + CA certificates only, no engine binary baked in.
     #[serde(default)]
     pub image: Option<String>,
     /// Bind-mount the host's `SSH_AUTH_SOCK` into the container when one is
