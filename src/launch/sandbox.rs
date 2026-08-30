@@ -74,6 +74,21 @@ pub(crate) fn requested_binaries(configured: &SandboxRuntime) -> &'static str {
     }
 }
 
+/// The hostname a container uses to reach the host's loopback, from inside
+/// its own network namespace — `127.0.0.1` inside the container is the
+/// container itself, not the host. Docker requires
+/// `--add-host=host.docker.internal:host-gateway` on the `run` invocation for
+/// this to resolve on Linux ([`container_command`] adds it); recent rootless
+/// Podman resolves `host.containers.internal` without an equivalent flag.
+/// Shared by `icebreaker.rs` (credential proxy) and `config_mount.rs` (ICM
+/// MCP endpoint, #1652) — both need the same host-to-container address.
+pub(crate) fn gateway_host(runtime: ContainerRuntime) -> &'static str {
+    match runtime {
+        ContainerRuntime::Docker => "host.docker.internal",
+        ContainerRuntime::Podman => "host.containers.internal",
+    }
+}
+
 /// Resolved container settings for a sandboxed launch — the concrete engine
 /// and image to run, after `Auto`/override resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,7 +114,12 @@ const SSH_AUTH_SOCK_PATH: &str = "/run/llmenv-ssh-agent.sock";
 /// [`SandboxSpec`] — bundled so the function stays inside the
 /// 5-positional-param limit.
 pub(crate) struct ContainerInputs<'a> {
-    pub(crate) binary_name: &'a str,
+    /// Absolute host path to the resolved engine binary (#1653) —
+    /// bind-mounted read-only at the identical in-container path and exec'd
+    /// directly by that path, rather than baked into the image. Mirrors
+    /// `config_dir`'s "mount at itself" pattern: the image only needs a
+    /// compatible libc, not the engine on its own `PATH`.
+    pub(crate) bin_path: &'a std::path::Path,
     pub(crate) args: &'a [String],
     /// The resolved/materialized env (#1650) — written to an owner-only
     /// `--env-file` rather than repeated `-e KEY=VALUE` flags, which would
@@ -118,11 +138,24 @@ pub(crate) struct ContainerInputs<'a> {
     /// `:ro` only protects the socket file from being replaced, not what
     /// reaching it grants.
     pub(crate) ssh_auth_sock: Option<&'a std::path::Path>,
+    /// Materialized config directory (e.g. `CLAUDE_CONFIG_DIR`) to bind-mount
+    /// read-only at the identical in-container path (#1652), so
+    /// `mcpServers`/skills/plugins/settings are visible to the containerized
+    /// engine. `None` for a non-Claude-Code adapter or when no config
+    /// directory was resolved.
+    pub(crate) config_dir: Option<&'a std::path::Path>,
+    /// Host path to a patched copy of `.claude.json` (ICM's mcpServers URL
+    /// rewritten from loopback to the container gateway host, #1652),
+    /// overlay-mounted read-only over the real file inside `config_dir` so
+    /// the rewritten URL wins without touching the host's own file. `None`
+    /// when no ICM entry needed rewriting, or `config_dir` is `None`.
+    pub(crate) patched_claude_json: Option<&'a std::path::Path>,
 }
 
 /// An env file written for one `docker`/`podman` invocation, deleted on drop
 /// once that invocation (and the container it started) has exited — mirrors
 /// `SocketCleanup`'s pattern for the launch notice socket.
+#[derive(Debug)]
 pub(crate) struct EnvFileGuard(std::path::PathBuf);
 
 impl Drop for EnvFileGuard {
@@ -142,6 +175,19 @@ impl Drop for EnvFileGuard {
 /// — the relaunch loop can call it more than once per session, and several
 /// tests call it within the same test binary (sharing one pid) in parallel.
 static ENV_FILE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Rejects a path that would break `--mount`'s comma-delimited `key=value`
+/// option string: `,`/`=` have no escaping in that format, so either would
+/// silently splice in an extra mount option or key rather than surviving as
+/// part of the path (pre-pr-review P2, #1652/#1653).
+fn validate_mount_path(path: &std::path::Path) -> anyhow::Result<()> {
+    let s = path.display().to_string();
+    anyhow::ensure!(
+        !s.contains(',') && !s.contains('='),
+        "path '{s}' contains ',' or '=', which --mount cannot represent safely"
+    );
+    Ok(())
+}
 
 /// Write `vars` to a fresh owner-only file in `--env-file` format (`KEY=VALUE`
 /// per line, no quoting or escaping support — this is `docker`/`podman`'s own
@@ -171,13 +217,14 @@ fn write_env_file(vars: &BTreeMap<String, String>) -> anyhow::Result<EnvFileGuar
 }
 
 /// Build the container invocation for a sandboxed launch (#1080):
-/// `<runtime> run --rm` plus the project/SSH mounts, resolved env (#1650),
-/// and baseline hardening flags, then `<image> <binary_name> <args>`.
+/// `<runtime> run --rm` plus the project/SSH/config-dir mounts, resolved env
+/// (#1650), and baseline hardening flags, then `<image> <bin_path> <args>`.
 ///
-/// The image is trusted to already carry `binary_name` on its own `PATH`;
-/// llmenv does not yet copy the host's resolved engine binary into the
-/// container (that's #1653's job). The icebreaker-sealed credential swap
-/// (#1651) happens in the caller, on `inputs.vars`, before this is called.
+/// The image itself carries no engine binary — `inputs.bin_path` is
+/// bind-mounted read-only at its own host path and exec'd directly (#1653),
+/// so the image only needs a compatible libc. The icebreaker-sealed
+/// credential swap (#1651) happens in the caller, on `inputs.vars`, before
+/// this is called.
 ///
 /// The returned [`EnvFileGuard`] must outlive the spawned process — it
 /// deletes the env file on drop, so dropping it before the container reads
@@ -189,6 +236,34 @@ pub(crate) fn container_command(
     spec: &SandboxSpec,
     inputs: ContainerInputs<'_>,
 ) -> anyhow::Result<(std::process::Command, EnvFileGuard)> {
+    // #1653/#1652 pre-pr-review P2: `--mount`'s value is a comma-delimited
+    // `key=value` list with no escaping, and `spec.image` is appended as a
+    // bare positional argument with no `--` separator — a path containing
+    // `,`/`=`, or an image string starting with `-`, would silently splice
+    // in an extra mount option or get parsed as a runtime flag instead of an
+    // image name (potentially neutralizing the hardening flags below).
+    // `spec.image` comes straight from `features.sandbox.image` in
+    // `config.yaml`; the paths are host-derived but not implausible for a
+    // local user to control (e.g. an oddly-named project directory).
+    validate_mount_path(inputs.project_dir)?;
+    if let Some(sock) = inputs.ssh_auth_sock {
+        validate_mount_path(sock)?;
+    }
+    if let Some(dir) = inputs.config_dir {
+        validate_mount_path(dir)?;
+    }
+    if let Some(patched) = inputs.patched_claude_json {
+        validate_mount_path(patched)?;
+    }
+    validate_mount_path(inputs.bin_path)?;
+    anyhow::ensure!(
+        !spec.image.starts_with('-'),
+        "features.sandbox.image '{}' starts with '-', which {} would parse as a flag rather \
+         than an image name",
+        spec.image,
+        spec.runtime.binary_name(),
+    );
+
     let env_file = write_env_file(inputs.vars)?;
 
     let mut cmd = std::process::Command::new(spec.runtime.binary_name());
@@ -228,9 +303,48 @@ pub(crate) fn container_command(
         cmd.arg("--env")
             .arg(format!("SSH_AUTH_SOCK={SSH_AUTH_SOCK_PATH}"));
     }
+    if let Some(dir) = inputs.config_dir {
+        cmd.arg("--mount").arg(format!(
+            "type=bind,source={},target={},readonly",
+            dir.display(),
+            dir.display(),
+        ));
+        // #1652 pre-pr-review P0: the directory mount above exposes
+        // `.credentials.json` — Claude Code's plaintext OAuth/API-key token
+        // store on Linux, and on macOS whenever the keychain backend is
+        // disabled (`src/auth/credentials.rs`'s `CREDENTIALS_FILE`). That
+        // file is Claude Code's own runtime secret, never something llmenv
+        // wrote for the container to read — mask it with a `/dev/null`
+        // overlay (an always-empty file at that path) so the mounted
+        // directory carries mcpServers/skills/plugins/settings without also
+        // handing the container a live credential.
+        cmd.arg("--mount").arg(format!(
+            "type=bind,source=/dev/null,target={},readonly",
+            dir.join(".credentials.json").display(),
+        ));
+        // Overlay-mounted AFTER the directory mount so it shadows the real
+        // file at the same path inside the container — mount order matters
+        // here, both engines apply mounts in the order given.
+        if let Some(patched) = inputs.patched_claude_json {
+            cmd.arg("--mount").arg(format!(
+                "type=bind,source={},target={},readonly",
+                patched.display(),
+                dir.join(".claude.json").display(),
+            ));
+        }
+    }
+    // #1653: the image doesn't carry the engine binary — bind-mount the
+    // resolved host binary read-only at the identical in-container path and
+    // exec that path directly, so any image with a compatible libc works
+    // regardless of what's on its own `PATH`.
+    cmd.arg("--mount").arg(format!(
+        "type=bind,source={},target={},readonly",
+        inputs.bin_path.display(),
+        inputs.bin_path.display(),
+    ));
     cmd.arg("--env-file").arg(&env_file.0);
     cmd.arg(&spec.image);
-    cmd.arg(inputs.binary_name);
+    cmd.arg(inputs.bin_path);
     cmd.args(inputs.args);
     Ok((cmd, env_file))
 }
@@ -351,11 +465,13 @@ mod tests {
         let (cmd, _guard) = container_command(
             &spec,
             ContainerInputs {
-                binary_name: "claude",
+                bin_path: std::path::Path::new("/usr/local/bin/claude"),
                 args: &args,
                 vars: &vars,
                 project_dir,
                 ssh_auth_sock: None,
+                config_dir: None,
+                patched_claude_json: None,
             },
         )
         .unwrap();
@@ -374,11 +490,42 @@ mod tests {
             tail,
             &[
                 "registry.example.com/sandbox:latest",
-                "claude",
+                "/usr/local/bin/claude",
                 "--foo",
                 "bar",
             ]
         );
+    }
+
+    #[test]
+    fn container_command_mounts_the_engine_binary_read_only_at_the_identical_path() {
+        let spec = SandboxSpec {
+            runtime: ContainerRuntime::Docker,
+            image: "img".to_string(),
+            forward_ssh_agent: true,
+        };
+        let args = Vec::new();
+        let vars = BTreeMap::new();
+        let project_dir = std::path::Path::new("/proj");
+        let bin_path = std::path::Path::new("/home/user/.local/bin/claude");
+        let (cmd, _guard) = container_command(
+            &spec,
+            ContainerInputs {
+                bin_path,
+                args: &args,
+                vars: &vars,
+                project_dir,
+                ssh_auth_sock: None,
+                config_dir: None,
+                patched_claude_json: None,
+            },
+        )
+        .unwrap();
+        let cmd_args = command_args(&cmd);
+        assert!(cmd_args.contains(&format!(
+            "type=bind,source={p},target={p},readonly",
+            p = bin_path.display()
+        )));
     }
 
     #[test]
@@ -395,11 +542,13 @@ mod tests {
         let (cmd, _guard) = container_command(
             &spec,
             ContainerInputs {
-                binary_name: "claude",
+                bin_path: std::path::Path::new("/usr/local/bin/claude"),
                 args: &args,
                 vars: &vars,
                 project_dir,
                 ssh_auth_sock: Some(ssh_sock),
+                config_dir: None,
+                patched_claude_json: None,
             },
         )
         .unwrap();
@@ -411,6 +560,58 @@ mod tests {
         assert!(args.contains(&"SSH_AUTH_SOCK=/run/llmenv-ssh-agent.sock".to_string()));
         // Docker gets no --userns flag — that's podman-only.
         assert!(!args.contains(&"--userns=keep-id".to_string()));
+    }
+
+    #[test]
+    fn container_command_rejects_a_project_dir_containing_a_comma() {
+        let spec = SandboxSpec {
+            runtime: ContainerRuntime::Docker,
+            image: "img".to_string(),
+            forward_ssh_agent: true,
+        };
+        let args = Vec::new();
+        let vars = BTreeMap::new();
+        let project_dir = std::path::Path::new("/proj,evil=target");
+        let err = container_command(
+            &spec,
+            ContainerInputs {
+                bin_path: std::path::Path::new("/usr/local/bin/claude"),
+                args: &args,
+                vars: &vars,
+                project_dir,
+                ssh_auth_sock: None,
+                config_dir: None,
+                patched_claude_json: None,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("cannot represent safely"));
+    }
+
+    #[test]
+    fn container_command_rejects_an_image_starting_with_a_dash() {
+        let spec = SandboxSpec {
+            runtime: ContainerRuntime::Docker,
+            image: "--privileged".to_string(),
+            forward_ssh_agent: true,
+        };
+        let args = Vec::new();
+        let vars = BTreeMap::new();
+        let project_dir = std::path::Path::new("/proj");
+        let err = container_command(
+            &spec,
+            ContainerInputs {
+                bin_path: std::path::Path::new("/usr/local/bin/claude"),
+                args: &args,
+                vars: &vars,
+                project_dir,
+                ssh_auth_sock: None,
+                config_dir: None,
+                patched_claude_json: None,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("starts with '-'"));
     }
 
     #[test]
@@ -427,11 +628,13 @@ mod tests {
         let (cmd, _guard) = container_command(
             &spec,
             ContainerInputs {
-                binary_name: "claude",
+                bin_path: std::path::Path::new("/usr/local/bin/claude"),
                 args: &args,
                 vars: &vars,
                 project_dir,
                 ssh_auth_sock: None,
+                config_dir: None,
+                patched_claude_json: None,
             },
         )
         .unwrap();
@@ -441,6 +644,129 @@ mod tests {
             "the raw value must not appear in argv"
         );
         assert_eq!(read_env_file(&cmd_args), "FOO=bar\n");
+    }
+
+    #[test]
+    fn container_command_mounts_config_dir_read_only_at_the_identical_path() {
+        let spec = SandboxSpec {
+            runtime: ContainerRuntime::Docker,
+            image: "img".to_string(),
+            forward_ssh_agent: true,
+        };
+        let args = Vec::new();
+        let vars = BTreeMap::new();
+        let project_dir = std::path::Path::new("/proj");
+        let config_dir = std::path::Path::new("/home/user/.cache/llmenv/claude-code/abc123");
+        let (cmd, _guard) = container_command(
+            &spec,
+            ContainerInputs {
+                bin_path: std::path::Path::new("/usr/local/bin/claude"),
+                args: &args,
+                vars: &vars,
+                project_dir,
+                ssh_auth_sock: None,
+                config_dir: Some(config_dir),
+                patched_claude_json: None,
+            },
+        )
+        .unwrap();
+        let cmd_args = command_args(&cmd);
+        assert!(cmd_args.contains(&format!(
+            "type=bind,source={p},target={p},readonly",
+            p = config_dir.display()
+        )));
+    }
+
+    #[test]
+    fn container_command_masks_credentials_json_with_dev_null_when_config_dir_mounted() {
+        let spec = SandboxSpec {
+            runtime: ContainerRuntime::Docker,
+            image: "img".to_string(),
+            forward_ssh_agent: true,
+        };
+        let args = Vec::new();
+        let vars = BTreeMap::new();
+        let project_dir = std::path::Path::new("/proj");
+        let config_dir = std::path::Path::new("/home/user/.cache/llmenv/claude-code/abc123");
+        let (cmd, _guard) = container_command(
+            &spec,
+            ContainerInputs {
+                bin_path: std::path::Path::new("/usr/local/bin/claude"),
+                args: &args,
+                vars: &vars,
+                project_dir,
+                ssh_auth_sock: None,
+                config_dir: Some(config_dir),
+                patched_claude_json: None,
+            },
+        )
+        .unwrap();
+        let cmd_args = command_args(&cmd);
+        assert!(cmd_args.contains(&format!(
+            "type=bind,source=/dev/null,target={}/.credentials.json,readonly",
+            config_dir.display()
+        )));
+    }
+
+    #[test]
+    fn container_command_overlays_patched_claude_json_over_the_config_dir_mount() {
+        let spec = SandboxSpec {
+            runtime: ContainerRuntime::Docker,
+            image: "img".to_string(),
+            forward_ssh_agent: true,
+        };
+        let args = Vec::new();
+        let vars = BTreeMap::new();
+        let project_dir = std::path::Path::new("/proj");
+        let config_dir = std::path::Path::new("/home/user/.cache/llmenv/claude-code/abc123");
+        let patched = std::path::Path::new("/tmp/llmenv-sandbox-claude-json-42-0");
+        let (cmd, _guard) = container_command(
+            &spec,
+            ContainerInputs {
+                bin_path: std::path::Path::new("/usr/local/bin/claude"),
+                args: &args,
+                vars: &vars,
+                project_dir,
+                ssh_auth_sock: None,
+                config_dir: Some(config_dir),
+                patched_claude_json: Some(patched),
+            },
+        )
+        .unwrap();
+        let cmd_args = command_args(&cmd);
+        assert!(cmd_args.contains(&format!(
+            "type=bind,source={},target={}/.claude.json,readonly",
+            patched.display(),
+            config_dir.display()
+        )));
+    }
+
+    #[test]
+    fn container_command_mounts_nothing_for_config_dir_when_absent() {
+        let spec = SandboxSpec {
+            runtime: ContainerRuntime::Docker,
+            image: "img".to_string(),
+            forward_ssh_agent: true,
+        };
+        let args = Vec::new();
+        let vars = BTreeMap::new();
+        let project_dir = std::path::Path::new("/proj");
+        let (cmd, _guard) = container_command(
+            &spec,
+            ContainerInputs {
+                bin_path: std::path::Path::new("/usr/local/bin/claude"),
+                args: &args,
+                vars: &vars,
+                project_dir,
+                ssh_auth_sock: None,
+                config_dir: None,
+                patched_claude_json: None,
+            },
+        )
+        .unwrap();
+        let cmd_args = command_args(&cmd);
+        assert!(!cmd_args.iter().any(|a| a.contains(".claude.json")));
+        assert!(!cmd_args.iter().any(|a| a.contains(".credentials.json")));
     }
 
     proptest! {
@@ -484,7 +810,10 @@ mod tests {
             vars in proptest::collection::btree_map("[A-Z_]{1,10}", "[a-zA-Z0-9]{0,15}", 0..5),
             extra_args in proptest::collection::vec("[a-zA-Z0-9-]{1,10}", 0..4),
             binary_name in "[a-z]{1,10}",
-            image in "[a-z0-9./:-]{1,30}",
+            // First char excludes '-' — container_command now rejects an
+            // image starting with '-' (pre-pr-review P2, #1653), covered by
+            // its own dedicated test rather than this general property.
+            image in "[a-z0-9./:][a-z0-9./:-]{0,29}",
         ) {
             let spec = SandboxSpec {
                 runtime: ContainerRuntime::Docker,
@@ -495,11 +824,13 @@ mod tests {
             let (cmd, _guard) = container_command(
                 &spec,
                 ContainerInputs {
-                    binary_name: &binary_name,
+                    bin_path: std::path::Path::new(&binary_name),
                     args: &extra_args,
                     vars: &vars,
                     project_dir,
                     ssh_auth_sock: None,
+                    config_dir: None,
+                    patched_claude_json: None,
                 },
             )
             .unwrap();

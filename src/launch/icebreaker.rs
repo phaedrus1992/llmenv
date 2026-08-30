@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 
 use anyhow::Context;
 
-use super::sandbox::ContainerRuntime;
+use super::sandbox::{ContainerRuntime, gateway_host};
 
 /// The credential env var this integration protects: Anthropic's documented
 /// API-key env var. Scoped to Claude Code only, matching `launch_proxy`'s own
@@ -136,21 +136,6 @@ pub(crate) async fn prepare(
         _server: server,
         container_vars,
     }))
-}
-
-/// The hostname a container uses to reach the host's loopback, from inside
-/// its own network namespace — `127.0.0.1` inside the container is the
-/// container itself, not the host where icebreaker listens. Docker requires
-/// `--add-host=host.docker.internal:host-gateway` on the `run` invocation for
-/// this to resolve on Linux (`sandbox::container_command` adds it); recent
-/// rootless Podman resolves `host.containers.internal` without an equivalent
-/// flag. Unverified against a running container on either engine — see this
-/// module's doc comment.
-fn gateway_host(runtime: ContainerRuntime) -> &'static str {
-    match runtime {
-        ContainerRuntime::Docker => "host.docker.internal",
-        ContainerRuntime::Podman => "host.containers.internal",
-    }
 }
 
 /// Extract the authority (`host[:port]`) icebreaker should allow and receive
