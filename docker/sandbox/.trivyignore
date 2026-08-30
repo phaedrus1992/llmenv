@@ -1,0 +1,9 @@
+# Trivy findings suppressed for the published sandbox image
+# (.github/workflows/sandbox-image.yml, #1721).
+#
+# Every entry here must be reviewed, not a blanket severity drop: name the
+# CVE, say why it's a false positive or genuinely unfixable for this image,
+# and set an expiry so it gets re-checked. Format:
+#   CVE-2026-XXXXX exp:2026-12-31 -- one-line reason
+#
+# Empty today — no findings have been suppressed yet.
