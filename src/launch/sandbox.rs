@@ -176,6 +176,60 @@ impl Drop for EnvFileGuard {
 /// tests call it within the same test binary (sharing one pid) in parallel.
 static ENV_FILE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// A file in [`sandbox_tmp_dir`] older than this was left by a launch that
+/// crashed before its guard's `Drop` ran (#1705) — no real sandboxed launch
+/// runs anywhere near this long, so anything older is safe to reap.
+const STALE_TEMP_FILE_AFTER: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Runs [`sweep_stale`] at most once per process — every sandboxed launch
+/// calls [`sandbox_tmp_dir`] at least once (via [`write_env_file`]), so this
+/// still sweeps once per launch without re-scanning the directory on every
+/// relaunch within the same session.
+static SWEEP_DONE: std::sync::Once = std::sync::Once::new();
+
+/// Owner-only subdirectory of llmenv's own state dir where sandbox launch
+/// temp files (env files, patched config overlays) are written, replacing
+/// the shared OS temp dir (#1705): a world-writable shared directory is a
+/// worse home for files that can carry a sealed credential's headers or a
+/// copy of `.claude.json` including any `mcpServers` auth headers/tokens,
+/// even though each file is already written owner-only itself.
+pub(crate) fn sandbox_tmp_dir() -> anyhow::Result<std::path::PathBuf> {
+    let dir = crate::paths::state_dir()?.join("sandbox-tmp");
+    crate::paths::create_dir_owner_only(&dir)
+        .with_context(|| format!("creating {}", dir.display()))?;
+    SWEEP_DONE.call_once(|| sweep_stale(&dir, STALE_TEMP_FILE_AFTER));
+    Ok(dir)
+}
+
+/// Remove every entry directly inside `dir` whose mtime is older than
+/// `stale_after` — a crashed launch's `EnvFileGuard`/`PatchedFileGuard` never
+/// runs its `Drop`, so its temp file would otherwise sit in `dir` forever.
+/// Best-effort: a stat or removal failure is logged and skipped rather than
+/// failing the launch this sweep happens to run inside of.
+fn sweep_stale(dir: &std::path::Path, stale_after: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|modified| std::time::SystemTime::now().duration_since(modified).ok())
+            .is_some_and(|age| age >= stale_after);
+        if is_stale
+            && let Err(e) = std::fs::remove_file(&path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                "launch: could not remove stale sandbox temp file {}: {e}",
+                path.display()
+            );
+        }
+    }
+}
+
 /// Rejects a path that would break `--mount`'s comma-delimited `key=value`
 /// option string: `,`/`=` have no escaping in that format, so either would
 /// silently splice in an extra mount option or key rather than surviving as
@@ -210,7 +264,7 @@ fn write_env_file(vars: &BTreeMap<String, String>) -> anyhow::Result<EnvFileGuar
         content.push('\n');
     }
     let n = ENV_FILE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("llmenv-sandbox-{}-{n}.env", std::process::id()));
+    let path = sandbox_tmp_dir()?.join(format!("llmenv-sandbox-{}-{n}.env", std::process::id()));
     crate::paths::write_owner_only(&path, content.as_bytes())
         .context("writing the sandbox env file")?;
     Ok(EnvFileGuard(path))
@@ -644,6 +698,47 @@ mod tests {
             "the raw value must not appear in argv"
         );
         assert_eq!(read_env_file(&cmd_args), "FOO=bar\n");
+    }
+
+    #[test]
+    fn write_env_file_writes_under_llmenv_state_dir_not_the_shared_os_temp_dir() {
+        let mut vars = BTreeMap::new();
+        vars.insert("FOO".to_string(), "bar".to_string());
+        let guard = write_env_file(&vars).unwrap();
+        let state_dir = crate::paths::state_dir().unwrap();
+        assert!(
+            guard.0.starts_with(&state_dir),
+            "env file {} must live under llmenv's own state dir {}",
+            guard.0.display(),
+            state_dir.display()
+        );
+        assert!(
+            !guard.0.starts_with(std::env::temp_dir()),
+            "env file {} must not live in the shared OS temp dir",
+            guard.0.display()
+        );
+    }
+
+    #[test]
+    fn sweep_stale_removes_files_older_than_threshold_but_keeps_fresh_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join("stale.env");
+        let fresh = dir.path().join("fresh.env");
+        std::fs::write(&stale, b"x").unwrap();
+        std::fs::write(&fresh, b"y").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+        filetime::set_file_mtime(&stale, filetime::FileTime::from_system_time(old)).unwrap();
+
+        sweep_stale(dir.path(), std::time::Duration::from_secs(3600));
+
+        assert!(
+            !stale.exists(),
+            "file past the staleness threshold must be removed"
+        );
+        assert!(
+            fresh.exists(),
+            "file within the staleness threshold must be kept"
+        );
     }
 
     #[test]

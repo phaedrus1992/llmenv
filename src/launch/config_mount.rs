@@ -121,7 +121,7 @@ pub(crate) fn prepare(
 /// deletes it on drop. Mirrors `sandbox::write_env_file`.
 fn write_patched_claude_json(bytes: &[u8]) -> anyhow::Result<PatchedFileGuard> {
     let n = PATCH_FILE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!(
+    let path = super::sandbox::sandbox_tmp_dir()?.join(format!(
         "llmenv-sandbox-claude-json-{}-{n}",
         std::process::id()
     ));
@@ -206,6 +206,24 @@ fn rewrite_loopback_url(url_str: &str, gateway_host: &str) -> anyhow::Result<Opt
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn write_patched_claude_json_writes_under_llmenv_state_dir_not_the_shared_os_temp_dir() {
+        let guard = write_patched_claude_json(b"{}").unwrap();
+        let path = guard.path();
+        let state_dir = crate::paths::state_dir().unwrap();
+        assert!(
+            path.starts_with(&state_dir),
+            "patched claude.json {} must live under llmenv's own state dir {}",
+            path.display(),
+            state_dir.display()
+        );
+        assert!(
+            !path.starts_with(std::env::temp_dir()),
+            "patched claude.json {} must not live in the shared OS temp dir",
+            path.display()
+        );
+    }
 
     #[test]
     fn rewrite_loopback_url_replaces_loopback_host_preserving_port_and_path() {
