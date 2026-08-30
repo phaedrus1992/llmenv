@@ -392,5 +392,77 @@ mod tests {
             std::fs::write(&path, &bytes).unwrap();
             let _ = patch_claude_json_loopback_urls(&path, "host.docker.internal");
         }
+
+        // pre-pr-review pbt-gap (#1652): roundtrip properties, not just
+        // no-crash — the earlier proptests above never asserted anything
+        // about the *result* of a rewrite.
+        #[test]
+        fn prop_rewrite_loopback_url_replaces_any_loopback_ip_preserving_rest(
+            loopback_octet in 0u8..=255,
+            port in 1u16..=65535,
+            path_segment in "[a-z]{1,10}",
+            gateway in prop_oneof![Just("host.docker.internal"), Just("host.containers.internal")],
+        ) {
+            let url = format!("http://127.0.0.{loopback_octet}:{port}/{path_segment}");
+            let rewritten = rewrite_loopback_url(&url, gateway).unwrap().unwrap();
+            prop_assert_eq!(rewritten, format!("http://{gateway}:{port}/{path_segment}"));
+        }
+
+        #[test]
+        fn prop_rewrite_loopback_url_is_none_for_non_loopback_hosts(
+            label in "[a-z][a-z0-9-]{0,15}",
+            tld in "[a-z]{2,5}",
+            port in 1u16..=65535,
+        ) {
+            let url = format!("http://{label}.{tld}:{port}/mcp");
+            prop_assert_eq!(
+                rewrite_loopback_url(&url, "host.docker.internal").unwrap(),
+                None
+            );
+        }
+
+        #[test]
+        fn prop_patch_claude_json_loopback_urls_rewrites_only_the_loopback_entries(
+            // `is_loopback[i]` decides whether server `i` gets a loopback or
+            // remote URL; index-based names avoid collisions between the two
+            // groups without a separate dedup step.
+            is_loopback in proptest::collection::vec(proptest::bool::ANY, 1..6),
+            port in 1u16..=65535,
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(CLAUDE_JSON_FILE);
+            let mut servers = serde_json::Map::new();
+            for (i, loopback) in is_loopback.iter().enumerate() {
+                let host = if *loopback { "127.0.0.1".to_string() } else { format!("remote{i}.example.com") };
+                servers.insert(
+                    format!("server{i}"),
+                    serde_json::json!({ "type": "http", "url": format!("http://{host}:{port}/mcp") }),
+                );
+            }
+            std::fs::write(
+                &path,
+                serde_json::json!({ "mcpServers": servers, "unrelated": "kept" }).to_string(),
+            )
+            .unwrap();
+
+            let any_loopback = is_loopback.iter().any(|b| *b);
+            let result = patch_claude_json_loopback_urls(&path, "host.docker.internal").unwrap();
+            prop_assert_eq!(result.is_some(), any_loopback);
+            if let Some(patched) = result {
+                let doc: serde_json::Value = serde_json::from_slice(&patched).unwrap();
+                prop_assert_eq!(doc.pointer("/unrelated").and_then(|v| v.as_str()), Some("kept"));
+                for (i, loopback) in is_loopback.iter().enumerate() {
+                    let url = doc
+                        .pointer(&format!("/mcpServers/server{i}/url"))
+                        .and_then(|v| v.as_str())
+                        .unwrap();
+                    if *loopback {
+                        prop_assert_eq!(url, format!("http://host.docker.internal:{port}/mcp"));
+                    } else {
+                        prop_assert_eq!(url, format!("http://remote{i}.example.com:{port}/mcp"));
+                    }
+                }
+            }
+        }
     }
 }
