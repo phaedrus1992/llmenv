@@ -155,6 +155,7 @@ pub(crate) struct ContainerInputs<'a> {
 /// An env file written for one `docker`/`podman` invocation, deleted on drop
 /// once that invocation (and the container it started) has exited — mirrors
 /// `SocketCleanup`'s pattern for the launch notice socket.
+#[derive(Debug)]
 pub(crate) struct EnvFileGuard(std::path::PathBuf);
 
 impl Drop for EnvFileGuard {
@@ -174,6 +175,19 @@ impl Drop for EnvFileGuard {
 /// — the relaunch loop can call it more than once per session, and several
 /// tests call it within the same test binary (sharing one pid) in parallel.
 static ENV_FILE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Rejects a path that would break `--mount`'s comma-delimited `key=value`
+/// option string: `,`/`=` have no escaping in that format, so either would
+/// silently splice in an extra mount option or key rather than surviving as
+/// part of the path (pre-pr-review P2, #1652/#1653).
+fn validate_mount_path(path: &std::path::Path) -> anyhow::Result<()> {
+    let s = path.display().to_string();
+    anyhow::ensure!(
+        !s.contains(',') && !s.contains('='),
+        "path '{s}' contains ',' or '=', which --mount cannot represent safely"
+    );
+    Ok(())
+}
 
 /// Write `vars` to a fresh owner-only file in `--env-file` format (`KEY=VALUE`
 /// per line, no quoting or escaping support — this is `docker`/`podman`'s own
@@ -222,6 +236,34 @@ pub(crate) fn container_command(
     spec: &SandboxSpec,
     inputs: ContainerInputs<'_>,
 ) -> anyhow::Result<(std::process::Command, EnvFileGuard)> {
+    // #1653/#1652 pre-pr-review P2: `--mount`'s value is a comma-delimited
+    // `key=value` list with no escaping, and `spec.image` is appended as a
+    // bare positional argument with no `--` separator — a path containing
+    // `,`/`=`, or an image string starting with `-`, would silently splice
+    // in an extra mount option or get parsed as a runtime flag instead of an
+    // image name (potentially neutralizing the hardening flags below).
+    // `spec.image` comes straight from `features.sandbox.image` in
+    // `config.yaml`; the paths are host-derived but not implausible for a
+    // local user to control (e.g. an oddly-named project directory).
+    validate_mount_path(inputs.project_dir)?;
+    if let Some(sock) = inputs.ssh_auth_sock {
+        validate_mount_path(sock)?;
+    }
+    if let Some(dir) = inputs.config_dir {
+        validate_mount_path(dir)?;
+    }
+    if let Some(patched) = inputs.patched_claude_json {
+        validate_mount_path(patched)?;
+    }
+    validate_mount_path(inputs.bin_path)?;
+    anyhow::ensure!(
+        !spec.image.starts_with('-'),
+        "features.sandbox.image '{}' starts with '-', which {} would parse as a flag rather \
+         than an image name",
+        spec.image,
+        spec.runtime.binary_name(),
+    );
+
     let env_file = write_env_file(inputs.vars)?;
 
     let mut cmd = std::process::Command::new(spec.runtime.binary_name());
@@ -521,6 +563,58 @@ mod tests {
     }
 
     #[test]
+    fn container_command_rejects_a_project_dir_containing_a_comma() {
+        let spec = SandboxSpec {
+            runtime: ContainerRuntime::Docker,
+            image: "img".to_string(),
+            forward_ssh_agent: true,
+        };
+        let args = Vec::new();
+        let vars = BTreeMap::new();
+        let project_dir = std::path::Path::new("/proj,evil=target");
+        let err = container_command(
+            &spec,
+            ContainerInputs {
+                bin_path: std::path::Path::new("/usr/local/bin/claude"),
+                args: &args,
+                vars: &vars,
+                project_dir,
+                ssh_auth_sock: None,
+                config_dir: None,
+                patched_claude_json: None,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("cannot represent safely"));
+    }
+
+    #[test]
+    fn container_command_rejects_an_image_starting_with_a_dash() {
+        let spec = SandboxSpec {
+            runtime: ContainerRuntime::Docker,
+            image: "--privileged".to_string(),
+            forward_ssh_agent: true,
+        };
+        let args = Vec::new();
+        let vars = BTreeMap::new();
+        let project_dir = std::path::Path::new("/proj");
+        let err = container_command(
+            &spec,
+            ContainerInputs {
+                bin_path: std::path::Path::new("/usr/local/bin/claude"),
+                args: &args,
+                vars: &vars,
+                project_dir,
+                ssh_auth_sock: None,
+                config_dir: None,
+                patched_claude_json: None,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("starts with '-'"));
+    }
+
+    #[test]
     fn container_command_writes_resolved_vars_to_the_env_file() {
         let spec = SandboxSpec {
             runtime: ContainerRuntime::Docker,
@@ -716,7 +810,10 @@ mod tests {
             vars in proptest::collection::btree_map("[A-Z_]{1,10}", "[a-zA-Z0-9]{0,15}", 0..5),
             extra_args in proptest::collection::vec("[a-zA-Z0-9-]{1,10}", 0..4),
             binary_name in "[a-z]{1,10}",
-            image in "[a-z0-9./:-]{1,30}",
+            // First char excludes '-' — container_command now rejects an
+            // image starting with '-' (pre-pr-review P2, #1653), covered by
+            // its own dedicated test rather than this general property.
+            image in "[a-z0-9./:][a-z0-9./:-]{0,29}",
         ) {
             let spec = SandboxSpec {
                 runtime: ContainerRuntime::Docker,

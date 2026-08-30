@@ -1,18 +1,20 @@
 //! Mounts the materialized Claude Code config directory into a sandboxed
-//! launch's container (#1652), and rewrites the ICM MCP server's URL so it
-//! resolves from inside the container's own network namespace.
+//! launch's container (#1652), and rewrites any `mcpServers` entry's
+//! loopback URL (ICM's included) so it resolves from inside the container's
+//! own network namespace.
 //!
 //! Before this, `sandbox::container_command` only mounted the project tree,
 //! `SSH_AUTH_SOCK`, and the resolved env vars — `CLAUDE_CONFIG_DIR` itself
 //! was never mounted, so a containerized Claude Code saw none of llmenv's
 //! materialized `mcpServers`, skills, plugins, or settings. This mounts that
 //! directory read-only at its own path (so the `CLAUDE_CONFIG_DIR` env var
-//! stays valid unmodified), and — when the ICM MCP entry in `.claude.json`
-//! points at a loopback address, which it does whenever the ICM host is this
-//! same machine — overlays a patched copy of just that one file with the URL
-//! rewritten to the container gateway host (`sandbox::gateway_host`),
-//! mirroring `icebreaker.rs`'s credential-proxy rewrite for the same reason:
-//! `127.0.0.1` inside the container is the container itself.
+//! stays valid unmodified), and — when any `mcpServers` entry in
+//! `.claude.json` points at a loopback address, which it does whenever that
+//! server runs on this same machine — overlays a patched copy of just that
+//! one file with every such URL rewritten to the container gateway host
+//! (`sandbox::gateway_host`), mirroring `icebreaker.rs`'s credential-proxy
+//! rewrite for the same reason: `127.0.0.1` inside the container is the
+//! container itself.
 //!
 //! Scoped to Claude Code only, matching `icebreaker.rs`'s precedent — no
 //! other adapter has an equivalent config-dir mount into the sandbox yet
@@ -69,7 +71,7 @@ static PATCH_FILE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 /// # Errors
 /// Propagates a read/parse/write failure preparing the patched file. A
 /// missing or malformed `.claude.json` is not an error here — the container
-/// still gets the directory mount unpatched; `patch_claude_json_icm_url`
+/// still gets the directory mount unpatched; `patch_claude_json_loopback_urls`
 /// treats "nothing to patch" as `Ok(None)`, not a failure.
 pub(crate) fn prepare(
     adapter_name: &str,
@@ -84,7 +86,7 @@ pub(crate) fn prepare(
     };
 
     let claude_json_path = config_dir.join(CLAUDE_JSON_FILE);
-    let patched_claude_json = match patch_claude_json_icm_url(
+    let patched_claude_json = match patch_claude_json_loopback_urls(
         &claude_json_path,
         super::sandbox::gateway_host(runtime),
     )? {
@@ -110,15 +112,19 @@ fn write_patched_claude_json(bytes: &[u8]) -> anyhow::Result<PatchedFileGuard> {
     Ok(PatchedFileGuard(path))
 }
 
-/// Read `claude_json_path` (if present) and, when its ICM (`icm`)
-/// `mcpServers` entry has a loopback-host URL, return the same document with
-/// that URL rewritten to `gateway_host`, serialized back to bytes.
+/// Read `claude_json_path` (if present) and rewrite every `mcpServers` entry
+/// whose `url` is a loopback host to `gateway_host`, serialized back to
+/// bytes. Not just ICM's own entry (pre-pr-review P2, #1652) — any plain
+/// `mcp:`-declared server with an HTTP/SSE transport has the identical
+/// problem: a URL naming this machine's loopback is unreachable from inside
+/// the container's own network namespace regardless of which server it is.
 ///
 /// Returns `Ok(None)` when there's nothing to patch: the file doesn't exist,
-/// doesn't parse as JSON, has no ICM entry, or that entry's URL isn't a
-/// loopback address in the first place (e.g. a remote ICM host — already
-/// reachable from inside the container exactly as it is on the host).
-fn patch_claude_json_icm_url(
+/// doesn't parse as JSON, has no `mcpServers` object, or none of its entries
+/// have a loopback-host URL in the first place (e.g. every server is remote
+/// — already reachable from inside the container exactly as it is on the
+/// host).
+fn patch_claude_json_loopback_urls(
     claude_json_path: &Path,
     gateway_host: &'static str,
 ) -> anyhow::Result<Option<Vec<u8>>> {
@@ -135,41 +141,34 @@ fn patch_claude_json_icm_url(
         // function can safely rewrite, so the container gets the file as-is.
         return Ok(None);
     };
-    let Some(url) = doc
-        .pointer(&format!(
-            "/mcpServers/{}/url",
-            llmenv_config::MEMORY_MCP_NAME
-        ))
-        .and_then(|v| v.as_str())
-    else {
+    let Some(servers) = doc.get_mut("mcpServers").and_then(|v| v.as_object_mut()) else {
         return Ok(None);
     };
-    let Some(rewritten) = rewrite_loopback_url(url, gateway_host)? else {
+    let mut rewrote_any = false;
+    for entry in servers.values_mut() {
+        let Some(url) = entry.get("url").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(rewritten) = rewrite_loopback_url(url, gateway_host)? else {
+            continue;
+        };
+        entry["url"] = serde_json::Value::String(rewritten);
+        rewrote_any = true;
+    }
+    if !rewrote_any {
         return Ok(None);
-    };
-    let pointer = format!("/mcpServers/{}/url", llmenv_config::MEMORY_MCP_NAME);
-    if let Some(slot) = doc.pointer_mut(&pointer) {
-        *slot = serde_json::Value::String(rewritten);
     }
     Ok(Some(serde_json::to_vec_pretty(&doc)?))
-}
-
-/// `true` for a host string that means "this machine, from this machine's
-/// own point of view" — unreachable from inside a container's own network
-/// namespace under that same name. Mirrors `cli::doctor::is_local_addr`'s
-/// semantics; kept as a local copy rather than a cross-module `pub(crate)`
-/// reach into `doctor`, which doesn't otherwise expose helpers outside its
-/// own module.
-fn is_loopback_host(host: &str) -> bool {
-    matches!(host, "localhost" | "0.0.0.0" | "::" | "::0")
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Rewrite `url_str`'s host to `gateway_host` when it's loopback, preserving
 /// scheme/port/path/query. Returns `Ok(None)` unchanged when the host isn't
 /// loopback (a remote ICM host needs no rewrite) or `url_str` doesn't parse.
+///
+/// Loopback judgment reuses `cli::doctor::is_local_addr` — the identical
+/// "unreachable under this name from outside the host" check, shared rather
+/// than duplicated (pre-pr-review P2, #1652) to avoid the two definitions
+/// silently drifting apart.
 fn rewrite_loopback_url(url_str: &str, gateway_host: &str) -> anyhow::Result<Option<String>> {
     let Ok(mut url) = url_str.parse::<url::Url>() else {
         return Ok(None);
@@ -177,7 +176,7 @@ fn rewrite_loopback_url(url_str: &str, gateway_host: &str) -> anyhow::Result<Opt
     let Some(host) = url.host_str() else {
         return Ok(None);
     };
-    if !is_loopback_host(host) {
+    if !crate::cli::doctor::is_local_addr(host) {
         return Ok(None);
     }
     url.set_host(Some(gateway_host))
@@ -190,19 +189,6 @@ fn rewrite_loopback_url(url_str: &str, gateway_host: &str) -> anyhow::Result<Opt
 mod tests {
     use super::*;
     use proptest::prelude::*;
-
-    #[test]
-    fn is_loopback_host_accepts_localhost_and_loopback_ips() {
-        assert!(is_loopback_host("localhost"));
-        assert!(is_loopback_host("127.0.0.1"));
-        assert!(is_loopback_host("::1"));
-    }
-
-    #[test]
-    fn is_loopback_host_rejects_remote_addresses() {
-        assert!(!is_loopback_host("10.0.0.4"));
-        assert!(!is_loopback_host("icm.example.com"));
-    }
 
     #[test]
     fn rewrite_loopback_url_replaces_loopback_host_preserving_port_and_path() {
@@ -237,12 +223,12 @@ mod tests {
     }
 
     #[test]
-    fn patch_claude_json_icm_url_rewrites_loopback_and_preserves_other_keys() {
+    fn patch_claude_json_loopback_urls_rewrites_loopback_and_preserves_other_keys() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(CLAUDE_JSON_FILE);
         std::fs::write(&path, claude_json_with_icm_url("http://127.0.0.1:9092/mcp")).unwrap();
 
-        let patched = patch_claude_json_icm_url(&path, "host.docker.internal")
+        let patched = patch_claude_json_loopback_urls(&path, "host.docker.internal")
             .unwrap()
             .unwrap();
         let doc: serde_json::Value = serde_json::from_slice(&patched).unwrap();
@@ -262,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn patch_claude_json_icm_url_returns_none_for_remote_icm_host() {
+    fn patch_claude_json_loopback_urls_returns_none_for_remote_icm_host() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(CLAUDE_JSON_FILE);
         std::fs::write(
@@ -272,39 +258,75 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            patch_claude_json_icm_url(&path, "host.docker.internal").unwrap(),
+            patch_claude_json_loopback_urls(&path, "host.docker.internal").unwrap(),
             None
         );
     }
 
     #[test]
-    fn patch_claude_json_icm_url_returns_none_when_file_absent() {
+    fn patch_claude_json_loopback_urls_returns_none_when_file_absent() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(CLAUDE_JSON_FILE);
         assert_eq!(
-            patch_claude_json_icm_url(&path, "host.docker.internal").unwrap(),
+            patch_claude_json_loopback_urls(&path, "host.docker.internal").unwrap(),
             None
         );
     }
 
     #[test]
-    fn patch_claude_json_icm_url_returns_none_when_no_icm_entry() {
+    fn patch_claude_json_loopback_urls_returns_none_for_empty_mcp_servers() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(CLAUDE_JSON_FILE);
         std::fs::write(&path, r#"{"mcpServers": {}}"#).unwrap();
         assert_eq!(
-            patch_claude_json_icm_url(&path, "host.docker.internal").unwrap(),
+            patch_claude_json_loopback_urls(&path, "host.docker.internal").unwrap(),
             None
         );
     }
 
     #[test]
-    fn patch_claude_json_icm_url_returns_none_when_malformed() {
+    fn patch_claude_json_loopback_urls_rewrites_a_non_icm_server_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CLAUDE_JSON_FILE);
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "mcpServers": {
+                    "my-local-tool": {
+                        "type": "http",
+                        "url": "http://127.0.0.1:4400/mcp",
+                        "headers": { "Authorization": "Bearer secret" },
+                    },
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let patched = patch_claude_json_loopback_urls(&path, "host.docker.internal")
+            .unwrap()
+            .unwrap();
+        let doc: serde_json::Value = serde_json::from_slice(&patched).unwrap();
+        assert_eq!(
+            doc.pointer("/mcpServers/my-local-tool/url")
+                .and_then(|v| v.as_str()),
+            Some("http://host.docker.internal:4400/mcp")
+        );
+        // Non-URL fields on the same entry survive untouched.
+        assert_eq!(
+            doc.pointer("/mcpServers/my-local-tool/headers/Authorization")
+                .and_then(|v| v.as_str()),
+            Some("Bearer secret")
+        );
+    }
+
+    #[test]
+    fn patch_claude_json_loopback_urls_returns_none_when_malformed() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(CLAUDE_JSON_FILE);
         std::fs::write(&path, "not json").unwrap();
         assert_eq!(
-            patch_claude_json_icm_url(&path, "host.docker.internal").unwrap(),
+            patch_claude_json_loopback_urls(&path, "host.docker.internal").unwrap(),
             None
         );
     }
@@ -364,11 +386,11 @@ mod tests {
         }
 
         #[test]
-        fn prop_patch_claude_json_icm_url_never_panics_on_arbitrary_bytes(bytes in ".{0,200}") {
+        fn prop_patch_claude_json_loopback_urls_never_panics_on_arbitrary_bytes(bytes in ".{0,200}") {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join(CLAUDE_JSON_FILE);
             std::fs::write(&path, &bytes).unwrap();
-            let _ = patch_claude_json_icm_url(&path, "host.docker.internal");
+            let _ = patch_claude_json_loopback_urls(&path, "host.docker.internal");
         }
     }
 }
