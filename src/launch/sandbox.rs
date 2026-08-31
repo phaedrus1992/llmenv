@@ -92,17 +92,49 @@ fn manifest_inspect_target(runtime: ContainerRuntime, image: &str) -> String {
     }
 }
 
+/// `stderr` substrings meaning `manifest inspect` never reached the
+/// registry at all (DNS/connect/TLS-level failure) — as opposed to reaching
+/// it and getting a definitive answer. Matched case-insensitively. Mirrors
+/// `attestation.rs`'s `NETWORK_UNREACHABLE_MARKERS` for the identical
+/// reason: neither `docker` nor `podman` has a dedicated "offline" exit
+/// code, so a failure matching none of these is treated as a genuine,
+/// definitive "not pullable" answer rather than silently reported as a
+/// network problem it isn't.
+const NETWORK_UNREACHABLE_MARKERS: &[&str] = &[
+    "could not resolve host",
+    "no such host",
+    "connection refused",
+    "network is unreachable",
+    "i/o timeout",
+    "dial tcp",
+    "tls handshake",
+    "timeout",
+];
+
 /// Checks that `image` can be pulled through `runtime`, without actually
 /// downloading it (`llmenv doctor`, #1654) — queries the registry's manifest
 /// directly via `manifest inspect` rather than a real `pull`, which would
 /// spend bandwidth and disk on every doctor run.
 ///
 /// # Errors
-/// Only when the `manifest inspect` invocation itself couldn't be run or
-/// timed out (see [`IMAGE_PULLABLE_TIMEOUT`]) — a definitive "not pullable"
-/// answer (bad reference, no registry auth, image missing) is `Ok(false)`,
-/// not an error.
+/// - `features.sandbox.image` starts with `-`, which `runtime.binary_name()`
+///   would parse as a flag rather than an image name — the same guard
+///   `container_command` applies before it ever reaches a shelled-out
+///   invocation.
+/// - The `manifest inspect` invocation itself couldn't be run, timed out
+///   (see [`IMAGE_PULLABLE_TIMEOUT`]), or its `stderr` matches
+///   [`NETWORK_UNREACHABLE_MARKERS`] — the registry was never actually
+///   reached, so nothing here can tell "not pullable" apart from "network
+///   down right now". A *reached-and-answered* negative (bad reference, no
+///   registry auth, image missing) is `Ok(false)`, not an error — that's a
+///   real answer, not an inconclusive one.
 pub(crate) fn probe_image_pullable(runtime: ContainerRuntime, image: &str) -> anyhow::Result<bool> {
+    anyhow::ensure!(
+        !image.starts_with('-'),
+        "features.sandbox.image '{image}' starts with '-', which {} would parse as a flag \
+         rather than an image name",
+        runtime.binary_name(),
+    );
     let target = manifest_inspect_target(runtime, image);
     let mut cmd = std::process::Command::new(runtime.binary_name());
     cmd.args(["manifest", "inspect", &target]);
@@ -112,7 +144,33 @@ pub(crate) fn probe_image_pullable(runtime: ContainerRuntime, image: &str) -> an
             runtime.binary_name()
         )
     })?;
-    Ok(output.status.success())
+    classify_manifest_inspect_output(&output, runtime, &target)
+}
+
+/// [`probe_image_pullable`]'s decision logic once `manifest inspect` has
+/// actually run — split out so the network-vs-definitive classification is
+/// testable against a synthetic [`std::process::Output`] without spawning a
+/// real `docker`/`podman`, mirroring `attestation.rs`'s `verify_with_gh`
+/// split for the identical reason.
+fn classify_manifest_inspect_output(
+    output: &std::process::Output,
+    runtime: ContainerRuntime,
+    target: &str,
+) -> anyhow::Result<bool> {
+    if output.status.success() {
+        return Ok(true);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr_lower = stderr.to_lowercase();
+    anyhow::ensure!(
+        !NETWORK_UNREACHABLE_MARKERS
+            .iter()
+            .any(|marker| stderr_lower.contains(marker)),
+        "`{} manifest inspect {target}` could not reach the registry: {}",
+        runtime.binary_name(),
+        stderr.trim(),
+    );
+    Ok(false)
 }
 
 /// The hostname a container uses to reach the host's loopback, from inside
@@ -468,6 +526,30 @@ pub(crate) fn container_command(
     if let Some(cred) = inputs.credential_file {
         validate_mount_path(cred)?;
     }
+    // pre-pr-review (#1698): `mcp_config_path`/`credential_file` are always
+    // caller-derived as `config_dir.join(<adapter's own fixed file name>)`
+    // today, never independently attacker-controlled — but nothing
+    // structurally enforced that. Assert containment explicitly so a future
+    // caller can't mount an overlay or a credential mask outside the
+    // directory it claims to be inside.
+    if let Some(dir) = inputs.config_dir {
+        if let Some(mcp_config_path) = inputs.mcp_config_path {
+            anyhow::ensure!(
+                mcp_config_path.starts_with(dir),
+                "mcp_config_path {} is not inside config_dir {}",
+                mcp_config_path.display(),
+                dir.display(),
+            );
+        }
+        if let Some(cred) = inputs.credential_file {
+            anyhow::ensure!(
+                cred.starts_with(dir),
+                "credential_file {} is not inside config_dir {}",
+                cred.display(),
+                dir.display(),
+            );
+        }
+    }
     validate_mount_path(inputs.bin_path)?;
     anyhow::ensure!(
         !spec.image.starts_with('-'),
@@ -590,6 +672,64 @@ mod tests {
         assert_eq!(
             manifest_inspect_target(ContainerRuntime::Podman, "alpine:latest"),
             "docker://alpine:latest"
+        );
+    }
+
+    // probe_image_pullable / classify_manifest_inspect_output
+    #[test]
+    fn probe_image_pullable_rejects_an_image_starting_with_a_dash() {
+        let err = probe_image_pullable(ContainerRuntime::Docker, "-malicious").unwrap_err();
+        assert!(err.to_string().contains("starts with '-'"));
+    }
+
+    fn fake_output(success: bool, stderr: &str) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(if success { 0 } else { 256 }),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn classify_manifest_inspect_output_true_on_success() {
+        let output = fake_output(true, "");
+        assert!(
+            classify_manifest_inspect_output(&output, ContainerRuntime::Docker, "alpine:latest")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn classify_manifest_inspect_output_false_on_a_definitive_not_found() {
+        let output = fake_output(
+            false,
+            "manifest unknown: manifest tagged by \"latest\" is not found",
+        );
+        assert!(
+            !classify_manifest_inspect_output(&output, ContainerRuntime::Docker, "alpine:latest")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn classify_manifest_inspect_output_errors_on_a_network_unreachable_stderr() {
+        let output = fake_output(
+            false,
+            "Error: dial tcp: lookup registry-1.docker.io: no such host",
+        );
+        let err =
+            classify_manifest_inspect_output(&output, ContainerRuntime::Docker, "alpine:latest")
+                .unwrap_err();
+        assert!(err.to_string().contains("could not reach the registry"));
+    }
+
+    #[test]
+    fn classify_manifest_inspect_output_network_marker_match_is_case_insensitive() {
+        let output = fake_output(false, "CONNECTION REFUSED");
+        assert!(
+            classify_manifest_inspect_output(&output, ContainerRuntime::Docker, "alpine:latest")
+                .is_err()
         );
     }
 
@@ -856,6 +996,66 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("starts with '-'"));
+    }
+
+    #[test]
+    fn container_command_rejects_an_mcp_config_path_outside_config_dir() {
+        let spec = SandboxSpec {
+            runtime: ContainerRuntime::Docker,
+            image: "img".to_string(),
+            forward_ssh_agent: true,
+        };
+        let args = Vec::new();
+        let vars = BTreeMap::new();
+        let project_dir = std::path::Path::new("/proj");
+        let config_dir = std::path::Path::new("/home/user/.cache/llmenv/claude-code/abc123");
+        let outside = std::path::Path::new("/etc/passwd");
+        let err = container_command(
+            &spec,
+            ContainerInputs {
+                bin_path: std::path::Path::new("/usr/local/bin/claude"),
+                args: &args,
+                vars: &vars,
+                project_dir,
+                ssh_auth_sock: None,
+                config_dir: Some(config_dir),
+                mcp_config_path: Some(outside),
+                patched_mcp_config: None,
+                credential_file: None,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("is not inside config_dir"));
+    }
+
+    #[test]
+    fn container_command_rejects_a_credential_file_outside_config_dir() {
+        let spec = SandboxSpec {
+            runtime: ContainerRuntime::Docker,
+            image: "img".to_string(),
+            forward_ssh_agent: true,
+        };
+        let args = Vec::new();
+        let vars = BTreeMap::new();
+        let project_dir = std::path::Path::new("/proj");
+        let config_dir = std::path::Path::new("/home/user/.cache/llmenv/codex/abc123");
+        let outside = std::path::Path::new("/etc/passwd");
+        let err = container_command(
+            &spec,
+            ContainerInputs {
+                bin_path: std::path::Path::new("/usr/local/bin/codex"),
+                args: &args,
+                vars: &vars,
+                project_dir,
+                ssh_auth_sock: None,
+                config_dir: Some(config_dir),
+                mcp_config_path: None,
+                patched_mcp_config: None,
+                credential_file: Some(outside),
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("is not inside config_dir"));
     }
 
     #[test]

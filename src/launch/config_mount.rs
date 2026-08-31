@@ -762,5 +762,44 @@ url = "http://icm.example.com:9092/mcp"
                 }
             }
         }
+
+        // #1698 pre-pr-review pbt-gap: the TOML branch got only a no-crash
+        // proptest — mirrors the JSON roundtrip property above, for Codex's
+        // config.toml/mcp_servers shape.
+        #[test]
+        fn prop_patch_toml_config_loopback_urls_rewrites_only_the_loopback_entries(
+            is_loopback in proptest::collection::vec(proptest::bool::ANY, 1..6),
+            port in 1u16..=65535,
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            let mut doc = String::from("model = \"gpt-5\"\n");
+            for (i, loopback) in is_loopback.iter().enumerate() {
+                let host = if *loopback { "127.0.0.1".to_string() } else { format!("remote{i}.example.com") };
+                doc.push_str(&format!(
+                    "\n[mcp_servers.server{i}]\nurl = \"http://{host}:{port}/mcp\"\n"
+                ));
+            }
+            std::fs::write(&path, &doc).unwrap();
+
+            let any_loopback = is_loopback.iter().any(|b| *b);
+            let result = patch_mcp_config_loopback_urls(&path, "mcp_servers", McpConfigFormat::Toml, "host.docker.internal").unwrap();
+            prop_assert_eq!(result.is_some(), any_loopback);
+            if let Some(patched) = result {
+                let parsed: toml::Table = std::str::from_utf8(&patched).unwrap().parse().unwrap();
+                prop_assert_eq!(parsed["model"].as_str(), Some("gpt-5"));
+                for (i, loopback) in is_loopback.iter().enumerate() {
+                    let server_name = format!("server{i}");
+                    let url = parsed["mcp_servers"][server_name.as_str()]["url"]
+                        .as_str()
+                        .unwrap();
+                    if *loopback {
+                        prop_assert_eq!(url, format!("http://host.docker.internal:{port}/mcp"));
+                    } else {
+                        prop_assert_eq!(url, format!("http://remote{i}.example.com:{port}/mcp"));
+                    }
+                }
+            }
+        }
     }
 }
