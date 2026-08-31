@@ -922,6 +922,37 @@ features:
 | `explain_before_act` | no       | Default `false` (added in v3.11.0). Denies a *modifying* Bash command when nothing has been said yet this turn. Off by default: a transcript heuristic.                                                                                     |
 | `answer_before_act`  | no       | Default `false` (added in v3.11.0). Denies a tool call while the user's question sits unanswered. Off by default: a transcript heuristic.                                                                                                   |
 
+### `features.sandbox:`
+
+(added in v4.0.0)
+
+Runs `llmenv launch <engine>` inside a container instead of directly on the
+host, so a bad delete, a force-push, or an exfiltrated token lands in a
+throwaway container rather than on the machine. Off by default. Full
+write-up — the default image, supply-chain hardening, `SSH_AUTH_SOCK`
+forwarding — lives under [Sandbox](commands.md#sandbox-featuressandbox) in
+the `launch` command reference; this is the field-level summary.
+
+```yaml
+features:
+  sandbox:
+    enabled: false            # opt-in
+    runtime: auto              # auto | docker | podman
+    image: null                # null = llmenv's published default image
+    forward_ssh_agent: true    # bind-mount the host SSH_AUTH_SOCK in
+```
+
+| Field               | Required | Notes                                                                                                           |
+|---------------------|----------|-----------------------------------------------------------------------------------------------------------------|
+| `enabled`           | no       | Default `false`. `--container`/`--no-container` on `llmenv launch` override this for one invocation.            |
+| `runtime`           | no       | Default `auto` (probes `PATH` for `podman`, then `docker`). `docker`/`podman` force one engine without probing. |
+| `image`             | no       | Default `null` — llmenv's published default sandbox image. Any other value overrides it.                        |
+| `forward_ssh_agent` | no       | Default `true`. Bind-mounts the host's `SSH_AUTH_SOCK` into the container when one is running.                  |
+
+`llmenv doctor` reports whether the configured runtime, the `icebreaker`
+binary, and the configured image are all available when this feature is
+enabled (added in v4.0.0, [#1654](https://github.com/phaedrus1992/llmenv/issues/1654)).
+
 ## `session_log:`
 
 llmenv records session activity — lifecycle events, the active scope, and

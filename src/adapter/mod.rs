@@ -309,6 +309,44 @@ fn no_hatch(key: &str, engine: &str, neutral: &str) -> String {
     )
 }
 
+/// Serialization format of an adapter's MCP-config file (#1698) — needed
+/// because [`crate::launch::config_mount`]'s loopback-URL rewrite has to
+/// parse the file before it can walk [`ConfigDirMount::mcp_servers_key`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpConfigFormat {
+    Json,
+    Toml,
+}
+
+/// What a sandboxed launch needs to mount and patch for this adapter
+/// (#1652, #1698): the config-dir env var this adapter sets (mirrors
+/// [`AgentAdapter::env_vars`]'s own value — naming it here lets
+/// `crate::launch::config_mount` look the directory up in the resolved env
+/// without re-deriving it from `env_vars`'s full output), and the
+/// MCP-config file's relative path/shape so a loopback server URL in it can
+/// be rewritten for the container's network namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfigDirMount {
+    /// Env var naming the resolved config directory, e.g. `CLAUDE_CONFIG_DIR`.
+    pub env_var: &'static str,
+    /// The MCP-config file's path relative to the config directory, e.g.
+    /// `.claude.json`.
+    pub mcp_config_file: &'static str,
+    /// Top-level key in `mcp_config_file` holding the name → server-entry
+    /// map, e.g. `mcpServers`.
+    pub mcp_servers_key: &'static str,
+    pub format: McpConfigFormat,
+    /// Relative path (within the config directory) of a runtime-written
+    /// credential file this adapter keeps outside its own materialized
+    /// config — Claude Code's `.credentials.json`, Codex's `auth.json`.
+    /// llmenv never authors this file; mounting the config directory into a
+    /// sandbox must mask it with a `/dev/null` overlay rather than exposing
+    /// a live credential the same way the directory mount exposes the
+    /// adapter's ordinary (non-secret) config. `None` for an adapter with
+    /// no such file (Crush, opencode, as of this writing).
+    pub credential_file: Option<&'static str>,
+}
+
 /// Per-agent rules for translating a [`MergedManifest`] into an on-disk layout
 /// and a set of environment variables that point the agent at it.
 ///
@@ -438,6 +476,13 @@ pub trait AgentAdapter {
     /// means the adapter has no typed output structs yet and emits no
     /// schema sidecar.
     fn config_schema(&self) -> Option<serde_json::Value> {
+        None
+    }
+
+    /// What a sandboxed launch mounts/patches for this adapter's config
+    /// directory (#1698). `None` (the default) means this adapter has no
+    /// config-dir concept a sandbox mount applies to.
+    fn config_dir_mount(&self) -> Option<ConfigDirMount> {
         None
     }
 }

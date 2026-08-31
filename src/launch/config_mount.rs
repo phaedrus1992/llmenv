@@ -1,35 +1,41 @@
-//! Mounts the materialized Claude Code config directory into a sandboxed
-//! launch's container (#1652), and rewrites any `mcpServers` entry's
-//! loopback URL (ICM's included) so it resolves from inside the container's
-//! own network namespace.
+//! Mounts an adapter's materialized config directory into a sandboxed
+//! launch's container (#1652, generalized to every adapter in #1698), and
+//! rewrites any MCP-server entry's loopback URL (ICM's included) so it
+//! resolves from inside the container's own network namespace.
 //!
-//! Before this, `sandbox::container_command` only mounted the project tree,
-//! `SSH_AUTH_SOCK`, and the resolved env vars — `CLAUDE_CONFIG_DIR` itself
-//! was never mounted, so a containerized Claude Code saw none of llmenv's
-//! materialized `mcpServers`, skills, plugins, or settings. This mounts that
-//! directory read-only at its own path (so the `CLAUDE_CONFIG_DIR` env var
-//! stays valid unmodified), and — when any `mcpServers` entry in
-//! `.claude.json` points at a loopback address, which it does whenever that
-//! server runs on this same machine — overlays a patched copy of just that
-//! one file with every such URL rewritten to the container gateway host
-//! (`sandbox::gateway_host`), mirroring `icebreaker.rs`'s credential-proxy
-//! rewrite for the same reason: `127.0.0.1` inside the container is the
-//! container itself.
+//! Before #1652, `sandbox::container_command` only mounted the project tree,
+//! `SSH_AUTH_SOCK`, and the resolved env vars — the config directory itself
+//! was never mounted, so a containerized engine saw none of llmenv's
+//! materialized MCP servers, skills, plugins, or settings. This mounts that
+//! directory read-only at its own path (so the adapter's own config-dir env
+//! var stays valid unmodified), and — when any MCP-server entry in the
+//! adapter's own MCP-config file (`AgentAdapter::config_dir_mount`'s
+//! `mcp_config_file`/`mcp_servers_key`) points at a loopback address, which
+//! it does whenever that server runs on this same machine — overlays a
+//! patched copy of just that one file with every such URL rewritten to the
+//! container gateway host (`sandbox::gateway_host`), mirroring
+//! `icebreaker.rs`'s credential-proxy rewrite for the same reason:
+//! `127.0.0.1` inside the container is the container itself.
 //!
-//! Scoped to Claude Code only, matching `icebreaker.rs`'s precedent — no
-//! other adapter has an equivalent config-dir mount into the sandbox yet
-//! (tracked separately, see the issue this module's own tracking references).
+//! Through #1652, this was scoped to Claude Code only, matching
+//! `icebreaker.rs`'s then-precedent. #1698 generalized it to every adapter
+//! via `AgentAdapter::config_dir_mount` — including, critically, masking
+//! whatever runtime-written credential file that adapter keeps outside its
+//! own materialized config (`ConfigDirMount::credential_file`): mounting the
+//! directory must not also hand the container a live OAuth/API-key store
+//! llmenv never authored.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 
+use crate::adapter::{ConfigDirMount, McpConfigFormat};
+
 use super::sandbox::ContainerRuntime;
 
-const CLAUDE_JSON_FILE: &str = ".claude.json";
-
-/// A patched copy of `.claude.json`, deleted on drop once the container that
-/// mounted it has exited — mirrors `sandbox::EnvFileGuard`'s pattern.
+/// A patched copy of an adapter's MCP-config file, deleted on drop once the
+/// container that mounted it has exited — mirrors `sandbox::EnvFileGuard`'s
+/// pattern.
 pub(crate) struct PatchedFileGuard(PathBuf);
 
 impl PatchedFileGuard {
@@ -51,13 +57,22 @@ impl Drop for PatchedFileGuard {
     }
 }
 
-/// What to bind-mount into a sandboxed launch's container so Claude Code
+/// What to bind-mount into a sandboxed launch's container so the adapter
 /// sees its materialized config: `config_dir` mounted read-only at the same
-/// in-container path, plus (when ICM's URL needed rewriting) a
-/// [`PatchedFileGuard`] overlay-mounted at `config_dir/.claude.json`.
+/// in-container path, plus (when an MCP-server URL needed rewriting) a
+/// [`PatchedFileGuard`] overlay-mounted at `mcp_config_path`, plus (when the
+/// adapter has one) a `/dev/null` mask over `credential_file`.
 pub(crate) struct ConfigMount {
     pub(crate) config_dir: PathBuf,
-    pub(crate) patched_claude_json: Option<PatchedFileGuard>,
+    /// Absolute path to the adapter's MCP-config file within `config_dir`
+    /// (e.g. `config_dir/.claude.json`) — the overlay-mount target for
+    /// `patched_mcp_config`.
+    pub(crate) mcp_config_path: PathBuf,
+    pub(crate) patched_mcp_config: Option<PatchedFileGuard>,
+    /// Absolute path to the adapter's runtime-written credential file within
+    /// `config_dir`, if it has one — masked with a `/dev/null` overlay so
+    /// the directory mount doesn't also expose a live credential.
+    pub(crate) credential_file: Option<PathBuf>,
 }
 
 /// Disambiguates concurrent [`write_patched_claude_json`] calls within the
@@ -65,29 +80,31 @@ pub(crate) struct ConfigMount {
 static PATCH_FILE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Resolve what to mount for this launch. `Ok(None)` when there's nothing to
-/// mount: a non-Claude-Code adapter, or no config directory resolved for
-/// this launch (the caller has nothing to pass in that case).
+/// mount: the adapter has no [`ConfigDirMount`] (`mount` is `None`), or no
+/// config directory was resolved for this launch (`config_dir` is `None`).
 ///
 /// # Errors
 /// Propagates a read/parse/write failure preparing the patched file. A
-/// missing or malformed `.claude.json` is not an error here — the container
-/// still gets the directory mount unpatched; `patch_claude_json_loopback_urls`
-/// treats "nothing to patch" as `Ok(None)`, not a failure.
+/// missing or malformed MCP-config file is not an error here — the
+/// container still gets the directory mount unpatched;
+/// [`patch_mcp_config_loopback_urls`] treats "nothing to patch" as
+/// `Ok(None)`, not a failure.
 pub(crate) fn prepare(
-    adapter_name: &str,
+    mount: Option<&ConfigDirMount>,
     runtime: ContainerRuntime,
     config_dir: Option<&Path>,
 ) -> anyhow::Result<Option<ConfigMount>> {
-    if adapter_name != "claude-code" {
-        return Ok(None);
-    }
-    let Some(config_dir) = config_dir else {
+    let (Some(mount), Some(config_dir)) = (mount, config_dir) else {
         return Ok(None);
     };
 
-    let claude_json_path = config_dir.join(CLAUDE_JSON_FILE);
-    let patched =
-        patch_claude_json_loopback_urls(&claude_json_path, super::sandbox::gateway_host(runtime))?;
+    let mcp_config_path = config_dir.join(mount.mcp_config_file);
+    let patched = patch_mcp_config_loopback_urls(
+        &mcp_config_path,
+        mount.mcp_servers_key,
+        mount.format,
+        super::sandbox::gateway_host(runtime),
+    )?;
     // pre-pr-review P1 (#1652): a rewritten URL is only reachable if the
     // rewritten server actually accepts connections arriving via the
     // container's bridge/gateway interface, not just its own loopback —
@@ -100,65 +117,81 @@ pub(crate) fn prepare(
     // in production") — tracked, not re-solved here, see #1702.
     if patched.is_some() {
         tracing::debug!(
-            "launch: rewrote a loopback mcpServers URL to {} for the sandboxed container — this \
+            "launch: rewrote a loopback MCP-server URL to {} for the sandboxed container — this \
              only actually connects if the rewritten server accepts connections on a \
              non-loopback interface (see #1702)",
             super::sandbox::gateway_host(runtime)
         );
     }
-    let patched_claude_json = match patched {
-        Some(patched_bytes) => Some(write_patched_claude_json(&patched_bytes)?),
+    let patched_mcp_config = match patched {
+        Some(patched_bytes) => Some(write_patched_mcp_config(&patched_bytes)?),
         None => None,
     };
 
     Ok(Some(ConfigMount {
         config_dir: config_dir.to_path_buf(),
-        patched_claude_json,
+        mcp_config_path,
+        patched_mcp_config,
+        credential_file: mount.credential_file.map(|f| config_dir.join(f)),
     }))
 }
 
 /// Write `bytes` to a fresh owner-only temp file, returning a guard that
 /// deletes it on drop. Mirrors `sandbox::write_env_file`.
-fn write_patched_claude_json(bytes: &[u8]) -> anyhow::Result<PatchedFileGuard> {
+fn write_patched_mcp_config(bytes: &[u8]) -> anyhow::Result<PatchedFileGuard> {
     let n = PATCH_FILE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = super::sandbox::sandbox_tmp_dir()?.join(format!(
-        "llmenv-sandbox-claude-json-{}-{n}",
+        "llmenv-sandbox-mcp-config-{}-{n}",
         std::process::id()
     ));
-    crate::paths::write_owner_only(&path, bytes).context("writing the patched claude.json")?;
+    crate::paths::write_owner_only(&path, bytes).context("writing the patched MCP-config file")?;
     Ok(PatchedFileGuard(path))
 }
 
-/// Read `claude_json_path` (if present) and rewrite every `mcpServers` entry
-/// whose `url` is a loopback host to `gateway_host`, serialized back to
-/// bytes. Not just ICM's own entry (pre-pr-review P2, #1652) — any plain
-/// `mcp:`-declared server with an HTTP/SSE transport has the identical
-/// problem: a URL naming this machine's loopback is unreachable from inside
-/// the container's own network namespace regardless of which server it is.
+/// Read `config_path` (if present) and rewrite every entry under
+/// `servers_key` whose `url` is a loopback host to `gateway_host`,
+/// serialized back to bytes in `format`. Not just ICM's own entry
+/// (pre-pr-review P2, #1652) — any plain `mcp:`-declared server with an
+/// HTTP/SSE transport has the identical problem: a URL naming this
+/// machine's loopback is unreachable from inside the container's own
+/// network namespace regardless of which server it is.
 ///
-/// Returns `Ok(None)` when there's nothing to patch: the file doesn't exist,
-/// doesn't parse as JSON, has no `mcpServers` object, or none of its entries
+/// Returns `Ok(None)` when there's nothing to patch: the file doesn't
+/// exist, doesn't parse, has no `servers_key` table, or none of its entries
 /// have a loopback-host URL in the first place (e.g. every server is remote
 /// — already reachable from inside the container exactly as it is on the
 /// host).
-fn patch_claude_json_loopback_urls(
-    claude_json_path: &Path,
+fn patch_mcp_config_loopback_urls(
+    config_path: &Path,
+    servers_key: &str,
+    format: McpConfigFormat,
     gateway_host: &'static str,
 ) -> anyhow::Result<Option<Vec<u8>>> {
-    let bytes = match std::fs::read(claude_json_path) {
+    let bytes = match std::fs::read(config_path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            return Err(e).with_context(|| format!("reading {}", claude_json_path.display()));
-        }
+        Err(e) => return Err(e).with_context(|| format!("reading {}", config_path.display())),
     };
-    let Ok(mut doc) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-        // Malformed .claude.json is a hard error elsewhere (materialization
+    match format {
+        McpConfigFormat::Json => patch_json_loopback_urls(&bytes, servers_key, gateway_host),
+        McpConfigFormat::Toml => patch_toml_loopback_urls(&bytes, servers_key, gateway_host),
+    }
+}
+
+/// [`patch_mcp_config_loopback_urls`]'s JSON-format branch (Claude Code's
+/// `mcpServers`, Crush/opencode's `mcp`).
+fn patch_json_loopback_urls(
+    bytes: &[u8],
+    servers_key: &str,
+    gateway_host: &'static str,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    let Ok(mut doc) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        // A malformed config file is a hard error elsewhere (materialization
         // refuses to write over it); here it just means there's nothing this
         // function can safely rewrite, so the container gets the file as-is.
         return Ok(None);
     };
-    let Some(servers) = doc.get_mut("mcpServers").and_then(|v| v.as_object_mut()) else {
+    let Some(servers) = doc.get_mut(servers_key).and_then(|v| v.as_object_mut()) else {
         return Ok(None);
     };
     let mut rewrote_any = false;
@@ -176,6 +209,41 @@ fn patch_claude_json_loopback_urls(
         return Ok(None);
     }
     Ok(Some(serde_json::to_vec_pretty(&doc)?))
+}
+
+/// [`patch_mcp_config_loopback_urls`]'s TOML-format branch (Codex's
+/// `mcp_servers`). Mirrors [`patch_json_loopback_urls`]; `toml::Table` (not
+/// `toml::Value`) is the parse target, matching `adapter::codex`'s own
+/// convention for the same file.
+fn patch_toml_loopback_urls(
+    bytes: &[u8],
+    servers_key: &str,
+    gateway_host: &'static str,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    let Ok(raw) = std::str::from_utf8(bytes) else {
+        return Ok(None);
+    };
+    let Ok(mut doc) = raw.parse::<toml::Table>() else {
+        return Ok(None);
+    };
+    let Some(servers) = doc.get_mut(servers_key).and_then(toml::Value::as_table_mut) else {
+        return Ok(None);
+    };
+    let mut rewrote_any = false;
+    for (_, entry) in servers.iter_mut() {
+        let Some(url) = entry.get("url").and_then(toml::Value::as_str) else {
+            continue;
+        };
+        let Some(rewritten) = rewrite_loopback_url(url, gateway_host)? else {
+            continue;
+        };
+        entry["url"] = toml::Value::String(rewritten);
+        rewrote_any = true;
+    }
+    if !rewrote_any {
+        return Ok(None);
+    }
+    Ok(Some(toml::to_string_pretty(&doc)?.into_bytes()))
 }
 
 /// Rewrite `url_str`'s host to `gateway_host` when it's loopback, preserving
@@ -207,20 +275,52 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    const CLAUDE_JSON_FILE: &str = ".claude.json";
+
+    fn claude_code_mount() -> ConfigDirMount {
+        ConfigDirMount {
+            env_var: "CLAUDE_CONFIG_DIR",
+            mcp_config_file: CLAUDE_JSON_FILE,
+            mcp_servers_key: "mcpServers",
+            format: McpConfigFormat::Json,
+            credential_file: Some(".credentials.json"),
+        }
+    }
+
+    fn codex_mount() -> ConfigDirMount {
+        ConfigDirMount {
+            env_var: "CODEX_HOME",
+            mcp_config_file: "config.toml",
+            mcp_servers_key: "mcp_servers",
+            format: McpConfigFormat::Toml,
+            credential_file: Some("auth.json"),
+        }
+    }
+
+    fn crush_mount() -> ConfigDirMount {
+        ConfigDirMount {
+            env_var: "CRUSH_GLOBAL_CONFIG",
+            mcp_config_file: "crush.json",
+            mcp_servers_key: "mcp",
+            format: McpConfigFormat::Json,
+            credential_file: None,
+        }
+    }
+
     #[test]
-    fn write_patched_claude_json_writes_under_llmenv_state_dir_not_the_shared_os_temp_dir() {
-        let guard = write_patched_claude_json(b"{}").unwrap();
+    fn write_patched_mcp_config_writes_under_llmenv_state_dir_not_the_shared_os_temp_dir() {
+        let guard = write_patched_mcp_config(b"{}").unwrap();
         let path = guard.path();
         let state_dir = crate::paths::state_dir().unwrap();
         assert!(
             path.starts_with(&state_dir),
-            "patched claude.json {} must live under llmenv's own state dir {}",
+            "patched MCP-config file {} must live under llmenv's own state dir {}",
             path.display(),
             state_dir.display()
         );
         assert!(
             !path.starts_with(std::env::temp_dir()),
-            "patched claude.json {} must not live in the shared OS temp dir",
+            "patched MCP-config file {} must not live in the shared OS temp dir",
             path.display()
         );
     }
@@ -258,14 +358,19 @@ mod tests {
     }
 
     #[test]
-    fn patch_claude_json_loopback_urls_rewrites_loopback_and_preserves_other_keys() {
+    fn patch_mcp_config_loopback_urls_rewrites_loopback_and_preserves_other_keys() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(CLAUDE_JSON_FILE);
         std::fs::write(&path, claude_json_with_icm_url("http://127.0.0.1:9092/mcp")).unwrap();
 
-        let patched = patch_claude_json_loopback_urls(&path, "host.docker.internal")
-            .unwrap()
-            .unwrap();
+        let patched = patch_mcp_config_loopback_urls(
+            &path,
+            "mcpServers",
+            McpConfigFormat::Json,
+            "host.docker.internal",
+        )
+        .unwrap()
+        .unwrap();
         let doc: serde_json::Value = serde_json::from_slice(&patched).unwrap();
         assert_eq!(
             doc.pointer(&format!(
@@ -283,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn patch_claude_json_loopback_urls_returns_none_for_remote_icm_host() {
+    fn patch_mcp_config_loopback_urls_returns_none_for_remote_icm_host() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(CLAUDE_JSON_FILE);
         std::fs::write(
@@ -293,34 +398,52 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            patch_claude_json_loopback_urls(&path, "host.docker.internal").unwrap(),
+            patch_mcp_config_loopback_urls(
+                &path,
+                "mcpServers",
+                McpConfigFormat::Json,
+                "host.docker.internal"
+            )
+            .unwrap(),
             None
         );
     }
 
     #[test]
-    fn patch_claude_json_loopback_urls_returns_none_when_file_absent() {
+    fn patch_mcp_config_loopback_urls_returns_none_when_file_absent() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(CLAUDE_JSON_FILE);
         assert_eq!(
-            patch_claude_json_loopback_urls(&path, "host.docker.internal").unwrap(),
+            patch_mcp_config_loopback_urls(
+                &path,
+                "mcpServers",
+                McpConfigFormat::Json,
+                "host.docker.internal"
+            )
+            .unwrap(),
             None
         );
     }
 
     #[test]
-    fn patch_claude_json_loopback_urls_returns_none_for_empty_mcp_servers() {
+    fn patch_mcp_config_loopback_urls_returns_none_for_empty_mcp_servers() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(CLAUDE_JSON_FILE);
         std::fs::write(&path, r#"{"mcpServers": {}}"#).unwrap();
         assert_eq!(
-            patch_claude_json_loopback_urls(&path, "host.docker.internal").unwrap(),
+            patch_mcp_config_loopback_urls(
+                &path,
+                "mcpServers",
+                McpConfigFormat::Json,
+                "host.docker.internal"
+            )
+            .unwrap(),
             None
         );
     }
 
     #[test]
-    fn patch_claude_json_loopback_urls_rewrites_a_non_icm_server_too() {
+    fn patch_mcp_config_loopback_urls_rewrites_a_non_icm_server_too() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(CLAUDE_JSON_FILE);
         std::fs::write(
@@ -338,9 +461,14 @@ mod tests {
         )
         .unwrap();
 
-        let patched = patch_claude_json_loopback_urls(&path, "host.docker.internal")
-            .unwrap()
-            .unwrap();
+        let patched = patch_mcp_config_loopback_urls(
+            &path,
+            "mcpServers",
+            McpConfigFormat::Json,
+            "host.docker.internal",
+        )
+        .unwrap()
+        .unwrap();
         let doc: serde_json::Value = serde_json::from_slice(&patched).unwrap();
         assert_eq!(
             doc.pointer("/mcpServers/my-local-tool/url")
@@ -356,37 +484,121 @@ mod tests {
     }
 
     #[test]
-    fn patch_claude_json_loopback_urls_returns_none_when_malformed() {
+    fn patch_mcp_config_loopback_urls_returns_none_when_malformed() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(CLAUDE_JSON_FILE);
         std::fs::write(&path, "not json").unwrap();
         assert_eq!(
-            patch_claude_json_loopback_urls(&path, "host.docker.internal").unwrap(),
+            patch_mcp_config_loopback_urls(
+                &path,
+                "mcpServers",
+                McpConfigFormat::Json,
+                "host.docker.internal"
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    // TOML branch (Codex's config.toml / mcp_servers)
+    #[test]
+    fn patch_mcp_config_loopback_urls_rewrites_a_toml_server_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+model = "gpt-5"
+
+[mcp_servers.icm]
+url = "http://127.0.0.1:9092/mcp"
+"#,
+        )
+        .unwrap();
+
+        let patched = patch_mcp_config_loopback_urls(
+            &path,
+            "mcp_servers",
+            McpConfigFormat::Toml,
+            "host.docker.internal",
+        )
+        .unwrap()
+        .unwrap();
+        let doc: toml::Table = std::str::from_utf8(&patched).unwrap().parse().unwrap();
+        assert_eq!(
+            doc["mcp_servers"]["icm"]["url"].as_str(),
+            Some("http://host.docker.internal:9092/mcp")
+        );
+        // Non-server keys survive untouched.
+        assert_eq!(doc["model"].as_str(), Some("gpt-5"));
+    }
+
+    #[test]
+    fn patch_mcp_config_loopback_urls_toml_returns_none_for_remote_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[mcp_servers.icm]
+url = "http://icm.example.com:9092/mcp"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            patch_mcp_config_loopback_urls(
+                &path,
+                "mcp_servers",
+                McpConfigFormat::Toml,
+                "host.docker.internal"
+            )
+            .unwrap(),
             None
         );
     }
 
     #[test]
-    fn prepare_returns_none_for_non_claude_code_adapter() {
+    fn patch_mcp_config_loopback_urls_toml_returns_none_when_malformed() {
         let dir = tempfile::tempdir().unwrap();
-        let result = prepare("crush", ContainerRuntime::Docker, Some(dir.path())).unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "not = [valid toml").unwrap();
+        assert_eq!(
+            patch_mcp_config_loopback_urls(
+                &path,
+                "mcp_servers",
+                McpConfigFormat::Toml,
+                "host.docker.internal"
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn prepare_returns_none_when_adapter_has_no_config_dir_mount() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = prepare(None, ContainerRuntime::Docker, Some(dir.path())).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn prepare_returns_none_when_no_config_dir_resolved() {
-        let result = prepare("claude-code", ContainerRuntime::Docker, None).unwrap();
+        let mount = claude_code_mount();
+        let result = prepare(Some(&mount), ContainerRuntime::Docker, None).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn prepare_mounts_dir_unpatched_when_claude_json_absent() {
         let dir = tempfile::tempdir().unwrap();
-        let result = prepare("claude-code", ContainerRuntime::Docker, Some(dir.path()))
+        let mount = claude_code_mount();
+        let result = prepare(Some(&mount), ContainerRuntime::Docker, Some(dir.path()))
             .unwrap()
             .unwrap();
         assert_eq!(result.config_dir, dir.path());
-        assert!(result.patched_claude_json.is_none());
+        assert_eq!(result.mcp_config_path, dir.path().join(CLAUDE_JSON_FILE));
+        assert!(result.patched_mcp_config.is_none());
     }
 
     #[test]
@@ -398,10 +610,11 @@ mod tests {
         )
         .unwrap();
 
-        let result = prepare("claude-code", ContainerRuntime::Docker, Some(dir.path()))
+        let mount = claude_code_mount();
+        let result = prepare(Some(&mount), ContainerRuntime::Docker, Some(dir.path()))
             .unwrap()
             .unwrap();
-        let guard = result.patched_claude_json.unwrap();
+        let guard = result.patched_mcp_config.unwrap();
         let doc: serde_json::Value =
             serde_json::from_slice(&std::fs::read(guard.path()).unwrap()).unwrap();
         assert_eq!(
@@ -414,6 +627,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn prepare_sets_credential_file_when_the_adapter_has_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mount = claude_code_mount();
+        let result = prepare(Some(&mount), ContainerRuntime::Docker, Some(dir.path()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            result.credential_file,
+            Some(dir.path().join(".credentials.json"))
+        );
+    }
+
+    #[test]
+    fn prepare_leaves_credential_file_none_when_the_adapter_has_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let mount = crush_mount();
+        let result = prepare(Some(&mount), ContainerRuntime::Docker, Some(dir.path()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.credential_file, None);
+    }
+
+    #[test]
+    fn prepare_mounts_codexs_toml_config_and_masks_auth_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[mcp_servers.icm]\nurl = \"http://127.0.0.1:9092/mcp\"\n",
+        )
+        .unwrap();
+
+        let mount = codex_mount();
+        let result = prepare(Some(&mount), ContainerRuntime::Docker, Some(dir.path()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.mcp_config_path, dir.path().join("config.toml"));
+        assert_eq!(result.credential_file, Some(dir.path().join("auth.json")));
+        let guard = result.patched_mcp_config.unwrap();
+        let doc: toml::Table = std::fs::read_to_string(guard.path())
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            doc["mcp_servers"]["icm"]["url"].as_str(),
+            Some("http://host.docker.internal:9092/mcp")
+        );
+    }
+
     proptest! {
         #[test]
         fn prop_rewrite_loopback_url_never_panics_on_arbitrary_input(url in ".{0,80}") {
@@ -421,11 +683,12 @@ mod tests {
         }
 
         #[test]
-        fn prop_patch_claude_json_loopback_urls_never_panics_on_arbitrary_bytes(bytes in ".{0,200}") {
+        fn prop_patch_mcp_config_loopback_urls_never_panics_on_arbitrary_bytes(bytes in ".{0,200}") {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join(CLAUDE_JSON_FILE);
             std::fs::write(&path, &bytes).unwrap();
-            let _ = patch_claude_json_loopback_urls(&path, "host.docker.internal");
+            let _ = patch_mcp_config_loopback_urls(&path, "mcpServers", McpConfigFormat::Json, "host.docker.internal");
+            let _ = patch_mcp_config_loopback_urls(&path, "mcp_servers", McpConfigFormat::Toml, "host.docker.internal");
         }
 
         // pre-pr-review pbt-gap (#1652): roundtrip properties, not just
@@ -457,7 +720,7 @@ mod tests {
         }
 
         #[test]
-        fn prop_patch_claude_json_loopback_urls_rewrites_only_the_loopback_entries(
+        fn prop_patch_mcp_config_loopback_urls_rewrites_only_the_loopback_entries(
             // `is_loopback[i]` decides whether server `i` gets a loopback or
             // remote URL; index-based names avoid collisions between the two
             // groups without a separate dedup step.
@@ -481,7 +744,7 @@ mod tests {
             .unwrap();
 
             let any_loopback = is_loopback.iter().any(|b| *b);
-            let result = patch_claude_json_loopback_urls(&path, "host.docker.internal").unwrap();
+            let result = patch_mcp_config_loopback_urls(&path, "mcpServers", McpConfigFormat::Json, "host.docker.internal").unwrap();
             prop_assert_eq!(result.is_some(), any_loopback);
             if let Some(patched) = result {
                 let doc: serde_json::Value = serde_json::from_slice(&patched).unwrap();

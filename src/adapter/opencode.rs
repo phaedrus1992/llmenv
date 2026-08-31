@@ -545,6 +545,18 @@ impl AgentAdapter for OpencodeAdapter {
         Ok(vec![("OPENCODE_CONFIG_DIR".into(), dir.to_owned())])
     }
 
+    fn config_dir_mount(&self) -> Option<super::ConfigDirMount> {
+        Some(super::ConfigDirMount {
+            env_var: "OPENCODE_CONFIG_DIR",
+            mcp_config_file: OPENCODE_JSON_FILE,
+            mcp_servers_key: "mcp",
+            format: super::McpConfigFormat::Json,
+            // opencode has no runtime-written credential file inside its
+            // config directory (as of this writing) — no file to mask.
+            credential_file: None,
+        })
+    }
+
     fn materialize(&self, manifest: &MergedManifest, out: &Path) -> anyhow::Result<Vec<PathBuf>> {
         super::skills::create_dir_owner_only(out)?;
 

@@ -138,6 +138,18 @@ impl AgentAdapter for CrushAdapter {
         ])
     }
 
+    fn config_dir_mount(&self) -> Option<super::ConfigDirMount> {
+        Some(super::ConfigDirMount {
+            env_var: "CRUSH_GLOBAL_CONFIG",
+            mcp_config_file: CRUSH_JSON_FILE,
+            mcp_servers_key: "mcp",
+            format: super::McpConfigFormat::Json,
+            // Crush has no auth/settings concept yet (see cli/mod.rs's
+            // interactive-first-run gating comment) — no credential file to mask.
+            credential_file: None,
+        })
+    }
+
     fn materialize(&self, manifest: &MergedManifest, out: &Path) -> anyhow::Result<Vec<PathBuf>> {
         // 1. Create output dir with owner-only permissions
         super::skills::create_dir_owner_only(out)?;

@@ -72,6 +72,18 @@ fn claude_md_matches_merged_agents_md() {
 }
 
 #[test]
+fn config_dir_mount_names_claude_config_dir_and_claude_json() {
+    let mount = ClaudeCodeAdapter
+        .config_dir_mount()
+        .expect("claude-code has a config-dir mount");
+    assert_eq!(mount.env_var, "CLAUDE_CONFIG_DIR");
+    assert_eq!(mount.mcp_config_file, ".claude.json");
+    assert_eq!(mount.mcp_servers_key, "mcpServers");
+    assert_eq!(mount.format, llmenv::adapter::McpConfigFormat::Json);
+    assert_eq!(mount.credential_file, Some(".credentials.json"));
+}
+
+#[test]
 fn env_vars_set_claude_config_dir() {
     let tmp = tempdir().expect("tempdir");
     let state_tmp = tempdir().expect("tempdir");
