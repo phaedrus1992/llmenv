@@ -19,16 +19,12 @@ env:
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/llmenv-sandbox
 
 jobs:
-  build-and-publish:
+  version:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
-      # Required by actions/attest-build-provenance: `id-token` to get the
-      # OIDC token Sigstore signs against, `attestations` to store the result
-      # — same pattern release.yml already uses for the binary artifacts.
-      id-token: write
-      attestations: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -44,6 +40,33 @@ jobs:
           fi
           echo "version=v$raw" >> "$GITHUB_OUTPUT"
 
+  # Builds each platform separately and pushes it to GHCR by digest only —
+  # no `vN`/`sha-<short>` tag, so it isn't what `docker pull
+  # ghcr.io/.../llmenv-sandbox:vN` resolves to and isn't listed as a
+  # version in GHCR's UI (#1732). Trivy scans that per-platform digest
+  # directly, so both linux/amd64 and linux/arm64 are actually scanned —
+  # today only the runner's own platform is (#1732). This job holds no
+  # `id-token`/`attestations` permission (#1733); the `publish` job below,
+  # which needs those to sign and attest, only runs once every matrix leg
+  # here has passed its scan.
+  build-scan:
+    needs: version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            slug: linux-amd64
+          - platform: linux/arm64
+            slug: linux-arm64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
       - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8  # v4.2.0
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
 
@@ -57,25 +80,23 @@ jobs:
         id: meta
         with:
           images: ${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=${{ steps.version.outputs.version }}
-            type=sha,format=short
 
+      # push-by-digest: pushes this platform's image so Trivy can scan the
+      # exact published bytes, but under no release tag (see job comment).
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
         id: build
         with:
           context: docker/sandbox
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
 
-      # Fails the workflow on a HIGH/CRITICAL finding (#1721) before the image
-      # is signed or attested — a vulnerable image shouldn't get either. Only
-      # a reviewed docker/sandbox/.trivyignore entry suppresses a specific
-      # finding; ignore-unfixed stays false so an unfixed CVE still fails the
-      # build and forces a deliberate, documented suppression instead of a
-      # blanket drop.
+      # Fails the workflow on a HIGH/CRITICAL finding (#1721) before the
+      # `publish` job can merge this digest into a released tag. Only a
+      # reviewed docker/sandbox/.trivyignore entry suppresses a specific
+      # finding; ignore-unfixed stays false so an unfixed CVE still fails
+      # the build and forces a deliberate, documented suppression instead
+      # of a blanket drop.
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
           image-ref: ${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
@@ -84,13 +105,89 @@ jobs:
           ignore-unfixed: false
           trivyignores: docker/sandbox/.trivyignore
 
+      - name: export digest
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: digests-${{ matrix.slug }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Only runs once every build-scan matrix leg has passed its Trivy scan.
+  # Merges the already-scanned per-platform digests into the release tags
+  # with no rebuild, then attests, SBOMs, and signs the merged image — the
+  # same as `build-and-publish` did before, just retargeted to the merged
+  # digest instead of build-push-action's single-step output.
+  publish:
+    needs: [version, build-scan]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      # Required by actions/attest-build-provenance: `id-token` to get the
+      # OIDC token Sigstore signs against, `attestations` to store the result
+      # — same pattern release.yml already uses for the binary artifacts.
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
+        id: meta
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ needs.version.outputs.version }}
+            type=sha,format=short
+
+      - name: merge digests into release tags
+        id: merge
+        working-directory: /tmp/digests
+        run: |
+          set -euo pipefail
+          tag_args=()
+          while IFS= read -r tag; do
+            [[ -n "$tag" ]] && tag_args+=(-t "$tag")
+          done <<< "$META_TAGS"
+          digest_refs=()
+          for digest in *; do
+            digest_refs+=("${IMAGE_NAME}@sha256:${digest}")
+          done
+          docker buildx imagetools create "${tag_args[@]}" "${digest_refs[@]}"
+          digest="$(docker buildx imagetools inspect "${IMAGE_NAME}:${VERSION}" --format '{{json .Manifest}}' | jq -r '.digest')"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          VERSION: ${{ needs.version.outputs.version }}
+          META_TAGS: ${{ steps.meta.outputs.tags }}
+
       # Generates the SBOM the next step attaches to the published image
-      # (#1722). Reads the just-pushed image straight from GHCR via the
-      # credentials docker/login-action already set up, by digest so it's the
-      # exact multi-arch manifest build-push-action just published.
+      # (#1722), from the merged multi-arch image now published in GHCR.
       - uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26  # v0.24.2
         with:
-          image: ${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          image: ${{ env.IMAGE_NAME }}@${{ steps.merge.outputs.digest }}
           format: spdx-json
           output-file: sandbox-image.spdx.json
           upload-artifact: false
@@ -98,14 +195,14 @@ jobs:
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6  # v4.2.2
         with:
           subject-name: ${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ steps.merge.outputs.digest }}
           sbom-path: sandbox-image.spdx.json
           push-to-registry: true
 
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
         with:
           subject-name: ${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ steps.merge.outputs.digest }}
           push-to-registry: true
 
       # Keyless signing (#1723): cosign uses the job's own OIDC token
@@ -123,4 +220,4 @@ jobs:
         run: cosign sign --yes "${IMAGE_NAME}@${DIGEST}"
         env:
           IMAGE_NAME: ${{ env.IMAGE_NAME }}
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.merge.outputs.digest }}
