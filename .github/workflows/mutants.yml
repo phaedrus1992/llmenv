@@ -83,7 +83,9 @@ jobs:
       # Surviving mutants on lines this PR touched are the actionable case: the
       # PR added or changed logic no test distinguishes from a wrong version.
       - if: env.HAS_RUST == '1'
-        run: cargo mutants --workspace --in-diff mutants-pr.diff --shard ${{ matrix.shard }}/4
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: cargo mutants --workspace --in-diff mutants-pr.diff --shard "${SHARD}"/4
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: always() && env.HAS_RUST == '1'
         with:
@@ -118,7 +120,9 @@ jobs:
           tool: cargo-mutants@27.1.0
       - name: Detect CPU count
         run: echo "CARGO_BUILD_JOBS=$(scripts/core_count.sh)" >> "$GITHUB_ENV"
-      - run: cargo mutants --workspace --shard ${{ matrix.shard }}/8
+      - env:
+          SHARD: ${{ matrix.shard }}
+        run: cargo mutants --workspace --shard "${SHARD}"/8
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: always()
         with:
