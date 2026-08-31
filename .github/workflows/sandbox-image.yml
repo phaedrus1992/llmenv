@@ -111,6 +111,38 @@ jobs:
           ignore-unfixed: false
           trivyignores: docker/sandbox/.trivyignore
 
+      # A failed scan leaves the digest-only blob `build-push-action` already
+      # pushed sitting in GHCR forever (#1757) — it carries no tag, SBOM,
+      # attestation, or signature, so nothing discovers it by tag, but it is
+      # a real registry artifact. GHCR's delete API takes a numeric package-
+      # version id, not a digest, so list versions and filter to the one
+      # matching this digest before deleting — never delete on a guess.
+      - name: delete unscanned digest from GHCR on scan failure
+        if: failure() && steps.build.outcome == 'success'
+        run: |
+          set -euo pipefail
+
+          # The GHCR container-versions API paginates; --paginate walks every
+          # page and concatenates each page's JSON array, so slurp them back
+          # into one array before filtering by digest.
+          version_id="$(gh api --paginate "/users/${OWNER}/packages/container/${PACKAGE}/versions?per_page=100" \
+            | jq -s 'add' \
+            | jq -r --arg d "$DIGEST" '.[] | select(.name == $d) | .id' \
+            | head -1)"
+
+          if [[ -z "$version_id" ]]; then
+            echo "::warning::No GHCR package version found for digest ${DIGEST} — nothing to clean up."
+            exit 0
+          fi
+
+          echo "Deleting unscanned GHCR package version ${version_id} (digest ${DIGEST})"
+          gh api -X DELETE "/users/${OWNER}/packages/container/${PACKAGE}/versions/${version_id}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          PACKAGE: llmenv-sandbox
+          DIGEST: ${{ steps.build.outputs.digest }}
+
       - name: export digest
         run: |
           if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
