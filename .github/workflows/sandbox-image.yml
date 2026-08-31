@@ -76,10 +76,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # tags: drives only the OCI labels below (org.opencontainers.image.version
+      # etc.) — push-by-digest ignores steps.meta.outputs.tags, so this never
+      # publishes a release tag. Without it, metadata-action falls back to a
+      # branch-ref-derived version and every layer gets a wrong version label.
       - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
         id: meta
         with:
           images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ needs.version.outputs.version }}
 
       # push-by-digest: pushes this platform's image so Trivy can scan the
       # exact published bytes, but under no release tag (see job comment).
@@ -107,6 +113,10 @@ jobs:
 
       - name: export digest
         run: |
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::build step produced no usable digest (got: '${DIGEST}')" >&2
+            exit 1
+          fi
           mkdir -p /tmp/digests
           touch "/tmp/digests/${DIGEST#sha256:}"
         env:
@@ -136,10 +146,6 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
 
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
@@ -162,25 +168,52 @@ jobs:
             type=raw,value=${{ needs.version.outputs.version }}
             type=sha,format=short
 
+      # Reads the merged index's digest straight from `imagetools create`'s own
+      # --metadata-file output, not a follow-up `imagetools inspect` of the
+      # :VERSION tag — inspecting the tag instead would race a concurrent
+      # workflow run that repoints it between the create and the inspect,
+      # and could attest/sign a different image than the one just scanned.
       - name: merge digests into release tags
         id: merge
         working-directory: /tmp/digests
         run: |
           set -euo pipefail
+          shopt -s nullglob
+
           tag_args=()
           while IFS= read -r tag; do
             [[ -n "$tag" ]] && tag_args+=(-t "$tag")
           done <<< "$META_TAGS"
+          if [[ ${#tag_args[@]} -eq 0 ]]; then
+            echo "::error::No tags parsed from docker/metadata-action output — refusing to publish an untagged image." >&2
+            exit 1
+          fi
+
+          # Must match the number of platforms in build-scan's matrix above.
+          expected_digests=2
           digest_refs=()
-          for digest in *; do
-            digest_refs+=("${IMAGE_NAME}@sha256:${digest}")
+          for digest_file in *; do
+            digest_hex="$(basename "$digest_file")"
+            if [[ ! "$digest_hex" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::Unexpected file in digest artifact directory: '${digest_hex}'" >&2
+              exit 1
+            fi
+            digest_refs+=("${IMAGE_NAME}@sha256:${digest_hex}")
           done
-          docker buildx imagetools create "${tag_args[@]}" "${digest_refs[@]}"
-          digest="$(docker buildx imagetools inspect "${IMAGE_NAME}:${VERSION}" --format '{{json .Manifest}}' | jq -r '.digest')"
+          if [[ ${#digest_refs[@]} -ne "$expected_digests" ]]; then
+            echo "::error::Expected ${expected_digests} platform digests, found ${#digest_refs[@]}." >&2
+            exit 1
+          fi
+
+          docker buildx imagetools create "${tag_args[@]}" --metadata-file metadata.json "${digest_refs[@]}"
+          digest="$(jq -r '.["containerimage.descriptor"].digest' metadata.json)"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::imagetools create produced no usable digest (got: '${digest}')" >&2
+            exit 1
+          fi
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
         env:
           IMAGE_NAME: ${{ env.IMAGE_NAME }}
-          VERSION: ${{ needs.version.outputs.version }}
           META_TAGS: ${{ steps.meta.outputs.tags }}
 
       # Generates the SBOM the next step attaches to the published image
