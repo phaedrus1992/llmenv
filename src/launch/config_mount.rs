@@ -300,14 +300,15 @@ pub(crate) fn find_unsealed_provider_api_key(
     };
     let doc: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     let providers = doc.get(location.providers_key)?.as_object()?;
-    providers
-        .iter()
-        .find(|(_, entry)| {
-            walk_key_path(entry, location.key_path)
-                .and_then(|v| v.as_str())
-                .is_some_and(|value| !looks_like_env_var_reference(value))
-        })
-        .map(|(id, _)| id.clone())
+    for (id, entry) in providers {
+        let Some(value) = walk_key_path(entry, location.key_path).and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if !looks_like_env_var_reference(value) {
+            return Some(id.clone());
+        }
+    }
+    None
 }
 
 /// Walks `entry` down `key_path`, one key per step. Returns `None` — for
