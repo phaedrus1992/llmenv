@@ -147,6 +147,10 @@ impl AgentAdapter for CrushAdapter {
             // Crush has no auth/settings concept yet (see cli/mod.rs's
             // interactive-first-run gating comment) — no credential file to mask.
             credential_file: None,
+            provider_api_key_location: Some(super::ProviderApiKeyLocation {
+                providers_key: "providers",
+                key_path: &["api_key"],
+            }),
         })
     }
 

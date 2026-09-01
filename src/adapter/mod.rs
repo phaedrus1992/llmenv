@@ -345,6 +345,30 @@ pub struct ConfigDirMount {
     /// adapter's ordinary (non-secret) config. `None` for an adapter with
     /// no such file (Crush, opencode, as of this writing).
     pub credential_file: Option<&'static str>,
+    /// Where a rendered `model_providers[].api_key` value sits inside
+    /// `mcp_config_file`, if this adapter renders one there (#1764).
+    /// `None` for an adapter with no `model_providers` rendering yet
+    /// (Claude Code has no such concept; Codex's rendering isn't
+    /// implemented yet — see `AgentAdapter::supports_model_providers`).
+    pub(crate) provider_api_key_location: Option<ProviderApiKeyLocation>,
+}
+
+/// Names the JSON path to a rendered provider's api_key-equivalent value,
+/// relative to the top of an adapter's MCP-config file (#1764) — used to
+/// warn when a sandboxed launch would expose a literal (non-env-var-
+/// reference) key by mounting that file into the container unsealed.
+///
+/// `providers_key` is the top-level key holding the id → provider-entry
+/// map (`providers` for Crush, `provider` for opencode — the dynamic
+/// provider id itself is walked at check time, not named here).
+/// `key_path` is the path from each provider entry's own object down to
+/// the key value (`["api_key"]` for Crush; `["options", "apiKey"]` for
+/// opencode, one level deeper since the key lives under a nested
+/// `options` object).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProviderApiKeyLocation {
+    pub(crate) providers_key: &'static str,
+    pub(crate) key_path: &'static [&'static str],
 }
 
 /// Per-agent rules for translating a [`MergedManifest`] into an on-disk layout

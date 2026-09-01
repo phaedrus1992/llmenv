@@ -554,6 +554,10 @@ impl AgentAdapter for OpencodeAdapter {
             // opencode has no runtime-written credential file inside its
             // config directory (as of this writing) — no file to mask.
             credential_file: None,
+            provider_api_key_location: Some(super::ProviderApiKeyLocation {
+                providers_key: "provider",
+                key_path: &["options", "apiKey"],
+            }),
         })
     }
 
