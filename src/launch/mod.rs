@@ -335,6 +335,23 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
             );
         }
 
+        // #1764: the same unsealed-credential risk #1669 warns about for an
+        // env var applies to a literal (non-`$VAR_NAME`) provider api_key
+        // sitting in the materialized MCP-config file #1698's mount now
+        // exposes to the container. `mcp_config_path` is only `Some` when
+        // sandbox mode is active (mirrors `config_dir`/`credential_file`
+        // above), so no separate `sandbox_spec.is_some()` check is needed.
+        if let (Some(mount), Some(path)) = (adapter_mount.as_ref(), mcp_config_path)
+            && let Some(location) = &mount.provider_api_key_location
+            && let Some(provider_id) = config_mount::find_unsealed_provider_api_key(path, location)
+        {
+            eprintln!(
+                "llmenv: sandbox mode is active and provider '{provider_id}' has a literal \
+                 api_key in its materialized config rather than a \"$VAR_NAME\" reference — \
+                 it will be exposed unsealed inside the container"
+            );
+        }
+
         // A container using icebreaker's sealed-token proxy has its outbound
         // traffic routed there directly (see `icebreaker.rs`'s module doc
         // comment) — launch_proxy's own rewrite rules would never see it,

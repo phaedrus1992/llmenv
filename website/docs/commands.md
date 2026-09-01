@@ -377,7 +377,13 @@ isn't covered yet — the cached credential is a local file, not an env var
 Code engine still gets any raw credential in the resolved environment
 forwarded into the container as-is, with no sealing — `launch` warns on
 stderr when this happens (added in v4.0.0), naming the credential-shaped
-variable so the gap isn't silent.
+variable so the gap isn't silent. The same warning fires for a Crush or
+opencode provider whose materialized `api_key` looks like a literal secret
+rather than a `"$VAR_NAME"` env-var reference (added in v4.0.0) — that value
+sits in the same MCP-config file the sandbox mount exposes to the
+container, so a literal key there is unsealed the same way an unsealed
+env var is. Claude Code has no `model_providers` concept, and Codex doesn't
+render `api_key` into its own config yet, so neither engine is affected.
 
 `features.sandbox` and `features.launch_proxy` cannot both be enabled for the
 same Claude Code launch yet — icebreaker's proxy already owns the container's

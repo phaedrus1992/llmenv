@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 
-use crate::adapter::{ConfigDirMount, McpConfigFormat};
+use crate::adapter::{ConfigDirMount, McpConfigFormat, ProviderApiKeyLocation};
 
 use super::sandbox::ContainerRuntime;
 
@@ -269,6 +269,81 @@ fn rewrite_loopback_url(url_str: &str, gateway_host: &str) -> anyhow::Result<Opt
     Ok(Some(url.to_string()))
 }
 
+/// Checks `mcp_config_path` for a provider entry whose api_key-equivalent
+/// value doesn't look like an env-var reference (#1764) — that value is
+/// about to be mounted into a sandboxed launch's container unsealed.
+/// Returns the offending provider's id, or `None` when there's nothing to
+/// warn about: the file is absent or doesn't parse, `location`'s
+/// `providers_key` isn't present, or every provider's key already looks
+/// like a `$VAR_NAME` reference.
+///
+/// JSON only — no adapter renders this into a TOML config yet (Codex's
+/// `model_providers` rendering isn't implemented; see
+/// `AgentAdapter::supports_model_providers`), so `location` is only ever
+/// `Some` for a JSON-format adapter today. A future TOML renderer would
+/// need its own branch here, the same way loopback-URL patching has one
+/// per format.
+pub(crate) fn find_unsealed_provider_api_key(
+    mcp_config_path: &Path,
+    location: &ProviderApiKeyLocation,
+) -> Option<String> {
+    let bytes = match std::fs::read(mcp_config_path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            tracing::debug!(
+                "launch: could not read {} to check for an unsealed provider api_key: {e}",
+                mcp_config_path.display()
+            );
+            return None;
+        }
+    };
+    let doc: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let providers = doc.get(location.providers_key)?.as_object()?;
+    for (id, entry) in providers {
+        let Some(value) = walk_key_path(entry, location.key_path).and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if !looks_like_env_var_reference(value) {
+            return Some(id.clone());
+        }
+    }
+    None
+}
+
+/// Walks `entry` down `key_path`, one key per step. Returns `None` — for
+/// just this one entry, not the caller's whole iteration — as soon as any
+/// step is missing, malformed, or not an object (pre-pr-review P1, #1764:
+/// a bare `?` inline in the per-provider loop instead propagated `None` out
+/// of the entire scanning function, so a provider with no `api_key` field
+/// at all, sorting before one that did, made the whole check silently miss
+/// the real one).
+fn walk_key_path<'a>(
+    entry: &'a serde_json::Value,
+    key_path: &[&str],
+) -> Option<&'a serde_json::Value> {
+    let mut cur = entry;
+    for key in key_path {
+        cur = cur.get(key)?;
+    }
+    Some(cur)
+}
+
+/// True for a bare `$VAR_NAME`-shaped reference (`^\$[A-Z_][A-Z0-9_]*$`) —
+/// the documented pattern for an env-var-backed `api_key`. Anything else
+/// non-empty is treated as a literal value.
+fn looks_like_env_var_reference(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix('$') else {
+        return false;
+    };
+    let mut chars = rest.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_uppercase() || first == '_')
+        && chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
@@ -284,6 +359,7 @@ mod tests {
             mcp_servers_key: "mcpServers",
             format: McpConfigFormat::Json,
             credential_file: Some(".credentials.json"),
+            provider_api_key_location: None,
         }
     }
 
@@ -294,6 +370,7 @@ mod tests {
             mcp_servers_key: "mcp_servers",
             format: McpConfigFormat::Toml,
             credential_file: Some("auth.json"),
+            provider_api_key_location: None,
         }
     }
 
@@ -304,6 +381,24 @@ mod tests {
             mcp_servers_key: "mcp",
             format: McpConfigFormat::Json,
             credential_file: None,
+            provider_api_key_location: Some(ProviderApiKeyLocation {
+                providers_key: "providers",
+                key_path: &["api_key"],
+            }),
+        }
+    }
+
+    fn opencode_mount() -> ConfigDirMount {
+        ConfigDirMount {
+            env_var: "OPENCODE_CONFIG_DIR",
+            mcp_config_file: "opencode.json",
+            mcp_servers_key: "mcp",
+            format: McpConfigFormat::Json,
+            credential_file: None,
+            provider_api_key_location: Some(ProviderApiKeyLocation {
+                providers_key: "provider",
+                key_path: &["options", "apiKey"],
+            }),
         }
     }
 
@@ -582,6 +677,190 @@ url = "http://icm.example.com:9092/mcp"
         assert!(result.is_none());
     }
 
+    // find_unsealed_provider_api_key / looks_like_env_var_reference
+    #[test]
+    fn looks_like_env_var_reference_accepts_a_bare_var_name() {
+        assert!(looks_like_env_var_reference("$OLLAMA_API_KEY"));
+        assert!(looks_like_env_var_reference("$_LEADING_UNDERSCORE"));
+    }
+
+    #[test]
+    fn looks_like_env_var_reference_rejects_a_literal_value() {
+        assert!(!looks_like_env_var_reference("sk-abc123"));
+        assert!(!looks_like_env_var_reference(""));
+        assert!(!looks_like_env_var_reference("$"));
+        assert!(!looks_like_env_var_reference("$lowercase"));
+        assert!(!looks_like_env_var_reference("$1STARTS_WITH_DIGIT"));
+        assert!(!looks_like_env_var_reference("${BRACED}"));
+    }
+
+    #[test]
+    fn find_unsealed_provider_api_key_detects_a_literal_crush_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("crush.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "providers": { "openai": { "api_key": "sk-literal-secret" } },
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let location = ProviderApiKeyLocation {
+            providers_key: "providers",
+            key_path: &["api_key"],
+        };
+        assert_eq!(
+            find_unsealed_provider_api_key(&path, &location),
+            Some("openai".to_string())
+        );
+    }
+
+    #[test]
+    fn find_unsealed_provider_api_key_ignores_an_env_var_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("crush.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "providers": { "openai": { "api_key": "$OPENAI_API_KEY" } },
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let location = ProviderApiKeyLocation {
+            providers_key: "providers",
+            key_path: &["api_key"],
+        };
+        assert_eq!(find_unsealed_provider_api_key(&path, &location), None);
+    }
+
+    #[test]
+    fn find_unsealed_provider_api_key_walks_the_nested_opencode_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "provider": { "ollama": { "options": { "apiKey": "sk-literal-secret" } } },
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let location = ProviderApiKeyLocation {
+            providers_key: "provider",
+            key_path: &["options", "apiKey"],
+        };
+        assert_eq!(
+            find_unsealed_provider_api_key(&path, &location),
+            Some("ollama".to_string())
+        );
+    }
+
+    #[test]
+    fn find_unsealed_provider_api_key_returns_none_when_file_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("crush.json");
+        let location = ProviderApiKeyLocation {
+            providers_key: "providers",
+            key_path: &["api_key"],
+        };
+        assert_eq!(find_unsealed_provider_api_key(&path, &location), None);
+    }
+
+    #[test]
+    fn find_unsealed_provider_api_key_returns_none_when_malformed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("crush.json");
+        std::fs::write(&path, "not json").unwrap();
+        let location = ProviderApiKeyLocation {
+            providers_key: "providers",
+            key_path: &["api_key"],
+        };
+        assert_eq!(find_unsealed_provider_api_key(&path, &location), None);
+    }
+
+    #[test]
+    fn find_unsealed_provider_api_key_returns_none_when_providers_key_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("crush.json");
+        std::fs::write(&path, serde_json::json!({ "mcp": {} }).to_string()).unwrap();
+        let location = ProviderApiKeyLocation {
+            providers_key: "providers",
+            key_path: &["api_key"],
+        };
+        assert_eq!(find_unsealed_provider_api_key(&path, &location), None);
+    }
+
+    #[test]
+    fn find_unsealed_provider_api_key_returns_none_when_no_api_key_field_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("crush.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({ "providers": { "openai": { "name": "OpenAI" } } }).to_string(),
+        )
+        .unwrap();
+        let location = ProviderApiKeyLocation {
+            providers_key: "providers",
+            key_path: &["api_key"],
+        };
+        assert_eq!(find_unsealed_provider_api_key(&path, &location), None);
+    }
+
+    // pre-pr-review P1 (#1764): a keyless provider sorting before a
+    // literal-key one used to make the whole scan bail out early instead
+    // of moving on to the next provider.
+    #[test]
+    fn find_unsealed_provider_api_key_keeps_scanning_past_a_keyless_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("crush.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "providers": {
+                    // "anthropic" sorts before "openai" — must not stop the scan.
+                    "anthropic": { "name": "Anthropic" },
+                    "openai": { "api_key": "sk-literal-secret" },
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let location = ProviderApiKeyLocation {
+            providers_key: "providers",
+            key_path: &["api_key"],
+        };
+        assert_eq!(
+            find_unsealed_provider_api_key(&path, &location),
+            Some("openai".to_string())
+        );
+    }
+
+    #[test]
+    fn prepare_sets_provider_api_key_location_for_crush() {
+        let dir = tempfile::tempdir().unwrap();
+        let mount = crush_mount();
+        assert!(mount.provider_api_key_location.is_some());
+        // prepare() itself doesn't consume provider_api_key_location (that
+        // check happens in launch/mod.rs, not config_mount::prepare) — this
+        // just confirms the fixture matches the real adapter's declaration
+        // and prepare() doesn't choke on the extra field.
+        let result = prepare(Some(&mount), ContainerRuntime::Docker, Some(dir.path())).unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn opencode_mount_declares_the_nested_provider_shape() {
+        let mount = opencode_mount();
+        let location = mount.provider_api_key_location.unwrap();
+        assert_eq!(location.providers_key, "provider");
+        assert_eq!(location.key_path, &["options", "apiKey"]);
+    }
+
     #[test]
     fn prepare_returns_none_when_no_config_dir_resolved() {
         let mount = claude_code_mount();
@@ -689,6 +968,81 @@ url = "http://icm.example.com:9092/mcp"
             std::fs::write(&path, &bytes).unwrap();
             let _ = patch_mcp_config_loopback_urls(&path, "mcpServers", McpConfigFormat::Json, "host.docker.internal");
             let _ = patch_mcp_config_loopback_urls(&path, "mcp_servers", McpConfigFormat::Toml, "host.docker.internal");
+        }
+
+        #[test]
+        fn prop_looks_like_env_var_reference_never_panics_on_arbitrary_input(value in ".{0,80}") {
+            let _ = looks_like_env_var_reference(&value);
+        }
+
+        // Roundtrip: any well-formed $VAR_NAME (uppercase/underscore/digit,
+        // not starting with a digit) is accepted; the same string with a
+        // lowercase letter spliced in is rejected.
+        #[test]
+        fn prop_looks_like_env_var_reference_accepts_well_formed_names(
+            first in prop_oneof![Just('_'), (b'A'..=b'Z').prop_map(char::from)],
+            rest in "[A-Z0-9_]{0,20}",
+        ) {
+            let name = format!("${first}{rest}");
+            prop_assert!(looks_like_env_var_reference(&name));
+        }
+
+        #[test]
+        fn prop_looks_like_env_var_reference_rejects_a_lowercase_char(
+            name in "[A-Z_][A-Z0-9_]{0,19}",
+            lower in "[a-z]",
+        ) {
+            let value = format!("${name}{lower}");
+            prop_assert!(!looks_like_env_var_reference(&value));
+        }
+
+        #[test]
+        fn prop_find_unsealed_provider_api_key_never_panics_on_arbitrary_bytes(bytes in ".{0,200}") {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("crush.json");
+            std::fs::write(&path, &bytes).unwrap();
+            let location = ProviderApiKeyLocation { providers_key: "providers", key_path: &["api_key"] };
+            let _ = find_unsealed_provider_api_key(&path, &location);
+        }
+
+        // pre-pr-review pbt-gap (#1764): a keyless/env-ref-only provider mixed
+        // in with a literal-key one, at every position the scan order (a
+        // BTreeMap iterates by sorted key) could put it — the exact class of
+        // input that exposed the P1 early-exit bug above.
+        #[test]
+        fn prop_find_unsealed_provider_api_key_finds_a_literal_key_regardless_of_scan_order(
+            shapes in proptest::collection::vec(0u8..=2, 1..6),
+        ) {
+            // shape 0 = no api_key field, 1 = env-var reference, 2 = literal key
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("crush.json");
+            let mut providers = serde_json::Map::new();
+            let mut literal_ids = Vec::new();
+            for (i, shape) in shapes.iter().enumerate() {
+                // Zero-padded so BTreeMap's sorted iteration doesn't put
+                // "provider10" before "provider2".
+                let id = format!("provider{i:03}");
+                let entry = match shape {
+                    0 => serde_json::json!({ "name": id }),
+                    1 => serde_json::json!({ "api_key": "$SOME_API_KEY" }),
+                    _ => {
+                        literal_ids.push(id.clone());
+                        serde_json::json!({ "api_key": "sk-literal-secret" })
+                    }
+                };
+                providers.insert(id, entry);
+            }
+            std::fs::write(&path, serde_json::json!({ "providers": providers }).to_string()).unwrap();
+
+            let location = ProviderApiKeyLocation { providers_key: "providers", key_path: &["api_key"] };
+            let result = find_unsealed_provider_api_key(&path, &location);
+            if literal_ids.is_empty() {
+                prop_assert_eq!(result, None);
+            } else {
+                // BTreeMap iterates in sorted key order, so the first
+                // zero-padded literal id in sorted order is the one found.
+                prop_assert_eq!(result, Some(literal_ids[0].clone()));
+            }
         }
 
         // pre-pr-review pbt-gap (#1652): roundtrip properties, not just

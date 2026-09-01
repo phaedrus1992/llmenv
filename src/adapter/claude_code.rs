@@ -321,6 +321,9 @@ impl AgentAdapter for ClaudeCodeAdapter {
             mcp_servers_key: "mcpServers",
             format: super::McpConfigFormat::Json,
             credential_file: Some(crate::auth::credentials::CREDENTIALS_FILE),
+            // Claude Code has no model_providers concept (Anthropic-only,
+            // no provider switching — see supports_model_providers below).
+            provider_api_key_location: None,
         })
     }
 
