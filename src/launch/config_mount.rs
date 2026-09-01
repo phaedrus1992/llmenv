@@ -287,22 +287,45 @@ pub(crate) fn find_unsealed_provider_api_key(
     mcp_config_path: &Path,
     location: &ProviderApiKeyLocation,
 ) -> Option<String> {
-    let bytes = std::fs::read(mcp_config_path).ok()?;
+    let bytes = match std::fs::read(mcp_config_path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            tracing::debug!(
+                "launch: could not read {} to check for an unsealed provider api_key: {e}",
+                mcp_config_path.display()
+            );
+            return None;
+        }
+    };
     let doc: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     let providers = doc.get(location.providers_key)?.as_object()?;
-    for (id, entry) in providers {
-        let mut cur = entry;
-        for key in location.key_path {
-            cur = cur.get(key)?;
-        }
-        let Some(value) = cur.as_str() else {
-            continue;
-        };
-        if !looks_like_env_var_reference(value) {
-            return Some(id.clone());
-        }
+    providers
+        .iter()
+        .find(|(_, entry)| {
+            walk_key_path(entry, location.key_path)
+                .and_then(|v| v.as_str())
+                .is_some_and(|value| !looks_like_env_var_reference(value))
+        })
+        .map(|(id, _)| id.clone())
+}
+
+/// Walks `entry` down `key_path`, one key per step. Returns `None` — for
+/// just this one entry, not the caller's whole iteration — as soon as any
+/// step is missing, malformed, or not an object (pre-pr-review P1, #1764:
+/// a bare `?` inline in the per-provider loop instead propagated `None` out
+/// of the entire scanning function, so a provider with no `api_key` field
+/// at all, sorting before one that did, made the whole check silently miss
+/// the real one).
+fn walk_key_path<'a>(
+    entry: &'a serde_json::Value,
+    key_path: &[&str],
+) -> Option<&'a serde_json::Value> {
+    let mut cur = entry;
+    for key in key_path {
+        cur = cur.get(key)?;
     }
-    None
+    Some(cur)
 }
 
 /// True for a bare `$VAR_NAME`-shaped reference (`^\$[A-Z_][A-Z0-9_]*$`) —
@@ -787,6 +810,35 @@ url = "http://icm.example.com:9092/mcp"
         assert_eq!(find_unsealed_provider_api_key(&path, &location), None);
     }
 
+    // pre-pr-review P1 (#1764): a keyless provider sorting before a
+    // literal-key one used to make the whole scan bail out early instead
+    // of moving on to the next provider.
+    #[test]
+    fn find_unsealed_provider_api_key_keeps_scanning_past_a_keyless_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("crush.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "providers": {
+                    // "anthropic" sorts before "openai" — must not stop the scan.
+                    "anthropic": { "name": "Anthropic" },
+                    "openai": { "api_key": "sk-literal-secret" },
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let location = ProviderApiKeyLocation {
+            providers_key: "providers",
+            key_path: &["api_key"],
+        };
+        assert_eq!(
+            find_unsealed_provider_api_key(&path, &location),
+            Some("openai".to_string())
+        );
+    }
+
     #[test]
     fn prepare_sets_provider_api_key_location_for_crush() {
         let dir = tempfile::tempdir().unwrap();
@@ -950,6 +1002,46 @@ url = "http://icm.example.com:9092/mcp"
             std::fs::write(&path, &bytes).unwrap();
             let location = ProviderApiKeyLocation { providers_key: "providers", key_path: &["api_key"] };
             let _ = find_unsealed_provider_api_key(&path, &location);
+        }
+
+        // pre-pr-review pbt-gap (#1764): a keyless/env-ref-only provider mixed
+        // in with a literal-key one, at every position the scan order (a
+        // BTreeMap iterates by sorted key) could put it — the exact class of
+        // input that exposed the P1 early-exit bug above.
+        #[test]
+        fn prop_find_unsealed_provider_api_key_finds_a_literal_key_regardless_of_scan_order(
+            shapes in proptest::collection::vec(0u8..=2, 1..6),
+        ) {
+            // shape 0 = no api_key field, 1 = env-var reference, 2 = literal key
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("crush.json");
+            let mut providers = serde_json::Map::new();
+            let mut literal_ids = Vec::new();
+            for (i, shape) in shapes.iter().enumerate() {
+                // Zero-padded so BTreeMap's sorted iteration doesn't put
+                // "provider10" before "provider2".
+                let id = format!("provider{i:03}");
+                let entry = match shape {
+                    0 => serde_json::json!({ "name": id }),
+                    1 => serde_json::json!({ "api_key": "$SOME_API_KEY" }),
+                    _ => {
+                        literal_ids.push(id.clone());
+                        serde_json::json!({ "api_key": "sk-literal-secret" })
+                    }
+                };
+                providers.insert(id, entry);
+            }
+            std::fs::write(&path, serde_json::json!({ "providers": providers }).to_string()).unwrap();
+
+            let location = ProviderApiKeyLocation { providers_key: "providers", key_path: &["api_key"] };
+            let result = find_unsealed_provider_api_key(&path, &location);
+            if literal_ids.is_empty() {
+                prop_assert_eq!(result, None);
+            } else {
+                // BTreeMap iterates in sorted key order, so the first
+                // zero-padded literal id in sorted order is the one found.
+                prop_assert_eq!(result, Some(literal_ids[0].clone()));
+            }
         }
 
         // pre-pr-review pbt-gap (#1652): roundtrip properties, not just
