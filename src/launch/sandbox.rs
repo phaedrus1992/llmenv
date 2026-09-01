@@ -74,6 +74,105 @@ pub(crate) fn requested_binaries(configured: &SandboxRuntime) -> &'static str {
     }
 }
 
+/// How long [`probe_image_pullable`] waits for a `manifest inspect` registry
+/// round trip before giving up. Matches `attestation.rs`'s `GH_TIMEOUT` —
+/// both are a bounded, best-effort network check that must not hang
+/// `llmenv doctor`.
+const IMAGE_PULLABLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The `image` argument [`probe_image_pullable`] passes to `manifest
+/// inspect`. Docker's subcommand takes a bare image reference and queries
+/// the registry directly; Podman's needs the `docker://` transport prefix to
+/// inspect a remote reference instead of looking for an already-local
+/// manifest list.
+fn manifest_inspect_target(runtime: ContainerRuntime, image: &str) -> String {
+    match runtime {
+        ContainerRuntime::Docker => image.to_string(),
+        ContainerRuntime::Podman => format!("docker://{image}"),
+    }
+}
+
+/// `stderr` substrings meaning `manifest inspect` never reached the
+/// registry at all (DNS/connect/TLS-level failure) — as opposed to reaching
+/// it and getting a definitive answer. Matched case-insensitively. Mirrors
+/// `attestation.rs`'s `NETWORK_UNREACHABLE_MARKERS` for the identical
+/// reason: neither `docker` nor `podman` has a dedicated "offline" exit
+/// code, so a failure matching none of these is treated as a genuine,
+/// definitive "not pullable" answer rather than silently reported as a
+/// network problem it isn't.
+const NETWORK_UNREACHABLE_MARKERS: &[&str] = &[
+    "could not resolve host",
+    "no such host",
+    "connection refused",
+    "network is unreachable",
+    "i/o timeout",
+    "dial tcp",
+    "tls handshake",
+    "timeout",
+];
+
+/// Checks that `image` can be pulled through `runtime`, without actually
+/// downloading it (`llmenv doctor`, #1654) — queries the registry's manifest
+/// directly via `manifest inspect` rather than a real `pull`, which would
+/// spend bandwidth and disk on every doctor run.
+///
+/// # Errors
+/// - `features.sandbox.image` starts with `-`, which `runtime.binary_name()`
+///   would parse as a flag rather than an image name — the same guard
+///   `container_command` applies before it ever reaches a shelled-out
+///   invocation.
+/// - The `manifest inspect` invocation itself couldn't be run, timed out
+///   (see [`IMAGE_PULLABLE_TIMEOUT`]), or its `stderr` matches
+///   [`NETWORK_UNREACHABLE_MARKERS`] — the registry was never actually
+///   reached, so nothing here can tell "not pullable" apart from "network
+///   down right now". A *reached-and-answered* negative (bad reference, no
+///   registry auth, image missing) is `Ok(false)`, not an error — that's a
+///   real answer, not an inconclusive one.
+pub(crate) fn probe_image_pullable(runtime: ContainerRuntime, image: &str) -> anyhow::Result<bool> {
+    anyhow::ensure!(
+        !image.starts_with('-'),
+        "features.sandbox.image '{image}' starts with '-', which {} would parse as a flag \
+         rather than an image name",
+        runtime.binary_name(),
+    );
+    let target = manifest_inspect_target(runtime, image);
+    let mut cmd = std::process::Command::new(runtime.binary_name());
+    cmd.args(["manifest", "inspect", &target]);
+    let output = super::run_with_timeout(cmd, IMAGE_PULLABLE_TIMEOUT).with_context(|| {
+        format!(
+            "running `{} manifest inspect {target}`",
+            runtime.binary_name()
+        )
+    })?;
+    classify_manifest_inspect_output(&output, runtime, &target)
+}
+
+/// [`probe_image_pullable`]'s decision logic once `manifest inspect` has
+/// actually run — split out so the network-vs-definitive classification is
+/// testable against a synthetic [`std::process::Output`] without spawning a
+/// real `docker`/`podman`, mirroring `attestation.rs`'s `verify_with_gh`
+/// split for the identical reason.
+fn classify_manifest_inspect_output(
+    output: &std::process::Output,
+    runtime: ContainerRuntime,
+    target: &str,
+) -> anyhow::Result<bool> {
+    if output.status.success() {
+        return Ok(true);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr_lower = stderr.to_lowercase();
+    anyhow::ensure!(
+        !NETWORK_UNREACHABLE_MARKERS
+            .iter()
+            .any(|marker| stderr_lower.contains(marker)),
+        "`{} manifest inspect {target}` could not reach the registry: {}",
+        runtime.binary_name(),
+        stderr.trim(),
+    );
+    Ok(false)
+}
+
 /// The hostname a container uses to reach the host's loopback, from inside
 /// its own network namespace — `127.0.0.1` inside the container is the
 /// container itself, not the host. Docker requires
@@ -139,17 +238,31 @@ pub(crate) struct ContainerInputs<'a> {
     /// reaching it grants.
     pub(crate) ssh_auth_sock: Option<&'a std::path::Path>,
     /// Materialized config directory (e.g. `CLAUDE_CONFIG_DIR`) to bind-mount
-    /// read-only at the identical in-container path (#1652), so
-    /// `mcpServers`/skills/plugins/settings are visible to the containerized
-    /// engine. `None` for a non-Claude-Code adapter or when no config
-    /// directory was resolved.
+    /// read-only at the identical in-container path (#1652, generalized to
+    /// every adapter in #1698), so MCP servers/skills/plugins/settings are
+    /// visible to the containerized engine. `None` for an adapter with no
+    /// `AgentAdapter::config_dir_mount`, or when no config directory was
+    /// resolved.
     pub(crate) config_dir: Option<&'a std::path::Path>,
-    /// Host path to a patched copy of `.claude.json` (ICM's mcpServers URL
-    /// rewritten from loopback to the container gateway host, #1652),
-    /// overlay-mounted read-only over the real file inside `config_dir` so
-    /// the rewritten URL wins without touching the host's own file. `None`
-    /// when no ICM entry needed rewriting, or `config_dir` is `None`.
-    pub(crate) patched_claude_json: Option<&'a std::path::Path>,
+    /// Absolute host path to the adapter's MCP-config file within
+    /// `config_dir` (e.g. `config_dir/.claude.json`) — the overlay-mount
+    /// target for `patched_mcp_config`. `None` when `config_dir` is `None`.
+    pub(crate) mcp_config_path: Option<&'a std::path::Path>,
+    /// Host path to a patched copy of `mcp_config_path` (an MCP server's URL
+    /// rewritten from loopback to the container gateway host, #1652,
+    /// #1698), overlay-mounted read-only over the real file at
+    /// `mcp_config_path` so the rewritten URL wins without touching the
+    /// host's own file. `None` when no entry needed rewriting, or
+    /// `config_dir` is `None`.
+    pub(crate) patched_mcp_config: Option<&'a std::path::Path>,
+    /// Absolute host path to a runtime-written credential file inside
+    /// `config_dir` (Claude Code's `.credentials.json`, Codex's
+    /// `auth.json`) that must be masked with a `/dev/null` overlay when the
+    /// directory is mounted — llmenv never wrote it, so mounting the
+    /// directory must not also expose a live credential (#1652 pre-pr-review
+    /// P0, generalized in #1698). `None` when the adapter has no such file
+    /// (Crush, opencode) or `config_dir` is `None`.
+    pub(crate) credential_file: Option<&'a std::path::Path>,
 }
 
 /// An env file written for one `docker`/`podman` invocation, deleted on drop
@@ -407,8 +520,35 @@ pub(crate) fn container_command(
     if let Some(dir) = inputs.config_dir {
         validate_mount_path(dir)?;
     }
-    if let Some(patched) = inputs.patched_claude_json {
+    if let Some(patched) = inputs.patched_mcp_config {
         validate_mount_path(patched)?;
+    }
+    if let Some(cred) = inputs.credential_file {
+        validate_mount_path(cred)?;
+    }
+    // pre-pr-review (#1698): `mcp_config_path`/`credential_file` are always
+    // caller-derived as `config_dir.join(<adapter's own fixed file name>)`
+    // today, never independently attacker-controlled — but nothing
+    // structurally enforced that. Assert containment explicitly so a future
+    // caller can't mount an overlay or a credential mask outside the
+    // directory it claims to be inside.
+    if let Some(dir) = inputs.config_dir {
+        if let Some(mcp_config_path) = inputs.mcp_config_path {
+            anyhow::ensure!(
+                mcp_config_path.starts_with(dir),
+                "mcp_config_path {} is not inside config_dir {}",
+                mcp_config_path.display(),
+                dir.display(),
+            );
+        }
+        if let Some(cred) = inputs.credential_file {
+            anyhow::ensure!(
+                cred.starts_with(dir),
+                "credential_file {} is not inside config_dir {}",
+                cred.display(),
+                dir.display(),
+            );
+        }
     }
     validate_mount_path(inputs.bin_path)?;
     anyhow::ensure!(
@@ -464,27 +604,31 @@ pub(crate) fn container_command(
             dir.display(),
             dir.display(),
         ));
-        // #1652 pre-pr-review P0: the directory mount above exposes
-        // `.credentials.json` — Claude Code's plaintext OAuth/API-key token
-        // store on Linux, and on macOS whenever the keychain backend is
-        // disabled (`src/auth/credentials.rs`'s `CREDENTIALS_FILE`). That
-        // file is Claude Code's own runtime secret, never something llmenv
-        // wrote for the container to read — mask it with a `/dev/null`
-        // overlay (an always-empty file at that path) so the mounted
-        // directory carries mcpServers/skills/plugins/settings without also
-        // handing the container a live credential.
-        cmd.arg("--mount").arg(format!(
-            "type=bind,source=/dev/null,target={},readonly",
-            dir.join(".credentials.json").display(),
-        ));
+        // #1652 pre-pr-review P0, generalized in #1698: the directory mount
+        // above exposes any runtime-written credential file the adapter
+        // keeps outside its own materialized config — Claude Code's
+        // plaintext `.credentials.json` OAuth/API-key store on Linux (and on
+        // macOS whenever the keychain backend is disabled), Codex's
+        // `auth.json`. That file is the engine's own runtime secret, never
+        // something llmenv wrote for the container to read — mask it with a
+        // `/dev/null` overlay (an always-empty file at that path) so the
+        // mounted directory carries the adapter's ordinary config without
+        // also handing the container a live credential. `None` for an
+        // adapter with no such file (Crush, opencode).
+        if let Some(cred) = inputs.credential_file {
+            cmd.arg("--mount").arg(format!(
+                "type=bind,source=/dev/null,target={},readonly",
+                cred.display(),
+            ));
+        }
         // Overlay-mounted AFTER the directory mount so it shadows the real
         // file at the same path inside the container — mount order matters
         // here, both engines apply mounts in the order given.
-        if let Some(patched) = inputs.patched_claude_json {
+        if let (Some(patched), Some(target)) = (inputs.patched_mcp_config, inputs.mcp_config_path) {
             cmd.arg("--mount").arg(format!(
                 "type=bind,source={},target={},readonly",
                 patched.display(),
-                dir.join(".claude.json").display(),
+                target.display(),
             ));
         }
     }
@@ -512,6 +656,81 @@ mod tests {
 
     fn path_with(dir: &std::path::Path) -> std::ffi::OsString {
         std::env::join_paths([dir]).unwrap()
+    }
+
+    // manifest_inspect_target
+    #[test]
+    fn manifest_inspect_target_is_bare_for_docker() {
+        assert_eq!(
+            manifest_inspect_target(ContainerRuntime::Docker, "alpine:latest"),
+            "alpine:latest"
+        );
+    }
+
+    #[test]
+    fn manifest_inspect_target_adds_docker_transport_for_podman() {
+        assert_eq!(
+            manifest_inspect_target(ContainerRuntime::Podman, "alpine:latest"),
+            "docker://alpine:latest"
+        );
+    }
+
+    // probe_image_pullable / classify_manifest_inspect_output
+    #[test]
+    fn probe_image_pullable_rejects_an_image_starting_with_a_dash() {
+        let err = probe_image_pullable(ContainerRuntime::Docker, "-malicious").unwrap_err();
+        assert!(err.to_string().contains("starts with '-'"));
+    }
+
+    fn fake_output(success: bool, stderr: &str) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(if success { 0 } else { 256 }),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn classify_manifest_inspect_output_true_on_success() {
+        let output = fake_output(true, "");
+        assert!(
+            classify_manifest_inspect_output(&output, ContainerRuntime::Docker, "alpine:latest")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn classify_manifest_inspect_output_false_on_a_definitive_not_found() {
+        let output = fake_output(
+            false,
+            "manifest unknown: manifest tagged by \"latest\" is not found",
+        );
+        assert!(
+            !classify_manifest_inspect_output(&output, ContainerRuntime::Docker, "alpine:latest")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn classify_manifest_inspect_output_errors_on_a_network_unreachable_stderr() {
+        let output = fake_output(
+            false,
+            "Error: dial tcp: lookup registry-1.docker.io: no such host",
+        );
+        let err =
+            classify_manifest_inspect_output(&output, ContainerRuntime::Docker, "alpine:latest")
+                .unwrap_err();
+        assert!(err.to_string().contains("could not reach the registry"));
+    }
+
+    #[test]
+    fn classify_manifest_inspect_output_network_marker_match_is_case_insensitive() {
+        let output = fake_output(false, "CONNECTION REFUSED");
+        assert!(
+            classify_manifest_inspect_output(&output, ContainerRuntime::Docker, "alpine:latest")
+                .is_err()
+        );
     }
 
     fn make_executable(dir: &std::path::Path, name: &str) {
@@ -626,7 +845,9 @@ mod tests {
                 project_dir,
                 ssh_auth_sock: None,
                 config_dir: None,
-                patched_claude_json: None,
+                mcp_config_path: None,
+                patched_mcp_config: None,
+                credential_file: None,
             },
         )
         .unwrap();
@@ -672,7 +893,9 @@ mod tests {
                 project_dir,
                 ssh_auth_sock: None,
                 config_dir: None,
-                patched_claude_json: None,
+                mcp_config_path: None,
+                patched_mcp_config: None,
+                credential_file: None,
             },
         )
         .unwrap();
@@ -703,7 +926,9 @@ mod tests {
                 project_dir,
                 ssh_auth_sock: Some(ssh_sock),
                 config_dir: None,
-                patched_claude_json: None,
+                mcp_config_path: None,
+                patched_mcp_config: None,
+                credential_file: None,
             },
         )
         .unwrap();
@@ -736,7 +961,9 @@ mod tests {
                 project_dir,
                 ssh_auth_sock: None,
                 config_dir: None,
-                patched_claude_json: None,
+                mcp_config_path: None,
+                patched_mcp_config: None,
+                credential_file: None,
             },
         )
         .unwrap_err();
@@ -762,11 +989,73 @@ mod tests {
                 project_dir,
                 ssh_auth_sock: None,
                 config_dir: None,
-                patched_claude_json: None,
+                mcp_config_path: None,
+                patched_mcp_config: None,
+                credential_file: None,
             },
         )
         .unwrap_err();
         assert!(err.to_string().contains("starts with '-'"));
+    }
+
+    #[test]
+    fn container_command_rejects_an_mcp_config_path_outside_config_dir() {
+        let spec = SandboxSpec {
+            runtime: ContainerRuntime::Docker,
+            image: "img".to_string(),
+            forward_ssh_agent: true,
+        };
+        let args = Vec::new();
+        let vars = BTreeMap::new();
+        let project_dir = std::path::Path::new("/proj");
+        let config_dir = std::path::Path::new("/home/user/.cache/llmenv/claude-code/abc123");
+        let outside = std::path::Path::new("/etc/passwd");
+        let err = container_command(
+            &spec,
+            ContainerInputs {
+                bin_path: std::path::Path::new("/usr/local/bin/claude"),
+                args: &args,
+                vars: &vars,
+                project_dir,
+                ssh_auth_sock: None,
+                config_dir: Some(config_dir),
+                mcp_config_path: Some(outside),
+                patched_mcp_config: None,
+                credential_file: None,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("is not inside config_dir"));
+    }
+
+    #[test]
+    fn container_command_rejects_a_credential_file_outside_config_dir() {
+        let spec = SandboxSpec {
+            runtime: ContainerRuntime::Docker,
+            image: "img".to_string(),
+            forward_ssh_agent: true,
+        };
+        let args = Vec::new();
+        let vars = BTreeMap::new();
+        let project_dir = std::path::Path::new("/proj");
+        let config_dir = std::path::Path::new("/home/user/.cache/llmenv/codex/abc123");
+        let outside = std::path::Path::new("/etc/passwd");
+        let err = container_command(
+            &spec,
+            ContainerInputs {
+                bin_path: std::path::Path::new("/usr/local/bin/codex"),
+                args: &args,
+                vars: &vars,
+                project_dir,
+                ssh_auth_sock: None,
+                config_dir: Some(config_dir),
+                mcp_config_path: None,
+                patched_mcp_config: None,
+                credential_file: Some(outside),
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("is not inside config_dir"));
     }
 
     #[test]
@@ -789,7 +1078,9 @@ mod tests {
                 project_dir,
                 ssh_auth_sock: None,
                 config_dir: None,
-                patched_claude_json: None,
+                mcp_config_path: None,
+                patched_mcp_config: None,
+                credential_file: None,
             },
         )
         .unwrap();
@@ -964,7 +1255,9 @@ mod tests {
                 project_dir,
                 ssh_auth_sock: None,
                 config_dir: Some(config_dir),
-                patched_claude_json: None,
+                mcp_config_path: None,
+                patched_mcp_config: None,
+                credential_file: None,
             },
         )
         .unwrap();
@@ -976,7 +1269,7 @@ mod tests {
     }
 
     #[test]
-    fn container_command_masks_credentials_json_with_dev_null_when_config_dir_mounted() {
+    fn container_command_masks_credential_file_with_dev_null_when_present() {
         let spec = SandboxSpec {
             runtime: ContainerRuntime::Docker,
             image: "img".to_string(),
@@ -986,6 +1279,7 @@ mod tests {
         let vars = BTreeMap::new();
         let project_dir = std::path::Path::new("/proj");
         let config_dir = std::path::Path::new("/home/user/.cache/llmenv/claude-code/abc123");
+        let credential_file = config_dir.join(".credentials.json");
         let (cmd, _guard) = container_command(
             &spec,
             ContainerInputs {
@@ -995,7 +1289,9 @@ mod tests {
                 project_dir,
                 ssh_auth_sock: None,
                 config_dir: Some(config_dir),
-                patched_claude_json: None,
+                mcp_config_path: None,
+                patched_mcp_config: None,
+                credential_file: Some(&credential_file),
             },
         )
         .unwrap();
@@ -1007,7 +1303,37 @@ mod tests {
     }
 
     #[test]
-    fn container_command_overlays_patched_claude_json_over_the_config_dir_mount() {
+    fn container_command_mounts_no_credential_mask_when_adapter_has_none() {
+        let spec = SandboxSpec {
+            runtime: ContainerRuntime::Docker,
+            image: "img".to_string(),
+            forward_ssh_agent: true,
+        };
+        let args = Vec::new();
+        let vars = BTreeMap::new();
+        let project_dir = std::path::Path::new("/proj");
+        let config_dir = std::path::Path::new("/home/user/.cache/llmenv/crush/abc123");
+        let (cmd, _guard) = container_command(
+            &spec,
+            ContainerInputs {
+                bin_path: std::path::Path::new("/usr/local/bin/crush"),
+                args: &args,
+                vars: &vars,
+                project_dir,
+                ssh_auth_sock: None,
+                config_dir: Some(config_dir),
+                mcp_config_path: None,
+                patched_mcp_config: None,
+                credential_file: None,
+            },
+        )
+        .unwrap();
+        let cmd_args = command_args(&cmd);
+        assert!(!cmd_args.iter().any(|a| a.contains("/dev/null")));
+    }
+
+    #[test]
+    fn container_command_overlays_patched_mcp_config_over_the_config_dir_mount() {
         let spec = SandboxSpec {
             runtime: ContainerRuntime::Docker,
             image: "img".to_string(),
@@ -1017,7 +1343,8 @@ mod tests {
         let vars = BTreeMap::new();
         let project_dir = std::path::Path::new("/proj");
         let config_dir = std::path::Path::new("/home/user/.cache/llmenv/claude-code/abc123");
-        let patched = std::path::Path::new("/tmp/llmenv-sandbox-claude-json-42-0");
+        let patched = std::path::Path::new("/tmp/llmenv-sandbox-mcp-config-42-0");
+        let mcp_config_path = config_dir.join(".claude.json");
         let (cmd, _guard) = container_command(
             &spec,
             ContainerInputs {
@@ -1027,13 +1354,51 @@ mod tests {
                 project_dir,
                 ssh_auth_sock: None,
                 config_dir: Some(config_dir),
-                patched_claude_json: Some(patched),
+                mcp_config_path: Some(&mcp_config_path),
+                patched_mcp_config: Some(patched),
+                credential_file: None,
             },
         )
         .unwrap();
         let cmd_args = command_args(&cmd);
         assert!(cmd_args.contains(&format!(
             "type=bind,source={},target={}/.claude.json,readonly",
+            patched.display(),
+            config_dir.display()
+        )));
+    }
+
+    #[test]
+    fn container_command_overlays_patched_mcp_config_for_a_non_claude_code_file_name() {
+        let spec = SandboxSpec {
+            runtime: ContainerRuntime::Docker,
+            image: "img".to_string(),
+            forward_ssh_agent: true,
+        };
+        let args = Vec::new();
+        let vars = BTreeMap::new();
+        let project_dir = std::path::Path::new("/proj");
+        let config_dir = std::path::Path::new("/home/user/.cache/llmenv/codex/abc123");
+        let patched = std::path::Path::new("/tmp/llmenv-sandbox-mcp-config-42-0");
+        let mcp_config_path = config_dir.join("config.toml");
+        let (cmd, _guard) = container_command(
+            &spec,
+            ContainerInputs {
+                bin_path: std::path::Path::new("/usr/local/bin/codex"),
+                args: &args,
+                vars: &vars,
+                project_dir,
+                ssh_auth_sock: None,
+                config_dir: Some(config_dir),
+                mcp_config_path: Some(&mcp_config_path),
+                patched_mcp_config: Some(patched),
+                credential_file: None,
+            },
+        )
+        .unwrap();
+        let cmd_args = command_args(&cmd);
+        assert!(cmd_args.contains(&format!(
+            "type=bind,source={},target={}/config.toml,readonly",
             patched.display(),
             config_dir.display()
         )));
@@ -1058,7 +1423,9 @@ mod tests {
                 project_dir,
                 ssh_auth_sock: None,
                 config_dir: None,
-                patched_claude_json: None,
+                mcp_config_path: None,
+                patched_mcp_config: None,
+                credential_file: None,
             },
         )
         .unwrap();
@@ -1128,7 +1495,9 @@ mod tests {
                     project_dir,
                     ssh_auth_sock: None,
                     config_dir: None,
-                    patched_claude_json: None,
+                    mcp_config_path: None,
+                patched_mcp_config: None,
+                credential_file: None,
                 },
             )
             .unwrap();

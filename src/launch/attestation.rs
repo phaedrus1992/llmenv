@@ -33,9 +33,8 @@
 //! verification against a locally pinned trust root, tracked separately.
 
 use std::ffi::OsStr;
-use std::io::Read;
-use std::process::{Command, Output, Stdio};
-use std::time::{Duration, Instant};
+use std::process::{Command, Output};
+use std::time::Duration;
 
 /// GitHub repository the sandbox image's attestation must be signed by.
 const SANDBOX_IMAGE_REPO: &str = "phaedrus1992/llmenv";
@@ -153,56 +152,7 @@ fn run_gh_attestation_verify(image: &str, repo: &str) -> std::io::Result<Output>
         .args(["--signer-workflow", SANDBOX_IMAGE_SIGNER_WORKFLOW])
         .arg("--bundle-from-oci")
         .args(["--format", "json"]);
-    run_with_timeout(cmd, GH_TIMEOUT)
-}
-
-/// Runs `cmd` to completion, killing it and returning
-/// [`std::io::ErrorKind::TimedOut`] if it doesn't finish within `timeout`.
-///
-/// Drains stdout/stderr on separate reader threads rather than reading them
-/// after the child exits — `Command::output()`'s own approach — because a
-/// child whose output exceeds the OS pipe buffer (an attestation bundle
-/// well over 64KB is common here) blocks on write until something reads,
-/// which a bare `try_wait` poll loop never does.
-fn run_with_timeout(mut cmd: Command, timeout: Duration) -> std::io::Result<Output> {
-    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
-    let (Some(mut stdout_pipe), Some(mut stderr_pipe)) = (child.stdout.take(), child.stderr.take())
-    else {
-        return Err(std::io::Error::other(
-            "gh: piped stdout/stderr unexpectedly absent after spawn",
-        ));
-    };
-    let stdout_thread = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stdout_pipe.read_to_end(&mut buf);
-        buf
-    });
-    let stderr_thread = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stderr_pipe.read_to_end(&mut buf);
-        buf
-    });
-
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                format!("gh attestation verify did not finish within {timeout:?}"),
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    };
-    Ok(Output {
-        status,
-        stdout: stdout_thread.join().unwrap_or_default(),
-        stderr: stderr_thread.join().unwrap_or_default(),
-    })
+    super::run_with_timeout(cmd, GH_TIMEOUT)
 }
 
 /// Classification logic shared by [`verify_before_run_in`]'s "gh is on
