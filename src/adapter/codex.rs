@@ -233,6 +233,16 @@ impl AgentAdapter for CodexAdapter {
         Ok(vec![("CODEX_HOME".into(), config_dir.to_string())])
     }
 
+    fn config_dir_mount(&self) -> Option<super::ConfigDirMount> {
+        Some(super::ConfigDirMount {
+            env_var: "CODEX_HOME",
+            mcp_config_file: CODEX_CONFIG_FILE,
+            mcp_servers_key: "mcp_servers",
+            format: super::McpConfigFormat::Toml,
+            credential_file: Some(crate::materialize::inherit::CODEX_AUTH_FILE),
+        })
+    }
+
     fn materialize(&self, manifest: &MergedManifest, out: &Path) -> anyhow::Result<Vec<PathBuf>> {
         super::skills::create_dir_owner_only(out)?;
         let mut owned: Vec<PathBuf> = Vec::new();

@@ -60,7 +60,7 @@ const CODEX_HISTORY_FILE: &str = "history.jsonl";
 /// captured copy forever would serve a stale or revoked credential to every
 /// new folder indefinitely. [`inherit_codex_auth`]/[`capture_codex_auth`]
 /// give it its own newest-wins contract instead (security-audit, #1421).
-const CODEX_AUTH_FILE: &str = "auth.json";
+pub const CODEX_AUTH_FILE: &str = "auth.json";
 /// Codex's [`COPIED_FILES`] equivalent — `auth.json` is deliberately excluded:
 /// it gets its own newest-wins capture via [`capture_codex_auth`] rather than
 /// this list's plain "copy in only when absent" contract (security-audit,
