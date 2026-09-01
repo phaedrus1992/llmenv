@@ -240,6 +240,10 @@ impl AgentAdapter for CodexAdapter {
             mcp_servers_key: "mcp_servers",
             format: super::McpConfigFormat::Toml,
             credential_file: Some(crate::materialize::inherit::CODEX_AUTH_FILE),
+            // Codex has model_providers, but rendering it into config.toml
+            // isn't implemented yet (see supports_model_providers below) —
+            // nothing to check until that lands.
+            provider_api_key_location: None,
         })
     }
 
