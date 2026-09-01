@@ -435,6 +435,64 @@ fn run_doctor_dependent_tools(use_color: bool) {
     }
 }
 
+/// `features.sandbox` doctor coverage (#1654, design doc item 7): a
+/// sandboxed launch needs the container runtime, the icebreaker binary, and
+/// the configured image to all be available — surfaced here so a launch
+/// failure isn't the first place a user learns one is missing. No-op when
+/// sandboxing isn't enabled, matching the other feature-gated sections above.
+fn run_doctor_sandbox(use_color: bool, config: &Config) {
+    let Some(sandbox) = config.features.as_ref().and_then(|f| f.sandbox.as_ref()) else {
+        return;
+    };
+    if !sandbox.enabled {
+        return;
+    }
+
+    let pass = super::doctor_pass(use_color);
+    let fail = super::doctor_fail(use_color);
+    let warn = super::doctor_warning(use_color);
+
+    eprintln!();
+    eprintln!("Sandbox checks:");
+
+    match crate::launch::sandbox::resolve_runtime(&sandbox.runtime) {
+        Some(runtime) => {
+            eprintln!(
+                "{pass} container runtime found on PATH ({})",
+                runtime.binary_name()
+            );
+
+            let image = sandbox
+                .image
+                .clone()
+                .unwrap_or_else(|| crate::launch::DEFAULT_SANDBOX_IMAGE.to_string());
+            match crate::launch::sandbox::probe_image_pullable(runtime, &image) {
+                Ok(true) => eprintln!("{pass} sandbox image is pullable: {image}"),
+                Ok(false) => eprintln!("{fail} sandbox image is not pullable: {image}"),
+                Err(e) => {
+                    eprintln!("{warn} could not verify sandbox image is pullable: {image}: {e:#}");
+                }
+            }
+        }
+        None => {
+            eprintln!(
+                "{fail} no container runtime found on PATH (need {}, required for \
+                 features.sandbox.enabled)",
+                crate::launch::sandbox::requested_binaries(&sandbox.runtime)
+            );
+        }
+    }
+
+    if crate::paths::binary_on_path("icebreaker") {
+        eprintln!("{pass} icebreaker binary found on PATH");
+    } else {
+        eprintln!(
+            "{fail} icebreaker binary not found on PATH (required for sandboxed launch \
+             credential handling)"
+        );
+    }
+}
+
 fn run_doctor_tool_availability(use_color: bool, config: &Config) {
     let pass = super::doctor_pass(use_color);
     let fail = super::doctor_fail(use_color);
@@ -1507,6 +1565,7 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
 
     run_doctor_tool_availability(use_color, &config);
     run_doctor_dependent_tools(use_color);
+    run_doctor_sandbox(use_color, &config);
 
     // When context-mode is enabled, verify the marketplace clone exists so
     // inject_context_mode can actually resolve the plugin. A missing clone is

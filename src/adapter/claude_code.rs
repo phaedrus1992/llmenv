@@ -314,6 +314,16 @@ impl AgentAdapter for ClaudeCodeAdapter {
         Ok(vars)
     }
 
+    fn config_dir_mount(&self) -> Option<super::ConfigDirMount> {
+        Some(super::ConfigDirMount {
+            env_var: "CLAUDE_CONFIG_DIR",
+            mcp_config_file: ".claude.json",
+            mcp_servers_key: "mcpServers",
+            format: super::McpConfigFormat::Json,
+            credential_file: Some(crate::auth::credentials::CREDENTIALS_FILE),
+        })
+    }
+
     fn materialize(&self, manifest: &MergedManifest, out: &Path) -> anyhow::Result<Vec<PathBuf>> {
         // Every path llmenv writes into `out`, relative to `out`. Returned as
         // the owned set so the orchestrator can reconcile ghost files on a

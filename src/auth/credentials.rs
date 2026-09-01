@@ -24,7 +24,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use sha2::{Digest, Sha256};
 
 /// Credential store path relative to `CLAUDE_CONFIG_DIR`.
-const CREDENTIALS_FILE: &str = ".credentials.json";
+pub(crate) const CREDENTIALS_FILE: &str = ".credentials.json";
 /// Top-level key carrying the OAuth token set.
 const OAUTH_KEY: &str = "claudeAiOauth";
 /// Sibling key in the same store holding per-MCP-server OAuth tokens, keyed

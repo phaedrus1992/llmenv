@@ -250,8 +250,9 @@ directly.
 `llmenv launch <engine>` can run the engine in a container instead of
 directly on the host, so a bad delete, a force-push, or an exfiltrated
 token lands in a throwaway container rather than on your machine. `llmenv
-doctor` checks for this feature are still to come
-([#1654](https://github.com/phaedrus1992/llmenv/issues/1654)).
+doctor` checks the container runtime, the `icebreaker` binary, and the
+configured image when this feature is enabled (added in v4.0.0,
+[#1654](https://github.com/phaedrus1992/llmenv/issues/1654)).
 
 Enable it in `config.yaml`, off by default:
 

@@ -26,6 +26,67 @@ use anyhow::Context;
 const RELAUNCH_MAX_ATTEMPTS: usize = 3;
 const RELAUNCH_WINDOW: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// Runs `cmd` to completion, killing it and returning
+/// [`std::io::ErrorKind::TimedOut`] if it doesn't finish within `timeout`.
+///
+/// Drains stdout/stderr on separate reader threads rather than reading them
+/// after the child exits — `Command::output()`'s own approach — because a
+/// child whose output exceeds the OS pipe buffer blocks on write until
+/// something reads, which a bare `try_wait` poll loop never does. Shared by
+/// `attestation.rs` (`gh attestation verify`, whose success output — a full
+/// attestation bundle — is well over a typical pipe buffer) and
+/// `sandbox::probe_image_pullable` (`docker`/`podman manifest inspect`).
+/// Both run before `launch`'s tokio runtime exists, so neither can reuse
+/// `tokio::time::timeout`.
+fn run_with_timeout(
+    mut cmd: std::process::Command,
+    timeout: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
+    use std::io::Read;
+
+    let mut child = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    let (Some(mut stdout_pipe), Some(mut stderr_pipe)) = (child.stdout.take(), child.stderr.take())
+    else {
+        return Err(std::io::Error::other(
+            "child process: piped stdout/stderr unexpectedly absent after spawn",
+        ));
+    };
+    let stdout_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let stderr_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        buf
+    });
+
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("child process did not finish within {timeout:?}"),
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: stdout_thread.join().unwrap_or_default(),
+        stderr: stderr_thread.join().unwrap_or_default(),
+    })
+}
+
 /// Caps how many times `launch` will relaunch a crashing child within a
 /// rolling window, so a child that crashes on every start doesn't loop
 /// forever. Attempts older than [`RELAUNCH_WINDOW`] no longer count.
@@ -228,26 +289,32 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
         };
         let container_vars = icebreaker_session.as_ref().map(|s| &s.container_vars);
 
-        // #1652: mounts the materialized config directory (mcpServers,
-        // skills, plugins, settings) into the container, with ICM's URL
-        // rewritten off loopback when needed — resolved once here, like
+        // #1652, generalized to every adapter in #1698: mounts the
+        // materialized config directory (MCP servers, skills, plugins,
+        // settings) into the container, with any loopback server URL
+        // rewritten when needed — resolved once here, like
         // icebreaker_session above, so it stays fixed across relaunches.
+        let adapter_mount = adapter.config_dir_mount();
         let config_mount = match &sandbox_spec {
             Some(spec) => config_mount::prepare(
-                adapter.name(),
+                adapter_mount.as_ref(),
                 spec.runtime,
-                resolved
-                    .vars
-                    .get("CLAUDE_CONFIG_DIR")
+                adapter_mount
+                    .as_ref()
+                    .and_then(|m| resolved.vars.get(m.env_var))
                     .map(std::path::Path::new),
             )?,
             None => None,
         };
         let config_dir = config_mount.as_ref().map(|m| m.config_dir.as_path());
-        let patched_claude_json = config_mount
+        let mcp_config_path = config_mount.as_ref().map(|m| m.mcp_config_path.as_path());
+        let patched_mcp_config = config_mount
             .as_ref()
-            .and_then(|m| m.patched_claude_json.as_ref())
+            .and_then(|m| m.patched_mcp_config.as_ref())
             .map(|g| g.path());
+        let credential_file = config_mount
+            .as_ref()
+            .and_then(|m| m.credential_file.as_deref());
 
         // #1669: icebreaker only seals `ANTHROPIC_API_KEY` — any other
         // credential-shaped var (present regardless of engine, and still
@@ -408,7 +475,9 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
                 container_vars,
                 ssh_auth_sock: ssh_auth_sock.as_deref(),
                 config_dir,
-                patched_claude_json,
+                mcp_config_path,
+                patched_mcp_config,
+                credential_file,
             },
             &resolved,
             notice_socket,
@@ -463,9 +532,18 @@ struct EngineTarget<'a> {
     /// (#1652), resolved once alongside `icebreaker_session` before this
     /// struct is built. Unused when `sandbox` is `None`.
     config_dir: Option<&'a std::path::Path>,
-    /// Patched `.claude.json` overlay path (#1652), when ICM's URL needed
-    /// rewriting. Unused when `sandbox` is `None`.
-    patched_claude_json: Option<&'a std::path::Path>,
+    /// Absolute path to the adapter's MCP-config file within `config_dir`
+    /// (#1698) — the overlay-mount target for `patched_mcp_config`. Unused
+    /// when `sandbox` is `None`.
+    mcp_config_path: Option<&'a std::path::Path>,
+    /// Patched MCP-config overlay path (#1652, #1698), when a server's URL
+    /// needed rewriting. Unused when `sandbox` is `None`.
+    patched_mcp_config: Option<&'a std::path::Path>,
+    /// Absolute path to the adapter's runtime-written credential file within
+    /// `config_dir`, if it has one (#1698) — masked with a `/dev/null`
+    /// overlay so the directory mount doesn't also expose a live
+    /// credential. Unused when `sandbox` is `None`.
+    credential_file: Option<&'a std::path::Path>,
 }
 
 /// llmenv's published default sandbox image (#1653): minimal libc + CA
@@ -493,7 +571,7 @@ struct EngineTarget<'a> {
 // still a manual step: update both together, and
 // tests/sandbox_image_renovate_tracking.rs fails the build if they diverge.
 // renovate: datasource=docker depName=ghcr.io/phaedrus1992/llmenv-sandbox currentValue=v1 versioning=docker
-const DEFAULT_SANDBOX_IMAGE: &str = "ghcr.io/phaedrus1992/llmenv-sandbox@sha256:68d87335b359f375c223131dd1c218f2cb153f7d98379f542989abcdce75a79c";
+pub(crate) const DEFAULT_SANDBOX_IMAGE: &str = "ghcr.io/phaedrus1992/llmenv-sandbox@sha256:68d87335b359f375c223131dd1c218f2cb153f7d98379f542989abcdce75a79c";
 
 /// Decide whether `narrow`'s launch runs sandboxed, and if so, resolve the
 /// concrete container runtime + image.
@@ -606,7 +684,9 @@ async fn supervision_loop(
         container_vars,
         ssh_auth_sock,
         config_dir,
-        patched_claude_json,
+        mcp_config_path,
+        patched_mcp_config,
+        credential_file,
     } = target;
     let mut cap = RelaunchCap::default();
 
@@ -628,7 +708,9 @@ async fn supervision_loop(
                         project_dir: &project_dir,
                         ssh_auth_sock,
                         config_dir,
-                        patched_claude_json,
+                        mcp_config_path,
+                        patched_mcp_config,
+                        credential_file,
                     },
                 )?;
                 (cmd, Some(guard))
@@ -918,6 +1000,32 @@ async fn wait_for_notice(notices: &socket::NoticeSlot) {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    // run_with_timeout
+    #[test]
+    fn run_with_timeout_returns_output_on_success() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "echo hello"]);
+        let output = run_with_timeout(cmd, std::time::Duration::from_secs(5)).unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
+    }
+
+    #[test]
+    fn run_with_timeout_reports_nonzero_exit_without_erroring() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "exit 3"]);
+        let output = run_with_timeout(cmd, std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(output.status.code(), Some(3));
+    }
+
+    #[test]
+    fn run_with_timeout_kills_a_child_that_outlives_the_deadline() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "sleep 5"]);
+        let err = run_with_timeout(cmd, std::time::Duration::from_millis(100)).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+    }
 
     // #1669: first_credential_shaped_var
     #[test]
