@@ -83,7 +83,7 @@
     {
       "customType": "regex",
       "description": "Track DEFAULT_SANDBOX_IMAGE's digest pin in src/launch/mod.rs",
-      "fileMatch": ["^src/launch/mod\\.rs$"],
+      "managerFilePatterns": ["/^src/launch/mod\\.rs$/"],
       "matchStrings": [
         "// renovate: datasource=(?<datasource>.*?) depName=(?<depName>.*?) currentValue=(?<currentValue>.*?) versioning=(?<versioning>.*?)\\n.*?@(?<currentDigest>sha256:[a-f0-9]+)\"",
       ],
