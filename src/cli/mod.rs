@@ -2832,9 +2832,20 @@ fn emit_hook_guards() {
     // Guard 1: skip in non-interactive shells (no 'i' in $-) — e.g. subshells
     // spawned by Claude Code's Bash tool have no prompt and should never render.
     println!("  [[ $- != *i* ]] && return");
-    // Guard 2: skip if environment is already active — avoids redundant re-renders
-    // when a child interactive shell inherits the already-active environment.
-    println!("  [[ -n \"$LLMENV_STATE_DIR\" ]] && return");
+    // Guard 2: skip only while the inherited environment is still fresh for
+    // this directory — avoids redundant re-renders on every prompt (#338),
+    // without trusting an environment inherited from a different project
+    // (#1895). `$LLMENV_STATE_DIR` merely being set proved nothing about
+    // *which* project it was resolved for — a child shell forked into a
+    // different project directory (terminal multiplexers like tmux/zellij,
+    // or tools like herdr that fork panes off a parent shell) inherited the
+    // parent's config/tags/cache path and never re-exported. A recorded
+    // project root that no longer contains `$PWD` means the environment is
+    // stale; no recorded root at all (no project scope was active) has
+    // nothing to compare, so it stays on the fast path.
+    println!(
+        "  [[ -n \"$LLMENV_STATE_DIR\" && ( -z \"$LLMENV_PROJECT_ROOT\" || \"$PWD\"/ == \"$LLMENV_PROJECT_ROOT\"/* ) ]] && return"
+    );
 }
 
 fn run_hook(shell: &str) -> anyhow::Result<()> {

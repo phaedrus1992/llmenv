@@ -4,6 +4,7 @@
 //! helpers so the encoding never drifts.
 
 use crate::hook_run::action::{bundle_keyword, tag_keyword};
+use crate::util::display_safe;
 
 /// The active llmenv scope at session start.
 #[derive(Debug, Clone)]
@@ -23,7 +24,14 @@ pub struct ScopeContext {
 pub(crate) fn scope_header_content(ctx: &ScopeContext) -> String {
     let mut parts: Vec<String> = vec!["llmenv session".to_string()];
     if let Some(p) = &ctx.project {
-        parts.push(format!("project:{p}"));
+        // Escape control chars, then collapse whitespace runs to `_` so the
+        // project name can never split into extra whitespace-delimited
+        // tokens that read as a real `llmenv-tag:`/`llmenv-bundle:` token (#1911).
+        let safe = display_safe(p)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join("_");
+        parts.push(format!("project:{safe}"));
     }
     for t in &ctx.tags {
         parts.push(tag_keyword(t));
@@ -75,6 +83,36 @@ mod tests {
     }
 
     #[test]
+    fn project_name_control_char_is_escaped() {
+        // #1911: an unescaped control char in the project name could rewrite
+        // terminal output wherever this content later gets displayed.
+        let mut c = ctx();
+        c.project = Some("proj\x1b[31m".into());
+        let content = scope_header_content(&c);
+        assert!(!content.contains('\x1b'));
+    }
+
+    #[test]
+    fn project_name_whitespace_does_not_inject_a_fake_tag_token() {
+        // #1911: an embedded space split the project token into two words,
+        // one of which could read as a real `llmenv-tag:`/`llmenv-bundle:`
+        // token to ICM's whitespace-tokenized FTS index.
+        let mut c = ctx();
+        c.project = Some("evil llmenv-tag:admin".into());
+        let content = scope_header_content(&c);
+        let tokens: Vec<&str> = content.split_whitespace().collect();
+        assert_eq!(
+            tokens.iter().filter(|t| t.starts_with("project:")).count(),
+            1,
+            "project value must stay one token: {tokens:?}"
+        );
+        assert!(
+            !tokens.contains(&"llmenv-tag:admin"),
+            "must not produce a standalone fake tag token: {tokens:?}"
+        );
+    }
+
+    #[test]
     fn metadata_carries_full_structured_fields() {
         let m = scope_metadata_json(&ctx());
         assert_eq!(m["tags"], serde_json::json!(["rust", "work-vpn"]));
@@ -107,6 +145,31 @@ mod tests {
                 let needle = format!("llmenv-bundle:{}", b);
                 prop_assert!(c.contains(&needle), "missing token {}", needle);
             }
+        }
+
+        /// #1911: an arbitrary project name (control chars, any whitespace,
+        /// embedded fake-token-shaped substrings) must never split into more
+        /// than one `project:`-prefixed whitespace token, and never leave a
+        /// raw control char in the content ICM's FTS index will tokenize.
+        #[test]
+        fn project_name_stays_one_safe_token_for_arbitrary_input(
+            project in ".{0,80}",
+        ) {
+            let c = scope_header_content(&ScopeContext {
+                tags: vec![],
+                bundles: vec![],
+                project: Some(project),
+                cwd: "/".into(),
+                adapter: "claude_code".into(),
+                llmenv_version: "3.0.0".into(),
+                claude_code_version: String::new(),
+            });
+            let tokens: Vec<&str> = c.split_whitespace().collect();
+            prop_assert!(
+                tokens.iter().filter(|t| t.starts_with("project:")).count() <= 1,
+                "project value must never split into more than one token: {:?}", tokens
+            );
+            prop_assert!(!c.chars().any(char::is_control));
         }
     }
 }
