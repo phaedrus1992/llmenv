@@ -2324,9 +2324,13 @@ fn purge_stale_owned_hooks(
 /// path whose plugin id is missing from the current enabled set. A hook that
 /// can't be traced to any remembered plugin directory — a first-party
 /// plugin's hook (no separate install path to remember), a user's own hook,
-/// or an llmenv-rendered hook — is always left alone. A missing or non-object
-/// `enabledPlugins` is treated as an empty enabled set, so removing every
-/// plugin still purges every one of their previously-tracked hooks rather
+/// or an llmenv-rendered hook — is always left alone. This is a benign-plugin
+/// assumption, not a hardening boundary: a hook command that resolves through
+/// a symlink placed inside the plugin's own install directory but pointing
+/// outside it is untraceable and survives purge, same as any other
+/// untraceable hook. A missing or non-object `enabledPlugins` is treated as
+/// an empty enabled set, so removing every plugin still purges every one of
+/// their previously-tracked hooks rather
 /// than skipping the purge.
 fn purge_hooks_from_disabled_plugins(
     existing: &mut serde_json::Value,
