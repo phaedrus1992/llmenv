@@ -18,11 +18,18 @@ permissions:
   contents: read
 
 concurrency:
-  # #1912: a pull_request-triggered retry groups on its own head ref (the
-  # forward-merge/<source>-to-<target> branch name), not github.ref (which
-  # for a pull_request event is the synthetic refs/pull/<n>/merge ref, never
-  # equal to the push-triggered group for the same source branch).
-  group: forward-merge-${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
+  # #1912: one shared group for every trigger, not one per source branch.
+  # Every cascade in this repo eventually reaches `main` (release/3.x ->
+  # release/4.x -> main; release/4.x -> main directly), so two cascades from
+  # different source branches already raced on `main` even before this
+  # trigger existed. Keying the group on the source branch (as upstream does)
+  # only avoids that race once FORWARD_MERGE_PAT forces every push through
+  # the PR path too (#1504) -- not ported here, so a push-triggered cascade
+  # still pushes directly. Adding the pull_request retry raises the odds of
+  # hitting that pre-existing race (a retry fires right as a new commit may
+  # also land on the source branch), so this port closes it with one global
+  # lock instead of copying the per-branch key upstream's fuller port relies on.
+  group: forward-merge-cascade
   cancel-in-progress: false
 
 jobs:
