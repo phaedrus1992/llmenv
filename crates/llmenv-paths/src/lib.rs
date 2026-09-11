@@ -217,7 +217,9 @@ fn config_dir_with_env(get_env: &impl Fn(&str) -> Option<String>) -> anyhow::Res
     // A set-but-empty override (`LLMENV_CONFIG_DIR=`) must fall through to the
     // `$HOME` default rather than resolving to a relative `PathBuf::from("")` (#1111).
     if let Some(dir) = get_env("LLMENV_CONFIG_DIR").filter(|d| !d.is_empty()) {
-        Ok(PathBuf::from(dir))
+        // Same bug class as #1910: a tilde-prefixed override is a directory
+        // path, not a literal string, and must be expanded like any other.
+        Ok(PathBuf::from(expand_tilde_with_env(&dir, get_env)))
     } else {
         // A set-but-empty `HOME` has the identical failure mode as the override
         // above (a relative `PathBuf::from("")`-derived path) — treat it as
@@ -243,7 +245,9 @@ fn state_dir_with_env(get_env: &impl Fn(&str) -> Option<String>) -> anyhow::Resu
     // A set-but-empty override (`LLMENV_STATE_DIR=`) must fall through to the
     // `$HOME` default rather than resolving to a relative `PathBuf::from("")` (#1111).
     if let Some(dir) = get_env("LLMENV_STATE_DIR").filter(|d| !d.is_empty()) {
-        Ok(PathBuf::from(dir))
+        // Same bug class as #1910: a tilde-prefixed override is a directory
+        // path, not a literal string, and must be expanded like any other.
+        Ok(PathBuf::from(expand_tilde_with_env(&dir, get_env)))
     } else {
         // Same reasoning as `config_dir_with_env`: a set-but-empty `HOME` must
         // also be treated as unset, not just the override.
@@ -924,6 +928,21 @@ mod tests {
     }
 
     #[test]
+    fn state_dir_with_env_tilde_override_is_expanded() {
+        // Same bug class as #1910's Config::load fix: LLMENV_STATE_DIR=~/foo
+        // must not be treated as a literal directory named "~".
+        let get_env = |name: &str| match name {
+            "LLMENV_STATE_DIR" => Some("~/custom-state".to_string()),
+            "HOME" => Some("/home/user".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            state_dir_with_env(&get_env).unwrap(),
+            PathBuf::from("/home/user/custom-state")
+        );
+    }
+
+    #[test]
     fn state_dir_with_env_empty_home_errors_instead_of_relative_path() {
         let get_env = |name: &str| match name {
             "HOME" => Some(String::new()),
@@ -973,6 +992,21 @@ mod tests {
         assert_eq!(
             config_dir_with_env(&get_env).unwrap(),
             PathBuf::from("/custom/config")
+        );
+    }
+
+    #[test]
+    fn config_dir_with_env_tilde_override_is_expanded() {
+        // Same bug class as #1910's Config::load fix: LLMENV_CONFIG_DIR=~/foo
+        // must not be treated as a literal directory named "~".
+        let get_env = |name: &str| match name {
+            "LLMENV_CONFIG_DIR" => Some("~/custom-config".to_string()),
+            "HOME" => Some("/home/user".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            config_dir_with_env(&get_env).unwrap(),
+            PathBuf::from("/home/user/custom-config")
         );
     }
 
