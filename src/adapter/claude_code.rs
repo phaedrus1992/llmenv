@@ -2319,14 +2319,15 @@ fn purge_stale_owned_hooks(
 /// disabled or removed is absent from this round's resolved plugin list, so its
 /// install path can only come from what llmenv remembered on the prior render.
 ///
-/// A hook is purged only when its `command` resolves (after canonicalization)
-/// under a *remembered* install path whose plugin id is missing from the
-/// current enabled set. A hook that can't be traced to any remembered plugin
-/// directory — a first-party plugin's hook (no separate install path to
-/// remember), a user's own hook, or an llmenv-rendered hook — is always left
-/// alone. A missing or non-object `enabledPlugins` is treated as an empty
-/// enabled set, so removing every plugin still purges every one of their
-/// previously-tracked hooks rather than skipping the purge.
+/// A hook is purged only when a whitespace-separated, path-like token of its
+/// `command` resolves (after canonicalization) under a *remembered* install
+/// path whose plugin id is missing from the current enabled set. A hook that
+/// can't be traced to any remembered plugin directory — a first-party
+/// plugin's hook (no separate install path to remember), a user's own hook,
+/// or an llmenv-rendered hook — is always left alone. A missing or non-object
+/// `enabledPlugins` is treated as an empty enabled set, so removing every
+/// plugin still purges every one of their previously-tracked hooks rather
+/// than skipping the purge.
 fn purge_hooks_from_disabled_plugins(
     existing: &mut serde_json::Value,
     prev_plugin_paths: Option<&serde_json::Value>,
@@ -2342,11 +2343,28 @@ fn purge_hooks_from_disabled_plugins(
 
     // Only a plugin no longer in the enabled set is a purge candidate; its
     // remembered directory is where a stale self-registered hook would live.
+    // A remembered path that no longer canonicalizes (the plugin's cache was
+    // pruned) is silently dropped rather than blocking the purge for every
+    // other still-traceable plugin.
     let disabled_roots: Vec<PathBuf> = prev_paths
         .iter()
         .filter(|(id, _)| !enabled_set.contains(id.as_str()))
-        .filter_map(|(_, path)| path.as_str())
-        .filter_map(|path| Path::new(path).canonicalize().ok())
+        .filter_map(|(id, path)| {
+            let path = path.as_str()?;
+            match Path::new(path).canonicalize() {
+                Ok(root) => Some(root),
+                Err(e) => {
+                    tracing::debug!(
+                        plugin = %id,
+                        path,
+                        error = %e,
+                        "remembered plugin install path no longer resolves; \
+                         its hooks won't be traced this round"
+                    );
+                    None
+                }
+            }
+        })
         .collect();
     if disabled_roots.is_empty() {
         return;
@@ -2367,15 +2385,34 @@ fn purge_hooks_from_disabled_plugins(
                 let traced_to_disabled_plugin = hook
                     .get("command")
                     .and_then(|v| v.as_str())
-                    .and_then(|cmd| Path::new(cmd).canonicalize().ok())
-                    .is_some_and(|cmd_path| {
-                        disabled_roots.iter().any(|root| cmd_path.starts_with(root))
+                    .is_some_and(|cmd| {
+                        disabled_roots
+                            .iter()
+                            .any(|root| command_points_under(cmd, root))
                     });
                 !traced_to_disabled_plugin
             });
             !hooks.is_empty()
         });
     }
+}
+
+/// True if a whitespace-separated, path-like token of `command` canonicalizes
+/// to a path under `root`.
+///
+/// A self-registered hook's `command` is realistically a full shell
+/// invocation (`"node <script>"`, `"bash <script> <args>"`), not a bare path —
+/// canonicalizing the whole string as one path only ever matches a hook with
+/// no interpreter prefix and no arguments, missing the common case entirely.
+/// Mirrors the path-like-token heuristic [`resolve_bundle_relative_paths`]
+/// already uses for the same class of hook-command string.
+fn command_points_under(command: &str, root: &Path) -> bool {
+    command.split_whitespace().any(|token| {
+        token.contains('/')
+            && Path::new(token)
+                .canonicalize()
+                .is_ok_and(|p| p.starts_with(root))
+    })
 }
 
 /// Render one marketplace's `extraKnownMarketplaces` entry body, or `None` if it
@@ -5707,6 +5744,40 @@ mod tests {
         assert!(
             sessions.is_none_or(|a| a.is_empty()),
             "hook from a disabled plugin must be purged: {:?}",
+            out["hooks"]
+        );
+    }
+
+    #[test]
+    fn reconcile_purges_hook_whose_command_has_an_interpreter_prefix() {
+        // A self-registered hook's command is realistically a multi-token shell
+        // invocation like "node <script>", not a bare path — this is the exact
+        // shape context-mode's own cache-heal hook uses (see
+        // reconcile_preserves_context_mode_self_registered_hook above). The whole
+        // string can't be canonicalized as one path; the path-like token inside
+        // it must be picked out first.
+        use serde_json::json;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        let (plugin_dir, script) = fake_plugin_hook(tmp.path(), "some-plugin", "self-heal.mjs");
+
+        let on_disk = json!({
+            "hooks": { "SessionStart": [
+                { "hooks": [ { "type": "command",
+                  "command": format!("node {}", script.to_string_lossy()) } ] }
+            ] }
+        });
+        std::fs::write(&path, serde_json::to_vec(&on_disk).unwrap()).unwrap();
+
+        let prev_plugin_paths = json!({ "some-plugin@some-market": plugin_dir.to_string_lossy() });
+        let fresh = json!({ "hooks": {} });
+
+        let out = reconcile_settings(&path, fresh, None, Some(&prev_plugin_paths))
+            .expect("reconcile_settings should succeed");
+        let sessions = out["hooks"].get("SessionStart").and_then(|v| v.as_array());
+        assert!(
+            sessions.is_none_or(|a| a.is_empty()),
+            "a hook with an interpreter-prefixed command must still be purged: {:?}",
             out["hooks"]
         );
     }
