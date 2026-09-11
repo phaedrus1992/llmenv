@@ -564,6 +564,59 @@ test_1381_non_version_change_bails() {
 }
 
 # ---------------------------------------------------------------------------
+# Test 10 (Issue #1912): retry trigger determines the correct source branch
+#
+# The cascade halts when forward-merge/<source>-to-<target> is already open,
+# and nothing re-fires once that PR merges (push only fires once per commit).
+# A pull_request(closed) trigger re-derives the source branch from the merged
+# branch's own name and re-checks it out, so the rest of the job runs exactly
+# as if the source had just been pushed again.
+#
+# This mirrors the "Determine source branch" step in forward-merge-release.yml.
+# Callers export: EVENT_NAME PUSHED_REF PR_HEAD_REF.
+# ---------------------------------------------------------------------------
+determine_source_block() {
+  cat <<'SHELL'
+set -euo pipefail
+if [[ "$EVENT_NAME" == "push" ]]; then
+  echo "ref=$PUSHED_REF"
+else
+  rest="${PR_HEAD_REF#forward-merge/}"
+  source_branch="${rest%-to-*}"
+  if [[ ! "$source_branch" =~ ^(release/[0-9]+\.x|main)$ ]]; then
+    echo "::error::could not parse a valid source branch out of forward-merge PR head ref '$PR_HEAD_REF' (expected forward-merge/<source>-to-<target>, source one of release/X.x or main)"
+    exit 1
+  fi
+  echo "ref=$source_branch"
+fi
+SHELL
+}
+
+test_1912_push_event_uses_pushed_ref() {
+  local out
+  out=$(EVENT_NAME=push PUSHED_REF=release/3.x PR_HEAD_REF='' \
+    bash -c "$(determine_source_block)" 2>&1 || true)
+  [[ "$out" == "ref=release/3.x" ]]
+}
+
+test_1912_merged_pr_parses_source_from_branch_name() {
+  local out
+  out=$(EVENT_NAME=pull_request PUSHED_REF='' \
+    PR_HEAD_REF="forward-merge/release/3.x-to-main" \
+    bash -c "$(determine_source_block)" 2>&1 || true)
+  [[ "$out" == "ref=release/3.x" ]]
+}
+
+test_1912_malformed_head_ref_fails_loudly_instead_of_silent_fallback() {
+  local out rc
+  out=$(EVENT_NAME=pull_request PUSHED_REF='' \
+    PR_HEAD_REF="forward-merge/not-a-real-branch" \
+    bash -c "$(determine_source_block)" 2>&1)
+  rc=$?
+  [[ "$rc" -ne 0 ]] && echo "$out" | grep -q "::error::could not parse a valid source branch"
+}
+
+# ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
 run_test "Issue #476: branch-exists guard prevents overwrite of in-progress resolution" \
@@ -592,6 +645,15 @@ run_test "Issue #1381: version-only manifest conflict keeps the target's version
 
 run_test "Issue #1381: a manifest change beyond the version bails instead of dropping it" \
   test_1381_non_version_change_bails
+
+run_test "Issue #1912: push event uses the pushed ref as the source branch" \
+  test_1912_push_event_uses_pushed_ref
+
+run_test "Issue #1912: merged forward-merge PR parses its source branch from its own head ref" \
+  test_1912_merged_pr_parses_source_from_branch_name
+
+run_test "Issue #1912: malformed head ref fails loudly instead of falling back silently" \
+  test_1912_malformed_head_ref_fails_loudly_instead_of_silent_fallback
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
