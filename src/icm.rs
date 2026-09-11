@@ -19,20 +19,11 @@ struct IcmMemory {
     bundles: Vec<String>,
 }
 
-/// Generate a minimal ICM context chunk for storage.
-/// Contains only variable parts (tags, bundles, project info) without boilerplate.
-/// Reduces token waste when the same boilerplate instruction is stored per-project.
-/// The full instruction text is provided once in the SessionStart hook injection.
-///
-/// # Example output
-/// ```text
-/// ## llmenv context
-/// Active tags: `work-vpn`, `rust`
-/// Bundles: `bundle1`, `bundle2`
-///
-/// **Project:** MyProject — A test project
-/// ```
-pub(crate) fn generate_minimal_chunk(active: &ActiveScopes, bundles: &[String]) -> String {
+/// Build the `## llmenv context` header shared by [`generate_minimal_chunk`]
+/// and [`generate_context_chunk`]: the tags/bundles summary lines, with no
+/// trailing content. Both callers append their own suffix (boilerplate
+/// instruction, project info) after this.
+fn context_header(active: &ActiveScopes, bundles: &[String]) -> String {
     let tags_str = if active.tags.is_empty() {
         "(none)".to_string()
     } else {
@@ -54,12 +45,16 @@ pub(crate) fn generate_minimal_chunk(active: &ActiveScopes, bundles: &[String]) 
             .join(", ")
     };
 
-    let mut chunk = format!(
+    format!(
         "## llmenv context\nActive tags: {}\nBundles: {}",
         tags_str, bundles_str
-    );
+    )
+}
 
-    // Add project description if present.
+/// Append the active project's name/description to `chunk`, if a project
+/// scope is present. Shared suffix for [`generate_minimal_chunk`] and
+/// [`generate_context_chunk`].
+fn append_project_info(chunk: &mut String, active: &ActiveScopes) {
     for scope in &active.scopes {
         if scope.kind == "project"
             && let Some(name) = &scope.name
@@ -72,7 +67,24 @@ pub(crate) fn generate_minimal_chunk(active: &ActiveScopes, bundles: &[String]) 
             }
         }
     }
+}
 
+/// Generate a minimal ICM context chunk for storage.
+/// Contains only variable parts (tags, bundles, project info) without boilerplate.
+/// Reduces token waste when the same boilerplate instruction is stored per-project.
+/// The full instruction text is provided once in the SessionStart hook injection.
+///
+/// # Example output
+/// ```text
+/// ## llmenv context
+/// Active tags: `work-vpn`, `rust`
+/// Bundles: `bundle1`, `bundle2`
+///
+/// **Project:** MyProject — A test project
+/// ```
+pub(crate) fn generate_minimal_chunk(active: &ActiveScopes, bundles: &[String]) -> String {
+    let mut chunk = context_header(active, bundles);
+    append_project_info(&mut chunk, active);
     chunk
 }
 
@@ -90,53 +102,16 @@ pub(crate) fn generate_minimal_chunk(active: &ActiveScopes, bundles: &[String]) 
 /// - Memory will be retrieved in any project using tag `work-vpn`
 /// ```
 pub fn generate_context_chunk(active: &ActiveScopes, bundles: &[String]) -> String {
-    let tags_str = if active.tags.is_empty() {
-        "(none)".to_string()
-    } else {
-        active
-            .tags
-            .iter()
-            .map(|t| format!("`{}`", t))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-
-    let bundles_str = if bundles.is_empty() {
-        "(none)".to_string()
-    } else {
-        bundles
-            .iter()
-            .map(|b| format!("`{}`", b))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-
-    let mut chunk = format!(
-        "## llmenv context\n\
-         Active tags: {}\n\
-         Bundles: {}\n\n\
+    let mut chunk = context_header(active, bundles);
+    chunk.push_str(
+        "\n\n\
          Store scope-specific memory under keyword `llmenv-tag:<tag>` (per tag) \
          or `llmenv-bundle:<bundle>` (per bundle) so it is retrievable across \
          projects. On each turn, llmenv auto-recalls memory under these tags' \
          `llmenv-tag:<tag>` and bundles' `llmenv-bundle:<bundle>` keywords \
          across all projects.",
-        tags_str, bundles_str
     );
-
-    // Add project description if present.
-    for scope in &active.scopes {
-        if scope.kind == "project"
-            && let Some(name) = &scope.name
-        {
-            chunk.push_str("\n\n**Project:** ");
-            chunk.push_str(name);
-            if let Some(desc) = &scope.description {
-                chunk.push_str(" — ");
-                chunk.push_str(desc);
-            }
-        }
-    }
-
+    append_project_info(&mut chunk, active);
     chunk
 }
 
@@ -342,6 +317,33 @@ mod tests {
             let json = serde_json::to_string(&memory).expect("serialize");
             let decoded: IcmMemory = serde_json::from_str(&json).expect("deserialize");
             prop_assert_eq!(memory, decoded);
+        }
+
+        // #1792: generate_minimal_chunk includes every input tag and bundle,
+        // each wrapped in backticks, and never contains the boilerplate
+        // instruction paragraph reserved for generate_context_chunk.
+        #[test]
+        fn minimal_chunk_includes_all_tags_and_bundles(
+            tags in proptest::collection::vec("[a-zA-Z0-9_-]{1,20}", 0..8),
+            bundles in proptest::collection::vec("[a-zA-Z0-9_-]{1,20}", 0..8),
+        ) {
+            let active = ActiveScopes {
+                scopes: vec![],
+                tags: tags.iter().cloned().collect(),
+                ..Default::default()
+            };
+            let chunk = generate_minimal_chunk(&active, &bundles);
+
+            for tag in &tags {
+                let wrapped = format!("`{}`", tag);
+                prop_assert!(chunk.contains(&wrapped));
+            }
+            for bundle in &bundles {
+                let wrapped = format!("`{}`", bundle);
+                prop_assert!(chunk.contains(&wrapped));
+            }
+            prop_assert!(!chunk.contains("Store scope-specific memory"));
+            prop_assert!(chunk.starts_with("## llmenv context"));
         }
 
         // #146: store + recall via filesystem preserves data integrity.
