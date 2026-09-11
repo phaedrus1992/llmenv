@@ -2657,9 +2657,9 @@ mod tests {
         MODELED_SETTINGS_KEYS, classify_claude_path, dedup_hooks_doc,
         generate_installed_plugins_json, generate_settings_json, is_hook_json,
         merge_mcp_into_claude_json, normalize_deprecated_tool, overlay_native, permission_mode_str,
-        purge_hooks_from_disabled_plugins, read_owned_servers, reconcile_settings,
-        reject_modeled_keys_in_catch_all, render_marketplace_source, render_permission_rule,
-        seed_install_method, seed_status_line,
+        plugin_install_paths_json, purge_hooks_from_disabled_plugins, read_owned_servers,
+        reconcile_settings, reject_modeled_keys_in_catch_all, render_marketplace_source,
+        render_permission_rule, seed_install_method, seed_status_line,
     };
     use crate::adapter::skills::{
         arb_distinct_resolved_mcps, arb_yaml_value, reject_hardcoded_config_path, validate_skills,
@@ -6021,6 +6021,50 @@ mod tests {
             let prev_plugin_paths = serde_json::json!({ "some@market": tmp.path().to_string_lossy() });
             let enabled_plugins = serde_json::json!({});
             purge_hooks_from_disabled_plugins(&mut existing, Some(&prev_plugin_paths), Some(&enabled_plugins));
+        }
+
+        // plugin_install_paths_json's map/filter invariant: every output
+        // key/value pair corresponds to a resolved plugin with Some(install_path),
+        // and a plugin with no install_path is never a key. `hash_map` keys on
+        // (marketplace, plugin) so generated ids are unique by construction,
+        // matching ResolvedPlugins' own "deduplicated by (marketplace, plugin)"
+        // invariant.
+        #[test]
+        fn plugin_install_paths_json_matches_source_plugins(
+            entries in prop::collection::hash_map(
+                (any::<String>(), any::<String>()),
+                proptest::option::of(any::<String>()),
+                0..8,
+            )
+        ) {
+            let resolved: Vec<ResolvedPlugin> = entries
+                .into_iter()
+                .map(|((marketplace, plugin), install_path)| ResolvedPlugin {
+                    marketplace,
+                    plugin,
+                    collection: "test".into(),
+                    install_path,
+                    git_commit_sha: None,
+                })
+                .collect();
+
+            let out = plugin_install_paths_json(&resolved);
+            let map = out.as_object().unwrap();
+
+            for p in &resolved {
+                let key = format!("{}@{}", p.plugin, p.marketplace);
+                match &p.install_path {
+                    Some(path) => prop_assert_eq!(
+                        map.get(&key).and_then(|v| v.as_str()),
+                        Some(path.as_str())
+                    ),
+                    None => prop_assert!(!map.contains_key(&key)),
+                }
+            }
+            prop_assert_eq!(
+                map.len(),
+                resolved.iter().filter(|p| p.install_path.is_some()).count()
+            );
         }
     }
 
