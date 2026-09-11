@@ -72,7 +72,7 @@ jiff = { version = "=0.2.35", default-features = false, features = ["std"] }
 anstyle = "=1.0.14"
 globset = { workspace = true }
 schemars = "=1.2.2"
-reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "json", "blocking"] }
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "json", "blocking"] }
 url = "=2.5.8"
 # Hostname via the uname(2) syscall instead of spawning the `hostname` binary on
 # every hook-run ("system" enables uname). "process" enables kill_process_group
