@@ -1743,6 +1743,22 @@ mod tests {
         assert_eq!(started.state, TaskState::Wip);
     }
 
+    // #1909: repro for the reported hard-block — a blocker that passed through
+    // `waiting` before `done` must resolve exactly like a blocker that went
+    // straight from open to done.
+    #[test]
+    fn start_task_allows_when_blocker_went_through_waiting_before_done() {
+        let dir = TempDir::new().expect("test");
+        let blocker = mk(dir.path(), "Blocker task", None).expect("test");
+        let task = mk(dir.path(), "Blocked task", None).expect("test");
+        block_task(dir.path(), &task.slug, &blocker.slug).expect("test");
+        start_task(dir.path(), &blocker.slug, false).expect("test");
+        wait_task(dir.path(), &blocker.slug, "needs input").expect("test");
+        done_task(dir.path(), &blocker.slug).expect("test");
+        let started = start_task(dir.path(), &task.slug, false).expect("test");
+        assert_eq!(started.state, TaskState::Wip);
+    }
+
     #[test]
     fn start_task_allows_when_blocker_is_done() {
         let dir = TempDir::new().expect("test");

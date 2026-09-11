@@ -10,6 +10,7 @@ use tracing_subscriber::layer::Context;
 
 use crate::session_log::event::{EventKind, EventScope, SessionLogEvent, now_rfc3339};
 use crate::session_log::file_sink::FileSink;
+use crate::util::display_safe;
 
 /// A `tracing_subscriber::Layer` that appends `info!`+ events to a `FileSink`.
 #[derive(Debug)]
@@ -32,7 +33,11 @@ struct MessageVisitor {
 impl Visit for MessageVisitor {
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
         if field.name() == "message" {
-            self.message = format!("{value:?}");
+            // A message can interpolate an attacker-influenced string (a file
+            // path, a rejected tag/bundle name); escape control chars so a
+            // tool that later prints `content` raw (e.g. `jq -r`) can't have
+            // its terminal output rewritten.
+            self.message = display_safe(&format!("{value:?}")).into_owned();
         }
     }
 }
@@ -111,6 +116,30 @@ mod tests {
                 .contains("materialized 3 files")
         );
         assert_eq!(v["fields"]["target"], "llmenv::materialize");
+    }
+
+    #[test]
+    fn control_char_in_message_is_escaped() {
+        // A tracing call can interpolate an attacker-influenced string (a
+        // file path, a rejected tag/bundle name). Unescaped, a control char
+        // survives the JSON round trip and can rewrite a terminal when a
+        // tool like `jq -r` prints `content` raw.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        capture_file_logs_at(
+            &path,
+            tracing_subscriber::filter::LevelFilter::TRACE,
+            || {
+                tracing::info!(target: "llmenv::test", "value is {}", "\x1b[31mred\x1b[0m");
+            },
+        );
+        let body = std::fs::read_to_string(&path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(body.lines().next().unwrap()).unwrap();
+        let content = v["content"].as_str().unwrap();
+        assert!(
+            !content.contains('\x1b'),
+            "raw ESC must not survive into content: {content}"
+        );
     }
 
     #[test]
