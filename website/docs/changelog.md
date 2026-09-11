@@ -111,6 +111,13 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 
 ## [Unreleased] - ReleaseDate
 
+### Fixed
+
+- `Config::load` now expands a leading `~`/`~user` in the config path itself instead of relying on a `debug_assert` the release build compiled out — a release build previously accepted a tilde-prefixed path silently and failed later with a confusing "failed to read config file" error instead of resolving it. Only `~` itself goes through string handling; the rest of the path joins back on as raw bytes, so a non-UTF-8 path is never mangled either way. `LLMENV_CONFIG_DIR`/`LLMENV_STATE_DIR` had the identical gap — a tilde-prefixed override silently resolved to a literal `./~/...` directory relative to cwd — and are fixed the same way. (#1910)
+- The shell hook's (`llmenv hook zsh|bash`) guard against redundant re-renders now compares `$PWD` against the project root it last resolved for, instead of only checking that `$LLMENV_STATE_DIR` is set. A child shell forked into a different project directory — a tmux/zellij pane, or a tool like herdr that forks panes off a parent shell — kept the parent's config, tags, and cache path indefinitely instead of picking up its own project's scope. (#1895)
+- The scope-header session-log event now sanitizes the project name the same way tags and bundles already are: control characters are escaped and whitespace runs collapse to `_`. A project name with a control character or embedded space could previously rewrite terminal output or inject a fake `llmenv-tag:`/`llmenv-bundle:` token into content ICM's FTS index searches. llmenv's own internal `tracing` log messages get the same control-character escaping now, for the same reason. See [Finding a session later](https://phaedrus1992.github.io/llmenv/docs/configuration#finding-a-session-later) (#1911)
+- The forward-merge cascade now retries once a blocking `forward-merge/<source>-to-<target>` PR clears, instead of leaving every commit that piled up on the source branch during the wait un-propagated forever, and every cascade trigger now serializes on one shared lock instead of racing on `main`. Only affects the release automation, not the shipped binary. (#1912)
+
 ## [3.11.1] - 2026-08-25
 
 One change since 3.11.0, and it's a security-posture one: llmenv stops pinning two of codebase-memory-mcp's launch defaults, `CBM_CACHE_DIR` and `CBM_ALLOWED_ROOT`, leaving scope control to the tool's own defaults and whoever configures it.
