@@ -99,7 +99,11 @@ Where `shape` is a 12-hex SHA-256 over the active tags ∪ enabled bundles.
 - **Reconciliation (version mode):** on re-render, a file llmenv owned last time
   but not this time (a dropped `rules/*.md`, a removed plugin) is deleted, while
   any file llmenv never owned is left untouched. `settings.json` is *merged*, not
-  overwritten, so a plugin that self-registered a hook into it survives.
+  overwritten, so a plugin that self-registered a hook into it survives — but
+  only while the plugin stays enabled. Disabling or removing a plugin purges a
+  hook traceable to that plugin's own resolved install directory (added in
+  v3.11.2); a hook a plugin registers somewhere else entirely is not yet
+  covered.
 - `VERSION_TAG` is `<pkg_version>-<git_short_hash>` (baked in at build time).
 - Plugin marketplaces are cloned once into `<cache_dir>/marketplaces/<name>/` and
   shared across scopes; the resolved git HEAD is mixed into the content hash so a
