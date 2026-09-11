@@ -5915,6 +5915,116 @@ mod tests {
     }
 
     #[test]
+    fn purge_never_matches_sibling_plugin_directory_with_overlapping_name_prefix() {
+        // Path::starts_with is component-based: a root "some-plugin" must never
+        // match a hook living under the sibling directory "some-plugin-2", even
+        // though the string "some-plugin" is a text prefix of "some-plugin-2".
+        use serde_json::json;
+        let tmp = tempfile::tempdir().unwrap();
+        let (disabled_dir, _disabled_script) = fake_plugin_hook(tmp.path(), "some-plugin", "a.sh");
+        let (_sibling_dir, sibling_script) = fake_plugin_hook(tmp.path(), "some-plugin-2", "a.sh");
+
+        let mut existing = json!({ "SessionStart": [
+            { "hooks": [ { "type": "command", "command": sibling_script.to_string_lossy() } ] }
+        ] });
+        let prev_plugin_paths =
+            json!({ "some-plugin@some-market": disabled_dir.to_string_lossy() });
+        let enabled_plugins = json!({}); // "some-plugin" is disabled
+
+        purge_hooks_from_disabled_plugins(
+            &mut existing,
+            Some(&prev_plugin_paths),
+            Some(&enabled_plugins),
+        );
+
+        let commands: Vec<String> = existing["SessionStart"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|e| e["hooks"].as_array().unwrap())
+            .filter_map(|h| h["command"].as_str().map(str::to_owned))
+            .collect();
+        assert!(
+            commands.iter().any(|c| c.contains("some-plugin-2")),
+            "a hook under a sibling directory with an overlapping name prefix \
+             must never be treated as belonging to the disabled plugin: {commands:?}"
+        );
+    }
+
+    proptest! {
+        // Core correctness invariant: a hook survives iff its owning plugin
+        // (traced through a real, canonicalizable install directory) is still
+        // in the enabled set — covering every enabled/disabled combination of
+        // two independent plugins, not just the one fixed scenario the example
+        // tests above exercise.
+        #[test]
+        fn purge_removes_hook_iff_its_plugin_is_disabled(
+            a_enabled in any::<bool>(),
+            b_enabled in any::<bool>(),
+        ) {
+            use serde_json::json;
+            let tmp = tempfile::tempdir().unwrap();
+            let (dir_a, script_a) = fake_plugin_hook(tmp.path(), "plugin-a", "hook.sh");
+            let (dir_b, script_b) = fake_plugin_hook(tmp.path(), "plugin-b", "hook.sh");
+
+            let mut existing = json!({ "SessionStart": [
+                { "hooks": [ { "type": "command", "command": script_a.to_string_lossy() } ] },
+                { "hooks": [ { "type": "command", "command": script_b.to_string_lossy() } ] },
+            ] });
+            let prev_plugin_paths = json!({
+                "plugin-a@market": dir_a.to_string_lossy(),
+                "plugin-b@market": dir_b.to_string_lossy(),
+            });
+            let mut enabled = serde_json::Map::new();
+            if a_enabled {
+                enabled.insert("plugin-a@market".to_string(), json!(true));
+            }
+            if b_enabled {
+                enabled.insert("plugin-b@market".to_string(), json!(true));
+            }
+            let enabled_plugins = serde_json::Value::Object(enabled);
+
+            purge_hooks_from_disabled_plugins(&mut existing, Some(&prev_plugin_paths), Some(&enabled_plugins));
+
+            let commands: Vec<String> = existing["SessionStart"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|e| e["hooks"].as_array().unwrap())
+                .filter_map(|h| h["command"].as_str().map(str::to_owned))
+                .collect();
+            prop_assert_eq!(commands.iter().any(|c| c.contains(&*dir_a.file_name().unwrap().to_string_lossy())), a_enabled);
+            prop_assert_eq!(commands.iter().any(|c| c.contains(&*dir_b.file_name().unwrap().to_string_lossy())), b_enabled);
+        }
+
+        // Idempotence across arbitrary hooks docs, not just the one fixed
+        // scenario `purge_disabled_plugin_hooks_is_idempotent` exercises.
+        #[test]
+        fn purge_disabled_plugin_hooks_is_idempotent_for_arbitrary_docs(existing in arb_json()) {
+            let tmp = tempfile::tempdir().unwrap();
+            let prev_plugin_paths = serde_json::json!({ "some@market": tmp.path().to_string_lossy() });
+            let enabled_plugins = serde_json::json!({});
+
+            let mut once = existing.clone();
+            purge_hooks_from_disabled_plugins(&mut once, Some(&prev_plugin_paths), Some(&enabled_plugins));
+            let mut twice = once.clone();
+            purge_hooks_from_disabled_plugins(&mut twice, Some(&prev_plugin_paths), Some(&enabled_plugins));
+            prop_assert_eq!(once, twice);
+        }
+
+        // No-panic property over arbitrary (including malformed) hooks-doc
+        // shapes: a non-object entry, a "hooks" field that isn't an array, a
+        // non-string "command" — every shape arb_json can produce.
+        #[test]
+        fn purge_never_panics_on_arbitrary_hooks_json(mut existing in arb_json()) {
+            let tmp = tempfile::tempdir().unwrap();
+            let prev_plugin_paths = serde_json::json!({ "some@market": tmp.path().to_string_lossy() });
+            let enabled_plugins = serde_json::json!({});
+            purge_hooks_from_disabled_plugins(&mut existing, Some(&prev_plugin_paths), Some(&enabled_plugins));
+        }
+    }
+
+    #[test]
     fn generate_settings_json_purges_hook_after_plugin_disabled_across_renders() {
         use serde_json::json;
         let tmp = tempfile::tempdir().unwrap();
