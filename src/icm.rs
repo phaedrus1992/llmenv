@@ -19,6 +19,63 @@ struct IcmMemory {
     bundles: Vec<String>,
 }
 
+/// Generate a minimal ICM context chunk for storage.
+/// Contains only variable parts (tags, bundles, project info) without boilerplate.
+/// Reduces token waste when the same boilerplate instruction is stored per-project.
+/// The full instruction text is provided once in the SessionStart hook injection.
+///
+/// # Example output
+/// ```text
+/// ## llmenv context
+/// Active tags: `work-vpn`, `rust`
+/// Bundles: `bundle1`, `bundle2`
+///
+/// **Project:** MyProject — A test project
+/// ```
+pub(crate) fn generate_minimal_chunk(active: &ActiveScopes, bundles: &[String]) -> String {
+    let tags_str = if active.tags.is_empty() {
+        "(none)".to_string()
+    } else {
+        active
+            .tags
+            .iter()
+            .map(|t| format!("`{}`", t))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    let bundles_str = if bundles.is_empty() {
+        "(none)".to_string()
+    } else {
+        bundles
+            .iter()
+            .map(|b| format!("`{}`", b))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    let mut chunk = format!(
+        "## llmenv context\nActive tags: {}\nBundles: {}",
+        tags_str, bundles_str
+    );
+
+    // Add project description if present.
+    for scope in &active.scopes {
+        if scope.kind == "project"
+            && let Some(name) = &scope.name
+        {
+            chunk.push_str("\n\n**Project:** ");
+            chunk.push_str(name);
+            if let Some(desc) = &scope.description {
+                chunk.push_str(" — ");
+                chunk.push_str(desc);
+            }
+        }
+    }
+
+    chunk
+}
+
 /// Generate an ICM context chunk encoding the active tags/bundles.
 /// The chunk is formatted as a markdown block that agents can paste into ICM.
 ///
@@ -126,6 +183,34 @@ fn read_memory(path: &Path) -> anyhow::Result<IcmMemory> {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn test_minimal_chunk_omits_boilerplate() {
+        let mut tags = BTreeSet::new();
+        tags.insert("work-vpn".to_string());
+        tags.insert("rust".to_string());
+
+        let active = ActiveScopes {
+            scopes: vec![],
+            tags,
+            ..Default::default()
+        };
+
+        let minimal = generate_minimal_chunk(&active, &[]);
+        let full = generate_context_chunk(&active, &[]);
+
+        // Minimal chunk should be much shorter (no boilerplate instruction).
+        assert!(minimal.len() < full.len());
+
+        // Minimal chunk includes tags and project info.
+        assert!(minimal.contains("work-vpn"));
+        assert!(minimal.contains("rust"));
+        assert!(minimal.contains("## llmenv context"));
+
+        // But not the instruction paragraph (boilerplate in full chunk).
+        assert!(!minimal.contains("Store scope-specific memory"));
+        assert!(full.contains("Store scope-specific memory"));
+    }
 
     #[test]
     fn test_context_chunk_includes_tags() {

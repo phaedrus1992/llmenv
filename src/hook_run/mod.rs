@@ -1063,14 +1063,23 @@ fn run_inner(
         let tag_queries = tag_recall_queries(&tags)?;
         let bundle_queries = bundle_recall_queries(&bundles)?;
         let query = tags.join(", ");
+        // Generate full chunk for injection into hook context, and minimal chunk
+        // for storage. The minimal chunk omits boilerplate instruction text
+        // that is provided once in the SessionStart hook injection, not stored
+        // per-project. This reduces per-turn token waste. (#1792)
         let mut chunk = crate::icm::generate_context_chunk(&active, &bundles);
+        let mut storage_chunk = crate::icm::generate_minimal_chunk(&active, &bundles);
 
         // Apply default type/importance markers from config (R1, R3) when no explicit
         // marker is present in the generated chunk.
         chunk = apply_memory_config_defaults(chunk, &config, &active);
+        // Apply markers to storage chunk too (not just injection chunk).
+        storage_chunk = apply_memory_config_defaults(storage_chunk, &config, &active);
+
         // #317: folded into the chunk the SessionEnd store already sends,
         // rather than issuing a second `icm_memory_store` — one store per
         // session end keeps the memory readable and halves the round trips.
+        // Append session metrics to both chunks (injection and storage).
         if stores_session_metrics(event)
             && let Ok(state_dir) = crate::paths::state_dir()
             && let Some(summary) = crate::hook_run::slippage::session_metrics_summary(
@@ -1081,6 +1090,8 @@ fn run_inner(
         {
             chunk.push_str("\n\n");
             chunk.push_str(&summary);
+            storage_chunk.push_str("\n\n");
+            storage_chunk.push_str(&summary);
         }
 
         // Reuse MCP HTTP client across events: the memory backend URL doesn't
@@ -1123,7 +1134,7 @@ fn run_inner(
                     tracing::warn!("failed to read dedup cache {}: {e}", dedup_path.display())
                 })
                 .ok()
-                .is_some_and(|prev| prev == chunk);
+                .is_some_and(|prev| prev == storage_chunk);
             if is_unchanged {
                 debug!("chunk unchanged since last store, skipping");
                 if !log_cfg.any_sink_enabled() {
@@ -1171,7 +1182,12 @@ fn run_inner(
                 && !session_end_unchanged
             {
                 let actions = dispatch(event, &tag_queries, &bundle_queries, wakeup_max_tokens);
-                out = run_memory_actions(client, actions, &query, &chunk).await?;
+                // Use minimal chunk for storage to avoid duplication. (#1792)
+                let store_content = match event {
+                    HookEvent::SessionEnd => &storage_chunk,
+                    _ => &chunk,
+                };
+                out = run_memory_actions(client, actions, &query, store_content).await?;
 
                 // PostSession: run reflective consolidation (R5) in a detached
                 // child process so the hook returns immediately instead of
@@ -1195,10 +1211,11 @@ fn run_inner(
             // the store call means a transient MCP failure leaves the snapshot ahead
             // of reality — the next SessionEnd sees the chunk as unchanged and skips
             // the store, permanently losing the memory. (#594 code review)
+            // Store the minimal chunk in the dedup snapshot to match what was stored. (#1792)
             if let Some(dedup_path) = &session_end_dedup_path
                 && !session_end_unchanged
             {
-                crate::paths::write_owner_only_atomic(dedup_path, chunk.as_bytes())?;
+                crate::paths::write_owner_only_atomic(dedup_path, storage_chunk.as_bytes())?;
             }
 
             // #231: append the task-tracker Stop reminder. Only reached here when
