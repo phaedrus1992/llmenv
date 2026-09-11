@@ -1826,6 +1826,15 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     let hooks_sidecar = out.join(HOOKS_SIDECAR_FILE);
     let prev_owned_hooks = read_hooks_sidecar(&hooks_sidecar);
 
+    // #1793: the external plugins' install paths llmenv is rendering as enabled
+    // this round, captured before reconcile consumes `settings_value`. A plugin
+    // dropped from config next time won't be in `manifest.plugins` any more, so
+    // its install path can only come from this sidecar — that's what lets the
+    // next reconcile trace a self-registered hook back to a now-disabled plugin.
+    let plugin_paths_sidecar = out.join(PLUGIN_INSTALL_PATHS_SIDECAR_FILE);
+    let prev_plugin_paths = read_hooks_sidecar(&plugin_paths_sidecar);
+    let rendered_plugin_paths = plugin_install_paths_json(&manifest.plugins);
+
     // #196/#175: in version mode `out` is the agent's live config dir for the
     // whole session, so a plugin may have self-registered hooks (or other keys)
     // into settings.json after llmenv last wrote it. A wholesale overwrite would
@@ -1833,7 +1842,12 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     // already on disk, while making llmenv authoritative over the keys it owns.
     // In strict mode the file never pre-exists (fresh content-hashed folder), so
     // this is a no-op there.
-    let reconciled = reconcile_settings(&settings_path, settings_value, prev_owned_hooks.as_ref())?;
+    let reconciled = reconcile_settings(
+        &settings_path,
+        settings_value,
+        prev_owned_hooks.as_ref(),
+        prev_plugin_paths.as_ref(),
+    )?;
     let json_str = serde_json::to_string_pretty(&reconciled)?;
 
     crate::paths::write_owner_only_atomic(&settings_path, json_str.as_bytes()).with_context(
@@ -1856,6 +1870,19 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         tracing::debug!(error = %e, path = %hooks_sidecar.display(), "failed to write hooks sidecar");
     }
 
+    // Same best-effort contract as the hooks sidecar above: a failed write just
+    // means the next render can't trace a disabled plugin's hook back to its
+    // directory, degrading to "never purge" rather than failing the render.
+    if let Ok(bytes) = serde_json::to_vec(&rendered_plugin_paths)
+        && let Err(e) = crate::paths::write_owner_only_atomic(&plugin_paths_sidecar, &bytes)
+    {
+        tracing::debug!(
+            error = %e,
+            path = %plugin_paths_sidecar.display(),
+            "failed to write plugin install-paths sidecar"
+        );
+    }
+
     Ok(())
 }
 
@@ -1863,11 +1890,37 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
 /// diff in [`reconcile_settings`] (#991). Dotfile so it stays out of the way.
 const HOOKS_SIDECAR_FILE: &str = ".llmenv-hooks.json";
 
+/// Sidecar recording `{"<plugin>@<marketplace>": "<install_path>"}` for every
+/// external plugin llmenv rendered as enabled, for the disabled-plugin hook
+/// purge in [`reconcile_settings`] (#1793). Dotfile so it stays out of the way.
+const PLUGIN_INSTALL_PATHS_SIDECAR_FILE: &str = ".llmenv-plugin-paths.json";
+
 /// Read the previously-rendered hooks sidecar. Returns `None` when absent or
 /// unparseable — reconcile then falls back to union-only behavior.
 fn read_hooks_sidecar(path: &Path) -> Option<serde_json::Value> {
     let bytes = std::fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
+}
+
+/// Build the `{"<plugin>@<marketplace>": "<install_path>"}` sidecar body for
+/// this round's resolved plugins (#1793). A first-party plugin has no separate
+/// install path (its payload lives inside the marketplace clone) and is
+/// omitted — untraceable, so `purge_hooks_from_disabled_plugins` never touches
+/// its hooks either way.
+fn plugin_install_paths_json(
+    plugins: &[crate::plugins::resolve::ResolvedPlugin],
+) -> serde_json::Value {
+    let map: serde_json::Map<String, serde_json::Value> = plugins
+        .iter()
+        .filter_map(|p| {
+            let install_path = p.install_path.as_ref()?;
+            Some((
+                format!("{}@{}", p.plugin, p.marketplace),
+                json!(install_path),
+            ))
+        })
+        .collect();
+    serde_json::Value::Object(map)
 }
 
 /// Top-level settings.json keys llmenv renders authoritatively. On a re-render
@@ -2116,6 +2169,7 @@ fn reconcile_settings(
     path: &Path,
     fresh: serde_json::Value,
     prev_owned_hooks: Option<&serde_json::Value>,
+    prev_plugin_paths: Option<&serde_json::Value>,
 ) -> anyhow::Result<serde_json::Value> {
     let existing = match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
@@ -2161,6 +2215,14 @@ fn reconcile_settings(
                         // hook removed from config must disappear, not linger via
                         // the union. Foreign hooks (never in prev_owned) are kept.
                         purge_stale_owned_hooks(v, prev_owned_hooks, fresh_val);
+                        // #1793: a plugin's self-registered hook, remembered from
+                        // when the plugin was still enabled, must not survive
+                        // once the plugin drops out of `enabledPlugins`.
+                        purge_hooks_from_disabled_plugins(
+                            v,
+                            prev_plugin_paths,
+                            fresh_obj.get("enabledPlugins"),
+                        );
                         merge_json(v, fresh_val.clone());
                         // merge_json only dedups byte-identical entries; entries
                         // differing by null-vs-absent keys need the strip-then-
@@ -2246,6 +2308,115 @@ fn purge_stale_owned_hooks(
             arr.retain(|e| !stale.contains(&normalized_hook(e)));
         }
     }
+}
+
+/// Remove a hook a plugin previously self-registered into `settings.json` once
+/// that plugin is no longer enabled (#1793).
+///
+/// `prev_plugin_paths` is the `{"<plugin>@<marketplace>": "<install_path>"}`
+/// sidecar recorded the last time each external plugin was rendered as enabled
+/// (see [`PLUGIN_INSTALL_PATHS_SIDECAR_FILE`]) — a plugin that has since been
+/// disabled or removed is absent from this round's resolved plugin list, so its
+/// install path can only come from what llmenv remembered on the prior render.
+///
+/// A hook is purged only when a whitespace-separated, path-like token of its
+/// `command` resolves (after canonicalization) under a *remembered* install
+/// path whose plugin id is missing from the current enabled set. A hook that
+/// can't be traced to any remembered plugin directory — a first-party
+/// plugin's hook (no separate install path to remember), a user's own hook,
+/// or an llmenv-rendered hook — is always left alone. This is a benign-plugin
+/// assumption, not a hardening boundary: a hook command that resolves through
+/// a symlink placed inside the plugin's own install directory but pointing
+/// outside it is untraceable and survives purge, same as any other
+/// untraceable hook. A missing or non-object `enabledPlugins` is treated as
+/// an empty enabled set, so removing every plugin still purges every one of
+/// their previously-tracked hooks rather
+/// than skipping the purge.
+fn purge_hooks_from_disabled_plugins(
+    existing: &mut serde_json::Value,
+    prev_plugin_paths: Option<&serde_json::Value>,
+    enabled_plugins: Option<&serde_json::Value>,
+) {
+    let Some(prev_paths) = prev_plugin_paths.and_then(|v| v.as_object()) else {
+        return;
+    };
+    let enabled_set: std::collections::HashSet<&str> = enabled_plugins
+        .and_then(|v| v.as_object())
+        .map(|m| m.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+
+    // Only a plugin no longer in the enabled set is a purge candidate; its
+    // remembered directory is where a stale self-registered hook would live.
+    // A remembered path that no longer canonicalizes (the plugin's cache was
+    // pruned) is silently dropped rather than blocking the purge for every
+    // other still-traceable plugin.
+    let disabled_roots: Vec<PathBuf> = prev_paths
+        .iter()
+        .filter(|(id, _)| !enabled_set.contains(id.as_str()))
+        .filter_map(|(id, path)| {
+            let path = path.as_str()?;
+            match Path::new(path).canonicalize() {
+                Ok(root) => Some(root),
+                Err(e) => {
+                    tracing::debug!(
+                        plugin = %id,
+                        path,
+                        error = %e,
+                        "remembered plugin install path no longer resolves; \
+                         its hooks won't be traced this round"
+                    );
+                    None
+                }
+            }
+        })
+        .collect();
+    if disabled_roots.is_empty() {
+        return;
+    }
+
+    let Some(existing_obj) = existing.as_object_mut() else {
+        return;
+    };
+    for entries in existing_obj.values_mut() {
+        let Some(arr) = entries.as_array_mut() else {
+            continue;
+        };
+        arr.retain_mut(|entry| {
+            let Some(hooks) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
+                return true;
+            };
+            hooks.retain(|hook| {
+                let traced_to_disabled_plugin = hook
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|cmd| {
+                        disabled_roots
+                            .iter()
+                            .any(|root| command_points_under(cmd, root))
+                    });
+                !traced_to_disabled_plugin
+            });
+            !hooks.is_empty()
+        });
+    }
+}
+
+/// True if a whitespace-separated, path-like token of `command` canonicalizes
+/// to a path under `root`.
+///
+/// A self-registered hook's `command` is realistically a full shell
+/// invocation (`"node <script>"`, `"bash <script> <args>"`), not a bare path —
+/// canonicalizing the whole string as one path only ever matches a hook with
+/// no interpreter prefix and no arguments, missing the common case entirely.
+/// Mirrors the path-like-token heuristic [`resolve_bundle_relative_paths`]
+/// already uses for the same class of hook-command string.
+fn command_points_under(command: &str, root: &Path) -> bool {
+    command.split_whitespace().any(|token| {
+        token.contains('/')
+            && Path::new(token)
+                .canonicalize()
+                .is_ok_and(|p| p.starts_with(root))
+    })
 }
 
 /// Render one marketplace's `extraKnownMarketplaces` entry body, or `None` if it
@@ -2490,8 +2661,9 @@ mod tests {
         MODELED_SETTINGS_KEYS, classify_claude_path, dedup_hooks_doc,
         generate_installed_plugins_json, generate_settings_json, is_hook_json,
         merge_mcp_into_claude_json, normalize_deprecated_tool, overlay_native, permission_mode_str,
-        read_owned_servers, reconcile_settings, reject_modeled_keys_in_catch_all,
-        render_marketplace_source, render_permission_rule, seed_install_method, seed_status_line,
+        plugin_install_paths_json, purge_hooks_from_disabled_plugins, read_owned_servers,
+        reconcile_settings, reject_modeled_keys_in_catch_all, render_marketplace_source,
+        render_permission_rule, seed_install_method, seed_status_line,
     };
     use crate::adapter::skills::{
         arb_distinct_resolved_mcps, arb_yaml_value, reject_hardcoded_config_path, validate_skills,
@@ -2501,6 +2673,7 @@ mod tests {
     use crate::merge::MergedManifest;
     use crate::plugins::resolve::{ResolvedMarketplace, ResolvedPlugin};
     use proptest::prelude::*;
+    use std::path::Path;
     use std::path::PathBuf;
 
     /// #1262: an empty `agents_md` with no applicable fragment must not leave a
@@ -4311,7 +4484,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("settings.json");
         let fresh = serde_json::json!({ "permissions": { "deny": ["X"] } });
-        let out = reconcile_settings(&path, fresh.clone(), None).unwrap();
+        let out = reconcile_settings(&path, fresh.clone(), None, None).unwrap();
         assert_eq!(
             out, fresh,
             "no prior file → llmenv's render is the whole truth"
@@ -4331,7 +4504,7 @@ mod tests {
             }),
         );
         let fresh = serde_json::json!({ "permissions": { "deny": ["FRESH"] } });
-        let out = reconcile_settings(&path, fresh, None).unwrap();
+        let out = reconcile_settings(&path, fresh, None, None).unwrap();
         // Owned key replaced authoritatively; foreign key untouched.
         assert_eq!(out["permissions"]["deny"], serde_json::json!(["FRESH"]));
         assert_eq!(out["contextModeState"]["session"], "abc");
@@ -4352,7 +4525,7 @@ mod tests {
         let fresh = serde_json::json!({
             "hooks": { "SessionStart": [{ "command": "llmenv-hook" }] }
         });
-        let out = reconcile_settings(&path, fresh, None).unwrap();
+        let out = reconcile_settings(&path, fresh, None, None).unwrap();
         let entries = out["hooks"]["SessionStart"].as_array().unwrap();
         let cmds: Vec<&str> = entries
             .iter()
@@ -4377,7 +4550,7 @@ mod tests {
             "hooks": { "SessionStart": [{ "command": "llmenv-hook" }] }
         });
         write_json(&path, &llmenv_hook);
-        let out = reconcile_settings(&path, llmenv_hook.clone(), None).unwrap();
+        let out = reconcile_settings(&path, llmenv_hook.clone(), None, None).unwrap();
         let entries = out["hooks"]["SessionStart"].as_array().unwrap();
         assert_eq!(entries.len(), 1, "identical hook deduped, not doubled");
     }
@@ -4396,7 +4569,7 @@ mod tests {
         write_json(&path, &old);
         let prev_owned = old["hooks"].clone();
         let fresh = serde_json::json!({ "hooks": {} });
-        let out = reconcile_settings(&path, fresh, Some(&prev_owned)).unwrap();
+        let out = reconcile_settings(&path, fresh, Some(&prev_owned), None).unwrap();
         let pre = out["hooks"].get("PreToolUse").and_then(|v| v.as_array());
         assert!(
             pre.is_none_or(|a| a.is_empty()),
@@ -4424,7 +4597,7 @@ mod tests {
             "SessionStart": [{ "hooks": [{ "type": "command", "command": "llmenv-x" }] }]
         });
         let fresh = serde_json::json!({ "hooks": {} });
-        let out = reconcile_settings(&path, fresh, Some(&prev_owned)).unwrap();
+        let out = reconcile_settings(&path, fresh, Some(&prev_owned), None).unwrap();
         let cmds: Vec<&str> = out["hooks"]["PreToolUse"]
             .as_array()
             .unwrap()
@@ -4473,7 +4646,7 @@ mod tests {
                 ]
             }
         });
-        let out = reconcile_settings(&path, fresh, None).unwrap();
+        let out = reconcile_settings(&path, fresh, None, None).unwrap();
         let entries = out["hooks"]["PostToolUse"].as_array().unwrap();
         assert_eq!(entries.len(), 1, "null-vs-absent tool deduped, not doubled");
     }
@@ -4507,7 +4680,7 @@ mod tests {
                 ]
             }
         });
-        let out = reconcile_settings(&path, fresh, None).unwrap();
+        let out = reconcile_settings(&path, fresh, None, None).unwrap();
         let entries = out["hooks"]["SessionStart"].as_array().unwrap();
         assert_eq!(entries.len(), 1, "nulls at any depth stripped before dedup");
     }
@@ -4525,7 +4698,7 @@ mod tests {
             &serde_json::json!({ "enabledPlugins": { "old@market": true } }),
         );
         let fresh = serde_json::json!({ "permissions": { "deny": [] } });
-        let out = reconcile_settings(&path, fresh, None).unwrap();
+        let out = reconcile_settings(&path, fresh, None, None).unwrap();
         assert!(
             out.get("enabledPlugins").is_none(),
             "stale owned key cleared on re-render"
@@ -4540,7 +4713,7 @@ mod tests {
         let path = tmp.path().join("settings.json");
         std::fs::write(&path, b"{ not valid json").unwrap();
         let fresh = serde_json::json!({ "permissions": { "deny": ["X"] } });
-        let out = reconcile_settings(&path, fresh.clone(), None).unwrap();
+        let out = reconcile_settings(&path, fresh.clone(), None, None).unwrap();
         assert_eq!(out, fresh);
     }
 
@@ -4559,7 +4732,7 @@ mod tests {
             "statusLine": { "type": "command", "command": "my-status-script" },
             "cleanupPeriodDays": 365,
         });
-        let out = reconcile_settings(&path, fresh, None).unwrap();
+        let out = reconcile_settings(&path, fresh, None, None).unwrap();
         assert_eq!(
             out["statusLine"]["command"], "my-status-script",
             "native passthrough key must survive re-render"
@@ -4590,8 +4763,8 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let path = tmp.path().join("settings.json");
             write_json(&path, &existing);
-            let a = reconcile_settings(&path, fresh.clone(), None).unwrap();
-            let b = reconcile_settings(&path, fresh.clone(), None).unwrap();
+            let a = reconcile_settings(&path, fresh.clone(), None, None).unwrap();
+            let b = reconcile_settings(&path, fresh.clone(), None, None).unwrap();
             prop_assert_eq!(a, b);
         }
 
@@ -4602,9 +4775,9 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let path = tmp.path().join("settings.json");
             write_json(&path, &existing);
-            let once = reconcile_settings(&path, fresh.clone(), None).unwrap();
+            let once = reconcile_settings(&path, fresh.clone(), None, None).unwrap();
             write_json(&path, &once);
-            let twice = reconcile_settings(&path, fresh, None).unwrap();
+            let twice = reconcile_settings(&path, fresh, None, None).unwrap();
             prop_assert_eq!(once, twice);
         }
 
@@ -4619,7 +4792,7 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let path = tmp.path().join("settings.json");
             write_json(&path, &existing);
-            let out = reconcile_settings(&path, fresh.clone(), None).unwrap();
+            let out = reconcile_settings(&path, fresh.clone(), None, None).unwrap();
             let fresh_obj = fresh.as_object().unwrap();
             for key in LLMENV_OWNED_SETTINGS_KEYS {
                 if key == "hooks" {
@@ -4661,7 +4834,7 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let path = tmp.path().join("settings.json");
             write_json(&path, &existing);
-            let out = reconcile_settings(&path, fresh, None).unwrap();
+            let out = reconcile_settings(&path, fresh, None, None).unwrap();
 
             let session_start = out["hooks"]["SessionStart"].as_array().unwrap();
             prop_assert!(
@@ -5509,8 +5682,8 @@ mod tests {
             "permissions": { "allow": [], "ask": [], "deny": [] }
         });
 
-        let merged =
-            reconcile_settings(&path, fresh, None).expect("reconcile_settings should succeed");
+        let merged = reconcile_settings(&path, fresh, None, None)
+            .expect("reconcile_settings should succeed");
         let ss = merged["hooks"]["SessionStart"].as_array().unwrap();
         let commands: Vec<&str> = ss
             .iter()
@@ -5530,6 +5703,429 @@ mod tests {
         assert_eq!(
             merged["enabledPlugins"]["context-mode@context-mode"],
             json!(true)
+        );
+    }
+
+    // ---- #1793: purge hooks self-registered by a now-disabled plugin ----
+
+    /// Create a fake plugin install directory with one hook script inside it.
+    /// `Path::canonicalize` requires the path to exist, so every purge test
+    /// needs a real file on disk to point a hook's `command` at.
+    fn fake_plugin_hook(
+        root: &Path,
+        plugin_dir_name: &str,
+        script_name: &str,
+    ) -> (PathBuf, PathBuf) {
+        let plugin_dir = root.join(plugin_dir_name);
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let script = plugin_dir.join(script_name);
+        std::fs::write(&script, "#!/bin/sh\n").unwrap();
+        (plugin_dir, script)
+    }
+
+    #[test]
+    fn reconcile_purges_hook_from_plugin_no_longer_enabled() {
+        use serde_json::json;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        let (plugin_dir, script) = fake_plugin_hook(tmp.path(), "some-plugin", "self-heal.sh");
+
+        let on_disk = json!({
+            "hooks": { "SessionStart": [
+                { "hooks": [ { "type": "command", "command": script.to_string_lossy() } ] }
+            ] }
+        });
+        std::fs::write(&path, serde_json::to_vec(&on_disk).unwrap()).unwrap();
+
+        // The last render remembered this plugin's install path while it was
+        // still enabled. This render: the plugin is gone from enabledPlugins.
+        let prev_plugin_paths = json!({ "some-plugin@some-market": plugin_dir.to_string_lossy() });
+        let fresh = json!({ "hooks": {} });
+
+        let out = reconcile_settings(&path, fresh, None, Some(&prev_plugin_paths))
+            .expect("reconcile_settings should succeed");
+        let sessions = out["hooks"].get("SessionStart").and_then(|v| v.as_array());
+        assert!(
+            sessions.is_none_or(|a| a.is_empty()),
+            "hook from a disabled plugin must be purged: {:?}",
+            out["hooks"]
+        );
+    }
+
+    #[test]
+    fn reconcile_purges_hook_whose_command_has_an_interpreter_prefix() {
+        // A self-registered hook's command is realistically a multi-token shell
+        // invocation like "node <script>", not a bare path — this is the exact
+        // shape context-mode's own cache-heal hook uses (see
+        // reconcile_preserves_context_mode_self_registered_hook above). The whole
+        // string can't be canonicalized as one path; the path-like token inside
+        // it must be picked out first.
+        use serde_json::json;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        let (plugin_dir, script) = fake_plugin_hook(tmp.path(), "some-plugin", "self-heal.mjs");
+
+        let on_disk = json!({
+            "hooks": { "SessionStart": [
+                { "hooks": [ { "type": "command",
+                  "command": format!("node {}", script.to_string_lossy()) } ] }
+            ] }
+        });
+        std::fs::write(&path, serde_json::to_vec(&on_disk).unwrap()).unwrap();
+
+        let prev_plugin_paths = json!({ "some-plugin@some-market": plugin_dir.to_string_lossy() });
+        let fresh = json!({ "hooks": {} });
+
+        let out = reconcile_settings(&path, fresh, None, Some(&prev_plugin_paths))
+            .expect("reconcile_settings should succeed");
+        let sessions = out["hooks"].get("SessionStart").and_then(|v| v.as_array());
+        assert!(
+            sessions.is_none_or(|a| a.is_empty()),
+            "a hook with an interpreter-prefixed command must still be purged: {:?}",
+            out["hooks"]
+        );
+    }
+
+    #[test]
+    fn reconcile_keeps_hook_from_still_enabled_plugin() {
+        use serde_json::json;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        let (plugin_dir, script) = fake_plugin_hook(tmp.path(), "some-plugin", "self-heal.sh");
+
+        let on_disk = json!({
+            "hooks": { "SessionStart": [
+                { "hooks": [ { "type": "command", "command": script.to_string_lossy() } ] }
+            ] }
+        });
+        std::fs::write(&path, serde_json::to_vec(&on_disk).unwrap()).unwrap();
+
+        let prev_plugin_paths = json!({ "some-plugin@some-market": plugin_dir.to_string_lossy() });
+        let fresh = json!({
+            "hooks": {},
+            "enabledPlugins": { "some-plugin@some-market": true }
+        });
+
+        let out = reconcile_settings(&path, fresh, None, Some(&prev_plugin_paths))
+            .expect("reconcile_settings should succeed");
+        let commands: Vec<String> = out["hooks"]["SessionStart"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|e| e["hooks"].as_array().unwrap())
+            .filter_map(|h| h["command"].as_str().map(str::to_owned))
+            .collect();
+        assert!(
+            commands.iter().any(|c| c.contains("self-heal.sh")),
+            "hook from a still-enabled plugin must survive: {commands:?}"
+        );
+    }
+
+    #[test]
+    fn reconcile_treats_missing_enabled_plugins_as_empty_set_for_plugin_purge() {
+        use serde_json::json;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        let (plugin_dir, script) = fake_plugin_hook(tmp.path(), "some-plugin", "self-heal.sh");
+
+        let on_disk = json!({
+            "hooks": { "SessionStart": [
+                { "hooks": [ { "type": "command", "command": script.to_string_lossy() } ] }
+            ] }
+        });
+        std::fs::write(&path, serde_json::to_vec(&on_disk).unwrap()).unwrap();
+
+        let prev_plugin_paths = json!({ "some-plugin@some-market": plugin_dir.to_string_lossy() });
+        // #1793 bug 3: fresh omits `enabledPlugins` entirely (every plugin
+        // removed) — must still purge, not skip the purge on a missing key.
+        let fresh = json!({ "hooks": {} });
+
+        let out = reconcile_settings(&path, fresh, None, Some(&prev_plugin_paths))
+            .expect("reconcile_settings should succeed");
+        let sessions = out["hooks"].get("SessionStart").and_then(|v| v.as_array());
+        assert!(
+            sessions.is_none_or(|a| a.is_empty()),
+            "a missing enabledPlugins must be treated as an empty enabled set: {:?}",
+            out["hooks"]
+        );
+    }
+
+    #[test]
+    fn reconcile_never_purges_hook_untraceable_to_any_remembered_plugin() {
+        use serde_json::json;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        // A user's own hook, or one from a plugin llmenv never tracked an
+        // install path for (e.g. a first-party plugin) — its command points
+        // somewhere that isn't under any remembered plugin directory.
+        let unrelated = tmp.path().join("unrelated.sh");
+        std::fs::write(&unrelated, "#!/bin/sh\n").unwrap();
+        let on_disk = json!({
+            "hooks": { "SessionStart": [
+                { "hooks": [ { "type": "command", "command": unrelated.to_string_lossy() } ] }
+            ] }
+        });
+        std::fs::write(&path, serde_json::to_vec(&on_disk).unwrap()).unwrap();
+
+        let (plugin_dir, _script) = fake_plugin_hook(tmp.path(), "some-plugin", "self-heal.sh");
+        let prev_plugin_paths = json!({ "some-plugin@some-market": plugin_dir.to_string_lossy() });
+        let fresh = json!({ "hooks": {} }); // some-plugin is now disabled
+
+        let out = reconcile_settings(&path, fresh, None, Some(&prev_plugin_paths))
+            .expect("reconcile_settings should succeed");
+        let commands: Vec<String> = out["hooks"]["SessionStart"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|e| e["hooks"].as_array().unwrap())
+            .filter_map(|h| h["command"].as_str().map(str::to_owned))
+            .collect();
+        assert!(
+            commands.iter().any(|c| c.contains("unrelated.sh")),
+            "a hook untraceable to any remembered plugin dir must never be touched: {commands:?}"
+        );
+    }
+
+    #[test]
+    fn purge_disabled_plugin_hooks_is_idempotent() {
+        use serde_json::json;
+        let tmp = tempfile::tempdir().unwrap();
+        let (plugin_dir, script) = fake_plugin_hook(tmp.path(), "some-plugin", "self-heal.sh");
+        let mut existing = json!({ "SessionStart": [
+            { "hooks": [ { "type": "command", "command": script.to_string_lossy() } ] }
+        ] });
+        let prev_plugin_paths = json!({ "some-plugin@some-market": plugin_dir.to_string_lossy() });
+        let enabled_plugins = json!({});
+
+        purge_hooks_from_disabled_plugins(
+            &mut existing,
+            Some(&prev_plugin_paths),
+            Some(&enabled_plugins),
+        );
+        let once = existing.clone();
+        purge_hooks_from_disabled_plugins(
+            &mut existing,
+            Some(&prev_plugin_paths),
+            Some(&enabled_plugins),
+        );
+        assert_eq!(
+            existing, once,
+            "purging twice must converge, not remove further or differ"
+        );
+        assert!(
+            existing["SessionStart"].as_array().unwrap().is_empty(),
+            "the disabled plugin's hook must actually be purged"
+        );
+    }
+
+    #[test]
+    fn purge_never_matches_sibling_plugin_directory_with_overlapping_name_prefix() {
+        // Path::starts_with is component-based: a root "some-plugin" must never
+        // match a hook living under the sibling directory "some-plugin-2", even
+        // though the string "some-plugin" is a text prefix of "some-plugin-2".
+        use serde_json::json;
+        let tmp = tempfile::tempdir().unwrap();
+        let (disabled_dir, _disabled_script) = fake_plugin_hook(tmp.path(), "some-plugin", "a.sh");
+        let (_sibling_dir, sibling_script) = fake_plugin_hook(tmp.path(), "some-plugin-2", "a.sh");
+
+        let mut existing = json!({ "SessionStart": [
+            { "hooks": [ { "type": "command", "command": sibling_script.to_string_lossy() } ] }
+        ] });
+        let prev_plugin_paths =
+            json!({ "some-plugin@some-market": disabled_dir.to_string_lossy() });
+        let enabled_plugins = json!({}); // "some-plugin" is disabled
+
+        purge_hooks_from_disabled_plugins(
+            &mut existing,
+            Some(&prev_plugin_paths),
+            Some(&enabled_plugins),
+        );
+
+        let commands: Vec<String> = existing["SessionStart"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|e| e["hooks"].as_array().unwrap())
+            .filter_map(|h| h["command"].as_str().map(str::to_owned))
+            .collect();
+        assert!(
+            commands.iter().any(|c| c.contains("some-plugin-2")),
+            "a hook under a sibling directory with an overlapping name prefix \
+             must never be treated as belonging to the disabled plugin: {commands:?}"
+        );
+    }
+
+    proptest! {
+        // Core correctness invariant: a hook survives iff its owning plugin
+        // (traced through a real, canonicalizable install directory) is still
+        // in the enabled set — covering every enabled/disabled combination of
+        // two independent plugins, not just the one fixed scenario the example
+        // tests above exercise.
+        #[test]
+        fn purge_removes_hook_iff_its_plugin_is_disabled(
+            a_enabled in any::<bool>(),
+            b_enabled in any::<bool>(),
+        ) {
+            use serde_json::json;
+            let tmp = tempfile::tempdir().unwrap();
+            let (dir_a, script_a) = fake_plugin_hook(tmp.path(), "plugin-a", "hook.sh");
+            let (dir_b, script_b) = fake_plugin_hook(tmp.path(), "plugin-b", "hook.sh");
+
+            let mut existing = json!({ "SessionStart": [
+                { "hooks": [ { "type": "command", "command": script_a.to_string_lossy() } ] },
+                { "hooks": [ { "type": "command", "command": script_b.to_string_lossy() } ] },
+            ] });
+            let prev_plugin_paths = json!({
+                "plugin-a@market": dir_a.to_string_lossy(),
+                "plugin-b@market": dir_b.to_string_lossy(),
+            });
+            let mut enabled = serde_json::Map::new();
+            if a_enabled {
+                enabled.insert("plugin-a@market".to_string(), json!(true));
+            }
+            if b_enabled {
+                enabled.insert("plugin-b@market".to_string(), json!(true));
+            }
+            let enabled_plugins = serde_json::Value::Object(enabled);
+
+            purge_hooks_from_disabled_plugins(&mut existing, Some(&prev_plugin_paths), Some(&enabled_plugins));
+
+            let commands: Vec<String> = existing["SessionStart"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|e| e["hooks"].as_array().unwrap())
+                .filter_map(|h| h["command"].as_str().map(str::to_owned))
+                .collect();
+            prop_assert_eq!(commands.iter().any(|c| c.contains(&*dir_a.file_name().unwrap().to_string_lossy())), a_enabled);
+            prop_assert_eq!(commands.iter().any(|c| c.contains(&*dir_b.file_name().unwrap().to_string_lossy())), b_enabled);
+        }
+
+        // Idempotence across arbitrary hooks docs, not just the one fixed
+        // scenario `purge_disabled_plugin_hooks_is_idempotent` exercises.
+        #[test]
+        fn purge_disabled_plugin_hooks_is_idempotent_for_arbitrary_docs(existing in arb_json()) {
+            let tmp = tempfile::tempdir().unwrap();
+            let prev_plugin_paths = serde_json::json!({ "some@market": tmp.path().to_string_lossy() });
+            let enabled_plugins = serde_json::json!({});
+
+            let mut once = existing.clone();
+            purge_hooks_from_disabled_plugins(&mut once, Some(&prev_plugin_paths), Some(&enabled_plugins));
+            let mut twice = once.clone();
+            purge_hooks_from_disabled_plugins(&mut twice, Some(&prev_plugin_paths), Some(&enabled_plugins));
+            prop_assert_eq!(once, twice);
+        }
+
+        // No-panic property over arbitrary (including malformed) hooks-doc
+        // shapes: a non-object entry, a "hooks" field that isn't an array, a
+        // non-string "command" — every shape arb_json can produce.
+        #[test]
+        fn purge_never_panics_on_arbitrary_hooks_json(mut existing in arb_json()) {
+            let tmp = tempfile::tempdir().unwrap();
+            let prev_plugin_paths = serde_json::json!({ "some@market": tmp.path().to_string_lossy() });
+            let enabled_plugins = serde_json::json!({});
+            purge_hooks_from_disabled_plugins(&mut existing, Some(&prev_plugin_paths), Some(&enabled_plugins));
+        }
+
+        // plugin_install_paths_json's map/filter invariant: every output
+        // key/value pair corresponds to a resolved plugin with Some(install_path),
+        // and a plugin with no install_path is never a key. `hash_map` keys on
+        // (marketplace, plugin) so generated ids are unique by construction,
+        // matching ResolvedPlugins' own "deduplicated by (marketplace, plugin)"
+        // invariant.
+        #[test]
+        fn plugin_install_paths_json_matches_source_plugins(
+            entries in prop::collection::hash_map(
+                (any::<String>(), any::<String>()),
+                proptest::option::of(any::<String>()),
+                0..8,
+            )
+        ) {
+            let resolved: Vec<ResolvedPlugin> = entries
+                .into_iter()
+                .map(|((marketplace, plugin), install_path)| ResolvedPlugin {
+                    marketplace,
+                    plugin,
+                    collection: "test".into(),
+                    install_path,
+                    git_commit_sha: None,
+                })
+                .collect();
+
+            let out = plugin_install_paths_json(&resolved);
+            let map = out.as_object().unwrap();
+
+            for p in &resolved {
+                let key = format!("{}@{}", p.plugin, p.marketplace);
+                match &p.install_path {
+                    Some(path) => prop_assert_eq!(
+                        map.get(&key).and_then(|v| v.as_str()),
+                        Some(path.as_str())
+                    ),
+                    None => prop_assert!(!map.contains_key(&key)),
+                }
+            }
+            prop_assert_eq!(
+                map.len(),
+                resolved.iter().filter(|p| p.install_path.is_some()).count()
+            );
+        }
+    }
+
+    #[test]
+    fn generate_settings_json_purges_hook_after_plugin_disabled_across_renders() {
+        use serde_json::json;
+        let tmp = tempfile::tempdir().unwrap();
+
+        // First render: an external plugin is enabled. Its install directory
+        // exists on disk, as it would once llmenv synced the plugin payload.
+        let install_dir = tmp.path().join("ext-plugin-install");
+        std::fs::create_dir_all(&install_dir).unwrap();
+        let hook_script = install_dir.join("self-heal.sh");
+        std::fs::write(&hook_script, "#!/bin/sh\n").unwrap();
+
+        let manifest_with_plugin = crate::merge::MergedManifest {
+            plugins: vec![crate::plugins::resolve::ResolvedPlugin {
+                marketplace: "some-market".into(),
+                plugin: "some-plugin".into(),
+                collection: "test".into(),
+                install_path: Some(install_dir.to_string_lossy().into_owned()),
+                git_commit_sha: None,
+            }],
+            ..Default::default()
+        };
+        generate_settings_json(tmp.path(), &manifest_with_plugin).unwrap();
+
+        // Simulate the plugin self-registering a hook at MCP boot, pointing at
+        // its own install directory — llmenv never renders this hook itself.
+        let settings_path = tmp.path().join("settings.json");
+        let mut settings: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+        settings["hooks"]["SessionStart"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "hooks": [{ "type": "command", "command": hook_script.to_string_lossy() }]
+            }));
+        std::fs::write(&settings_path, serde_json::to_vec(&settings).unwrap()).unwrap();
+
+        // Second render: the plugin is gone from config entirely.
+        let manifest_without_plugin = crate::merge::MergedManifest::default();
+        generate_settings_json(tmp.path(), &manifest_without_plugin).unwrap();
+
+        let after: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+        let commands: Vec<String> = after["hooks"]["SessionStart"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|e| e["hooks"].as_array().cloned().unwrap_or_default())
+            .filter_map(|h| h["command"].as_str().map(str::to_owned))
+            .collect();
+        assert!(
+            !commands.iter().any(|c| c.contains("self-heal.sh")),
+            "hook from a plugin removed from config must be purged on the next render: \
+             {commands:?}"
         );
     }
 
