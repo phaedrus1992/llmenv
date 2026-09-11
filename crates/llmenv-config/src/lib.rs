@@ -62,21 +62,22 @@ impl Config {
         self.session_log.clone().unwrap_or_default()
     }
 
-    /// Load and validate a config from an **already-expanded** path.
-    ///
-    /// `load` does not perform tilde (`~`) expansion — the caller is
-    /// responsible for expanding `~`/`~user` (e.g. via `llmenv_paths`) before
-    /// calling. A `debug_assert` guards this contract in debug builds.
+    /// Load and validate a config, expanding a leading `~`/`~user` first.
     ///
     /// # Errors
     /// Returns an error if the file can't be read, isn't valid YAML, or fails
     /// schema validation.
     pub fn load(path: &Path) -> anyhow::Result<Self> {
-        debug_assert!(
-            !path.starts_with("~"),
-            "Config::load expects an expanded path; got tilde-prefixed {}",
-            path.display()
-        );
+        // Only tilde-prefixed paths go through the `&str` round trip — anything
+        // else keeps its original bytes, so a non-UTF-8 path is never mangled.
+        let path: std::borrow::Cow<'_, Path> = if path.starts_with("~") {
+            std::borrow::Cow::Owned(std::path::PathBuf::from(llmenv_paths::expand_tilde(
+                &path.to_string_lossy(),
+            )))
+        } else {
+            std::borrow::Cow::Borrowed(path)
+        };
+        let path = path.as_ref();
         let s = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config file: {}", path.display()))?;
         let cfg: Self = serde_yaml::from_str(&s)
@@ -179,9 +180,38 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "expanded path")]
-    fn load_rejects_tilde_path_in_debug() {
-        let _ = Config::load(Path::new("~/.config/llmenv/config.yaml"));
+    fn load_expands_tilde_path() {
+        // #1910: `load` used to only debug_assert the caller pre-expanded `~`,
+        // so a release build silently mis-resolved a tilde path instead of
+        // erroring. It must now expand `~` itself.
+        let home = std::env::var("HOME").unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix(".llmenv-config-test-")
+            .tempdir_in(&home)
+            .unwrap();
+        let p = dir.path().join("config.yaml");
+        std::fs::write(&p, "cache: {}\n").unwrap();
+        let dir_name = dir.path().file_name().unwrap().to_str().unwrap();
+        let tilde_path = format!("~/{dir_name}/config.yaml");
+        assert!(Config::load(Path::new(&tilde_path)).is_ok());
+    }
+
+    // macOS (APFS/HFS+) rejects invalid-UTF-8 filenames at the syscall level, so this
+    // property is only observable on Linux, where filenames are arbitrary bytes.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn load_does_not_mangle_a_non_tilde_non_utf8_path() {
+        // #1910 follow-up: expansion must only touch tilde-prefixed paths.
+        // Round-tripping every path through `to_string_lossy` would corrupt
+        // a non-UTF-8 path that never needed expansion in the first place.
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut bytes = tmp.path().join("").into_os_string().into_vec();
+        bytes.extend_from_slice(b"caf\xe9.yaml"); // invalid UTF-8 byte 0xe9
+        let p = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&bytes));
+        std::fs::write(&p, "cache: {}\n").unwrap();
+        assert!(Config::load(&p).is_ok());
     }
 
     #[test]
