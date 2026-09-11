@@ -251,6 +251,31 @@ fn dispatch(
     }
 }
 
+/// Whether the previously-stored dedup snapshot (R3) matches the chunk about
+/// to be stored. `prev` is `None` when no snapshot exists yet (first
+/// SessionEnd, or a read failure) — always "changed" in that case. Extracted
+/// as a pure function so the comparison is directly unit-testable without
+/// standing up `run_inner`'s full config/MCP harness. (#1792)
+fn chunk_unchanged(prev: Option<&str>, current: &str) -> bool {
+    prev.is_some_and(|p| p == current)
+}
+
+/// Which chunk `run_inner` stores for a given event: the minimal
+/// (boilerplate-free) `storage_chunk` for `SessionEnd`, the full `chunk`
+/// (used for hook-context injection) otherwise. Extracted as a pure function
+/// so the SessionEnd-uses-the-minimal-chunk invariant is directly
+/// unit-testable. (#1792)
+fn store_content_for_event<'a>(
+    event: HookEvent,
+    chunk: &'a str,
+    storage_chunk: &'a str,
+) -> &'a str {
+    match event {
+        HookEvent::SessionEnd => storage_chunk,
+        _ => chunk,
+    }
+}
+
 /// Maps a `HookEvent` to its session-log `(kind, role)`. `None` for
 /// the lifecycle/memory events (`SessionStart`/`TurnStart`/`SessionEnd`),
 /// which `handle_session_log` handles separately.
@@ -1129,12 +1154,12 @@ fn run_inner(
             None
         };
         let session_end_unchanged = if let Some(dedup_path) = &session_end_dedup_path {
-            let is_unchanged = std::fs::read_to_string(dedup_path)
+            let prev = std::fs::read_to_string(dedup_path)
                 .inspect_err(|e| {
                     tracing::warn!("failed to read dedup cache {}: {e}", dedup_path.display())
                 })
-                .ok()
-                .is_some_and(|prev| prev == storage_chunk);
+                .ok();
+            let is_unchanged = chunk_unchanged(prev.as_deref(), &storage_chunk);
             if is_unchanged {
                 debug!("chunk unchanged since last store, skipping");
                 if !log_cfg.any_sink_enabled() {
@@ -1183,10 +1208,7 @@ fn run_inner(
             {
                 let actions = dispatch(event, &tag_queries, &bundle_queries, wakeup_max_tokens);
                 // Use minimal chunk for storage to avoid duplication. (#1792)
-                let store_content = match event {
-                    HookEvent::SessionEnd => &storage_chunk,
-                    _ => &chunk,
-                };
+                let store_content = store_content_for_event(event, &chunk, &storage_chunk);
                 out = run_memory_actions(client, actions, &query, store_content).await?;
 
                 // PostSession: run reflective consolidation (R5) in a detached
@@ -4345,6 +4367,43 @@ mod tests {
         assert_eq!(
             dispatch(HookEvent::TurnStart, &[], &[], Some(750)),
             vec![Action::Recall]
+        );
+    }
+
+    #[test]
+    fn chunk_unchanged_true_when_prev_matches_current() {
+        assert!(chunk_unchanged(Some("same"), "same"));
+    }
+
+    #[test]
+    fn chunk_unchanged_false_when_prev_differs_from_current() {
+        assert!(!chunk_unchanged(Some("old"), "new"));
+    }
+
+    #[test]
+    fn chunk_unchanged_false_when_no_prior_snapshot() {
+        // No snapshot yet (first SessionEnd, or a read failure) is always
+        // "changed" — never skip the very first store.
+        assert!(!chunk_unchanged(None, "anything"));
+    }
+
+    #[test]
+    fn store_content_for_event_session_end_uses_storage_chunk() {
+        assert_eq!(
+            store_content_for_event(HookEvent::SessionEnd, "full", "minimal"),
+            "minimal"
+        );
+    }
+
+    #[test]
+    fn store_content_for_event_other_events_use_full_chunk() {
+        assert_eq!(
+            store_content_for_event(HookEvent::TurnStart, "full", "minimal"),
+            "full"
+        );
+        assert_eq!(
+            store_content_for_event(HookEvent::SessionStart, "full", "minimal"),
+            "full"
         );
     }
 
