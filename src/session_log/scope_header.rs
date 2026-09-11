@@ -146,5 +146,30 @@ mod tests {
                 prop_assert!(c.contains(&needle), "missing token {}", needle);
             }
         }
+
+        /// #1911: an arbitrary project name (control chars, any whitespace,
+        /// embedded fake-token-shaped substrings) must never split into more
+        /// than one `project:`-prefixed whitespace token, and never leave a
+        /// raw control char in the content ICM's FTS index will tokenize.
+        #[test]
+        fn project_name_stays_one_safe_token_for_arbitrary_input(
+            project in ".{0,80}",
+        ) {
+            let c = scope_header_content(&ScopeContext {
+                tags: vec![],
+                bundles: vec![],
+                project: Some(project),
+                cwd: "/".into(),
+                adapter: "claude_code".into(),
+                llmenv_version: "3.0.0".into(),
+                claude_code_version: String::new(),
+            });
+            let tokens: Vec<&str> = c.split_whitespace().collect();
+            prop_assert!(
+                tokens.iter().filter(|t| t.starts_with("project:")).count() <= 1,
+                "project value must never split into more than one token: {:?}", tokens
+            );
+            prop_assert!(!c.chars().any(char::is_control));
+        }
     }
 }
