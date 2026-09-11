@@ -95,7 +95,11 @@ running agent only loads them when you relaunch it (`llmenv check-stale` nudges
 you on the next `SessionStart`). The folder is the agent's live config dir for the
 whole session, so in-session state llmenv doesn't own — Claude's runtime files,
 third-party plugin state — is preserved across re-renders. `settings.json` is
-merged rather than clobbered, so a plugin's self-registered hooks survive.
+merged rather than clobbered, so a plugin's self-registered hooks survive —
+but only while the plugin stays enabled. Disabling or removing a plugin
+purges a hook traceable to that plugin's own resolved install directory
+(added in v3.11.2); a hook a plugin registers somewhere else entirely is not
+yet covered.
 
 Each materialized folder carries a `.llmenv-manifest.json` dotfile (the content
 hash + the files llmenv owns). It is what `check-stale`/`doctor` use to detect
