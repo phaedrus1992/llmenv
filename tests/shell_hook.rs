@@ -265,6 +265,23 @@ fn guard_skips_when_pwd_still_under_recorded_project_root() {
     );
 }
 
+/// `$PWD` sitting exactly at the recorded project root (no subdirectory) —
+/// the most common real-world case — must also stay on the fast path.
+#[test]
+fn guard_skips_when_pwd_is_exactly_the_recorded_project_root() {
+    let project_dir = TempDir::new().unwrap();
+    let project_root = std::fs::canonicalize(project_dir.path()).unwrap();
+
+    assert!(
+        !guard_falls_through(
+            Some("/some/state"),
+            Some(project_root.to_str().unwrap()),
+            &project_root,
+        ),
+        "guard must stay on the fast path when $PWD equals the project root exactly"
+    );
+}
+
 /// No project scope was ever active (`$LLMENV_PROJECT_ROOT` unset) — nothing
 /// to compare `$PWD` against, so the guard keeps the old presence-only
 /// behavior and stays on the fast path.
