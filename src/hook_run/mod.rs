@@ -251,6 +251,31 @@ fn dispatch(
     }
 }
 
+/// Whether the previously-stored dedup snapshot (R3) matches the chunk about
+/// to be stored. `prev` is `None` when no snapshot exists yet (first
+/// SessionEnd, or a read failure) — always "changed" in that case. Extracted
+/// as a pure function so the comparison is directly unit-testable without
+/// standing up `run_inner`'s full config/MCP harness. (#1792)
+fn chunk_unchanged(prev: Option<&str>, current: &str) -> bool {
+    prev.is_some_and(|p| p == current)
+}
+
+/// Which chunk `run_inner` stores for a given event: the minimal
+/// (boilerplate-free) `storage_chunk` for `SessionEnd`, the full `chunk`
+/// (used for hook-context injection) otherwise. Extracted as a pure function
+/// so the SessionEnd-uses-the-minimal-chunk invariant is directly
+/// unit-testable. (#1792)
+fn store_content_for_event<'a>(
+    event: HookEvent,
+    chunk: &'a str,
+    storage_chunk: &'a str,
+) -> &'a str {
+    match event {
+        HookEvent::SessionEnd => storage_chunk,
+        _ => chunk,
+    }
+}
+
 /// Maps a `HookEvent` to its session-log `(kind, role)`. `None` for
 /// the lifecycle/memory events (`SessionStart`/`TurnStart`/`SessionEnd`),
 /// which `handle_session_log` handles separately.
@@ -1063,14 +1088,23 @@ fn run_inner(
         let tag_queries = tag_recall_queries(&tags)?;
         let bundle_queries = bundle_recall_queries(&bundles)?;
         let query = tags.join(", ");
+        // Generate full chunk for injection into hook context, and minimal chunk
+        // for storage. The minimal chunk omits boilerplate instruction text
+        // that is provided once in the SessionStart hook injection, not stored
+        // per-project. This reduces per-turn token waste. (#1792)
         let mut chunk = crate::icm::generate_context_chunk(&active, &bundles);
+        let mut storage_chunk = crate::icm::generate_minimal_chunk(&active, &bundles);
 
         // Apply default type/importance markers from config (R1, R3) when no explicit
         // marker is present in the generated chunk.
         chunk = apply_memory_config_defaults(chunk, &config, &active);
+        // Apply markers to storage chunk too (not just injection chunk).
+        storage_chunk = apply_memory_config_defaults(storage_chunk, &config, &active);
+
         // #317: folded into the chunk the SessionEnd store already sends,
         // rather than issuing a second `icm_memory_store` — one store per
         // session end keeps the memory readable and halves the round trips.
+        // Append session metrics to both chunks (injection and storage).
         if stores_session_metrics(event)
             && let Ok(state_dir) = crate::paths::state_dir()
             && let Some(summary) = crate::hook_run::slippage::session_metrics_summary(
@@ -1081,6 +1115,8 @@ fn run_inner(
         {
             chunk.push_str("\n\n");
             chunk.push_str(&summary);
+            storage_chunk.push_str("\n\n");
+            storage_chunk.push_str(&summary);
         }
 
         // Reuse MCP HTTP client across events: the memory backend URL doesn't
@@ -1118,12 +1154,12 @@ fn run_inner(
             None
         };
         let session_end_unchanged = if let Some(dedup_path) = &session_end_dedup_path {
-            let is_unchanged = std::fs::read_to_string(dedup_path)
+            let prev = std::fs::read_to_string(dedup_path)
                 .inspect_err(|e| {
                     tracing::warn!("failed to read dedup cache {}: {e}", dedup_path.display())
                 })
-                .ok()
-                .is_some_and(|prev| prev == chunk);
+                .ok();
+            let is_unchanged = chunk_unchanged(prev.as_deref(), &storage_chunk);
             if is_unchanged {
                 debug!("chunk unchanged since last store, skipping");
                 if !log_cfg.any_sink_enabled() {
@@ -1171,7 +1207,9 @@ fn run_inner(
                 && !session_end_unchanged
             {
                 let actions = dispatch(event, &tag_queries, &bundle_queries, wakeup_max_tokens);
-                out = run_memory_actions(client, actions, &query, &chunk).await?;
+                // Use minimal chunk for storage to avoid duplication. (#1792)
+                let store_content = store_content_for_event(event, &chunk, &storage_chunk);
+                out = run_memory_actions(client, actions, &query, store_content).await?;
 
                 // PostSession: run reflective consolidation (R5) in a detached
                 // child process so the hook returns immediately instead of
@@ -1195,10 +1233,11 @@ fn run_inner(
             // the store call means a transient MCP failure leaves the snapshot ahead
             // of reality — the next SessionEnd sees the chunk as unchanged and skips
             // the store, permanently losing the memory. (#594 code review)
+            // Store the minimal chunk in the dedup snapshot to match what was stored. (#1792)
             if let Some(dedup_path) = &session_end_dedup_path
                 && !session_end_unchanged
             {
-                crate::paths::write_owner_only_atomic(dedup_path, chunk.as_bytes())?;
+                crate::paths::write_owner_only_atomic(dedup_path, storage_chunk.as_bytes())?;
             }
 
             // #231: append the task-tracker Stop reminder. Only reached here when
@@ -4328,6 +4367,43 @@ mod tests {
         assert_eq!(
             dispatch(HookEvent::TurnStart, &[], &[], Some(750)),
             vec![Action::Recall]
+        );
+    }
+
+    #[test]
+    fn chunk_unchanged_true_when_prev_matches_current() {
+        assert!(chunk_unchanged(Some("same"), "same"));
+    }
+
+    #[test]
+    fn chunk_unchanged_false_when_prev_differs_from_current() {
+        assert!(!chunk_unchanged(Some("old"), "new"));
+    }
+
+    #[test]
+    fn chunk_unchanged_false_when_no_prior_snapshot() {
+        // No snapshot yet (first SessionEnd, or a read failure) is always
+        // "changed" — never skip the very first store.
+        assert!(!chunk_unchanged(None, "anything"));
+    }
+
+    #[test]
+    fn store_content_for_event_session_end_uses_storage_chunk() {
+        assert_eq!(
+            store_content_for_event(HookEvent::SessionEnd, "full", "minimal"),
+            "minimal"
+        );
+    }
+
+    #[test]
+    fn store_content_for_event_other_events_use_full_chunk() {
+        assert_eq!(
+            store_content_for_event(HookEvent::TurnStart, "full", "minimal"),
+            "full"
+        );
+        assert_eq!(
+            store_content_for_event(HookEvent::SessionStart, "full", "minimal"),
+            "full"
         );
     }
 
