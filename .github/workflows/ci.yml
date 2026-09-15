@@ -75,7 +75,7 @@ jobs:
             ~/.rustup/settings.toml
           # Keep toolchain + components in the key in sync with the step below.
           key: &rustup-cache-key rustup-ubuntu-latest-${{ hashFiles('rust-toolchain.toml') }}
-      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0  # master
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de  # master
         with:
           toolchain: stable
           components: rustfmt, clippy
@@ -128,7 +128,7 @@ jobs:
       # install below tracks latest (or vice versa) reintroduces exactly the
       # frozen-pin-vs-moving-tool mismatch #1584 fixed -- both must float
       # together so a Rust release and hawk's next release stay in lockstep.
-      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0  # master
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de  # master
         id: toolchain
         with:
           toolchain: stable
