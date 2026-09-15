@@ -68,7 +68,7 @@ walkdir = "=2.5.0"
 sha2 = "=0.11.0"
 hex = "=0.4.3"
 humantime = "=2.4.0"
-jiff = { version = "=0.2.35", default-features = false, features = ["std"] }
+jiff = { version = "=0.2.37", default-features = false, features = ["std"] }
 anstyle = "=1.0.14"
 globset = { workspace = true }
 schemars = "=1.2.2"
