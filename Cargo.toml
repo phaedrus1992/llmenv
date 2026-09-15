@@ -105,7 +105,7 @@ directories = "=6.0.0"
 sha2 = { workspace = true }
 hex = "=0.4.3"
 humantime = { workspace = true }
-jiff = { version = "=0.2.35", default-features = false, features = ["std"] }
+jiff = { version = "=0.2.37", default-features = false, features = ["std"] }
 anstyle = { workspace = true }
 glob = "=0.3.4"
 globset = { workspace = true }
