@@ -124,7 +124,7 @@ jobs:
           persist-credentials: false
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
         with:
-          version: "v0.17.0"
+          version: "v0.18.0"
       # id: toolchain -- rust-toolchain.toml pins channel = "stable" for the
       # rest of the repo, but doesn't declare the rust-src/rustc-dev/
       # llvm-tools-preview components hawk needs, so this step installs its
