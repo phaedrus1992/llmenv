@@ -41,7 +41,7 @@ reqwest = { version = "=0.13.5", default-features = false, features = ["rustls",
 # fork+exec'ing `kill`, which narrows the already-small window in which a
 # reaped pid could be recycled before the group-kill fires. rustix is already
 # in the tree transitively. No unsafe.
-rustix = { version = "=1.1.4", features = ["fs", "process", "system"] }
+rustix = { version = "=1.1.5", features = ["fs", "process", "system"] }
 # hyper/hyper-util/http-body-util/http/futures-util/regex are already present
 # transitively via reqwest — promoted to direct deps here for the launch
 # proxy's (#1289) HTTP server, not new additions to the dependency tree.
