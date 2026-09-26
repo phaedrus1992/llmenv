@@ -511,14 +511,27 @@ mod tests {
         assert!(port > 0);
     }
 
+    #[test]
+    fn upstream_authority_rejects_an_invalid_punycode_host() {
+        let mut vars = BTreeMap::new();
+        vars.insert(
+            "ANTHROPIC_BASE_URL".to_string(),
+            "https://xn--z-2c-da35-.example/anthropic".to_string(),
+        );
+        assert!(upstream_authority(&vars).is_err());
+    }
+
     proptest! {
+        /// Labels have no consecutive hyphens: a label that starts `xn--` is punycode, and
+        /// `url::Url` rejects invalid punycode (see the test below).
+        ///
         /// Excludes the default ports (80/443) from the range: `url::Url`
         /// omits a port matching the scheme default from `Url::port()`, which
         /// would make the extracted authority disagree with the input port
         /// for no reason related to this function's own correctness.
         #[test]
         fn prop_upstream_authority_extracts_host_and_optional_port(
-            host in "[a-z][a-z0-9-]{0,15}(\\.[a-z][a-z0-9-]{0,15}){0,3}",
+            host in "[a-z]([a-z0-9]|-[a-z0-9]){0,7}(\\.[a-z]([a-z0-9]|-[a-z0-9]){0,7}){0,3}",
             port in proptest::option::of(1024u16..=65535),
             scheme in prop_oneof![Just("http"), Just("https")],
         ) {
