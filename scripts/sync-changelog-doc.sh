@@ -12,7 +12,14 @@ fi
 
 cd "$(dirname "$0")/.."
 
-cat > website/docs/changelog.md << 'FRONTMATTER'
+# Built in a temp file and moved into place only on success, so a failure
+# partway through (find/sort below, or perl further down) leaves the real
+# website/docs/changelog.md untouched instead of truncated to just the
+# frontmatter.
+OUT="$(mktemp)"
+trap 'rm -f "$OUT" "${CHANGELOG_LIST:-}"' EXIT
+
+cat > "$OUT" << 'FRONTMATTER'
 ---
 id: changelog
 title: Changelog
@@ -30,6 +37,21 @@ FRONTMATTER
 # so the combined output has only one preamble.
 #
 # Discovers CHANGELOG-N.md files dynamically — no hardcoded list.
+#
+# Captured to a temp file (not streamed via `< <(find | sort)`) so `set -e`
+# sees a `find` or `sort` failure: a process substitution's exit status is
+# invisible to the while/read loop consuming it, so either command failing
+# would otherwise run the loop over whatever partial output happened to
+# exist and silently regenerate an incomplete changelog. A temp file (not a
+# plain variable) because the list is NUL-delimited, and bash string
+# variables can't hold embedded NUL bytes.
+CHANGELOG_LIST="$(mktemp)"
+if ! find . -maxdepth 1 -name 'CHANGELOG-*.md' -print0 \
+    | sort -t- -k2 -n -r -z > "$CHANGELOG_LIST"; then
+  echo "::error::failed to list CHANGELOG-*.md files" >&2
+  exit 1
+fi
+
 first=true
 while IFS= read -r -d '' f; do
   f="${f#./}"
@@ -49,11 +71,11 @@ while IFS= read -r -d '' f; do
       s/\n+(?=## \[)/\n\n## Version $ENV{V}.x\n\n/ms;
       s/^\n+//;
       s/\n+$/\n/;
-    ' "$f" >> website/docs/changelog.md
+    ' "$f" >> "$OUT"
   else
-    echo "" >> website/docs/changelog.md
-    echo "## Version ${v}.x" >> website/docs/changelog.md
-    echo "" >> website/docs/changelog.md
+    echo "" >> "$OUT"
+    echo "## Version ${v}.x" >> "$OUT"
+    echo "" >> "$OUT"
     # Subsequent files: strip preamble, footer + sentinels
     perl -0777 -pe '
       s/<!--\s*next-url\s*-->.*$//ms;
@@ -61,8 +83,9 @@ while IFS= read -r -d '' f; do
       s/^<!--\s*[\d.]+\s+next-header\s*-->\n//mg;
       s/^\n+//;
       s/\n+$/\n/;
-    ' "$f" >> website/docs/changelog.md
+    ' "$f" >> "$OUT"
   fi
-done < <(find . -maxdepth 1 -name 'CHANGELOG-*.md' -print0 | sort -t- -k2 -n -r -z)
+done < "$CHANGELOG_LIST"
 
+mv "$OUT" website/docs/changelog.md
 echo "Done. website/docs/changelog.md regenerated."
