@@ -28,11 +28,14 @@ use tempfile::TempDir;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// A syntactically well-formed 64-character hex token — `hook_run`'s client
-/// now rejects anything else outright (#1487), so a short fixture string
-/// like the pre-#1487 tests used would just make this test hang instead of
-/// exercising the protocol.
-const TEST_TOKEN: &str = "ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34";
+/// A fresh, syntactically well-formed 64-character hex token — `hook_run`'s client rejects
+/// anything else outright (#1487), so a short fixture string would make a test hang instead of
+/// exercising the protocol. Random per test, so no key literal sits in the source (#2164).
+fn test_token() -> String {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).unwrap();
+    hex::encode(bytes)
+}
 
 /// Computes the same `HMAC-SHA256(secret, message)`, hex-encoded, that
 /// `src/launch/socket.rs`'s `hmac_hex` computes — duplicated here since that
@@ -124,7 +127,7 @@ adapter:
 fn serve_one_notice(
     listener: UnixListener,
     notice: &'static str,
-    expected_token: &'static str,
+    expected_token: String,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let Ok((mut stream, _)) = listener.accept() else {
@@ -139,7 +142,7 @@ fn serve_one_notice(
         };
         let server_nonce = "server-nonce-fixture";
         let server_proof = hmac_hex(
-            expected_token,
+            &expected_token,
             &handshake_message("server", client_nonce, server_nonce, &[]),
         );
         let server_hello = serde_json::json!({
@@ -154,7 +157,7 @@ fn serve_one_notice(
             return;
         };
         let expected_request_proof = hmac_hex(
-            expected_token,
+            &expected_token,
             &handshake_message("client", client_nonce, server_nonce, &[]),
         );
         if request.get("proof").and_then(serde_json::Value::as_str)
@@ -163,7 +166,7 @@ fn serve_one_notice(
             return;
         }
         let response_proof = hmac_hex(
-            expected_token,
+            &expected_token,
             &handshake_message(
                 "response",
                 client_nonce,
@@ -210,7 +213,8 @@ fn hook_run_delivers_launch_notice_joined_with_existing_context() {
     // own timeout — are what actually catches that; waiting on this thread
     // too would just hang the test alongside it. It's reclaimed when the
     // test binary process exits.
-    let _server = serve_one_notice(listener, "credentials expire soon", TEST_TOKEN);
+    let token = test_token();
+    let _server = serve_one_notice(listener, "credentials expire soon", token.clone());
 
     let test_file_dir = TempDir::new().unwrap();
     let file_path = test_file_dir.path().join("hook_run_launch_notice.txt");
@@ -245,7 +249,7 @@ fn hook_run_delivers_launch_notice_joined_with_existing_context() {
         // and must send exactly this value — serve_one_notice above checks it
         // before answering, so a wrong value here would hang this test the
         // same way a client that never dials the socket would.
-        .env("LLMENV_LAUNCH_TOKEN", TEST_TOKEN)
+        .env("LLMENV_LAUNCH_TOKEN", &token)
         .arg("hook-run")
         .arg("pre_tool_use")
         .write_stdin(payload.as_str());
