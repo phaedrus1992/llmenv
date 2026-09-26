@@ -8,3 +8,4 @@ mutants.out*/
 .claude/*.local.json
 .claude/worktrees
 .yaks/
+__pycache__/

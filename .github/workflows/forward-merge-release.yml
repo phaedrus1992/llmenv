@@ -151,6 +151,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
+      # Lockfile conflicts are resolved by regenerating the lockfile, so the job
+      # needs both toolchains. Pins match ci.yml and docs.yml. (#2166)
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de  # master
+        with:
+          toolchain: stable
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: 24.19.0
+          package-manager-cache: false
+
       - name: Forward-merge cascade
         env:
           CURRENT: ${{ steps.detect.outputs.current }}
@@ -407,32 +420,79 @@ jobs:
             return 1
           }
 
-          # Whether every difference the source introduced in $1 since the merge
-          # base is a version literal.
+          # Whether keeping the target's copy of manifest $1 loses nothing the
+          # source changed. Own-version differences and the same pin bumped on two
+          # release lines pass. A new, removed or newer-than-target dependency does
+          # not. A regex that blanks every `version = "..."` cannot tell these
+          # apart: it would call a newer source pin "version-only" and drop it.
+          # Rules: docs/design/issue-2166-forward-merge-drift.md
           #
-          # Blanking every `version = "..."` on both sides and comparing is the
-          # whole test: if the files are then identical, versions are the only
-          # thing that changed. A line the source actually added (a new
-          # dependency, say) survives blanking and makes them differ, so it can
-          # never be mistaken for a version bump and silently dropped. Comparing
-          # the diff's changed lines against a version-shaped regex instead would
-          # get exactly that case wrong — `serde = { version = "1" }` matches the
-          # regex too.
-          version_only_change() {
-            local file="$1" base before after
+          # #1532: this job holds FORWARD_MERGE_PAT, so it never runs a script
+          # from the merged tree or the source. It runs the target's own copy
+          # (HEAD, before this merge). A target without the script has no rule,
+          # so the caller bails and a human merges once.
+          manifest_keeps_target() {
+            local file="$1" base dir rc=0 line
             base=$(git merge-base HEAD "$SOURCE_REF") || return 1
-            before=$(git show "$base:$file" 2>/dev/null \
-              | sed -E 's/version = "[^"]*"/version = "*"/g') || return 1
-            after=$(git show "$SOURCE_REF:$file" 2>/dev/null \
-              | sed -E 's/version = "[^"]*"/version = "*"/g') || return 1
-            [[ "$before" == "$after" ]]
+            dir=$(mktemp -d) || return 1
+            if git show "HEAD:scripts/forward_merge_manifest.py" > "$dir/check.py" 2>/dev/null \
+                && git show "$base:$file" > "$dir/base.toml" \
+                && git show "$SOURCE_REF:$file" > "$dir/source.toml" \
+                && git show "HEAD:$file" > "$dir/target.toml"; then
+              python3 "$dir/check.py" "$dir/base.toml" "$dir/source.toml" "$dir/target.toml" \
+                2> "$dir/problems.txt" || rc=$?
+            else
+              echo "  ${file//::/  }: $TARGET has no manifest check yet, or a copy could not be read"
+              rc=2
+            fi
+            # Log text comes from the source's files; strip `::` as in #1543.
+            if [[ -s "$dir/problems.txt" ]]; then
+              while IFS= read -r line; do
+                echo "  ${file//::/  }: ${line//::/  }"
+              done < "$dir/problems.txt"
+            fi
+            rm -f "$dir/check.py" "$dir/base.toml" "$dir/source.toml" "$dir/target.toml" \
+              "$dir/problems.txt"
+            rmdir "$dir"
+            return "$rc"
+          }
+
+          # Rebuild the lockfiles from the target's copy and the merged manifests.
+          # A hand merge of a lockfile is never right. A lockfile-only change on the
+          # source is not carried over; the target keeps its own. `--ignore-scripts`
+          # keeps npm from running package code with the PAT in the environment.
+          regenerate_lockfiles() {
+            if [[ "$1" -eq 1 ]]; then
+              echo "  Cargo.lock: regenerating from the merged manifests"
+              git checkout --ours -- Cargo.lock || {
+                echo "::error::Cargo.lock: git checkout --ours failed" >&2
+                return 1
+              }
+              if ! cargo update --workspace; then
+                echo "::error::Cargo.lock: 'cargo update --workspace' failed" >&2
+                return 1
+              fi
+              git add -- Cargo.lock
+            fi
+            if [[ "$2" -eq 1 ]]; then
+              echo "  website/package-lock.json: regenerating from the merged package.json"
+              git checkout --ours -- website/package-lock.json || {
+                echo "::error::website/package-lock.json: git checkout --ours failed" >&2
+                return 1
+              }
+              if ! (cd website && npm install --package-lock-only --ignore-scripts); then
+                echo "::error::website/package-lock.json: 'npm install --package-lock-only --ignore-scripts' failed" >&2
+                return 1
+              fi
+              git add -- website/package-lock.json
+            fi
           }
 
           # Resolve the conflicts a forward-merge produces every single time, and
           # only those. Returns non-zero the moment it meets one it has no rule
           # for, leaving the caller to bail.
           #
-          # Two classes:
+          # Three classes:
           #   * website/docs/changelog.md is generated by
           #     scripts/sync-changelog-doc.sh, so it's regenerated from the
           #     merged CHANGELOG-*.md rather than reconciled line by line.
@@ -440,12 +500,12 @@ jobs:
           #     always carry different versions, so `release/4.x` (4.0.0-alpha.1)
           #     into `main` (5.0.0-alpha.1) collides on all six every time. A
           #     forward-merge must never change the target's own version, so the
-          #     target's side wins — but only after `version_only_change` proves
-          #     the source's side holds nothing else. Keeping the target's
-          #     manifests *and* its Cargo.lock leaves the pair mutually
-          #     consistent, so no `cargo` run is needed to repair the lock.
+          #     target's side wins — but only after `manifest_keeps_target` proves
+          #     the source's side holds nothing else.
+          #   * Cargo.lock and website/package-lock.json are regenerated once every
+          #     other conflict is resolved, never merged by hand.
           auto_resolve_conflicts() {
-            local file conflicted_files remaining
+            local file conflicted_files remaining lock_cargo=0 lock_npm=0
             # Captured to a variable, with an explicit `|| { ...; return 1; }`
             # handler — not streamed via `< <(git diff ...)`, and not relying
             # on `set -e` to catch a bare failure, since this whole function
@@ -532,8 +592,14 @@ jobs:
                   rm -f "$tmp_script"
                   git add -- "$file"
                   ;;
-                Cargo.toml | Cargo.lock | crates/*/Cargo.toml)
-                  if ! version_only_change "$file"; then
+                Cargo.lock)
+                  lock_cargo=1
+                  ;;
+                website/package-lock.json)
+                  lock_npm=1
+                  ;;
+                Cargo.toml | crates/*/Cargo.toml)
+                  if ! manifest_keeps_target "$file"; then
                     echo "::error::$file_display: $SOURCE_DESC changed more than version numbers here, so keeping $TARGET's copy could drop real changes"
                     return 1
                   fi
@@ -547,6 +613,7 @@ jobs:
                   ;;
               esac
             done <<< "$conflicted_files"
+            regenerate_lockfiles "$lock_cargo" "$lock_npm" || return 1
             # Same explicit-handler reasoning as above: this re-check must
             # not silently read as "nothing left" just because `git diff`
             # failed — `set -e` can't catch that here either.
