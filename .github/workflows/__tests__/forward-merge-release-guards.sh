@@ -427,96 +427,19 @@ EOF
   return 1
 }
 
-# Build the auto-resolution script — mirrors version_only_change and
-# auto_resolve_conflicts in forward-merge-release.yml. Unlike the blocks above
-# this runs against a real git repo, because the whole point of the guard is
-# what the source branch did to the file in history.
+# Build the auto-resolution script. The manifest, lockfile and conflict functions
+# are cut out of forward-merge-release.yml itself, so this tests the shipped code
+# and cannot drift from it. Unlike the blocks above this runs against a real git
+# repo, because the whole point of the guard is what the source branch did to the
+# file in history.
 # Callers export: SOURCE_REF TARGET SOURCE_DESC and run it inside a conflicted merge.
+WORKFLOW="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/forward-merge-release.yml"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+
 resolve_block() {
+  echo 'set -euo pipefail'
+  sed -n '/^ *manifest_keeps_target() {/,/^ *for TARGET in/p' "$WORKFLOW" | sed '$d'
   cat <<'SHELL'
-set -euo pipefail
-
-version_only_change() {
-  local file="$1" base before after
-  base=$(git merge-base HEAD "$SOURCE_REF") || return 1
-  before=$(git show "$base:$file" 2>/dev/null \
-    | sed -E 's/version = "[^"]*"/version = "*"/g') || return 1
-  after=$(git show "$SOURCE_REF:$file" 2>/dev/null \
-    | sed -E 's/version = "[^"]*"/version = "*"/g') || return 1
-  [[ "$before" == "$after" ]]
-}
-
-auto_resolve_conflicts() {
-  local file conflicted_files remaining
-  conflicted_files="$(git diff --name-only --diff-filter=U)" || {
-    echo "::error::failed to list conflicted files" >&2
-    return 1
-  }
-  while IFS= read -r file; do
-    [[ -n "$file" ]] || continue
-    case "$file" in
-      website/docs/changelog.md)
-        echo "  $file: regenerating from the merged CHANGELOG-*.md sources"
-        git checkout --ours -- "$file" || {
-          echo "::error::$file: git checkout --ours failed" >&2
-          return 1
-        }
-        local script_path="scripts/sync-changelog-doc.sh" target_script source_script tmp_script
-        target_script=$(git show "HEAD:$script_path" 2>/dev/null) || {
-          echo "::error::$file: failed to read $TARGET's copy of $script_path" >&2
-          return 1
-        }
-        source_script=$(git show "$SOURCE_REF:$script_path" 2>/dev/null) || {
-          echo "::error::$file: failed to read $SOURCE_DESC's copy of $script_path" >&2
-          return 1
-        }
-        if [[ "$target_script" != "$source_script" ]]; then
-          echo "::error::$file: $script_path differs between $SOURCE_DESC and $TARGET; a script-logic change must be forward-merged and reviewed by hand, not auto-run" >&2
-          return 1
-        fi
-        # Materialized inside scripts/ (not /tmp) so the script's own
-        # `cd "$(dirname "$0")/.."` still lands on the repo root. Written
-        # from the already-verified $target_script, not a second `git show`,
-        # so there's no gap between what was compared and what runs.
-        tmp_script=$(mktemp "$PWD/scripts/.sync-changelog-doc.XXXXXX") || {
-          echo "::error::$file: failed to create temp file for $script_path" >&2
-          return 1
-        }
-        printf '%s\n' "$target_script" > "$tmp_script" || {
-          echo "::error::$file: failed to write pinned copy of $script_path" >&2
-          rm -f "$tmp_script"
-          return 1
-        }
-        if ! bash "$tmp_script"; then
-          echo "::error::$file: scripts/sync-changelog-doc.sh failed to regenerate the changelog" >&2
-          rm -f "$tmp_script"
-          return 1
-        fi
-        rm -f "$tmp_script"
-        git add -- "$file"
-        ;;
-      Cargo.toml | Cargo.lock | crates/*/Cargo.toml)
-        if ! version_only_change "$file"; then
-          echo "::error::$file: $SOURCE_DESC changed more than version numbers here, so keeping $TARGET's copy could drop real changes"
-          return 1
-        fi
-        echo "  $file: keeping $TARGET's own version"
-        git checkout --ours -- "$file"
-        git add -- "$file"
-        ;;
-      *)
-        echo "::error::$file: conflict has no auto-resolution rule"
-        return 1
-        ;;
-    esac
-  done <<< "$conflicted_files"
-  remaining="$(git diff --name-only --diff-filter=U)" || {
-    echo "::error::failed to verify remaining conflicts" >&2
-    return 1
-  }
-  [[ -z "$remaining" ]]
-}
-
 if auto_resolve_conflicts; then
   echo "RESOLVED"
 else
@@ -537,17 +460,19 @@ make_version_conflict_repo() {
     git config user.email t@t
     git config user.name t
     git config commit.gpgsign false
-    printf 'version = "1.0.0"\n\n[dependencies]\nanyhow = { version = "1" }\n' > Cargo.toml
-    git add Cargo.toml
+    printf '[package]\nversion = "1.0.0"\n\n[dependencies]\nanyhow = { version = "1" }\n' > Cargo.toml
+    mkdir scripts
+    cp "$REPO_ROOT/scripts/forward_merge_manifest.py" scripts/
+    git add Cargo.toml scripts
     git commit -q -m base
 
     git switch -q -c source
-    printf 'version = "4.0.0-alpha.1"\n\n[dependencies]\nanyhow = { version = "1" }\n%s' "$extra" \
+    printf '[package]\nversion = "4.0.0-alpha.1"\n\n[dependencies]\nanyhow = { version = "1" }\n%s' "$extra" \
       > Cargo.toml
     git commit -q -am "source bump"
 
     git switch -q target
-    printf 'version = "5.0.0-alpha.1"\n\n[dependencies]\nanyhow = { version = "1" }\n' > Cargo.toml
+    printf '[package]\nversion = "5.0.0-alpha.1"\n\n[dependencies]\nanyhow = { version = "1" }\n' > Cargo.toml
     git commit -q -am "target bump"
 
     git merge --no-commit --no-ff source >/dev/null 2>&1 || true
@@ -570,7 +495,7 @@ test_1381_version_only_conflict_keeps_target_version() {
 
   out=$(cd "$repo" && SOURCE_REF=source TARGET=main SOURCE_DESC=release/4.x \
     bash -c "$(resolve_block)" 2>&1 || true)
-  version=$(cd "$repo" && head -1 Cargo.toml)
+  version=$(cd "$repo" && sed -n 2p Cargo.toml)
   trash "$repo" 2>/dev/null || true
 
   if [[ "$out" == *RESOLVED* ]] && [[ "$version" == 'version = "5.0.0-alpha.1"' ]]; then
@@ -1124,6 +1049,128 @@ test_1534_test_mirror_matches_production_script_integrity_guard() {
     return 0
   fi
   echo "  production's per-target script-integrity guard no longer matches the lines this file mirrors -- update script_integrity_guard_block above" >&2
+  return 1
+}
+
+# Build a repo where source and target both bumped the same pin (Renovate on two
+# release lines), each moved its own version, and each rewrote both lockfiles.
+# `$1` is the clap pin the source moves to; the target is on 1.0.1. The base
+# commit carries the manifest script unless `$2` is "no-script". Leaves the repo
+# inside a conflicted `git merge source`. Echoes the path.
+make_pin_drift_repo() {
+  local source_pin="$1" script="${2:-script}" repo
+  repo=$(mktemp -d)
+  (
+    cd "$repo" || exit 1
+    git init -q -b target .
+    git config user.email t@t
+    git config user.name t
+    git config commit.gpgsign false
+    mkdir website scripts
+    if [[ "$script" == script ]]; then
+      cp "$REPO_ROOT/scripts/forward_merge_manifest.py" scripts/
+    else
+      touch scripts/.keep
+    fi
+    write_drift_files 1.0.0 1.0.0 base base
+    git add -A
+    git commit -q -m base
+
+    git switch -q -c source
+    write_drift_files "$source_pin" 3.11.2 source-lock source-npm
+    git commit -q -am "source"
+
+    git switch -q target
+    write_drift_files 1.0.1 4.0.0-alpha.1 target-lock target-npm
+    git commit -q -am "target"
+
+    git merge --no-commit --no-ff source >/dev/null 2>&1 || true
+  )
+  printf '%s\n' "$repo"
+}
+
+# Args: clap pin, package version, Cargo.lock body, package-lock.json body.
+write_drift_files() {
+  printf '[package]\nversion = "%s"\n\n[dependencies]\nclap = { version = "=%s" }\n' "$2" "$1" > Cargo.toml
+  printf '%s\n' "$3" > Cargo.lock
+  printf '%s\n' "$4" > website/package-lock.json
+}
+
+# Put `cargo` and `npm` stubs on PATH. Each rewrites its lockfile to a marker,
+# or exits non-zero when FAIL_TOOL names it. Echoes the stub directory.
+make_tool_stubs() {
+  local dir
+  dir=$(mktemp -d)
+  cat > "$dir/cargo" <<'STUB'
+#!/usr/bin/env bash
+[[ "${FAIL_TOOL:-}" == cargo ]] && exit 1
+echo regenerated-by-cargo > Cargo.lock
+STUB
+  cat > "$dir/npm" <<'STUB'
+#!/usr/bin/env bash
+[[ "${FAIL_TOOL:-}" == npm ]] && exit 1
+echo regenerated-by-npm > package-lock.json
+STUB
+  chmod +x "$dir/cargo" "$dir/npm"
+  printf '%s\n' "$dir"
+}
+
+# Run the resolution block in a pin-drift repo. Sets DRIFT_OUT and DRIFT_REPO;
+# the caller removes the repo. Args: source pin, optional "no-script".
+run_drift() {
+  local stubs
+  DRIFT_REPO=$(make_pin_drift_repo "$@")
+  stubs=$(make_tool_stubs)
+  DRIFT_OUT=$(cd "$DRIFT_REPO" && PATH="$stubs:$PATH" FAIL_TOOL="${FAIL_TOOL:-}" \
+    SOURCE_REF=source TARGET=release/4.x SOURCE_DESC=release/3.x \
+    bash -c "$(resolve_block)" 2>&1 || true)
+  trash "$stubs" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# Tests (Issue #2166): the same pin bumped on two release lines, plus both
+# lockfiles rewritten on both lines, resolves with no human step. A real change
+# still bails. The manifest check is the target's own copy (#1532), never the
+# source's.
+# ---------------------------------------------------------------------------
+test_2166_same_pin_bump_and_lockfiles_resolve() {
+  local manifest cargo_lock npm_lock
+  run_drift 1.0.1
+  manifest=$(cd "$DRIFT_REPO" && cat Cargo.toml)
+  cargo_lock=$(cd "$DRIFT_REPO" && cat Cargo.lock)
+  npm_lock=$(cd "$DRIFT_REPO" && cat website/package-lock.json)
+  trash "$DRIFT_REPO" 2>/dev/null || true
+
+  if [[ "$DRIFT_OUT" == *RESOLVED* ]] && [[ "$manifest" == *'version = "4.0.0-alpha.1"'* ]] \
+      && [[ "$cargo_lock" == regenerated-by-cargo ]] && [[ "$npm_lock" == regenerated-by-npm ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "${DRIFT_OUT//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2166_newer_source_pin_bails() {
+  run_drift 1.0.2
+  trash "$DRIFT_REPO" 2>/dev/null || true
+  [[ "$DRIFT_OUT" == *BAILED* ]] && [[ "$DRIFT_OUT" == *"newer than target"* ]] && return 0
+  printf '  out: %s\n' "${DRIFT_OUT//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2166_lockfile_tool_failure_bails_naming_command() {
+  FAIL_TOOL=npm run_drift 1.0.1
+  trash "$DRIFT_REPO" 2>/dev/null || true
+  [[ "$DRIFT_OUT" == *BAILED* ]] && [[ "$DRIFT_OUT" == *"npm install --package-lock-only"* ]] \
+    && return 0
+  printf '  out: %s\n' "${DRIFT_OUT//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2166_target_without_manifest_script_bails() {
+  run_drift 1.0.1 no-script
+  trash "$DRIFT_REPO" 2>/dev/null || true
+  [[ "$DRIFT_OUT" == *BAILED* ]] && [[ "$DRIFT_OUT" == *"no manifest check yet"* ]] && return 0
+  printf '  out: %s\n' "${DRIFT_OUT//$'\n'/ | }" >&2
   return 1
 }
 
@@ -2404,6 +2451,18 @@ run_test "Issue #1543 follow-up: git merge's own conflict output is fully suppre
   test_1543_git_merge_stdout_suppressed_on_conflict
 run_test "Issue #1543 follow-up: the test mirror still matches production's merge output suppression" \
   test_1543_test_mirror_matches_production_merge_output_suppression
+
+run_test "Issue #2166: same pin bumped on both lines and lockfiles resolve with no human step" \
+  test_2166_same_pin_bump_and_lockfiles_resolve
+
+run_test "Issue #2166: a source pin newer than the target still bails" \
+  test_2166_newer_source_pin_bails
+
+run_test "Issue #2166: a failing lockfile tool bails and names the command" \
+  test_2166_lockfile_tool_failure_bails_naming_command
+
+run_test "Issue #2166: a target without the manifest script bails instead of running the source's copy" \
+  test_2166_target_without_manifest_script_bails
 
 run_test "Issue #1675: a push event uses the pushed branch as the source" \
   test_1675_push_event_uses_pushed_branch_as_source
