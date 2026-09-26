@@ -220,6 +220,17 @@ pub(crate) fn split_recall_records(text: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
+    proptest! {
+        /// Splitting never loses or invents text: the non-whitespace characters of the
+        /// records, in order, equal those of the input.
+        #[test]
+        fn split_recall_records_preserves_all_text(text in "(\\[[a-z]{1,8}\\] )?[a-z \\[\\]\n]{0,200}") {
+            let strip = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+            let joined = split_recall_records(&text).join("\n");
+            prop_assert_eq!(strip(&joined), strip(&text));
+        }
+    }
+
     #[test]
     fn split_recall_records_splits_on_topic_lines() {
         let text = "[ctx-a] first line\n  detail\n[ctx-b] second\n";

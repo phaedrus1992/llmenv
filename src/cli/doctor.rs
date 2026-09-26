@@ -2428,6 +2428,30 @@ mod tests {
         }
     }
 
+    proptest! {
+        /// Any triple that fits nine digits round-trips through the text form, with or without
+        /// a `v` prefix and a suffix.
+        #[test]
+        fn parse_semver_triple_round_trips(
+            a in 0u64..1_000_000_000,
+            b in 0u64..1_000_000_000,
+            c in 0u64..1_000_000_000,
+            prefix in prop::sample::select(vec!["", "v"]),
+            suffix in prop::sample::select(vec!["", "-rc.1", "+build.5"]),
+        ) {
+            let text = format!("{prefix}{a}.{b}.{c}{suffix}");
+            prop_assert_eq!(parse_semver_triple(&text), Some((a, b, c)));
+        }
+
+        /// The parser never panics, and only accepts text that starts with a digit or `v`.
+        #[test]
+        fn parse_semver_triple_never_panics(text in "\\PC{0,24}") {
+            if parse_semver_triple(&text).is_some() {
+                prop_assert!(text.starts_with(|c: char| c.is_ascii_digit() || c == 'v'));
+            }
+        }
+    }
+
     #[test]
     fn cbm_floor_warning_fires_only_below_the_floor() {
         let warning = cbm_floor_warning("0.10.8").expect("0.10.8 is below the floor");
