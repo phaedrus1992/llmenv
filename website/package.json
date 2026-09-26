@@ -42,7 +42,7 @@
     "vitest": "5.0.1"
   },
   "overrides": {
-    "serialize-javascript": "7.1.1",
+    "serialize-javascript": "7.1.2",
     "uuid": "14.0.2"
   },
   "browserslist": {
