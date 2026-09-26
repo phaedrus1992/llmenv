@@ -20,7 +20,7 @@ serde_yaml = { package = "serde_yaml_ng", version = "=0.10.0" }
 # table keys correctly, and MCP server names come from user config — a name
 # containing a dot would silently become nested tables.
 toml = "=1.1.6"
-thiserror = "=2.0.20"
+thiserror = "=2.0.21"
 tracing = "=0.1.44"
 proptest = "=1.11.0"
 pulldown-cmark = "=0.13.4"
@@ -98,7 +98,7 @@ toml = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "json"] }
-thiserror = "=2.0.20"
+thiserror = "=2.0.21"
 anyhow = "=1.0.104"
 walkdir = { workspace = true }
 directories = "=6.0.0"
