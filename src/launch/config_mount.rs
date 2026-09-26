@@ -955,6 +955,20 @@ url = "http://icm.example.com:9092/mcp"
         );
     }
 
+    /// Ports other than 80. The `url` crate drops an `http` URL's default port when it
+    /// serializes, so a rewritten URL never keeps `:80`; see the test below.
+    fn non_default_http_port() -> impl Strategy<Value = u16> {
+        prop_oneof![1u16..80, 81u16..=65535]
+    }
+
+    #[test]
+    fn rewrite_loopback_url_drops_the_http_default_port() {
+        let rewritten = rewrite_loopback_url("http://127.0.0.1:80/mcp", "host.docker.internal")
+            .unwrap()
+            .unwrap();
+        assert_eq!(rewritten, "http://host.docker.internal/mcp");
+    }
+
     proptest! {
         #[test]
         fn prop_rewrite_loopback_url_never_panics_on_arbitrary_input(url in ".{0,80}") {
@@ -1051,7 +1065,7 @@ url = "http://icm.example.com:9092/mcp"
         #[test]
         fn prop_rewrite_loopback_url_replaces_any_loopback_ip_preserving_rest(
             loopback_octet in 0u8..=255,
-            port in 1u16..=65535,
+            port in non_default_http_port(),
             path_segment in "[a-z]{1,10}",
             gateway in prop_oneof![Just("host.docker.internal"), Just("host.containers.internal")],
         ) {
@@ -1079,7 +1093,7 @@ url = "http://icm.example.com:9092/mcp"
             // remote URL; index-based names avoid collisions between the two
             // groups without a separate dedup step.
             is_loopback in proptest::collection::vec(proptest::bool::ANY, 1..6),
-            port in 1u16..=65535,
+            port in non_default_http_port(),
         ) {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join(CLAUDE_JSON_FILE);
@@ -1123,7 +1137,7 @@ url = "http://icm.example.com:9092/mcp"
         #[test]
         fn prop_patch_toml_config_loopback_urls_rewrites_only_the_loopback_entries(
             is_loopback in proptest::collection::vec(proptest::bool::ANY, 1..6),
-            port in 1u16..=65535,
+            port in non_default_http_port(),
         ) {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("config.toml");
