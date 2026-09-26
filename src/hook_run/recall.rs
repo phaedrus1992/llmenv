@@ -408,6 +408,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn passthrough_text_skips_empty_results_and_exact_duplicates() {
+        let texts = ["", "pack", "pack", "other"];
+        let index = Cell::new(0);
+        let (text, _) = run_with_budget(vec![Action::WakeUp(None); 4], |_| {
+            let text = texts[index.get()].to_string();
+            index.set(index.get() + 1);
+            async move { Ok(text) }
+        })
+        .await
+        .expect("fake runner does not fail");
+        assert_eq!(text, "pack\n\nother");
+    }
+
+    #[tokio::test]
     async fn a_failing_action_propagates_its_error() {
         let result = run_with_budget(vec![Action::Recall], |_| async {
             Err::<String, _>(anyhow::anyhow!("boom"))
