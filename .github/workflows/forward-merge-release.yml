@@ -216,30 +216,12 @@ jobs:
             return 1
           }
 
-          # Whether every difference the source introduced in $1 since the merge
-          # base is a version literal.
-          #
-          # Blanking every `version = "..."` on both sides and comparing is the
-          # whole test: if the files are then identical, versions are the only
-          # thing that changed. A line the source actually added (a new
-          # dependency, say) survives blanking and makes them differ, so it can
-          # never be mistaken for a version bump and silently dropped. Comparing
-          # the diff's changed lines against a version-shaped regex instead would
-          # get exactly that case wrong — `serde = { version = "1" }` matches the
-          # regex too.
-          version_only_change() {
-            local file="$1" base before after
-            base=$(git merge-base HEAD "$SOURCE_REF") || return 1
-            before=$(git show "$base:$file" 2>/dev/null \
-              | sed -E 's/version = "[^"]*"/version = "*"/g') || return 1
-            after=$(git show "$SOURCE_REF:$file" 2>/dev/null \
-              | sed -E 's/version = "[^"]*"/version = "*"/g') || return 1
-            [[ "$before" == "$after" ]]
-          }
-
           # Whether keeping the target's copy of manifest $1 loses nothing the
-          # source changed. Handles Renovate bumping the same pin on two release
-          # lines. Rules: docs/design/issue-2166-forward-merge-drift.md
+          # source changed. Own-version differences and the same pin bumped on two
+          # release lines pass. A new, removed or newer-than-target dependency does
+          # not. A regex that blanks every `version = "..."` cannot tell these
+          # apart: it would call a newer source pin "version-only" and drop it.
+          # Rules: docs/design/issue-2166-forward-merge-drift.md
           manifest_keeps_target() {
             local file="$1" base dir rc
             [[ -n "$MANIFEST_CHECK" ]] || return 1
@@ -301,8 +283,8 @@ jobs:
           #     always carry different versions, so `release/4.x` (4.0.0-alpha.1)
           #     into `main` (5.0.0-alpha.1) collides on every one every time. A
           #     forward-merge must never change the target's own version, so the
-          #     target's side wins — but only after `version_only_change` or
-          #     `manifest_keeps_target` proves the source's side holds nothing else.
+          #     target's side wins — but only after `manifest_keeps_target` proves
+          #     the source's side holds nothing else.
           #   * Cargo.lock and website/package-lock.json are regenerated once every
           #     other conflict is resolved, never merged by hand.
           auto_resolve_conflicts() {
@@ -317,7 +299,7 @@ jobs:
                   git add -- "$file"
                   ;;
                 Cargo.toml | crates/*/Cargo.toml)
-                  if ! version_only_change "$file" && ! manifest_keeps_target "$file"; then
+                  if ! manifest_keeps_target "$file"; then
                     echo "::error::$file: $SOURCE_DESC changed more than version numbers here, so keeping $TARGET's copy could drop real changes"
                     return 1
                   fi

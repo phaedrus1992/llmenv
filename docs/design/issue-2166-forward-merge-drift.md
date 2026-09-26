@@ -73,7 +73,17 @@ Rules:
 4. A dependency removed or added by the source since the base: exit 1.
 5. Any other key that differs between base and source outside the tables in rule 1 and the ignores in rule 2: exit 1.
 
-In `auto_resolve_conflicts`, for `Cargo.toml` and `crates/*/Cargo.toml`: accept the target's copy when `version_only_change` passes **or** the script exits 0.
+In `auto_resolve_conflicts`, for `Cargo.toml` and `crates/*/Cargo.toml`: accept the target's copy only when the script exits 0.
+The workflow no longer uses `version_only_change`.
+That check blanks every `version = "…"`, so it called a source bump to a newer third-party pin "version-only", and keeping the target's copy then dropped the bump.
+The script already ignores the version differences the old check was for (package versions and path dependencies).
+
+Two details the first draft did not cover:
+
+- A `{ workspace = true }` dependency is resolved against `[workspace.dependencies]` before the comparison, because a branch can hoist a pin there (4.x did this for `rustix`).
+- The operator (`=`, `^`, `~`, `>=`) must be equal on both sides, and only the numbers are ordered.
+
+The workflow copies the script from the pushed branch at the start of the job, because a target branch may not carry it yet.
 Write the three versions to temp files with `git show <ref>:<path>`.
 
 ### 3. Lockfile rules
