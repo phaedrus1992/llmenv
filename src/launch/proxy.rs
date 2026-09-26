@@ -192,17 +192,21 @@ fn strip_pattern(pattern: &str, is_regex: bool, text: &str) -> String {
 /// literal drifting between the two sites.
 pub(crate) const PEER_AUTH_HEADER: &str = "x-llmenv-launch-proxy-token";
 
+/// What [`bind`] hands back: the listener, its address and this session's peer-auth token.
+/// Named fields, like `socket::BoundSocket`, keep the address apart from the secret (#2164).
+pub(crate) struct BoundProxy {
+    pub(crate) listener: tokio::net::TcpListener,
+    pub(crate) addr: std::net::SocketAddr,
+    pub(crate) token: crate::launch::socket::LaunchToken,
+}
+
 /// Bind the local proxy listener on an OS-assigned ephemeral port, loopback
 /// only, and generate this session's peer-auth token (#1632) — see
 /// `peer_authorized` for why loopback binding alone isn't enough.
 ///
 /// # Errors
 /// Returns an error when the bind fails or the token can't be generated.
-pub(crate) async fn bind() -> anyhow::Result<(
-    tokio::net::TcpListener,
-    std::net::SocketAddr,
-    crate::launch::socket::LaunchToken,
-)> {
+pub(crate) async fn bind() -> anyhow::Result<BoundProxy> {
     let token = crate::launch::socket::LaunchToken::generate()
         .context("generating launch proxy peer-auth token")?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -211,7 +215,11 @@ pub(crate) async fn bind() -> anyhow::Result<(
     let addr = listener
         .local_addr()
         .context("reading launch proxy listener address")?;
-    Ok((listener, addr, token))
+    Ok(BoundProxy {
+        listener,
+        addr,
+        token,
+    })
 }
 
 /// Whether `headers` carries the exact [`PEER_AUTH_HEADER`] value `token`
@@ -628,7 +636,11 @@ mod tests {
                 value: json!({"type": "disabled"}),
             },
         )]);
-        let (listener, addr, token) = bind().await.unwrap();
+        let BoundProxy {
+            listener,
+            addr,
+            token,
+        } = bind().await.unwrap();
         let (_tx, rx) = tokio::sync::watch::channel(false);
         let upstream_url: url::Url = upstream.uri().parse().unwrap();
         tokio::spawn(serve(listener, upstream_url, rules, token.clone(), rx));
@@ -658,7 +670,11 @@ mod tests {
         // some other host), this would still fail loudly with wiremock's own
         // "no matching mock" 404 rather than silently succeeding.
         let rules = std::sync::Arc::new(Vec::new());
-        let (listener, addr, token) = bind().await.unwrap();
+        let BoundProxy {
+            listener,
+            addr,
+            token,
+        } = bind().await.unwrap();
         let (_tx, rx) = tokio::sync::watch::channel(false);
         let upstream_url: url::Url = upstream.uri().parse().unwrap();
         tokio::spawn(serve(listener, upstream_url, rules, token.clone(), rx));
@@ -690,7 +706,11 @@ mod tests {
             .await;
 
         let rules = std::sync::Arc::new(Vec::new());
-        let (listener, addr, token) = bind().await.unwrap();
+        let BoundProxy {
+            listener,
+            addr,
+            token,
+        } = bind().await.unwrap();
         let (_tx, rx) = tokio::sync::watch::channel(false);
         let upstream_url: url::Url = upstream.uri().parse().unwrap();
         tokio::spawn(serve(listener, upstream_url, rules, token.clone(), rx));
@@ -728,7 +748,11 @@ mod tests {
             .await;
 
         let rules = std::sync::Arc::new(Vec::new());
-        let (listener, addr, token) = bind().await.unwrap();
+        let BoundProxy {
+            listener,
+            addr,
+            token,
+        } = bind().await.unwrap();
         let (_tx, rx) = tokio::sync::watch::channel(false);
         let upstream_url: url::Url = format!("{}/anthropic", upstream.uri()).parse().unwrap();
         tokio::spawn(serve(listener, upstream_url, rules, token.clone(), rx));
@@ -758,7 +782,11 @@ mod tests {
             .await;
 
         let rules = std::sync::Arc::new(Vec::new());
-        let (listener, addr, token) = bind().await.unwrap();
+        let BoundProxy {
+            listener,
+            addr,
+            token,
+        } = bind().await.unwrap();
         let (_tx, rx) = tokio::sync::watch::channel(false);
         let upstream_url: url::Url = upstream.uri().parse().unwrap();
         tokio::spawn(serve(listener, upstream_url, rules, token.clone(), rx));
@@ -795,7 +823,11 @@ mod tests {
         // request should fail loudly (wiremock's "no matching mock" 404),
         // not silently succeed.
         let rules = std::sync::Arc::new(Vec::new());
-        let (listener, addr, token) = bind().await.unwrap();
+        let BoundProxy {
+            listener,
+            addr,
+            token,
+        } = bind().await.unwrap();
         let (_tx, rx) = tokio::sync::watch::channel(false);
         let upstream_url: url::Url = upstream.uri().parse().unwrap();
         tokio::spawn(serve(listener, upstream_url, rules, token, rx));
@@ -818,7 +850,11 @@ mod tests {
         let _guard = llmenv_util::testkit::port_guard();
         let upstream = wiremock::MockServer::start().await;
         let rules = std::sync::Arc::new(Vec::new());
-        let (listener, addr, token) = bind().await.unwrap();
+        let BoundProxy {
+            listener,
+            addr,
+            token,
+        } = bind().await.unwrap();
         let (_tx, rx) = tokio::sync::watch::channel(false);
         let upstream_url: url::Url = upstream.uri().parse().unwrap();
         tokio::spawn(serve(listener, upstream_url, rules, token, rx));

@@ -201,6 +201,7 @@ async fn fetch(path: std::ffi::OsString, token: String) -> Option<String> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::launch::socket::{BoundSocket, LaunchToken};
 
     #[test]
     fn returns_none_when_env_var_is_unset() {
@@ -214,8 +215,12 @@ mod tests {
 
     #[tokio::test]
     async fn delivers_a_queued_notice_from_a_real_socket() {
-        let (listener, notices, path, token) =
-            crate::launch::socket::bind(std::process::id() + 1).unwrap();
+        let BoundSocket {
+            listener,
+            notices,
+            path,
+            token,
+        } = crate::launch::socket::bind(std::process::id() + 1).unwrap();
         *notices.lock().await = Some("credentials expire soon".to_string());
         let server = tokio::spawn(crate::launch::socket::serve(
             listener,
@@ -237,12 +242,17 @@ mod tests {
     /// notice, even though the peer uid check passes (same test process).
     #[tokio::test]
     async fn rejects_a_notice_fetch_with_the_wrong_token() {
-        let (listener, notices, path, token) =
-            crate::launch::socket::bind(std::process::id() + 5).unwrap();
+        let BoundSocket {
+            listener,
+            notices,
+            path,
+            token,
+        } = crate::launch::socket::bind(std::process::id() + 5).unwrap();
         *notices.lock().await = Some("credentials expire soon".to_string());
         let server = tokio::spawn(crate::launch::socket::serve(listener, notices, token));
 
-        let notice = fetch(path.into_os_string(), "wrong-token".to_string()).await;
+        let wrong_token = LaunchToken::generate().unwrap();
+        let notice = fetch(path.into_os_string(), wrong_token.as_str().to_string()).await;
         assert_eq!(notice, None);
         server.abort();
     }
@@ -302,7 +312,8 @@ mod tests {
             stream.read(&mut buf).await
         });
 
-        let notice = fetch(path.into_os_string(), "real-token".to_string()).await;
+        let client_token = LaunchToken::generate().unwrap();
+        let notice = fetch(path.into_os_string(), client_token.as_str().to_string()).await;
         assert_eq!(
             notice, None,
             "a fetch against a server with an invalid proof must return None"
@@ -335,8 +346,12 @@ mod tests {
                 .build()
                 .unwrap();
             rt.block_on(async {
-                let (listener, notices, path, token) =
-                    crate::launch::socket::bind(std::process::id() + 1000).unwrap();
+                let BoundSocket {
+                    listener,
+                    notices,
+                    path,
+                    token,
+                } = crate::launch::socket::bind(std::process::id() + 1000).unwrap();
                 *notices.lock().await = Some(notice.clone());
                 let server = tokio::spawn(crate::launch::socket::serve(
                     listener,

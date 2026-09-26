@@ -309,14 +309,23 @@ fn socket_path_in(
     Ok(dir.join(format!("launch-{pid}.sock")))
 }
 
-/// Bind the per-session socket, returning the listener, the notice mailbox
-/// background tasks push into, the bound path (for `LLMENV_LAUNCH_SOCKET` and
-/// later cleanup), and the shared secret (for `LLMENV_LAUNCH_TOKEN`, #1484).
+/// What [`bind`] hands back: the listener, the notice mailbox background tasks push into, the
+/// bound path (for `LLMENV_LAUNCH_SOCKET` and later cleanup), and the shared secret (for
+/// `LLMENV_LAUNCH_TOKEN`, #1484). Named fields keep the path apart from the secret, where a
+/// tuple made static analysis treat the path as key material (#2164).
+pub(crate) struct BoundSocket {
+    pub(crate) listener: UnixListener,
+    pub(crate) notices: NoticeSlot,
+    pub(crate) path: PathBuf,
+    pub(crate) token: LaunchToken,
+}
+
+/// Bind the per-session socket. See [`BoundSocket`].
 ///
 /// # Errors
 /// Returns an error when the path can't be resolved, the bind fails, or the
 /// token can't be generated.
-pub(crate) fn bind(pid: u32) -> anyhow::Result<(UnixListener, NoticeSlot, PathBuf, LaunchToken)> {
+pub(crate) fn bind(pid: u32) -> anyhow::Result<BoundSocket> {
     // Generated before any filesystem state exists: a `UnixListener` doesn't
     // unlink its socket file on drop, so if this failed after `bind` below,
     // the caller would never receive `path` to construct its own cleanup
@@ -338,7 +347,12 @@ pub(crate) fn bind(pid: u32) -> anyhow::Result<(UnixListener, NoticeSlot, PathBu
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("hardening permissions on {}", path.display()))?;
     }
-    Ok((listener, Arc::new(Mutex::new(None)), path, token))
+    Ok(BoundSocket {
+        listener,
+        notices: Arc::new(Mutex::new(None)),
+        path,
+        token,
+    })
 }
 
 /// Accept connections until the caller drops this future (i.e. when
@@ -751,7 +765,7 @@ mod tests {
         // Offset from the other tests' pids in this binary (plain
         // `std::process::id()`, `+1` in `hook_run::launch_client`'s tests)
         // so a parallel run doesn't have two tests binding the same path.
-        let (_listener, _notices, path, _token) = bind(std::process::id() + 2).unwrap();
+        let BoundSocket { path, .. } = bind(std::process::id() + 2).unwrap();
 
         let dir_mode = std::fs::metadata(path.parent().unwrap())
             .unwrap()
@@ -776,7 +790,12 @@ mod tests {
     /// covered by `is_authorized_peer_false_for_mismatched_uid` instead.
     #[tokio::test]
     async fn pending_events_delivers_a_queued_notice_exactly_once() {
-        let (listener, notices, path, token) = bind(std::process::id()).unwrap();
+        let BoundSocket {
+            listener,
+            notices,
+            path,
+            token,
+        } = bind(std::process::id()).unwrap();
         *notices.lock().await = Some("config changed".to_string());
         let server = tokio::spawn(serve(listener, notices, token.clone()));
 
@@ -799,7 +818,12 @@ mod tests {
     /// arrives.
     #[tokio::test]
     async fn pending_events_rejects_a_request_with_an_invalid_proof() {
-        let (listener, notices, path, token) = bind(std::process::id() + 3).unwrap();
+        let BoundSocket {
+            listener,
+            notices,
+            path,
+            token,
+        } = bind(std::process::id() + 3).unwrap();
         *notices.lock().await = Some("config changed".to_string());
         let server = tokio::spawn(serve(listener, notices, token));
 
@@ -910,7 +934,12 @@ mod tests {
     /// (EOF) means the server dropped its end of the stream.
     #[tokio::test]
     async fn handle_connection_closes_a_peer_that_never_completes_the_handshake() {
-        let (listener, notices, path, token) = bind(std::process::id() + 7).unwrap();
+        let BoundSocket {
+            listener,
+            notices,
+            path,
+            token,
+        } = bind(std::process::id() + 7).unwrap();
         let server = tokio::spawn(serve(listener, notices, token));
 
         let mut stream = UnixStream::connect(&path).await.unwrap();
@@ -940,7 +969,12 @@ mod tests {
     /// request is rejected.
     #[tokio::test]
     async fn pending_events_rejects_the_two_connection_reflection_attack() {
-        let (listener, notices, path, token) = bind(std::process::id() + 6).unwrap();
+        let BoundSocket {
+            listener,
+            notices,
+            path,
+            token,
+        } = bind(std::process::id() + 6).unwrap();
         *notices.lock().await = Some("config changed".to_string());
         let server = tokio::spawn(serve(listener, notices, token));
 
