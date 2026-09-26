@@ -163,11 +163,22 @@ fn strip_advisory(text: &str) -> String {
         .join("\n")
 }
 
-/// Matches the first line of one ICM recall record: `[<topic>] <text>`.
-static RECORD_START: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    #[expect(clippy::expect_used, reason = "the pattern is a compile-time literal")]
-    regex::Regex::new(r"^\[[^\]\n]{1,200}\] ").expect("record-start pattern is valid")
-});
+/// Longest topic, in characters, that a record's first line may carry.
+const MAX_TOPIC_CHARS: usize = 200;
+
+/// Whether `line` opens an ICM recall record: `[<topic>] <text>`.
+///
+/// Phases: the line starts with `[`; the first `]` ends the topic; the topic has 1 to
+/// [`MAX_TOPIC_CHARS`] characters; a space follows the `]`.
+fn is_record_start(line: &str) -> bool {
+    let Some(after_open) = line.strip_prefix('[') else {
+        return false;
+    };
+    let Some((topic, after_topic)) = after_open.split_once(']') else {
+        return false;
+    };
+    (1..=MAX_TOPIC_CHARS).contains(&topic.chars().count()) && after_topic.starts_with(' ')
+}
 
 /// Split one recall action's text into ICM records, so a byte budget can keep
 /// whole records and drop the rest (#2159).
@@ -181,7 +192,7 @@ pub(crate) fn split_recall_records(text: &str) -> Vec<String> {
     let mut records: Vec<Vec<&str>> = Vec::new();
     for line in text.lines() {
         match records.last_mut() {
-            Some(current) if !RECORD_START.is_match(line) => current.push(line),
+            Some(current) if !is_record_start(line) => current.push(line),
             _ => records.push(vec![line]),
         }
     }
@@ -236,6 +247,16 @@ mod tests {
     fn split_recall_records_treats_a_bracket_line_without_close_space_as_continuation() {
         let text = "[t] body\n[not a record]\n[x]no-space\n[] empty topic";
         assert_eq!(split_recall_records(text), vec![text]);
+    }
+
+    #[test]
+    fn is_record_start_bounds_the_topic_in_characters() {
+        let record = |topic: String| format!("[{topic}] body");
+        assert!(is_record_start(&record("a".repeat(MAX_TOPIC_CHARS))));
+        assert!(!is_record_start(&record("a".repeat(MAX_TOPIC_CHARS + 1))));
+        assert!(!is_record_start(&record(String::new())));
+        // 200 two-byte characters are 400 bytes but still a valid topic.
+        assert!(is_record_start(&record("é".repeat(MAX_TOPIC_CHARS))));
     }
 
     #[test]
