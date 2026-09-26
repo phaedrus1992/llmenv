@@ -80,7 +80,9 @@ fn run_doctor_token_efficiency(
     match get("CLAUDE_CODE_SUBAGENT_MODEL") {
         Some(_) => eprintln!("{info} CLAUDE_CODE_SUBAGENT_MODEL is set"),
         None => {
-            eprintln!("{info} CLAUDE_CODE_SUBAGENT_MODEL not set (default: claude-sonnet-4-6)")
+            eprintln!(
+                "{info} CLAUDE_CODE_SUBAGENT_MODEL not set (Claude Code picks the model per agent)"
+            )
         }
     }
 

@@ -264,10 +264,9 @@ native:
       CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: "1"
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
 
-      # Enable agent teams and a fixed subagent model (sonnet-4-6) for
-      # predictable multi-agent behavior.
+      # Enable agent teams. "inherit" keeps each agent's own `model:` frontmatter.
       CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1"
-      CLAUDE_CODE_SUBAGENT_MODEL: "claude-sonnet-4-6"
+      CLAUDE_CODE_SUBAGENT_MODEL: "inherit"
 
       # Telemetry off. These are paired with the user-level config choice.
       DISABLE_ERROR_REPORTING: "1"
