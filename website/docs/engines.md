@@ -274,7 +274,7 @@ Keys that no modeled feature owns go under `native.crush`:
 ```yaml
 native:
   crush:
-    model: claude-opus-4-5
+    model: claude-opus-5-5
     provider: anthropic
 ```
 

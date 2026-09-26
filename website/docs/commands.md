@@ -1073,7 +1073,10 @@ active context (active bundles, active MCP servers, etc.). Checks:
   anything. Offline by design: no "an update is available" claim is made, since
   checking would mean a network round trip per tool on every run. Tools that
   aren't installed are skipped — the tool-availability checks above already
-  report those.
+  report those. (added in v3.11.2) A `codebase-memory-mcp` older than 0.11.0
+  gets a warning: llmenv's guidance names tools that release added
+  (`get_file_outline`, `compare_graphs`), and the first index after upgrading
+  rebuilds each project once.
 - dead `native_<feature>.<engine>` keys (added in v3.8.0) — warns when a key in
   `native_permissions`, `native_hooks`, `native_plugins`, `native_mcp`,
   `native_model_providers`, or `native` names no registered engine (a typo), or
