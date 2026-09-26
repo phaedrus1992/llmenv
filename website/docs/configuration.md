@@ -647,6 +647,10 @@ reference). A `SKILL.md` reference
 feature is enabled, teaching the agent when to reach for codebase-memory-mcp
 instead of a plain `grep`/`find` sweep.
 
+(changed in v3.11.2) The tiers cover codebase-memory-mcp v0.11.0, which added
+two read-only tools: `get_file_outline` and `compare_graphs`. Both are
+pre-approved. Before this change they fell through to a prompt on every call.
+
 Two caveats worth knowing before relying on the pre-approved tools:
 
 - **The pre-approved read tools are cross-project, not workspace-scoped.**
@@ -665,7 +669,9 @@ Two caveats worth knowing before relying on the pre-approved tools:
   upstream/here as [#1331](https://github.com/phaedrus1992/llmenv/issues/1331).
   An index is re-buildable (re-indexing the correct repo recovers it), so this
   is a nuisance rather than data loss, but it is not gated by the `ask` tier
-  the way `delete_project` itself is.
+  the way `delete_project` itself is. (since v3.11.0 a
+  `PreToolUse` hook denies the `name` override — see
+  [The `index_repository` name guard](mcp.md#the-index_repository-name-guard).)
 
 ### `features.throttle:`
 

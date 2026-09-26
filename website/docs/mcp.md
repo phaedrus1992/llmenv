@@ -264,6 +264,13 @@ so overwriting an existing index is a deliberate choice:
 codebase-memory-mcp cli index_repository '{"repo_path": "/path/to/repo", "name": "custom-key"}'
 ```
 
+(changed in v3.11.2) The same hook also denies `index_repository` with
+`persistence: true`. That option makes codebase-memory-mcp write
+`.codebase-memory/graph.db.zst` into the indexed repository, and because the
+tool is auto-allowed, a model could otherwise add that artifact to a repo
+without a prompt. To share a graph artifact on purpose, run
+`codebase-memory-mcp` from a shell.
+
 `codebase_memory` and `memory` (ICM) are fully independent: both can be
 active at once, and llmenv does not coordinate between them.
 
