@@ -265,7 +265,12 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
         // `_cleanup` is bound here (not further down) so it stays alive
         // for the whole supervised session whenever a socket exists.
         let (socket_path, notices, token, _cleanup) = match socket::bind(std::process::id()) {
-            Ok((listener, notices, path, token)) => {
+            Ok(socket::BoundSocket {
+                listener,
+                notices,
+                path,
+                token,
+            }) => {
                 tokio::spawn(socket::serve(listener, Arc::clone(&notices), token.clone()));
                 let cleanup = Some(SocketCleanup(path.clone()));
                 (Some(path), Some(notices), Some(token), cleanup)
@@ -387,7 +392,11 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
                         .filter(|p| p.enabled && adapter.name() == "claude-code");
                     match launch_proxy {
                         Some(launch_proxy) => match proxy::bind().await {
-                            Ok((listener, addr, proxy_token)) => {
+                            Ok(proxy::BoundProxy {
+                                listener,
+                                addr,
+                                token: proxy_token,
+                            }) => {
                                 let upstream_str = resolved
                                     .vars
                                     .get("ANTHROPIC_BASE_URL")
