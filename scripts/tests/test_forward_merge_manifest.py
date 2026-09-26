@@ -124,6 +124,28 @@ class ForwardMergeManifestTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("libc", err)
 
+    def test_target_hoisted_dependency_is_resolved(self) -> None:
+        base = BASE + 'rustix = { version = "=1.1.4", features = ["fs"] }\n'
+        source = SOURCE + 'rustix = { version = "=1.1.5", features = ["fs"] }\n'
+        target = (
+            TARGET
+            + "rustix = { workspace = true }\n"
+            + '[workspace.dependencies]\nrustix = { version = "=1.1.5", features = ["fs"] }\n'
+        )
+        code, err = run(base, source, target)
+        self.assertEqual(code, 0, err)
+
+    def test_hoisted_dependency_older_than_source_is_blocked(self) -> None:
+        base = BASE + 'rustix = "=1.1.4"\n'
+        source = SOURCE + 'rustix = "=1.1.6"\n'
+        target = (
+            TARGET
+            + 'rustix = { workspace = true }\n[workspace.dependencies]\nrustix = "=1.1.5"\n'
+        )
+        code, err = run(base, source, target)
+        self.assertEqual(code, 1)
+        self.assertIn("rustix", err)
+
     def test_invalid_toml_exits_two(self) -> None:
         code, err = run(BASE, "not = [valid", TARGET)
         self.assertEqual(code, 2)

@@ -38,6 +38,47 @@ def dep_tables(doc: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return tables
 
 
+def expand_inherited(doc: dict[str, Any]) -> dict[str, Any]:
+    """Replace each `{ workspace = true }` dependency with the workspace entry it inherits.
+
+    A branch can hoist a dependency into `[workspace.dependencies]`. Without this step the
+    hoisted entry has no version of its own, and the comparison sees a false difference.
+    """
+    shared = doc.get("workspace", {}).get("dependencies", {})
+    expanded = dict(doc)
+    for name, table in dep_tables(doc).items():
+        if name == "workspace.dependencies":
+            continue
+        new_table = {}
+        for dep, spec in table.items():
+            if (
+                isinstance(spec, dict)
+                and spec.get("workspace") is True
+                and dep in shared
+            ):
+                merged = normalize_dep(shared[dep])
+                local = {k: v for k, v in spec.items() if k != "workspace"}
+                features = sorted(
+                    set(merged.get("features", [])) | set(local.pop("features", []))
+                )
+                merged.update(local)
+                if features:
+                    merged["features"] = features
+                spec = merged
+            new_table[dep] = spec
+        _set_table(expanded, name, new_table)
+    return expanded
+
+
+def _set_table(doc: dict[str, Any], name: str, table: dict[str, Any]) -> None:
+    """Write a dependency table back into a manifest under its dotted table name."""
+    if name.startswith("target."):
+        cfg, kind = name[len("target.") :].rsplit(".", 1)
+        doc["target"] = {**doc["target"], cfg: {**doc["target"][cfg], kind: table}}
+    else:
+        doc[name] = table
+
+
 def normalize_dep(spec: Any) -> dict[str, Any]:
     """Return a dependency as a table. A path dependency loses its `version` field."""
     dep = {"version": spec} if isinstance(spec, str) else dict(spec)
@@ -146,7 +187,9 @@ def check(
 ) -> list[str]:
     """Return every reason the target's manifest cannot stand in for the source's."""
     problems = []
-    base_tables, source_tables, target_tables = map(dep_tables, (base, source, target))
+    base_tables, source_tables, target_tables = (
+        dep_tables(expand_inherited(doc)) for doc in (base, source, target)
+    )
     for name in sorted(set(base_tables) | set(source_tables)):
         problems += table_problems(
             name,
