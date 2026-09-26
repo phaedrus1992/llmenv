@@ -521,17 +521,20 @@ mod tests {
         assert!(upstream_authority(&vars).is_err());
     }
 
+    /// One to four dot-joined labels. A label has no hyphen, so it can never start `xn--`,
+    /// which is punycode that `url::Url` rejects when it is invalid (see the test above).
+    fn dns_host() -> impl Strategy<Value = String> {
+        proptest::collection::vec("[a-z][a-z0-9]{0,15}", 1..=4).prop_map(|labels| labels.join("."))
+    }
+
     proptest! {
-        /// Labels have no consecutive hyphens: a label that starts `xn--` is punycode, and
-        /// `url::Url` rejects invalid punycode (see the test below).
-        ///
         /// Excludes the default ports (80/443) from the range: `url::Url`
         /// omits a port matching the scheme default from `Url::port()`, which
         /// would make the extracted authority disagree with the input port
         /// for no reason related to this function's own correctness.
         #[test]
         fn prop_upstream_authority_extracts_host_and_optional_port(
-            host in "[a-z]([a-z0-9]|-[a-z0-9]){0,7}(\\.[a-z]([a-z0-9]|-[a-z0-9]){0,7}){0,3}",
+            host in dns_host(),
             port in proptest::option::of(1024u16..=65535),
             scheme in prop_oneof![Just("http"), Just("https")],
         ) {
