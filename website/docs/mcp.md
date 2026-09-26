@@ -264,6 +264,13 @@ so overwriting an existing index is a deliberate choice:
 codebase-memory-mcp cli index_repository '{"repo_path": "/path/to/repo", "name": "custom-key"}'
 ```
 
+(changed in v3.11.2) The same hook also denies `index_repository` with
+`persistence: true`. That option makes codebase-memory-mcp write
+`.codebase-memory/graph.db.zst` into the indexed repository, and because the
+tool is auto-allowed, a model could otherwise add that artifact to a repo
+without a prompt. To share a graph artifact on purpose, run
+`codebase-memory-mcp` from a shell.
+
 `codebase_memory` and `memory` (ICM) are fully independent: both can be
 active at once, and llmenv does not coordinate between them.
 
@@ -403,11 +410,19 @@ neutral events:
 - **SessionStart** — `hook-run session_start` injects the session wake-up pack
   (`icm_wake_up`) containing your critical memories (by importance and recency)
 - **TurnStart** — `hook-run turn_start` injects recalled context at the start of
-  each agent turn (`icm_memory_recall`). It issues a project-scoped recall for
-  the active tags, then one **project-unfiltered** recall per active tag keyed on
-  `llmenv-tag:<tag>`, and one **project-unfiltered** recall per active bundle
+  each agent turn (`icm_memory_recall`). It issues one **project-unfiltered**
+  recall per active tag keyed on `llmenv-tag:<tag>`, and one per active bundle
   keyed on `llmenv-bundle:<bundle>` — so memory stored under a tag or bundle in
-  one project surfaces when the same tag or bundle activates in another
+  one project surfaces when the same tag or bundle activates in another. It
+  finishes with a natural-language recall on the active tags. (changed in
+  v3.11.2) Recalls run from most to least specific scope: tags from the
+  project's `.llmenv.yaml` and `$LLMENV_EXTRA_TAGS`, then bundles, then tags
+  from content, network, user and host scopes, then tags no scope supplied (such
+  as the OS tag), then the natural-language recall. The injected text is capped
+  at 8,000 bytes of whole memory records, duplicates are dropped, and one line
+  reports how many lower-priority memories were left out. Claude Code saves a
+  hook output above about 10 KB to a file and shows the model only a 2 KB
+  preview, so without the cap the most specific memories could be cut off.
 - **SessionEnd** — `hook-run session_end` stores the active scope context
   (`icm_memory_store`) when the session closes
 

@@ -21,6 +21,11 @@
 //! llmenv's own call passes `repo_path` alone (see
 //! `build_index_repository_command`), so nothing llmenv does trips this.
 //!
+//! The same hook also denies `persistence: true`, which makes the tool write
+//! `.codebase-memory/graph.db.zst` into the indexed repository. The tool sits in
+//! the unprompted `Mutation` tier, so without this a model could add that
+//! artifact to a repo silently.
+//!
 //! Stateless, like `cd_guard`: the decision comes from the current call's
 //! arguments alone.
 
@@ -28,23 +33,41 @@ use llmenv_mcp::resolve::INDEX_REPOSITORY_TOOL;
 
 /// Handle a `PreToolUse` event for codebase-memory-mcp's `index_repository`.
 /// Returns a `__DENY__:`-prefixed reason when the call carries a `name`
-/// override, or an empty string when it doesn't apply (different tool, or no
-/// override — the shape llmenv's own auto-index uses).
+/// override or `persistence: true`, or an empty string when it doesn't apply
+/// (different tool, or neither — the shape llmenv's own auto-index uses).
+/// The `name` reason wins when both are present.
 pub(crate) fn handle_pre_tool_use(stdin_payload: &serde_json::Value) -> String {
     if stdin_payload.get("tool_name").and_then(|v| v.as_str()) != Some(INDEX_REPOSITORY_TOOL) {
         return String::new();
     }
+    let input = stdin_payload.get("tool_input");
     // Absent, null, or empty `name` all mean "derive the key from repo_path",
     // which is the safe path. Only a non-empty override can land on another
     // project's key.
-    let Some(name) = stdin_payload
-        .get("tool_input")
+    if let Some(name) = input
         .and_then(|v| v.get("name"))
         .and_then(|v| v.as_str())
         .filter(|n| !n.trim().is_empty())
-    else {
-        return String::new();
-    };
+    {
+        return name_override_reason(name);
+    }
+    // A non-boolean `persistence` is invalid input that the tool rejects itself.
+    if input
+        .and_then(|v| v.get("persistence"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        return PERSISTENCE_REASON.to_string();
+    }
+    String::new()
+}
+
+const PERSISTENCE_REASON: &str = "__DENY__:llmenv blocked `index_repository` with \
+    persistence=true. It writes .codebase-memory/graph.db.zst into the repository. Call it \
+    without persistence. To share a graph artifact on purpose, run codebase-memory-mcp from a \
+    shell.";
+
+fn name_override_reason(name: &str) -> String {
     format!(
         "__DENY__:llmenv blocked `index_repository` with name=\"{name}\". The name overrides the \
          project key the index is written under, and codebase-memory-mcp doesn't check whether \
@@ -76,6 +99,47 @@ mod tests {
             out.contains("other-project"),
             "reason names the key: {out:?}"
         );
+    }
+
+    #[test]
+    fn denies_persistence_true() {
+        let out = handle_pre_tool_use(&payload(
+            INDEX_REPOSITORY_TOOL,
+            serde_json::json!({ "repo_path": "/repo", "persistence": true }),
+        ));
+        assert!(out.starts_with("__DENY__:"), "expected a deny, got {out:?}");
+        assert!(
+            out.contains("graph.db.zst"),
+            "reason names the artifact: {out:?}"
+        );
+    }
+
+    #[test]
+    fn allows_persistence_that_is_not_true() {
+        for persistence in [
+            serde_json::json!(false),
+            serde_json::Value::Null,
+            serde_json::json!("true"),
+        ] {
+            assert_eq!(
+                handle_pre_tool_use(&payload(
+                    INDEX_REPOSITORY_TOOL,
+                    serde_json::json!({ "repo_path": "/repo", "persistence": persistence }),
+                )),
+                "",
+                "{persistence:?} is not a request to persist"
+            );
+        }
+    }
+
+    #[test]
+    fn name_reason_wins_over_persistence() {
+        let out = handle_pre_tool_use(&payload(
+            INDEX_REPOSITORY_TOOL,
+            serde_json::json!({ "name": "other-project", "persistence": true }),
+        ));
+        assert!(out.contains("other-project"), "{out:?}");
+        assert!(!out.contains("graph.db.zst"), "{out:?}");
     }
 
     #[test]
