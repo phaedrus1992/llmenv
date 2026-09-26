@@ -1287,7 +1287,6 @@ dependencies = [
  "predicates",
  "proptest",
  "pulldown-cmark",
- "regex",
  "reqwest",
  "rustix",
  "schemars",
