@@ -30,6 +30,11 @@
     "@docusaurus/module-type-aliases": "3.10.2",
     "typescript": "7.0.2"
   },
+  "overrides": {
+    "lodash-es": "4.18.1",
+    "serialize-javascript": "7.1.1",
+    "uuid": "14.0.2"
+  },
   "browserslist": {
     "production": [">0.5%", "not dead", "not op_mini all"],
     "development": ["last 3 chrome version", "last 3 firefox version", "last 5 safari version"]
