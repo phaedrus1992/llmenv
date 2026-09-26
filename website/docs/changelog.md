@@ -111,14 +111,25 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- `llmenv doctor` warns when the installed codebase-memory-mcp is older than 0.11.0, the release llmenv's tool tiers and guidance assume. See [`doctor`](https://phaedrus1992.github.io/llmenv/docs/commands)
+
 ### Fixed
 
+- The `anthropic-api` consolidation backend defaulted to a model id that does not exist (`claude-sonnet-5-20250624`), so every call failed unless `ANTHROPIC_MODEL` was set. It now defaults to `claude-sonnet-5`, and an `ANTHROPIC_MODEL` alias such as `opus` (valid for Claude Code, rejected by the Messages API) is ignored with a warning. `llmenv doctor` no longer claims a stale default for `CLAUDE_CODE_SUBAGENT_MODEL`. See [Post-session consolidation](https://phaedrus1992.github.io/llmenv/docs/configuration#post-session-consolidation)
+- codebase-memory-mcp 0.11.0's new read-only tools (`get_file_outline`, `compare_graphs`) no longer prompt on every call, and `index_repository` with `persistence: true` is denied, so a model can no longer write a `.codebase-memory/graph.db.zst` artifact into a repo unprompted. See [The `index_repository` name guard](https://phaedrus1992.github.io/llmenv/docs/mcp#the-index_repository-name-guard)
+- The `TurnStart` memory recall is now capped at 8,000 bytes of whole records and ordered most specific first (project tags, bundles, broader scopes, then the unfiltered recall). Claude Code was saving the 10-35 KB output to a file and showing the model only a 2 KB preview of the least specific memories. See [Lifecycle hooks](https://phaedrus1992.github.io/llmenv/docs/mcp#lifecycle-hooks)
 - `Config::load` now expands a leading `~`/`~user` in the config path itself instead of relying on a `debug_assert` the release build compiled out — a release build previously accepted a tilde-prefixed path silently and failed later with a confusing "failed to read config file" error instead of resolving it. Only `~` itself goes through string handling; the rest of the path joins back on as raw bytes, so a non-UTF-8 path is never mangled either way. `LLMENV_CONFIG_DIR`/`LLMENV_STATE_DIR` had the identical gap — a tilde-prefixed override silently resolved to a literal `./~/...` directory relative to cwd — and are fixed the same way. (#1910)
 - The shell hook's (`llmenv hook zsh|bash`) guard against redundant re-renders now compares `$PWD` against the project root it last resolved for, instead of only checking that `$LLMENV_STATE_DIR` is set. A child shell forked into a different project directory — a tmux/zellij pane, or a tool like herdr that forks panes off a parent shell — kept the parent's config, tags, and cache path indefinitely instead of picking up its own project's scope. (#1895)
 - The scope-header session-log event now sanitizes the project name the same way tags and bundles already are: control characters are escaped and whitespace runs collapse to `_`. A project name with a control character or embedded space could previously rewrite terminal output or inject a fake `llmenv-tag:`/`llmenv-bundle:` token into content ICM's FTS index searches. llmenv's own internal `tracing` log messages get the same control-character escaping now, for the same reason. See [Finding a session later](https://phaedrus1992.github.io/llmenv/docs/configuration#finding-a-session-later) (#1911)
 - The forward-merge cascade now retries once a blocking `forward-merge/<source>-to-<target>` PR clears, instead of leaving every commit that piled up on the source branch during the wait un-propagated forever, and every cascade trigger now serializes on one shared lock instead of racing on `main`. Only affects the release automation, not the shipped binary. (#1912)
 - Scope-context memory now stores only the tags/bundles/project fields ICM needs, instead of the same record's byte-identical instruction paragraph every project's SessionEnd store repeated. The instruction text is still injected once via SessionStart, so agents see it the same as before — recalling scope context across several projects no longer pays for that paragraph once per project, on every turn. (#1792)
 - Disabling or removing a plugin now purges a self-registered hook it wrote into `settings.json`, instead of leaving it behind forever (still firing on every `SessionStart`). Only covers a hook traceable back to that plugin's own resolved install directory — a hook a plugin registers somewhere else entirely is a known, tracked gap (#1932). See [Materialize](https://phaedrus1992.github.io/llmenv/docs/concepts#materialize). (#1793)
+
+### Security
+
+- Pin `lodash-es`, `serialize-javascript` and `uuid` to patched versions in the docs site's npm overrides, clearing the open `npm audit` and Dependabot findings. The site's dependencies do not ship in the binary.
 
 ## [3.11.1] - 2026-08-25
 

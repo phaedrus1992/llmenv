@@ -152,6 +152,12 @@ const ICM_MCP_PREFIX: &str = "mcp__icm__";
 /// therefore tiered `Destructive`, not `Mutation`, despite being a "write"
 /// in the same broad sense as the other two.
 ///
+/// Checked against cbm `v0.11.0`. `get_file_outline` is `ReadOnly` although
+/// upstream annotates it destructive: its handler uses the query-only store
+/// path and runs two `SELECT`s, and the annotation is a leftover of the
+/// read-only split that was never revisited for this tool. `manage_adr`'s new
+/// `set_sections` mode does not change its tier.
+///
 /// `delete_project` is also destructive (irreversibly removes a project's
 /// index). The `ask` boundary alone doesn't cover everything destructive
 /// here: `index_repository`'s `name` override can replace a *different*
@@ -164,7 +170,9 @@ const CBM_READ_ONLY: &[&str] = &[
     "query_graph",
     "trace_path",
     "get_code_snippet",
+    "get_file_outline",
     "get_graph_schema",
+    "compare_graphs",
     "get_architecture",
     "search_code",
     "list_projects",
@@ -4424,6 +4432,26 @@ mod tests {
     /// this file.
     #[test]
     fn cbm_tiers_cover_every_known_tool_exactly_once() {
+        /// Tool names from codebase-memory-mcp `v0.11.0` (`TOOL_ANNOTATIONS`).
+        const UPSTREAM_TOOLS: [&str; 17] = [
+            "index_repository",
+            "search_graph",
+            "query_graph",
+            "trace_path",
+            "get_code_snippet",
+            "get_file_outline",
+            "get_graph_schema",
+            "compare_graphs",
+            "get_architecture",
+            "search_code",
+            "list_projects",
+            "delete_project",
+            "index_status",
+            "check_index_coverage",
+            "detect_changes",
+            "manage_adr",
+            "ingest_traces",
+        ];
         let mut seen = std::collections::HashSet::new();
         for tool in CBM_READ_ONLY
             .iter()
@@ -4432,11 +4460,12 @@ mod tests {
         {
             assert!(seen.insert(*tool), "{tool} appears in more than one tier");
         }
+        let expected: std::collections::HashSet<&str> = UPSTREAM_TOOLS.into_iter().collect();
         assert_eq!(
-            seen.len(),
-            15,
-            "expected all 15 codebase-memory-mcp tools tiered exactly once, got {}: {seen:?}",
-            seen.len()
+            seen, expected,
+            "codebase-memory-mcp tool list changed: update the tier table in \
+             src/adapter/claude_code.rs and this list; see \
+             docs/design/issue-2151-cbm-011-tool-tiers.md"
         );
     }
 

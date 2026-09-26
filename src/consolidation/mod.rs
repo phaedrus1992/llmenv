@@ -7,7 +7,8 @@
 //! - **`claude-cli`** (default) — calls `claude -p` as a subprocess. Works with
 //!   a Claude subscription; no `ANTHROPIC_API_KEY` needed.
 //! - **`anthropic-api`** — calls the Anthropic Messages API directly via HTTP.
-//!   Requires `ANTHROPIC_API_KEY` and `ANTHROPIC_MODEL` env vars.
+//!   Requires `ANTHROPIC_API_KEY`. `ANTHROPIC_MODEL` is optional and must be a
+//!   full model id; the default is `claude-sonnet-5`.
 //!
 //! ICM's `icm_memory_consolidate` MCP tool exists but requires both `topic`
 //! and `summary` parameters and simply merges a topic's memories into one
@@ -35,7 +36,7 @@ const MIN_RECORDS: usize = 3;
 /// Maximum character length for a single rule bullet.
 const MAX_RULE_LENGTH: usize = 500;
 /// Default model for the `anthropic-api` backend.
-const DEFAULT_MODEL: &str = "claude-sonnet-5-20250624";
+const DEFAULT_MODEL: &str = "claude-sonnet-5";
 
 /// ExpeL-inspired consolidation prompt (spec R5).
 ///
@@ -240,6 +241,26 @@ fn kill_process_group(pid: u32) {
     }
 }
 
+/// Pick the model for the `anthropic-api` backend from `ANTHROPIC_MODEL`.
+///
+/// Claude Code also reads `ANTHROPIC_MODEL` and accepts aliases such as `opus`. The Messages
+/// API rejects an alias, so only a value that starts with `claude-` is used. Returns the model
+/// and, when the value was rejected, a warning for the caller to log.
+fn resolve_api_model(env_value: Option<&str>) -> (String, Option<String>) {
+    match env_value {
+        None => (DEFAULT_MODEL.to_string(), None),
+        Some(value) if value.starts_with("claude-") => (value.to_string(), None),
+        Some(value) => (
+            DEFAULT_MODEL.to_string(),
+            Some(format!(
+                "consolidation: ignoring ANTHROPIC_MODEL=\"{value}\": the Messages API needs a \
+                 full model ID such as claude-sonnet-5, not a Claude Code alias. \
+                 Using {DEFAULT_MODEL}."
+            )),
+        ),
+    }
+}
+
 /// Make a non-streaming call to the Anthropic Messages API.
 ///
 /// Requires `ANTHROPIC_API_KEY` and (optionally) `ANTHROPIC_MODEL` env vars.
@@ -248,7 +269,10 @@ fn kill_process_group(pid: u32) {
 /// Returns `anyhow::Error` on HTTP failure, timeout, or malformed response.
 async fn call_anthropic_api(prompt: &str) -> anyhow::Result<String> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")?;
-    let model = std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+    let (model, warning) = resolve_api_model(std::env::var("ANTHROPIC_MODEL").ok().as_deref());
+    if let Some(warning) = warning {
+        tracing::warn!("{warning}");
+    }
 
     let client = reqwest::Client::builder().timeout(LLM_TIMEOUT).build()?;
 
@@ -469,6 +493,41 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+
+    #[test]
+    fn default_model_is_a_published_id() {
+        assert_eq!(
+            DEFAULT_MODEL, "claude-sonnet-5",
+            "DEFAULT_MODEL must be a published Messages API id (docs/design/issue-2143-model-ids.md)"
+        );
+    }
+
+    #[test]
+    fn resolve_api_model_uses_default_when_unset() {
+        assert_eq!(resolve_api_model(None), (DEFAULT_MODEL.to_string(), None));
+    }
+
+    #[test]
+    fn resolve_api_model_accepts_full_id() {
+        assert_eq!(
+            resolve_api_model(Some("claude-opus-5-5")),
+            ("claude-opus-5-5".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn resolve_api_model_rejects_aliases_and_empty() {
+        for value in ["opus", "sonnet[1m]", ""] {
+            let (model, warning) = resolve_api_model(Some(value));
+            assert_eq!(model, DEFAULT_MODEL, "value {value:?}");
+            let warning = warning.expect("alias must warn");
+            assert!(
+                warning.contains(&format!("ANTHROPIC_MODEL=\"{value}\"")),
+                "{warning}"
+            );
+            assert!(warning.contains(DEFAULT_MODEL), "{warning}");
+        }
+    }
 
     #[test]
     fn parse_recall_output_empty() {
