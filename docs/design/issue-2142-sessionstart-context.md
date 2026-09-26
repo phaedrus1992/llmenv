@@ -44,9 +44,9 @@ Claude Code 2.1.277 also fixed the one known defect: a session continued after `
    The model can then tell the one-time summary from per-prompt recall.
 4. **Size.** Wake-up text goes through `split_recall_records` and the same `RECALL_BUDGET_BYTES` (8,000) budget as #2159, with the same omission line.
    `SessionStart` output is subject to the same inline limit in Claude Code.
-5. **`source` handling.** Claude Code's `SessionStart` payload carries `source`: `startup`, `resume`, `clear` or `compact`.
+5. **`source` handling.** Claude Code's `SessionStart` payload carries `source`: `startup`, `resume`, `clear`, `compact` or `fork` (hooks reference, fetched 2026-09-26).
    - `startup`, `clear`, `compact`, missing, or any other value: run `WakeUp` and emit.
-   - `resume`: do not run `WakeUp` at all. The resumed transcript already holds the earlier injection, and re-sending it doubles the context.
+   - `resume` or `fork`: do not run `WakeUp` at all. Both carry the earlier conversation, which already holds the earlier injection, and re-sending it doubles the context.
 6. **Nothing moves out of `TurnStart` in this issue.** The scope chunk is only `Store` content at `SessionEnd`, not per-prompt injection, so there is nothing else to move.
    Per-prompt recall stays per-prompt; #2141 makes it specific to the prompt.
 
@@ -86,8 +86,8 @@ Update the comment on the shared function: remove the claim that all adapters re
 
 ### Dispatch
 
-`dispatch` gains the `source` value, or a `bool` named `resumed`, as an argument.
-`SessionStart` with `resumed == true` returns `vec![]`.
+`dispatch` gains a `bool` argument named `continued`, true when `source` is `resume` or `fork`.
+`SessionStart` with `continued == true` returns `vec![]`.
 Read `source` from `stdin_payload["source"]` in `run_inner`.
 `dispatch` has 4 positional parameters today; adding one makes 5, which is the project limit, so do not add more.
 
@@ -101,14 +101,14 @@ Reuse the same function #2159 adds; do not write a second budget loop.
 1. Emitter table test: every combination of event (`SessionStart`, `SessionEnd`, `UserPromptSubmit`) and `SessionStartContext` gives the expected output or `""`.
 2. Claude Code adapter test: `emit_hook_context("SessionStart", "x")` returns JSON whose `hookSpecificOutput.hookEventName` is `SessionStart` and whose `additionalContext` starts with `[ICM MEMORY CONTEXT (session start)]`.
 3. Crush and opencode adapter tests: `SessionStart` returns `""`.
-4. `dispatch` test: `SessionStart` with `resumed == true` returns no actions; with `false` returns `WakeUp`.
-5. `source` parsing test: `"resume"` sets `resumed`; `"startup"`, `"clear"`, `"compact"`, missing and non-string all do not.
+4. `dispatch` test: `SessionStart` with `continued == true` returns no actions; with `false` returns `WakeUp`.
+5. `source` parsing test: `"resume"` and `"fork"` set `continued`; `"startup"`, `"clear"`, `"compact"`, missing and non-string all do not.
 6. Budget test: a wake-up text larger than the budget is cut at whole records with the omission line.
 
 ## Acceptance criteria
 
 1. A new Claude Code session with ICM configured shows the `[ICM MEMORY CONTEXT (session start)]` block in context.
-2. `claude --resume` does not add a second wake-up block, and the hook makes no `icm_wake_up` call (check with `LLMENV_TRACE_TIMING=1`).
+2. `claude --resume` and a forked session do not add a second wake-up block, and the hook makes no `icm_wake_up` call (check with `LLMENV_TRACE_TIMING=1`).
 3. `SessionEnd` still produces no hook output and no Claude Code validation error.
 4. Changelog entry under `Fixed`: wake-up memories now reach the model at session start.
 5. The memory docs page describes the session-start block, tagged `(changed in v3.12.0)`.
