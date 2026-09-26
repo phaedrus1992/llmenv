@@ -66,15 +66,15 @@ pub(super) struct RecallBudget {
     seen: HashSet<String>,
     kept_bytes: usize,
     /// Records seen, including duplicates and omitted ones.
-    pub(super) records: usize,
+    records: usize,
     /// Bytes of the records seen.
-    pub(super) record_bytes: usize,
+    record_bytes: usize,
     /// Records identical to a record already kept.
-    pub(super) duplicates: usize,
+    duplicates: usize,
     /// Records dropped because they did not fit.
-    pub(super) omitted: usize,
+    omitted: usize,
     /// Recall actions not run because the budget was full.
-    pub(super) skipped_actions: usize,
+    skipped_actions: usize,
 }
 
 impl RecallBudget {
@@ -101,7 +101,7 @@ impl RecallBudget {
         }
     }
 
-    pub(super) fn kept(&self) -> &[String] {
+    fn kept(&self) -> &[String] {
         &self.kept
     }
 
