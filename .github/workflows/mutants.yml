@@ -7,7 +7,8 @@ name: mutants
 # ~30h serially — far too slow to gate a PR on. Instead:
 #
 #   in-diff  — PRs only test mutants on lines the PR actually changed, which is
-#              usually a handful, and fails if any survive.
+#              usually a handful, and fails if any survive. A plan job sizes the
+#              shard count from the mutant count (#2189).
 #   sweep    — the full scoped set, sharded, weekly. Report-only: the backlog is
 #              not clean yet, so failing here would just be permanently red.
 on:
@@ -30,23 +31,58 @@ env:
   # virtualized disk (os error 5, #553). Inert for steps that don't call rustup.
   RUSTUP_IO_THREADS: "1"
 jobs:
+  plan:
+    # One shard per ~6 mutants, capped (scripts/mutants-plan.sh). Every shard
+    # repeats a ~3 minute baseline build and test run, so more shards than that
+    # only add cost. A fixed 4 shards took 32-38 minutes on an 81-mutant diff (#2189).
+    name: mutants (plan)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          # The plan diffs against the base branch, so it needs the history.
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de  # master
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
+        with:
+          tool: cargo-mutants@27.1.0
+      - id: plan
+        # `base_ref` goes through the environment, not string interpolation — a
+        # branch name is attacker-controllable and would otherwise be pasted
+        # straight into the shell.
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: scripts/mutants-plan.sh "$BASE_REF" >> "$GITHUB_OUTPUT"
+
   in-diff:
     # Sharded because the budget is per-mutant, not per-PR: cargo-mutants runs a
-    # full build+test for each one (~100s here), so a PR touching ~25 mutable
-    # lines exceeds a single runner's 45 minutes and the job is killed mid-run —
-    # which reads as a CI failure while telling you nothing about the code. Four
-    # shards keep wall-clock roughly constant as diffs grow.
-    name: mutants (changed lines, shard ${{ matrix.shard }}/4)
-    if: github.event_name == 'pull_request'
+    # full build+test for each one (~100s here), so a big diff exceeds a single
+    # runner's 45 minutes and the job is killed mid-run — which reads as a CI
+    # failure while telling you nothing about the code. The plan job sizes the
+    # shard count, so wall-clock stays roughly constant as diffs grow.
+    name: mutants (changed lines, shard ${{ matrix.shard }}/${{ needs.plan.outputs.shards }})
+    needs: plan
+    # A PR that touches no Rust has nothing to mutate, and cargo-mutants exits
+    # non-zero on an empty set rather than treating it as "nothing to do" —
+    # which would turn a docs- or workflow-only PR into a red build. The plan
+    # reports zero shards for it, and this job does not run.
+    if: github.event_name == 'pull_request' && needs.plan.outputs.shards != '0'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         # cargo-mutants shards are zero-indexed — `k/n` requires k < n, so the
-        # last shard is 3/4, not 4/4. A 1-based list fails that shard outright
-        # (`shard k must be less than n`) rather than mis-splitting the work.
-        shard: [0, 1, 2, 3]
+        # last shard is n-1, not n. The plan job emits the zero-indexed list.
+        shard: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -59,33 +95,30 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
       - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
         with:
-          tool: cargo-mutants@27.1.0
+          tool: cargo-mutants@27.1.0,cargo-nextest
       - name: Detect CPU count
         run: echo "CARGO_BUILD_JOBS=$(scripts/core_count.sh)" >> "$GITHUB_ENV"
       - name: Diff against the merge base
-        # `base_ref` goes through the environment, not string interpolation — a
-        # branch name is attacker-controllable and would otherwise be pasted
-        # straight into the shell.
         env:
           BASE_REF: ${{ github.base_ref }}
         run: |
           git diff "origin/${BASE_REF}"...HEAD > mutants-pr.diff
           wc -l mutants-pr.diff
-          # A PR that touches no Rust has nothing to mutate, and cargo-mutants
-          # exits non-zero on an empty set rather than treating it as "nothing
-          # to do" — which turns a docs- or workflow-only PR into a red build.
-          if git diff --name-only "origin/${BASE_REF}"...HEAD | grep -q '\.rs$'; then
-            echo "HAS_RUST=1" >> "$GITHUB_ENV"
-          else
-            echo "no Rust changed; skipping mutation testing"
-            echo "HAS_RUST=0" >> "$GITHUB_ENV"
-          fi
       # Surviving mutants on lines this PR touched are the actionable case: the
       # PR added or changed logic no test distinguishes from a wrong version.
-      - if: env.HAS_RUST == '1'
-        run: cargo mutants --workspace --in-diff mutants-pr.diff --shard ${{ matrix.shard }}/4
+      #
+      # --test-tool nextest: nextest stops at the first failing test, and almost
+      # every mutant is caught, so most test runs end early. --in-place builds in
+      # the checkout instead of a temporary copy, so the cached target directory
+      # from rust-cache is reused. Both are safe on a disposable CI checkout.
+      - env:
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ needs.plan.outputs.shards }}
+        run: >-
+          cargo mutants --workspace --in-place --test-tool nextest
+          --in-diff mutants-pr.diff --shard "$SHARD/$SHARDS"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        if: always() && env.HAS_RUST == '1'
+        if: always()
         with:
           name: mutants-in-diff-${{ matrix.shard }}
           path: mutants.out/
