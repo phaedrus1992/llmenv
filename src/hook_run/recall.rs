@@ -105,6 +105,30 @@ impl RecallBudget {
         &self.kept
     }
 
+    /// The `[LLMENV_CONTEXT]` trace line, or `None` when tracing is off or no recall ran or
+    /// was skipped.
+    ///
+    /// `recall_*` counts every record ICM returned and `injected_*` counts the records kept.
+    /// `advisory_stripped` counts duplicate records, `omitted` counts records dropped for the
+    /// byte budget, and `skipped_actions` counts recall queries not run because the budget was
+    /// full.
+    pub(super) fn trace_line(&self, enabled: bool) -> Option<String> {
+        if !enabled || (self.records == 0 && self.skipped_actions == 0) {
+            return None;
+        }
+        let injected_bytes: usize = self.kept.iter().map(String::len).sum();
+        Some(format!(
+            "[LLMENV_CONTEXT] recall_entries={} recall_bytes={} injected_entries={} \
+             injected_bytes={injected_bytes} advisory_stripped={} omitted={} skipped_actions={}",
+            self.records,
+            self.record_bytes,
+            self.kept.len(),
+            self.duplicates,
+            self.omitted,
+            self.skipped_actions
+        ))
+    }
+
     /// One line that says what was left out, or `None` when nothing was.
     fn notice(&self) -> Option<String> {
         let (omitted, skipped) = (self.omitted, self.skipped_actions);
@@ -326,6 +350,61 @@ mod tests {
         .expect("fake runner does not fail");
         assert_eq!(text, big);
         assert_eq!(budget, RecallBudget::default());
+    }
+
+    fn record_of(len: usize) -> String {
+        format!("[t] {}", "x".repeat(len - 4))
+    }
+
+    #[test]
+    fn the_budget_is_used_exactly_and_never_exceeded() {
+        let mut budget = RecallBudget::default();
+        // Two records use 3,002 bytes each with the separator, so 1,994 bytes of room remain.
+        budget.add_records(vec![record_of(3_000), format!("{}y", record_of(2_999))]);
+        budget.add_records(vec![record_of(1_995), record_of(1_994)]);
+        let lengths: Vec<usize> = budget.kept().iter().map(String::len).collect();
+        assert_eq!(lengths, [3_000, 3_000, 1_994]);
+        assert_eq!(budget.omitted, 1);
+    }
+
+    #[test]
+    fn a_full_budget_starts_at_exactly_the_minimum_free_bytes() {
+        let mut budget = RecallBudget::default();
+        // 7,798 + 2 separator bytes leaves exactly MIN_FREE_BYTES free: not full yet.
+        budget.add_records(vec![record_of(
+            RECALL_BUDGET_BYTES - MIN_FREE_BYTES - SEPARATOR_BYTES,
+        )]);
+        assert!(!budget.is_full());
+        budget.add_records(vec![record_of(6)]);
+        assert!(budget.is_full());
+    }
+
+    #[test]
+    fn trace_line_is_absent_until_a_recall_ran() {
+        assert_eq!(RecallBudget::default().trace_line(true), None);
+        let skipped_only = RecallBudget {
+            skipped_actions: 2,
+            ..RecallBudget::default()
+        };
+        assert!(skipped_only.trace_line(true).is_some());
+        assert_eq!(skipped_only.trace_line(false), None);
+    }
+
+    #[test]
+    fn trace_line_reports_every_counter() {
+        let mut budget = RecallBudget::default();
+        budget.add_records(vec![
+            "[t] a".to_string(),
+            "[t] a".to_string(),
+            "[t] bb".to_string(),
+        ]);
+        assert_eq!(
+            budget.trace_line(true).as_deref(),
+            Some(
+                "[LLMENV_CONTEXT] recall_entries=3 recall_bytes=16 injected_entries=2 \
+                 injected_bytes=11 advisory_stripped=1 omitted=0 skipped_actions=0"
+            )
+        );
     }
 
     #[tokio::test]

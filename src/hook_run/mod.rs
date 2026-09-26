@@ -1347,36 +1347,12 @@ async fn run_memory_actions(
         action.run(client, query, chunk).await
     })
     .await?;
-    if budget.records > 0 || budget.skipped_actions > 0 {
-        emit_context_trace(&budget);
+    // Same env var that gates hook-run's other stderr telemetry (#1261).
+    let tracing_enabled = std::env::var_os("LLMENV_TRACE_TIMING").is_some();
+    if let Some(line) = budget.trace_line(tracing_enabled) {
+        eprintln!("{line}");
     }
     Ok(text)
-}
-
-/// Emit `[LLMENV_CONTEXT] recall_entries=N recall_bytes=N injected_entries=N
-/// injected_bytes=N advisory_stripped=N omitted=N skipped_actions=N` to stderr when
-/// `LLMENV_TRACE_TIMING` is set (#1261) — the same env var that already gates hook-run's other
-/// stderr telemetry.
-///
-/// Granularity is per recall *record* (#2159): `recall_*` counts every record ICM returned,
-/// `injected_*` counts the records kept, `advisory_stripped` counts records dropped as exact
-/// duplicates of a kept record, `omitted` counts records dropped for the byte budget, and
-/// `skipped_actions` counts recall queries not run because the budget was already full.
-fn emit_context_trace(budget: &recall::RecallBudget) {
-    if std::env::var_os("LLMENV_TRACE_TIMING").is_none() {
-        return;
-    }
-    let injected_bytes: usize = budget.kept().iter().map(String::len).sum();
-    eprintln!(
-        "[LLMENV_CONTEXT] recall_entries={} recall_bytes={} injected_entries={} \
-         injected_bytes={injected_bytes} advisory_stripped={} omitted={} skipped_actions={}",
-        budget.records,
-        budget.record_bytes,
-        budget.kept().len(),
-        budget.duplicates,
-        budget.omitted,
-        budget.skipped_actions
-    );
 }
 
 /// Borrowed inputs `run_session_log` needs, grouped to keep the function under
@@ -4379,9 +4355,29 @@ mod tests {
         );
     }
 
-    #[test]
-    fn emit_context_trace_never_panics_without_env_var() {
-        emit_context_trace(&recall::RecallBudget::default());
+    #[tokio::test]
+    async fn run_memory_actions_joins_deduplicated_recall_records() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": { "content": [{ "type": "text", "text": "[t] one\n[t] two\nNo memories found." }] }
+        });
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("URL");
+
+        let text = run_memory_actions(&client, vec![Action::Recall, Action::Recall], "q", "chunk")
+            .await
+            .expect("recall succeeds");
+
+        assert_eq!(text, "[t] one\n\n[t] two");
     }
 
     #[test]
