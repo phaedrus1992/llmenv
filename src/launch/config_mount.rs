@@ -1076,7 +1076,8 @@ url = "http://icm.example.com:9092/mcp"
 
         #[test]
         fn prop_rewrite_loopback_url_is_none_for_non_loopback_hosts(
-            label in "[a-z][a-z0-9-]{0,15}",
+            // No hyphen, so the label can never start `xn--` (punycode, which `url` validates).
+            label in "[a-z][a-z0-9]{0,15}",
             tld in "[a-z]{2,5}",
             port in 1u16..=65535,
         ) {
