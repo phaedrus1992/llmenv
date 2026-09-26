@@ -247,8 +247,17 @@ Tier 1 uses the same string as its `query`; if it is empty, tier 1 uses `<projec
 ### B5. Not in part B
 
 - No config knob for tiers or budget. Add one only when a user asks for it.
-- No change to `Store`. Setting `project` on `Store` is a separate change with a data-migration question; it is out of scope.
 - No SessionStart injection; that is #2142.
+
+### B5a. Store sets the project
+
+`Action::Store` sends no `project` today, so ICM stores each scope-context memory under the ICM server's own working-directory name.
+Part B fixes this: when `<project>` (B1) is known, `Store` sends `"project": "<project>"`.
+When it is not known, `Store` sends no `project`, as today.
+
+No migration is needed.
+Every recall in part B sends `project: ""`, so memories stored before this change are still found.
+Add one argument test: `Store` with a known project carries `project`; without one, the key is absent.
 
 ### B6. Tests and acceptance (part B)
 
