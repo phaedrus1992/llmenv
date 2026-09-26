@@ -19,7 +19,7 @@ serde_yaml = { package = "serde_yaml_ng", version = "=0.10.0" }
 # Codex's config is TOML (#233). A hand-rolled emitter would have to quote
 # table keys correctly, and MCP server names come from user config — a name
 # containing a dot would silently become nested tables.
-toml = "=1.1.5"
+toml = "=1.1.6"
 thiserror = "=2.0.20"
 tracing = "=0.1.44"
 proptest = "=1.11.0"
@@ -41,7 +41,7 @@ reqwest = { version = "=0.13.5", default-features = false, features = ["rustls",
 # fork+exec'ing `kill`, which narrows the already-small window in which a
 # reaped pid could be recycled before the group-kill fires. rustix is already
 # in the tree transitively. No unsafe.
-rustix = { version = "=1.1.4", features = ["fs", "process", "system"] }
+rustix = { version = "=1.1.5", features = ["fs", "process", "system"] }
 # hyper/hyper-util/http-body-util/http/futures-util/regex are already present
 # transitively via reqwest — promoted to direct deps here for the launch
 # proxy's (#1289) HTTP server, not new additions to the dependency tree.
@@ -89,8 +89,8 @@ llmenv-util = { path = "crates/llmenv-util", version = "4.0.0-alpha.1" }
 llmenv-scope = { path = "crates/llmenv-scope", version = "4.0.0-alpha.1" }
 llmenv-mcp = { path = "crates/llmenv-mcp", version = "4.0.0-alpha.1" }
 llmenv-task = { path = "crates/llmenv-task", version = "4.0.0-alpha.1" }
-clap = { version = "=4.6.6", features = ["derive"] }
-clap_complete = "=4.6.9"
+clap = { version = "=4.6.7", features = ["derive"] }
+clap_complete = "=4.6.11"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 serde_yaml = { package = "serde_yaml_ng", version = "=0.10.0" }
@@ -105,7 +105,7 @@ directories = "=6.0.0"
 sha2 = { workspace = true }
 hex = "=0.4.3"
 humantime = { workspace = true }
-jiff = { version = "=0.2.35", default-features = false, features = ["std"] }
+jiff = { version = "=0.2.37", default-features = false, features = ["std"] }
 anstyle = { workspace = true }
 glob = "=0.3.4"
 globset = { workspace = true }
