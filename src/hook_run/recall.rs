@@ -11,7 +11,7 @@ use crate::hook_run::action::{Action, split_recall_records};
 
 /// Claude Code saves hook output over about 10 KB to a file and shows the model a 2 KB
 /// preview. Stay well under that limit.
-pub(super) const RECALL_BUDGET_BYTES: usize = 8_000;
+const RECALL_BUDGET_BYTES: usize = 8_000;
 
 /// Below this many free bytes the remaining recall queries are skipped, because their
 /// records would rarely fit.
