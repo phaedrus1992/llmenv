@@ -510,6 +510,7 @@ features:
 | `default_topics` | no | Documentation only; preserved across round-trips |
 | `mcp_permissions` | no | Per-tier permission override for the ICM MCP's tools — see [`mcp_permissions`](#featuresmcp_permissions) below |
 | `wakeup_max_tokens` | no | Token budget for the `SessionStart` wake-up call, `20`-`4000` (added in v3.8.0) |
+| `consolidation` | no | Post-session memory consolidation — see [Post-session consolidation](#post-session-consolidation) below (added in v3.3.0) |
 
 `wakeup_max_tokens` (added in v3.8.0) controls the size of the wake-up pack
 injected at session start. When unset, llmenv omits the argument entirely and
@@ -518,6 +519,37 @@ the 500 tokens icm's own `config.toml` may configure, since that file is never
 consulted on this path. Set it explicitly to request a different budget; out-
 of-range values fail `llmenv doctor`/materialize validation instead of being
 silently clamped.
+
+#### Post-session consolidation
+
+(added in v3.3.0; model default changed in v3.11.2)
+
+After a session ends, llmenv can ask an LLM to distill that session's episodic memories into a few
+semantic rules and store them back in ICM. It is off by default and skips a session with fewer than
+three memories.
+
+```yaml
+features:
+  memory:
+    - server_host: home-server
+      port: 9092
+      consolidation:
+        enabled: true
+        backend: claude-cli      # or anthropic-api
+        max_rules_per_session: 10
+```
+
+| Field | Default | Notes |
+| ------- | ---------- | ------- |
+| `enabled` | `false` | Turns consolidation on |
+| `backend` | `claude-cli` | `claude-cli` runs `claude -p` and works with a Claude subscription. `anthropic-api` calls the Messages API directly and needs `ANTHROPIC_API_KEY` |
+| `max_rules_per_session` | `10` | Maximum number of rules stored per session |
+
+The `anthropic-api` backend uses the model `claude-sonnet-5`. To use another model, set
+`ANTHROPIC_MODEL` to a full model ID such as `claude-opus-5-5`. Claude Code also reads
+`ANTHROPIC_MODEL` and accepts aliases such as `opus` or `sonnet[1m]`. The Messages API rejects an
+alias, so llmenv ignores any value that does not start with `claude-`, logs a warning, and uses the
+default model. The `claude-cli` backend does not read this setting.
 
 See [MCP & Memory](mcp.md) for the topology, security model, and `mcp-proxy`
 requirements.
@@ -615,6 +647,10 @@ reference). A `SKILL.md` reference
 feature is enabled, teaching the agent when to reach for codebase-memory-mcp
 instead of a plain `grep`/`find` sweep.
 
+(changed in v3.11.2) The tiers cover codebase-memory-mcp v0.11.0, which added
+two read-only tools: `get_file_outline` and `compare_graphs`. Both are
+pre-approved. Before this change they fell through to a prompt on every call.
+
 Two caveats worth knowing before relying on the pre-approved tools:
 
 - **The pre-approved read tools are cross-project, not workspace-scoped.**
@@ -633,7 +669,9 @@ Two caveats worth knowing before relying on the pre-approved tools:
   upstream/here as [#1331](https://github.com/phaedrus1992/llmenv/issues/1331).
   An index is re-buildable (re-indexing the correct repo recovers it), so this
   is a nuisance rather than data loss, but it is not gated by the `ask` tier
-  the way `delete_project` itself is.
+  the way `delete_project` itself is. (since v3.11.0 a
+  `PreToolUse` hook denies the `name` override — see
+  [The `index_repository` name guard](mcp.md#the-index_repository-name-guard).)
 
 ### `features.throttle:`
 

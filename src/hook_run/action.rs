@@ -186,10 +186,87 @@ fn strip_advisory(text: &str) -> String {
         .join("\n")
 }
 
+/// Matches the first line of one ICM recall record: `[<topic>] <text>`.
+static RECORD_START: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    #[expect(clippy::expect_used, reason = "the pattern is a compile-time literal")]
+    regex::Regex::new(r"^\[[^\]\n]{1,200}\] ").expect("record-start pattern is valid")
+});
+
+/// Split one recall action's text into ICM records, so a byte budget can keep
+/// whole records and drop the rest (#2159).
+///
+/// A record starts at a `[<topic>] ` line and runs to the next such line. Lines
+/// before the first record form a record of their own. Text with no record
+/// line is one record, so a change to ICM's format degrades to per-action
+/// behavior and never loses text. Each record has trailing whitespace removed,
+/// and empty records are dropped.
+pub(crate) fn split_recall_records(text: &str) -> Vec<String> {
+    let mut records: Vec<Vec<&str>> = Vec::new();
+    for line in text.lines() {
+        match records.last_mut() {
+            Some(current) if !RECORD_START.is_match(line) => current.push(line),
+            _ => records.push(vec![line]),
+        }
+    }
+    records
+        .into_iter()
+        .map(|lines| lines.join("\n").trim_end().to_string())
+        .filter(|record| !record.is_empty())
+        .collect()
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    proptest! {
+        /// Splitting never loses or invents text: the non-whitespace characters of the
+        /// records, in order, equal those of the input.
+        #[test]
+        fn split_recall_records_preserves_all_text(text in "(\\[[a-z]{1,8}\\] )?[a-z \\[\\]\n]{0,200}") {
+            let strip = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+            let joined = split_recall_records(&text).join("\n");
+            prop_assert_eq!(strip(&joined), strip(&text));
+        }
+    }
+
+    #[test]
+    fn split_recall_records_splits_on_topic_lines() {
+        let text = "[ctx-a] first line\n  detail\n[ctx-b] second\n";
+        assert_eq!(
+            split_recall_records(text),
+            vec!["[ctx-a] first line\n  detail", "[ctx-b] second"]
+        );
+    }
+
+    #[test]
+    fn split_recall_records_keeps_text_without_record_lines_whole() {
+        assert_eq!(split_recall_records("a\nb\n"), vec!["a\nb"]);
+        assert!(split_recall_records("").is_empty());
+        assert!(split_recall_records("\n  \n").is_empty());
+    }
+
+    #[test]
+    fn split_recall_records_keeps_leading_text_as_its_own_record() {
+        assert_eq!(
+            split_recall_records("preamble\n[t] body"),
+            vec!["preamble", "[t] body"]
+        );
+    }
+
+    #[test]
+    fn split_recall_records_treats_a_bracket_line_without_close_space_as_continuation() {
+        let text = "[t] body\n[not a record]\n[x]no-space\n[] empty topic";
+        assert_eq!(split_recall_records(text), vec![text]);
+    }
+
+    #[test]
+    fn split_recall_records_bounds_the_topic_length() {
+        let long = format!("[{}] body", "a".repeat(201));
+        let text = format!("[t] first\n{long}");
+        assert_eq!(split_recall_records(&text), vec![text.as_str()]);
+    }
 
     #[test]
     fn action_tool_name_mapping() {

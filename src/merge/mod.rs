@@ -431,6 +431,66 @@ mod tests {
     use std::collections::BTreeMap;
     use tempfile::tempdir;
 
+    #[test]
+    fn bundle_rules_appear_in_merged_manifest() {
+        let tmp = tempdir().unwrap();
+        let bundle_dir = tmp.path().join("rules-bundle");
+        std::fs::create_dir_all(bundle_dir.join("rules")).unwrap();
+        std::fs::write(bundle_dir.join("rules/style.md"), "Keep functions short.\n").unwrap();
+        let bundle = BundleRef {
+            name: "rules-bundle".into(),
+            path: bundle_dir,
+            precedence: 1,
+        };
+
+        let manifest = merge(&Capabilities::default(), &BTreeMap::new(), &[bundle]).unwrap();
+
+        assert_eq!(
+            manifest.rules.len(),
+            1,
+            "the bundle's rules/*.md must be ingested"
+        );
+        assert_eq!(manifest.rules[0].bundle, "rules-bundle");
+        assert_eq!(
+            manifest.rules[0].rel,
+            std::path::PathBuf::from("rules/style.md")
+        );
+    }
+
+    #[test]
+    fn a_missing_agents_md_is_skipped_but_an_unreadable_one_fails_the_merge() {
+        let tmp = tempdir().unwrap();
+        let missing = tmp.path().join("no-agents");
+        std::fs::create_dir_all(&missing).unwrap();
+        let bundle = |name: &str, path: std::path::PathBuf| BundleRef {
+            name: name.into(),
+            path,
+            precedence: 1,
+        };
+        assert!(
+            merge(
+                &Capabilities::default(),
+                &BTreeMap::new(),
+                &[bundle("no-agents", missing)]
+            )
+            .is_ok(),
+            "a bundle without AGENTS.md is valid"
+        );
+
+        // A directory named AGENTS.md makes the read fail with an error other than NotFound.
+        let broken = tmp.path().join("broken");
+        std::fs::create_dir_all(broken.join("AGENTS.md")).unwrap();
+        assert!(
+            merge(
+                &Capabilities::default(),
+                &BTreeMap::new(),
+                &[bundle("broken", broken)]
+            )
+            .is_err(),
+            "an AGENTS.md that cannot be read must surface, not be skipped"
+        );
+    }
+
     // #329: a bundle.yaml with an mcp: block must contribute to MergedManifest capabilities.mcp.
     #[test]
     fn bundle_mcp_block_appears_in_merged_capabilities() {

@@ -13,6 +13,7 @@ pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
 pub(crate) mod mcp_client;
 pub(crate) mod read_once;
+mod recall;
 pub(crate) mod repeat_detect;
 mod session_state;
 pub(crate) mod slippage;
@@ -25,7 +26,7 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use action::Action;
 use anyhow::Context as _;
@@ -221,22 +222,34 @@ impl std::fmt::Display for HookEvent {
 /// active memory entry's configured wake-up token budget (#1216, `None` if
 /// unset), threaded straight into `Action::WakeUp` on `SessionStart`.
 ///
-/// `TurnStart` runs the project-scoped natural-language `Recall` first, then one
-/// project-unfiltered `RecallTag` per active tag (#197), then one
-/// project-unfiltered `RecallBundle` per active bundle (#228). The turn-capture
+/// `TurnStart` runs the most specific recalls first (#2159): every rank-1 tag (project scope
+/// and `$LLMENV_EXTRA_TAGS`), then every active bundle, then the tags of the broader scopes in
+/// rank order (see [`recall::tag_specificity`]; a tag with no entry in `ranks` is unscoped), and
+/// last the natural-language `Recall`, because it has no project filter and is the least
+/// specific. Tag and bundle recalls are project-unfiltered (#197, #228). The turn-capture
 /// events carry no memory actions.
 fn dispatch(
     event: HookEvent,
     tag_queries: &[TagRecallQuery],
     bundle_queries: &[BundleRecallQuery],
+    ranks: &BTreeMap<String, u8>,
     wakeup_max_tokens: Option<u32>,
 ) -> Vec<Action> {
     match event {
         HookEvent::SessionStart => vec![Action::WakeUp(wakeup_max_tokens)],
         HookEvent::TurnStart => {
-            let mut actions = vec![Action::Recall];
-            actions.extend(tag_queries.iter().cloned().map(Action::RecallTag));
+            let rank_of =
+                |q: &TagRecallQuery| ranks.get(&q.tag).copied().unwrap_or(recall::UNSCOPED_RANK);
+            let mut tags: Vec<&TagRecallQuery> = tag_queries.iter().collect();
+            // Stable, so tags of one rank keep the caller's (alphabetical) order.
+            tags.sort_by_key(|q| rank_of(q));
+            let split = tags.partition_point(|q| rank_of(q) <= recall::MOST_SPECIFIC_RANK);
+            let (specific, broader) = tags.split_at(split);
+            let mut actions: Vec<Action> = Vec::new();
+            actions.extend(specific.iter().map(|q| Action::RecallTag((*q).clone())));
             actions.extend(bundle_queries.iter().cloned().map(Action::RecallBundle));
+            actions.extend(broader.iter().map(|q| Action::RecallTag((*q).clone())));
+            actions.push(Action::Recall);
             actions
         }
         HookEvent::SessionEnd => vec![Action::Store],
@@ -1087,6 +1100,7 @@ fn run_inner(
         // injection; these are the single sources of the tag/bundle→keyword encoding.
         let tag_queries = tag_recall_queries(&tags)?;
         let bundle_queries = bundle_recall_queries(&bundles)?;
+        let tag_ranks = recall::tag_specificity(&active);
         let query = tags.join(", ");
         // Generate full chunk for injection into hook context, and minimal chunk
         // for storage. The minimal chunk omits boilerplate instruction text
@@ -1206,7 +1220,13 @@ fn run_inner(
             if let Some(client) = &client
                 && !session_end_unchanged
             {
-                let actions = dispatch(event, &tag_queries, &bundle_queries, wakeup_max_tokens);
+                let actions = dispatch(
+                    event,
+                    &tag_queries,
+                    &bundle_queries,
+                    &tag_ranks,
+                    wakeup_max_tokens,
+                );
                 // Use minimal chunk for storage to avoid duplication. (#1792)
                 let store_content = store_content_for_event(event, &chunk, &storage_chunk);
                 out = run_memory_actions(client, actions, &query, store_content).await?;
@@ -1314,106 +1334,25 @@ fn run_inner(
 
 /// Run one event's ordered memory actions and concatenate their text output.
 ///
-/// TurnStart fans out to a project-scoped recall plus one per active tag and
-/// bundle. When the same memory is stored under several of those keywords it
-/// comes back from more than one recall, so the naive concatenation injects the
-/// identical block two or three times — pure context/token cost with no added
-/// information. Exact-duplicate action outputs are dropped (order preserved,
-/// first wins); only byte-identical blocks are removed, so no unique recall is
-/// ever lost.
+/// `TurnStart` recall is capped and deduplicated by record, most specific first, so the
+/// injected context stays under the size Claude Code inlines (#2159). See
+/// [`recall::run_with_budget`].
 async fn run_memory_actions(
     client: &McpHttpClient,
     actions: Vec<Action>,
     query: &str,
     chunk: &str,
 ) -> anyhow::Result<String> {
-    let mut results: Vec<(bool, String)> = Vec::with_capacity(actions.len());
-    for action in actions {
-        let is_recall = matches!(
-            action,
-            Action::Recall | Action::RecallTag(_) | Action::RecallBundle(_)
-        );
-        let text = action.run(client, query, chunk).await?;
-        results.push((is_recall, text));
+    let (text, budget) = recall::run_with_budget(actions, |action| async move {
+        action.run(client, query, chunk).await
+    })
+    .await?;
+    // Same env var that gates hook-run's other stderr telemetry (#1261).
+    let tracing_enabled = std::env::var_os("LLMENV_TRACE_TIMING").is_some();
+    if let Some(line) = budget.trace_line(tracing_enabled) {
+        eprintln!("{line}");
     }
-    let (kept, stats) = dedup_and_count_action_results(results);
-    if stats.recall_entries > 0 || stats.recall_dropped > 0 {
-        emit_context_trace(&stats, &kept);
-    }
-    Ok(kept.join("\n\n"))
-}
-
-/// Recall-specific counters produced alongside [`dedup_and_count_action_results`]'s
-/// dedup pass, for [`emit_context_trace`] (#1261).
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct RecallStats {
-    /// Recall-type actions (`Recall`/`RecallTag`/`RecallBundle`) whose
-    /// response was non-empty after `strip_advisory`.
-    recall_entries: usize,
-    /// Total byte length of those non-empty responses.
-    recall_bytes: usize,
-    /// Recall-type actions whose response was dropped — either empty after
-    /// `strip_advisory` (advisory-only noise), or an exact duplicate of an
-    /// already-kept action's text.
-    recall_dropped: usize,
-}
-
-/// Pure core of [`run_memory_actions`]'s dedup pass, split out so it's
-/// testable without a live/mocked MCP client (#1261): given each action's
-/// `(is_recall, text)` result, in dispatch order, drop empty and
-/// exact-duplicate texts (first occurrence wins) and tally [`RecallStats`].
-///
-/// `dispatch` never mixes recall actions with `WakeUp`/`Store` in the same
-/// batch (see its own doc comment), so `is_recall` is uniform across one
-/// call in practice — checked per-entry anyway so the counters stay correct
-/// if that ever changes, rather than assuming it from the batch's first
-/// element.
-fn dedup_and_count_action_results(results: Vec<(bool, String)>) -> (Vec<String>, RecallStats) {
-    let mut kept: Vec<String> = Vec::new();
-    let mut stats = RecallStats::default();
-    for (is_recall, text) in results {
-        if is_recall && !text.is_empty() {
-            stats.recall_entries += 1;
-            stats.recall_bytes += text.len();
-        }
-        if text.is_empty() || kept.contains(&text) {
-            if is_recall {
-                stats.recall_dropped += 1;
-            }
-            continue;
-        }
-        kept.push(text);
-    }
-    (kept, stats)
-}
-
-/// Emit `[LLMENV_CONTEXT] recall_entries=N recall_bytes=N injected_entries=N
-/// injected_bytes=N advisory_stripped=N` to stderr when `LLMENV_TRACE_TIMING`
-/// is set (#1261) — the same env var that already gates hook-run's other
-/// stderr telemetry.
-///
-/// Granularity is per recall-type *action* (one project-scoped `Recall`, one
-/// `RecallTag` per active tag, one `RecallBundle` per active bundle), not
-/// per individual memory record within an action's response: parsing ICM's
-/// recall-response text format to count records would couple this client to
-/// a format owned by a separate system (see `crate::consolidation`'s own,
-/// narrower parser, which only handles the non-compact format one specific
-/// caller uses). `advisory_stripped` covers both ways a recalled action's
-/// text ends up not injected — the whole response was advisory-only noise
-/// (empty after `strip_advisory`), or it exactly duplicated an already-kept
-/// action's text — rather than only the strictly-advisory case, since both
-/// are "recalled but not injected" from an external observer's perspective.
-fn emit_context_trace(stats: &RecallStats, kept: &[String]) {
-    if std::env::var_os("LLMENV_TRACE_TIMING").is_none() {
-        return;
-    }
-    let injected_entries = kept.len();
-    let injected_bytes: usize = kept.iter().map(String::len).sum();
-    eprintln!(
-        "[LLMENV_CONTEXT] recall_entries={} recall_bytes={} injected_entries={injected_entries} \
-         injected_bytes={injected_bytes} advisory_stripped={}",
-        stats.recall_entries, stats.recall_bytes, stats.recall_dropped
-    );
+    Ok(text)
 }
 
 /// Borrowed inputs `run_session_log` needs, grouped to keep the function under
@@ -4270,7 +4209,10 @@ mod tests {
             HookEvent::SubagentStop,
             HookEvent::PreCompact,
         ] {
-            assert_eq!(dispatch(ev, &[], &[], None), Vec::<Action>::new());
+            assert_eq!(
+                dispatch(ev, &[], &[], &BTreeMap::new(), None),
+                Vec::<Action>::new()
+            );
         }
     }
 
@@ -4339,19 +4281,19 @@ mod tests {
     #[test]
     fn dispatch_maps_events_to_actions() {
         assert_eq!(
-            dispatch(HookEvent::SessionStart, &[], &[], None),
+            dispatch(HookEvent::SessionStart, &[], &[], &BTreeMap::new(), None),
             vec![Action::WakeUp(None)]
         );
         assert_eq!(
-            dispatch(HookEvent::TurnStart, &[], &[], None),
+            dispatch(HookEvent::TurnStart, &[], &[], &BTreeMap::new(), None),
             vec![Action::Recall]
         );
         assert_eq!(
-            dispatch(HookEvent::SessionEnd, &[], &[], None),
+            dispatch(HookEvent::SessionEnd, &[], &[], &BTreeMap::new(), None),
             vec![Action::Store]
         );
         assert_eq!(
-            dispatch(HookEvent::PostSession, &[], &[], None),
+            dispatch(HookEvent::PostSession, &[], &[], &BTreeMap::new(), None),
             vec![],
             "PostSession defers to consolidation module, no dispatch actions"
         );
@@ -4360,12 +4302,18 @@ mod tests {
     #[test]
     fn dispatch_threads_wakeup_max_tokens_into_session_start_only() {
         assert_eq!(
-            dispatch(HookEvent::SessionStart, &[], &[], Some(750)),
+            dispatch(
+                HookEvent::SessionStart,
+                &[],
+                &[],
+                &BTreeMap::new(),
+                Some(750)
+            ),
             vec![Action::WakeUp(Some(750))]
         );
         // Not carried by any other event's actions — WakeUp only fires on SessionStart.
         assert_eq!(
-            dispatch(HookEvent::TurnStart, &[], &[], Some(750)),
+            dispatch(HookEvent::TurnStart, &[], &[], &BTreeMap::new(), Some(750)),
             vec![Action::Recall]
         );
     }
@@ -4407,93 +4355,39 @@ mod tests {
         );
     }
 
-    #[test]
-    fn dedup_and_count_drops_empty_and_exact_duplicate_recall_results() {
-        let results = vec![
-            (true, "memory A".to_string()),
-            (true, String::new()),          // advisory-only, stripped to empty
-            (true, "memory A".to_string()), // exact duplicate of the first
-            (true, "memory B".to_string()),
-        ];
-        let (kept, stats) = dedup_and_count_action_results(results);
-        assert_eq!(kept, vec!["memory A".to_string(), "memory B".to_string()]);
-        // recall_entries only counts non-empty responses: 3 of the 4 (the
-        // empty one never increments it), and recall_dropped counts the
-        // empty one plus the exact-duplicate — 2 of those 3 non-empty/total.
-        assert_eq!(stats.recall_entries, 3);
-        assert_eq!(stats.recall_bytes, "memory A".len() * 2 + "memory B".len());
-        assert_eq!(stats.recall_dropped, 2);
-    }
+    #[tokio::test]
+    async fn run_memory_actions_joins_deduplicated_recall_records() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    #[test]
-    fn dedup_and_count_ignores_non_recall_actions_in_the_tally() {
-        // WakeUp/Store never mix with recall actions per `dispatch`, but the
-        // tally must still be scoped to `is_recall` entries if that changes.
-        let results = vec![(false, "wake-up pack".to_string())];
-        let (kept, stats) = dedup_and_count_action_results(results);
-        assert_eq!(kept, vec!["wake-up pack".to_string()]);
-        assert_eq!(stats, RecallStats::default());
-    }
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": { "content": [{ "type": "text", "text": "[t] one\n[t] two\nNo memories found." }] }
+        });
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("URL");
 
-    #[test]
-    fn emit_context_trace_never_panics_without_env_var() {
-        let stats = RecallStats {
-            recall_entries: 3,
-            recall_bytes: 42,
-            recall_dropped: 1,
-        };
-        emit_context_trace(&stats, &["memory A".to_string()]);
-    }
+        let text = run_memory_actions(&client, vec![Action::Recall, Action::Recall], "q", "chunk")
+            .await
+            .expect("recall succeeds");
 
-    fn arb_action_result() -> impl Strategy<Value = (bool, String)> {
-        (
-            any::<bool>(),
-            prop_oneof![Just(String::new()), "[a-z ]{1,12}"],
-        )
-    }
-
-    proptest! {
-        #[test]
-        fn dedup_and_count_never_panics(results in prop::collection::vec(arb_action_result(), 0..8)) {
-            let _ = dedup_and_count_action_results(results);
-        }
-
-        // recall_entries counts exactly the non-empty (is_recall, text) pairs —
-        // independent of dedup, which only affects `kept`/`recall_dropped`.
-        #[test]
-        fn recall_entries_matches_non_empty_recall_input_count(
-            results in prop::collection::vec(arb_action_result(), 0..8)
-        ) {
-            let expected = results.iter().filter(|(r, t)| *r && !t.is_empty()).count();
-            let (_, stats) = dedup_and_count_action_results(results);
-            prop_assert_eq!(stats.recall_entries, expected);
-        }
-
-        // kept never carries a duplicate string, and every kept string
-        // actually came from the input (dedup can only drop, never invent).
-        #[test]
-        fn kept_has_no_duplicates_and_is_a_subset_of_input(
-            results in prop::collection::vec(arb_action_result(), 0..8)
-        ) {
-            let texts: Vec<String> = results.iter().map(|(_, t)| t.clone()).collect();
-            let (kept, _) = dedup_and_count_action_results(results);
-            let mut seen = std::collections::HashSet::new();
-            for text in &kept {
-                prop_assert!(seen.insert(text.clone()), "kept must not repeat {text:?}");
-                prop_assert!(texts.contains(text), "kept must only contain input text");
-            }
-        }
+        assert_eq!(text, "[t] one\n\n[t] two");
     }
 
     #[test]
     fn turn_start_expands_one_recall_tag_per_active_tag() {
         let tags = vec!["rust".to_string(), "work-vpn".to_string()];
         let queries = tag_recall_queries(&tags).expect("valid tags");
-        let actions = dispatch(HookEvent::TurnStart, &queries, &[], None);
+        let actions = dispatch(HookEvent::TurnStart, &queries, &[], &BTreeMap::new(), None);
         assert_eq!(
             actions,
             vec![
-                Action::Recall,
                 Action::RecallTag(TagRecallQuery {
                     tag: "rust".to_string(),
                     keyword: "llmenv-tag:rust".to_string(),
@@ -4502,8 +4396,9 @@ mod tests {
                     tag: "work-vpn".to_string(),
                     keyword: "llmenv-tag:work-vpn".to_string(),
                 }),
+                Action::Recall,
             ],
-            "TurnStart must run project recall then one tag recall per active tag"
+            "TurnStart must run one tag recall per active tag, then the project recall"
         );
     }
 
@@ -4511,11 +4406,10 @@ mod tests {
     fn turn_start_expands_one_recall_bundle_per_active_bundle() {
         let bundles = vec!["base".to_string(), "rust-defaults".to_string()];
         let queries = bundle_recall_queries(&bundles).expect("valid bundles");
-        let actions = dispatch(HookEvent::TurnStart, &[], &queries, None);
+        let actions = dispatch(HookEvent::TurnStart, &[], &queries, &BTreeMap::new(), None);
         assert_eq!(
             actions,
             vec![
-                Action::Recall,
                 Action::RecallBundle(BundleRecallQuery {
                     bundle: "base".to_string(),
                     keyword: "llmenv-bundle:base".to_string(),
@@ -4524,6 +4418,7 @@ mod tests {
                     bundle: "rust-defaults".to_string(),
                     keyword: "llmenv-bundle:rust-defaults".to_string(),
                 }),
+                Action::Recall,
             ],
             "TurnStart must emit one bundle recall per active bundle"
         );
@@ -4533,11 +4428,12 @@ mod tests {
     fn turn_start_interleaves_tag_and_bundle_recalls() {
         let tag_qs = tag_recall_queries(&["rust".to_string()]).expect("valid");
         let bundle_qs = bundle_recall_queries(&["base".to_string()]).expect("valid");
-        let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs, None);
-        // Order: project recall, then tag recalls, then bundle recalls.
-        assert_eq!(actions[0], Action::Recall);
-        assert!(matches!(actions[1], Action::RecallTag(_)));
-        assert!(matches!(actions[2], Action::RecallBundle(_)));
+        let ranks = BTreeMap::from([("rust".to_string(), 1)]);
+        let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs, &ranks, None);
+        // Order: rank-1 tag recalls, then bundle recalls, then project recall.
+        assert!(matches!(actions[0], Action::RecallTag(_)));
+        assert!(matches!(actions[1], Action::RecallBundle(_)));
+        assert_eq!(actions[2], Action::Recall);
         assert_eq!(actions.len(), 3);
     }
 
@@ -4581,13 +4477,14 @@ mod tests {
         // recalls keyed on different prefixes — no cross-contamination.
         let tag_qs = tag_recall_queries(&["foo".to_string()]).expect("valid");
         let bundle_qs = bundle_recall_queries(&["foo".to_string()]).expect("valid");
-        let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs, None);
+        let ranks = BTreeMap::from([("foo".to_string(), 1)]);
+        let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs, &ranks, None);
         assert_eq!(actions.len(), 3);
-        match &actions[1] {
+        match &actions[0] {
             Action::RecallTag(q) => assert_eq!(q.keyword, "llmenv-tag:foo"),
             other => panic!("expected RecallTag, got {other:?}"),
         }
-        match &actions[2] {
+        match &actions[1] {
             Action::RecallBundle(q) => assert_eq!(q.keyword, "llmenv-bundle:foo"),
             other => panic!("expected RecallBundle, got {other:?}"),
         }
@@ -4687,8 +4584,8 @@ mod tests {
     }
 
     proptest! {
-        // dispatch(TurnStart) always produces [Recall, N×RecallTag, M×RecallBundle]
-        // regardless of N and M. This is the ordering invariant.
+        // With no ranks, dispatch(TurnStart) always produces
+        // [M×RecallBundle, N×RecallTag, Recall] regardless of N and M.
         #[test]
         fn prop_dispatch_turn_start_ordering(
             tags in proptest::collection::vec(valid_name(), 0..8),
@@ -4696,20 +4593,61 @@ mod tests {
         ) {
             let tag_qs = tag_recall_queries(&tags).expect("valid tags");
             let bundle_qs = bundle_recall_queries(&bundles).expect("valid bundles");
-            let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs, None);
+            let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs, &BTreeMap::new(), None);
 
             prop_assert_eq!(actions.len(), 1 + tags.len() + bundles.len());
-            prop_assert!(matches!(actions[0], Action::Recall));
-            for a in &actions[1..=tags.len()] {
-                prop_assert!(matches!(a, Action::RecallTag(_)), "expected RecallTag, got {a:?}");
-            }
-            for a in &actions[1 + tags.len()..] {
+            for a in &actions[..bundles.len()] {
                 prop_assert!(
                     matches!(a, Action::RecallBundle(_)),
                     "expected RecallBundle, got {a:?}"
                 );
             }
+            for a in &actions[bundles.len()..bundles.len() + tags.len()] {
+                prop_assert!(matches!(a, Action::RecallTag(_)), "expected RecallTag, got {a:?}");
+            }
+            prop_assert!(matches!(actions.last(), Some(Action::Recall)));
         }
+    }
+
+    #[test]
+    fn turn_start_orders_tags_by_specificity_with_bundles_after_rank_one() {
+        let tags: Vec<String> = [
+            "aaa-host",
+            "bbb-project",
+            "ccc-user",
+            "ddd-project",
+            "eee-loose",
+        ]
+        .map(String::from)
+        .to_vec();
+        let ranks = BTreeMap::from([
+            ("aaa-host".to_string(), 5),
+            ("bbb-project".to_string(), 1),
+            ("ccc-user".to_string(), 4),
+            ("ddd-project".to_string(), 1),
+        ]);
+        let tag_qs = tag_recall_queries(&tags).expect("valid tags");
+        let bundle_qs = bundle_recall_queries(&["base".to_string()]).expect("valid bundle");
+        let order: Vec<String> = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs, &ranks, None)
+            .iter()
+            .map(|a| match a {
+                Action::RecallTag(q) => q.tag.clone(),
+                Action::RecallBundle(q) => format!("bundle:{}", q.bundle),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "bbb-project",
+                "ddd-project",
+                "bundle:base",
+                "ccc-user",
+                "aaa-host",
+                "eee-loose",
+                "Recall",
+            ]
+        );
     }
 
     // ===== #1143: MemoryEndpoint::into_url() message formatting =====
