@@ -1,6 +1,6 @@
 # Adaptive ICM recall: session dedup, activity relevance, related topics
 
-Issue: #2249.
+Issues: #2249, #2251.
 Milestone: v3.12.0.
 Base branch: `release/3.x`.
 
@@ -19,6 +19,11 @@ The `TurnStart` recall (wired to Claude Code `UserPromptSubmit`) builds its inpu
 The same tags give the same records on every turn.
 The block uses up to 8,000 bytes per turn and carries no signal about the work in progress.
 
+A second defect (#2251): `emit_hook_context` returns an empty string for `SessionStart` (`src/adapter/mod.rs:548`), and the Claude Code adapter delegates to it (`src/adapter/claude_code.rs:552`).
+Every session start runs `icm_wake_up` and then discards the result.
+The suppression cites #558, which was about `SessionEnd`.
+The Claude Code hooks reference says `SessionStart` accepts `hookSpecificOutput.additionalContext`.
+
 ## Goals
 
 1. Send a memory once per model context, not once per turn.
@@ -26,6 +31,7 @@ The block uses up to 8,000 bytes per turn and carries no signal about the work i
 3. Add memories from related topics, with the ICM tools that exist today.
 4. Inject error-relevant memories at the moment a tool fails.
 5. Give a subagent memories that match its task.
+6. Deliver the `SessionStart` context to the model in Claude Code (#2251).
 
 ## Non-goals
 
@@ -39,7 +45,7 @@ The block uses up to 8,000 bytes per turn and carries no signal about the work i
 
 | Question | Decision |
 | --- | --- |
-| The scope-tagged set | Send it once per epoch, then use the per-turn budget for relevance. |
+| The scope-tagged set | Send it once per epoch from `SessionStart`, with the wake-up pack. `TurnStart` uses its budget for relevance. |
 | Relevance signals | Prompt text, tool activity, errors, and the transcript tail. |
 | Related topics | Topic fanout and keyword fanout with `icm_memory_recall`. |
 | Mid-turn injection | On tool failure only. |
@@ -130,8 +136,12 @@ New registrations, each only when a memory backend is active (the same rule as `
   This is a local file write only: no MCP call, no output, and no permission decision.
 - `SubagentStart`: inject task-relevant memories.
 
-The existing `SessionStart` registration also handles the reset.
+The existing `SessionStart` registration also handles the reset and the scope set.
 No `PostCompact` registration is needed, because `SessionStart` fires after a compaction with `source: "compact"`.
+
+`ClaudeCodeAdapter::emit_hook_context` stops delegating `SessionStart` to the shared function.
+It emits the `additionalContext` envelope for `SessionStart`, and keeps `SessionEnd` suppressed (#2251).
+The shared function keeps its current behavior for the other adapters.
 
 ## Data flow
 
@@ -147,13 +157,20 @@ No `PostCompact` registration is needed, because `SessionStart` fires after a co
   The payload does not name the parent session, so the ledger cannot copy the parent state.
 - `/clear` also gives a new `session_id`, so the reset for `clear` is automatic.
   The explicit reset stays, because it costs nothing.
-- The existing `icm_wake_up` call stays.
-  Any `[topic]` records in its output go into `agents.main.sent`.
+- After the reset decision, run the wake-up pack and the scope set:
+  1. `icm_wake_up`, unchanged.
+     Its text passes through outside the byte budget, the same as today.
+  2. The current scope-tag recall, ranked by `recall.rs:31-60`, inside the 8,000-byte budget.
+  3. Drop scope records whose hash is in `agents.main.sent`.
+     On `resume` this removes the records that the replayed transcript already holds.
+  4. Add the kept hashes to `agents.main.sent`, set `agents.main.scope_sent`, and save the ledger.
+  5. Inject the text through `additionalContext`.
 
 ### `TurnStart` (Claude Code `UserPromptSubmit`)
 
 1. Load the ledger.
-2. If `agents.main.scope_sent` is false, run the current scope-tag recall (ranked by `recall.rs:31-60`), then set `scope_sent`.
+2. If `agents.main.scope_sent` is false, run the scope-tag recall here, then set `scope_sent`.
+   This is a fallback for a session where the `SessionStart` hook did not run or failed, for example when llmenv was installed mid-session.
 3. Build the relevance query.
    If the query hash equals `last_query_hash` and no activity arrived after `last_turn_at`, make no relevance calls.
 4. Wave 1, concurrent:
@@ -163,7 +180,7 @@ No `PostCompact` registration is needed, because `SessionStart` fires after a co
 5. Wave 2, concurrent, after wave 1: topic fanout.
    At most 2 recalls, one per sibling topic, with `topic` set and `limit: 3`.
    Skip wave 2 when wave 1 took more than 1.5 seconds.
-6. Merge in budget order: the scope set (step 2 only), main, keyword fanout, topic fanout, cross-project.
+6. Merge in budget order: the scope set (step 2 fallback only), main, keyword fanout, topic fanout, cross-project.
 7. Drop records whose hash is in `agents.main.sent`.
    Apply the 8,000-byte budget (`RECALL_BUDGET_BYTES`).
    The existing omission notice reports records that did not fit.
@@ -212,7 +229,9 @@ The `SubagentStart` payload has `agent_id` and `agent_type`, but no task text.
 `HOOK_TIMEOUT` stays at 2 seconds per MCP call (`src/hook_run/mod.rs:137`).
 Today the calls run one after another, so the worst case is (tags + bundles + 1) × 2 seconds.
 The new flow runs each wave concurrently on the existing current-thread runtime.
-The worst case is about 4 seconds on a turn that also sends the scope set, and about 2 seconds after that.
+The `TurnStart` worst case is two waves, about 4 seconds.
+Wave 2 is skipped after a slow wave 1, so a slow backend costs about 2 seconds.
+The scope-set calls move to `SessionStart`, which already runs them in the current serial order and cost.
 `PostToolBatch` and `PreToolUse` on `Agent` make no MCP call.
 
 ## Failure handling
@@ -256,8 +275,10 @@ Source: the Claude Code hooks reference, `https://code.claude.com/docs/en/hooks.
 - Unit and property tests for `relevance.rs`: the query caps, term extraction, sibling-topic derivation, and the same output for the same input.
 - Ledger tests: the reset per `source`, hash dedup per agent key, the TTL prune, a corrupt file, an invalid id, and two concurrent writers with no lost update.
 - Integration tests with the existing mock MCP server:
-  - Turn 1 sends the scope set, and turn 2 does not repeat it.
-  - A `compact` reset sends the scope set again.
+  - `SessionStart` sends the wake-up pack and the scope set, and the next `TurnStart` does not repeat a scope record.
+  - A `compact` `SessionStart` resets the ledger and sends the scope set again.
+  - A `resume` `SessionStart` keeps the ledger and sends no scope record already in `sent`.
+  - A `TurnStart` with `scope_sent` false (no `SessionStart` ran) sends the scope set as a fallback.
   - A change of prompt changes the relevance calls.
   - The skip rule makes no calls for a repeated query with no new activity.
   - A tool failure injects error memories, and a later turn does not repeat them.
@@ -266,6 +287,8 @@ Source: the Claude Code hooks reference, `https://code.claude.com/docs/en/hooks.
   - A `SubagentStart` with no queued entry falls back to `agent_type` plus the activity terms.
   - `adaptive_recall: false` gives the current output byte for byte.
 - Adapter tests: the new hooks register only when a memory backend is active.
+- Adapter tests (#2251): the Claude Code adapter emits the `additionalContext` envelope for `SessionStart`, and still emits nothing for `SessionEnd`.
+  The shared `emit_hook_context` keeps its `SessionStart` suppression for the other adapters.
 
 ## Docs
 
