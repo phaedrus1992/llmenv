@@ -36,7 +36,7 @@ use tracing::{debug, error, warn};
 
 use crate::config::SessionLog;
 use crate::mcp::resolve::MEMORY_MCP_NAME;
-use crate::mcp::resolve::{ResolvedKind, resolve_mcps};
+use crate::mcp::resolve::{MemoryHookSettings, ResolvedKind, resolve_mcps};
 use crate::session_log::dispatch as transcript_dispatch;
 use crate::session_log::event::{EventKind, EventScope, SessionLogEvent, now_rfc3339};
 use crate::session_log::{ScopeContext, scope_header_content, scope_metadata_json, state};
@@ -1161,7 +1161,8 @@ fn run_inner(
         static MCP_CLIENT_CACHE: OnceLock<Mutex<HashMap<String, McpHttpClient>>> = OnceLock::new();
         let resolved_client =
             resolve_memory_client(&config, config_dir, &active, event, &MCP_CLIENT_CACHE);
-        let wakeup_max_tokens = resolved_client.as_ref().and_then(|r| r.wakeup_max_tokens);
+        let settings = resolved_client.as_ref().map(|r| r.settings);
+        let wakeup_max_tokens = settings.and_then(|s| s.wakeup_max_tokens);
         let client = resolved_client.map(|r| r.client);
         let state_path = Some(state::state_path());
         let ctx = build_scope_context(
@@ -1705,11 +1706,10 @@ fn recall_bundle_names(active: &crate::scope::ActiveScopes) -> Vec<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MemoryEndpoint {
     /// The memory backend resolved to this HTTP URL, carrying the active
-    /// `features.memory` entry's configured `wakeup_max_tokens` (#1216,
-    /// `None` if unset).
+    /// `features.memory` entry's hook settings (#1216, #2249).
     Active {
         url: String,
-        wakeup_max_tokens: Option<u32>,
+        settings: MemoryHookSettings,
     },
     /// No bundle fired for the active scopes and no top-level `features.memory`
     /// entry matched — nothing could have supplied a backend.
@@ -1771,33 +1771,36 @@ impl MemoryEndpoint {
         }
     }
 
-    /// The active entry's configured wake-up token budget (#1216). `None`
-    /// for every non-[`MemoryEndpoint::Active`] variant, and for `Active`
-    /// itself when `features.memory[].wakeup_max_tokens` is unset.
-    fn wakeup_max_tokens(&self) -> Option<u32> {
+    /// The active entry's hook settings (#1216, #2249). `None` for every
+    /// non-[`MemoryEndpoint::Active`] variant.
+    fn settings(&self) -> Option<MemoryHookSettings> {
         match self {
-            Self::Active {
-                wakeup_max_tokens, ..
-            } => *wakeup_max_tokens,
+            Self::Active { settings, .. } => Some(*settings),
             _ => None,
         }
     }
 
-    /// Consume into `(url, wakeup_max_tokens)`, erroring exactly as
-    /// [`Self::into_url`] — `into_url` itself keeps its existing signature
-    /// since it has several other callers that don't need the token budget.
-    fn into_url_and_wakeup_max_tokens(self) -> anyhow::Result<(String, Option<u32>)> {
-        let wakeup_max_tokens = self.wakeup_max_tokens();
-        Ok((self.into_url()?, wakeup_max_tokens))
+    /// Consume into `(url, settings)`, erroring exactly as [`Self::into_url`] —
+    /// `into_url` itself keeps its existing signature since it has several
+    /// other callers that don't need the settings.
+    fn into_url_and_settings(self) -> anyhow::Result<(String, MemoryHookSettings)> {
+        let settings = self.settings().unwrap_or(DEFAULT_MEMORY_HOOK);
+        Ok((self.into_url()?, settings))
     }
 }
 
+/// The settings of a `features.memory` entry that sets neither hook field.
+const DEFAULT_MEMORY_HOOK: MemoryHookSettings = MemoryHookSettings {
+    wakeup_max_tokens: None,
+    adaptive_recall: true,
+};
+
 /// A resolved memory-backend client plus the active `features.memory`
-/// entry's configured wake-up token budget (#1216) — the two travel
-/// together since both come from the same resolved endpoint.
+/// entry's hook settings (#1216, #2249) — the two travel together since both
+/// come from the same resolved endpoint.
 struct ResolvedMemoryClient {
     client: McpHttpClient,
-    wakeup_max_tokens: Option<u32>,
+    settings: MemoryHookSettings,
 }
 
 /// Resolve (or reuse from `cache`) the MCP client for the active memory
@@ -1816,8 +1819,8 @@ fn resolve_memory_client(
     event: impl std::fmt::Display,
     cache: &'static OnceLock<Mutex<HashMap<String, McpHttpClient>>>,
 ) -> Option<ResolvedMemoryClient> {
-    let (url, wakeup_max_tokens) = match memory_url(config, config_dir, active)
-        .and_then(MemoryEndpoint::into_url_and_wakeup_max_tokens)
+    let (url, settings) = match memory_url(config, config_dir, active)
+        .and_then(MemoryEndpoint::into_url_and_settings)
     {
         Ok(pair) => pair,
         Err(e) => {
@@ -1839,10 +1842,7 @@ fn resolve_memory_client(
             }
         }
     };
-    Some(ResolvedMemoryClient {
-        client,
-        wakeup_max_tokens,
-    })
+    Some(ResolvedMemoryClient { client, settings })
 }
 
 /// Find the resolved memory backend's HTTP URL for the active tags, or the
@@ -1901,15 +1901,13 @@ pub(crate) fn memory_url(
     let resolved = resolve_mcps(&config.mcp, &all_memory, &all_host, &active.tags)
         .map_err(|e| annotate_resolve_error(e, config, config_dir, active))?;
     let matched = resolved.into_iter().find_map(|m| match m.kind {
-        ResolvedKind::Remote { url, .. } if m.name == MEMORY_MCP_NAME => {
-            Some((url, m.wakeup_max_tokens))
-        }
+        ResolvedKind::Remote { url, .. } if m.name == MEMORY_MCP_NAME => Some((url, m.memory_hook)),
         _ => None,
     });
     Ok(match matched {
-        Some((url, wakeup_max_tokens)) => MemoryEndpoint::Active {
+        Some((url, settings)) => MemoryEndpoint::Active {
             url,
-            wakeup_max_tokens,
+            settings: settings.unwrap_or(DEFAULT_MEMORY_HOOK),
         },
         None => classify_missing_memory(
             config,
@@ -2854,6 +2852,7 @@ mod tests {
             consolidation: None,
             mcp_permissions: None,
             wakeup_max_tokens: None,
+            adaptive_recall: true,
         }];
         let mut persisted_host = std::collections::BTreeMap::new();
         persisted_host.insert(
@@ -2875,7 +2874,7 @@ mod tests {
             url,
             MemoryEndpoint::Active {
                 url: "http://still.local:7878/mcp".into(),
-                wakeup_max_tokens: None,
+                settings: DEFAULT_MEMORY_HOOK,
             },
             "memory_url must read the persisted merge cache instead of falling \
              back to a live merge of a bundle that declares no memory/host"
@@ -2945,7 +2944,7 @@ mod tests {
             url,
             MemoryEndpoint::Active {
                 url: "http://still.local:7878/mcp".into(),
-                wakeup_max_tokens: None,
+                settings: DEFAULT_MEMORY_HOOK,
             },
             "a key mismatch must fall back to a correct live merge, never the stale cache"
         );
@@ -3195,6 +3194,7 @@ mod tests {
                     consolidation: None,
                     mcp_permissions: None,
                     wakeup_max_tokens: Some(750),
+                    adaptive_recall: true,
                 }],
                 ..Default::default()
             }),
@@ -3207,7 +3207,10 @@ mod tests {
         };
 
         let endpoint = memory_url(&config, config_root.path(), &active).expect("test");
-        assert_eq!(endpoint.wakeup_max_tokens(), Some(750));
+        assert_eq!(
+            endpoint.settings().and_then(|s| s.wakeup_max_tokens),
+            Some(750)
+        );
     }
 
     // #1140: a top-level `features.memory` entry exists but its `when` isn't
@@ -3241,6 +3244,7 @@ mod tests {
                     consolidation: None,
                     mcp_permissions: None,
                     wakeup_max_tokens: None,
+                    adaptive_recall: true,
                 }],
                 ..Default::default()
             }),
@@ -3508,6 +3512,7 @@ mod tests {
                     consolidation: None,
                     mcp_permissions: None,
                     wakeup_max_tokens: None,
+                    adaptive_recall: true,
                 }],
                 ..Default::default()
             }),
@@ -4770,6 +4775,7 @@ mod tests {
             consolidation: None,
             mcp_permissions: None,
             wakeup_max_tokens: None,
+            adaptive_recall: true,
         }
     }
 
@@ -4947,6 +4953,7 @@ mod tests {
                 consolidation: None,
                 mcp_permissions: None,
                 wakeup_max_tokens: None,
+                adaptive_recall: true,
             }],
             ..Default::default()
         });

@@ -41,11 +41,19 @@ pub struct ResolvedMcp {
     /// (plain `mcp` entries and `codebase_memory` have no tier constants to
     /// override). Consumed by `ClaudeCodeAdapter` only today.
     pub mcp_permissions: Option<McpPermissions>,
-    /// Token budget for the `icm_wake_up` call (#1216), carried through from
-    /// the source `features.memory` entry for the ICM MCP. `None` for every
-    /// other server. Consumed by `hook_run`'s live dispatch pipeline, not by
-    /// static materialization.
+    /// Hook-time settings from the source `features.memory` entry for the ICM
+    /// MCP (#1216, #2249). `None` for every other server. Consumed by
+    /// `hook_run`'s live dispatch pipeline, not by static materialization.
+    pub memory_hook: Option<MemoryHookSettings>,
+}
+
+/// Settings that `hook_run` reads from the active `features.memory` entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryHookSettings {
+    /// Token budget for the `icm_wake_up` call (#1216).
     pub wakeup_max_tokens: Option<u32>,
+    /// Whether adaptive recall is on (#2249).
+    pub adaptive_recall: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,7 +230,7 @@ fn resolve_static(m: &McpServer) -> Result<ResolvedMcp, ResolveError> {
         timeout: m.timeout,
         disabled_tools: m.disabled_tools.clone(),
         mcp_permissions: None,
-        wakeup_max_tokens: None,
+        memory_hook: None,
     })
 }
 
@@ -252,7 +260,10 @@ fn resolve_memory(
         mcp_permissions: mem.mcp_permissions.clone(),
         // #1216: threads the configured wake-up token budget through so
         // hook_run's dispatch pipeline can pass it explicitly to icm_wake_up.
-        wakeup_max_tokens: mem.wakeup_max_tokens,
+        memory_hook: Some(MemoryHookSettings {
+            wakeup_max_tokens: mem.wakeup_max_tokens,
+            adaptive_recall: mem.adaptive_recall,
+        }),
     })
 }
 
@@ -298,7 +309,7 @@ fn resolve_codebase_memory(
         timeout: None,
         disabled_tools: vec![],
         mcp_permissions: cm.mcp_permissions.clone(),
-        wakeup_max_tokens: None,
+        memory_hook: None,
     }
 }
 
@@ -440,6 +451,7 @@ mod tests {
             consolidation: None,
             mcp_permissions: None,
             wakeup_max_tokens: None,
+            adaptive_recall: true,
         }
     }
 
@@ -530,18 +542,31 @@ mod tests {
     }
 
     #[test]
-    fn memory_carries_wakeup_max_tokens() {
+    fn memory_carries_hook_settings() {
         let mut mem = memory();
         mem.wakeup_max_tokens = Some(750);
+        mem.adaptive_recall = false;
         let resolved = resolve_mcps(&[], &[mem], &base_host(), &tags(&["network-home"])).unwrap();
-        assert_eq!(resolved[0].wakeup_max_tokens, Some(750));
+        assert_eq!(
+            resolved[0].memory_hook,
+            Some(MemoryHookSettings {
+                wakeup_max_tokens: Some(750),
+                adaptive_recall: false,
+            })
+        );
     }
 
     #[test]
-    fn memory_wakeup_max_tokens_defaults_to_none() {
+    fn memory_hook_settings_default_to_no_budget_and_adaptive() {
         let resolved =
             resolve_mcps(&[], &[memory()], &base_host(), &tags(&["network-home"])).unwrap();
-        assert_eq!(resolved[0].wakeup_max_tokens, None);
+        assert_eq!(
+            resolved[0].memory_hook,
+            Some(MemoryHookSettings {
+                wakeup_max_tokens: None,
+                adaptive_recall: true,
+            })
+        );
     }
 
     #[test]
@@ -560,6 +585,7 @@ mod tests {
             consolidation: None,
             mcp_permissions: None,
             wakeup_max_tokens: None,
+            adaptive_recall: true,
         };
         let work = Memory {
             server_host: "hesitation-marks".into(),
@@ -575,6 +601,7 @@ mod tests {
             consolidation: None,
             mcp_permissions: None,
             wakeup_max_tokens: None,
+            adaptive_recall: true,
         };
         let mut host = base_host();
         host.insert(
@@ -607,6 +634,7 @@ mod tests {
             consolidation: None,
             mcp_permissions: None,
             wakeup_max_tokens: None,
+            adaptive_recall: true,
         };
         let work = Memory {
             server_host: "hesitation-marks".into(),
@@ -622,6 +650,7 @@ mod tests {
             consolidation: None,
             mcp_permissions: None,
             wakeup_max_tokens: None,
+            adaptive_recall: true,
         };
         let mut host = base_host();
         host.insert(

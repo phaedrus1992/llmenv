@@ -3588,7 +3588,7 @@ mod tests {
                 timeout: None,
                 disabled_tools: vec![],
                 mcp_permissions: None,
-                wakeup_max_tokens: None,
+                memory_hook: None,
             }],
             ..Default::default()
         }
@@ -3688,7 +3688,7 @@ mod tests {
                 timeout: None,
                 disabled_tools: vec![],
                 mcp_permissions: None,
-                wakeup_max_tokens: None,
+                memory_hook: None,
             }],
             ..Default::default()
         };
@@ -3841,7 +3841,7 @@ mod tests {
                 timeout: None,
                 disabled_tools: vec![],
                 mcp_permissions: None,
-                wakeup_max_tokens: None,
+                memory_hook: None,
             }],
             ..Default::default()
         };
@@ -3886,7 +3886,7 @@ mod tests {
                 timeout: None,
                 disabled_tools: vec![],
                 mcp_permissions: None,
-                wakeup_max_tokens: None,
+                memory_hook: None,
             }],
             ..Default::default()
         };
@@ -3939,7 +3939,7 @@ mod tests {
                     mutation: Some(crate::config::McpPermissionAction::Ask),
                     destructive: None,
                 }),
-                wakeup_max_tokens: None,
+                memory_hook: None,
             }],
             ..Default::default()
         };
@@ -4168,6 +4168,7 @@ mod tests {
                 destructive: Some(crate::config::McpPermissionAction::Deny),
             }),
             wakeup_max_tokens: None,
+            adaptive_recall: true,
         };
         let active_tags = std::collections::BTreeSet::from(["home".to_string()]);
         let resolved = crate::mcp::resolve::resolve_mcps(&[], &[memory], &host, &active_tags)
@@ -5196,7 +5197,7 @@ mod tests {
             timeout: None,
             disabled_tools: vec![],
             mcp_permissions: None,
-            wakeup_max_tokens: None,
+            memory_hook: None,
         }
     }
 
@@ -5211,7 +5212,7 @@ mod tests {
             timeout: None,
             disabled_tools: vec![],
             mcp_permissions: None,
-            wakeup_max_tokens: None,
+            memory_hook: None,
         }
     }
 
@@ -5392,7 +5393,7 @@ mod tests {
             timeout: None,
             disabled_tools: vec![],
             mcp_permissions: None,
-            wakeup_max_tokens: None,
+            memory_hook: None,
         };
         let native: serde_yaml::Value =
             serde_yaml::from_str("mcpServers:\n  icm:\n    env: null\n").unwrap();
@@ -6399,7 +6400,7 @@ mod tests {
                         timeout: None,
                         disabled_tools: vec![],
                         mcp_permissions: None,
-                        wakeup_max_tokens: None,
+                        memory_hook: None,
                     }],
                     ..Default::default()
                 },

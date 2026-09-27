@@ -1288,6 +1288,7 @@ mod tests {
                         consolidation: None,
                         mcp_permissions,
                         wakeup_max_tokens,
+                        adaptive_recall: true,
                     }
                 },
             )
@@ -1912,6 +1913,7 @@ mod tests {
             auto_prune: false,
             mcp_permissions: None,
             wakeup_max_tokens: None,
+            adaptive_recall: true,
         }
     }
 
