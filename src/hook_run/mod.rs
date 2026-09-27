@@ -15,6 +15,7 @@ pub(crate) mod mcp_client;
 pub(crate) mod read_once;
 mod recall;
 pub(crate) mod repeat_detect;
+mod session_ledger;
 mod session_state;
 pub(crate) mod slippage;
 pub(crate) mod task_tools;
