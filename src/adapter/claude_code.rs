@@ -550,6 +550,17 @@ impl AgentAdapter for ClaudeCodeAdapter {
     }
 
     fn emit_hook_context(&self, hook_event_name: &str, text: &str) -> String {
+        // Claude Code accepts additionalContext on SessionStart (#2251). The shared
+        // helper suppresses it, because the other engines are not verified.
+        if hook_event_name == "SessionStart" && !text.trim().is_empty() {
+            return serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": hook_event_name,
+                    "additionalContext": format!("{}\n{text}", super::MEMORY_CONTEXT_HEADER),
+                }
+            })
+            .to_string();
+        }
         super::emit_hook_context(hook_event_name, text)
     }
 }
@@ -7019,12 +7030,40 @@ mod tests {
     }
 
     #[test]
-    fn emit_hook_context_store_only_events_return_empty_string() {
-        // Store-only events (SessionStart, SessionEnd) have no model turn to inject
-        // context into. Should return empty per Claude Code schema (no additionalContext).
-        let adapter = ClaudeCodeAdapter;
-        assert_eq!(adapter.emit_hook_context("SessionEnd", "data"), "");
-        assert_eq!(adapter.emit_hook_context("SessionStart", "data"), "");
+    fn emit_hook_context_session_end_returns_empty_string() {
+        // SessionEnd has no model turn to inject context into, and its schema
+        // rejects additionalContext (#558).
+        assert_eq!(
+            ClaudeCodeAdapter.emit_hook_context("SessionEnd", "data"),
+            ""
+        );
+    }
+
+    #[test]
+    fn emit_hook_context_session_start_injects_for_claude_code() {
+        // #2251: Claude Code accepts additionalContext on SessionStart; the shared
+        // suppression came from #558, which was about SessionEnd only.
+        let output = ClaudeCodeAdapter.emit_hook_context("SessionStart", "wake data");
+        let parsed: serde_json::Value = serde_json::from_str(&output).expect("must be valid JSON");
+        assert_eq!(
+            parsed["hookSpecificOutput"]["hookEventName"],
+            "SessionStart"
+        );
+        assert!(
+            parsed["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .expect("must have additionalContext")
+                .contains("wake data")
+        );
+        assert_eq!(
+            ClaudeCodeAdapter.emit_hook_context("SessionStart", "  "),
+            ""
+        );
+        assert_eq!(
+            super::super::emit_hook_context("SessionStart", "x"),
+            "",
+            "shared path unchanged"
+        );
     }
 
     #[test]

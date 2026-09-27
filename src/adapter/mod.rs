@@ -533,6 +533,9 @@ pub(crate) fn resolve_command_paths_against_files(
 /// * `hook_event_name` — the event name (e.g. `"SessionStart"`), echoed
 ///   back as `hookEventName` inside `hookSpecificOutput`.
 /// * `text` — the injected context, placed as `additionalContext`.
+/// The first line of every injected ICM memory block.
+pub(crate) const MEMORY_CONTEXT_HEADER: &str = "[ICM MEMORY CONTEXT (auto-injected)]";
+
 #[must_use]
 pub(crate) fn emit_hook_context(hook_event_name: &str, text: &str) -> String {
     // Whitespace-only counts as empty: an all-advisory recall (stripped by
@@ -547,7 +550,7 @@ pub(crate) fn emit_hook_context(hook_event_name: &str, text: &str) -> String {
     if matches!(hook_event_name, "SessionStart" | "SessionEnd") {
         return String::new();
     }
-    let wrapped = format!("[ICM MEMORY CONTEXT (auto-injected)]\n{text}");
+    let wrapped = format!("{MEMORY_CONTEXT_HEADER}\n{text}");
     serde_json::json!({
         "hookSpecificOutput": {
             "hookEventName": hook_event_name,
