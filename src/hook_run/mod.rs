@@ -7,6 +7,7 @@
 //! path and must never block it.
 
 pub(crate) mod action;
+mod adaptive;
 pub(crate) mod cbm_index_guard;
 pub(crate) mod cd_guard;
 pub(crate) mod detached_consolidation;
