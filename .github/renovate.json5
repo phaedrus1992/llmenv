@@ -204,4 +204,7 @@
     "enabled": true,
     "labels": ["dependencies", "security"],
   },
+  // Dependabot data covers only the default branch; OSV lets Renovate raise
+  // security PRs for direct dependencies on release/* too.
+  "osvVulnerabilityAlerts": true,
 }

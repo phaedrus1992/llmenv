@@ -1,0 +1,173 @@
+name: Release branch advisory scan
+
+# Dependabot alerts, and so Renovate's vulnerabilityAlerts (which reads Dependabot's
+# data), only cover the default branch. cargo deny's own PR-triggered check also misses
+# a release branch when no PR touches Rust code. This scheduled scan closes that gap:
+# it runs cargo deny + npm audit against every release/X.x branch directly and files or
+# updates a per-branch issue. Design: docs/design/issue-2165-release-branch-advisory-scan.md
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  branches:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    outputs:
+      branches: ${{ steps.list.outputs.branches }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Ensure security label exists
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create security \
+            --description "Security advisory on a release branch" \
+            --color "B60205" --force
+
+      - name: List release branches
+        id: list
+        run: |
+          set -euo pipefail
+          NAMES=$(git ls-remote --heads origin 'release/*' \
+            | sed 's|.*refs/heads/||' \
+            | grep -E '^release/[0-9]+\.x$' \
+            | sort -V)
+          JSON=$(printf '%s\n' "$NAMES" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "branches=$JSON" >> "$GITHUB_OUTPUT"
+
+  scan:
+    needs: branches
+    if: needs.branches.outputs.branches != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: ${{ fromJson(needs.branches.outputs.branches) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout release branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ matrix.branch }}
+          persist-credentials: false
+
+      # The rest of this job needs scripts/release-advisory-report.sh, but the branch
+      # just checked out may predate this workflow and not carry it yet. Read main's
+      # copy instead of the branch's own, the same "run the known-good ref's copy, never
+      # a possibly-stale checkout" pattern forward-merge-release.yml uses for
+      # forward_merge_manifest.py (#2177).
+      - name: Fetch main's copy of the report scripts
+        run: |
+          set -euo pipefail
+          git fetch origin main --depth 1
+          mkdir -p "$RUNNER_TEMP/report-scripts"
+          git show origin/main:scripts/release-advisory-report.sh \
+            > "$RUNNER_TEMP/report-scripts/release-advisory-report.sh"
+          git show origin/main:scripts/release_advisory_report.py \
+            > "$RUNNER_TEMP/report-scripts/release_advisory_report.py"
+          chmod +x "$RUNNER_TEMP/report-scripts/release-advisory-report.sh"
+
+      - name: cargo deny check advisories
+        id: deny
+        continue-on-error: true
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25  # v2.1.1
+        with:
+          command: check advisories
+
+      - name: Check for website lockfile
+        id: website
+        run: |
+          set -euo pipefail
+          if [[ -f website/package-lock.json ]]; then
+            echo "has_lockfile=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_lockfile=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Node
+        if: steps.website.outputs.has_lockfile == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: 24.19.0
+
+      - name: npm audit
+        if: steps.website.outputs.has_lockfile == 'true'
+        continue-on-error: true
+        working-directory: website
+        run: npm audit --package-lock-only --audit-level=moderate --json > "$RUNNER_TEMP/npm-audit.json"
+
+      - name: Build report
+        id: report
+        env:
+          BRANCH: ${{ matrix.branch }}
+          DENY_OUTCOME: ${{ steps.deny.outcome }}
+          HAS_LOCKFILE: ${{ steps.website.outputs.has_lockfile }}
+        run: |
+          set -euo pipefail
+          if [[ "$HAS_LOCKFILE" == "true" ]]; then
+            AUDIT_PATH="$RUNNER_TEMP/npm-audit.json"
+          else
+            AUDIT_PATH="-"
+          fi
+          RC=0
+          REPORT=$("$RUNNER_TEMP/report-scripts/release-advisory-report.sh" "$BRANCH" "$DENY_OUTCOME" "$AUDIT_PATH") || RC=$?
+          if [[ $RC -eq 0 ]]; then
+            echo "has_findings=false" >> "$GITHUB_OUTPUT"
+          elif [[ $RC -eq 1 ]]; then
+            echo "has_findings=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::release-advisory-report.sh failed for $BRANCH (exit $RC): ${REPORT//::/  }"
+            exit 1
+          fi
+          DELIM="report-$(uuidgen)"
+          {
+            echo "report<<$DELIM"
+            echo "$REPORT"
+            echo "$DELIM"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: File or update the branch's security issue
+        if: steps.report.outputs.has_findings == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ matrix.branch }}
+          REPORT: ${{ steps.report.outputs.report }}
+        run: |
+          set -euo pipefail
+          TITLE="security: advisories on $BRANCH"
+          ISSUE=$(gh issue list --label security --state open --json number,title \
+            --jq "[.[] | select(.title == \"$TITLE\")][0].number // empty")
+          if [[ -n "$ISSUE" ]]; then
+            gh issue edit "$ISSUE" --body "$REPORT"
+          else
+            gh issue create --title "$TITLE" --body "$REPORT" \
+              --label security --label dependencies --label P1
+          fi
+
+      - name: Close the branch's security issue when clean
+        if: steps.report.outputs.has_findings == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ matrix.branch }}
+        run: |
+          set -euo pipefail
+          TITLE="security: advisories on $BRANCH"
+          ISSUE=$(gh issue list --label security --state open --json number,title \
+            --jq "[.[] | select(.title == \"$TITLE\")][0].number // empty")
+          if [[ -n "$ISSUE" ]]; then
+            gh issue comment "$ISSUE" --body "No advisories on $BRANCH as of $(date -u +%Y-%m-%d)."
+            gh issue close "$ISSUE"
+          fi
