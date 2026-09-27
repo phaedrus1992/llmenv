@@ -197,14 +197,6 @@ jobs:
           SOURCE_REF="origin/$CURRENT"
           SOURCE_DESC="$CURRENT"
 
-          # A target branch may not carry the script yet, so keep a copy from the
-          # pushed branch. Without it, a manifest that is not version-only bails.
-          MANIFEST_CHECK="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/forward_merge_manifest.py"
-          if ! cp scripts/forward_merge_manifest.py "$MANIFEST_CHECK" 2>/dev/null; then
-            echo "::warning::scripts/forward_merge_manifest.py missing on $CURRENT; pin drift will not auto-resolve"
-            MANIFEST_CHECK=""
-          fi
-
           # Abort on conflict — never commit a broken merge or push a conflict
           # branch. The cascade exits with a clear error so whoever pushed to the
           # release branch resolves manually.
@@ -222,27 +214,44 @@ jobs:
           # not. A regex that blanks every `version = "..."` cannot tell these
           # apart: it would call a newer source pin "version-only" and drop it.
           # Rules: docs/design/issue-2166-forward-merge-drift.md
+          #
+          # Runs the target's own copy (HEAD, before this merge) — never the
+          # source's or the merged tree's — matching release/4.x (#2177). A
+          # target without the script has no rule to apply, so the caller
+          # bails and a human merges once.
+          #
+          # Return codes the caller (auto_resolve_conflicts) branches on:
+          #   0 = keeping the target's copy is safe
+          #   1 = the check ran and found a real change beyond a version bump
+          #   3 = the check could not run at all (a ref was unreadable) —
+          #       distinct from 1 so the caller names the real cause instead
+          #       of claiming a change was found when none was ever checked
           manifest_keeps_target() {
-            local file="$1" base dir rc
-            [[ -n "$MANIFEST_CHECK" ]] || return 1
-            base=$(git merge-base HEAD "$SOURCE_REF") || return 1
-            dir=$(mktemp -d) || return 1
-            if git show "$base:$file" > "$dir/base.toml" \
-                && git show "$SOURCE_REF:$file" > "$dir/source.toml" \
-                && git show "HEAD:$file" > "$dir/target.toml"; then
-              if python3 "$MANIFEST_CHECK" "$dir/base.toml" "$dir/source.toml" "$dir/target.toml" \
-                  2> "$dir/problems.txt"; then
-                rc=0
-              else
-                rc=$?
-              fi
+            local file="$1" base dir rc=0 missing=""
+            local file_display="${file//::/  }"
+            base=$(git merge-base HEAD "$SOURCE_REF") || return 3
+            dir=$(mktemp -d) || return 3
+            git show "HEAD:scripts/forward_merge_manifest.py" > "$dir/check.py" 2>/dev/null \
+              || missing="the manifest-check script ($TARGET has no scripts/forward_merge_manifest.py yet)"
+            [[ -n "$missing" ]] || git show "$base:$file" > "$dir/base.toml" 2>/dev/null \
+              || missing="$file_display at the merge-base"
+            [[ -n "$missing" ]] || git show "$SOURCE_REF:$file" > "$dir/source.toml" 2>/dev/null \
+              || missing="$file_display on $SOURCE_DESC"
+            [[ -n "$missing" ]] || git show "HEAD:$file" > "$dir/target.toml" 2>/dev/null \
+              || missing="$file_display on $TARGET"
+            if [[ -n "$missing" ]]; then
+              echo "  $file_display: could not read ${missing//::/  }"
+              rc=3
             else
-              rc=2
+              python3 "$dir/check.py" "$dir/base.toml" "$dir/source.toml" "$dir/target.toml" \
+                2> "$dir/problems.txt" || rc=$?
+              # Log text comes from the source's files; strip `::` as in #1543.
+              if [[ -s "$dir/problems.txt" ]]; then
+                sed -e "s/::/  /g" -e "s|^|  $file_display: |" "$dir/problems.txt"
+              fi
             fi
-            if [[ $rc -ne 0 && -s "$dir/problems.txt" ]]; then
-              sed "s|^|  $file: |" "$dir/problems.txt"
-            fi
-            rm -f "$dir/base.toml" "$dir/source.toml" "$dir/target.toml" "$dir/problems.txt"
+            rm -f "$dir/check.py" "$dir/base.toml" "$dir/source.toml" "$dir/target.toml" \
+              "$dir/problems.txt"
             rmdir "$dir"
             return "$rc"
           }
@@ -288,7 +297,7 @@ jobs:
           #   * Cargo.lock and website/package-lock.json are regenerated once every
           #     other conflict is resolved, never merged by hand.
           auto_resolve_conflicts() {
-            local file lock_cargo=0 lock_npm=0
+            local file lock_cargo=0 lock_npm=0 mkt_rc
             while IFS= read -r file; do
               [[ -n "$file" ]] || continue
               case "$file" in
@@ -299,7 +308,19 @@ jobs:
                   git add -- "$file"
                   ;;
                 Cargo.toml | crates/*/Cargo.toml)
-                  if ! manifest_keeps_target "$file"; then
+                  # `if manifest_keeps_target ...; then mkt_rc=0; else mkt_rc=$?; fi` (not a
+                  # bare `manifest_keeps_target; mkt_rc=$?`) -- same set -e hazard noted
+                  # elsewhere in this job: a bare command's exit status would kill the
+                  # script under set -e before mkt_rc=$? ever ran.
+                  if manifest_keeps_target "$file"; then
+                    mkt_rc=0
+                  else
+                    mkt_rc=$?
+                  fi
+                  if [[ "$mkt_rc" -eq 3 ]]; then
+                    echo "::error::$file: could not check whether keeping $TARGET's copy is safe (see log above); refusing to auto-resolve"
+                    return 1
+                  elif [[ "$mkt_rc" -ne 0 ]]; then
                     echo "::error::$file: $SOURCE_DESC changed more than version numbers here, so keeping $TARGET's copy could drop real changes"
                     return 1
                   fi
