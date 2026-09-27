@@ -197,14 +197,6 @@ jobs:
           SOURCE_REF="origin/$CURRENT"
           SOURCE_DESC="$CURRENT"
 
-          # A target branch may not carry the script yet, so keep a copy from the
-          # pushed branch. Without it, a manifest that is not version-only bails.
-          MANIFEST_CHECK="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/forward_merge_manifest.py"
-          if ! cp scripts/forward_merge_manifest.py "$MANIFEST_CHECK" 2>/dev/null; then
-            echo "::warning::scripts/forward_merge_manifest.py missing on $CURRENT; pin drift will not auto-resolve"
-            MANIFEST_CHECK=""
-          fi
-
           # Abort on conflict — never commit a broken merge or push a conflict
           # branch. The cascade exits with a clear error so whoever pushed to the
           # release branch resolves manually.
@@ -222,27 +214,33 @@ jobs:
           # not. A regex that blanks every `version = "..."` cannot tell these
           # apart: it would call a newer source pin "version-only" and drop it.
           # Rules: docs/design/issue-2166-forward-merge-drift.md
+          #
+          # Runs the target's own copy (HEAD, before this merge) — never the
+          # source's or the merged tree's — matching release/4.x (#2177). A
+          # target without the script has no rule to apply, so the caller
+          # bails and a human merges once.
           manifest_keeps_target() {
-            local file="$1" base dir rc
-            [[ -n "$MANIFEST_CHECK" ]] || return 1
+            local file="$1" base dir rc=0 line
             base=$(git merge-base HEAD "$SOURCE_REF") || return 1
             dir=$(mktemp -d) || return 1
-            if git show "$base:$file" > "$dir/base.toml" \
+            if git show "HEAD:scripts/forward_merge_manifest.py" > "$dir/check.py" 2>/dev/null \
+                && git show "$base:$file" > "$dir/base.toml" \
                 && git show "$SOURCE_REF:$file" > "$dir/source.toml" \
                 && git show "HEAD:$file" > "$dir/target.toml"; then
-              if python3 "$MANIFEST_CHECK" "$dir/base.toml" "$dir/source.toml" "$dir/target.toml" \
-                  2> "$dir/problems.txt"; then
-                rc=0
-              else
-                rc=$?
-              fi
+              python3 "$dir/check.py" "$dir/base.toml" "$dir/source.toml" "$dir/target.toml" \
+                2> "$dir/problems.txt" || rc=$?
             else
+              echo "  ${file//::/  }: $TARGET has no manifest check yet, or a copy could not be read"
               rc=2
             fi
-            if [[ $rc -ne 0 && -s "$dir/problems.txt" ]]; then
-              sed "s|^|  $file: |" "$dir/problems.txt"
+            # Log text comes from the source's files; strip `::` as in #1543.
+            if [[ -s "$dir/problems.txt" ]]; then
+              while IFS= read -r line; do
+                echo "  ${file//::/  }: ${line//::/  }"
+              done < "$dir/problems.txt"
             fi
-            rm -f "$dir/base.toml" "$dir/source.toml" "$dir/target.toml" "$dir/problems.txt"
+            rm -f "$dir/check.py" "$dir/base.toml" "$dir/source.toml" "$dir/target.toml" \
+              "$dir/problems.txt"
             rmdir "$dir"
             return "$rc"
           }

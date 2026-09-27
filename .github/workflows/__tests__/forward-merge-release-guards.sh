@@ -449,6 +449,17 @@ fi
 SHELL
 }
 
+# Commit a real copy of scripts/forward_merge_manifest.py into the current
+# directory, staged for the next commit. manifest_keeps_target now reads the
+# target's own copy via `git show HEAD:scripts/forward_merge_manifest.py`
+# (#2177), so every fixture repo's target branch needs the file in its tree —
+# an external path (the old MANIFEST_CHECK env var) is no longer consulted.
+commit_manifest_script() {
+  mkdir -p scripts
+  cp "$REPO_ROOT/scripts/forward_merge_manifest.py" scripts/forward_merge_manifest.py
+  git add scripts/forward_merge_manifest.py
+}
+
 # Build a repo where `source` and `target` both moved their own version, plus
 # whatever extra change `$1` adds to source's Cargo.toml. Leaves the caller
 # inside a conflicted `git merge source` on the target branch. Echoes the path.
@@ -462,6 +473,7 @@ make_version_conflict_repo() {
     git config user.name t
     git config commit.gpgsign false
     printf '[package]\nversion = "1.0.0"\n\n[dependencies]\nanyhow = { version = "1" }\n' > Cargo.toml
+    commit_manifest_script
     git add Cargo.toml
     git commit -q -m base
 
@@ -493,7 +505,6 @@ test_1381_version_only_conflict_keeps_target_version() {
   repo=$(make_version_conflict_repo "")
 
   out=$(cd "$repo" && SOURCE_REF=source TARGET=main SOURCE_DESC=release/4.x \
-    MANIFEST_CHECK="$REPO_ROOT/scripts/forward_merge_manifest.py" \
     bash -c "$(resolve_block)" 2>&1 || true)
   version=$(cd "$repo" && sed -n 2p Cargo.toml)
   trash "$repo" 2>/dev/null || true
@@ -520,11 +531,53 @@ test_1381_non_version_change_bails() {
   repo=$(make_version_conflict_repo 'serde = { version = "1" }\n')
 
   out=$(cd "$repo" && SOURCE_REF=source TARGET=main SOURCE_DESC=release/4.x \
-    MANIFEST_CHECK="$REPO_ROOT/scripts/forward_merge_manifest.py" \
     bash -c "$(resolve_block)" 2>&1 || true)
   trash "$repo" 2>/dev/null || true
 
   if [[ "$out" == *BAILED* ]] && [[ "$out" == *"more than version numbers"* ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Test (Issue #2177): a target that carries no manifest script bails instead
+# of resolving. manifest_keeps_target reads only the target's own copy
+# (git show HEAD:scripts/forward_merge_manifest.py) -- a target predating the
+# script has no rule to apply, and the caller must not guess.
+# ---------------------------------------------------------------------------
+test_2177_target_missing_script_bails() {
+  local repo out
+  repo=$(mktemp -d)
+  (
+    cd "$repo" || exit 1
+    git init -q -b target .
+    git config user.email t@t
+    git config user.name t
+    git config commit.gpgsign false
+    printf '[package]\nversion = "1.0.0"\n\n[dependencies]\nanyhow = { version = "1" }\n' > Cargo.toml
+    git add Cargo.toml
+    git commit -q -m base
+
+    git switch -q -c source
+    printf '[package]\nversion = "4.0.0-alpha.1"\n\n[dependencies]\nanyhow = { version = "1" }\n' \
+      > Cargo.toml
+    git commit -q -am "source bump"
+
+    git switch -q target
+    printf '[package]\nversion = "5.0.0-alpha.1"\n\n[dependencies]\nanyhow = { version = "1" }\n' \
+      > Cargo.toml
+    git commit -q -am "target bump"
+
+    git merge --no-commit --no-ff source >/dev/null 2>&1 || true
+  )
+
+  out=$(cd "$repo" && SOURCE_REF=source TARGET=release/no-script SOURCE_DESC=release/4.x \
+    bash -c "$(resolve_block)" 2>&1 || true)
+  trash "$repo" 2>/dev/null || true
+
+  if [[ "$out" == *BAILED* ]] && [[ "$out" == *"release/no-script has no manifest check yet"* ]]; then
     return 0
   fi
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
@@ -546,6 +599,7 @@ make_pin_drift_repo() {
     git config commit.gpgsign false
     mkdir website
     write_drift_files 1.0.0 1.0.0 base base
+    commit_manifest_script
     git add -A
     git commit -q -m base
 
@@ -596,7 +650,6 @@ run_drift() {
   stubs=$(make_tool_stubs)
   DRIFT_OUT=$(cd "$DRIFT_REPO" && PATH="$stubs:$PATH" FAIL_TOOL="${FAIL_TOOL:-}" \
     SOURCE_REF=source TARGET=release/4.x SOURCE_DESC=release/3.x \
-    MANIFEST_CHECK="$REPO_ROOT/scripts/forward_merge_manifest.py" \
     bash -c "$(resolve_block)" 2>&1 || true)
   trash "$stubs" 2>/dev/null || true
 }
@@ -937,6 +990,9 @@ run_test "Issue #2166: a source pin newer than the target still bails" \
 
 run_test "Issue #2166: a failing lockfile tool bails and names the command" \
   test_2166_lockfile_tool_failure_bails_naming_command
+
+run_test "Issue #2177: a target with no manifest script bails instead of resolving" \
+  test_2177_target_missing_script_bails
 
 run_test "Issue #1912: push event uses the pushed ref as the source branch" \
   test_1912_push_event_uses_pushed_ref
