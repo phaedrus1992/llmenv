@@ -1004,30 +1004,57 @@ fn read_claude_json(path: &Path) -> anyhow::Result<serde_json::Value> {
 /// `permissions.defaultMode` or a built-in default; the reason explains which
 /// rule applied.
 #[allow(dead_code)]
-pub(crate) fn starting_permission_mode(settings: &serde_json::Value) -> (String, &'static str) {
-    if let Some(serde_json::Value::String(mode)) = settings
+pub(crate) fn starting_permission_mode(
+    settings: &serde_json::Value,
+) -> Result<(String, &'static str), String> {
+    // Check permissions.defaultMode first (highest priority from settings).
+    // Must be a string; non-string values are configuration errors, not fallbacks.
+    if let Some(default_mode) = settings
         .get("permissions")
         .and_then(|p| p.get("defaultMode"))
     {
-        (
-            mode.clone(),
-            "set by capabilities.permissions.default_mode or native settings",
-        )
-    } else if settings
+        match default_mode {
+            serde_json::Value::String(mode) => {
+                return Ok((
+                    mode.clone(),
+                    "set by capabilities.permissions.default_mode or native settings",
+                ));
+            }
+            _ => {
+                return Err(format!(
+                    "permissions.defaultMode must be a string, got {}",
+                    match default_mode {
+                        serde_json::Value::Null => "null",
+                        serde_json::Value::Bool(_) => "boolean",
+                        serde_json::Value::Number(_) => "number",
+                        serde_json::Value::String(_) => "string",
+                        serde_json::Value::Array(_) => "array",
+                        serde_json::Value::Object(_) => "object",
+                    }
+                ));
+            }
+        }
+    }
+
+    // Check disableAutoMode (both top-level and in permissions object).
+    // Only the string value "disable" is valid; booleans are ignored.
+    let disable_auto = settings
         .get("disableAutoMode")
         .is_some_and(|v| v == "disable")
         || settings
             .get("permissions")
             .and_then(|p| p.get("disableAutoMode"))
-            .is_some_and(|v| v == "disable")
-    {
-        ("default".to_string(), "auto mode is disabled in settings")
-    } else {
-        (
-            "auto".to_string(),
-            "Claude Code 2.1.283+ built-in default for interactive sessions (claude -p starts in default)",
-        )
+            .is_some_and(|v| v == "disable");
+
+    if disable_auto {
+        return Ok(("default".to_string(), "auto mode is disabled in settings"));
     }
+
+    // Default: auto mode (Claude Code 2.1.283+ for interactive sessions)
+    Ok((
+        "auto".to_string(),
+        "Claude Code 2.1.283+ built-in default for interactive sessions (claude -p starts in default)",
+    ))
 }
 
 /// Copy files from a source directory into a destination recursively, writing
@@ -1890,6 +1917,13 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         settings.insert("autoMemoryEnabled".into(), json!(false));
     }
 
+    // #2146: account sync loads skills and plugins outside llmenv's scope rules
+    // (Claude Code 2.1.275). Disable by default; native settings can turn it back on.
+    // Emitted before native overlays so native.claude_code.syncClaudeAiSkills
+    // can still override if set.
+    settings.insert("syncClaudeAiSkills".into(), json!(false));
+    settings.insert("syncClaudeAiPlugins".into(), json!(false));
+
     // #221: Render first-class capability fields (effort level, advisor size)
     if let Some(effort_level) = &manifest.capabilities.effort_level {
         settings.insert("effortLevel".into(), json!(effort_level));
@@ -2096,11 +2130,13 @@ fn plugin_install_paths_json(
 /// dropped from config must actually disappear, and `permissions` must never be
 /// weakened by a stale union. The one shared key, `hooks`, is handled specially
 /// (see [`reconcile_settings`]) so a plugin's self-registered hook survives.
-pub(crate) const LLMENV_OWNED_SETTINGS_KEYS: [&str; 10] = [
+pub(crate) const LLMENV_OWNED_SETTINGS_KEYS: [&str; 12] = [
     "permissions",
     "enabledPlugins",
     "extraKnownMarketplaces",
     "autoMemoryEnabled",
+    "syncClaudeAiSkills",
+    "syncClaudeAiPlugins",
     "effortLevel",
     "advisorSize",
     "outputStyle",
@@ -3932,6 +3968,54 @@ mod tests {
             settings["autoMemoryEnabled"],
             serde_json::json!(false),
             "native must still win on a non-null collision, got: {settings}"
+        );
+    }
+
+    /// #2146: claude.ai account sync (skills and plugins) disabled by default.
+    #[test]
+    fn sync_disabled_by_default() {
+        let settings = render_settings_for_test(&crate::merge::MergedManifest::default());
+        assert_eq!(
+            settings["syncClaudeAiSkills"],
+            serde_json::json!(false),
+            "syncClaudeAiSkills must default to false"
+        );
+        assert_eq!(
+            settings["syncClaudeAiPlugins"],
+            serde_json::json!(false),
+            "syncClaudeAiPlugins must default to false"
+        );
+    }
+
+    /// #2146: native override allows re-enabling sync.
+    #[test]
+    fn native_can_override_sync_defaults() {
+        let settings = render_settings_for_test(&manifest_with_native_override(
+            "syncClaudeAiSkills",
+            serde_yaml::Value::Bool(true),
+        ));
+        assert_eq!(
+            settings["syncClaudeAiSkills"],
+            serde_json::json!(true),
+            "native.claude_code.syncClaudeAiSkills: true must override default"
+        );
+        assert_eq!(
+            settings["syncClaudeAiPlugins"],
+            serde_json::json!(false),
+            "syncClaudeAiPlugins stays false when not overridden"
+        );
+    }
+
+    /// #2146: the sync keys are owned by llmenv, so stale values are replaced.
+    #[test]
+    fn sync_keys_are_in_owned_settings_keys() {
+        assert!(
+            LLMENV_OWNED_SETTINGS_KEYS.contains(&"syncClaudeAiSkills"),
+            "syncClaudeAiSkills must be in LLMENV_OWNED_SETTINGS_KEYS"
+        );
+        assert!(
+            LLMENV_OWNED_SETTINGS_KEYS.contains(&"syncClaudeAiPlugins"),
+            "syncClaudeAiPlugins must be in LLMENV_OWNED_SETTINGS_KEYS"
         );
     }
 
@@ -7810,7 +7894,7 @@ mod tests {
         let settings = serde_json::json!({
             "permissions": { "defaultMode": "plan" }
         });
-        let (mode, reason) = starting_permission_mode(&settings);
+        let (mode, reason) = starting_permission_mode(&settings).unwrap();
         assert_eq!(mode, "plan");
         assert_eq!(
             reason,
@@ -7823,7 +7907,7 @@ mod tests {
         let settings = serde_json::json!({
             "permissions": { "defaultMode": "manual" }
         });
-        let (mode, reason) = starting_permission_mode(&settings);
+        let (mode, reason) = starting_permission_mode(&settings).unwrap();
         assert_eq!(mode, "manual");
         assert_eq!(
             reason,
@@ -7836,7 +7920,7 @@ mod tests {
         let settings = serde_json::json!({
             "disableAutoMode": "disable"
         });
-        let (mode, reason) = starting_permission_mode(&settings);
+        let (mode, reason) = starting_permission_mode(&settings).unwrap();
         assert_eq!(mode, "default");
         assert_eq!(reason, "auto mode is disabled in settings");
     }
@@ -7846,7 +7930,7 @@ mod tests {
         let settings = serde_json::json!({
             "permissions": { "disableAutoMode": "disable" }
         });
-        let (mode, reason) = starting_permission_mode(&settings);
+        let (mode, reason) = starting_permission_mode(&settings).unwrap();
         assert_eq!(mode, "default");
         assert_eq!(reason, "auto mode is disabled in settings");
     }
@@ -7854,8 +7938,32 @@ mod tests {
     #[test]
     fn starting_permission_mode_empty_object() {
         let settings = serde_json::json!({});
-        let (mode, reason) = starting_permission_mode(&settings);
+        let (mode, reason) = starting_permission_mode(&settings).unwrap();
         assert_eq!(mode, "auto");
         assert!(reason.contains("Claude Code 2.1.283+"));
+    }
+
+    /// #2216: non-string defaultMode is a configuration error, not a fallback.
+    #[test]
+    fn starting_permission_mode_rejects_non_string_default_mode() {
+        let settings = serde_json::json!({
+            "permissions": { "defaultMode": true }
+        });
+        let err = starting_permission_mode(&settings).unwrap_err();
+        assert!(err.contains("must be a string"), "error: {err}");
+        assert!(err.contains("boolean"), "error: {err}");
+    }
+
+    /// #2216: boolean disableAutoMode is ignored (only string "disable" counts).
+    #[test]
+    fn starting_permission_mode_ignores_boolean_disable_auto_mode() {
+        let settings = serde_json::json!({
+            "permissions": { "disableAutoMode": true }
+        });
+        let (mode, _) = starting_permission_mode(&settings).unwrap();
+        assert_eq!(
+            mode, "auto",
+            "boolean disableAutoMode is not the string 'disable'"
+        );
     }
 }
