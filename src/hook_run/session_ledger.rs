@@ -306,14 +306,22 @@ impl LedgerStore {
         }
     }
 
-    /// Remove `.lock` files whose `.json` was pruned. A live session recreates
-    /// its lock file on the next access, so a removal here is safe.
+    /// Remove stale `.lock` files whose `.json` is gone. A session in its first
+    /// update holds a lock with no `.json` yet; a removal of that lock lets a
+    /// second writer lock a new file and lose an update, so only old locks go.
     fn prune_orphan_locks(&self) {
         let Ok(entries) = std::fs::read_dir(&self.dir) else {
             return;
         };
+        let max_age = Duration::from_secs(STALE_DAYS * 86_400);
         for path in entries.flatten().map(|e| e.path()) {
-            if path.extension().and_then(|e| e.to_str()) == Some("lock")
+            let stale = std::fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > max_age);
+            if stale
+                && path.extension().and_then(|e| e.to_str()) == Some("lock")
                 && !path.with_extension("json").exists()
             {
                 let _ignored = std::fs::remove_file(&path);
@@ -464,13 +472,21 @@ mod tests {
     }
 
     #[test]
-    fn orphan_lock_files_are_removed_on_write() {
+    fn only_stale_orphan_lock_files_are_removed_on_write() {
         let (dir, store) = store();
-        let lock = dir.path().join("recall_session").join("gone.lock");
+        let old = dir.path().join("recall_session").join("gone.lock");
+        let fresh = dir.path().join("recall_session").join("starting.lock");
         store.update("s1", |_| ());
-        std::fs::write(&lock, "").unwrap();
+        std::fs::write(&old, "").unwrap();
+        std::fs::write(&fresh, "").unwrap();
+        let ten_days = std::time::SystemTime::now() - std::time::Duration::from_secs(10 * 86_400);
+        filetime::set_file_mtime(&old, filetime::FileTime::from_system_time(ten_days)).unwrap();
         store.update("s1", |_| ());
-        assert!(!lock.exists());
+        assert!(!old.exists(), "a stale orphan lock is removed");
+        assert!(
+            fresh.exists(),
+            "a session in its first update keeps its lock"
+        );
         assert!(dir.path().join("recall_session").join("s1.lock").exists());
     }
 }
