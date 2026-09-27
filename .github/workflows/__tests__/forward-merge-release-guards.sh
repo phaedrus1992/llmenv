@@ -546,6 +546,12 @@ test_1381_non_version_change_bails() {
 # of resolving. manifest_keeps_target reads only the target's own copy
 # (git show HEAD:scripts/forward_merge_manifest.py) -- a target predating the
 # script has no rule to apply, and the caller must not guess.
+#
+# `source` deliberately carries the script here and `target` does not. The
+# bug this guards against is a fallback to the source's copy (exactly what
+# the old MANIFEST_CHECK-from-the-pushed-branch code did) -- a fixture where
+# neither branch has the script can't tell that fallback apart from a correct
+# bail, since there'd be nothing to fall back to either way.
 # ---------------------------------------------------------------------------
 test_2177_target_missing_script_bails() {
   local repo out
@@ -563,7 +569,8 @@ test_2177_target_missing_script_bails() {
     git switch -q -c source
     printf '[package]\nversion = "4.0.0-alpha.1"\n\n[dependencies]\nanyhow = { version = "1" }\n' \
       > Cargo.toml
-    git commit -q -am "source bump"
+    commit_manifest_script
+    git commit -q -am "source bump, adds manifest script"
 
     git switch -q target
     printf '[package]\nversion = "5.0.0-alpha.1"\n\n[dependencies]\nanyhow = { version = "1" }\n' \
@@ -577,7 +584,9 @@ test_2177_target_missing_script_bails() {
     bash -c "$(resolve_block)" 2>&1 || true)
   trash "$repo" 2>/dev/null || true
 
-  if [[ "$out" == *BAILED* ]] && [[ "$out" == *"release/no-script has no manifest check yet"* ]]; then
+  if [[ "$out" == *BAILED* ]] \
+      && [[ "$out" == *"could not check whether keeping release/no-script's copy is safe"* ]] \
+      && [[ "$out" == *"could not read the manifest-check script (release/no-script has no scripts/forward_merge_manifest.py yet)"* ]]; then
     return 0
   fi
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
