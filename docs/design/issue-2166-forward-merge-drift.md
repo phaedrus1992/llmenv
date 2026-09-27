@@ -83,10 +83,10 @@ Two details the first draft did not cover:
 - A `{ workspace = true }` dependency is resolved against `[workspace.dependencies]` before the comparison, because a branch can hoist a pin there (4.x did this for `rustix`).
 - The operator (`=`, `^`, `~`, `>=`) must be equal on both sides, and only the numbers are ordered.
 
-The workflow copies the script from the pushed branch at the start of the job, because a target branch may not carry it yet.
-On release/4.x the workflow holds `FORWARD_MERGE_PAT`, so it runs the target's own copy of the script instead (#1532, #2171).
-A target without the script has no rule for a manifest conflict, and one manual merge puts the script there.
-Write the three versions to temp files with `git show <ref>:<path>`.
+The workflow runs the target's own copy of the script, read with `git show HEAD:scripts/forward_merge_manifest.py`, never the source's or the merged tree's.
+On release/4.x this is because the job holds `FORWARD_MERGE_PAT` (#1532, #2171); release/3.x has no PAT but adopted the same rule for consistency (#2177).
+A target branch that predates the script has no rule to apply, so the caller bails and a human merges once.
+Write the three manifest versions to temp files with `git show <ref>:<path>`.
 
 ### 3. Lockfile rules
 
