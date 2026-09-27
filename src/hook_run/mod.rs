@@ -445,6 +445,72 @@ fn can_short_circuit(event: HookEvent, log_cfg: &crate::config::SessionLog) -> b
     !log_cfg.any_sink_wants(level)
 }
 
+/// Whether `event` writes to the recall ledger without any MCP call (#2249).
+fn records_locally(event: HookEvent) -> bool {
+    matches!(event, HookEvent::PostToolBatch | HookEvent::PreToolUse)
+}
+
+/// Whether `event` takes the adaptive recall flow instead of the stateless actions.
+/// An unsafe `session_id` cannot key a ledger file, so it takes the stateless actions.
+fn uses_adaptive(
+    event: HookEvent,
+    settings: Option<MemoryHookSettings>,
+    session_id: Option<&str>,
+) -> bool {
+    settings.is_some_and(|s| s.adaptive_recall)
+        && session_id.is_some_and(crate::paths::is_valid_short_name)
+        && matches!(
+            event,
+            HookEvent::SessionStart
+                | HookEvent::TurnStart
+                | HookEvent::PostToolUseFailure
+                | HookEvent::SubagentStart
+        )
+}
+
+/// The inputs of [`run_event_memory`], grouped to stay under the positional
+/// parameter limit.
+struct MemoryCall<'a> {
+    event: HookEvent,
+    client: &'a McpHttpClient,
+    settings: Option<MemoryHookSettings>,
+    session_id: Option<&'a str>,
+    payload: &'a serde_json::Value,
+    actions: Vec<Action>,
+    scope: Vec<Action>,
+    query: &'a str,
+    store_content: &'a str,
+}
+
+/// Run the event's memory work: the adaptive flow when it applies, else the
+/// stateless actions. A missing state dir degrades to the stateless actions.
+async fn run_event_memory(call: MemoryCall<'_>) -> anyhow::Result<String> {
+    let state_dir = crate::paths::state_dir().ok();
+    let (Some(session_id), Some(state_dir)) = (call.session_id, state_dir) else {
+        return run_memory_actions(call.client, call.actions, call.query, call.store_content).await;
+    };
+    if !uses_adaptive(call.event, call.settings, Some(session_id)) {
+        return run_memory_actions(call.client, call.actions, call.query, call.store_content).await;
+    }
+    let store = session_ledger::LedgerStore::new(&state_dir);
+    let ctx = adaptive::AdaptiveCtx {
+        client: call.client,
+        store: &store,
+        session_id,
+        payload: call.payload,
+    };
+    match call.event {
+        HookEvent::SessionStart => {
+            let wake = Action::WakeUp(call.settings.and_then(|s| s.wakeup_max_tokens));
+            adaptive::session_start(&ctx, wake, call.scope).await
+        }
+        HookEvent::TurnStart => adaptive::turn_start(&ctx, call.scope).await,
+        HookEvent::PostToolUseFailure => adaptive::tool_failure(&ctx).await,
+        HookEvent::SubagentStart => adaptive::subagent_start(&ctx).await,
+        _ => run_memory_actions(call.client, call.actions, call.query, call.store_content).await,
+    }
+}
+
 /// Whether `event` is the one that records a completed tool call for the
 /// slippage metrics layer (#317).
 ///
@@ -970,6 +1036,19 @@ fn run_inner(
     // short-circuit, or enabling any of them would silently drop Debug-level
     // session logging for every PreToolUse event (the #231/#864
     // early-return-drops-logging bug class).
+    // #2249: local ledger writes need no scope or MCP work, so they run before every
+    // early return in this function.
+    if records_locally(event)
+        && let (Some(session_id), Ok(state_dir)) = (claude_session_id, crate::paths::state_dir())
+    {
+        adaptive::record_local(
+            event,
+            &session_ledger::LedgerStore::new(&state_dir),
+            session_id,
+            stdin_payload,
+        );
+    }
+
     let pre_tool_text = if event == HookEvent::PreToolUse {
         // `state_dir()` is passed in rather than resolved there so its failure
         // stays a degradation instead of an abort — see the doc comment on
@@ -1071,6 +1150,8 @@ fn run_inner(
                 | HookEvent::SessionEnd
                 | HookEvent::PostToolUse
                 | HookEvent::PostSession
+                | HookEvent::PostToolUseFailure
+                | HookEvent::SubagentStart
         ) && !log_cfg.any_sink_enabled()
         {
             emit_trace_timing(t0, t_config, None, None, None);
@@ -1263,7 +1344,18 @@ fn run_inner(
                 );
                 // Use minimal chunk for storage to avoid duplication. (#1792)
                 let store_content = store_content_for_event(event, &chunk, &storage_chunk);
-                out = run_memory_actions(client, actions, &query, store_content).await?;
+                out = run_event_memory(MemoryCall {
+                    event,
+                    client,
+                    settings,
+                    session_id: claude_session_id,
+                    payload: stdin_payload,
+                    actions,
+                    scope: scope_recall_actions(&tag_queries, &bundle_queries, &tag_ranks),
+                    query: &query,
+                    store_content,
+                })
+                .await?;
 
                 // PostSession: run reflective consolidation (R5) in a detached
                 // child process so the hook returns immediately instead of
@@ -2500,6 +2592,40 @@ mod tests {
         "post_tool_use_failure",
         "subagent_start",
     ];
+
+    #[test]
+    fn adaptive_applies_only_to_its_events_with_a_valid_session() {
+        let on = Some(MemoryHookSettings {
+            wakeup_max_tokens: None,
+            adaptive_recall: true,
+        });
+        let off = Some(MemoryHookSettings {
+            wakeup_max_tokens: None,
+            adaptive_recall: false,
+        });
+        for event in [
+            HookEvent::SessionStart,
+            HookEvent::TurnStart,
+            HookEvent::PostToolUseFailure,
+            HookEvent::SubagentStart,
+        ] {
+            assert!(uses_adaptive(event, on, Some("s1")), "{event}");
+            assert!(!uses_adaptive(event, off, Some("s1")), "{event}");
+            assert!(!uses_adaptive(event, on, None), "{event}");
+            assert!(
+                !uses_adaptive(event, on, Some("../x")),
+                "unsafe id: {event}"
+            );
+        }
+        assert!(!uses_adaptive(HookEvent::SessionEnd, on, Some("s1")));
+    }
+
+    #[test]
+    fn local_recording_events_skip_the_memory_pipeline() {
+        assert!(records_locally(HookEvent::PostToolBatch));
+        assert!(records_locally(HookEvent::PreToolUse));
+        assert!(!records_locally(HookEvent::TurnStart));
+    }
 
     #[test]
     fn scope_recall_actions_is_turn_start_without_the_final_recall() {
