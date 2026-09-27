@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.11.2] - 2026-09-27
+
 This is a bugfix sprint: llmenv had several places where it trusted stale or wrong state without checking it.
 
 A hardcoded model id for the `anthropic-api` consolidation backend didn't exist, so it failed every call. A shell hook and a session-log event both trusted an environment inherited from a different project instead of checking the current directory. A leading `~` in a config path or in `LLMENV_CONFIG_DIR`/`LLMENV_STATE_DIR` silently resolved to the wrong directory in release builds. None of these failed loudly — they just did the wrong thing.

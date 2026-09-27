@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.11.2] - 2026-09-27
+
 This is a bugfix sprint: llmenv had several places where it trusted stale or wrong state without checking it.
 
 A hardcoded model id for the `anthropic-api` consolidation backend didn't exist, so it failed every call. A shell hook and a session-log event both trusted an environment inherited from a different project instead of checking the current directory. A leading `~` in a config path or in `LLMENV_CONFIG_DIR`/`LLMENV_STATE_DIR` silently resolved to the wrong directory in release builds. None of these failed loudly — they just did the wrong thing.
@@ -897,7 +899,8 @@ the rc.1 and rc.2 sections below.
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.11.1...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.11.2...HEAD
+[3.11.2]: https://github.com/phaedrus1992/llmenv/compare/v3.11.1...v3.11.2
 [3.11.1]: https://github.com/phaedrus1992/llmenv/compare/v3.11.0...v3.11.1
 [3.11.0]: https://github.com/phaedrus1992/llmenv/compare/v3.10.0...v3.11.0
 [3.10.0]: https://github.com/phaedrus1992/llmenv/compare/v3.9.0...v3.10.0
