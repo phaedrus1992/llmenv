@@ -114,12 +114,35 @@ pub(crate) fn lifecycle_hook_registrations(
             "needs a memory backend (features.memory)",
         ),
         (
+            "post_tool_batch",
+            icm_active,
+            "needs a memory backend (features.memory)",
+        ),
+        (
+            "post_tool_use_failure",
+            icm_active,
+            "needs a memory backend (features.memory)",
+        ),
+        (
+            "subagent_start",
+            icm_active,
+            "needs a memory backend (features.memory)",
+        ),
+        (
             "stop",
             session_log || task_tracker || slippage_critique,
             "needs session logging, features.task_tracker, or slippage self_critique",
         ),
     ]
 }
+
+/// `(engine-neutral event, native Claude event)` pairs registered for adaptive
+/// ICM recall (#2249) when a memory backend is active.
+const ADAPTIVE_RECALL_HOOK_EVENTS: &[(&str, &str)] = &[
+    ("post_tool_batch", "PostToolBatch"),
+    ("post_tool_use_failure", "PostToolUseFailure"),
+    ("subagent_start", "SubagentStart"),
+];
 
 /// `(engine-neutral event, native Claude event)` pairs registered when any
 /// session-log sink is enabled — per-hook prompt/tool-use capture (#382).
@@ -266,6 +289,9 @@ const CLAUDE_CODE_HOOK_EVENTS: &[&str] = &[
     "Stop",
     "SubagentStop",
     "PreCompact",
+    "PostToolBatch",
+    "PostToolUseFailure",
+    "SubagentStart",
 ];
 
 impl AgentAdapter for ClaudeCodeAdapter {
@@ -1578,6 +1604,34 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             .or_default()
             .push(json!({
                 "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} turn_start") }],
+            }));
+    }
+
+    // #2249: adaptive recall records tool activity, injects on failures and subagent
+    // starts, and queues subagent tasks. Same gate as turn_start: each hook fires often.
+    let registered = lifecycle_hook_registrations(manifest);
+    let is_on = |name: &str| {
+        registered
+            .iter()
+            .any(|(event, on, _)| *event == name && *on)
+    };
+    for (neutral_event, native_event) in ADAPTIVE_RECALL_HOOK_EVENTS {
+        if is_on(neutral_event) {
+            hooks_by_event
+                .entry((*native_event).to_string())
+                .or_default()
+                .push(json!({
+                    "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} {neutral_event}") }],
+                }));
+        }
+    }
+    if is_on("subagent_start") {
+        hooks_by_event
+            .entry("PreToolUse".to_string())
+            .or_default()
+            .push(json!({
+                "matcher": "^Agent$",
+                "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} pre_tool_use") }],
             }));
     }
 
@@ -3680,6 +3734,50 @@ mod tests {
                 "{event} must not carry a hook-run command when all sinks are disabled; got {:?}",
                 hook_commands_for(&settings, event)
             );
+        }
+    }
+
+    #[test]
+    fn adaptive_recall_hooks_register_only_with_a_memory_backend() {
+        // #2249: the adaptive recall hooks fire on every tool batch, failure, and
+        // subagent start, so they share turn_start's memory-backend gate.
+        let manifest = crate::merge::MergedManifest {
+            mcps: vec![crate::mcp::resolve::ResolvedMcp {
+                name: crate::mcp::resolve::MEMORY_MCP_NAME.to_string(),
+                kind: crate::mcp::resolve::ResolvedKind::Remote {
+                    url: "http://localhost:9999".into(),
+                    transport: crate::config::McpTransport::Http,
+                },
+                headers: Default::default(),
+                timeout: None,
+                disabled_tools: vec![],
+                mcp_permissions: None,
+                memory_hook: None,
+            }],
+            ..Default::default()
+        };
+        let settings = render_settings_for_test(&manifest);
+        for (event, neutral) in [
+            ("PostToolBatch", "post_tool_batch"),
+            ("PostToolUseFailure", "post_tool_use_failure"),
+            ("SubagentStart", "subagent_start"),
+        ] {
+            assert_eq!(
+                hook_commands_for(&settings, event),
+                [format!("{HOOK_RUN_COMMAND} {neutral}")],
+                "{event}"
+            );
+        }
+        let agent_matcher = settings["hooks"]["PreToolUse"]
+            .as_array()
+            .expect("PreToolUse hooks")
+            .iter()
+            .any(|entry| entry["matcher"] == "^Agent$");
+        assert!(agent_matcher, "PreToolUse must match the Agent tool");
+
+        let bare = render_settings_for_test(&crate::merge::MergedManifest::default());
+        for event in ["PostToolBatch", "PostToolUseFailure", "SubagentStart"] {
+            assert!(hook_commands_for(&bare, event).is_empty(), "{event}");
         }
     }
 
