@@ -693,6 +693,212 @@ test_1912_malformed_head_ref_fails_loudly_instead_of_silent_fallback() {
   [[ "$rc" -ne 0 ]] && echo "$out" | grep -q "::error::could not parse a valid source branch"
 }
 
+# Build the "update an existing stale merge branch" block: what runs when a
+# direct push to $TARGET fails and $MERGE_BRANCH already exists. Extracted
+# from production (not hand-copied) so the test can't drift from the real
+# code. bail_on_conflict/auto_resolve_conflicts are the real production
+# functions (this branch has no push_with_pat/FORWARD_MERGE_PAT -- pushes
+# here are plain `git push`). Wrapped in a one-iteration for-loop because
+# production's `break` is only valid inside a loop.
+# Callers export: SOURCE_REF TARGET SOURCE_DESC MERGE_BRANCH, set ls_rc=0,
+# and provide git/gh on PATH; run from a checkout of $TARGET.
+existing_branch_update_block() {
+  echo 'set -euo pipefail'
+  sed -n '/^ *bail_on_conflict() {/,/^ *for TARGET in/p' "$WORKFLOW" | sed '$d'
+  echo 'for _once in once; do'
+  sed -n '/^ *if \[\[ \$ls_rc -eq 0 \]\]; then$/,/^ *elif \[\[ \$ls_rc -ne 2 \]\]; then$/p' "$WORKFLOW" | sed '$d'
+  echo 'fi'
+  echo 'done'
+}
+
+# Build a bare "origin" + working clone. Branch layout:
+#   target                         - base content
+#   source                         - base, plus an older commit and (only
+#                                    after the merge branch below is created)
+#                                    a newer commit -- the newer one is what
+#                                    the update-existing-branch block must
+#                                    pick up.
+#   forward-merge/rel-to-target    - an "existing" (possibly stale) merge of
+#                                    source's OLDER commit into target. When
+#                                    $1=conflict, this branch also carries a
+#                                    human's own hand-edit that the new
+#                                    source commit will conflict with.
+# Leaves the working clone checked out on `target`. Echoes: working dir,
+# then the bare origin dir (space-separated on one line).
+make_stale_merge_branch_repo() {
+  local mode="${1:-clean}" origin_dir work_dir
+  origin_dir=$(mktemp -d)
+  git init -q --bare "$origin_dir"
+  work_dir=$(mktemp -d)
+  (
+    cd "$work_dir" || exit 1
+    git init -q -b target .
+    git config user.email t@t
+    git config user.name t
+    git config commit.gpgsign false
+    git remote add origin "$origin_dir"
+
+    echo base > shared.txt
+    git add shared.txt
+    git commit -q -m base
+    git push -q origin target
+
+    git switch -q -c source
+    echo "source: older change" >> shared.txt
+    git commit -q -am "source older commit"
+    git push -q origin source
+
+    # The existing (stale) forward-merge branch, built from source's older
+    # commit only.
+    git switch -q -c "forward-merge/rel-to-target" target
+    git merge -q --no-edit source
+    if [[ "$mode" == conflict ]]; then
+      echo "human's own hand resolution" > shared.txt
+      git commit -q -am "human hand-resolution on the stale branch"
+    fi
+    git push -q origin "forward-merge/rel-to-target"
+
+    # The new commit that landed on source after the branch above was
+    # created -- what the block under test must merge forward.
+    git switch -q source
+    echo "source: newer change" >> shared.txt
+    git commit -q -am "source newer commit"
+    git push -q origin source
+
+    git switch -q target
+  )
+  printf '%s %s\n' "$work_dir" "$origin_dir"
+}
+
+# ---------------------------------------------------------------------------
+# Test (Issue #2220): a stale forward-merge branch is updated in place
+# instead of halting the cascade forever.
+#
+# Scenario: $MERGE_BRANCH already exists (an earlier, now-stale attempt) and
+# a new commit has since landed on the source branch. The old behaviour
+# halted every run from here on, silently, until a human noticed and updated
+# the branch by hand.
+#
+# Expected after fix: the new source commit is merged into the existing
+# branch (a plain push, never --force) and the result is pushed back, so the
+# already-open PR picks up the new commit automatically.
+# ---------------------------------------------------------------------------
+test_2220_stale_branch_is_updated_not_halted() {
+  local dirs work_dir origin_dir git_stub out final_content
+  dirs=$(make_stale_merge_branch_repo clean)
+  work_dir="${dirs% *}"
+  origin_dir="${dirs#* }"
+
+  git_stub=$(mktemp -d)
+  cat > "$git_stub/git" <<STUB
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  if [[ "\$arg" == "--force" || "\$arg" == "--force-with-lease" ]]; then
+    echo "::error::force push used: \$*" >&2
+    exit 99
+  fi
+done
+exec "$(command -v git)" "\$@"
+STUB
+  chmod +x "$git_stub/git"
+
+  local script out rc
+  script=$(existing_branch_update_block)
+  out=$(cd "$work_dir" && PATH="$git_stub:$PATH" \
+    SOURCE_REF=origin/source TARGET=target SOURCE_DESC=release/x \
+    MERGE_BRANCH="forward-merge/rel-to-target" ls_rc=0 \
+    bash -c "$script" 2>&1)
+  rc=$?
+  trash "$git_stub" 2>/dev/null || rm -rf "$git_stub"
+
+  if [[ $rc -ne 0 ]]; then
+    echo "  block exited $rc, expected 0. Output:" >&2
+    echo "$out" | sed 's/^/    /' >&2
+    rm -rf "$work_dir" "$origin_dir"
+    return 1
+  fi
+
+  final_content=$(git -C "$origin_dir" show "forward-merge/rel-to-target:shared.txt")
+  rm -rf "$work_dir" "$origin_dir"
+
+  if ! echo "$final_content" | grep -q "older change"; then
+    echo "  updated branch lost the pre-existing (older) content -- got: $final_content" >&2
+    return 1
+  fi
+  if ! echo "$final_content" | grep -q "newer change"; then
+    echo "  updated branch never picked up the new source commit -- got: $final_content" >&2
+    return 1
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Test (Issue #2220, review follow-up of #476): updating a stale branch must
+# never destroy a human's in-progress conflict resolution. When the new
+# source commit conflicts with what's already on the branch, bail instead of
+# force-pushing over it.
+# ---------------------------------------------------------------------------
+test_2220_conflicting_update_never_force_pushes() {
+  local dirs work_dir origin_dir git_stub out before_content after_content
+
+  dirs=$(make_stale_merge_branch_repo conflict)
+  work_dir="${dirs% *}"
+  origin_dir="${dirs#* }"
+  before_content=$(git -C "$origin_dir" show "forward-merge/rel-to-target:shared.txt")
+
+  git_stub=$(mktemp -d)
+  cat > "$git_stub/git" <<STUB
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  if [[ "\$arg" == "--force" || "\$arg" == "--force-with-lease" ]]; then
+    echo "::error::force push used: \$*" >&2
+    exit 99
+  fi
+done
+exec "$(command -v git)" "\$@"
+STUB
+  chmod +x "$git_stub/git"
+
+  local script
+  script=$(existing_branch_update_block)
+  out=$(cd "$work_dir" && PATH="$git_stub:$PATH" \
+    SOURCE_REF=origin/source TARGET=target SOURCE_DESC=release/x \
+    MERGE_BRANCH="forward-merge/rel-to-target" ls_rc=0 \
+    bash -c "$script" 2>&1 || true)
+
+  after_content=$(git -C "$origin_dir" show "forward-merge/rel-to-target:shared.txt")
+  rm -rf "$work_dir" "$origin_dir" "$git_stub"
+
+  if [[ "$before_content" != "$after_content" ]]; then
+    echo "  remote branch content changed despite an unresolved conflict -- possible overwrite of human work" >&2
+    echo "  before: $before_content" >&2
+    echo "  after:  $after_content" >&2
+    return 1
+  fi
+  if ! echo "$out" | grep -q "Merge conflict"; then
+    echo "  expected a merge-conflict message; got:" >&2
+    echo "$out" | sed 's/^/    /' >&2
+    return 1
+  fi
+  return 0
+}
+
+# Drift guard: existing_branch_update_block extracts real production lines
+# (not a hand copy) -- assert they're still shaped the way the sed ranges
+# above expect, so a future edit there fails loudly here instead of quietly
+# extracting nothing.
+test_2220_test_mirror_matches_production_stale_branch_update() {
+  if grep -qF 'if [[ $ls_rc -eq 0 ]]; then' "$WORKFLOW" \
+      && grep -qF 'elif [[ $ls_rc -ne 2 ]]; then' "$WORKFLOW" \
+      && grep -qF 'if ! git fetch origin "$MERGE_BRANCH"; then' "$WORKFLOW" \
+      && grep -qF 'if ! git checkout -B "$MERGE_BRANCH" "origin/$MERGE_BRANCH"; then' "$WORKFLOW" \
+      && grep -qF 'if ! git push origin "$MERGE_BRANCH"; then' "$WORKFLOW"; then
+    return 0
+  fi
+  echo "  production's stale-branch-update block no longer matches the lines this file mirrors -- update existing_branch_update_block above" >&2
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
@@ -740,6 +946,15 @@ run_test "Issue #1912: merged forward-merge PR parses its source branch from its
 
 run_test "Issue #1912: malformed head ref fails loudly instead of falling back silently" \
   test_1912_malformed_head_ref_fails_loudly_instead_of_silent_fallback
+
+run_test "Issue #2220: a stale forward-merge branch is updated in place, not halted forever" \
+  test_2220_stale_branch_is_updated_not_halted
+
+run_test "Issue #2220: a conflicting update never force-pushes over a human's work" \
+  test_2220_conflicting_update_never_force_pushes
+
+run_test "Issue #2220: the test mirror still matches production's stale-branch-update logic" \
+  test_2220_test_mirror_matches_production_stale_branch_update
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

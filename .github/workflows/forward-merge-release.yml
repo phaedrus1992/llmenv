@@ -439,10 +439,63 @@ jobs:
                 ls_rc=$?
               fi
               if [[ $ls_rc -eq 0 ]]; then
-                echo "::warning::$MERGE_BRANCH already exists; not overwriting in-progress resolution"
-                echo "::error::Cascade halted: $TARGET is protected and $MERGE_BRANCH is already open"
+                # #2220: a stale $MERGE_BRANCH used to halt the cascade
+                # forever -- every commit landing on $CURRENT while that PR
+                # sat open just never propagated, silently, until someone
+                # noticed and updated it by hand. Merge $SOURCE_REF onto the
+                # branch's existing tip instead. This is never a force-push
+                # (a human may be resolving a conflict on it by hand, and
+                # overwriting that would destroy their work) -- only a
+                # fast-forward of whatever's already there, so an in-progress
+                # manual resolution is preserved and simply gains the new
+                # commits on top. Pushing new commits to an already-open PR's
+                # branch updates that PR in place; no second `gh pr create`
+                # needed.
+                echo "$MERGE_BRANCH already exists; merging $SOURCE_DESC into it instead of halting"
+                if ! git fetch origin "$MERGE_BRANCH"; then
+                  echo "::error::Failed to fetch existing $MERGE_BRANCH"
+                  echo "::endgroup::"
+                  HALTED="fetch of existing merge branch failed for $TARGET"
+                  break
+                fi
+                if ! git checkout -B "$MERGE_BRANCH" "origin/$MERGE_BRANCH"; then
+                  echo "::error::Failed to check out existing $MERGE_BRANCH"
+                  echo "::endgroup::"
+                  HALTED="checkout of existing merge branch failed for $TARGET"
+                  break
+                fi
+                if git merge-base --is-ancestor "$SOURCE_REF" HEAD; then
+                  echo "$MERGE_BRANCH already contains $SOURCE_DESC; nothing to update"
+                  echo "::endgroup::"
+                  HALTED="protected branch $TARGET"
+                  break
+                fi
+                if ! git merge --no-edit "$SOURCE_REF" >/dev/null 2>&1; then
+                  echo "Conflicts merging $SOURCE_DESC into existing $MERGE_BRANCH; attempting auto-resolution:"
+                  if auto_resolve_conflicts; then
+                    git commit --no-edit
+                  else
+                    if ! git merge --abort; then
+                      echo "::error::Failed to abort merge; working tree may be inconsistent"
+                      echo "::endgroup::"
+                      HALTED="merge abort failed updating $MERGE_BRANCH"
+                      break
+                    fi
+                    bail_on_conflict "$SOURCE_DESC" "$MERGE_BRANCH" || true
+                    echo "::endgroup::"
+                    HALTED="conflict updating existing $MERGE_BRANCH"
+                    break
+                  fi
+                fi
+                if ! git push origin "$MERGE_BRANCH"; then
+                  echo "::error::Push to update existing merge branch $MERGE_BRANCH failed"
+                  echo "::endgroup::"
+                  HALTED="merge-branch update push failed for $TARGET"
+                  break
+                fi
+                echo "::error::Cascade halted: updated existing PR for $TARGET instead of pushing directly"
                 echo "::endgroup::"
-                HALTED="protected branch $TARGET"
+                HALTED="protected branch $TARGET (branch updated with $SOURCE_DESC)"
                 break
               elif [[ $ls_rc -ne 2 ]]; then
                 echo "::error::Network error checking if $MERGE_BRANCH exists (exit $ls_rc); halting cascade"
