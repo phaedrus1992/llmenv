@@ -901,13 +901,13 @@ pub(crate) fn starting_permission_mode(settings: &serde_json::Value) -> (String,
         )
     } else if settings
         .get("disableAutoMode")
-        .map_or(false, |v| v == "disable")
+        .is_some_and(|v| v == "disable")
     {
         ("default".to_string(), "auto mode is disabled in settings")
     } else if settings
         .get("permissions")
         .and_then(|p| p.get("disableAutoMode"))
-        .map_or(false, |v| v == "disable")
+        .is_some_and(|v| v == "disable")
     {
         ("default".to_string(), "auto mode is disabled in settings")
     } else {
