@@ -414,8 +414,12 @@ jobs:
           # release branch resolves manually.
           bail_on_conflict() {
             local src="$1" tgt="$2"
-            echo "::error::Merge conflict: $src into $tgt has conflicts. Resolve manually:"
-            echo "::error::  git checkout $tgt && git merge $src"
+            # #2227: sanitize :: in attacker-controlled values (git refs) to prevent
+            # log injection, same as #1543. Git ref names can't contain ::, so this is
+            # defense-in-depth, but consistent with manifest_keeps_target.
+            local src_display="${src//::/  }" tgt_display="${tgt//::/  }"
+            echo "::error::Merge conflict: $src_display into $tgt_display has conflicts. Resolve manually:"
+            echo "::error::  git checkout $tgt_display && git merge $src_display"
             echo "::error::Cascade halted; downstream targets not merged"
             return 1
           }
@@ -675,7 +679,11 @@ jobs:
             fi
             if [[ $FETCH_RC -ne 0 ]]; then
               if [[ -n "$FETCH_STDERR" ]]; then
-                echo "::warning::fetch of $CURRENT $TARGET failed: ${FETCH_STDERR//$'\n'/ }"
+                # #2227: sanitize :: and newlines in stderr (attacker-controlled via
+                # error messages from git commands on malicious servers).
+                FETCH_STDERR_SAFE="${FETCH_STDERR//$'\n'/ }"
+                FETCH_STDERR_SAFE="${FETCH_STDERR_SAFE//::/  }"
+                echo "::warning::fetch of $CURRENT $TARGET failed: $FETCH_STDERR_SAFE"
               else
                 echo "::warning::fetch of $CURRENT $TARGET failed (exit $FETCH_RC; no stderr)"
               fi
@@ -848,7 +856,11 @@ jobs:
               elif [[ -n "$PUSH_STDERR" ]]; then
                 # Log the actual error so operators can distinguish protection
                 # rejections from auth/network failures.
-                echo "::warning::push to $TARGET failed: ${PUSH_STDERR//$'\n'/ }"
+                # #2227: sanitize :: and newlines in stderr (attacker-controlled via
+                # error messages from git commands on malicious servers).
+                PUSH_STDERR_SAFE="${PUSH_STDERR//$'\n'/ }"
+                PUSH_STDERR_SAFE="${PUSH_STDERR_SAFE//::/  }"
+                echo "::warning::push to $TARGET failed: $PUSH_STDERR_SAFE"
               else
                 echo "::warning::push to $TARGET failed (exit $PUSH_RC; no stderr)"
               fi
