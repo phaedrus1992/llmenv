@@ -4,14 +4,15 @@
 //! preview, so the most specific recalls must come first and the total must stay small.
 //! Design: docs/design/issue-2159-2141-icm-recall-prioritization.md
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::future::Future;
 
 use crate::hook_run::action::{Action, split_recall_records};
+use crate::hook_run::session_ledger::record_hash;
 
 /// Claude Code saves hook output over about 10 KB to a file and shows the model a 2 KB
 /// preview. Stay well under that limit.
-const RECALL_BUDGET_BYTES: usize = 8_000;
+pub(super) const RECALL_BUDGET_BYTES: usize = 8_000;
 
 /// Below this many free bytes the remaining recall queries are skipped, because their
 /// records would rarely fit.
@@ -60,7 +61,7 @@ pub(super) fn tag_specificity(active: &crate::scope::ActiveScopes) -> BTreeMap<S
 }
 
 /// The recall records kept so far, and what did not fit.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(super) struct RecallBudget {
     kept: Vec<String>,
     seen: HashSet<String>,
@@ -75,12 +76,57 @@ pub(super) struct RecallBudget {
     omitted: usize,
     /// Recall actions not run because the budget was full.
     skipped_actions: usize,
+    /// Byte limit of the kept records.
+    limit: usize,
+    /// Hashes of records the context already holds (#2249).
+    sent: BTreeSet<String>,
+    /// Records skipped because their hash is in `sent`.
+    pub(super) already_sent: usize,
+}
+
+impl Default for RecallBudget {
+    fn default() -> Self {
+        Self::new(RECALL_BUDGET_BYTES, BTreeSet::new())
+    }
 }
 
 impl RecallBudget {
+    /// A budget of `limit` bytes that skips every record whose hash is in `sent`.
+    pub(super) fn new(limit: usize, sent: BTreeSet<String>) -> Self {
+        Self {
+            kept: Vec::new(),
+            seen: HashSet::new(),
+            kept_bytes: 0,
+            records: 0,
+            record_bytes: 0,
+            duplicates: 0,
+            omitted: 0,
+            skipped_actions: 0,
+            limit,
+            sent,
+            already_sent: 0,
+        }
+    }
+
     /// Whether too little room is left to run another recall.
-    fn is_full(&self) -> bool {
-        RECALL_BUDGET_BYTES.saturating_sub(self.kept_bytes) < MIN_FREE_BYTES
+    pub(super) fn is_full(&self) -> bool {
+        self.limit.saturating_sub(self.kept_bytes) < MIN_FREE_BYTES
+    }
+
+    pub(super) fn add_text(&mut self, text: &str) {
+        self.add_records(split_recall_records(text));
+    }
+
+    pub(super) fn kept_hashes(&self) -> Vec<String> {
+        self.kept.iter().map(|r| record_hash(r)).collect()
+    }
+
+    /// The passthrough text, then the kept records, then the omission notice.
+    pub(super) fn render(&self, passthrough: Vec<String>) -> String {
+        let mut parts = passthrough;
+        parts.extend(self.kept.iter().cloned());
+        parts.extend(self.notice());
+        parts.join("\n\n")
     }
 
     /// Keep each record that is new and fits. A record that does not fit is counted as
@@ -89,9 +135,11 @@ impl RecallBudget {
         for record in records {
             self.records += 1;
             self.record_bytes += record.len();
-            if self.seen.contains(&record) {
+            if self.sent.contains(&record_hash(&record)) {
+                self.already_sent += 1;
+            } else if self.seen.contains(&record) {
                 self.duplicates += 1;
-            } else if self.kept_bytes + record.len() + SEPARATOR_BYTES <= RECALL_BUDGET_BYTES {
+            } else if self.kept_bytes + record.len() + SEPARATOR_BYTES <= self.limit {
                 self.kept_bytes += record.len() + SEPARATOR_BYTES;
                 self.seen.insert(record.clone());
                 self.kept.push(record);
@@ -101,6 +149,7 @@ impl RecallBudget {
         }
     }
 
+    #[cfg(test)]
     fn kept(&self) -> &[String] {
         &self.kept
     }
@@ -109,8 +158,9 @@ impl RecallBudget {
     /// was skipped.
     ///
     /// `recall_*` counts every record ICM returned and `injected_*` counts the records kept.
-    /// `advisory_stripped` counts duplicate records, `omitted` counts records dropped for the
-    /// byte budget, and `skipped_actions` counts recall queries not run because the budget was
+    /// `duplicate_records` counts records identical to one kept earlier in this call,
+    /// `already_sent` counts records skipped because the context already holds them,
+    /// `omitted` counts records dropped for the byte budget, and `skipped_actions` counts recall queries not run because the budget was
     /// full.
     pub(super) fn trace_line(&self, enabled: bool) -> Option<String> {
         if !enabled || (self.records == 0 && self.skipped_actions == 0) {
@@ -119,11 +169,13 @@ impl RecallBudget {
         let injected_bytes: usize = self.kept.iter().map(String::len).sum();
         Some(format!(
             "[LLMENV_CONTEXT] recall_entries={} recall_bytes={} injected_entries={} \
-             injected_bytes={injected_bytes} advisory_stripped={} omitted={} skipped_actions={}",
+             injected_bytes={injected_bytes} duplicate_records={} already_sent={} omitted={} \
+             skipped_actions={}",
             self.records,
             self.record_bytes,
             self.kept.len(),
             self.duplicates,
+            self.already_sent,
             self.omitted,
             self.skipped_actions
         ))
@@ -151,7 +203,7 @@ impl RecallBudget {
 fn is_recall(action: &Action) -> bool {
     matches!(
         action,
-        Action::Recall | Action::RecallTag(_) | Action::RecallBundle(_)
+        Action::Recall | Action::RecallTag(_) | Action::RecallBundle(_) | Action::RecallQuery(_)
     )
 }
 
@@ -165,13 +217,29 @@ fn is_recall(action: &Action) -> bool {
 /// Returns the first error from `run`.
 pub(super) async fn run_with_budget<F, Fut>(
     actions: Vec<Action>,
+    run: F,
+) -> anyhow::Result<(String, RecallBudget)>
+where
+    F: FnMut(Action) -> Fut,
+    Fut: Future<Output = anyhow::Result<String>>,
+{
+    run_with_budget_filtered(actions, RecallBudget::default(), run).await
+}
+
+/// [`run_with_budget`] with a caller-supplied budget, so that a limit and a sent
+/// set apply (#2249).
+///
+/// # Errors
+/// Returns the first error from `run`.
+pub(super) async fn run_with_budget_filtered<F, Fut>(
+    actions: Vec<Action>,
+    mut budget: RecallBudget,
     mut run: F,
 ) -> anyhow::Result<(String, RecallBudget)>
 where
     F: FnMut(Action) -> Fut,
     Fut: Future<Output = anyhow::Result<String>>,
 {
-    let mut budget = RecallBudget::default();
     let mut passthrough: Vec<String> = Vec::new();
     for action in actions {
         if !is_recall(&action) {
@@ -182,13 +250,11 @@ where
         } else if budget.is_full() {
             budget.skipped_actions += 1;
         } else {
-            budget.add_records(split_recall_records(&run(action).await?));
+            budget.add_text(&run(action).await?);
         }
     }
-    let mut parts = passthrough;
-    parts.extend(budget.kept().iter().cloned());
-    parts.extend(budget.notice());
-    Ok((parts.join("\n\n"), budget))
+    let text = budget.render(passthrough);
+    Ok((text, budget))
 }
 
 #[cfg(test)]
@@ -380,6 +446,24 @@ mod tests {
     }
 
     #[test]
+    fn sent_records_are_skipped_and_counted() {
+        let sent: BTreeSet<String> = [record_hash("[t] old")].into();
+        let mut budget = RecallBudget::new(RECALL_BUDGET_BYTES, sent);
+        budget.add_text("[t] old\n[t] new");
+        assert_eq!(budget.kept(), ["[t] new"]);
+        assert_eq!(budget.already_sent, 1);
+        assert_eq!(budget.kept_hashes(), [record_hash("[t] new")]);
+    }
+
+    #[test]
+    fn a_smaller_limit_is_respected() {
+        let mut budget = RecallBudget::new(2_000, BTreeSet::new());
+        budget.add_records(vec![record_of(1_500), format!("{}y", record_of(1_499))]);
+        assert_eq!(budget.kept().len(), 1);
+        assert_eq!(budget.omitted, 1);
+    }
+
+    #[test]
     fn trace_line_is_absent_until_a_recall_ran() {
         assert_eq!(RecallBudget::default().trace_line(true), None);
         let skipped_only = RecallBudget {
@@ -402,7 +486,8 @@ mod tests {
             budget.trace_line(true).as_deref(),
             Some(
                 "[LLMENV_CONTEXT] recall_entries=3 recall_bytes=16 injected_entries=2 \
-                 injected_bytes=11 advisory_stripped=1 omitted=0 skipped_actions=0"
+                 injected_bytes=11 duplicate_records=1 already_sent=0 omitted=0 \
+                 skipped_actions=0"
             )
         );
     }

@@ -64,6 +64,17 @@ pub fn parse_importance_marker(chunk: &str) -> Option<&str> {
     parse_marker(chunk, "llmenv-importance:")
 }
 
+/// One adaptive recall call (#2249). `None` fields are left out of the tool call,
+/// so ICM applies its own default (for `project`, the server's cwd project filter).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecallQuery {
+    pub query: String,
+    pub topic: Option<String>,
+    pub keyword: Option<String>,
+    pub project: Option<String>,
+    pub limit: u8,
+}
+
 /// One memory action against the ICM MCP backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
@@ -88,6 +99,8 @@ pub enum Action {
     /// `RecallTag` for bundles (#228): one action per active bundle, ensuring
     /// memory stored under a bundle in one project surfaces in another.
     RecallBundle(BundleRecallQuery),
+    /// Adaptive recall with an explicit query and filters (#2249).
+    RecallQuery(RecallQuery),
     /// Best-effort store of the active scope context (`icm_memory_store`).
     Store,
 }
@@ -97,7 +110,10 @@ impl Action {
     pub fn tool_name(&self) -> &'static str {
         match self {
             Action::WakeUp(_) => "icm_wake_up",
-            Action::Recall | Action::RecallTag(_) | Action::RecallBundle(_) => "icm_memory_recall",
+            Action::Recall
+            | Action::RecallTag(_)
+            | Action::RecallBundle(_)
+            | Action::RecallQuery(_) => "icm_memory_recall",
             Action::Store => "icm_memory_store",
         }
     }
@@ -125,6 +141,19 @@ impl Action {
                 "project": "",
                 "keyword": q.keyword,
             }),
+            Action::RecallQuery(q) => {
+                let mut args = json!({ "query": q.query, "limit": q.limit });
+                for (key, value) in [
+                    ("topic", &q.topic),
+                    ("keyword", &q.keyword),
+                    ("project", &q.project),
+                ] {
+                    if let Some(value) = value {
+                        args[key] = json!(value);
+                    }
+                }
+                args
+            }
             Action::Store => {
                 let mut args = json!({ "content": chunk, "topic": "llmenv-scope-context" });
                 if let Some(mtyp) = parse_type_marker(chunk) {
@@ -240,6 +269,31 @@ mod tests {
             let joined = split_recall_records(&text).join("\n");
             prop_assert_eq!(strip(&joined), strip(&text));
         }
+    }
+
+    #[test]
+    fn recall_query_sends_only_the_fields_it_has() {
+        let full = Action::RecallQuery(RecallQuery {
+            query: "q".into(),
+            topic: Some("errors-resolved".into()),
+            keyword: Some("cargo".into()),
+            project: Some(String::new()),
+            limit: 3,
+        });
+        assert_eq!(full.tool_name(), "icm_memory_recall");
+        assert_eq!(
+            full.arguments("ignored", "ignored"),
+            json!({"query": "q", "topic": "errors-resolved", "keyword": "cargo",
+                   "project": "", "limit": 3})
+        );
+        let bare = Action::RecallQuery(RecallQuery {
+            query: "q".into(),
+            topic: None,
+            keyword: None,
+            project: None,
+            limit: 10,
+        });
+        assert_eq!(bare.arguments("", ""), json!({"query": "q", "limit": 10}));
     }
 
     #[test]

@@ -253,17 +253,7 @@ fn dispatch(
     match event {
         HookEvent::SessionStart => vec![Action::WakeUp(wakeup_max_tokens)],
         HookEvent::TurnStart => {
-            let rank_of =
-                |q: &TagRecallQuery| ranks.get(&q.tag).copied().unwrap_or(recall::UNSCOPED_RANK);
-            let mut tags: Vec<&TagRecallQuery> = tag_queries.iter().collect();
-            // Stable, so tags of one rank keep the caller's (alphabetical) order.
-            tags.sort_by_key(|q| rank_of(q));
-            let split = tags.partition_point(|q| rank_of(q) <= recall::MOST_SPECIFIC_RANK);
-            let (specific, broader) = tags.split_at(split);
-            let mut actions: Vec<Action> = Vec::new();
-            actions.extend(specific.iter().map(|q| Action::RecallTag((*q).clone())));
-            actions.extend(bundle_queries.iter().cloned().map(Action::RecallBundle));
-            actions.extend(broader.iter().map(|q| Action::RecallTag((*q).clone())));
+            let mut actions = scope_recall_actions(tag_queries, bundle_queries, ranks);
             actions.push(Action::Recall);
             actions
         }
@@ -280,6 +270,26 @@ fn dispatch(
         | HookEvent::SubagentStart => vec![],
         HookEvent::PostSession => vec![], // consolidation runs as a separate step
     }
+}
+
+/// The scope-tag recalls in specificity order (#2159): rank-1 tags, bundles, then
+/// broader tags.
+fn scope_recall_actions(
+    tag_queries: &[TagRecallQuery],
+    bundle_queries: &[BundleRecallQuery],
+    ranks: &BTreeMap<String, u8>,
+) -> Vec<Action> {
+    let rank_of = |q: &TagRecallQuery| ranks.get(&q.tag).copied().unwrap_or(recall::UNSCOPED_RANK);
+    let mut tags: Vec<&TagRecallQuery> = tag_queries.iter().collect();
+    // Stable, so tags of one rank keep the caller's (alphabetical) order.
+    tags.sort_by_key(|q| rank_of(q));
+    let split = tags.partition_point(|q| rank_of(q) <= recall::MOST_SPECIFIC_RANK);
+    let (specific, broader) = tags.split_at(split);
+    let mut actions: Vec<Action> = Vec::new();
+    actions.extend(specific.iter().map(|q| Action::RecallTag((*q).clone())));
+    actions.extend(bundle_queries.iter().cloned().map(Action::RecallBundle));
+    actions.extend(broader.iter().map(|q| Action::RecallTag((*q).clone())));
+    actions
 }
 
 /// Whether the previously-stored dedup snapshot (R3) matches the chunk about
@@ -2489,6 +2499,15 @@ mod tests {
         "post_tool_use_failure",
         "subagent_start",
     ];
+
+    #[test]
+    fn scope_recall_actions_is_turn_start_without_the_final_recall() {
+        let tags = tag_recall_queries(&["a".to_string()]).unwrap();
+        let turn = dispatch(HookEvent::TurnStart, &tags, &[], &BTreeMap::new(), None);
+        let scope = scope_recall_actions(&tags, &[], &BTreeMap::new());
+        assert_eq!(turn.last(), Some(&Action::Recall));
+        assert_eq!(scope, turn[..turn.len() - 1]);
+    }
 
     #[test]
     fn adaptive_recall_events_round_trip_through_their_names() {
