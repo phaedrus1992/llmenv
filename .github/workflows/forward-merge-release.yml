@@ -202,8 +202,12 @@ jobs:
           # release branch resolves manually.
           bail_on_conflict() {
             local src="$1" tgt="$2"
-            echo "::error::Merge conflict: $src into $tgt has conflicts. Resolve manually:"
-            echo "::error::  git checkout $tgt && git merge $src"
+            # #2227: sanitize :: in attacker-controlled values (git refs) to prevent
+            # log injection, same as #1543. Git ref names can't contain ::, so this is
+            # defense-in-depth, but consistent with manifest_keeps_target.
+            local src_display="${src//::/  }" tgt_display="${tgt//::/  }"
+            echo "::error::Merge conflict: $src_display into $tgt_display has conflicts. Resolve manually:"
+            echo "::error::  git checkout $tgt_display && git merge $src_display"
             echo "::error::Cascade halted; downstream targets not merged"
             return 1
           }
@@ -297,12 +301,14 @@ jobs:
           #   * Cargo.lock and website/package-lock.json are regenerated once every
           #     other conflict is resolved, never merged by hand.
           auto_resolve_conflicts() {
-            local file lock_cargo=0 lock_npm=0 mkt_rc
+            local file lock_cargo=0 lock_npm=0 mkt_rc file_display
             while IFS= read -r file; do
               [[ -n "$file" ]] || continue
+              # #2227: sanitize :: in file paths to prevent log injection (#1543).
+              file_display="${file//::/  }"
               case "$file" in
                 website/docs/changelog.md)
-                  echo "  $file: regenerating from the merged CHANGELOG-*.md sources"
+                  echo "  $file_display: regenerating from the merged CHANGELOG-*.md sources"
                   git checkout --ours -- "$file"
                   bash scripts/sync-changelog-doc.sh
                   git add -- "$file"
@@ -318,13 +324,13 @@ jobs:
                     mkt_rc=$?
                   fi
                   if [[ "$mkt_rc" -eq 3 ]]; then
-                    echo "::error::$file: could not check whether keeping $TARGET's copy is safe (see log above); refusing to auto-resolve"
+                    echo "::error::$file_display: could not check whether keeping $TARGET's copy is safe (see log above); refusing to auto-resolve"
                     return 1
                   elif [[ "$mkt_rc" -ne 0 ]]; then
-                    echo "::error::$file: $SOURCE_DESC changed more than version numbers here, so keeping $TARGET's copy could drop real changes"
+                    echo "::error::$file_display: $SOURCE_DESC changed more than version numbers here, so keeping $TARGET's copy could drop real changes"
                     return 1
                   fi
-                  echo "  $file: keeping $TARGET's own version"
+                  echo "  $file_display: keeping $TARGET's own version"
                   git checkout --ours -- "$file"
                   git add -- "$file"
                   ;;
@@ -335,7 +341,7 @@ jobs:
                   lock_npm=1
                   ;;
                 *)
-                  echo "::error::$file: conflict has no auto-resolution rule"
+                  echo "::error::$file_display: conflict has no auto-resolution rule"
                   return 1
                   ;;
               esac
@@ -370,7 +376,11 @@ jobs:
             fi
             if [[ $FETCH_RC -ne 0 ]]; then
               if [[ -n "$FETCH_STDERR" ]]; then
-                echo "::warning::fetch of $CURRENT $TARGET failed: ${FETCH_STDERR//$'\n'/ }"
+                # #2227: sanitize :: and newlines in stderr (attacker-controlled via
+                # error messages from git commands on malicious servers).
+                local fetch_stderr_safe="${FETCH_STDERR//$'\n'/ }"
+                fetch_stderr_safe="${fetch_stderr_safe//::/  }"
+                echo "::warning::fetch of $CURRENT $TARGET failed: $fetch_stderr_safe"
               else
                 echo "::warning::fetch of $CURRENT $TARGET failed (exit $FETCH_RC; no stderr)"
               fi
@@ -448,7 +458,11 @@ jobs:
               # Log the actual error so operators can distinguish protection
               # rejections from auth/network failures.
               if [[ -n "$PUSH_STDERR" ]]; then
-                echo "::warning::push to $TARGET failed: ${PUSH_STDERR//$'\n'/ }"
+                # #2227: sanitize :: and newlines in stderr (attacker-controlled via
+                # error messages from git commands on malicious servers).
+                local push_stderr_safe="${PUSH_STDERR//$'\n'/ }"
+                push_stderr_safe="${push_stderr_safe//::/  }"
+                echo "::warning::push to $TARGET failed: $push_stderr_safe"
               else
                 echo "::warning::push to $TARGET failed (exit $PUSH_RC; no stderr)"
               fi
