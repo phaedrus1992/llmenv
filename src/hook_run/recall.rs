@@ -81,7 +81,7 @@ pub(super) struct RecallBudget {
     /// Hashes of records the context already holds (#2249).
     sent: BTreeSet<String>,
     /// Records skipped because their hash is in `sent`.
-    pub(super) already_sent: usize,
+    already_sent: usize,
 }
 
 impl Default for RecallBudget {

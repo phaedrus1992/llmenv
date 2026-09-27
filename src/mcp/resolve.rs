@@ -51,9 +51,9 @@ pub struct ResolvedMcp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryHookSettings {
     /// Token budget for the `icm_wake_up` call (#1216).
-    pub wakeup_max_tokens: Option<u32>,
+    pub(crate) wakeup_max_tokens: Option<u32>,
     /// Whether adaptive recall is on (#2249).
-    pub adaptive_recall: bool,
+    pub(crate) adaptive_recall: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

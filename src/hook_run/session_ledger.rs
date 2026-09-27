@@ -54,17 +54,17 @@ pub(crate) struct ToolError {
 /// A subagent task seen on the `Agent` tool call, waiting for its `SubagentStart`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PendingSubagent {
-    pub(crate) tool_use_id: String,
-    pub(crate) subagent_type: String,
+    tool_use_id: String,
+    subagent_type: String,
     pub(crate) task: String,
-    pub(crate) at: i64,
+    at: i64,
 }
 
 /// The recall state of one Claude Code session.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct Ledger {
-    pub(crate) epoch: u64,
+    epoch: u64,
     agents: BTreeMap<String, AgentState>,
     activity: VecDeque<Activity>,
     errors: VecDeque<ToolError>,

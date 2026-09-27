@@ -7,7 +7,7 @@ use std::path::Path;
 
 use crate::hook_run::session_ledger::{Activity, ToolError};
 
-pub(crate) const QUERY_CAP: usize = 600;
+const QUERY_CAP: usize = 600;
 const PROMPT_CAP: usize = 500;
 const TAIL_CAP: usize = 300;
 const ACTIVITY_WINDOW: usize = 10;
@@ -81,7 +81,7 @@ fn dir_name(path: Option<&Path>) -> Option<&str> {
 }
 
 /// Topic terms from the newest activity: file stems, their directory, command names.
-pub(crate) fn activity_terms(activity: &VecDeque<Activity>) -> Vec<String> {
+fn activity_terms(activity: &VecDeque<Activity>) -> Vec<String> {
     let mut terms: Vec<String> = Vec::new();
     let mut add = |term: &str| {
         if !term.is_empty() && !GENERIC_DIRS.contains(&term) && !terms.iter().any(|t| t == term) {
