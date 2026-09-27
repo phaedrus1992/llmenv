@@ -884,6 +884,39 @@ fn read_claude_json(path: &Path) -> anyhow::Result<serde_json::Value> {
     }
 }
 
+/// Determine the starting permission mode Claude Code will use for an interactive
+/// session with these rendered settings, and why.
+///
+/// Returns a tuple of (mode, reason). The mode is a string value from
+/// `permissions.defaultMode` or a built-in default; the reason explains which
+/// rule applied.
+#[allow(dead_code)]
+pub(crate) fn starting_permission_mode(settings: &serde_json::Value) -> (String, &'static str) {
+    if let Some(serde_json::Value::String(mode)) = settings
+        .get("permissions")
+        .and_then(|p| p.get("defaultMode"))
+    {
+        (
+            mode.clone(),
+            "set by capabilities.permissions.default_mode or native settings",
+        )
+    } else if settings
+        .get("disableAutoMode")
+        .is_some_and(|v| v == "disable")
+        || settings
+            .get("permissions")
+            .and_then(|p| p.get("disableAutoMode"))
+            .is_some_and(|v| v == "disable")
+    {
+        ("default".to_string(), "auto mode is disabled in settings")
+    } else {
+        (
+            "auto".to_string(),
+            "Claude Code 2.1.283+ built-in default for interactive sessions (claude -p starts in default)",
+        )
+    }
+}
+
 /// Copy files from a source directory into a destination recursively, writing
 /// each file owner-only (0o600). Non-UTF-8 paths are skipped (same policy as
 /// `scan_skill_files_for_hardcoded_paths`). Returns the list of relative paths
@@ -2671,7 +2704,7 @@ mod tests {
         merge_mcp_into_claude_json, normalize_deprecated_tool, overlay_native, permission_mode_str,
         plugin_install_paths_json, purge_hooks_from_disabled_plugins, read_owned_servers,
         reconcile_settings, reject_modeled_keys_in_catch_all, render_marketplace_source,
-        render_permission_rule, seed_install_method, seed_status_line,
+        render_permission_rule, seed_install_method, seed_status_line, starting_permission_mode,
     };
     use crate::adapter::skills::{
         arb_distinct_resolved_mcps, arb_yaml_value, reject_hardcoded_config_path, validate_skills,
@@ -7149,5 +7182,59 @@ mod tests {
             "CTX tool(s) in tier arrays but not in ALL_KNOWN_CTX_TOOLS: {extras:?}\n\
              Either remove the stale entry or add the tool to ALL_KNOWN_CTX_TOOLS."
         );
+    }
+
+    #[test]
+    fn starting_permission_mode_with_explicit_default_mode() {
+        let settings = serde_json::json!({
+            "permissions": { "defaultMode": "plan" }
+        });
+        let (mode, reason) = starting_permission_mode(&settings);
+        assert_eq!(mode, "plan");
+        assert_eq!(
+            reason,
+            "set by capabilities.permissions.default_mode or native settings"
+        );
+    }
+
+    #[test]
+    fn starting_permission_mode_with_manual_alias() {
+        let settings = serde_json::json!({
+            "permissions": { "defaultMode": "manual" }
+        });
+        let (mode, reason) = starting_permission_mode(&settings);
+        assert_eq!(mode, "manual");
+        assert_eq!(
+            reason,
+            "set by capabilities.permissions.default_mode or native settings"
+        );
+    }
+
+    #[test]
+    fn starting_permission_mode_with_top_level_disable_auto_mode() {
+        let settings = serde_json::json!({
+            "disableAutoMode": "disable"
+        });
+        let (mode, reason) = starting_permission_mode(&settings);
+        assert_eq!(mode, "default");
+        assert_eq!(reason, "auto mode is disabled in settings");
+    }
+
+    #[test]
+    fn starting_permission_mode_with_permissions_disable_auto_mode() {
+        let settings = serde_json::json!({
+            "permissions": { "disableAutoMode": "disable" }
+        });
+        let (mode, reason) = starting_permission_mode(&settings);
+        assert_eq!(mode, "default");
+        assert_eq!(reason, "auto mode is disabled in settings");
+    }
+
+    #[test]
+    fn starting_permission_mode_empty_object() {
+        let settings = serde_json::json!({});
+        let (mode, reason) = starting_permission_mode(&settings);
+        assert_eq!(mode, "auto");
+        assert!(reason.contains("Claude Code 2.1.283+"));
     }
 }
