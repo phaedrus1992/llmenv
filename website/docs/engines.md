@@ -170,6 +170,18 @@ It also:
 - sets `CLAUDE_CONFIG_DIR` to the materialized directory so Claude Code uses it;
 - emits `autoMemoryEnabled: false` when the ICM memory server is present, so ICM
   and Claude's native auto-memory don't both write (a `native` override wins);
+- emits `syncClaudeAiSkills: false` and `syncClaudeAiPlugins: false` (added in
+  v3.12.0) — since Claude Code 2.1.275, a terminal session signed in with a
+  claude.ai account downloads the skills and plugins enabled on that account
+  and loads them into every scope, going around llmenv's own scope rules and
+  risking a name collision with an llmenv-managed skill or plugin. A `native`
+  override (e.g. `native.claude_code.syncClaudeAiSkills: true`) re-enables
+  sync; on the first render after upgrade, Claude Code moves any already-synced
+  skills/plugins into `skills/.trash/` and `plugins/.trash/` inside the
+  rendered config dir rather than deleting them. `disableClaudeAiConnectors`
+  (claude.ai MCP connectors) is a separate setting and is not touched by this
+  default — set `native.claude_code.disableClaudeAiConnectors: true` directly
+  if you want connectors off too;
 - registers a `SessionStart` hook running `llmenv hook-run session_start`, which
   performs the drift check alongside memory wake-up (folded into one process in
   v3.11.0 — it was a separate `llmenv check-stale` hook before).
