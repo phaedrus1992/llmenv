@@ -378,9 +378,9 @@ jobs:
               if [[ -n "$FETCH_STDERR" ]]; then
                 # #2227: sanitize :: and newlines in stderr (attacker-controlled via
                 # error messages from git commands on malicious servers).
-                local fetch_stderr_safe="${FETCH_STDERR//$'\n'/ }"
-                fetch_stderr_safe="${fetch_stderr_safe//::/  }"
-                echo "::warning::fetch of $CURRENT $TARGET failed: $fetch_stderr_safe"
+                FETCH_STDERR_SAFE="${FETCH_STDERR//$'\n'/ }"
+                FETCH_STDERR_SAFE="${FETCH_STDERR_SAFE//::/  }"
+                echo "::warning::fetch of $CURRENT $TARGET failed: $FETCH_STDERR_SAFE"
               else
                 echo "::warning::fetch of $CURRENT $TARGET failed (exit $FETCH_RC; no stderr)"
               fi
@@ -460,9 +460,9 @@ jobs:
               if [[ -n "$PUSH_STDERR" ]]; then
                 # #2227: sanitize :: and newlines in stderr (attacker-controlled via
                 # error messages from git commands on malicious servers).
-                local push_stderr_safe="${PUSH_STDERR//$'\n'/ }"
-                push_stderr_safe="${push_stderr_safe//::/  }"
-                echo "::warning::push to $TARGET failed: $push_stderr_safe"
+                PUSH_STDERR_SAFE="${PUSH_STDERR//$'\n'/ }"
+                PUSH_STDERR_SAFE="${PUSH_STDERR_SAFE//::/  }"
+                echo "::warning::push to $TARGET failed: $PUSH_STDERR_SAFE"
               else
                 echo "::warning::push to $TARGET failed (exit $PUSH_RC; no stderr)"
               fi
