@@ -33,7 +33,8 @@ jobs:
         run: |
           gh label create security \
             --description "Security advisory on a release branch" \
-            --color "B60205" --force
+            --color "B60205" --force \
+            || echo "::warning::could not ensure the 'security' label exists; check repo permissions -- the scan step below will fail on a missing label"
 
       - name: List release branches
         id: list
@@ -123,13 +124,22 @@ jobs:
             AUDIT_PATH="-"
           fi
           RC=0
-          REPORT=$("$RUNNER_TEMP/report-scripts/release-advisory-report.sh" "$BRANCH" "$DENY_OUTCOME" "$AUDIT_PATH") || RC=$?
+          REPORT_ERR="$RUNNER_TEMP/report-script-stderr.txt"
+          REPORT=$("$RUNNER_TEMP/report-scripts/release-advisory-report.sh" "$BRANCH" "$DENY_OUTCOME" "$AUDIT_PATH" \
+            2>"$REPORT_ERR") || RC=$?
           if [[ $RC -eq 0 ]]; then
             echo "has_findings=false" >> "$GITHUB_OUTPUT"
           elif [[ $RC -eq 1 ]]; then
             echo "has_findings=true" >> "$GITHUB_OUTPUT"
           else
-            echo "::error::release-advisory-report.sh failed for $BRANCH (exit $RC): ${REPORT//::/  }"
+            # The script's own diagnostic went to $REPORT_ERR (stderr), not $REPORT
+            # (stdout only), so it must be read back in here to reach the annotation --
+            # otherwise the surfaced ::error:: names the exit code but never why.
+            # Flatten newlines and strip `::` first, same log-hygiene rule as #1543/#2177.
+            ERR_TEXT=$(<"$REPORT_ERR")
+            ERR_TEXT="${ERR_TEXT//$'\n'/ }"
+            ERR_TEXT="${ERR_TEXT//::/  }"
+            echo "::error::release-advisory-report.sh failed for $BRANCH (exit $RC): $ERR_TEXT"
             exit 1
           fi
           DELIM="report-$(uuidgen)"
@@ -139,35 +149,30 @@ jobs:
             echo "$DELIM"
           } >> "$GITHUB_OUTPUT"
 
-      - name: File or update the branch's security issue
-        if: steps.report.outputs.has_findings == 'true'
+      - name: File, update, or close the branch's security issue
         env:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ matrix.branch }}
+          HAS_FINDINGS: ${{ steps.report.outputs.has_findings }}
           REPORT: ${{ steps.report.outputs.report }}
         run: |
           set -euo pipefail
           TITLE="security: advisories on $BRANCH"
+          # $title is a jq variable bound by --arg, not a shell variable; the single
+          # quotes are deliberate so bash never expands it.
+          # shellcheck disable=SC2016
           ISSUE=$(gh issue list --label security --state open --json number,title \
-            --jq "[.[] | select(.title == \"$TITLE\")][0].number // empty")
-          if [[ -n "$ISSUE" ]]; then
-            gh issue edit "$ISSUE" --body "$REPORT"
+            --jq --arg title "$TITLE" '[.[] | select(.title == $title)][0].number // empty')
+          if [[ "$HAS_FINDINGS" == "true" ]]; then
+            if [[ -n "$ISSUE" ]]; then
+              gh issue edit "$ISSUE" --body "$REPORT"
+            else
+              gh issue create --title "$TITLE" --body "$REPORT" \
+                --label security --label dependencies --label P1
+            fi
           else
-            gh issue create --title "$TITLE" --body "$REPORT" \
-              --label security --label dependencies --label P1
-          fi
-
-      - name: Close the branch's security issue when clean
-        if: steps.report.outputs.has_findings == 'false'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BRANCH: ${{ matrix.branch }}
-        run: |
-          set -euo pipefail
-          TITLE="security: advisories on $BRANCH"
-          ISSUE=$(gh issue list --label security --state open --json number,title \
-            --jq "[.[] | select(.title == \"$TITLE\")][0].number // empty")
-          if [[ -n "$ISSUE" ]]; then
-            gh issue comment "$ISSUE" --body "No advisories on $BRANCH as of $(date -u +%Y-%m-%d)."
-            gh issue close "$ISSUE"
+            if [[ -n "$ISSUE" ]]; then
+              gh issue comment "$ISSUE" --body "No advisories on $BRANCH as of $(date -u +%Y-%m-%d)."
+              gh issue close "$ISSUE"
+            fi
           fi
