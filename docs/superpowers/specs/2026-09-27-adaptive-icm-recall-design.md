@@ -77,7 +77,7 @@ Fields:
 | `errors` | ring, 5 entries | Tool name and the first 300 bytes of the error text, with a timestamp. |
 | `last_query_hash` | hash | The hash of the previous `TurnStart` relevance query. |
 | `last_turn_at` | timestamp | The time of the previous `TurnStart`. |
-| `pending_subagents` | queue, 8 entries | `subagent_type`, the first 600 characters of the task `prompt`, and a timestamp, from each `Agent` tool call. Entries older than 5 minutes are dropped. |
+| `pending_subagents` | queue, 8 entries | `tool_use_id`, `subagent_type`, the first 600 characters of the task `prompt`, and a timestamp, from each `Agent` tool call. Entries older than 5 minutes are dropped. A second entry with the same `tool_use_id` is ignored, because the session-log `PreToolUse` registration has no matcher and can fire `pre_tool_use` again for the same call. |
 
 A record hash covers the record topic plus its normalized text (whitespace collapsed).
 ICM recall output carries no record id, so the content is the only stable key.
@@ -123,8 +123,9 @@ A topic that does not match a canonical form gives no siblings.
 
 - `Action::Recall` gets optional `topic`, `keyword`, `project`, and `limit` arguments for the relevance and fanout calls.
   No new MCP tool is needed.
-- The final `Recall` call no longer sends the joined tag list as a natural-language query.
+- In adaptive mode, the scope set drops the final `Recall` call, which sends the joined tag list as a natural-language query.
   The relevance query replaces it.
+  With `adaptive_recall: false`, the call stays, so that the output does not change.
 
 ### Adapter wiring (`src/adapter/claude_code.rs`)
 
