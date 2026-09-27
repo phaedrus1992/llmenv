@@ -301,3 +301,4 @@ Source: the Claude Code hooks reference, `https://code.claude.com/docs/en/hooks.
 
 - Upstream ICM: expose record ids and links in `icm_memory_recall` output.
   This allows graph-based related-topic expansion and exact dedup by id.
+  Filed as rtk-ai/icm#476.
