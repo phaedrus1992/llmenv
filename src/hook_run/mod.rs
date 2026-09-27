@@ -14,6 +14,7 @@ pub(crate) mod detached_store;
 pub(crate) mod mcp_client;
 pub(crate) mod read_once;
 mod recall;
+mod relevance;
 pub(crate) mod repeat_detect;
 mod session_ledger;
 mod session_state;

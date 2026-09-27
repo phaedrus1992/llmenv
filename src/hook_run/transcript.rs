@@ -82,6 +82,24 @@ pub(crate) fn read_turn_state(path: &Path) -> Option<TurnState> {
     Some(state)
 }
 
+/// The newest assistant text in the tail of `path`, capped at `max_chars`.
+///
+/// Returns `None` when the transcript can't be read or holds no assistant text.
+pub(crate) fn last_assistant_text(path: &Path, max_chars: usize) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let lines: Vec<&str> = text.lines().collect();
+    let tail = lines.len().saturating_sub(TAIL_LINES);
+    lines.get(tail..)?.iter().rev().find_map(|line| {
+        let entry: serde_json::Value = serde_json::from_str(line).ok()?;
+        let message = entry.get("message")?;
+        if message.get("role").and_then(serde_json::Value::as_str) != Some("assistant") {
+            return None;
+        }
+        // `user_text` reads the `text` blocks of any message; its name is historical.
+        user_text(message).map(|t| t.chars().take(max_chars).collect())
+    })
+}
+
 /// The human-authored text of a user message, or `None` when the entry is a
 /// tool result rather than something the user typed.
 fn user_text(message: &serde_json::Value) -> Option<String> {
@@ -130,6 +148,26 @@ mod tests {
             .concat();
         std::fs::write(file.path(), body).unwrap();
         file
+    }
+
+    #[test]
+    fn last_assistant_text_returns_the_newest_visible_text_capped() {
+        let assistant = |content: serde_json::Value| serde_json::json!({"message": {"role": "assistant", "content": content}});
+        let file = transcript(&[
+            assistant(serde_json::json!([{"type": "text", "text": "old"}])),
+            assistant(serde_json::json!([{"type": "thinking", "thinking": "x"}])),
+            assistant(serde_json::json!([{"type": "text", "text": "newest reply"}])),
+            serde_json::json!({"message": {"role": "user",
+                "content": [{"type": "tool_result", "content": "r"}]}}),
+        ]);
+        assert_eq!(
+            last_assistant_text(file.path(), 6).as_deref(),
+            Some("newest")
+        );
+        assert_eq!(
+            last_assistant_text(std::path::Path::new("/nonexistent"), 6),
+            None
+        );
     }
 
     fn user(text: &str) -> serde_json::Value {
