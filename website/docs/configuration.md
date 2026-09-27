@@ -181,7 +181,7 @@ bundle's `bundle.yaml` (bundle-scoped); contributors are merged by value shape.
 ```yaml
 capabilities:
   permissions:
-    default_mode: acceptEdits           # acceptEdits | plan | default | bypassPermissions
+    default_mode: acceptEdits           # default | manual | acceptEdits | plan | auto | dontAsk | bypassPermissions
     preset: safe-readonly               # added in v3.8.0 — see below
     allow:
       - { tool: Bash, pattern: "git *" }
@@ -249,6 +249,47 @@ capabilities:
 - `native_<feature>` maps are per-engine raw fragments emitted verbatim. They are
   the escape hatch for engine-specific rules with no neutral form. See
   [Engines](engines.md).
+
+### Starting permission mode (Claude Code) (added in v3.11.2)
+
+When a Claude Code session starts, the permission mode is determined by this
+selection order:
+
+1. The `--permission-mode` flag or `--dangerously-skip-permissions` flag on the
+   `claude` command.
+2. `permissions.defaultMode` in the user's `~/.claude/settings.json` (rendered
+   by llmenv here). Setting this in a project's `.claude/settings.json` does
+   not work—`auto` and `bypassPermissions` require the user file.
+3. Claude Code's built-in default:
+   - **`auto`** for interactive terminal or VS Code sessions (Claude Code 2.1.283+).
+   - **`default` (Manual)** for `claude -p` or the Agent SDK.
+   - If `disableAutoMode` is set to `"disable"` anywhere in the settings,
+     defaults to `default` instead of `auto`.
+
+If auto mode is not available to the session (due to model, provider, organization, or
+server-side restrictions), the session starts in Manual (`default`) instead.
+
+Set `default_mode: default` (or `manual`) to keep Manual mode if you prefer not to rely on
+Claude Code's auto mode:
+
+```yaml
+capabilities:
+  permissions:
+    default_mode: default               # keeps Manual mode even for interactive sessions
+```
+
+With telemetry off, auto mode's safety review runs on Anthropic's server by default from
+Claude Code 2.1.282. To run it locally instead, set a native override:
+
+```yaml
+capabilities:
+  native_hooks:
+    claude_code:
+      env:
+        CLAUDE_CODE_AUTO_MODE_SERVER: "0"
+```
+
+See Claude Code's [permission modes](https://www.anthropic.com/documentation/permissions) documentation for the full reference.
 
 ### `model_providers` / `default_models`
 
