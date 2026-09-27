@@ -448,6 +448,17 @@ fi
 SHELL
 }
 
+# Commit a real copy of scripts/forward_merge_manifest.py into the current
+# directory, staged for the next commit. manifest_keeps_target now reads the
+# target's own copy via `git show HEAD:scripts/forward_merge_manifest.py`
+# (#2177), so every fixture repo's target branch needs the file in its tree —
+# an external path (the old MANIFEST_CHECK env var) is no longer consulted.
+commit_manifest_script() {
+  mkdir -p scripts
+  cp "$REPO_ROOT/scripts/forward_merge_manifest.py" scripts/forward_merge_manifest.py
+  git add scripts/forward_merge_manifest.py
+}
+
 # Build a repo where `source` and `target` both moved their own version, plus
 # whatever extra change `$1` adds to source's Cargo.toml. Leaves the caller
 # inside a conflicted `git merge source` on the target branch. Echoes the path.
@@ -1169,7 +1180,7 @@ test_2166_lockfile_tool_failure_bails_naming_command() {
 test_2166_target_without_manifest_script_bails() {
   run_drift 1.0.1 no-script
   trash "$DRIFT_REPO" 2>/dev/null || true
-  [[ "$DRIFT_OUT" == *BAILED* ]] && [[ "$DRIFT_OUT" == *"no manifest check yet"* ]] && return 0
+  [[ "$DRIFT_OUT" == *BAILED* ]] && [[ "$DRIFT_OUT" == *"could not read the manifest-check script"* ]] && return 0
   printf '  out: %s\n' "${DRIFT_OUT//$'\n'/ | }" >&2
   return 1
 }
@@ -2022,7 +2033,8 @@ test_1543_normal_filename_unchanged() {
 # expression added to auto_resolve_conflicts in forward-merge-release.yml,
 # and its three call sites (changelog.md, Cargo.toml/lock, and the
 # no-auto-resolution fallback) must all use the sanitized copy in their log
-# output, not the raw path.
+# output, not the raw path. manifest_keeps_target declares the same
+# expression independently (#2177) -- two declarations total, not one.
 test_1543_test_mirror_matches_production_file_display_sanitization() {
   local workflow_file count
   workflow_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/forward-merge-release.yml"
@@ -2030,7 +2042,7 @@ test_1543_test_mirror_matches_production_file_display_sanitization() {
   # shellcheck disable=SC2016 # literal grep -F patterns, not expressions to expand
   count=$(grep -c 'file_display="${file//::/  }"' "$workflow_file")
   # shellcheck disable=SC2016 # literal grep -F patterns, not expressions to expand
-  if [[ "$count" -eq 1 ]] \
+  if [[ "$count" -eq 2 ]] \
       && grep -qF '"  $file_display: regenerating from the merged CHANGELOG-*.md sources"' "$workflow_file" \
       && grep -qF "\"  \$file_display: keeping \$TARGET's own version\"" "$workflow_file" \
       && grep -qF '"::error::$file_display: conflict has no auto-resolution rule"' "$workflow_file"; then
