@@ -231,6 +231,13 @@ registers it with the server's own background auto-watch (`auto_watch`,
 upstream default `true`), which re-indexes on git changes automatically —
 llmenv doesn't implement its own reindex scheduling on top of that.
 
+(changed in v3.11.2) llmenv's model guidance covers codebase-memory-mcp 0.11.0
+tools, including `get_file_outline` and `compare_graphs` for detailed code
+inspection and change detection.
+After upgrading codebase-memory-mcp from 0.10.8 or earlier, the first session
+in each project rebuilds that project's index once (index format change);
+llmenv starts that index at session start, so large repositories are slow once.
+
 ### The `index_repository` name guard
 
 (added in v3.11.0)
