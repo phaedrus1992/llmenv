@@ -171,6 +171,12 @@ pub enum HookEvent {
     SubagentStop,
     /// About to compact the transcript (Claude Code: `PreCompact`).
     PreCompact,
+    /// A batch of tool calls resolved (Claude Code: `PostToolBatch`).
+    PostToolBatch,
+    /// A tool call failed (Claude Code: `PostToolUseFailure`).
+    PostToolUseFailure,
+    /// A subagent is spawned or resumed (Claude Code: `SubagentStart`).
+    SubagentStart,
 }
 
 impl FromStr for HookEvent {
@@ -188,10 +194,14 @@ impl FromStr for HookEvent {
             "stop" => Ok(HookEvent::Stop),
             "subagent_stop" => Ok(HookEvent::SubagentStop),
             "pre_compact" => Ok(HookEvent::PreCompact),
+            "post_tool_batch" => Ok(HookEvent::PostToolBatch),
+            "post_tool_use_failure" => Ok(HookEvent::PostToolUseFailure),
+            "subagent_start" => Ok(HookEvent::SubagentStart),
             other => Err(anyhow::anyhow!(
                 "unknown hook event '{other}' (expected session_start|turn_start|session_end|\
                  user_prompt_submit|pre_tool_use|post_tool_use|notification|stop|\
-                 subagent_stop|pre_compact)"
+                 subagent_stop|pre_compact|post_tool_batch|post_tool_use_failure|\
+                 subagent_start)"
             )),
         }
     }
@@ -211,6 +221,9 @@ impl std::fmt::Display for HookEvent {
             HookEvent::SubagentStop => "subagent_stop",
             HookEvent::PreCompact => "pre_compact",
             HookEvent::PostSession => "post_session",
+            HookEvent::PostToolBatch => "post_tool_batch",
+            HookEvent::PostToolUseFailure => "post_tool_use_failure",
+            HookEvent::SubagentStart => "subagent_start",
         };
         f.write_str(s)
     }
@@ -259,7 +272,10 @@ fn dispatch(
         | HookEvent::Notification
         | HookEvent::Stop
         | HookEvent::SubagentStop
-        | HookEvent::PreCompact => vec![],
+        | HookEvent::PreCompact
+        | HookEvent::PostToolBatch
+        | HookEvent::PostToolUseFailure
+        | HookEvent::SubagentStart => vec![],
         HookEvent::PostSession => vec![], // consolidation runs as a separate step
     }
 }
@@ -302,6 +318,7 @@ fn event_to_log_kind(event: HookEvent) -> Option<(EventKind, &'static str)> {
         HookEvent::PreCompact => Some((EventKind::Notification, "system")),
         HookEvent::SessionStart | HookEvent::TurnStart | HookEvent::SessionEnd => None,
         HookEvent::PostSession => None, // consolidation runs as a separate step
+        HookEvent::PostToolBatch | HookEvent::PostToolUseFailure | HookEvent::SubagentStart => None,
     }
 }
 
@@ -343,7 +360,10 @@ fn event_content(event: HookEvent, payload: &serde_json::Value) -> (Option<Strin
         HookEvent::SessionStart
         | HookEvent::TurnStart
         | HookEvent::SessionEnd
-        | HookEvent::PostSession => (None, String::new()),
+        | HookEvent::PostSession
+        | HookEvent::PostToolBatch
+        | HookEvent::PostToolUseFailure
+        | HookEvent::SubagentStart => (None, String::new()),
     }
 }
 
@@ -2465,7 +2485,24 @@ mod tests {
         "stop",
         "subagent_stop",
         "pre_compact",
+        "post_tool_batch",
+        "post_tool_use_failure",
+        "subagent_start",
     ];
+
+    #[test]
+    fn adaptive_recall_events_round_trip_through_their_names() {
+        for (name, event) in [
+            ("post_tool_batch", HookEvent::PostToolBatch),
+            ("post_tool_use_failure", HookEvent::PostToolUseFailure),
+            ("subagent_start", HookEvent::SubagentStart),
+        ] {
+            assert_eq!(name.parse::<HookEvent>().unwrap(), event);
+            assert_eq!(event.to_string(), name);
+            assert!(dispatch(event, &[], &[], &BTreeMap::new(), None).is_empty());
+            assert_eq!(event_to_log_kind(event), None);
+        }
+    }
 
     #[test]
     fn all_hook_events_covers_every_variant() {
@@ -2475,7 +2512,7 @@ mod tests {
         }
         // `HookEvent` derives no variant count, so this guards the list
         // against a variant added to the enum but not to `from_str`.
-        assert_eq!(ALL_HOOK_EVENTS.len(), 11);
+        assert_eq!(ALL_HOOK_EVENTS.len(), 14);
     }
 
     // The gate is fed `AgentAdapter::name` (hyphenated), not `engine_id`
