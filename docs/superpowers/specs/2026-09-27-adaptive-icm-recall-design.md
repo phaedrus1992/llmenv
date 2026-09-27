@@ -71,11 +71,12 @@ Fields:
 | `errors` | ring, 5 entries | Tool name and the first 300 bytes of the error text, with a timestamp. |
 | `last_query_hash` | hash | The hash of the previous `TurnStart` relevance query. |
 | `last_turn_at` | timestamp | The time of the previous `TurnStart`. |
+| `pending_subagents` | queue, 8 entries | `subagent_type`, the first 600 characters of the task `prompt`, and a timestamp, from each `Agent` tool call. Entries older than 5 minutes are dropped. |
 
 A record hash covers the record topic plus its normalized text (whitespace collapsed).
 ICM recall output carries no record id, so the content is the only stable key.
 
-Subagent hooks share the parent `session_id`.
+Subagent hooks share the parent `session_id`, and carry the subagent `agent_id` as a common input field.
 The `sent` set is keyed per agent for that reason.
 Without the key, a record injected into a subagent is marked as sent for the parent, which never saw it.
 
@@ -125,6 +126,8 @@ New registrations, each only when a memory backend is active (the same rule as `
 
 - `PostToolBatch`: record activity.
 - `PostToolUseFailure`: record the error, then inject.
+- `PreToolUse` with the matcher `Agent`: queue the subagent task text in `pending_subagents`.
+  This is a local file write only: no MCP call, no output, and no permission decision.
 - `SubagentStart`: inject task-relevant memories.
 
 The existing `SessionStart` registration also handles the reset.
@@ -138,7 +141,12 @@ No `PostCompact` registration is needed, because `SessionStart` fires after a co
   Increment `epoch`, and clear all `agents` entries.
   Keep `activity` and `errors`, because they still describe the session.
 - `source` is `resume`: keep the ledger if it exists.
-  The resumed transcript still holds the earlier injections.
+  On resume, Claude Code replays the saved hook text from the transcript, so the earlier injections are still in context.
+- `source` is `fork`: the fork gets a new `session_id`, so its ledger starts empty.
+  The fork keeps the parent context, so the scope set repeats one time.
+  The payload does not name the parent session, so the ledger cannot copy the parent state.
+- `/clear` also gives a new `session_id`, so the reset for `clear` is automatic.
+  The explicit reset stays, because it costs nothing.
 - The existing `icm_wake_up` call stays.
   Any `[topic]` records in its output go into `agents.main.sent`.
 
@@ -179,13 +187,25 @@ This is a local file write only: no MCP call and no output.
 3. Filter against the `sent` set of the current context (`agent_id` from the hook input, else `main`).
 4. Apply a 2,000-byte budget, inject, and record the kept hashes.
 
+### `PreToolUse` on `Agent`
+
+Append `tool_input.subagent_type` and the head of `tool_input.prompt` to `pending_subagents`.
+The hook returns no output, so it never changes the permission flow.
+
 ### `SubagentStart`
 
-1. Build a relevance query from the subagent task text, capped at 600 characters.
-2. Run wave 1 and wave 2 as for `TurnStart`, with no scope-set step and no skip rule.
-3. Filter against `agents[agent_id].sent`, which starts empty.
+The `SubagentStart` payload has `agent_id` and `agent_type`, but no task text.
+
+1. Take the oldest `pending_subagents` entry whose `subagent_type` equals `agent_type`, and remove it from the queue.
+   Parallel launches of the same agent type can swap task texts between siblings.
+   All siblings come from the same parent turn, so the cost of a swap is a less exact query, not a wrong context.
+2. Build a relevance query from that task text, capped at 600 characters.
+   If no entry matches (for example, a resumed subagent or an agent-team message), build the query from `agent_type` plus the parent activity terms.
+3. Run wave 1 and wave 2 as for `TurnStart`, with no scope-set step and no skip rule.
+4. Filter against `agents[agent_id].sent`, which starts empty.
    A subagent starts with a fresh context, so the parent `sent` set does not apply.
-4. Apply a 4,000-byte budget, inject through `additionalContext`, and record the kept hashes under `agents[agent_id]`.
+   `SubagentStart` fires again when a subagent resumes, and the per-agent `sent` set prevents a repeat.
+5. Apply a 4,000-byte budget, inject through `additionalContext`, and record the kept hashes under `agents[agent_id]`.
 
 ## Latency
 
@@ -193,7 +213,7 @@ This is a local file write only: no MCP call and no output.
 Today the calls run one after another, so the worst case is (tags + bundles + 1) × 2 seconds.
 The new flow runs each wave concurrently on the existing current-thread runtime.
 The worst case is about 4 seconds on a turn that also sends the scope set, and about 2 seconds after that.
-`PostToolBatch` makes no MCP call.
+`PostToolBatch` and `PreToolUse` on `Agent` make no MCP call.
 
 ## Failure handling
 
@@ -203,28 +223,33 @@ A hook must never block or break a turn.
   The cost is one repeat of the scope set.
 - An invalid `session_id`: skip the ledger and run the current stateless recall.
 - An MCP timeout or error in one call: keep the results of the other calls.
-- Claude Code does not put `agent_id` in hook input (fact 4 below is false):
-  - `SubagentStart` still injects, and records its hashes under a key made from the `SubagentStart` payload.
-    That key is never read again, so the parent `sent` set does not change.
-  - `PostToolUseFailure` cannot tell a subagent from the parent.
-    It filters against `agents.main.sent`, injects, and records no hashes.
-    A later turn can repeat one of those records, but no record is marked as sent to a context that did not see it.
+- A hook input with an `agent_id` that fails `is_valid_short_name`: treat the context as `main` for filters, and record no hashes.
+
+## Injected text
+
+The Claude Code docs warn that text framed as out-of-band system commands can trigger prompt-injection defenses.
+The block keeps its current factual header, and adds no imperative framing around the records.
 
 ## Config
 
 One new key: `features.memory[].adaptive_recall` (bool, default `true`).
 `false` restores the current stateless recall exactly, which gives a rollback path.
 
-## Facts to verify before code
+## Verified hook facts
 
-The plan must confirm these against Claude Code before it writes code that depends on them:
+Source: the Claude Code hooks reference, `https://code.claude.com/docs/en/hooks.md`, read on 2026-09-27.
 
-1. The `PostToolBatch` payload shape.
-   If it lacks per-tool inputs, record activity from `PostToolUse` instead, with the same local-write-only rule.
-2. Whether `PostToolUseFailure` accepts `hookSpecificOutput.additionalContext`.
-3. Whether the `SubagentStart` payload carries the subagent task text.
-4. Whether hook input fired inside a subagent carries `agent_id`.
-5. The `source` values of `SessionStart`: `startup`, `resume`, `clear`, `compact`.
+1. `PostToolBatch` input has `tool_calls`, an array of `tool_name`, `tool_input`, `tool_use_id`, and `tool_response`.
+   It fires once per batch, with no matcher, and accepts `additionalContext`.
+2. `PostToolUseFailure` input has `tool_name`, `tool_input`, `tool_use_id`, `error`, and the optional `is_interrupt` and `duration_ms`.
+   It accepts `hookSpecificOutput.additionalContext`.
+   The `error` format varies by tool, so only its first line and a byte-capped head are used.
+3. `SubagentStart` input has `agent_id` and `agent_type` only.
+   It accepts `additionalContext`, which goes to the subagent context before its first prompt.
+4. Hook input fired inside a subagent carries `agent_id` and `agent_type` as common input fields.
+5. `SessionStart` `source` is one of `startup`, `resume`, `clear`, `compact`, or `fork`.
+   `/clear` gives a new `session_id`.
+6. The `Agent` tool input has `subagent_type` and `prompt`.
 
 ## Testing
 
@@ -237,6 +262,8 @@ The plan must confirm these against Claude Code before it writes code that depen
   - The skip rule makes no calls for a repeated query with no new activity.
   - A tool failure injects error memories, and a later turn does not repeat them.
   - A subagent gets memories that the parent already saw, and the parent `sent` set does not change.
+  - A `PreToolUse` on `Agent` queues the task text, and the matching `SubagentStart` uses it for the query.
+  - A `SubagentStart` with no queued entry falls back to `agent_type` plus the activity terms.
   - `adaptive_recall: false` gives the current output byte for byte.
 - Adapter tests: the new hooks register only when a memory backend is active.
 
