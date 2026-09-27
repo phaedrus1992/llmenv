@@ -111,6 +111,18 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 
 ## [Unreleased] - ReleaseDate
 
+### Changed
+
+- The Claude Code adapter now disables claude.ai account skill and plugin sync by default (`syncClaudeAiSkills`/`syncClaudeAiPlugins: false`). Since Claude Code 2.1.275, a signed-in session downloads the skills and plugins enabled on that account and loads them into every scope, going around llmenv's own scope rules. Set `native.claude_code.syncClaudeAiSkills: true` (and the plugins equivalent) to opt back in; on the first render after upgrade, Claude Code moves already-synced items into `skills/.trash/`/`plugins/.trash/` rather than deleting them. See [What the Claude Code adapter emits](https://phaedrus1992.github.io/llmenv/docs/engines#what-the-claude-code-adapter-emits) (#2146)
+
+## [3.11.2] - 2026-09-27
+
+This is a bugfix sprint: llmenv had several places where it trusted stale or wrong state without checking it.
+
+A hardcoded model id for the `anthropic-api` consolidation backend didn't exist, so it failed every call. A shell hook and a session-log event both trusted an environment inherited from a different project instead of checking the current directory. A leading `~` in a config path or in `LLMENV_CONFIG_DIR`/`LLMENV_STATE_DIR` silently resolved to the wrong directory in release builds. None of these failed loudly — they just did the wrong thing.
+
+Alongside those fixes, this release tightens llmenv's integration with codebase-memory-mcp 0.11.0 (tool tiers, a version-floor check in `llmenv doctor`, and a `SessionStart` memory recall that's now capped in size and ordered most-specific-first), trims duplicate bytes out of ICM's scope-context storage, and cleans up a disabled plugin's leftover hooks instead of leaving them firing forever.
+
 ### Added
 
 - `llmenv doctor` warns when the installed codebase-memory-mcp is older than 0.11.0, the release llmenv's tool tiers and guidance assume. See [`doctor`](https://phaedrus1992.github.io/llmenv/docs/commands)
@@ -123,14 +135,8 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 - `Config::load` now expands a leading `~`/`~user` in the config path itself instead of relying on a `debug_assert` the release build compiled out — a release build previously accepted a tilde-prefixed path silently and failed later with a confusing "failed to read config file" error instead of resolving it. Only `~` itself goes through string handling; the rest of the path joins back on as raw bytes, so a non-UTF-8 path is never mangled either way. `LLMENV_CONFIG_DIR`/`LLMENV_STATE_DIR` had the identical gap — a tilde-prefixed override silently resolved to a literal `./~/...` directory relative to cwd — and are fixed the same way. (#1910)
 - The shell hook's (`llmenv hook zsh|bash`) guard against redundant re-renders now compares `$PWD` against the project root it last resolved for, instead of only checking that `$LLMENV_STATE_DIR` is set. A child shell forked into a different project directory — a tmux/zellij pane, or a tool like herdr that forks panes off a parent shell — kept the parent's config, tags, and cache path indefinitely instead of picking up its own project's scope. (#1895)
 - The scope-header session-log event now sanitizes the project name the same way tags and bundles already are: control characters are escaped and whitespace runs collapse to `_`. A project name with a control character or embedded space could previously rewrite terminal output or inject a fake `llmenv-tag:`/`llmenv-bundle:` token into content ICM's FTS index searches. llmenv's own internal `tracing` log messages get the same control-character escaping now, for the same reason. See [Finding a session later](https://phaedrus1992.github.io/llmenv/docs/configuration#finding-a-session-later) (#1911)
-- The forward-merge cascade now retries once a blocking `forward-merge/<source>-to-<target>` PR clears, instead of leaving every commit that piled up on the source branch during the wait un-propagated forever, and every cascade trigger now serializes on one shared lock instead of racing on `main`. Only affects the release automation, not the shipped binary. (#1912)
-- A `forward-merge/<source>-to-<target>` branch already existing (e.g. still waiting on required checks) halted the cascade forever instead of ever picking up new commits, even after the retry fix above. The cascade now merges the new commits onto that branch's existing tip and pushes (never force), so the already-open PR updates in place instead of going stale. Only affects the release automation, not the shipped binary. (#2220)
 - Scope-context memory now stores only the tags/bundles/project fields ICM needs, instead of the same record's byte-identical instruction paragraph every project's SessionEnd store repeated. The instruction text is still injected once via SessionStart, so agents see it the same as before — recalling scope context across several projects no longer pays for that paragraph once per project, on every turn. (#1792)
 - Disabling or removing a plugin now purges a self-registered hook it wrote into `settings.json`, instead of leaving it behind forever (still firing on every `SessionStart`). Only covers a hook traceable back to that plugin's own resolved install directory — a hook a plugin registers somewhere else entirely is a known, tracked gap (#1932). See [Materialize](https://phaedrus1992.github.io/llmenv/docs/concepts#materialize). (#1793)
-
-### Security
-
-- Pin `lodash-es`, `serialize-javascript` and `uuid` to patched versions in the docs site's npm overrides, clearing the open `npm audit` and Dependabot findings. The site's dependencies do not ship in the binary.
 
 ## [3.11.1] - 2026-08-25
 

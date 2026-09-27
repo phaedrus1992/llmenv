@@ -40,3 +40,5 @@ permissions:
     - Read(./.env)
     - "WebFetch(domain:internal.example.com)"
     - "WebFetch(domain:other.example.com)"
+syncClaudeAiPlugins: false
+syncClaudeAiSkills: false
