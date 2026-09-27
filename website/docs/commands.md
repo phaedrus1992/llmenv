@@ -260,17 +260,28 @@ Engine-neutral lifecycle hooks that inject ICM memory context over MCP and
 drive [`session_log:`](configuration.md#session_log). Invoked by the agent
 runtime (not by users directly).
 
-Lifecycle/memory events (`session_start`, `session_end` are auto-registered by
-the Claude Code adapter; `turn_start` is not yet wired in, see
-[#499](https://github.com/phaedrus1992/llmenv/issues/499)):
+Lifecycle/memory events (`session_start` and `session_end` are always registered
+by the Claude Code adapter; `turn_start` and the adaptive recall events need a
+memory backend):
 
-- `session_start` — injects the session wake-up pack (`icm_wake_up`); also
+- `session_start` — injects the session wake-up pack (`icm_wake_up`); with
+  `adaptive_recall` (added in v3.12.0), also injects the scope-tagged memories
+  and resets the per-session recall state after a compaction or `/clear`; also
   creates the correlated ICM transcript session and emits the baseline
-  `lifecycle_start` + scope-header session-log events
-- `turn_start` — injects recalled context (`icm_memory_recall`): a project-scoped
-  recall for the active tags, plus one project-unfiltered recall per active tag
-  keyed on `llmenv-tag:<tag>` and one per active bundle keyed on
-  `llmenv-bundle:<bundle>`, so tag and bundle memory crosses project boundaries
+  `lifecycle_start` + scope-header session-log events. Before v3.12.0, Claude
+  Code fetched the wake-up pack but never showed it to the model.
+- `turn_start` — with `adaptive_recall` (changed in v3.12.0), injects memories
+  that match the prompt and recent session activity, plus related topics, and
+  skips memories already sent in this context; without it, injects the
+  scope-tagged recall on every prompt: a project-scoped recall for the active
+  tags, plus one project-unfiltered recall per active tag keyed on
+  `llmenv-tag:<tag>` and one per active bundle keyed on `llmenv-bundle:<bundle>`
+- `post_tool_batch` (added in v3.12.0) — records the tools, files, and commands
+  of a batch in the per-session recall state; no output
+- `post_tool_use_failure` (added in v3.12.0) — records the error and injects
+  memories about it
+- `subagent_start` (added in v3.12.0) — injects memories that match the
+  subagent's task, which a `pre_tool_use` hook on the `Agent` tool records
 - `session_end` — best-effort store of the active scope context
   (`icm_memory_store`); also emits the baseline `lifecycle_end` session-log event
 
@@ -658,10 +669,12 @@ active context (active bundles, active MCP servers, etc.). Checks:
   network scope whose `match` has no `gateway_mac` (added in v3.8.0) — only
   `gateway_mac` is evaluated today, so `ssid`/`cidr` alone can never match
 - lifecycle hooks (added in v3.11.0) — lists which lifecycle events
-  (`session_start`, `session_end`, `turn_start`, `stop`) are wired for
+  (`session_start`, `session_end`, `turn_start`, `post_tool_batch`,
+  `post_tool_use_failure`, `subagent_start`, `stop`) are wired for
   `claude_code` in the active scope, and for any that aren't, what would enable
-  them. `session_start`/`session_end` are always registered; `turn_start` needs
-  a memory backend; `stop` needs session logging or `features.task_tracker`.
+  them. `session_start`/`session_end` are always registered; `turn_start` and
+  the three adaptive recall events (added in v3.12.0) need a memory backend;
+  `stop` needs session logging or `features.task_tracker`.
   `turn_start`'s gate is read straight from the generator; the others are
   derived separately and held in step by a test that renders `settings.json`
   for each combination and fails if the report disagrees.

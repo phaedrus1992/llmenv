@@ -20,9 +20,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- ICM recall now adapts to the session instead of sending the same memory block on every prompt. Each memory goes out once per context (again after a compaction or `/clear`), and each prompt pulls memories that match what you're asking and what the session just touched, plus related topics; a failed tool call gets memories about that error, and a new subagent gets memories for its task. On by default; set `features.memory[].adaptive_recall: false` to get the old behavior. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#featuresmemory) (#2249)
+
 ### Changed
 
 - The Claude Code adapter now disables claude.ai account skill and plugin sync by default (`syncClaudeAiSkills`/`syncClaudeAiPlugins: false`). Since Claude Code 2.1.275, a signed-in session downloads the skills and plugins enabled on that account and loads them into every scope, going around llmenv's own scope rules. Set `native.claude_code.syncClaudeAiSkills: true` (and the plugins equivalent) to opt back in; on the first render after upgrade, Claude Code moves already-synced items into `skills/.trash/`/`plugins/.trash/` rather than deleting them. See [What the Claude Code adapter emits](https://phaedrus1992.github.io/llmenv/docs/engines#what-the-claude-code-adapter-emits) (#2146)
+
+### Fixed
+
+- The session-start wake-up pack now reaches the model in Claude Code. llmenv fetched it from ICM at every session start and then threw it away, because the output for `SessionStart` was suppressed along with `SessionEnd` (#2251)
 
 ## [3.11.2] - 2026-09-27
 
