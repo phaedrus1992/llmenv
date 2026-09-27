@@ -890,6 +890,7 @@ fn read_claude_json(path: &Path) -> anyhow::Result<serde_json::Value> {
 /// Returns a tuple of (mode, reason). The mode is a string value from
 /// `permissions.defaultMode` or a built-in default; the reason explains which
 /// rule applied.
+#[allow(dead_code)]
 pub(crate) fn starting_permission_mode(settings: &serde_json::Value) -> (String, &'static str) {
     if let Some(serde_json::Value::String(mode)) = settings
         .get("permissions")
