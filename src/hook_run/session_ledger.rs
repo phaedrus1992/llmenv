@@ -536,6 +536,35 @@ mod tests {
     }
 
     #[test]
+    fn a_full_agent_map_evicts_only_for_a_new_agent() {
+        let mut l = Ledger::default();
+        for i in 0..MAX_AGENTS {
+            l.mark_sent(&format!("agent-{i:03}"), ["h".to_string()]);
+        }
+        assert_eq!(l.agents.len(), MAX_AGENTS, "no eviction below the cap");
+        l.mark_sent("agent-000", ["h2".to_string()]);
+        assert_eq!(l.agents.len(), MAX_AGENTS);
+        assert!(
+            (0..MAX_AGENTS).all(|i| l.knows_agent(&format!("agent-{i:03}"))),
+            "an existing agent's write evicts nobody"
+        );
+    }
+
+    #[test]
+    fn activity_since_needs_strictly_newer_activity() {
+        let mut l = Ledger::default();
+        assert!(!l.activity_since(0), "no activity");
+        l.push_activity(Activity {
+            tool: "Read".to_string(),
+            target: None,
+            at: 100,
+        });
+        assert!(l.activity_since(99));
+        assert!(!l.activity_since(100), "same second is not newer");
+        assert!(!l.activity_since(101));
+    }
+
+    #[test]
     fn sent_sets_are_kept_per_agent() {
         let mut l = Ledger::default();
         l.mark_sent("agent-1", ["h".to_string()]);

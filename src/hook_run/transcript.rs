@@ -198,6 +198,21 @@ mod tests {
     }
 
     #[test]
+    fn the_tail_read_spans_more_than_a_few_kilobytes() {
+        let filler = serde_json::json!({"message": {"role": "user",
+            "content": [{"type": "tool_result", "content": "x".repeat(20_000)}]}});
+        let file = transcript(&[
+            serde_json::json!({"message": {"role": "assistant",
+                "content": [{"type": "text", "text": "before the filler"}]}}),
+            filler,
+        ]);
+        assert_eq!(
+            last_assistant_text(file.path(), 40).as_deref(),
+            Some("before the filler")
+        );
+    }
+
+    #[test]
     fn last_assistant_text_returns_the_newest_visible_text_capped() {
         let assistant = |content: serde_json::Value| serde_json::json!({"message": {"role": "assistant", "content": content}});
         let file = transcript(&[

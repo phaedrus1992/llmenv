@@ -257,6 +257,39 @@ mod tests {
     }
 
     #[test]
+    fn activity_terms_drop_empty_generic_and_repeated_targets() {
+        let ring: VecDeque<_> = [
+            act("Bash", Some(""), 1),
+            act("Bash", Some("src"), 2),
+            act("Bash", Some("cargo"), 3),
+            act("Bash", Some("cargo"), 4),
+        ]
+        .into();
+        assert_eq!(activity_terms(&ring), ["cargo"]);
+    }
+
+    #[test]
+    fn a_target_without_a_slash_is_kept_whole() {
+        let ring: VecDeque<_> = [act("Bash", Some("Cargo.toml"), 1)].into();
+        assert_eq!(activity_terms(&ring), ["Cargo.toml"]);
+    }
+
+    #[test]
+    fn an_error_from_the_last_turn_second_is_not_fresh() {
+        let activity = VecDeque::new();
+        let errors: VecDeque<_> = [ToolError {
+            tool: "Bash".into(),
+            head: "old failure".into(),
+            at: 10,
+        }]
+        .into();
+        let query = turn_query(&signals("p", &activity, &errors, 10, None));
+        assert!(!query.contains("old failure"), "{query}");
+        let query = turn_query(&signals("p", &activity, &errors, 9, None));
+        assert!(query.contains("old failure"), "{query}");
+    }
+
+    #[test]
     fn turn_query_combines_prompt_terms_new_error_and_tail() {
         let activity: VecDeque<_> = [act("Bash", Some("git"), 5)].into();
         let errors: VecDeque<_> = [ToolError {
