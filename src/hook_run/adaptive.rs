@@ -12,7 +12,8 @@ use crate::hook_run::action::{Action, RecallQuery, split_recall_records};
 use crate::hook_run::mcp_client::McpHttpClient;
 use crate::hook_run::recall::{RECALL_BUDGET_BYTES, RecallBudget};
 use crate::hook_run::relevance::{self, TurnSignals};
-use crate::hook_run::session_ledger::{LedgerStore, MAIN_AGENT, record_hash, unix_now};
+use crate::hook_run::session_ledger::{LedgerStore, MAIN_AGENT, record_hash};
+use crate::hook_run::session_state::unix_now;
 use crate::hook_run::transcript;
 
 const FAILURE_BUDGET_BYTES: usize = 2_000;
