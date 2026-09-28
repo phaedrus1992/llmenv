@@ -12,7 +12,7 @@ use crate::git::secure_git;
 
 /// The repository name at the end of a git remote URL: HTTPS, `user@host:path`,
 /// or an SSH alias such as `alias:owner/repo.git`.
-pub(crate) fn repo_name_from_url(url: &str) -> Option<String> {
+fn repo_name_from_url(url: &str) -> Option<String> {
     let trimmed = url.trim_end_matches('/');
     let last_segment = trimmed.rsplit(['/', ':']).next().unwrap_or(trimmed);
     let name = last_segment.strip_suffix(".git").unwrap_or(last_segment);

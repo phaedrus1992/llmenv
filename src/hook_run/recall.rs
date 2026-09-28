@@ -231,7 +231,7 @@ where
 ///
 /// # Errors
 /// Returns the first error from `run`.
-pub(super) async fn run_with_budget_filtered<F, Fut>(
+async fn run_with_budget_filtered<F, Fut>(
     actions: Vec<Action>,
     mut budget: RecallBudget,
     mut run: F,
