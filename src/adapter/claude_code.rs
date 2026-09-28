@@ -89,6 +89,12 @@ pub(crate) fn lifecycle_hook_registrations(
     manifest: &MergedManifest,
 ) -> Vec<(&'static str, bool, &'static str)> {
     let icm_active = manifest.mcps.iter().any(|m| m.name == MEMORY_MCP_NAME);
+    // #2249: the adaptive recall hooks are the ones `adaptive_recall: false` turns
+    // off; an ICM entry without resolved settings uses the default, which is on.
+    let adaptive_recall = manifest
+        .mcps
+        .iter()
+        .any(|m| m.name == MEMORY_MCP_NAME && m.memory_hook.is_none_or(|h| h.adaptive_recall));
     let session_log = manifest.session_log.any_sink_enabled();
     let task_tracker = manifest
         .capabilities
@@ -114,12 +120,35 @@ pub(crate) fn lifecycle_hook_registrations(
             "needs a memory backend (features.memory)",
         ),
         (
+            "post_tool_batch",
+            adaptive_recall,
+            "needs a memory backend with adaptive_recall on (features.memory)",
+        ),
+        (
+            "post_tool_use_failure",
+            adaptive_recall,
+            "needs a memory backend with adaptive_recall on (features.memory)",
+        ),
+        (
+            "subagent_start",
+            adaptive_recall,
+            "needs a memory backend with adaptive_recall on (features.memory)",
+        ),
+        (
             "stop",
             session_log || task_tracker || slippage_critique,
             "needs session logging, features.task_tracker, or slippage self_critique",
         ),
     ]
 }
+
+/// `(engine-neutral event, native Claude event)` pairs registered for adaptive
+/// ICM recall (#2249) when a memory backend is active.
+const ADAPTIVE_RECALL_HOOK_EVENTS: &[(&str, &str)] = &[
+    ("post_tool_batch", "PostToolBatch"),
+    ("post_tool_use_failure", "PostToolUseFailure"),
+    ("subagent_start", "SubagentStart"),
+];
 
 /// `(engine-neutral event, native Claude event)` pairs registered when any
 /// session-log sink is enabled — per-hook prompt/tool-use capture (#382).
@@ -266,6 +295,9 @@ const CLAUDE_CODE_HOOK_EVENTS: &[&str] = &[
     "Stop",
     "SubagentStop",
     "PreCompact",
+    "PostToolBatch",
+    "PostToolUseFailure",
+    "SubagentStart",
 ];
 
 impl AgentAdapter for ClaudeCodeAdapter {
@@ -550,6 +582,17 @@ impl AgentAdapter for ClaudeCodeAdapter {
     }
 
     fn emit_hook_context(&self, hook_event_name: &str, text: &str) -> String {
+        // Claude Code accepts additionalContext on SessionStart (#2251). The shared
+        // helper suppresses it, because the other engines are not verified.
+        if hook_event_name == "SessionStart" && !text.trim().is_empty() {
+            return serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": hook_event_name,
+                    "additionalContext": format!("{}\n{text}", super::MEMORY_CONTEXT_HEADER),
+                }
+            })
+            .to_string();
+        }
         super::emit_hook_context(hook_event_name, text)
     }
 }
@@ -1567,6 +1610,34 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             .or_default()
             .push(json!({
                 "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} turn_start") }],
+            }));
+    }
+
+    // #2249: adaptive recall records tool activity, injects on failures and subagent
+    // starts, and queues subagent tasks. Same gate as turn_start: each hook fires often.
+    let registered = lifecycle_hook_registrations(manifest);
+    let is_on = |name: &str| {
+        registered
+            .iter()
+            .any(|(event, on, _)| *event == name && *on)
+    };
+    for (neutral_event, native_event) in ADAPTIVE_RECALL_HOOK_EVENTS {
+        if is_on(neutral_event) {
+            hooks_by_event
+                .entry((*native_event).to_string())
+                .or_default()
+                .push(json!({
+                    "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} {neutral_event}") }],
+                }));
+        }
+    }
+    if is_on("subagent_start") {
+        hooks_by_event
+            .entry("PreToolUse".to_string())
+            .or_default()
+            .push(json!({
+                "matcher": "^Agent$",
+                "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} subagent_task") }],
             }));
     }
 
@@ -3588,7 +3659,7 @@ mod tests {
                 timeout: None,
                 disabled_tools: vec![],
                 mcp_permissions: None,
-                wakeup_max_tokens: None,
+                memory_hook: None,
             }],
             ..Default::default()
         }
@@ -3673,6 +3744,92 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_recall_hooks_register_only_with_a_memory_backend() {
+        // #2249: the adaptive recall hooks fire on every tool batch, failure, and
+        // subagent start, so they share turn_start's memory-backend gate.
+        let manifest = crate::merge::MergedManifest {
+            mcps: vec![crate::mcp::resolve::ResolvedMcp {
+                name: crate::mcp::resolve::MEMORY_MCP_NAME.to_string(),
+                kind: crate::mcp::resolve::ResolvedKind::Remote {
+                    url: "http://localhost:9999".into(),
+                    transport: crate::config::McpTransport::Http,
+                },
+                headers: Default::default(),
+                timeout: None,
+                disabled_tools: vec![],
+                mcp_permissions: None,
+                memory_hook: None,
+            }],
+            ..Default::default()
+        };
+        let settings = render_settings_for_test(&manifest);
+        for (event, neutral) in [
+            ("PostToolBatch", "post_tool_batch"),
+            ("PostToolUseFailure", "post_tool_use_failure"),
+            ("SubagentStart", "subagent_start"),
+        ] {
+            assert_eq!(
+                hook_commands_for(&settings, event),
+                [format!("{HOOK_RUN_COMMAND} {neutral}")],
+                "{event}"
+            );
+        }
+        let agent_matcher = settings["hooks"]["PreToolUse"]
+            .as_array()
+            .expect("PreToolUse hooks")
+            .iter()
+            .any(|entry| {
+                entry["matcher"] == "^Agent$"
+                    && entry["hooks"][0]["command"] == format!("{HOOK_RUN_COMMAND} subagent_task")
+            });
+        assert!(
+            agent_matcher,
+            "PreToolUse must queue Agent tasks via subagent_task"
+        );
+
+        let bare = render_settings_for_test(&crate::merge::MergedManifest::default());
+        for event in ["PostToolBatch", "PostToolUseFailure", "SubagentStart"] {
+            assert!(hook_commands_for(&bare, event).is_empty(), "{event}");
+        }
+    }
+
+    #[test]
+    fn adaptive_recall_false_registers_no_adaptive_hooks() {
+        // #2249: the rollback flag must also stop the per-tool ledger writes.
+        let manifest = crate::merge::MergedManifest {
+            mcps: vec![crate::mcp::resolve::ResolvedMcp {
+                name: crate::mcp::resolve::MEMORY_MCP_NAME.to_string(),
+                kind: crate::mcp::resolve::ResolvedKind::Remote {
+                    url: "http://localhost:9999".into(),
+                    transport: crate::config::McpTransport::Http,
+                },
+                headers: Default::default(),
+                timeout: None,
+                disabled_tools: vec![],
+                mcp_permissions: None,
+                memory_hook: Some(crate::mcp::resolve::MemoryHookSettings {
+                    wakeup_max_tokens: None,
+                    adaptive_recall: false,
+                }),
+            }],
+            ..Default::default()
+        };
+        let settings = render_settings_for_test(&manifest);
+        for event in ["PostToolBatch", "PostToolUseFailure", "SubagentStart"] {
+            assert!(hook_commands_for(&settings, event).is_empty(), "{event}");
+        }
+        assert!(
+            !hook_commands_for(&settings, "PreToolUse")
+                .contains(&format!("{HOOK_RUN_COMMAND} subagent_task"))
+        );
+        assert!(
+            hook_commands_for(&settings, "UserPromptSubmit")
+                .contains(&format!("{HOOK_RUN_COMMAND} turn_start")),
+            "stateless recall still runs"
+        );
+    }
+
+    #[test]
     fn turn_start_wired_when_memory_backend_active() {
         // #499: UserPromptSubmit gets the turn_start hook-run command only when
         // a memory backend (the `icm` MCP) resolved for this scope — reuses the
@@ -3688,7 +3845,7 @@ mod tests {
                 timeout: None,
                 disabled_tools: vec![],
                 mcp_permissions: None,
-                wakeup_max_tokens: None,
+                memory_hook: None,
             }],
             ..Default::default()
         };
@@ -3841,7 +3998,7 @@ mod tests {
                 timeout: None,
                 disabled_tools: vec![],
                 mcp_permissions: None,
-                wakeup_max_tokens: None,
+                memory_hook: None,
             }],
             ..Default::default()
         };
@@ -3886,7 +4043,7 @@ mod tests {
                 timeout: None,
                 disabled_tools: vec![],
                 mcp_permissions: None,
-                wakeup_max_tokens: None,
+                memory_hook: None,
             }],
             ..Default::default()
         };
@@ -3939,7 +4096,7 @@ mod tests {
                     mutation: Some(crate::config::McpPermissionAction::Ask),
                     destructive: None,
                 }),
-                wakeup_max_tokens: None,
+                memory_hook: None,
             }],
             ..Default::default()
         };
@@ -4168,6 +4325,7 @@ mod tests {
                 destructive: Some(crate::config::McpPermissionAction::Deny),
             }),
             wakeup_max_tokens: None,
+            adaptive_recall: true,
         };
         let active_tags = std::collections::BTreeSet::from(["home".to_string()]);
         let resolved = crate::mcp::resolve::resolve_mcps(&[], &[memory], &host, &active_tags)
@@ -5196,7 +5354,7 @@ mod tests {
             timeout: None,
             disabled_tools: vec![],
             mcp_permissions: None,
-            wakeup_max_tokens: None,
+            memory_hook: None,
         }
     }
 
@@ -5211,7 +5369,7 @@ mod tests {
             timeout: None,
             disabled_tools: vec![],
             mcp_permissions: None,
-            wakeup_max_tokens: None,
+            memory_hook: None,
         }
     }
 
@@ -5392,7 +5550,7 @@ mod tests {
             timeout: None,
             disabled_tools: vec![],
             mcp_permissions: None,
-            wakeup_max_tokens: None,
+            memory_hook: None,
         };
         let native: serde_yaml::Value =
             serde_yaml::from_str("mcpServers:\n  icm:\n    env: null\n").unwrap();
@@ -6399,7 +6557,7 @@ mod tests {
                         timeout: None,
                         disabled_tools: vec![],
                         mcp_permissions: None,
-                        wakeup_max_tokens: None,
+                        memory_hook: None,
                     }],
                     ..Default::default()
                 },
@@ -7018,12 +7176,40 @@ mod tests {
     }
 
     #[test]
-    fn emit_hook_context_store_only_events_return_empty_string() {
-        // Store-only events (SessionStart, SessionEnd) have no model turn to inject
-        // context into. Should return empty per Claude Code schema (no additionalContext).
-        let adapter = ClaudeCodeAdapter;
-        assert_eq!(adapter.emit_hook_context("SessionEnd", "data"), "");
-        assert_eq!(adapter.emit_hook_context("SessionStart", "data"), "");
+    fn emit_hook_context_session_end_returns_empty_string() {
+        // SessionEnd has no model turn to inject context into, and its schema
+        // rejects additionalContext (#558).
+        assert_eq!(
+            ClaudeCodeAdapter.emit_hook_context("SessionEnd", "data"),
+            ""
+        );
+    }
+
+    #[test]
+    fn emit_hook_context_session_start_injects_for_claude_code() {
+        // #2251: Claude Code accepts additionalContext on SessionStart; the shared
+        // suppression came from #558, which was about SessionEnd only.
+        let output = ClaudeCodeAdapter.emit_hook_context("SessionStart", "wake data");
+        let parsed: serde_json::Value = serde_json::from_str(&output).expect("must be valid JSON");
+        assert_eq!(
+            parsed["hookSpecificOutput"]["hookEventName"],
+            "SessionStart"
+        );
+        assert!(
+            parsed["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .expect("must have additionalContext")
+                .contains("wake data")
+        );
+        assert_eq!(
+            ClaudeCodeAdapter.emit_hook_context("SessionStart", "  "),
+            ""
+        );
+        assert_eq!(
+            super::super::emit_hook_context("SessionStart", "x"),
+            "",
+            "shared path unchanged"
+        );
     }
 
     #[test]

@@ -1591,6 +1591,7 @@ mod tests {
                 consolidation: None,
                 mcp_permissions: None,
                 wakeup_max_tokens: None,
+                adaptive_recall: true,
             }],
             ..Default::default()
         });
@@ -1628,6 +1629,7 @@ mod tests {
                 consolidation: None,
                 mcp_permissions: None,
                 wakeup_max_tokens: None,
+                adaptive_recall: true,
             }],
             ..Default::default()
         });
@@ -2325,6 +2327,7 @@ mod tests {
                     consolidation: None,
                     mcp_permissions: None,
                     wakeup_max_tokens: None,
+                    adaptive_recall: true,
                 }],
                 ..Features::default()
             }),
@@ -2357,6 +2360,7 @@ mod tests {
                     consolidation: None,
                     mcp_permissions: None,
                     wakeup_max_tokens: None,
+                    adaptive_recall: true,
                 }],
                 ..Features::default()
             }),

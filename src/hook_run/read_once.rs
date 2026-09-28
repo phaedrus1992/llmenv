@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ReadOnce as ReadOnceConfig;
 use crate::config::ReadOnceMode;
+use crate::hook_run::session_state::unix_now;
 
 /// A single tracked file read in the session cache.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -119,14 +120,6 @@ pub fn clear_cache() -> anyhow::Result<()> {
         writeln!(std::io::stdout(), "No read-once cache to clear")?;
     }
     Ok(())
-}
-
-/// Return the current unix timestamp as i64.
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
 }
 
 /// Handle a PreToolUse event for the read-once feature.

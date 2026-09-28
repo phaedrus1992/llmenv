@@ -495,7 +495,7 @@ pub(crate) fn arb_distinct_resolved_mcps()
                     timeout,
                     disabled_tools: vec![],
                     mcp_permissions: None,
-                    wakeup_max_tokens: None,
+                    memory_hook: None,
                 })
                 .collect()
         })

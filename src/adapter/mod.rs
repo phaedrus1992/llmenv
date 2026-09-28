@@ -518,12 +518,16 @@ pub(crate) fn resolve_command_paths_against_files(
     if resolved { Some(result) } else { None }
 }
 
+/// The first line of every injected ICM memory block.
+const MEMORY_CONTEXT_HEADER: &str = "[ICM MEMORY CONTEXT (auto-injected)]";
+
 /// Format injected hook context in the adapter-native hook-output shape.
 ///
-/// Empty input always returns an empty string. Store-only events
-/// (SessionStart, SessionEnd) also return empty — they have no model turn
-/// to inject context into, and all known adapter schemas reject
-/// `additionalContext` in their `hookSpecificOutput` for these events.
+/// Empty input always returns an empty string. `SessionEnd` also returns
+/// empty: it has no model turn to inject context into, and Claude Code
+/// rejects `additionalContext` there (#558). `SessionStart` returns empty
+/// here because the other engines' schemas are not verified; the Claude
+/// Code adapter overrides it, since Claude Code accepts it (#2251).
 ///
 /// This is the shared implementation behind every adapter's
 /// [`AgentAdapter::emit_hook_context`], replacing the three copies that
@@ -541,13 +545,12 @@ pub(crate) fn emit_hook_context(hook_event_name: &str, text: &str) -> String {
     if text.trim().is_empty() {
         return String::new();
     }
-    // Store-only events (SessionStart, SessionEnd) have no model turn to inject
-    // context into, and most adapters' hook schemas reject additionalContext in
-    // hookSpecificOutput. Return empty so these events emit no output. (#558)
+    // SessionEnd rejects additionalContext (#558). SessionStart is not verified for
+    // the other engines; the Claude Code adapter handles it itself (#2251).
     if matches!(hook_event_name, "SessionStart" | "SessionEnd") {
         return String::new();
     }
-    let wrapped = format!("[ICM MEMORY CONTEXT (auto-injected)]\n{text}");
+    let wrapped = format!("{MEMORY_CONTEXT_HEADER}\n{text}");
     serde_json::json!({
         "hookSpecificOutput": {
             "hookEventName": hook_event_name,

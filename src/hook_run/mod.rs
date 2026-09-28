@@ -7,14 +7,18 @@
 //! path and must never block it.
 
 pub(crate) mod action;
+mod adaptive;
 pub(crate) mod cbm_index_guard;
 pub(crate) mod cd_guard;
 pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
 pub(crate) mod mcp_client;
+mod project;
 pub(crate) mod read_once;
 mod recall;
+mod relevance;
 pub(crate) mod repeat_detect;
+mod session_ledger;
 mod session_state;
 pub(crate) mod slippage;
 pub(crate) mod task_tools;
@@ -35,8 +39,9 @@ use serde_json::json;
 use tracing::{debug, error, warn};
 
 use crate::config::SessionLog;
+use crate::hook_run::action::WakeUpArgs;
 use crate::mcp::resolve::MEMORY_MCP_NAME;
-use crate::mcp::resolve::{ResolvedKind, resolve_mcps};
+use crate::mcp::resolve::{MemoryHookSettings, ResolvedKind, resolve_mcps};
 use crate::session_log::dispatch as transcript_dispatch;
 use crate::session_log::event::{EventKind, EventScope, SessionLogEvent, now_rfc3339};
 use crate::session_log::{ScopeContext, scope_header_content, scope_metadata_json, state};
@@ -171,6 +176,15 @@ pub enum HookEvent {
     SubagentStop,
     /// About to compact the transcript (Claude Code: `PreCompact`).
     PreCompact,
+    /// A batch of tool calls resolved (Claude Code: `PostToolBatch`).
+    PostToolBatch,
+    /// A tool call failed (Claude Code: `PostToolUseFailure`).
+    PostToolUseFailure,
+    /// A subagent is spawned or resumed (Claude Code: `SubagentStart`).
+    SubagentStart,
+    /// An `Agent` tool call is about to run (Claude Code: `PreToolUse` with the
+    /// `^Agent$` matcher); queues the subagent task for adaptive recall (#2249).
+    SubagentTask,
 }
 
 impl FromStr for HookEvent {
@@ -188,10 +202,15 @@ impl FromStr for HookEvent {
             "stop" => Ok(HookEvent::Stop),
             "subagent_stop" => Ok(HookEvent::SubagentStop),
             "pre_compact" => Ok(HookEvent::PreCompact),
+            "post_tool_batch" => Ok(HookEvent::PostToolBatch),
+            "post_tool_use_failure" => Ok(HookEvent::PostToolUseFailure),
+            "subagent_start" => Ok(HookEvent::SubagentStart),
+            "subagent_task" => Ok(HookEvent::SubagentTask),
             other => Err(anyhow::anyhow!(
                 "unknown hook event '{other}' (expected session_start|turn_start|session_end|\
                  user_prompt_submit|pre_tool_use|post_tool_use|notification|stop|\
-                 subagent_stop|pre_compact)"
+                 subagent_stop|pre_compact|post_tool_batch|post_tool_use_failure|\
+                 subagent_start|subagent_task)"
             )),
         }
     }
@@ -211,6 +230,10 @@ impl std::fmt::Display for HookEvent {
             HookEvent::SubagentStop => "subagent_stop",
             HookEvent::PreCompact => "pre_compact",
             HookEvent::PostSession => "post_session",
+            HookEvent::PostToolBatch => "post_tool_batch",
+            HookEvent::PostToolUseFailure => "post_tool_use_failure",
+            HookEvent::SubagentStart => "subagent_start",
+            HookEvent::SubagentTask => "subagent_task",
         };
         f.write_str(s)
     }
@@ -219,8 +242,8 @@ impl std::fmt::Display for HookEvent {
 /// The ordered actions to run for an event, given the active tags' and bundles'
 /// recall queries (built by [`tag_recall_queries`] and [`bundle_recall_queries`],
 /// the single sources of tag→recall and bundle→recall expansion), plus the
-/// active memory entry's configured wake-up token budget (#1216, `None` if
-/// unset), threaded straight into `Action::WakeUp` on `SessionStart`.
+/// wake-up arguments (the configured token budget, #1216, and the session's
+/// project, #2249), threaded straight into `Action::WakeUp` on `SessionStart`.
 ///
 /// `TurnStart` runs the most specific recalls first (#2159): every rank-1 tag (project scope
 /// and `$LLMENV_EXTRA_TAGS`), then every active bundle, then the tags of the broader scopes in
@@ -233,22 +256,12 @@ fn dispatch(
     tag_queries: &[TagRecallQuery],
     bundle_queries: &[BundleRecallQuery],
     ranks: &BTreeMap<String, u8>,
-    wakeup_max_tokens: Option<u32>,
+    wake: &WakeUpArgs,
 ) -> Vec<Action> {
     match event {
-        HookEvent::SessionStart => vec![Action::WakeUp(wakeup_max_tokens)],
+        HookEvent::SessionStart => vec![Action::WakeUp(wake.clone())],
         HookEvent::TurnStart => {
-            let rank_of =
-                |q: &TagRecallQuery| ranks.get(&q.tag).copied().unwrap_or(recall::UNSCOPED_RANK);
-            let mut tags: Vec<&TagRecallQuery> = tag_queries.iter().collect();
-            // Stable, so tags of one rank keep the caller's (alphabetical) order.
-            tags.sort_by_key(|q| rank_of(q));
-            let split = tags.partition_point(|q| rank_of(q) <= recall::MOST_SPECIFIC_RANK);
-            let (specific, broader) = tags.split_at(split);
-            let mut actions: Vec<Action> = Vec::new();
-            actions.extend(specific.iter().map(|q| Action::RecallTag((*q).clone())));
-            actions.extend(bundle_queries.iter().cloned().map(Action::RecallBundle));
-            actions.extend(broader.iter().map(|q| Action::RecallTag((*q).clone())));
+            let mut actions = scope_recall_actions(tag_queries, bundle_queries, ranks);
             actions.push(Action::Recall);
             actions
         }
@@ -259,9 +272,33 @@ fn dispatch(
         | HookEvent::Notification
         | HookEvent::Stop
         | HookEvent::SubagentStop
-        | HookEvent::PreCompact => vec![],
+        | HookEvent::PreCompact
+        | HookEvent::PostToolBatch
+        | HookEvent::PostToolUseFailure
+        | HookEvent::SubagentStart
+        | HookEvent::SubagentTask => vec![],
         HookEvent::PostSession => vec![], // consolidation runs as a separate step
     }
+}
+
+/// The scope-tag recalls in specificity order (#2159): rank-1 tags, bundles, then
+/// broader tags.
+fn scope_recall_actions(
+    tag_queries: &[TagRecallQuery],
+    bundle_queries: &[BundleRecallQuery],
+    ranks: &BTreeMap<String, u8>,
+) -> Vec<Action> {
+    let rank_of = |q: &TagRecallQuery| ranks.get(&q.tag).copied().unwrap_or(recall::UNSCOPED_RANK);
+    let mut tags: Vec<&TagRecallQuery> = tag_queries.iter().collect();
+    // Stable, so tags of one rank keep the caller's (alphabetical) order.
+    tags.sort_by_key(|q| rank_of(q));
+    let split = tags.partition_point(|q| rank_of(q) <= recall::MOST_SPECIFIC_RANK);
+    let (specific, broader) = tags.split_at(split);
+    let mut actions: Vec<Action> = Vec::new();
+    actions.extend(specific.iter().map(|q| Action::RecallTag((*q).clone())));
+    actions.extend(bundle_queries.iter().cloned().map(Action::RecallBundle));
+    actions.extend(broader.iter().map(|q| Action::RecallTag((*q).clone())));
+    actions
 }
 
 /// Whether the previously-stored dedup snapshot (R3) matches the chunk about
@@ -302,6 +339,10 @@ fn event_to_log_kind(event: HookEvent) -> Option<(EventKind, &'static str)> {
         HookEvent::PreCompact => Some((EventKind::Notification, "system")),
         HookEvent::SessionStart | HookEvent::TurnStart | HookEvent::SessionEnd => None,
         HookEvent::PostSession => None, // consolidation runs as a separate step
+        HookEvent::PostToolBatch
+        | HookEvent::PostToolUseFailure
+        | HookEvent::SubagentStart
+        | HookEvent::SubagentTask => None,
     }
 }
 
@@ -343,7 +384,11 @@ fn event_content(event: HookEvent, payload: &serde_json::Value) -> (Option<Strin
         HookEvent::SessionStart
         | HookEvent::TurnStart
         | HookEvent::SessionEnd
-        | HookEvent::PostSession => (None, String::new()),
+        | HookEvent::PostSession
+        | HookEvent::PostToolBatch
+        | HookEvent::PostToolUseFailure
+        | HookEvent::SubagentStart
+        | HookEvent::SubagentTask => (None, String::new()),
     }
 }
 
@@ -410,6 +455,98 @@ fn blocks_by_exit_code(engine: &str) -> bool {
 fn can_short_circuit(event: HookEvent, log_cfg: &crate::config::SessionLog) -> bool {
     let level = event_to_log_kind(event).map_or(LogLevel::Debug, |(kind, _)| kind.log_level());
     !log_cfg.any_sink_wants(level)
+}
+
+/// The session's working directory: the hook payload's `cwd`, else the process cwd.
+fn hook_cwd(payload: &serde_json::Value, fallback: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(payload["cwd"].as_str().unwrap_or(fallback))
+}
+
+/// The `icm_wake_up` arguments for `event`. The project lookup runs git, so only
+/// `SessionStart`, the one event that wakes up, pays for it.
+fn wake_args(
+    event: HookEvent,
+    settings: Option<MemoryHookSettings>,
+    payload: &serde_json::Value,
+    cwd: &str,
+) -> WakeUpArgs {
+    WakeUpArgs {
+        max_tokens: settings.and_then(|s| s.wakeup_max_tokens),
+        project: (event == HookEvent::SessionStart)
+            .then(|| project::session_project(&hook_cwd(payload, cwd)))
+            .flatten(),
+    }
+}
+
+/// Whether `event` writes to the recall ledger without any MCP call (#2249).
+fn records_locally(event: HookEvent) -> bool {
+    matches!(event, HookEvent::PostToolBatch | HookEvent::SubagentTask)
+}
+
+/// Whether `event` takes the adaptive recall flow instead of the stateless actions.
+/// An unsafe `session_id` cannot key a ledger file, so it takes the stateless actions.
+fn uses_adaptive(
+    event: HookEvent,
+    settings: Option<MemoryHookSettings>,
+    session_id: Option<&str>,
+) -> bool {
+    settings.is_some_and(|s| s.adaptive_recall)
+        && session_id.is_some_and(crate::paths::is_valid_short_name)
+        && matches!(
+            event,
+            HookEvent::SessionStart
+                | HookEvent::TurnStart
+                | HookEvent::PostToolUseFailure
+                | HookEvent::SubagentStart
+        )
+}
+
+/// The inputs of [`run_event_memory`], grouped to stay under the positional
+/// parameter limit.
+struct MemoryCall<'a> {
+    event: HookEvent,
+    client: &'a McpHttpClient,
+    settings: Option<MemoryHookSettings>,
+    session_id: Option<&'a str>,
+    state_dir: Option<std::path::PathBuf>,
+    payload: &'a serde_json::Value,
+    actions: Vec<Action>,
+    scope: Vec<Action>,
+    wake: WakeUpArgs,
+    query: &'a str,
+    store_content: &'a str,
+}
+
+/// Run the event's memory work: the adaptive flow when it applies, else the
+/// stateless actions. A missing state dir degrades to the stateless actions.
+async fn run_event_memory(call: MemoryCall<'_>) -> anyhow::Result<String> {
+    let Some(session_id) = call.session_id else {
+        return run_memory_actions(call.client, call.actions, call.query, call.store_content).await;
+    };
+    // A separate bind keeps the session id out of the state dir path's data flow,
+    // which CodeQL tracks through a tuple (rust/cleartext-logging).
+    let Some(state_dir) = call.state_dir.as_deref() else {
+        return run_memory_actions(call.client, call.actions, call.query, call.store_content).await;
+    };
+    if !uses_adaptive(call.event, call.settings, Some(session_id)) {
+        return run_memory_actions(call.client, call.actions, call.query, call.store_content).await;
+    }
+    let store = session_ledger::LedgerStore::new(state_dir);
+    let ctx = adaptive::AdaptiveCtx {
+        client: call.client,
+        store: &store,
+        session_id,
+        payload: call.payload,
+    };
+    match call.event {
+        HookEvent::SessionStart => {
+            adaptive::session_start(&ctx, Action::WakeUp(call.wake), call.scope).await
+        }
+        HookEvent::TurnStart => adaptive::turn_start(&ctx, call.scope).await,
+        HookEvent::PostToolUseFailure => adaptive::tool_failure(&ctx).await,
+        HookEvent::SubagentStart => adaptive::subagent_start(&ctx).await,
+        _ => run_memory_actions(call.client, call.actions, call.query, call.store_content).await,
+    }
 }
 
 /// Whether `event` is the one that records a completed tool call for the
@@ -937,6 +1074,23 @@ fn run_inner(
     // short-circuit, or enabling any of them would silently drop Debug-level
     // session logging for every PreToolUse event (the #231/#864
     // early-return-drops-logging bug class).
+    // #2249: local ledger writes need no scope or MCP work, so they run before every
+    // early return in this function.
+    if records_locally(event)
+        && let (Some(session_id), Ok(state_dir)) = (
+            claude_session_id,
+            crate::paths::state_dir()
+                .inspect_err(|e| tracing::error!("no state dir, recall ledger skipped: {e}")),
+        )
+    {
+        adaptive::record_local(
+            event,
+            &session_ledger::LedgerStore::new(&state_dir),
+            session_id,
+            stdin_payload,
+        );
+    }
+
     let pre_tool_text = if event == HookEvent::PreToolUse {
         // `state_dir()` is passed in rather than resolved there so its failure
         // stays a degradation instead of an abort — see the doc comment on
@@ -1038,6 +1192,8 @@ fn run_inner(
                 | HookEvent::SessionEnd
                 | HookEvent::PostToolUse
                 | HookEvent::PostSession
+                | HookEvent::PostToolUseFailure
+                | HookEvent::SubagentStart
         ) && !log_cfg.any_sink_enabled()
         {
             emit_trace_timing(t0, t_config, None, None, None);
@@ -1141,7 +1297,8 @@ fn run_inner(
         static MCP_CLIENT_CACHE: OnceLock<Mutex<HashMap<String, McpHttpClient>>> = OnceLock::new();
         let resolved_client =
             resolve_memory_client(&config, config_dir, &active, event, &MCP_CLIENT_CACHE);
-        let wakeup_max_tokens = resolved_client.as_ref().and_then(|r| r.wakeup_max_tokens);
+        let settings = resolved_client.as_ref().map(|r| r.settings);
+        let wake = wake_args(event, settings, stdin_payload, &env.cwd);
         let client = resolved_client.map(|r| r.client);
         let state_path = Some(state::state_path());
         let ctx = build_scope_context(
@@ -1220,16 +1377,27 @@ fn run_inner(
             if let Some(client) = &client
                 && !session_end_unchanged
             {
-                let actions = dispatch(
-                    event,
-                    &tag_queries,
-                    &bundle_queries,
-                    &tag_ranks,
-                    wakeup_max_tokens,
-                );
+                let actions = dispatch(event, &tag_queries, &bundle_queries, &tag_ranks, &wake);
                 // Use minimal chunk for storage to avoid duplication. (#1792)
                 let store_content = store_content_for_event(event, &chunk, &storage_chunk);
-                out = run_memory_actions(client, actions, &query, store_content).await?;
+                out = run_event_memory(MemoryCall {
+                    event,
+                    client,
+                    settings,
+                    session_id: claude_session_id,
+                    state_dir: crate::paths::state_dir()
+                        .inspect_err(|e| {
+                            tracing::error!("no state dir, adaptive recall falls back: {e}");
+                        })
+                        .ok(),
+                    payload: stdin_payload,
+                    actions,
+                    scope: scope_recall_actions(&tag_queries, &bundle_queries, &tag_ranks),
+                    wake: wake.clone(),
+                    query: &query,
+                    store_content,
+                })
+                .await?;
 
                 // PostSession: run reflective consolidation (R5) in a detached
                 // child process so the hook returns immediately instead of
@@ -1685,11 +1853,10 @@ fn recall_bundle_names(active: &crate::scope::ActiveScopes) -> Vec<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MemoryEndpoint {
     /// The memory backend resolved to this HTTP URL, carrying the active
-    /// `features.memory` entry's configured `wakeup_max_tokens` (#1216,
-    /// `None` if unset).
+    /// `features.memory` entry's hook settings (#1216, #2249).
     Active {
         url: String,
-        wakeup_max_tokens: Option<u32>,
+        settings: MemoryHookSettings,
     },
     /// No bundle fired for the active scopes and no top-level `features.memory`
     /// entry matched — nothing could have supplied a backend.
@@ -1751,33 +1918,36 @@ impl MemoryEndpoint {
         }
     }
 
-    /// The active entry's configured wake-up token budget (#1216). `None`
-    /// for every non-[`MemoryEndpoint::Active`] variant, and for `Active`
-    /// itself when `features.memory[].wakeup_max_tokens` is unset.
-    fn wakeup_max_tokens(&self) -> Option<u32> {
+    /// The active entry's hook settings (#1216, #2249). `None` for every
+    /// non-[`MemoryEndpoint::Active`] variant.
+    fn settings(&self) -> Option<MemoryHookSettings> {
         match self {
-            Self::Active {
-                wakeup_max_tokens, ..
-            } => *wakeup_max_tokens,
+            Self::Active { settings, .. } => Some(*settings),
             _ => None,
         }
     }
 
-    /// Consume into `(url, wakeup_max_tokens)`, erroring exactly as
-    /// [`Self::into_url`] — `into_url` itself keeps its existing signature
-    /// since it has several other callers that don't need the token budget.
-    fn into_url_and_wakeup_max_tokens(self) -> anyhow::Result<(String, Option<u32>)> {
-        let wakeup_max_tokens = self.wakeup_max_tokens();
-        Ok((self.into_url()?, wakeup_max_tokens))
+    /// Consume into `(url, settings)`, erroring exactly as [`Self::into_url`] —
+    /// `into_url` itself keeps its existing signature since it has several
+    /// other callers that don't need the settings.
+    fn into_url_and_settings(self) -> anyhow::Result<(String, MemoryHookSettings)> {
+        let settings = self.settings().unwrap_or(DEFAULT_MEMORY_HOOK);
+        Ok((self.into_url()?, settings))
     }
 }
 
+/// The settings of a `features.memory` entry that sets neither hook field.
+const DEFAULT_MEMORY_HOOK: MemoryHookSettings = MemoryHookSettings {
+    wakeup_max_tokens: None,
+    adaptive_recall: true,
+};
+
 /// A resolved memory-backend client plus the active `features.memory`
-/// entry's configured wake-up token budget (#1216) — the two travel
-/// together since both come from the same resolved endpoint.
+/// entry's hook settings (#1216, #2249) — the two travel together since both
+/// come from the same resolved endpoint.
 struct ResolvedMemoryClient {
     client: McpHttpClient,
-    wakeup_max_tokens: Option<u32>,
+    settings: MemoryHookSettings,
 }
 
 /// Resolve (or reuse from `cache`) the MCP client for the active memory
@@ -1796,8 +1966,8 @@ fn resolve_memory_client(
     event: impl std::fmt::Display,
     cache: &'static OnceLock<Mutex<HashMap<String, McpHttpClient>>>,
 ) -> Option<ResolvedMemoryClient> {
-    let (url, wakeup_max_tokens) = match memory_url(config, config_dir, active)
-        .and_then(MemoryEndpoint::into_url_and_wakeup_max_tokens)
+    let (url, settings) = match memory_url(config, config_dir, active)
+        .and_then(MemoryEndpoint::into_url_and_settings)
     {
         Ok(pair) => pair,
         Err(e) => {
@@ -1819,10 +1989,7 @@ fn resolve_memory_client(
             }
         }
     };
-    Some(ResolvedMemoryClient {
-        client,
-        wakeup_max_tokens,
-    })
+    Some(ResolvedMemoryClient { client, settings })
 }
 
 /// Find the resolved memory backend's HTTP URL for the active tags, or the
@@ -1881,15 +2048,13 @@ pub(crate) fn memory_url(
     let resolved = resolve_mcps(&config.mcp, &all_memory, &all_host, &active.tags)
         .map_err(|e| annotate_resolve_error(e, config, config_dir, active))?;
     let matched = resolved.into_iter().find_map(|m| match m.kind {
-        ResolvedKind::Remote { url, .. } if m.name == MEMORY_MCP_NAME => {
-            Some((url, m.wakeup_max_tokens))
-        }
+        ResolvedKind::Remote { url, .. } if m.name == MEMORY_MCP_NAME => Some((url, m.memory_hook)),
         _ => None,
     });
     Ok(match matched {
-        Some((url, wakeup_max_tokens)) => MemoryEndpoint::Active {
+        Some((url, settings)) => MemoryEndpoint::Active {
             url,
-            wakeup_max_tokens,
+            settings: settings.unwrap_or(DEFAULT_MEMORY_HOOK),
         },
         None => classify_missing_memory(
             config,
@@ -2465,7 +2630,79 @@ mod tests {
         "stop",
         "subagent_stop",
         "pre_compact",
+        "post_tool_batch",
+        "post_tool_use_failure",
+        "subagent_start",
+        "subagent_task",
     ];
+
+    #[test]
+    fn adaptive_applies_only_to_its_events_with_a_valid_session() {
+        let on = Some(MemoryHookSettings {
+            wakeup_max_tokens: None,
+            adaptive_recall: true,
+        });
+        let off = Some(MemoryHookSettings {
+            wakeup_max_tokens: None,
+            adaptive_recall: false,
+        });
+        for event in [
+            HookEvent::SessionStart,
+            HookEvent::TurnStart,
+            HookEvent::PostToolUseFailure,
+            HookEvent::SubagentStart,
+        ] {
+            assert!(uses_adaptive(event, on, Some("s1")), "{event}");
+            assert!(!uses_adaptive(event, off, Some("s1")), "{event}");
+            assert!(!uses_adaptive(event, on, None), "{event}");
+            assert!(
+                !uses_adaptive(event, on, Some("../x")),
+                "unsafe id: {event}"
+            );
+        }
+        assert!(!uses_adaptive(HookEvent::SessionEnd, on, Some("s1")));
+    }
+
+    #[test]
+    fn local_recording_events_skip_the_memory_pipeline() {
+        assert!(records_locally(HookEvent::PostToolBatch));
+        assert!(records_locally(HookEvent::SubagentTask));
+        assert!(
+            !records_locally(HookEvent::PreToolUse),
+            "the general PreToolUse hook must not write the ledger"
+        );
+        assert!(!records_locally(HookEvent::TurnStart));
+    }
+
+    #[test]
+    fn scope_recall_actions_is_turn_start_without_the_final_recall() {
+        let tags = tag_recall_queries(&["a".to_string()]).unwrap();
+        let turn = dispatch(
+            HookEvent::TurnStart,
+            &tags,
+            &[],
+            &BTreeMap::new(),
+            &WakeUpArgs::default(),
+        );
+        let scope = scope_recall_actions(&tags, &[], &BTreeMap::new());
+        assert_eq!(turn.last(), Some(&Action::Recall));
+        assert_eq!(scope, turn[..turn.len() - 1]);
+    }
+
+    #[test]
+    fn adaptive_recall_events_round_trip_through_their_names() {
+        for (name, event) in [
+            ("post_tool_batch", HookEvent::PostToolBatch),
+            ("post_tool_use_failure", HookEvent::PostToolUseFailure),
+            ("subagent_start", HookEvent::SubagentStart),
+            ("subagent_task", HookEvent::SubagentTask),
+        ] {
+            assert_eq!(name.parse::<HookEvent>().unwrap(), event);
+            assert_eq!(event.to_string(), name);
+            assert!(dispatch(event, &[], &[], &BTreeMap::new(), &WakeUpArgs::default()).is_empty());
+            assert_eq!(event_to_log_kind(event), None);
+        }
+    }
 
     #[test]
     fn all_hook_events_covers_every_variant() {
@@ -2475,7 +2712,7 @@ mod tests {
         }
         // `HookEvent` derives no variant count, so this guards the list
         // against a variant added to the enum but not to `from_str`.
-        assert_eq!(ALL_HOOK_EVENTS.len(), 11);
+        assert_eq!(ALL_HOOK_EVENTS.len(), 15);
     }
 
     // The gate is fed `AgentAdapter::name` (hyphenated), not `engine_id`
@@ -2817,6 +3054,7 @@ mod tests {
             consolidation: None,
             mcp_permissions: None,
             wakeup_max_tokens: None,
+            adaptive_recall: true,
         }];
         let mut persisted_host = std::collections::BTreeMap::new();
         persisted_host.insert(
@@ -2838,7 +3076,7 @@ mod tests {
             url,
             MemoryEndpoint::Active {
                 url: "http://still.local:7878/mcp".into(),
-                wakeup_max_tokens: None,
+                settings: DEFAULT_MEMORY_HOOK,
             },
             "memory_url must read the persisted merge cache instead of falling \
              back to a live merge of a bundle that declares no memory/host"
@@ -2908,9 +3146,63 @@ mod tests {
             url,
             MemoryEndpoint::Active {
                 url: "http://still.local:7878/mcp".into(),
-                wakeup_max_tokens: None,
+                settings: DEFAULT_MEMORY_HOOK,
             },
             "a key mismatch must fall back to a correct live merge, never the stale cache"
+        );
+    }
+
+    // Static MCPs resolve ahead of the memory backend, so an unnamed match
+    // would hand the hooks another server's URL.
+    #[test]
+    fn memory_url_skips_other_remote_mcps() {
+        let config_root = tempfile::tempdir().expect("test");
+        let bundle_dir = config_root.path().join("bundles").join("b");
+        std::fs::create_dir_all(&bundle_dir).expect("test");
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            concat!(
+                "features:\n",
+                "  memory:\n",
+                "    - server_host: still\n",
+                "      port: 7878\n",
+                "      when: [mytag]\n",
+                "host:\n",
+                "  still:\n",
+                "    addr: still.local\n",
+            ),
+        )
+        .expect("test");
+        let cache_dir = tempfile::tempdir().expect("test");
+        let other: crate::config::McpServer = serde_json::from_value(serde_json::json!({
+            "name": "aaa-remote", "when": ["mytag"], "type": "http",
+            "url": "http://other.invalid/mcp"
+        }))
+        .expect("test");
+        let config = crate::config::Config {
+            bundle: vec![crate::config::Bundle {
+                name: "b".into(),
+                when: vec!["mytag".into()],
+            }],
+            mcp: vec![other],
+            cache: crate::config::Cache {
+                cache_dir: cache_dir.path().to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let active = crate::scope::ActiveScopes {
+            scopes: vec![],
+            tags: std::collections::BTreeSet::from(["mytag".to_string()]),
+            extra_tags: std::collections::BTreeSet::new(),
+        };
+        let url = memory_url(&config, config_root.path(), &active).expect("test");
+        assert_eq!(
+            url,
+            MemoryEndpoint::Active {
+                url: "http://still.local:7878/mcp".into(),
+                settings: DEFAULT_MEMORY_HOOK,
+            }
         );
     }
 
@@ -3158,6 +3450,7 @@ mod tests {
                     consolidation: None,
                     mcp_permissions: None,
                     wakeup_max_tokens: Some(750),
+                    adaptive_recall: true,
                 }],
                 ..Default::default()
             }),
@@ -3170,7 +3463,10 @@ mod tests {
         };
 
         let endpoint = memory_url(&config, config_root.path(), &active).expect("test");
-        assert_eq!(endpoint.wakeup_max_tokens(), Some(750));
+        assert_eq!(
+            endpoint.settings().and_then(|s| s.wakeup_max_tokens),
+            Some(750)
+        );
     }
 
     // #1140: a top-level `features.memory` entry exists but its `when` isn't
@@ -3204,6 +3500,7 @@ mod tests {
                     consolidation: None,
                     mcp_permissions: None,
                     wakeup_max_tokens: None,
+                    adaptive_recall: true,
                 }],
                 ..Default::default()
             }),
@@ -3471,6 +3768,7 @@ mod tests {
                     consolidation: None,
                     mcp_permissions: None,
                     wakeup_max_tokens: None,
+                    adaptive_recall: true,
                 }],
                 ..Default::default()
             }),
@@ -4210,7 +4508,7 @@ mod tests {
             HookEvent::PreCompact,
         ] {
             assert_eq!(
-                dispatch(ev, &[], &[], &BTreeMap::new(), None),
+                dispatch(ev, &[], &[], &BTreeMap::new(), &WakeUpArgs::default()),
                 Vec::<Action>::new()
             );
         }
@@ -4281,19 +4579,43 @@ mod tests {
     #[test]
     fn dispatch_maps_events_to_actions() {
         assert_eq!(
-            dispatch(HookEvent::SessionStart, &[], &[], &BTreeMap::new(), None),
-            vec![Action::WakeUp(None)]
+            dispatch(
+                HookEvent::SessionStart,
+                &[],
+                &[],
+                &BTreeMap::new(),
+                &WakeUpArgs::default()
+            ),
+            vec![Action::WakeUp(WakeUpArgs::default())]
         );
         assert_eq!(
-            dispatch(HookEvent::TurnStart, &[], &[], &BTreeMap::new(), None),
+            dispatch(
+                HookEvent::TurnStart,
+                &[],
+                &[],
+                &BTreeMap::new(),
+                &WakeUpArgs::default()
+            ),
             vec![Action::Recall]
         );
         assert_eq!(
-            dispatch(HookEvent::SessionEnd, &[], &[], &BTreeMap::new(), None),
+            dispatch(
+                HookEvent::SessionEnd,
+                &[],
+                &[],
+                &BTreeMap::new(),
+                &WakeUpArgs::default()
+            ),
             vec![Action::Store]
         );
         assert_eq!(
-            dispatch(HookEvent::PostSession, &[], &[], &BTreeMap::new(), None),
+            dispatch(
+                HookEvent::PostSession,
+                &[],
+                &[],
+                &BTreeMap::new(),
+                &WakeUpArgs::default()
+            ),
             vec![],
             "PostSession defers to consolidation module, no dispatch actions"
         );
@@ -4301,19 +4623,23 @@ mod tests {
 
     #[test]
     fn dispatch_threads_wakeup_max_tokens_into_session_start_only() {
+        let wake_750 = WakeUpArgs {
+            max_tokens: Some(750),
+            project: Some("llmenv".into()),
+        };
         assert_eq!(
             dispatch(
                 HookEvent::SessionStart,
                 &[],
                 &[],
                 &BTreeMap::new(),
-                Some(750)
+                &wake_750
             ),
-            vec![Action::WakeUp(Some(750))]
+            vec![Action::WakeUp(wake_750.clone())]
         );
         // Not carried by any other event's actions — WakeUp only fires on SessionStart.
         assert_eq!(
-            dispatch(HookEvent::TurnStart, &[], &[], &BTreeMap::new(), Some(750)),
+            dispatch(HookEvent::TurnStart, &[], &[], &BTreeMap::new(), &wake_750),
             vec![Action::Recall]
         );
     }
@@ -4384,7 +4710,13 @@ mod tests {
     fn turn_start_expands_one_recall_tag_per_active_tag() {
         let tags = vec!["rust".to_string(), "work-vpn".to_string()];
         let queries = tag_recall_queries(&tags).expect("valid tags");
-        let actions = dispatch(HookEvent::TurnStart, &queries, &[], &BTreeMap::new(), None);
+        let actions = dispatch(
+            HookEvent::TurnStart,
+            &queries,
+            &[],
+            &BTreeMap::new(),
+            &WakeUpArgs::default(),
+        );
         assert_eq!(
             actions,
             vec![
@@ -4406,7 +4738,13 @@ mod tests {
     fn turn_start_expands_one_recall_bundle_per_active_bundle() {
         let bundles = vec!["base".to_string(), "rust-defaults".to_string()];
         let queries = bundle_recall_queries(&bundles).expect("valid bundles");
-        let actions = dispatch(HookEvent::TurnStart, &[], &queries, &BTreeMap::new(), None);
+        let actions = dispatch(
+            HookEvent::TurnStart,
+            &[],
+            &queries,
+            &BTreeMap::new(),
+            &WakeUpArgs::default(),
+        );
         assert_eq!(
             actions,
             vec![
@@ -4429,7 +4767,13 @@ mod tests {
         let tag_qs = tag_recall_queries(&["rust".to_string()]).expect("valid");
         let bundle_qs = bundle_recall_queries(&["base".to_string()]).expect("valid");
         let ranks = BTreeMap::from([("rust".to_string(), 1)]);
-        let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs, &ranks, None);
+        let actions = dispatch(
+            HookEvent::TurnStart,
+            &tag_qs,
+            &bundle_qs,
+            &ranks,
+            &WakeUpArgs::default(),
+        );
         // Order: rank-1 tag recalls, then bundle recalls, then project recall.
         assert!(matches!(actions[0], Action::RecallTag(_)));
         assert!(matches!(actions[1], Action::RecallBundle(_)));
@@ -4478,7 +4822,13 @@ mod tests {
         let tag_qs = tag_recall_queries(&["foo".to_string()]).expect("valid");
         let bundle_qs = bundle_recall_queries(&["foo".to_string()]).expect("valid");
         let ranks = BTreeMap::from([("foo".to_string(), 1)]);
-        let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs, &ranks, None);
+        let actions = dispatch(
+            HookEvent::TurnStart,
+            &tag_qs,
+            &bundle_qs,
+            &ranks,
+            &WakeUpArgs::default(),
+        );
         assert_eq!(actions.len(), 3);
         match &actions[0] {
             Action::RecallTag(q) => assert_eq!(q.keyword, "llmenv-tag:foo"),
@@ -4593,7 +4943,7 @@ mod tests {
         ) {
             let tag_qs = tag_recall_queries(&tags).expect("valid tags");
             let bundle_qs = bundle_recall_queries(&bundles).expect("valid bundles");
-            let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs, &BTreeMap::new(), None);
+            let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs, &BTreeMap::new(), &WakeUpArgs::default());
 
             prop_assert_eq!(actions.len(), 1 + tags.len() + bundles.len());
             for a in &actions[..bundles.len()] {
@@ -4628,14 +4978,20 @@ mod tests {
         ]);
         let tag_qs = tag_recall_queries(&tags).expect("valid tags");
         let bundle_qs = bundle_recall_queries(&["base".to_string()]).expect("valid bundle");
-        let order: Vec<String> = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs, &ranks, None)
-            .iter()
-            .map(|a| match a {
-                Action::RecallTag(q) => q.tag.clone(),
-                Action::RecallBundle(q) => format!("bundle:{}", q.bundle),
-                other => format!("{other:?}"),
-            })
-            .collect();
+        let order: Vec<String> = dispatch(
+            HookEvent::TurnStart,
+            &tag_qs,
+            &bundle_qs,
+            &ranks,
+            &WakeUpArgs::default(),
+        )
+        .iter()
+        .map(|a| match a {
+            Action::RecallTag(q) => q.tag.clone(),
+            Action::RecallBundle(q) => format!("bundle:{}", q.bundle),
+            other => format!("{other:?}"),
+        })
+        .collect();
         assert_eq!(
             order,
             [
@@ -4733,6 +5089,7 @@ mod tests {
             consolidation: None,
             mcp_permissions: None,
             wakeup_max_tokens: None,
+            adaptive_recall: true,
         }
     }
 
@@ -4910,6 +5267,7 @@ mod tests {
                 consolidation: None,
                 mcp_permissions: None,
                 wakeup_max_tokens: None,
+                adaptive_recall: true,
             }],
             ..Default::default()
         });
@@ -5482,5 +5840,128 @@ mod session_log_tests {
         let lines = jsonl_lines(&path);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0]["kind"], "lifecycle_end");
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test code")]
+mod adaptive_routing_tests {
+    use std::time::Duration;
+
+    use serde_json::json;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+
+    async fn run(
+        event: HookEvent,
+        payload: &serde_json::Value,
+        adaptive_recall: bool,
+    ) -> tempfile::TempDir {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0", "id": 1,
+                "result": {"content": [{"type": "text", "text": ""}]}
+            })))
+            .mount(&server)
+            .await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
+        run_event_memory(MemoryCall {
+            event,
+            client: &client,
+            settings: Some(MemoryHookSettings {
+                wakeup_max_tokens: None,
+                adaptive_recall,
+            }),
+            session_id: Some("s1"),
+            state_dir: Some(state_dir.path().to_path_buf()),
+            payload,
+            actions: Vec::new(),
+            scope: Vec::new(),
+            wake: WakeUpArgs::default(),
+            query: "",
+            store_content: "",
+        })
+        .await
+        .unwrap();
+        state_dir
+    }
+
+    fn wrote_ledger(state_dir: &tempfile::TempDir) -> bool {
+        state_dir.path().join("recall_session/s1.json").is_file()
+    }
+
+    fn adaptive_events() -> [(HookEvent, serde_json::Value); 4] {
+        [
+            (HookEvent::SessionStart, json!({"source": "startup"})),
+            (HookEvent::TurnStart, json!({"prompt": "hi"})),
+            (
+                HookEvent::PostToolUseFailure,
+                json!({"tool_name": "Bash", "error": "x"}),
+            ),
+            (
+                HookEvent::SubagentStart,
+                json!({"agent_id": "a1", "agent_type": "Explore"}),
+            ),
+        ]
+    }
+
+    #[tokio::test]
+    async fn adaptive_events_take_the_ledger_flow() {
+        for (event, payload) in adaptive_events() {
+            let dir = run(event, &payload, true).await;
+            assert!(wrote_ledger(&dir), "{event:?} must use the adaptive flow");
+        }
+    }
+
+    #[tokio::test]
+    async fn adaptive_recall_off_keeps_the_stateless_flow() {
+        for (event, payload) in adaptive_events() {
+            let dir = run(event, &payload, false).await;
+            assert!(!wrote_ledger(&dir), "{event:?} must stay stateless");
+        }
+    }
+
+    fn git_repo_with_origin() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for args in [
+            &["init", "-q"][..],
+            &["remote", "add", "origin", "git@github.com:me/wake-repo.git"],
+        ] {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        }
+        dir
+    }
+
+    #[test]
+    fn only_session_start_sends_a_wake_project() {
+        let repo = git_repo_with_origin();
+        let cwd = repo.path().to_str().unwrap();
+        let payload = json!({"cwd": cwd});
+        let start = wake_args(HookEvent::SessionStart, None, &payload, "/");
+        assert_eq!(start.project.as_deref(), Some("wake-repo"));
+        let turn = wake_args(HookEvent::TurnStart, None, &payload, "/");
+        assert_eq!(turn.project, None);
+    }
+
+    #[test]
+    fn hook_cwd_prefers_the_payload_then_the_fallback() {
+        assert_eq!(
+            hook_cwd(&json!({"cwd": "/from/payload"}), "/fallback"),
+            std::path::PathBuf::from("/from/payload")
+        );
+        assert_eq!(
+            hook_cwd(&json!({}), "/fallback"),
+            std::path::PathBuf::from("/fallback")
+        );
     }
 }

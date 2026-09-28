@@ -49,13 +49,42 @@ impl TurnState {
 /// long tool-call sequence, small enough that the read stays cheap.
 const TAIL_LINES: usize = 200;
 
+/// How many trailing bytes to read. `transcript_path` comes from hook stdin, so
+/// the read must stay bounded whatever the file is.
+const TAIL_BYTES: u64 = 1024 * 1024;
+
+/// The last [`TAIL_BYTES`] of a regular file, starting at a line boundary.
+/// `None` for anything that is not a readable regular file.
+fn read_tail(path: &Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let start = meta.len().saturating_sub(TAIL_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    file.take(TAIL_BYTES).read_to_end(&mut bytes).ok()?;
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    if start == 0 {
+        return Some(text);
+    }
+    // The first line after the seek is cut in the middle, so it is dropped.
+    Some(
+        text.split_once('\n')
+            .map(|(_, rest)| rest.to_string())
+            .unwrap_or_default(),
+    )
+}
+
 /// Read the tail of `path` and summarise the current turn.
 ///
 /// Returns `None` when the transcript can't be read or parsed at all — these
 /// layers fail open, since denying a tool call because a log file was
 /// unreadable would be worse than the slippage they guard against.
 pub(crate) fn read_turn_state(path: &Path) -> Option<TurnState> {
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = read_tail(path)?;
     let lines: Vec<&str> = text.lines().collect();
     let tail = lines.len().saturating_sub(TAIL_LINES);
     let mut state = TurnState::default();
@@ -80,6 +109,24 @@ pub(crate) fn read_turn_state(path: &Path) -> Option<TurnState> {
         }
     }
     Some(state)
+}
+
+/// The newest assistant text in the tail of `path`, capped at `max_chars`.
+///
+/// Returns `None` when the transcript can't be read or holds no assistant text.
+pub(crate) fn last_assistant_text(path: &Path, max_chars: usize) -> Option<String> {
+    let text = read_tail(path)?;
+    let lines: Vec<&str> = text.lines().collect();
+    let tail = lines.len().saturating_sub(TAIL_LINES);
+    lines.get(tail..)?.iter().rev().find_map(|line| {
+        let entry: serde_json::Value = serde_json::from_str(line).ok()?;
+        let message = entry.get("message")?;
+        if message.get("role").and_then(serde_json::Value::as_str) != Some("assistant") {
+            return None;
+        }
+        // `user_text` reads the `text` blocks of any message; its name is historical.
+        user_text(message).map(|t| t.chars().take(max_chars).collect())
+    })
 }
 
 /// The human-authored text of a user message, or `None` when the entry is a
@@ -130,6 +177,59 @@ mod tests {
             .concat();
         std::fs::write(file.path(), body).unwrap();
         file
+    }
+
+    #[test]
+    fn transcript_reads_refuse_a_non_file_and_cap_a_large_one() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(last_assistant_text(dir.path(), 10), None);
+        assert_eq!(read_turn_state(dir.path()), None);
+        let filler = serde_json::json!({"message": {"role": "user",
+            "content": [{"type": "tool_result", "content": "x".repeat(10_000)}]}});
+        let mut lines = vec![filler; 300];
+        lines.push(serde_json::json!({"message": {"role": "assistant",
+            "content": [{"type": "text", "text": "last words"}]}}));
+        let file = transcript(&lines);
+        assert!(std::fs::metadata(file.path()).unwrap().len() > TAIL_BYTES);
+        assert_eq!(
+            last_assistant_text(file.path(), 20).as_deref(),
+            Some("last words")
+        );
+    }
+
+    #[test]
+    fn the_tail_read_spans_more_than_a_few_kilobytes() {
+        let filler = serde_json::json!({"message": {"role": "user",
+            "content": [{"type": "tool_result", "content": "x".repeat(20_000)}]}});
+        let file = transcript(&[
+            serde_json::json!({"message": {"role": "assistant",
+                "content": [{"type": "text", "text": "before the filler"}]}}),
+            filler,
+        ]);
+        assert_eq!(
+            last_assistant_text(file.path(), 40).as_deref(),
+            Some("before the filler")
+        );
+    }
+
+    #[test]
+    fn last_assistant_text_returns_the_newest_visible_text_capped() {
+        let assistant = |content: serde_json::Value| serde_json::json!({"message": {"role": "assistant", "content": content}});
+        let file = transcript(&[
+            assistant(serde_json::json!([{"type": "text", "text": "old"}])),
+            assistant(serde_json::json!([{"type": "thinking", "thinking": "x"}])),
+            assistant(serde_json::json!([{"type": "text", "text": "newest reply"}])),
+            serde_json::json!({"message": {"role": "user",
+                "content": [{"type": "tool_result", "content": "r"}]}}),
+        ]);
+        assert_eq!(
+            last_assistant_text(file.path(), 6).as_deref(),
+            Some("newest")
+        );
+        assert_eq!(
+            last_assistant_text(std::path::Path::new("/nonexistent"), 6),
+            None
+        );
     }
 
     fn user(text: &str) -> serde_json::Value {

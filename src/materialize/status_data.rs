@@ -637,6 +637,7 @@ mod tests {
             consolidation: None,
             mcp_permissions: None,
             wakeup_max_tokens: None,
+            adaptive_recall: true,
         };
         let config = Config {
             features: Some(Features {
