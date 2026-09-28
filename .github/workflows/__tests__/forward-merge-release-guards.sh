@@ -2356,8 +2356,9 @@ test_1675_test_mirror_matches_production_source_branch_retry() {
 target_list_block() {
   echo "set -euo pipefail"
   sed -n '/# Build target list/,/TARGETS+=("main")/p' "$WORKFLOW" | sed 's/^          //'
-  # shellcheck disable=SC2016 # literal text for the child shell to expand
-  echo 'printf "%s\n" "${TARGETS[@]}"'
+  cat <<'SHELL'
+printf '%s\n' "${TARGETS[@]}"
+SHELL
 }
 
 test_2240_malformed_head_ref_error_is_sanitized() {
@@ -2428,6 +2429,7 @@ approve_pending_runs() { :; }
 SHELL
   sed -n '/^ *bail_on_conflict() {/,/^ *for TARGET in/p' "$WORKFLOW" | sed '$d'
   echo 'for _once in once; do'
+  # shellcheck disable=SC2016 # literal sed address, not an expression to expand
   sed -n '/^ *if \[\[ \$ls_rc -eq 0 \]\]; then$/,/^ *elif \[\[ \$ls_rc -ne 2 \]\]; then$/p' "$WORKFLOW" | sed '$d'
   echo 'fi'
   echo 'done'
@@ -2535,7 +2537,7 @@ STUB
 
   if [[ $rc -ne 0 ]]; then
     echo "  block exited $rc, expected 0. Output:" >&2
-    echo "$out" | sed 's/^/    /' >&2
+    printf '    %s\n' "${out//$'\n'/$'\n'    }" >&2
     rm -rf "$work_dir" "$origin_dir"
     return 1
   fi
@@ -2599,7 +2601,7 @@ STUB
   fi
   if ! echo "$out" | grep -q "Merge conflict"; then
     echo "  expected a merge-conflict message; got:" >&2
-    echo "$out" | sed 's/^/    /' >&2
+    printf '    %s\n' "${out//$'\n'/$'\n'    }" >&2
     return 1
   fi
   return 0
@@ -2610,6 +2612,7 @@ STUB
 # above expect, so a future edit there fails loudly here instead of quietly
 # extracting nothing.
 test_2220_test_mirror_matches_production_stale_branch_update() {
+  # shellcheck disable=SC2016 # literal grep -F patterns, not expressions to expand
   if grep -qF 'if [[ $ls_rc -eq 0 ]]; then' "$WORKFLOW" \
       && grep -qF 'elif [[ $ls_rc -ne 2 ]]; then' "$WORKFLOW" \
       && grep -qF 'if ! git fetch origin "$MERGE_BRANCH"; then' "$WORKFLOW" \
