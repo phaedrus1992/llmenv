@@ -220,20 +220,23 @@ impl LedgerStore {
     }
 
     /// Read the ledger. `None` only for an unsafe `session_id` or a busy lock.
+    /// An unreadable file reads as empty here, because nothing is written back.
     pub(crate) fn load(&self, session_id: &str) -> Option<Ledger> {
         let _lock = self.lock(session_id)?;
-        Some(self.read(session_id))
+        Some(self.read(session_id).unwrap_or_default())
     }
 
-    /// Apply `f` under the lock and save. `None` for an unsafe `session_id` or a
-    /// busy lock. A failed save is logged; the result of `f` is still returned.
+    /// Apply `f` under the lock and save. `None` for an unsafe `session_id`, a
+    /// busy lock, or a file that exists but cannot be read: a write then would
+    /// replace good state with an empty ledger. A failed save is logged; the
+    /// result of `f` is still returned.
     pub(crate) fn update<T>(
         &self,
         session_id: &str,
         f: impl FnOnce(&mut Ledger) -> T,
     ) -> Option<T> {
         let _lock = self.lock(session_id)?;
-        let mut ledger = self.read(session_id);
+        let mut ledger = self.read(session_id)?;
         let result = f(&mut ledger);
         self.write(session_id, &ledger);
         Some(result)
@@ -276,20 +279,25 @@ impl LedgerStore {
         }
     }
 
-    fn read(&self, session_id: &str) -> Ledger {
+    /// The stored ledger: a default for a missing or corrupt file, `None` for a
+    /// file that exists but cannot be read.
+    fn read(&self, session_id: &str) -> Option<Ledger> {
         let path = self.file(session_id, "json");
         match std::fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-                tracing::warn!(
-                    "recall ledger {} is corrupt, starting fresh: {e}",
+            Ok(text) => Some(serde_json::from_str(&text).unwrap_or_else(|e| {
+                tracing::error!(
+                    "recall ledger {} is corrupt, starting a fresh epoch: {e}",
                     path.display()
                 );
                 Ledger::default()
-            }),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ledger::default(),
+            })),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Ledger::default()),
             Err(e) => {
-                tracing::warn!("cannot read recall ledger {}: {e}", path.display());
-                Ledger::default()
+                tracing::error!(
+                    "cannot read recall ledger {}, update skipped: {e}",
+                    path.display()
+                );
+                None
             }
         }
     }
@@ -416,6 +424,20 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "{\"epoch\": 3, \"agents\": ").unwrap();
         assert_eq!(store.load("s1"), Some(Ledger::default()));
+    }
+
+    #[test]
+    fn an_unreadable_ledger_is_not_overwritten() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, store) = store();
+        store.update("s1", |l| l.mark_sent(MAIN_AGENT, ["keep".to_string()]));
+        let path = dir.path().join("recall_session").join("s1.json");
+        let before = std::fs::read(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let result = store.update("s1", |l| l.mark_sent(MAIN_AGENT, ["new".to_string()]));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(result, None, "an unreadable ledger must skip the write");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]
