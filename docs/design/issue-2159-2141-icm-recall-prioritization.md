@@ -268,3 +268,11 @@ Add one argument test: `Store` with a known project carries `project`; without o
 5. Session-state cache test: same `HEAD` content does not re-read keywords; changed content does.
 6. Acceptance: on a branch named for an issue, the first injected record mentions that issue when ICM holds a memory for it.
 7. Changelog entry under `Added`; docs page describes the tiers and the prompt-to-ICM data flow, tagged `(added in v3.12.0)`.
+
+## Update for #2249 (v3.12.0)
+
+With `adaptive_recall` on, the ranked scope-tag recall described here runs at `SessionStart`, one time per model context, not on every prompt.
+`TurnStart` runs a relevance recall instead, and it drops the final tag-list `Recall` call.
+The byte budget and the specificity ranking in this document still apply to the scope set.
+With `adaptive_recall: false`, the behavior in this document is unchanged.
+Design: `docs/superpowers/specs/2026-09-27-adaptive-icm-recall-design.md`.

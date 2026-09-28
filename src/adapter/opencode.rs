@@ -2173,7 +2173,7 @@ mod tests {
             timeout: Some(10_000),
             disabled_tools: vec![],
             mcp_permissions: None,
-            wakeup_max_tokens: None,
+            memory_hook: None,
         });
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
@@ -2204,7 +2204,7 @@ mod tests {
             timeout: Some(5000),
             disabled_tools: vec![],
             mcp_permissions: None,
-            wakeup_max_tokens: None,
+            memory_hook: None,
         });
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
@@ -2232,7 +2232,7 @@ mod tests {
             timeout: None,
             disabled_tools: vec![],
             mcp_permissions: None,
-            wakeup_max_tokens: None,
+            memory_hook: None,
         });
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
@@ -3920,7 +3920,7 @@ mod tests {
             timeout: None,
             disabled_tools: vec![],
             mcp_permissions: None,
-            wakeup_max_tokens: None,
+            memory_hook: None,
         });
         OpencodeAdapter.materialize(&manifest, out.path()).unwrap();
         let raw = std::fs::read_to_string(out.path().join(OPENCODE_JSON_FILE)).unwrap();
@@ -4367,7 +4367,7 @@ mod tests {
                 timeout: None,
                 disabled_tools: vec![],
                 mcp_permissions: None,
-                wakeup_max_tokens: None,
+                memory_hook: None,
             }],
             ..Default::default()
         }
@@ -4513,7 +4513,7 @@ mod tests {
                     timeout: None,
                     disabled_tools: vec![],
                     mcp_permissions: None,
-                    wakeup_max_tokens: None,
+                    memory_hook: None,
                 });
             }
             manifest.capabilities.features = Some(crate::config::Features {
@@ -4648,7 +4648,7 @@ mod tests {
             timeout: None,
             disabled_tools: vec![],
             mcp_permissions: None,
-            wakeup_max_tokens: None,
+            memory_hook: None,
         });
         let with = generate_shim_js(&[], &cbm).unwrap();
         let without = generate_shim_js(&[], &manifest_without_session_log()).unwrap();

@@ -1505,6 +1505,15 @@ pub struct Memory {
     /// instead of being silently truncated by icm.
     #[serde(default)]
     pub wakeup_max_tokens: Option<u32>,
+    /// Per-session adaptive recall (#2249). When `true`, the hooks send each memory one
+    /// time per model context and pick per-turn memories from session activity. `false`
+    /// restores the stateless per-turn recall.
+    #[serde(default = "default_adaptive_recall")]
+    pub adaptive_recall: bool,
+}
+
+fn default_adaptive_recall() -> bool {
+    true
 }
 
 /// Manual, not derived (#1044): `listen_host`'s real default is
@@ -1528,6 +1537,7 @@ impl Default for Memory {
             auto_prune: false,
             mcp_permissions: None,
             wakeup_max_tokens: None,
+            adaptive_recall: default_adaptive_recall(),
         }
     }
 }
@@ -2006,6 +2016,17 @@ pub fn split_plugin_ref(s: &str) -> Option<(&str, &str)> {
 pub(crate) mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn memory_adaptive_recall_defaults_to_true_and_accepts_false() {
+        let on: Memory = serde_yaml::from_str("server_host: h\nport: 1\nwhen: [t]\n").unwrap();
+        assert!(on.adaptive_recall);
+        assert!(Memory::default().adaptive_recall);
+        let off: Memory =
+            serde_yaml::from_str("server_host: h\nport: 1\nwhen: [t]\nadaptive_recall: false\n")
+                .unwrap();
+        assert!(!off.adaptive_recall);
+    }
 
     /// Shared with `validate.rs` (#1265) — was byte-identically duplicated
     /// there; this is the one home.

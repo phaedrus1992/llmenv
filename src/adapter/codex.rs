@@ -974,7 +974,7 @@ mod tests {
             timeout: None,
             disabled_tools: vec![],
             mcp_permissions: None,
-            wakeup_max_tokens: None,
+            memory_hook: None,
         }
     }
 
@@ -989,7 +989,7 @@ mod tests {
             timeout: None,
             disabled_tools: vec![],
             mcp_permissions: None,
-            wakeup_max_tokens: None,
+            memory_hook: None,
         }
     }
 
@@ -1408,7 +1408,7 @@ mod tests {
                 timeout: None,
                 disabled_tools: vec![],
                 mcp_permissions: None,
-                wakeup_max_tokens: None,
+                memory_hook: None,
             }],
             ..Default::default()
         }
