@@ -17,3 +17,10 @@ examine_globs = [
   "src/merge/**",
   "src/hook_run/**",
 ]
+
+# Equivalent mutants: each compares an elapsed time with a limit, and no test
+# can observe the difference between `<` and `<=` at the exact boundary.
+exclude_re = [
+  "replace < with <= in waves",
+  "replace > with >= in LedgerStore::prune_orphan_locks",
+]
