@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -22,8 +22,9 @@ const MAX_AGENTS: usize = 32;
 const PENDING_TTL_SECS: i64 = 300;
 const ERROR_HEAD_BYTES: usize = 300;
 const TASK_HEAD_CHARS: usize = 600;
-/// A hook must not stall the agent on a busy ledger, so a write gives up after this wait.
-const LOCK_WAIT: Duration = Duration::from_millis(200);
+/// A hook must not stall the agent on a busy ledger, so a write gives up after
+/// `LOCK_ATTEMPTS` polls, about 200 ms.
+const LOCK_ATTEMPTS: u32 = 20;
 const LOCK_POLL: Duration = Duration::from_millis(10);
 const STALE_DAYS: u64 = 7;
 /// Hex characters kept from the SHA-256 digest; 64 bits is enough to key one session.
@@ -278,8 +279,7 @@ impl LedgerStore {
             .open(self.file(session_id, "lock"))
             .inspect_err(|e| tracing::error!("cannot open recall ledger lock: {e}"))
             .ok()?;
-        let start = Instant::now();
-        loop {
+        for _ in 0..LOCK_ATTEMPTS {
             match file.try_lock() {
                 Ok(()) => {
                     // The orphan prune goes by age, so a held lock must look new.
@@ -288,15 +288,15 @@ impl LedgerStore {
                     }
                     return Some(file);
                 }
-                Err(std::fs::TryLockError::WouldBlock) if start.elapsed() < LOCK_WAIT => {
-                    std::thread::sleep(LOCK_POLL);
-                }
+                Err(std::fs::TryLockError::WouldBlock) => std::thread::sleep(LOCK_POLL),
                 Err(e) => {
-                    tracing::warn!("recall ledger busy or unlockable, access skipped: {e}");
+                    tracing::warn!("recall ledger lock failed, access skipped: {e}");
                     return None;
                 }
             }
         }
+        tracing::warn!("recall ledger busy, access skipped");
+        None
     }
 
     /// The stored ledger: a default for a missing or corrupt file, `None` for a
@@ -610,6 +610,27 @@ mod tests {
     }
 
     #[test]
+    fn a_lock_released_during_the_wait_is_taken() {
+        let (_dir, store) = store();
+        let held = store.lock("s1").unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            drop(held);
+        });
+        assert!(store.update("s1", |l| l.last_turn_at = 1).is_some());
+        release.join().unwrap();
+    }
+
+    #[test]
+    fn a_lock_held_past_the_wait_skips_the_update() {
+        let (_dir, store) = store();
+        let held = store.lock("s1").unwrap();
+        assert!(store.update("s1", |l| l.last_turn_at = 1).is_none());
+        drop(held);
+        assert_eq!(store.load("s1").unwrap().last_turn_at, 0);
+    }
+
+    #[test]
     fn concurrent_updates_are_not_lost() {
         let (_dir, store) = store();
         let store = std::sync::Arc::new(store);
@@ -635,13 +656,20 @@ mod tests {
         let (dir, store) = store();
         let old = dir.path().join("recall_session").join("gone.lock");
         let fresh = dir.path().join("recall_session").join("starting.lock");
+        let recent = dir.path().join("recall_session").join("recent.lock");
         store.update("s1", |_| ());
         std::fs::write(&old, "").unwrap();
         std::fs::write(&fresh, "").unwrap();
-        let ten_days = std::time::SystemTime::now() - std::time::Duration::from_secs(10 * 86_400);
-        filetime::set_file_mtime(&old, filetime::FileTime::from_system_time(ten_days)).unwrap();
+        std::fs::write(&recent, "").unwrap();
+        let days_ago = |days: u64| {
+            let at = std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86_400);
+            filetime::FileTime::from_system_time(at)
+        };
+        filetime::set_file_mtime(&old, days_ago(10)).unwrap();
+        filetime::set_file_mtime(&recent, days_ago(3)).unwrap();
         store.update("s1", |_| ());
         assert!(!old.exists(), "a stale orphan lock is removed");
+        assert!(recent.exists(), "an orphan lock younger than 7 days stays");
         assert!(
             fresh.exists(),
             "a session in its first update keeps its lock"
