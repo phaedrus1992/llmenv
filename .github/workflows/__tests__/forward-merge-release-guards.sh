@@ -37,7 +37,9 @@ else
 fi
 if [[ $FETCH_RC -ne 0 ]]; then
   if [[ -n "$FETCH_STDERR" ]]; then
-    echo "::warning::fetch of $CURRENT $TARGET failed: $FETCH_STDERR"
+    FETCH_STDERR_SAFE="${FETCH_STDERR//$'\n'/ }"
+    FETCH_STDERR_SAFE="${FETCH_STDERR_SAFE//::/  }"
+    echo "::warning::fetch of $CURRENT $TARGET failed: $FETCH_STDERR_SAFE"
   else
     echo "::warning::fetch of $CURRENT $TARGET failed (exit $FETCH_RC; no stderr)"
   fi
@@ -2137,7 +2139,8 @@ else
   rest="${PR_HEAD_REF#forward-merge/}"
   source_branch="${rest%-to-*}"
   if [[ ! "$source_branch" =~ ^(release/[0-9]+\.x|main)$ ]]; then
-    echo "::error::could not parse a valid source branch out of forward-merge PR head ref '$PR_HEAD_REF' (expected forward-merge/<source>-to-<target>, source one of release/X.x or main)"
+    head_ref_display="${PR_HEAD_REF//::/  }"
+    echo "::error::could not parse a valid source branch out of forward-merge PR head ref '$head_ref_display' (expected forward-merge/<source>-to-<target>, source one of release/X.x or main)"
     exit 1
   fi
   echo "ref=$source_branch"
@@ -2333,10 +2336,77 @@ test_1675_test_mirror_matches_production_source_branch_retry() {
       && grep -qF 'github.event.pull_request.merged == true' "$workflow_file" \
       && grep -qF 'github.event.pull_request.head.repo.full_name == github.repository' "$workflow_file" \
       && grep -qF "startsWith(github.event.pull_request.base.ref, 'release/')" "$workflow_file" \
-      && grep -qF 'if [[ ! "$source_branch" =~ ^(release/[0-9]+\.x|main)$ ]]; then' "$workflow_file"; then
+      && grep -qF 'if [[ ! "$source_branch" =~ ^(release/[0-9]+\.x|main)$ ]]; then' "$workflow_file" \
+      && grep -qF 'head_ref_display="${PR_HEAD_REF//::/  }"' "$workflow_file"; then
     return 0
   fi
   echo "  production's source-branch retry logic no longer matches the lines this file mirrors -- update determine_source_branch_block/job_admits_run above" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Issue #2240: a branch name reaches a workflow-command echo raw at only two
+# sites, before the regex check. Every later echo reads a name that the
+# detect step's `grep -E '^release/[0-9]+\.x$'` (or the literal `main`)
+# already bounded, so a `::` cannot reach it.
+# ---------------------------------------------------------------------------
+
+# The target-list block of the cascade step, extracted from production (not
+# hand-copied) so it cannot drift. It prints TARGETS, one per line.
+target_list_block() {
+  echo "set -euo pipefail"
+  sed -n '/# Build target list/,/TARGETS+=("main")/p' "$WORKFLOW" | sed 's/^          //'
+  # shellcheck disable=SC2016 # literal text for the child shell to expand
+  echo 'printf "%s\n" "${TARGETS[@]}"'
+}
+
+test_2240_malformed_head_ref_error_is_sanitized() {
+  local out rc
+  out=$(EVENT_NAME="pull_request" PUSHED_REF="" \
+    PR_HEAD_REF="forward-merge/x::stop-commands::tok-to-main" \
+    bash -c "$(determine_source_branch_block)" 2>&1)
+  rc=$?
+
+  if [[ $rc -ne 0 ]] && [[ "$out" == *"::error::could not parse a valid source branch"* ]] \
+      && [[ "$out" != *"::stop-commands::"* ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "$out" >&2
+  printf '  rc: %s\n' "$rc" >&2
+  return 1
+}
+
+test_2240_unversioned_branch_warning_is_sanitized() {
+  local out rc
+  out=$(CURRENT="release/x::stop-commands::tok" BRANCHES="release/3.x" \
+    bash -c "$(target_list_block)" 2>&1)
+  rc=$?
+
+  if [[ $rc -eq 0 ]] && [[ "$out" == *"::warning::"*"is not a versioned release/X.x branch"* ]] \
+      && [[ "$out" != *"::stop-commands::"* ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  printf '  rc: %s\n' "$rc" >&2
+  return 1
+}
+
+# The later echoes stay safe only while two facts hold: the detect step
+# filters BRANCHES through the release-line regex, and the cascade stops when
+# CURRENT is not one of those branches. The targets are then those branches
+# plus `main`.
+test_2240_cascade_targets_are_regex_bounded() {
+  local out
+  out=$(CURRENT="release/3.x" BRANCHES=$'release/3.x\nrelease/4.x' \
+    bash -c "$(target_list_block)" 2>&1)
+
+  # shellcheck disable=SC2016 # literal grep -F pattern, not an expression to expand
+  if grep -qF "grep -E '^release/[0-9]+\.x\$'" "$WORKFLOW" \
+      && [[ "$out" == $'release/4.x\nmain' ]]; then
+    return 0
+  fi
+  echo "  the detect step no longer bounds branch names to release/X.x, or the target list changed shape -- re-check every ::error::/::warning:: echo of \$CURRENT/\$TARGET/\$SOURCE_DESC/\$MERGE_BRANCH for #2240" >&2
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
   return 1
 }
 
@@ -2725,6 +2795,12 @@ run_test "Issue #2220: a conflicting update never force-pushes over a human's wo
   test_2220_conflicting_update_never_force_pushes
 run_test "Issue #2220: the test mirror still matches production's stale-branch-update logic" \
   test_2220_test_mirror_matches_production_stale_branch_update
+run_test "Issue #2240: a malformed PR head ref is printed with :: removed" \
+  test_2240_malformed_head_ref_error_is_sanitized
+run_test "Issue #2240: a branch that is not a release line is printed with :: removed" \
+  test_2240_unversioned_branch_warning_is_sanitized
+run_test "Issue #2240: every later echo reads only regex-bounded branch names" \
+  test_2240_cascade_targets_are_regex_bounded
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

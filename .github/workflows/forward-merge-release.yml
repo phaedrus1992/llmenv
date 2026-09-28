@@ -102,7 +102,9 @@ jobs:
             rest="${PR_HEAD_REF#forward-merge/}"
             source_branch="${rest%-to-*}"
             if [[ ! "$source_branch" =~ ^(release/[0-9]+\.x|main)$ ]]; then
-              echo "::error::could not parse a valid source branch out of forward-merge PR head ref '$PR_HEAD_REF' (expected forward-merge/<source>-to-<target>, source one of release/X.x or main)"
+              # #2240: this ref has not passed the regex yet, so strip `::` as in #1543.
+              head_ref_display="${PR_HEAD_REF//::/  }"
+              echo "::error::could not parse a valid source branch out of forward-merge PR head ref '$head_ref_display' (expected forward-merge/<source>-to-<target>, source one of release/X.x or main)"
               exit 1
             fi
             echo "ref=$source_branch" >> "$GITHUB_OUTPUT"
@@ -388,10 +390,14 @@ jobs:
           # The trigger (release/**) is broader than the X.x regex, so a branch
           # like release/foo would otherwise fall through and merge into main.
           if [[ "$FOUND" -eq 0 ]]; then
-            echo "::warning::$CURRENT is not a versioned release/X.x branch; skipping cascade"
+            # #2240: CURRENT failed the regex, so strip `::` as in #1543.
+            echo "::warning::${CURRENT//::/  } is not a versioned release/X.x branch; skipping cascade"
             exit 0
           fi
 
+          # From here on, CURRENT and every TARGET match the detect step's
+          # release/X.x regex or are `main`, so a `::` cannot reach the echoes
+          # of CURRENT, TARGET, SOURCE_DESC or MERGE_BRANCH below (#2240).
           TARGETS+=("main")
 
           # Track whether the cascade halted early so the run fails visibly
