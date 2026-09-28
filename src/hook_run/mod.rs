@@ -495,7 +495,9 @@ struct MemoryCall<'a> {
 /// Run the event's memory work: the adaptive flow when it applies, else the
 /// stateless actions. A missing state dir degrades to the stateless actions.
 async fn run_event_memory(call: MemoryCall<'_>) -> anyhow::Result<String> {
-    let state_dir = crate::paths::state_dir().ok();
+    let state_dir = crate::paths::state_dir()
+        .inspect_err(|e| tracing::error!("no state dir, adaptive recall falls back: {e}"))
+        .ok();
     let (Some(session_id), Some(state_dir)) = (call.session_id, state_dir) else {
         return run_memory_actions(call.client, call.actions, call.query, call.store_content).await;
     };
@@ -1049,7 +1051,11 @@ fn run_inner(
     // #2249: local ledger writes need no scope or MCP work, so they run before every
     // early return in this function.
     if records_locally(event)
-        && let (Some(session_id), Ok(state_dir)) = (claude_session_id, crate::paths::state_dir())
+        && let (Some(session_id), Ok(state_dir)) = (
+            claude_session_id,
+            crate::paths::state_dir()
+                .inspect_err(|e| tracing::error!("no state dir, recall ledger skipped: {e}")),
+        )
     {
         adaptive::record_local(
             event,
