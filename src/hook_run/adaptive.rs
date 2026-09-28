@@ -107,9 +107,19 @@ async fn recall(client: &McpHttpClient, q: Option<RecallQuery>) -> Option<anyhow
     Some(Action::RecallQuery(q?).run(client, "", "").await)
 }
 
-/// The recall texts for `text`, in budget order: main, keyword fanout, topic
-/// fanout. The flag says whether the main recall succeeded.
-async fn waves(client: &McpHttpClient, text: &str, keywords: &[String]) -> (Outcome, bool) {
+/// The recall texts for `text`, in budget order: the session project's main
+/// recall, the all-projects main recall, keyword fanout, topic fanout. The flag
+/// says whether a main recall succeeded.
+async fn waves(
+    client: &McpHttpClient,
+    text: &str,
+    keywords: &[String],
+    project: Option<&str>,
+) -> (Outcome, bool) {
+    let scoped = project.map(|p| RecallQuery {
+        project: Some(p.to_string()),
+        ..query(text, MAIN_LIMIT)
+    });
     let keyword = |i: usize| {
         keywords.get(i).map(|k| RecallQuery {
             keyword: Some(k.clone()),
@@ -117,14 +127,17 @@ async fn waves(client: &McpHttpClient, text: &str, keywords: &[String]) -> (Outc
         })
     };
     let start = Instant::now();
-    let (main, kw0, kw1) = tokio::join!(
+    let (own, main, kw0, kw1) = tokio::join!(
+        recall(client, scoped),
         recall(client, Some(query(text, MAIN_LIMIT))),
         recall(client, keyword(0)),
         recall(client, keyword(1)),
     );
-    let main_ok = matches!(main, Some(Ok(_)));
+    let main_ok = matches!(own, Some(Ok(_))) || matches!(main, Some(Ok(_)));
     let mut outcome = Outcome::default();
-    [main, kw0, kw1].into_iter().for_each(|r| outcome.push(r));
+    [own, main, kw0, kw1]
+        .into_iter()
+        .for_each(|r| outcome.push(r));
     if start.elapsed() < WAVE2_CUTOFF {
         let topics: Vec<String> = outcome
             .texts
@@ -177,12 +190,19 @@ pub(super) async fn session_start(
     scope: Vec<Action>,
 ) -> anyhow::Result<String> {
     let reset = resets_ledger(ctx.payload["source"].as_str());
+    let project = match &wake {
+        Action::WakeUp(args) => args.project.clone(),
+        _ => None,
+    };
     // One locked update, so a busy lock can never leave a pre-reset sent set in use.
     let sent = ctx
         .store
         .update(ctx.session_id, |l| {
             if reset {
                 l.reset();
+            }
+            if project.is_some() {
+                l.project = project;
             }
             l.sent_for(MAIN_AGENT)
         })
@@ -249,7 +269,7 @@ pub(super) async fn turn_start(
     let mut main_ok = false;
     if !repeated && !text.is_empty() {
         let keywords = relevance::fanout_keywords(ledger.activity());
-        let (wave, ok) = waves(ctx.client, &text, &keywords).await;
+        let (wave, ok) = waves(ctx.client, &text, &keywords, ledger.project.as_deref()).await;
         wave.texts.iter().for_each(|t| budget.add_text(t));
         main_ok = ok;
         outcome.merge(wave);
@@ -348,7 +368,7 @@ pub(super) async fn subagent_start(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<Stri
     let mut outcome = Outcome::default();
     if !text.is_empty() {
         let keywords = relevance::fanout_keywords(ledger.activity());
-        (outcome, _) = waves(ctx.client, &text, &keywords).await;
+        (outcome, _) = waves(ctx.client, &text, &keywords, ledger.project.as_deref()).await;
         outcome.texts.iter().for_each(|t| budget.add_text(t));
     }
     report("subagent_start", &outcome, &budget);
@@ -476,7 +496,7 @@ mod tests {
         let start = json!({"source": "startup"});
         let out = session_start(
             &ctx(&f, &start),
-            Action::WakeUp(None),
+            Action::WakeUp(crate::hook_run::action::WakeUpArgs::default()),
             vec![tag_action("proj")],
         )
         .await
@@ -506,7 +526,7 @@ mod tests {
             let payload = json!({ "source": source });
             let out = session_start(
                 &ctx(&f, &payload),
-                Action::WakeUp(None),
+                Action::WakeUp(crate::hook_run::action::WakeUpArgs::default()),
                 vec![tag_action("proj")],
             )
             .await
@@ -659,7 +679,7 @@ mod tests {
     async fn waves_count_every_failed_call() {
         let server = failing_server().await;
         let f = fixture(&server);
-        let (outcome, main_ok) = waves(&f.client, "q", &["k".to_string()]).await;
+        let (outcome, main_ok) = waves(&f.client, "q", &["k".to_string()], None).await;
         assert!(!main_ok);
         assert!(outcome.all_failed(), "{outcome:?}");
         assert_eq!(outcome.calls, 2);
@@ -697,7 +717,7 @@ mod tests {
         let start = json!({"source": "startup"});
         let out = session_start(
             &ctx(&f, &start),
-            Action::WakeUp(None),
+            Action::WakeUp(crate::hook_run::action::WakeUpArgs::default()),
             vec![tag_action("proj")],
         )
         .await
@@ -718,7 +738,7 @@ mod tests {
         let start = json!({"source": "startup"});
         let out = session_start(
             &ctx(&f, &start),
-            Action::WakeUp(None),
+            Action::WakeUp(crate::hook_run::action::WakeUpArgs::default()),
             vec![tag_action("proj")],
         )
         .await
@@ -726,6 +746,33 @@ mod tests {
         assert!(out.len() <= RECALL_BUDGET_BYTES + 200, "{}", out.len());
         let sent = f.store.load("s1").unwrap().sent_for(MAIN_AGENT).len();
         assert!(sent < 10, "only records that fit are marked sent: {sent}");
+    }
+
+    #[tokio::test]
+    async fn the_session_project_ranks_first_after_session_start() {
+        let server = server_with(&[
+            ("\"project\":\"llmenv\"", "[decisions-llmenv] project fact"),
+            ("\"limit\":10", "[preferences] global fact"),
+        ])
+        .await;
+        let f = fixture(&server);
+        let wake = Action::WakeUp(crate::hook_run::action::WakeUpArgs {
+            max_tokens: None,
+            project: Some("llmenv".into()),
+        });
+        session_start(&ctx(&f, &json!({"source": "startup"})), wake, vec![])
+            .await
+            .unwrap();
+        assert_eq!(
+            f.store.load("s1").unwrap().project.as_deref(),
+            Some("llmenv")
+        );
+        let out = turn_start(&ctx(&f, &json!({"prompt": "why"})), vec![])
+            .await
+            .unwrap();
+        let project_at = out.find("project fact").expect("project-scoped record");
+        let global_at = out.find("global fact").expect("all-projects record");
+        assert!(project_at < global_at, "{out}");
     }
 
     #[tokio::test]

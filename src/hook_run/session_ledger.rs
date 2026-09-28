@@ -73,6 +73,8 @@ pub(crate) struct Ledger {
     pub(crate) last_query_hash: Option<String>,
     pub(crate) last_turn_at: i64,
     pending_subagents: VecDeque<PendingSubagent>,
+    /// The session's project name, found once at `SessionStart` (#2249).
+    pub(crate) project: Option<String>,
 }
 
 impl Ledger {

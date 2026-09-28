@@ -408,10 +408,15 @@ mod tests {
     #[tokio::test]
     async fn non_recall_actions_pass_through_outside_the_budget() {
         let big = "w".repeat(RECALL_BUDGET_BYTES + 1000);
-        let (text, budget) = run_with_budget(vec![Action::WakeUp(None)], |_| {
-            let big = big.clone();
-            async move { Ok(big) }
-        })
+        let (text, budget) = run_with_budget(
+            vec![Action::WakeUp(
+                crate::hook_run::action::WakeUpArgs::default(),
+            )],
+            |_| {
+                let big = big.clone();
+                async move { Ok(big) }
+            },
+        )
         .await
         .expect("fake runner does not fail");
         assert_eq!(text, big);
@@ -496,11 +501,14 @@ mod tests {
     async fn passthrough_text_skips_empty_results_and_exact_duplicates() {
         let texts = ["", "pack", "pack", "other"];
         let index = Cell::new(0);
-        let (text, _) = run_with_budget(vec![Action::WakeUp(None); 4], |_| {
-            let text = texts[index.get()].to_string();
-            index.set(index.get() + 1);
-            async move { Ok(text) }
-        })
+        let (text, _) = run_with_budget(
+            vec![Action::WakeUp(crate::hook_run::action::WakeUpArgs::default()); 4],
+            |_| {
+                let text = texts[index.get()].to_string();
+                index.set(index.get() + 1);
+                async move { Ok(text) }
+            },
+        )
         .await
         .expect("fake runner does not fail");
         assert_eq!(text, "pack\n\nother");

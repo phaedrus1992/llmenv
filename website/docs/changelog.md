@@ -30,7 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- The session-start wake-up pack now reaches the model in Claude Code. llmenv fetched it from ICM at every session start and then threw it away, because the output for `SessionStart` was suppressed along with `SessionEnd` (#2251)
+- The session-start wake-up pack now reaches the model in Claude Code. llmenv fetched it from ICM at every session start and then threw it away, because the output for `SessionStart` was suppressed along with `SessionEnd`. The wake-up call now also names the session's project, so a remote ICM server returns this project's context instead of whichever project its own working directory points at (#2251)
 
 ## [3.11.2] - 2026-09-27
 

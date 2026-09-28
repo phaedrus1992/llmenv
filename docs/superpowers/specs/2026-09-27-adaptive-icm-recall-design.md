@@ -159,8 +159,12 @@ The shared function keeps its current behavior for the other adapters.
 - `/clear` also gives a new `session_id`, so the reset for `clear` is automatic.
   The explicit reset stays, because it costs nothing.
 - After the reset decision, run the wake-up pack and the scope set:
-  1. `icm_wake_up`, unchanged.
-     Its text passes through outside the byte budget, the same as today.
+  1. `icm_wake_up`, with `project: <name>` when the session project is known.
+     The project comes from the hook `cwd` with ICM's own rule: the origin remote's repo name, then the main repository's directory name, then the base name (`src/hook_run/project.rs`).
+     Without it, ICM uses the ICM server's working directory, which is wrong for a remote `icm serve`.
+     This applies in both modes, because #2251 now delivers the wake-up pack.
+     The name is stored in the ledger `project` field for the later hooks.
+     The wake-up text is outside the recall budget, and the scope set gets only the room that it leaves.
   2. The current scope-tag recall, ranked by `recall.rs:31-60`, inside the 8,000-byte budget.
   3. Drop scope records whose hash is in `agents.main.sent`.
      On `resume` this removes the records that the replayed transcript already holds.
@@ -178,7 +182,9 @@ The shared function keeps its current behavior for the other adapters.
    - Main recall: the query, `limit: 10`.
    - Keyword fanout: each fanout keyword as the `keyword` filter, `limit: 3`.
 
-   Every adaptive recall sends `project: ""`.
+   - Project recall: when the ledger knows the session project, the query with `project: <name>`, `limit: 10`, ahead of the main recall in budget order.
+
+   Every other adaptive recall sends `project: ""`.
    ICM's default project filter is the ICM server's own working directory, which says nothing about this session when ICM runs remotely.
    A live check against a remote `icm serve` returned unrelated records with the default filter, and the matching record first with `project: ""`.
    No separate cross-project recall is needed, because the main recall already searches all projects.

@@ -13,6 +13,7 @@ pub(crate) mod cd_guard;
 pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
 pub(crate) mod mcp_client;
+mod project;
 pub(crate) mod read_once;
 mod recall;
 mod relevance;
@@ -38,6 +39,7 @@ use serde_json::json;
 use tracing::{debug, error, warn};
 
 use crate::config::SessionLog;
+use crate::hook_run::action::WakeUpArgs;
 use crate::mcp::resolve::MEMORY_MCP_NAME;
 use crate::mcp::resolve::{MemoryHookSettings, ResolvedKind, resolve_mcps};
 use crate::session_log::dispatch as transcript_dispatch;
@@ -240,8 +242,8 @@ impl std::fmt::Display for HookEvent {
 /// The ordered actions to run for an event, given the active tags' and bundles'
 /// recall queries (built by [`tag_recall_queries`] and [`bundle_recall_queries`],
 /// the single sources of tag→recall and bundle→recall expansion), plus the
-/// active memory entry's configured wake-up token budget (#1216, `None` if
-/// unset), threaded straight into `Action::WakeUp` on `SessionStart`.
+/// wake-up arguments (the configured token budget, #1216, and the session's
+/// project, #2249), threaded straight into `Action::WakeUp` on `SessionStart`.
 ///
 /// `TurnStart` runs the most specific recalls first (#2159): every rank-1 tag (project scope
 /// and `$LLMENV_EXTRA_TAGS`), then every active bundle, then the tags of the broader scopes in
@@ -254,10 +256,10 @@ fn dispatch(
     tag_queries: &[TagRecallQuery],
     bundle_queries: &[BundleRecallQuery],
     ranks: &BTreeMap<String, u8>,
-    wakeup_max_tokens: Option<u32>,
+    wake: &WakeUpArgs,
 ) -> Vec<Action> {
     match event {
-        HookEvent::SessionStart => vec![Action::WakeUp(wakeup_max_tokens)],
+        HookEvent::SessionStart => vec![Action::WakeUp(wake.clone())],
         HookEvent::TurnStart => {
             let mut actions = scope_recall_actions(tag_queries, bundle_queries, ranks);
             actions.push(Action::Recall);
@@ -455,6 +457,11 @@ fn can_short_circuit(event: HookEvent, log_cfg: &crate::config::SessionLog) -> b
     !log_cfg.any_sink_wants(level)
 }
 
+/// The session's working directory: the hook payload's `cwd`, else the process cwd.
+fn hook_cwd(payload: &serde_json::Value, fallback: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(payload["cwd"].as_str().unwrap_or(fallback))
+}
+
 /// Whether `event` writes to the recall ledger without any MCP call (#2249).
 fn records_locally(event: HookEvent) -> bool {
     matches!(event, HookEvent::PostToolBatch | HookEvent::SubagentTask)
@@ -488,6 +495,7 @@ struct MemoryCall<'a> {
     payload: &'a serde_json::Value,
     actions: Vec<Action>,
     scope: Vec<Action>,
+    wake: WakeUpArgs,
     query: &'a str,
     store_content: &'a str,
 }
@@ -513,8 +521,7 @@ async fn run_event_memory(call: MemoryCall<'_>) -> anyhow::Result<String> {
     };
     match call.event {
         HookEvent::SessionStart => {
-            let wake = Action::WakeUp(call.settings.and_then(|s| s.wakeup_max_tokens));
-            adaptive::session_start(&ctx, wake, call.scope).await
+            adaptive::session_start(&ctx, Action::WakeUp(call.wake), call.scope).await
         }
         HookEvent::TurnStart => adaptive::turn_start(&ctx, call.scope).await,
         HookEvent::PostToolUseFailure => adaptive::tool_failure(&ctx).await,
@@ -1272,7 +1279,13 @@ fn run_inner(
         let resolved_client =
             resolve_memory_client(&config, config_dir, &active, event, &MCP_CLIENT_CACHE);
         let settings = resolved_client.as_ref().map(|r| r.settings);
-        let wakeup_max_tokens = settings.and_then(|s| s.wakeup_max_tokens);
+        // The project lookup runs git, so only the event that uses it pays for it.
+        let wake = WakeUpArgs {
+            max_tokens: settings.and_then(|s| s.wakeup_max_tokens),
+            project: (event == HookEvent::SessionStart)
+                .then(|| project::session_project(&hook_cwd(stdin_payload, &env.cwd)))
+                .flatten(),
+        };
         let client = resolved_client.map(|r| r.client);
         let state_path = Some(state::state_path());
         let ctx = build_scope_context(
@@ -1351,13 +1364,7 @@ fn run_inner(
             if let Some(client) = &client
                 && !session_end_unchanged
             {
-                let actions = dispatch(
-                    event,
-                    &tag_queries,
-                    &bundle_queries,
-                    &tag_ranks,
-                    wakeup_max_tokens,
-                );
+                let actions = dispatch(event, &tag_queries, &bundle_queries, &tag_ranks, &wake);
                 // Use minimal chunk for storage to avoid duplication. (#1792)
                 let store_content = store_content_for_event(event, &chunk, &storage_chunk);
                 out = run_event_memory(MemoryCall {
@@ -1368,6 +1375,7 @@ fn run_inner(
                     payload: stdin_payload,
                     actions,
                     scope: scope_recall_actions(&tag_queries, &bundle_queries, &tag_ranks),
+                    wake: wake.clone(),
                     query: &query,
                     store_content,
                 })
@@ -2651,7 +2659,13 @@ mod tests {
     #[test]
     fn scope_recall_actions_is_turn_start_without_the_final_recall() {
         let tags = tag_recall_queries(&["a".to_string()]).unwrap();
-        let turn = dispatch(HookEvent::TurnStart, &tags, &[], &BTreeMap::new(), None);
+        let turn = dispatch(
+            HookEvent::TurnStart,
+            &tags,
+            &[],
+            &BTreeMap::new(),
+            &WakeUpArgs::default(),
+        );
         let scope = scope_recall_actions(&tags, &[], &BTreeMap::new());
         assert_eq!(turn.last(), Some(&Action::Recall));
         assert_eq!(scope, turn[..turn.len() - 1]);
@@ -2667,7 +2681,7 @@ mod tests {
         ] {
             assert_eq!(name.parse::<HookEvent>().unwrap(), event);
             assert_eq!(event.to_string(), name);
-            assert!(dispatch(event, &[], &[], &BTreeMap::new(), None).is_empty());
+            assert!(dispatch(event, &[], &[], &BTreeMap::new(), &WakeUpArgs::default()).is_empty());
             assert_eq!(event_to_log_kind(event), None);
         }
     }
@@ -4422,7 +4436,7 @@ mod tests {
             HookEvent::PreCompact,
         ] {
             assert_eq!(
-                dispatch(ev, &[], &[], &BTreeMap::new(), None),
+                dispatch(ev, &[], &[], &BTreeMap::new(), &WakeUpArgs::default()),
                 Vec::<Action>::new()
             );
         }
@@ -4493,19 +4507,43 @@ mod tests {
     #[test]
     fn dispatch_maps_events_to_actions() {
         assert_eq!(
-            dispatch(HookEvent::SessionStart, &[], &[], &BTreeMap::new(), None),
-            vec![Action::WakeUp(None)]
+            dispatch(
+                HookEvent::SessionStart,
+                &[],
+                &[],
+                &BTreeMap::new(),
+                &WakeUpArgs::default()
+            ),
+            vec![Action::WakeUp(WakeUpArgs::default())]
         );
         assert_eq!(
-            dispatch(HookEvent::TurnStart, &[], &[], &BTreeMap::new(), None),
+            dispatch(
+                HookEvent::TurnStart,
+                &[],
+                &[],
+                &BTreeMap::new(),
+                &WakeUpArgs::default()
+            ),
             vec![Action::Recall]
         );
         assert_eq!(
-            dispatch(HookEvent::SessionEnd, &[], &[], &BTreeMap::new(), None),
+            dispatch(
+                HookEvent::SessionEnd,
+                &[],
+                &[],
+                &BTreeMap::new(),
+                &WakeUpArgs::default()
+            ),
             vec![Action::Store]
         );
         assert_eq!(
-            dispatch(HookEvent::PostSession, &[], &[], &BTreeMap::new(), None),
+            dispatch(
+                HookEvent::PostSession,
+                &[],
+                &[],
+                &BTreeMap::new(),
+                &WakeUpArgs::default()
+            ),
             vec![],
             "PostSession defers to consolidation module, no dispatch actions"
         );
@@ -4513,19 +4551,23 @@ mod tests {
 
     #[test]
     fn dispatch_threads_wakeup_max_tokens_into_session_start_only() {
+        let wake_750 = WakeUpArgs {
+            max_tokens: Some(750),
+            project: Some("llmenv".into()),
+        };
         assert_eq!(
             dispatch(
                 HookEvent::SessionStart,
                 &[],
                 &[],
                 &BTreeMap::new(),
-                Some(750)
+                &wake_750
             ),
-            vec![Action::WakeUp(Some(750))]
+            vec![Action::WakeUp(wake_750.clone())]
         );
         // Not carried by any other event's actions — WakeUp only fires on SessionStart.
         assert_eq!(
-            dispatch(HookEvent::TurnStart, &[], &[], &BTreeMap::new(), Some(750)),
+            dispatch(HookEvent::TurnStart, &[], &[], &BTreeMap::new(), &wake_750),
             vec![Action::Recall]
         );
     }
@@ -4596,7 +4638,13 @@ mod tests {
     fn turn_start_expands_one_recall_tag_per_active_tag() {
         let tags = vec!["rust".to_string(), "work-vpn".to_string()];
         let queries = tag_recall_queries(&tags).expect("valid tags");
-        let actions = dispatch(HookEvent::TurnStart, &queries, &[], &BTreeMap::new(), None);
+        let actions = dispatch(
+            HookEvent::TurnStart,
+            &queries,
+            &[],
+            &BTreeMap::new(),
+            &WakeUpArgs::default(),
+        );
         assert_eq!(
             actions,
             vec![
@@ -4618,7 +4666,13 @@ mod tests {
     fn turn_start_expands_one_recall_bundle_per_active_bundle() {
         let bundles = vec!["base".to_string(), "rust-defaults".to_string()];
         let queries = bundle_recall_queries(&bundles).expect("valid bundles");
-        let actions = dispatch(HookEvent::TurnStart, &[], &queries, &BTreeMap::new(), None);
+        let actions = dispatch(
+            HookEvent::TurnStart,
+            &[],
+            &queries,
+            &BTreeMap::new(),
+            &WakeUpArgs::default(),
+        );
         assert_eq!(
             actions,
             vec![
@@ -4641,7 +4695,13 @@ mod tests {
         let tag_qs = tag_recall_queries(&["rust".to_string()]).expect("valid");
         let bundle_qs = bundle_recall_queries(&["base".to_string()]).expect("valid");
         let ranks = BTreeMap::from([("rust".to_string(), 1)]);
-        let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs, &ranks, None);
+        let actions = dispatch(
+            HookEvent::TurnStart,
+            &tag_qs,
+            &bundle_qs,
+            &ranks,
+            &WakeUpArgs::default(),
+        );
         // Order: rank-1 tag recalls, then bundle recalls, then project recall.
         assert!(matches!(actions[0], Action::RecallTag(_)));
         assert!(matches!(actions[1], Action::RecallBundle(_)));
@@ -4690,7 +4750,13 @@ mod tests {
         let tag_qs = tag_recall_queries(&["foo".to_string()]).expect("valid");
         let bundle_qs = bundle_recall_queries(&["foo".to_string()]).expect("valid");
         let ranks = BTreeMap::from([("foo".to_string(), 1)]);
-        let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs, &ranks, None);
+        let actions = dispatch(
+            HookEvent::TurnStart,
+            &tag_qs,
+            &bundle_qs,
+            &ranks,
+            &WakeUpArgs::default(),
+        );
         assert_eq!(actions.len(), 3);
         match &actions[0] {
             Action::RecallTag(q) => assert_eq!(q.keyword, "llmenv-tag:foo"),
@@ -4805,7 +4871,7 @@ mod tests {
         ) {
             let tag_qs = tag_recall_queries(&tags).expect("valid tags");
             let bundle_qs = bundle_recall_queries(&bundles).expect("valid bundles");
-            let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs, &BTreeMap::new(), None);
+            let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs, &BTreeMap::new(), &WakeUpArgs::default());
 
             prop_assert_eq!(actions.len(), 1 + tags.len() + bundles.len());
             for a in &actions[..bundles.len()] {
@@ -4840,14 +4906,20 @@ mod tests {
         ]);
         let tag_qs = tag_recall_queries(&tags).expect("valid tags");
         let bundle_qs = bundle_recall_queries(&["base".to_string()]).expect("valid bundle");
-        let order: Vec<String> = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs, &ranks, None)
-            .iter()
-            .map(|a| match a {
-                Action::RecallTag(q) => q.tag.clone(),
-                Action::RecallBundle(q) => format!("bundle:{}", q.bundle),
-                other => format!("{other:?}"),
-            })
-            .collect();
+        let order: Vec<String> = dispatch(
+            HookEvent::TurnStart,
+            &tag_qs,
+            &bundle_qs,
+            &ranks,
+            &WakeUpArgs::default(),
+        )
+        .iter()
+        .map(|a| match a {
+            Action::RecallTag(q) => q.tag.clone(),
+            Action::RecallBundle(q) => format!("bundle:{}", q.bundle),
+            other => format!("{other:?}"),
+        })
+        .collect();
         assert_eq!(
             order,
             [
