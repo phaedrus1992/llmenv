@@ -32,12 +32,14 @@ pub(super) struct AdaptiveCtx<'a> {
     pub(super) payload: &'a Value,
 }
 
+/// A recall across all projects. ICM's default project filter is the ICM
+/// server's own cwd, which says nothing about this session when ICM runs remotely.
 fn query(text: &str, limit: u8) -> RecallQuery {
     RecallQuery {
         query: text.to_string(),
         topic: None,
         keyword: None,
-        project: None,
+        project: Some(String::new()),
         limit,
     }
 }
@@ -57,25 +59,19 @@ async fn recall(client: &McpHttpClient, q: Option<RecallQuery>) -> String {
 }
 
 /// The recall texts for `text`, in budget order: main, keyword fanout, topic
-/// fanout, cross-project.
+/// fanout.
 async fn waves(client: &McpHttpClient, text: &str, keywords: &[String]) -> Vec<String> {
     let keyword = |i: usize| {
         keywords.get(i).map(|k| RecallQuery {
             keyword: Some(k.clone()),
-            project: Some(String::new()),
             ..query(text, FANOUT_LIMIT)
         })
     };
-    let cross = RecallQuery {
-        project: Some(String::new()),
-        ..query(text, FANOUT_LIMIT)
-    };
     let start = Instant::now();
-    let (main, kw0, kw1, cross) = tokio::join!(
+    let (main, kw0, kw1) = tokio::join!(
         recall(client, Some(query(text, MAIN_LIMIT))),
         recall(client, keyword(0)),
         recall(client, keyword(1)),
-        recall(client, Some(cross)),
     );
     let mut texts = vec![main, kw0, kw1];
     if start.elapsed() < WAVE2_CUTOFF {
@@ -94,7 +90,6 @@ async fn waves(client: &McpHttpClient, text: &str, keywords: &[String]) -> Vec<S
         let (t0, t1) = tokio::join!(recall(client, topic(0)), recall(client, topic(1)));
         texts.extend([t0, t1]);
     }
-    texts.push(cross);
     texts
 }
 
@@ -216,7 +211,6 @@ pub(super) async fn tool_failure(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<String
     let text = relevance::error_query(tool, error);
     let resolved = RecallQuery {
         topic: Some("errors-resolved".to_string()),
-        project: Some(String::new()),
         ..query(&text, FANOUT_LIMIT)
     };
     let (main, fixes) = tokio::join!(
@@ -469,17 +463,61 @@ mod tests {
 
     #[tokio::test]
     async fn one_failed_call_keeps_the_others() {
-        let server = server_with(&[("\"limit\":10", "[context-p] kept fact")]).await;
+        let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(body_string_contains("\"project\":\"\""))
+            .and(body_string_contains("decisions-p"))
             .respond_with(ResponseTemplate::new(500))
             .mount(&server)
             .await;
+        for (needle, body) in [
+            ("initialize", ""),
+            ("\"limit\":10", "[context-p] kept fact"),
+        ] {
+            Mock::given(method("POST"))
+                .and(body_string_contains(needle))
+                .respond_with(ResponseTemplate::new(200).set_body_json(text(body)))
+                .mount(&server)
+                .await;
+        }
         let f = fixture(&server);
         f.store.update("s1", |l| l.set_scope_sent(MAIN_AGENT));
         let turn = json!({"prompt": "x"});
         let out = turn_start(&ctx(&f, &turn), vec![]).await.unwrap();
         assert!(out.contains("kept fact"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn every_adaptive_recall_searches_all_projects() {
+        // The default project filter is the ICM server's own cwd, which says
+        // nothing about this session when ICM runs remotely (AGENTS.md).
+        let server = server_with(&[("\"limit\":10", "[context-p] fact")]).await;
+        let f = fixture(&server);
+        f.store.update("s1", |l| {
+            l.set_scope_sent(MAIN_AGENT);
+            l.push_activity(relevance::activity_from_tool_call(
+                "Bash",
+                &json!({"command": "cargo test"}),
+                1,
+            ));
+        });
+        turn_start(&ctx(&f, &json!({"prompt": "why"})), vec![])
+            .await
+            .unwrap();
+        tool_failure(&ctx(&f, &json!({"tool_name": "Bash", "error": "boom"})))
+            .await
+            .unwrap();
+        let recalls: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| String::from_utf8_lossy(&r.body).into_owned())
+            .filter(|b| b.contains("icm_memory_recall"))
+            .collect();
+        assert!(recalls.len() >= 4, "{recalls:?}");
+        for body in &recalls {
+            assert!(body.contains("\"project\":\"\""), "{body}");
+        }
     }
 
     #[tokio::test]

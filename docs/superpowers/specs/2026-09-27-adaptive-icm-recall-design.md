@@ -175,13 +175,17 @@ The shared function keeps its current behavior for the other adapters.
 3. Build the relevance query.
    If the query hash equals `last_query_hash` and no activity arrived after `last_turn_at`, make no relevance calls.
 4. Wave 1, concurrent:
-   - Main recall: the query, `limit: 10`, default project filter.
-   - Keyword fanout: each fanout keyword as the `keyword` filter, `project: ""`, `limit: 3`.
-   - Cross-project recall: the query, `project: ""`, `limit: 3`.
+   - Main recall: the query, `limit: 10`.
+   - Keyword fanout: each fanout keyword as the `keyword` filter, `limit: 3`.
+
+   Every adaptive recall sends `project: ""`.
+   ICM's default project filter is the ICM server's own working directory, which says nothing about this session when ICM runs remotely.
+   A live check against a remote `icm serve` returned unrelated records with the default filter, and the matching record first with `project: ""`.
+   No separate cross-project recall is needed, because the main recall already searches all projects.
 5. Wave 2, concurrent, after wave 1: topic fanout.
    At most 2 recalls, one per sibling topic, with `topic` set and `limit: 3`.
    Skip wave 2 when wave 1 took more than 1.5 seconds.
-6. Merge in budget order: the scope set (step 2 fallback only), main, keyword fanout, topic fanout, cross-project.
+6. Merge in budget order: the scope set (step 2 fallback only), main, keyword fanout, topic fanout.
 7. Drop records whose hash is in `agents.main.sent`.
    Apply the 8,000-byte budget (`RECALL_BUDGET_BYTES`).
    The existing omission notice reports records that did not fit.
@@ -200,8 +204,8 @@ This is a local file write only: no MCP call and no output.
 
 1. Append the failure to `errors`.
 2. Run the error recall, concurrent:
-   - The tool name plus the error head as the query, default project filter, `limit: 5`.
-   - The same query with `topic: "errors-resolved"`, `project: ""`, `limit: 3`.
+   - The tool name plus the error head as the query, `limit: 5`.
+   - The same query with `topic: "errors-resolved"`, `limit: 3`.
 3. Filter against the `sent` set of the current context (`agent_id` from the hook input, else `main`).
 4. Apply a 2,000-byte budget, inject, and record the kept hashes.
 
