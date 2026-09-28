@@ -267,7 +267,13 @@ impl LedgerStore {
         let start = Instant::now();
         loop {
             match file.try_lock() {
-                Ok(()) => return Some(file),
+                Ok(()) => {
+                    // The orphan prune goes by age, so a held lock must look new.
+                    if let Err(e) = file.set_modified(std::time::SystemTime::now()) {
+                        tracing::warn!("cannot refresh recall ledger lock age: {e}");
+                    }
+                    return Some(file);
+                }
                 Err(std::fs::TryLockError::WouldBlock) if start.elapsed() < LOCK_WAIT => {
                     std::thread::sleep(LOCK_POLL);
                 }
@@ -438,6 +444,23 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(result, None, "an unreadable ledger must skip the write");
         assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn taking_the_lock_refreshes_its_age() {
+        let (dir, store) = store();
+        store.update("s1", |_| ());
+        let lock = dir.path().join("recall_session").join("s1.lock");
+        let ten_days = std::time::SystemTime::now() - std::time::Duration::from_secs(10 * 86_400);
+        filetime::set_file_mtime(&lock, filetime::FileTime::from_system_time(ten_days)).unwrap();
+        store.load("s1").unwrap();
+        let age = std::fs::metadata(&lock)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .elapsed()
+            .unwrap();
+        assert!(age < std::time::Duration::from_secs(60), "{age:?}");
     }
 
     #[test]
