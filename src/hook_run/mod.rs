@@ -506,7 +506,12 @@ async fn run_event_memory(call: MemoryCall<'_>) -> anyhow::Result<String> {
     let state_dir = crate::paths::state_dir()
         .inspect_err(|e| tracing::error!("no state dir, adaptive recall falls back: {e}"))
         .ok();
-    let (Some(session_id), Some(state_dir)) = (call.session_id, state_dir) else {
+    let Some(session_id) = call.session_id else {
+        return run_memory_actions(call.client, call.actions, call.query, call.store_content).await;
+    };
+    // A separate bind keeps the session id out of the state dir path's data flow,
+    // which CodeQL tracks through a tuple (rust/cleartext-logging).
+    let Some(state_dir) = state_dir else {
         return run_memory_actions(call.client, call.actions, call.query, call.store_content).await;
     };
     if !uses_adaptive(call.event, call.settings, Some(session_id)) {
