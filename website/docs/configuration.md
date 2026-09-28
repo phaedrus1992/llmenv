@@ -551,6 +551,7 @@ features:
 | `default_topics` | no | Documentation only; preserved across round-trips |
 | `mcp_permissions` | no | Per-tier permission override for the ICM MCP's tools — see [`mcp_permissions`](#featuresmcp_permissions) below |
 | `wakeup_max_tokens` | no | Token budget for the `SessionStart` wake-up call, `20`-`4000` (added in v3.8.0) |
+| `adaptive_recall` | no | Per-session adaptive recall, `true` or `false`, default `true` (added in v3.12.0) |
 | `consolidation` | no | Post-session memory consolidation — see [Post-session consolidation](#post-session-consolidation) below (added in v3.3.0) |
 
 `wakeup_max_tokens` (added in v3.8.0) controls the size of the wake-up pack
@@ -560,6 +561,14 @@ the 500 tokens icm's own `config.toml` may configure, since that file is never
 consulted on this path. Set it explicitly to request a different budget; out-
 of-range values fail `llmenv doctor`/materialize validation instead of being
 silently clamped.
+
+`adaptive_recall` (added in v3.12.0) controls how the lifecycle hooks pick memories.
+With the default `true`, llmenv keeps a small state file per session and sends each memory one time per model context.
+The session start sends the wake-up pack and the scope-tagged memories.
+Each prompt then recalls memories that match the prompt, the files and commands in recent tool calls, the newest tool error, and the last assistant reply, plus memories from related topics.
+A failed tool call injects memories about that error, and a new subagent gets memories that match its task.
+After a compaction or `/clear`, the state resets and the scope-tagged memories go out again.
+Set `adaptive_recall: false` to go back to the stateless recall, which sends the same scope-tagged memories on every prompt.
 
 #### Post-session consolidation
 

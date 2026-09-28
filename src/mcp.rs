@@ -7,8 +7,8 @@ pub mod proxy {
 
 pub mod resolve {
     pub use llmenv_mcp::resolve::{
-        CODEBASE_MEMORY_MCP_NAME, MEMORY_MCP_NAME, ResolveError, ResolvedKind, ResolvedMcp,
-        codebase_memory_paths, memory_is_tag_active, resolve_bundle_mcps,
+        CODEBASE_MEMORY_MCP_NAME, MEMORY_MCP_NAME, MemoryHookSettings, ResolveError, ResolvedKind,
+        ResolvedMcp, codebase_memory_paths, memory_is_tag_active, resolve_bundle_mcps,
         resolve_codebase_memory_entries, resolve_mcps,
     };
 }
