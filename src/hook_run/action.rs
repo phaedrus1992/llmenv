@@ -271,6 +271,29 @@ mod tests {
         }
     }
 
+    proptest! {
+        /// The arguments hold `query` and `limit`, plus exactly the filters that are set.
+        #[test]
+        fn recall_query_arguments_match_the_query(
+            query in "\\PC{0,40}",
+            topic in prop::option::of("[a-z-]{0,12}"),
+            keyword in prop::option::of("[a-z-]{0,12}"),
+            project in prop::option::of("[a-z-]{0,12}"),
+            limit in 1u8..=20,
+        ) {
+            let q = RecallQuery { query, topic, keyword, project, limit };
+            let args = Action::RecallQuery(q.clone()).arguments("x", "y");
+            let obj = args.as_object().unwrap();
+            let expected = 2 + [&q.topic, &q.keyword, &q.project].iter().filter(|v| v.is_some()).count();
+            prop_assert_eq!(obj.len(), expected);
+            prop_assert_eq!(obj["query"].as_str(), Some(q.query.as_str()));
+            prop_assert_eq!(obj["limit"].as_u64(), Some(u64::from(q.limit)));
+            for (key, value) in [("topic", &q.topic), ("keyword", &q.keyword), ("project", &q.project)] {
+                prop_assert_eq!(obj.get(key).and_then(|v| v.as_str()), value.as_deref());
+            }
+        }
+    }
+
     #[test]
     fn recall_query_sends_only_the_fields_it_has() {
         let full = Action::RecallQuery(RecallQuery {

@@ -324,6 +324,45 @@ mod tests {
     }
 
     proptest! {
+        /// At most two siblings, never a topic already hit, never a repeat.
+        #[test]
+        fn sibling_topics_are_new_unique_and_capped(
+            hits in prop::collection::vec("(context|decisions|errors|preferences)-?[a-z]{0,4}", 0..8),
+        ) {
+            let siblings = sibling_topics(&hits);
+            prop_assert!(siblings.len() <= MAX_SIBLINGS);
+            for (i, topic) in siblings.iter().enumerate() {
+                prop_assert!(!hits.contains(topic), "{topic} was already hit");
+                prop_assert!(!siblings[..i].contains(topic), "{topic} repeated");
+            }
+            prop_assert_eq!(siblings, sibling_topics(&hits));
+        }
+
+        /// A `[topic] text` record gives back exactly its topic.
+        #[test]
+        fn record_topic_reads_back_the_topic(topic in "[a-z0-9_:-]{1,30}", rest in "\\PC{0,50}") {
+            let record = format!("[{topic}] {rest}");
+            prop_assert_eq!(record_topic(&record), Some(topic.as_str()));
+        }
+
+        /// A file path is kept whole; a command gives its program name, past env
+        /// assignments and any directory.
+        #[test]
+        fn activity_target_is_the_path_or_the_program(
+            path in "/[a-z]{1,8}(/[a-z_]{1,8}){0,4}\\.rs",
+            envs in prop::collection::vec("[A-Z]{1,5}=[a-z0-9]{0,4}", 0..3),
+            dir in "(/[a-z]{1,6}){0,3}/",
+            program in "[a-z][a-z0-9-]{0,10}",
+        ) {
+            let read = activity_from_tool_call("Read", &json!({ "file_path": path }), 0);
+            prop_assert_eq!(read.target.as_deref(), Some(path.as_str()));
+            let command = format!("{} {dir}{program} --flag", envs.join(" "));
+            let bash = activity_from_tool_call("Bash", &json!({ "command": command }), 0);
+            prop_assert_eq!(bash.target.as_deref(), Some(program.as_str()));
+        }
+    }
+
+    proptest! {
         #[test]
         fn caps_never_split_a_char(prompt in "\\PC{0,900}", tail in "\\PC{0,900}") {
             let empty = VecDeque::new();

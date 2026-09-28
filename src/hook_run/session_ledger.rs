@@ -341,6 +341,62 @@ mod tests {
         (dir, store)
     }
 
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Any whitespace layout of the same words gives the same 16-hex-char hash.
+        #[test]
+        fn record_hash_depends_only_on_the_words(
+            words in prop::collection::vec("[a-z0-9\\[\\]]{1,8}", 1..12),
+            seps in prop::collection::vec("[ \t\n]{1,3}", 12),
+        ) {
+            let spaced: String = words
+                .iter()
+                .zip(seps.iter())
+                .map(|(w, s)| format!("{w}{s}"))
+                .collect();
+            let single = words.join(" ");
+            prop_assert_eq!(record_hash(&spaced), record_hash(&single));
+            prop_assert_eq!(record_hash(&single).len(), HASH_HEX_CHARS);
+            prop_assert!(record_hash(&single).chars().all(|c| c.is_ascii_hexdigit()));
+        }
+
+        /// The head is a prefix, fits the limit, and is the whole text when it fits.
+        #[test]
+        fn head_bytes_is_a_bounded_prefix(text in "\\PC{0,200}", max in 0usize..400) {
+            let head = head_bytes(&text, max);
+            prop_assert!(text.starts_with(&head));
+            prop_assert!(head.len() <= max);
+            if text.len() <= max {
+                prop_assert_eq!(head, text);
+            }
+        }
+
+        /// Whatever the operations, the ledger survives a JSON round trip unchanged.
+        #[test]
+        fn ledger_round_trips_through_json(
+            hashes in prop::collection::vec("[0-9a-f]{16}", 0..10),
+            tools in prop::collection::vec("[A-Za-z]{1,10}", 0..30),
+            prompt in "\\PC{0,700}",
+            error in "\\PC{0,500}",
+        ) {
+            let mut l = Ledger::default();
+            l.reset();
+            l.mark_sent(MAIN_AGENT, hashes.clone());
+            l.mark_sent("agent-1", hashes);
+            for (i, tool) in tools.iter().enumerate() {
+                let at = i64::try_from(i).unwrap_or(0);
+                l.push_activity(Activity { tool: tool.clone(), target: Some(prompt.clone()), at });
+                l.push_error(tool, &error, at);
+                l.queue_subagent(&format!("u{i}"), tool, &prompt, at);
+            }
+            l.last_query_hash = Some("abc".into());
+            let json = serde_json::to_string(&l).unwrap();
+            let back: Ledger = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(back, l);
+        }
+    }
+
     #[test]
     fn record_hash_ignores_whitespace_layout() {
         assert_eq!(record_hash("[t] a  b\n c"), record_hash("[t] a b c"));
