@@ -197,18 +197,15 @@ impl Ledger {
 
 fn push_capped<T>(ring: &mut VecDeque<T>, entry: T, cap: usize) {
     ring.push_back(entry);
-    while ring.len() > cap {
-        ring.pop_front();
-    }
+    let excess = ring.len().saturating_sub(cap);
+    ring.drain(..excess);
 }
 
 /// The longest prefix of `text` that fits in `max` bytes and ends on a char boundary.
 fn head_bytes(text: &str, max: usize) -> String {
-    let mut end = text.len().min(max);
-    while !text.is_char_boundary(end) {
-        end = end.saturating_sub(1);
-    }
-    text.get(..end).unwrap_or_default().to_string()
+    text.get(..text.floor_char_boundary(max))
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// A stable key for one recall record: whitespace layout does not change it.
@@ -221,13 +218,6 @@ pub(crate) fn record_hash(record: &str) -> String {
         .chars()
         .take(HASH_HEX_CHARS)
         .collect()
-}
-
-pub(crate) fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
-        .unwrap_or_default()
 }
 
 /// The ledger files under `state_dir()/recall_session/`.
