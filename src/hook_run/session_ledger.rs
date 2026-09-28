@@ -175,6 +175,18 @@ impl Ledger {
         self.pending_subagents.remove(index)
     }
 
+    /// Whether `agent` already has an entry, which means a subagent resumed.
+    pub(crate) fn knows_agent(&self, agent: &str) -> bool {
+        self.agents.contains_key(agent)
+    }
+
+    /// Remove the queued task of one `Agent` call, when that call has finished
+    /// or was denied and so will never reach a `SubagentStart`.
+    pub(crate) fn drop_subagent(&mut self, tool_use_id: &str) {
+        self.pending_subagents
+            .retain(|p| p.tool_use_id != tool_use_id);
+    }
+
     fn drop_expired(&mut self, now: i64) {
         self.pending_subagents
             .retain(|p| now.saturating_sub(p.at) <= PENDING_TTL_SECS);

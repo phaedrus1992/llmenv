@@ -326,9 +326,17 @@ pub(super) async fn subagent_start(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<Stri
     }
     let agent_type = ctx.payload["agent_type"].as_str().unwrap_or_default();
     let now = unix_now();
+    // A resumed subagent already has an entry; its task was taken at launch, and
+    // the queue now holds tasks for new siblings only.
     let task = ctx
         .store
-        .update(ctx.session_id, |l| l.take_subagent(agent_type, now))
+        .update(ctx.session_id, |l| {
+            if l.knows_agent(&key) {
+                None
+            } else {
+                l.take_subagent(agent_type, now)
+            }
+        })
         .flatten();
     let ledger = ctx.store.load(ctx.session_id).unwrap_or_default();
     let text = relevance::subagent_query(
@@ -365,6 +373,11 @@ pub(super) fn record_local(
             store.update(session_id, |l| {
                 for call in calls {
                     let tool = call["tool_name"].as_str().unwrap_or_default();
+                    if tool == "Agent"
+                        && let Some(id) = call["tool_use_id"].as_str()
+                    {
+                        l.drop_subagent(id);
+                    }
                     l.push_activity(relevance::activity_from_tool_call(
                         tool,
                         &call["tool_input"],
@@ -764,6 +777,51 @@ mod tests {
         let ledger = f.store.load("s1").unwrap();
         assert_eq!(ledger.sent_for(MAIN_AGENT).len(), 1, "parent unchanged");
         assert_eq!(ledger.sent_for("agent-1").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_resumed_subagent_leaves_the_queue_alone() {
+        let server = server_with(&[("\"limit\":10", "")]).await;
+        let f = fixture(&server);
+        f.store
+            .update("s1", |l| l.mark_sent("agent-1", ["h".to_string()]));
+        record_local(
+            HookEvent::SubagentTask,
+            &f.store,
+            "s1",
+            &json!({"tool_name": "Agent", "tool_use_id": "u2",
+                    "tool_input": {"subagent_type": "Explore", "prompt": "new sibling task"}}),
+        );
+        let resumed = json!({"agent_id": "agent-1", "agent_type": "Explore"});
+        subagent_start(&ctx(&f, &resumed)).await.unwrap();
+        let task = f
+            .store
+            .update("s1", |l| l.take_subagent("Explore", unix_now()))
+            .flatten();
+        assert_eq!(task.map(|t| t.task).as_deref(), Some("new sibling task"));
+    }
+
+    #[test]
+    fn a_finished_agent_call_leaves_the_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LedgerStore::new(dir.path());
+        record_local(
+            HookEvent::SubagentTask,
+            &store,
+            "s1",
+            &json!({"tool_name": "Agent", "tool_use_id": "u1",
+                    "tool_input": {"subagent_type": "Explore", "prompt": "denied task"}}),
+        );
+        record_local(
+            HookEvent::PostToolBatch,
+            &store,
+            "s1",
+            &json!({"tool_calls": [{"tool_name": "Agent", "tool_use_id": "u1", "tool_input": {}}]}),
+        );
+        let task = store
+            .update("s1", |l| l.take_subagent("Explore", unix_now()))
+            .flatten();
+        assert!(task.is_none());
     }
 
     #[test]
