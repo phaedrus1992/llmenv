@@ -264,6 +264,7 @@ fn all_events_fail_soft_without_backend() {
         "post_tool_batch",
         "post_tool_use_failure",
         "subagent_start",
+        "subagent_task",
     ] {
         hook_cmd(dir.path(), &config_path, event)
             .timeout(Duration::from_secs(10))

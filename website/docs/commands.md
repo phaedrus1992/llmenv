@@ -261,8 +261,8 @@ drive [`session_log:`](configuration.md#session_log). Invoked by the agent
 runtime (not by users directly).
 
 Lifecycle/memory events (`session_start` and `session_end` are always registered
-by the Claude Code adapter; `turn_start` and the adaptive recall events need a
-memory backend):
+by the Claude Code adapter; `turn_start` needs a memory backend, and the adaptive
+recall events also need `adaptive_recall` on):
 
 - `session_start` — injects the session wake-up pack (`icm_wake_up`); with
   `adaptive_recall` (added in v3.12.0), also injects the scope-tagged memories
@@ -281,7 +281,9 @@ memory backend):
 - `post_tool_use_failure` (added in v3.12.0) — records the error and injects
   memories about it
 - `subagent_start` (added in v3.12.0) — injects memories that match the
-  subagent's task, which a `pre_tool_use` hook on the `Agent` tool records
+  subagent's task, which `subagent_task` records
+- `subagent_task` (added in v3.12.0) — a `PreToolUse` hook on the `Agent` tool
+  that queues the subagent's task text; no output
 - `session_end` — best-effort store of the active scope context
   (`icm_memory_store`); also emits the baseline `lifecycle_end` session-log event
 
@@ -672,8 +674,9 @@ active context (active bundles, active MCP servers, etc.). Checks:
   (`session_start`, `session_end`, `turn_start`, `post_tool_batch`,
   `post_tool_use_failure`, `subagent_start`, `stop`) are wired for
   `claude_code` in the active scope, and for any that aren't, what would enable
-  them. `session_start`/`session_end` are always registered; `turn_start` and
-  the three adaptive recall events (added in v3.12.0) need a memory backend;
+  them. `session_start`/`session_end` are always registered; `turn_start` needs
+  a memory backend, and the three adaptive recall events (added in v3.12.0)
+  also need `adaptive_recall` on;
   `stop` needs session logging or `features.task_tracker`.
   `turn_start`'s gate is read straight from the generator; the others are
   derived separately and held in step by a test that renders `settings.json`

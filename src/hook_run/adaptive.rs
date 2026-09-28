@@ -373,7 +373,7 @@ pub(super) fn record_local(
                 }
             });
         }
-        HookEvent::PreToolUse if payload["tool_name"].as_str() == Some("Agent") => {
+        HookEvent::SubagentTask if payload["tool_name"].as_str() == Some("Agent") => {
             let input = &payload["tool_input"];
             let id = payload["tool_use_id"].as_str().unwrap_or_default();
             let kind = input["subagent_type"].as_str().unwrap_or("general-purpose");
@@ -752,7 +752,7 @@ mod tests {
             );
         });
         record_local(
-            HookEvent::PreToolUse,
+            HookEvent::SubagentTask,
             &f.store,
             "s1",
             &json!({"tool_name": "Agent", "tool_use_id": "u1",

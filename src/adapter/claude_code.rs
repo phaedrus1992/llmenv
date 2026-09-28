@@ -89,6 +89,12 @@ pub(crate) fn lifecycle_hook_registrations(
     manifest: &MergedManifest,
 ) -> Vec<(&'static str, bool, &'static str)> {
     let icm_active = manifest.mcps.iter().any(|m| m.name == MEMORY_MCP_NAME);
+    // #2249: the adaptive recall hooks are the ones `adaptive_recall: false` turns
+    // off; an ICM entry without resolved settings uses the default, which is on.
+    let adaptive_recall = manifest
+        .mcps
+        .iter()
+        .any(|m| m.name == MEMORY_MCP_NAME && m.memory_hook.is_none_or(|h| h.adaptive_recall));
     let session_log = manifest.session_log.any_sink_enabled();
     let task_tracker = manifest
         .capabilities
@@ -115,18 +121,18 @@ pub(crate) fn lifecycle_hook_registrations(
         ),
         (
             "post_tool_batch",
-            icm_active,
-            "needs a memory backend (features.memory)",
+            adaptive_recall,
+            "needs a memory backend with adaptive_recall on (features.memory)",
         ),
         (
             "post_tool_use_failure",
-            icm_active,
-            "needs a memory backend (features.memory)",
+            adaptive_recall,
+            "needs a memory backend with adaptive_recall on (features.memory)",
         ),
         (
             "subagent_start",
-            icm_active,
-            "needs a memory backend (features.memory)",
+            adaptive_recall,
+            "needs a memory backend with adaptive_recall on (features.memory)",
         ),
         (
             "stop",
@@ -1631,7 +1637,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             .or_default()
             .push(json!({
                 "matcher": "^Agent$",
-                "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} pre_tool_use") }],
+                "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} subagent_task") }],
             }));
     }
 
@@ -3772,13 +3778,55 @@ mod tests {
             .as_array()
             .expect("PreToolUse hooks")
             .iter()
-            .any(|entry| entry["matcher"] == "^Agent$");
-        assert!(agent_matcher, "PreToolUse must match the Agent tool");
+            .any(|entry| {
+                entry["matcher"] == "^Agent$"
+                    && entry["hooks"][0]["command"] == format!("{HOOK_RUN_COMMAND} subagent_task")
+            });
+        assert!(
+            agent_matcher,
+            "PreToolUse must queue Agent tasks via subagent_task"
+        );
 
         let bare = render_settings_for_test(&crate::merge::MergedManifest::default());
         for event in ["PostToolBatch", "PostToolUseFailure", "SubagentStart"] {
             assert!(hook_commands_for(&bare, event).is_empty(), "{event}");
         }
+    }
+
+    #[test]
+    fn adaptive_recall_false_registers_no_adaptive_hooks() {
+        // #2249: the rollback flag must also stop the per-tool ledger writes.
+        let manifest = crate::merge::MergedManifest {
+            mcps: vec![crate::mcp::resolve::ResolvedMcp {
+                name: crate::mcp::resolve::MEMORY_MCP_NAME.to_string(),
+                kind: crate::mcp::resolve::ResolvedKind::Remote {
+                    url: "http://localhost:9999".into(),
+                    transport: crate::config::McpTransport::Http,
+                },
+                headers: Default::default(),
+                timeout: None,
+                disabled_tools: vec![],
+                mcp_permissions: None,
+                memory_hook: Some(crate::mcp::resolve::MemoryHookSettings {
+                    wakeup_max_tokens: None,
+                    adaptive_recall: false,
+                }),
+            }],
+            ..Default::default()
+        };
+        let settings = render_settings_for_test(&manifest);
+        for event in ["PostToolBatch", "PostToolUseFailure", "SubagentStart"] {
+            assert!(hook_commands_for(&settings, event).is_empty(), "{event}");
+        }
+        assert!(
+            !hook_commands_for(&settings, "PreToolUse")
+                .contains(&format!("{HOOK_RUN_COMMAND} subagent_task"))
+        );
+        assert!(
+            hook_commands_for(&settings, "UserPromptSubmit")
+                .contains(&format!("{HOOK_RUN_COMMAND} turn_start")),
+            "stateless recall still runs"
+        );
     }
 
     #[test]

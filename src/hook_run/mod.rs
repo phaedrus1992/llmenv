@@ -180,6 +180,9 @@ pub enum HookEvent {
     PostToolUseFailure,
     /// A subagent is spawned or resumed (Claude Code: `SubagentStart`).
     SubagentStart,
+    /// An `Agent` tool call is about to run (Claude Code: `PreToolUse` with the
+    /// `^Agent$` matcher); queues the subagent task for adaptive recall (#2249).
+    SubagentTask,
 }
 
 impl FromStr for HookEvent {
@@ -200,11 +203,12 @@ impl FromStr for HookEvent {
             "post_tool_batch" => Ok(HookEvent::PostToolBatch),
             "post_tool_use_failure" => Ok(HookEvent::PostToolUseFailure),
             "subagent_start" => Ok(HookEvent::SubagentStart),
+            "subagent_task" => Ok(HookEvent::SubagentTask),
             other => Err(anyhow::anyhow!(
                 "unknown hook event '{other}' (expected session_start|turn_start|session_end|\
                  user_prompt_submit|pre_tool_use|post_tool_use|notification|stop|\
                  subagent_stop|pre_compact|post_tool_batch|post_tool_use_failure|\
-                 subagent_start)"
+                 subagent_start|subagent_task)"
             )),
         }
     }
@@ -227,6 +231,7 @@ impl std::fmt::Display for HookEvent {
             HookEvent::PostToolBatch => "post_tool_batch",
             HookEvent::PostToolUseFailure => "post_tool_use_failure",
             HookEvent::SubagentStart => "subagent_start",
+            HookEvent::SubagentTask => "subagent_task",
         };
         f.write_str(s)
     }
@@ -268,7 +273,8 @@ fn dispatch(
         | HookEvent::PreCompact
         | HookEvent::PostToolBatch
         | HookEvent::PostToolUseFailure
-        | HookEvent::SubagentStart => vec![],
+        | HookEvent::SubagentStart
+        | HookEvent::SubagentTask => vec![],
         HookEvent::PostSession => vec![], // consolidation runs as a separate step
     }
 }
@@ -331,7 +337,10 @@ fn event_to_log_kind(event: HookEvent) -> Option<(EventKind, &'static str)> {
         HookEvent::PreCompact => Some((EventKind::Notification, "system")),
         HookEvent::SessionStart | HookEvent::TurnStart | HookEvent::SessionEnd => None,
         HookEvent::PostSession => None, // consolidation runs as a separate step
-        HookEvent::PostToolBatch | HookEvent::PostToolUseFailure | HookEvent::SubagentStart => None,
+        HookEvent::PostToolBatch
+        | HookEvent::PostToolUseFailure
+        | HookEvent::SubagentStart
+        | HookEvent::SubagentTask => None,
     }
 }
 
@@ -376,7 +385,8 @@ fn event_content(event: HookEvent, payload: &serde_json::Value) -> (Option<Strin
         | HookEvent::PostSession
         | HookEvent::PostToolBatch
         | HookEvent::PostToolUseFailure
-        | HookEvent::SubagentStart => (None, String::new()),
+        | HookEvent::SubagentStart
+        | HookEvent::SubagentTask => (None, String::new()),
     }
 }
 
@@ -447,7 +457,7 @@ fn can_short_circuit(event: HookEvent, log_cfg: &crate::config::SessionLog) -> b
 
 /// Whether `event` writes to the recall ledger without any MCP call (#2249).
 fn records_locally(event: HookEvent) -> bool {
-    matches!(event, HookEvent::PostToolBatch | HookEvent::PreToolUse)
+    matches!(event, HookEvent::PostToolBatch | HookEvent::SubagentTask)
 }
 
 /// Whether `event` takes the adaptive recall flow instead of the stateless actions.
@@ -2591,6 +2601,7 @@ mod tests {
         "post_tool_batch",
         "post_tool_use_failure",
         "subagent_start",
+        "subagent_task",
     ];
 
     #[test]
@@ -2623,7 +2634,11 @@ mod tests {
     #[test]
     fn local_recording_events_skip_the_memory_pipeline() {
         assert!(records_locally(HookEvent::PostToolBatch));
-        assert!(records_locally(HookEvent::PreToolUse));
+        assert!(records_locally(HookEvent::SubagentTask));
+        assert!(
+            !records_locally(HookEvent::PreToolUse),
+            "the general PreToolUse hook must not write the ledger"
+        );
         assert!(!records_locally(HookEvent::TurnStart));
     }
 
@@ -2642,6 +2657,7 @@ mod tests {
             ("post_tool_batch", HookEvent::PostToolBatch),
             ("post_tool_use_failure", HookEvent::PostToolUseFailure),
             ("subagent_start", HookEvent::SubagentStart),
+            ("subagent_task", HookEvent::SubagentTask),
         ] {
             assert_eq!(name.parse::<HookEvent>().unwrap(), event);
             assert_eq!(event.to_string(), name);
@@ -2658,7 +2674,7 @@ mod tests {
         }
         // `HookEvent` derives no variant count, so this guards the list
         // against a variant added to the enum but not to `from_str`.
-        assert_eq!(ALL_HOOK_EVENTS.len(), 14);
+        assert_eq!(ALL_HOOK_EVENTS.len(), 15);
     }
 
     // The gate is fed `AgentAdapter::name` (hyphenated), not `engine_id`
