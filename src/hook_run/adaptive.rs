@@ -750,6 +750,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_wake_pack_takes_its_own_length_from_the_scope_budget() {
+        let wake = "w".repeat(3_000);
+        let scope = format!("[context-p] big scope fact {}", "x".repeat(3_000));
+        let server = server_with(&[("icm_wake_up", &wake), ("llmenv-tag:proj", &scope)]).await;
+        let f = fixture(&server);
+        let out = session_start(
+            &ctx(&f, &json!({"source": "startup"})),
+            Action::WakeUp(crate::hook_run::action::WakeUpArgs::default()),
+            vec![tag_action("proj")],
+        )
+        .await
+        .unwrap();
+        assert!(
+            out.contains("big scope fact"),
+            "the record fits: {}",
+            out.len()
+        );
+    }
+
+    async fn start_with_a_failed_wake(
+        scope_body: Option<&str>,
+        scope: Vec<Action>,
+    ) -> anyhow::Result<String> {
+        let pairs: Vec<(&str, &str)> = scope_body
+            .map(|b| ("llmenv-tag:proj", b))
+            .into_iter()
+            .collect();
+        let server = server_with(&pairs).await;
+        let f = fixture(&server);
+        session_start(
+            &ctx(&f, &json!({"source": "startup"})),
+            Action::WakeUp(crate::hook_run::action::WakeUpArgs::default()),
+            scope,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_failed_wake_with_a_working_scope_still_sends_the_scope() {
+        let out =
+            start_with_a_failed_wake(Some("[context-p] scope fact"), vec![tag_action("proj")])
+                .await
+                .unwrap();
+        assert!(out.contains("scope fact"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_wake_is_an_error_when_the_scope_also_fails() {
+        assert!(
+            start_with_a_failed_wake(None, vec![tag_action("proj")])
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_wake_is_an_error_when_there_is_no_scope() {
+        assert!(start_with_a_failed_wake(None, Vec::new()).await.is_err());
+    }
+
+    #[tokio::test]
     async fn the_session_project_ranks_first_after_session_start() {
         let server = server_with(&[
             ("\"project\":\"llmenv\"", "[decisions-llmenv] project fact"),
