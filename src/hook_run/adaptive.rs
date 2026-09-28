@@ -10,9 +10,9 @@ use serde_json::Value;
 use crate::hook_run::HookEvent;
 use crate::hook_run::action::{Action, RecallQuery, split_recall_records};
 use crate::hook_run::mcp_client::McpHttpClient;
-use crate::hook_run::recall::{RECALL_BUDGET_BYTES, RecallBudget, run_with_budget_filtered};
+use crate::hook_run::recall::{RECALL_BUDGET_BYTES, RecallBudget};
 use crate::hook_run::relevance::{self, TurnSignals};
-use crate::hook_run::session_ledger::{Ledger, LedgerStore, MAIN_AGENT, record_hash, unix_now};
+use crate::hook_run::session_ledger::{LedgerStore, MAIN_AGENT, record_hash, unix_now};
 use crate::hook_run::transcript;
 
 const FAILURE_BUDGET_BYTES: usize = 2_000;
@@ -44,23 +44,72 @@ fn query(text: &str, limit: u8) -> RecallQuery {
     }
 }
 
-/// Run one recall; a failure costs its own records only.
-async fn recall(client: &McpHttpClient, q: Option<RecallQuery>) -> String {
-    let Some(q) = q else {
-        return String::new();
-    };
-    Action::RecallQuery(q)
-        .run(client, "", "")
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!("adaptive recall call failed, its records are skipped: {e}");
-            String::new()
-        })
+/// What a set of recall calls returned.
+#[derive(Debug, Default)]
+struct Outcome {
+    texts: Vec<String>,
+    calls: usize,
+    failed: usize,
+}
+
+impl Outcome {
+    /// Record one call. `None` means no call ran, so nothing is counted.
+    fn push(&mut self, result: Option<anyhow::Result<String>>) {
+        let Some(result) = result else {
+            return;
+        };
+        self.calls += 1;
+        match result {
+            Ok(text) => self.texts.push(text),
+            Err(e) => {
+                self.failed += 1;
+                tracing::warn!("adaptive recall call failed, its records are skipped: {e}");
+            }
+        }
+    }
+
+    fn merge(&mut self, other: Outcome) {
+        self.texts.extend(other.texts);
+        self.calls += other.calls;
+        self.failed += other.failed;
+    }
+
+    fn all_failed(&self) -> bool {
+        self.calls > 0 && self.failed == self.calls
+    }
+}
+
+/// The stderr line for a flow whose every ICM call failed. A single failed call
+/// only costs its records, but a dead backend must be visible, as it is on the
+/// stateless path.
+fn outage_notice(flow: &str, outcome: &Outcome) -> Option<String> {
+    outcome.all_failed().then(|| {
+        format!(
+            "llmenv: memory {flow} recall skipped: all {} ICM calls failed",
+            outcome.calls
+        )
+    })
+}
+
+/// Print the outage line and the `[LLMENV_CONTEXT]` trace line for one flow.
+fn report(flow: &str, outcome: &Outcome, budget: &RecallBudget) {
+    if let Some(line) = outage_notice(flow, outcome) {
+        eprintln!("{line}");
+    }
+    // Same env var that gates hook-run's other stderr telemetry (#1261).
+    let tracing_enabled = std::env::var_os("LLMENV_TRACE_TIMING").is_some();
+    if let Some(line) = budget.trace_line(tracing_enabled) {
+        eprintln!("{line}");
+    }
+}
+
+async fn recall(client: &McpHttpClient, q: Option<RecallQuery>) -> Option<anyhow::Result<String>> {
+    Some(Action::RecallQuery(q?).run(client, "", "").await)
 }
 
 /// The recall texts for `text`, in budget order: main, keyword fanout, topic
-/// fanout.
-async fn waves(client: &McpHttpClient, text: &str, keywords: &[String]) -> Vec<String> {
+/// fanout. The flag says whether the main recall succeeded.
+async fn waves(client: &McpHttpClient, text: &str, keywords: &[String]) -> (Outcome, bool) {
     let keyword = |i: usize| {
         keywords.get(i).map(|k| RecallQuery {
             keyword: Some(k.clone()),
@@ -73,9 +122,12 @@ async fn waves(client: &McpHttpClient, text: &str, keywords: &[String]) -> Vec<S
         recall(client, keyword(0)),
         recall(client, keyword(1)),
     );
-    let mut texts = vec![main, kw0, kw1];
+    let main_ok = matches!(main, Some(Ok(_)));
+    let mut outcome = Outcome::default();
+    [main, kw0, kw1].into_iter().for_each(|r| outcome.push(r));
     if start.elapsed() < WAVE2_CUTOFF {
-        let topics: Vec<String> = texts
+        let topics: Vec<String> = outcome
+            .texts
             .iter()
             .flat_map(|t| split_recall_records(t))
             .filter_map(|r| relevance::record_topic(&r).map(str::to_string))
@@ -88,13 +140,34 @@ async fn waves(client: &McpHttpClient, text: &str, keywords: &[String]) -> Vec<S
             })
         };
         let (t0, t1) = tokio::join!(recall(client, topic(0)), recall(client, topic(1)));
-        texts.extend([t0, t1]);
+        outcome.push(t0);
+        outcome.push(t1);
     }
-    texts
+    (outcome, main_ok)
 }
 
 fn resets_ledger(source: Option<&str>) -> bool {
     matches!(source, Some("startup" | "clear" | "compact"))
+}
+
+/// Run the scope recalls into `budget`, one after another, until it is full.
+async fn run_scope(
+    ctx: &AdaptiveCtx<'_>,
+    scope: Vec<Action>,
+    budget: &mut RecallBudget,
+) -> Outcome {
+    let mut outcome = Outcome::default();
+    for action in scope {
+        if budget.is_full() {
+            break;
+        }
+        outcome.push(Some(action.run(ctx.client, "", "").await));
+        if let Some(text) = outcome.texts.last() {
+            budget.add_text(text);
+        }
+        outcome.texts.clear();
+    }
+    outcome
 }
 
 /// `SessionStart`: reset per `source`, then send the wake-up pack and the scope set.
@@ -103,42 +176,47 @@ pub(super) async fn session_start(
     wake: Action,
     scope: Vec<Action>,
 ) -> anyhow::Result<String> {
-    if resets_ledger(ctx.payload["source"].as_str()) {
-        ctx.store.update(ctx.session_id, Ledger::reset);
-    }
+    let reset = resets_ledger(ctx.payload["source"].as_str());
+    // One locked update, so a busy lock can never leave a pre-reset sent set in use.
     let sent = ctx
         .store
-        .load(ctx.session_id)
-        .unwrap_or_default()
-        .sent_for(MAIN_AGENT);
-    let mut actions = vec![wake];
-    actions.extend(scope);
-    let budget = RecallBudget::new(RECALL_BUDGET_BYTES, sent);
-    let (text, budget) = run_with_budget_filtered(actions, budget, |a| async move {
-        a.run(ctx.client, "", "").await
-    })
-    .await?;
+        .update(ctx.session_id, |l| {
+            if reset {
+                l.reset();
+            }
+            l.sent_for(MAIN_AGENT)
+        })
+        .unwrap_or_default();
+    let wake = wake.run(ctx.client, "", "").await;
+    // Claude Code spills output over about 10 KB to a file, so the scope set gets
+    // only the room that the wake-up pack leaves.
+    let wake_bytes = wake.as_ref().map_or(0, |t| t.len() + 2);
+    let mut budget = RecallBudget::new(RECALL_BUDGET_BYTES.saturating_sub(wake_bytes), sent);
+    let scope_len = scope.len();
+    let outcome = run_scope(ctx, scope, &mut budget).await;
+    report("session_start", &outcome, &budget);
+    let wake = match wake {
+        Ok(text) => text,
+        Err(e) if outcome.all_failed() || scope_len == 0 => return Err(e),
+        Err(e) => {
+            tracing::warn!("icm_wake_up failed, the scope set still goes out: {e}");
+            String::new()
+        }
+    };
+    let complete = outcome.failed == 0;
     let kept = budget.kept_hashes();
     ctx.store.update(ctx.session_id, |l| {
         l.mark_sent(MAIN_AGENT, kept);
-        l.set_scope_sent(MAIN_AGENT);
-    });
-    Ok(text)
-}
-
-/// Add the scope set to `budget`, for a session where no `SessionStart` ran in
-/// this epoch.
-async fn fallback_scope(ctx: &AdaptiveCtx<'_>, scope: Vec<Action>, budget: &mut RecallBudget) {
-    for action in scope {
-        if budget.is_full() {
-            break;
+        if complete {
+            l.set_scope_sent(MAIN_AGENT);
         }
-        let text = action.run(ctx.client, "", "").await.unwrap_or_else(|e| {
-            tracing::warn!("scope recall call failed, its records are skipped: {e}");
-            String::new()
-        });
-        budget.add_text(&text);
-    }
+    });
+    let passthrough = if wake.is_empty() {
+        Vec::new()
+    } else {
+        vec![wake]
+    };
+    Ok(budget.render(passthrough))
 }
 
 /// `TurnStart`: relevance recall, with the scope set as a fallback when no
@@ -150,9 +228,11 @@ pub(super) async fn turn_start(
     let ledger = ctx.store.load(ctx.session_id).unwrap_or_default();
     let mut budget = RecallBudget::new(RECALL_BUDGET_BYTES, ledger.sent_for(MAIN_AGENT));
     let fallback = !ledger.scope_sent(MAIN_AGENT);
+    let mut outcome = Outcome::default();
     if fallback {
-        fallback_scope(ctx, scope, &mut budget).await;
+        outcome = run_scope(ctx, scope, &mut budget).await;
     }
+    let scope_complete = fallback && outcome.calls > 0 && outcome.failed == 0;
     let tail = ctx.payload["transcript_path"]
         .as_str()
         .and_then(|p| transcript::last_assistant_text(Path::new(p), TAIL_CHARS));
@@ -166,19 +246,25 @@ pub(super) async fn turn_start(
     let query_hash = record_hash(&text);
     let repeated = ledger.last_query_hash.as_deref() == Some(query_hash.as_str())
         && !ledger.activity_since(ledger.last_turn_at);
+    let mut main_ok = false;
     if !repeated && !text.is_empty() {
         let keywords = relevance::fanout_keywords(ledger.activity());
-        for wave_text in waves(ctx.client, &text, &keywords).await {
-            budget.add_text(&wave_text);
-        }
+        let (wave, ok) = waves(ctx.client, &text, &keywords).await;
+        wave.texts.iter().for_each(|t| budget.add_text(t));
+        main_ok = ok;
+        outcome.merge(wave);
     }
+    report("turn_start", &outcome, &budget);
     let kept = budget.kept_hashes();
     let now = unix_now();
     ctx.store.update(ctx.session_id, |l| {
         l.mark_sent(MAIN_AGENT, kept);
-        l.last_query_hash = Some(query_hash);
         l.last_turn_at = now;
-        if fallback {
+        // A failed recall is not a finished query; the skip rule must not reuse it.
+        if main_ok {
+            l.last_query_hash = Some(query_hash);
+        }
+        if scope_complete {
             l.set_scope_sent(MAIN_AGENT);
         }
     });
@@ -217,9 +303,12 @@ pub(super) async fn tool_failure(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<String
         recall(ctx.client, Some(query(&text, FAILURE_LIMIT))),
         recall(ctx.client, Some(resolved)),
     );
+    let mut outcome = Outcome::default();
+    outcome.push(fixes);
+    outcome.push(main);
     let mut budget = RecallBudget::new(FAILURE_BUDGET_BYTES, sent);
-    budget.add_text(&fixes);
-    budget.add_text(&main);
+    outcome.texts.iter().for_each(|t| budget.add_text(t));
+    report("post_tool_use_failure", &outcome, &budget);
     if record {
         let kept = budget.kept_hashes();
         ctx.store
@@ -248,12 +337,13 @@ pub(super) async fn subagent_start(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<Stri
         ledger.activity(),
     );
     let mut budget = RecallBudget::new(SUBAGENT_BUDGET_BYTES, ledger.sent_for(&key));
+    let mut outcome = Outcome::default();
     if !text.is_empty() {
         let keywords = relevance::fanout_keywords(ledger.activity());
-        for wave_text in waves(ctx.client, &text, &keywords).await {
-            budget.add_text(&wave_text);
-        }
+        (outcome, _) = waves(ctx.client, &text, &keywords).await;
+        outcome.texts.iter().for_each(|t| budget.add_text(t));
     }
+    report("subagent_start", &outcome, &budget);
     let kept = budget.kept_hashes();
     ctx.store
         .update(ctx.session_id, |l| l.mark_sent(&key, kept));
@@ -518,6 +608,111 @@ mod tests {
         for body in &recalls {
             assert!(body.contains("\"project\":\"\""), "{body}");
         }
+    }
+
+    async fn failing_server() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("initialize"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(text("")))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn the_fallback_is_retried_after_every_scope_call_failed() {
+        let server = failing_server().await;
+        let f = fixture(&server);
+        turn_start(&ctx(&f, &json!({"prompt": "hi"})), vec![tag_action("proj")])
+            .await
+            .unwrap();
+        let ledger = f.store.load("s1").unwrap();
+        assert!(
+            !ledger.scope_sent(MAIN_AGENT),
+            "a failed fallback must run again"
+        );
+        assert_eq!(
+            ledger.last_query_hash, None,
+            "a failed recall is not a done query"
+        );
+    }
+
+    #[tokio::test]
+    async fn waves_count_every_failed_call() {
+        let server = failing_server().await;
+        let f = fixture(&server);
+        let (outcome, main_ok) = waves(&f.client, "q", &["k".to_string()]).await;
+        assert!(!main_ok);
+        assert!(outcome.all_failed(), "{outcome:?}");
+        assert_eq!(outcome.calls, 2);
+    }
+
+    #[test]
+    fn outage_notice_only_when_every_call_failed() {
+        let mut outcome = Outcome::default();
+        assert_eq!(outage_notice("turn_start", &outcome), None);
+        outcome.calls = 3;
+        outcome.failed = 2;
+        assert_eq!(outage_notice("turn_start", &outcome), None);
+        outcome.failed = 3;
+        assert_eq!(
+            outage_notice("turn_start", &outcome).as_deref(),
+            Some("llmenv: memory turn_start recall skipped: all 3 ICM calls failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn session_start_keeps_the_wake_pack_when_a_scope_call_fails() {
+        let server = MockServer::start().await;
+        for (needle, body) in [("initialize", ""), ("icm_wake_up", "wake pack")] {
+            Mock::given(method("POST"))
+                .and(body_string_contains(needle))
+                .respond_with(ResponseTemplate::new(200).set_body_json(text(body)))
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let f = fixture(&server);
+        let start = json!({"source": "startup"});
+        let out = session_start(
+            &ctx(&f, &start),
+            Action::WakeUp(None),
+            vec![tag_action("proj")],
+        )
+        .await
+        .unwrap();
+        assert!(out.contains("wake pack"), "{out}");
+        assert!(!f.store.load("s1").unwrap().scope_sent(MAIN_AGENT));
+    }
+
+    #[tokio::test]
+    async fn session_start_scope_budget_leaves_room_for_the_wake_pack() {
+        let wake = "w".repeat(7_000);
+        let scope: String = (0..10)
+            .map(|i| format!("[context-p] scope fact {i} {}", "x".repeat(300)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let server = server_with(&[("icm_wake_up", &wake), ("llmenv-tag:proj", &scope)]).await;
+        let f = fixture(&server);
+        let start = json!({"source": "startup"});
+        let out = session_start(
+            &ctx(&f, &start),
+            Action::WakeUp(None),
+            vec![tag_action("proj")],
+        )
+        .await
+        .unwrap();
+        assert!(out.len() <= RECALL_BUDGET_BYTES + 200, "{}", out.len());
+        let sent = f.store.load("s1").unwrap().sent_for(MAIN_AGENT).len();
+        assert!(sent < 10, "only records that fit are marked sent: {sent}");
     }
 
     #[tokio::test]
