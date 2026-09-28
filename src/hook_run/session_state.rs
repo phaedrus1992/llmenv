@@ -58,11 +58,12 @@ pub(crate) fn prune_stale_json_files(dir: &Path, max_age_days: u64) {
     }
 }
 
-fn unix_now() -> i64 {
+/// Seconds since the Unix epoch; 0 for a clock set before 1970.
+pub(crate) fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
         .unwrap_or_default()
-        .as_secs() as i64
 }
 
 #[cfg(test)]
@@ -97,5 +98,15 @@ mod tests {
     fn missing_dir_is_a_noop() {
         let dir = TempDir::new().expect("test");
         prune_stale_json_files(&dir.path().join("does-not-exist"), 7);
+    }
+
+    #[test]
+    fn unix_now_reads_the_real_clock() {
+        let expected = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("test")
+            .as_secs();
+        let now = u64::try_from(unix_now()).expect("test");
+        assert!(now.abs_diff(expected) <= 5, "{now} vs {expected}");
     }
 }

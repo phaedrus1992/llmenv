@@ -41,6 +41,28 @@ pub fn parse_importance_marker(chunk: &str) -> Option<&str> {
     parse_marker(chunk, "llmenv-importance:")
 }
 
+/// The arguments of one `icm_wake_up` call. `None` fields are left out, so ICM
+/// applies its own default.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WakeUpArgs {
+    /// `features.memory[].wakeup_max_tokens` (#1216).
+    pub max_tokens: Option<u32>,
+    /// The session's project name (#2249). Without it, ICM uses the ICM server's
+    /// own working directory, which is wrong for a remote `icm serve`.
+    pub project: Option<String>,
+}
+
+/// One adaptive recall call (#2249). `None` fields are left out of the tool call,
+/// so ICM applies its own default (for `project`, the server's cwd project filter).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecallQuery {
+    pub query: String,
+    pub topic: Option<String>,
+    pub keyword: Option<String>,
+    pub project: Option<String>,
+    pub limit: u8,
+}
+
 /// One memory action against the ICM MCP backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
@@ -49,7 +71,7 @@ pub enum Action {
     /// active memory entry, passed through as the tool call's `max_tokens`
     /// argument. `None` omits the argument entirely, letting icm's own MCP
     /// handler fall back to its hardcoded 200-token default.
-    WakeUp(Option<u32>),
+    WakeUp(WakeUpArgs),
     /// Inject recalled context for the active tags/project (`icm_memory_recall`).
     /// Project-scoped (cwd default) natural-language recall.
     Recall,
@@ -65,6 +87,8 @@ pub enum Action {
     /// `RecallTag` for bundles (#228): one action per active bundle, ensuring
     /// memory stored under a bundle in one project surfaces in another.
     RecallBundle(BundleRecallQuery),
+    /// Adaptive recall with an explicit query and filters (#2249).
+    RecallQuery(RecallQuery),
     /// Best-effort store of the active scope context (`icm_memory_store`).
     Store,
 }
@@ -74,7 +98,10 @@ impl Action {
     pub fn tool_name(&self) -> &'static str {
         match self {
             Action::WakeUp(_) => "icm_wake_up",
-            Action::Recall | Action::RecallTag(_) | Action::RecallBundle(_) => "icm_memory_recall",
+            Action::Recall
+            | Action::RecallTag(_)
+            | Action::RecallBundle(_)
+            | Action::RecallQuery(_) => "icm_memory_recall",
             Action::Store => "icm_memory_store",
         }
     }
@@ -89,8 +116,16 @@ impl Action {
     /// `keyword: llmenv-bundle:<bundle>` to scope the recall.
     pub fn arguments(&self, query: &str, chunk: &str) -> Value {
         match self {
-            Action::WakeUp(Some(n)) => json!({ "max_tokens": n }),
-            Action::WakeUp(None) => json!({}),
+            Action::WakeUp(w) => {
+                let mut args = json!({});
+                if let Some(n) = w.max_tokens {
+                    args["max_tokens"] = json!(n);
+                }
+                if let Some(project) = &w.project {
+                    args["project"] = json!(project);
+                }
+                args
+            }
             Action::Recall => json!({ "query": query }),
             Action::RecallTag(q) => json!({
                 "query": q.tag,
@@ -102,6 +137,19 @@ impl Action {
                 "project": "",
                 "keyword": q.keyword,
             }),
+            Action::RecallQuery(q) => {
+                let mut args = json!({ "query": q.query, "limit": q.limit });
+                for (key, value) in [
+                    ("topic", &q.topic),
+                    ("keyword", &q.keyword),
+                    ("project", &q.project),
+                ] {
+                    if let Some(value) = value {
+                        args[key] = json!(value);
+                    }
+                }
+                args
+            }
             Action::Store => {
                 let mut args = json!({ "content": chunk, "topic": "llmenv-scope-context" });
                 if let Some(mtyp) = parse_type_marker(chunk) {
@@ -219,6 +267,68 @@ mod tests {
         }
     }
 
+    proptest! {
+        /// The arguments hold `query` and `limit`, plus exactly the filters that are set.
+        #[test]
+        fn recall_query_arguments_match_the_query(
+            query in "\\PC{0,40}",
+            topic in prop::option::of("[a-z-]{0,12}"),
+            keyword in prop::option::of("[a-z-]{0,12}"),
+            project in prop::option::of("[a-z-]{0,12}"),
+            limit in 1u8..=20,
+        ) {
+            let q = RecallQuery { query, topic, keyword, project, limit };
+            let args = Action::RecallQuery(q.clone()).arguments("x", "y");
+            let obj = args.as_object().unwrap();
+            let expected = 2 + [&q.topic, &q.keyword, &q.project].iter().filter(|v| v.is_some()).count();
+            prop_assert_eq!(obj.len(), expected);
+            prop_assert_eq!(obj["query"].as_str(), Some(q.query.as_str()));
+            prop_assert_eq!(obj["limit"].as_u64(), Some(u64::from(q.limit)));
+            for (key, value) in [("topic", &q.topic), ("keyword", &q.keyword), ("project", &q.project)] {
+                prop_assert_eq!(obj.get(key).and_then(|v| v.as_str()), value.as_deref());
+            }
+        }
+    }
+
+    #[test]
+    fn wake_up_sends_the_project_when_known() {
+        let args = Action::WakeUp(WakeUpArgs {
+            max_tokens: Some(300),
+            project: Some("llmenv".into()),
+        })
+        .arguments("", "");
+        assert_eq!(args, json!({"max_tokens": 300, "project": "llmenv"}));
+        assert_eq!(
+            Action::WakeUp(WakeUpArgs::default()).arguments("", ""),
+            json!({})
+        );
+    }
+
+    #[test]
+    fn recall_query_sends_only_the_fields_it_has() {
+        let full = Action::RecallQuery(RecallQuery {
+            query: "q".into(),
+            topic: Some("errors-resolved".into()),
+            keyword: Some("cargo".into()),
+            project: Some(String::new()),
+            limit: 3,
+        });
+        assert_eq!(full.tool_name(), "icm_memory_recall");
+        assert_eq!(
+            full.arguments("ignored", "ignored"),
+            json!({"query": "q", "topic": "errors-resolved", "keyword": "cargo",
+                   "project": "", "limit": 3})
+        );
+        let bare = Action::RecallQuery(RecallQuery {
+            query: "q".into(),
+            topic: None,
+            keyword: None,
+            project: None,
+            limit: 10,
+        });
+        assert_eq!(bare.arguments("", ""), json!({"query": "q", "limit": 10}));
+    }
+
     #[test]
     fn split_recall_records_splits_on_topic_lines() {
         let text = "[ctx-a] first line\n  detail\n[ctx-b] second\n";
@@ -268,7 +378,10 @@ mod tests {
 
     #[test]
     fn action_tool_name_mapping() {
-        assert_eq!(Action::WakeUp(None).tool_name(), "icm_wake_up");
+        assert_eq!(
+            Action::WakeUp(WakeUpArgs::default()).tool_name(),
+            "icm_wake_up"
+        );
         assert_eq!(Action::Recall.tool_name(), "icm_memory_recall");
         assert_eq!(Action::Store.tool_name(), "icm_memory_store");
         assert_eq!(recall_bundle("base").tool_name(), "icm_memory_recall");
@@ -276,13 +389,17 @@ mod tests {
 
     #[test]
     fn wakeup_arguments_are_empty_object_when_unconfigured() {
-        let args = Action::WakeUp(None).arguments("query text", "chunk text");
+        let args = Action::WakeUp(WakeUpArgs::default()).arguments("query text", "chunk text");
         assert_eq!(args, serde_json::json!({}));
     }
 
     #[test]
     fn wakeup_arguments_carry_configured_max_tokens() {
-        let args = Action::WakeUp(Some(750)).arguments("query text", "chunk text");
+        let args = Action::WakeUp(WakeUpArgs {
+            max_tokens: Some(750),
+            project: None,
+        })
+        .arguments("query text", "chunk text");
         assert_eq!(args, serde_json::json!({ "max_tokens": 750 }));
     }
 
