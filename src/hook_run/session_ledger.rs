@@ -16,6 +16,8 @@ pub(crate) const MAIN_AGENT: &str = "main";
 const ACTIVITY_CAP: usize = 20;
 const ERRORS_CAP: usize = 5;
 const PENDING_CAP: usize = 8;
+/// Every subagent adds an entry; an evicted one can only cause a repeat to that subagent.
+const MAX_AGENTS: usize = 32;
 /// A queued task that no `SubagentStart` took within this time is stale.
 const PENDING_TTL_SECS: i64 = 300;
 const ERROR_HEAD_BYTES: usize = 300;
@@ -89,11 +91,19 @@ impl Ledger {
     }
 
     pub(crate) fn mark_sent(&mut self, agent: &str, hashes: impl IntoIterator<Item = String>) {
-        self.agents
-            .entry(agent.to_string())
-            .or_default()
-            .sent
-            .extend(hashes);
+        self.agent_mut(agent).sent.extend(hashes);
+    }
+
+    /// The entry for `agent`, created if missing. A new entry past
+    /// [`MAX_AGENTS`] evicts one other subagent entry, never `main`.
+    fn agent_mut(&mut self, agent: &str) -> &mut AgentState {
+        if !self.agents.contains_key(agent) && self.agents.len() >= MAX_AGENTS {
+            let victim = self.agents.keys().find(|k| *k != MAIN_AGENT).cloned();
+            if let Some(victim) = victim {
+                self.agents.remove(&victim);
+            }
+        }
+        self.agents.entry(agent.to_string()).or_default()
     }
 
     pub(crate) fn scope_sent(&self, agent: &str) -> bool {
@@ -101,7 +111,7 @@ impl Ledger {
     }
 
     pub(crate) fn set_scope_sent(&mut self, agent: &str) {
-        self.agents.entry(agent.to_string()).or_default().scope_sent = true;
+        self.agent_mut(agent).scope_sent = true;
     }
 
     pub(crate) fn activity(&self) -> &VecDeque<Activity> {
@@ -494,6 +504,21 @@ mod tests {
         assert!(after.sent_for(MAIN_AGENT).is_empty());
         assert!(!after.scope_sent(MAIN_AGENT));
         assert_eq!(after.activity().len(), 1, "activity survives a reset");
+    }
+
+    #[test]
+    fn the_agent_map_is_capped_and_keeps_main() {
+        let mut l = Ledger::default();
+        l.mark_sent(MAIN_AGENT, ["m".to_string()]);
+        for i in 0..(MAX_AGENTS * 2) {
+            l.mark_sent(&format!("agent-{i:03}"), ["h".to_string()]);
+        }
+        assert!(l.agents.len() <= MAX_AGENTS, "{}", l.agents.len());
+        assert!(l.sent_for(MAIN_AGENT).contains("m"));
+        assert!(
+            l.sent_for(&format!("agent-{:03}", MAX_AGENTS * 2 - 1))
+                .contains("h")
+        );
     }
 
     #[test]
