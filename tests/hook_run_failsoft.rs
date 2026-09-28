@@ -311,6 +311,20 @@ fn adaptive_events_fail_soft_with_an_unreachable_backend() {
 }
 
 #[test]
+fn an_adaptive_turn_reports_a_dead_backend_on_stderr() {
+    let (dir, config_path) = setup_config(&config_with_memory_addr("127.0.0.1", 9));
+    hook_cmd(dir.path(), &config_path, "turn_start")
+        .write_stdin(r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"hi"}"#)
+        .timeout(Duration::from_secs(20))
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "llmenv: memory turn_start recall skipped: all",
+        ));
+}
+
+#[test]
 fn pre_tool_use_without_read_once_config_passes_through() {
     let (dir, config_path) = setup_config(&config_no_backend());
     hook_cmd(dir.path(), &config_path, "pre_tool_use")

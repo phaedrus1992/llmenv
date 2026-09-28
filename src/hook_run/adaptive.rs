@@ -252,7 +252,7 @@ pub(super) async fn turn_start(
     if fallback {
         outcome = run_scope(ctx, scope, &mut budget).await;
     }
-    let scope_complete = fallback && outcome.calls > 0 && outcome.failed == 0;
+    let scope_complete = fallback && outcome.failed == 0;
     let tail = ctx.payload["transcript_path"]
         .as_str()
         .and_then(|p| transcript::last_assistant_text(Path::new(p), TAIL_CHARS));
@@ -892,5 +892,84 @@ mod tests {
             .map(|a| a.target.clone().unwrap())
             .collect();
         assert_eq!(targets, ["/r/src/a.rs", "cargo"]);
+    }
+
+    #[test]
+    fn record_local_queues_only_agent_tool_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LedgerStore::new(dir.path());
+        let task = |tool: &str, id: &str| {
+            json!({"tool_name": tool, "tool_use_id": id,
+                   "tool_input": {"subagent_type": "Explore", "prompt": "find it"}})
+        };
+        record_local(HookEvent::SubagentTask, &store, "s1", &task("Bash", "t1"));
+        let mut ledger = store.load("s1").unwrap();
+        assert!(
+            ledger.take_subagent("Explore", unix_now()).is_none(),
+            "a non-Agent tool queues nothing"
+        );
+        record_local(HookEvent::SubagentTask, &store, "s1", &task("Agent", "t2"));
+        let mut ledger = store.load("s1").unwrap();
+        assert_eq!(
+            ledger.take_subagent("Explore", unix_now()).unwrap().task,
+            "find it"
+        );
+    }
+
+    #[test]
+    fn outcome_merge_adds_counts_and_texts() {
+        let mut a = Outcome::default();
+        a.push(Some(Ok("one".to_string())));
+        a.push(Some(Err(anyhow::anyhow!("down"))));
+        let mut b = Outcome::default();
+        b.push(Some(Ok("two".to_string())));
+        b.push(Some(Err(anyhow::anyhow!("down"))));
+        b.push(Some(Err(anyhow::anyhow!("down"))));
+        a.merge(b);
+        assert_eq!((a.calls, a.failed), (5, 3));
+        assert_eq!(a.texts, ["one", "two"]);
+    }
+
+    #[test]
+    fn agent_key_refuses_an_unsafe_agent_id() {
+        assert_eq!(agent_key(&json!({})), (MAIN_AGENT.to_string(), true));
+        assert_eq!(
+            agent_key(&json!({"agent_id": "a1"})),
+            ("a1".to_string(), true)
+        );
+        assert_eq!(
+            agent_key(&json!({"agent_id": "../x"})),
+            (MAIN_AGENT.to_string(), false)
+        );
+    }
+
+    #[tokio::test]
+    async fn subagent_start_without_an_agent_id_does_nothing() {
+        let server = server_with(&[]).await;
+        let f = fixture(&server);
+        let payload = json!({"agent_type": "Explore"});
+        let out = subagent_start(&ctx(&f, &payload)).await.unwrap();
+        assert!(out.is_empty(), "{out}");
+        assert!(
+            !f.store.load("s1").unwrap().knows_agent(MAIN_AGENT),
+            "no ledger write"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_start_sends_activity_terms_as_keyword_filters() {
+        let server = server_with(&[("\"keyword\":\"recall\"", "[k] keyword fact")]).await;
+        let f = fixture(&server);
+        f.store.update("s1", |l| {
+            l.set_scope_sent(MAIN_AGENT);
+            l.push_activity(crate::hook_run::session_ledger::Activity {
+                tool: "Read".to_string(),
+                target: Some("/r/src/hook_run/recall.rs".to_string()),
+                at: 1,
+            });
+        });
+        let payload = json!({"prompt": "work on it"});
+        let out = turn_start(&ctx(&f, &payload), Vec::new()).await.unwrap();
+        assert!(out.contains("keyword fact"), "{out}");
     }
 }

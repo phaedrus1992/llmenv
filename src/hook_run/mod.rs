@@ -462,6 +462,22 @@ fn hook_cwd(payload: &serde_json::Value, fallback: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(payload["cwd"].as_str().unwrap_or(fallback))
 }
 
+/// The `icm_wake_up` arguments for `event`. The project lookup runs git, so only
+/// `SessionStart`, the one event that wakes up, pays for it.
+fn wake_args(
+    event: HookEvent,
+    settings: Option<MemoryHookSettings>,
+    payload: &serde_json::Value,
+    cwd: &str,
+) -> WakeUpArgs {
+    WakeUpArgs {
+        max_tokens: settings.and_then(|s| s.wakeup_max_tokens),
+        project: (event == HookEvent::SessionStart)
+            .then(|| project::session_project(&hook_cwd(payload, cwd)))
+            .flatten(),
+    }
+}
+
 /// Whether `event` writes to the recall ledger without any MCP call (#2249).
 fn records_locally(event: HookEvent) -> bool {
     matches!(event, HookEvent::PostToolBatch | HookEvent::SubagentTask)
@@ -492,6 +508,7 @@ struct MemoryCall<'a> {
     client: &'a McpHttpClient,
     settings: Option<MemoryHookSettings>,
     session_id: Option<&'a str>,
+    state_dir: Option<std::path::PathBuf>,
     payload: &'a serde_json::Value,
     actions: Vec<Action>,
     scope: Vec<Action>,
@@ -503,21 +520,18 @@ struct MemoryCall<'a> {
 /// Run the event's memory work: the adaptive flow when it applies, else the
 /// stateless actions. A missing state dir degrades to the stateless actions.
 async fn run_event_memory(call: MemoryCall<'_>) -> anyhow::Result<String> {
-    let state_dir = crate::paths::state_dir()
-        .inspect_err(|e| tracing::error!("no state dir, adaptive recall falls back: {e}"))
-        .ok();
     let Some(session_id) = call.session_id else {
         return run_memory_actions(call.client, call.actions, call.query, call.store_content).await;
     };
     // A separate bind keeps the session id out of the state dir path's data flow,
     // which CodeQL tracks through a tuple (rust/cleartext-logging).
-    let Some(state_dir) = state_dir else {
+    let Some(state_dir) = call.state_dir.as_deref() else {
         return run_memory_actions(call.client, call.actions, call.query, call.store_content).await;
     };
     if !uses_adaptive(call.event, call.settings, Some(session_id)) {
         return run_memory_actions(call.client, call.actions, call.query, call.store_content).await;
     }
-    let store = session_ledger::LedgerStore::new(&state_dir);
+    let store = session_ledger::LedgerStore::new(state_dir);
     let ctx = adaptive::AdaptiveCtx {
         client: call.client,
         store: &store,
@@ -1284,13 +1298,7 @@ fn run_inner(
         let resolved_client =
             resolve_memory_client(&config, config_dir, &active, event, &MCP_CLIENT_CACHE);
         let settings = resolved_client.as_ref().map(|r| r.settings);
-        // The project lookup runs git, so only the event that uses it pays for it.
-        let wake = WakeUpArgs {
-            max_tokens: settings.and_then(|s| s.wakeup_max_tokens),
-            project: (event == HookEvent::SessionStart)
-                .then(|| project::session_project(&hook_cwd(stdin_payload, &env.cwd)))
-                .flatten(),
-        };
+        let wake = wake_args(event, settings, stdin_payload, &env.cwd);
         let client = resolved_client.map(|r| r.client);
         let state_path = Some(state::state_path());
         let ctx = build_scope_context(
@@ -1377,6 +1385,11 @@ fn run_inner(
                     client,
                     settings,
                     session_id: claude_session_id,
+                    state_dir: crate::paths::state_dir()
+                        .inspect_err(|e| {
+                            tracing::error!("no state dir, adaptive recall falls back: {e}");
+                        })
+                        .ok(),
                     payload: stdin_payload,
                     actions,
                     scope: scope_recall_actions(&tag_queries, &bundle_queries, &tag_ranks),
@@ -3136,6 +3149,60 @@ mod tests {
                 settings: DEFAULT_MEMORY_HOOK,
             },
             "a key mismatch must fall back to a correct live merge, never the stale cache"
+        );
+    }
+
+    // Static MCPs resolve ahead of the memory backend, so an unnamed match
+    // would hand the hooks another server's URL.
+    #[test]
+    fn memory_url_skips_other_remote_mcps() {
+        let config_root = tempfile::tempdir().expect("test");
+        let bundle_dir = config_root.path().join("bundles").join("b");
+        std::fs::create_dir_all(&bundle_dir).expect("test");
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            concat!(
+                "features:\n",
+                "  memory:\n",
+                "    - server_host: still\n",
+                "      port: 7878\n",
+                "      when: [mytag]\n",
+                "host:\n",
+                "  still:\n",
+                "    addr: still.local\n",
+            ),
+        )
+        .expect("test");
+        let cache_dir = tempfile::tempdir().expect("test");
+        let other: crate::config::McpServer = serde_json::from_value(serde_json::json!({
+            "name": "aaa-remote", "when": ["mytag"], "type": "http",
+            "url": "http://other.invalid/mcp"
+        }))
+        .expect("test");
+        let config = crate::config::Config {
+            bundle: vec![crate::config::Bundle {
+                name: "b".into(),
+                when: vec!["mytag".into()],
+            }],
+            mcp: vec![other],
+            cache: crate::config::Cache {
+                cache_dir: cache_dir.path().to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let active = crate::scope::ActiveScopes {
+            scopes: vec![],
+            tags: std::collections::BTreeSet::from(["mytag".to_string()]),
+            extra_tags: std::collections::BTreeSet::new(),
+        };
+        let url = memory_url(&config, config_root.path(), &active).expect("test");
+        assert_eq!(
+            url,
+            MemoryEndpoint::Active {
+                url: "http://still.local:7878/mcp".into(),
+                settings: DEFAULT_MEMORY_HOOK,
+            }
         );
     }
 
@@ -5773,5 +5840,128 @@ mod session_log_tests {
         let lines = jsonl_lines(&path);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0]["kind"], "lifecycle_end");
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test code")]
+mod adaptive_routing_tests {
+    use std::time::Duration;
+
+    use serde_json::json;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+
+    async fn run(
+        event: HookEvent,
+        payload: &serde_json::Value,
+        adaptive_recall: bool,
+    ) -> tempfile::TempDir {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0", "id": 1,
+                "result": {"content": [{"type": "text", "text": ""}]}
+            })))
+            .mount(&server)
+            .await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
+        run_event_memory(MemoryCall {
+            event,
+            client: &client,
+            settings: Some(MemoryHookSettings {
+                wakeup_max_tokens: None,
+                adaptive_recall,
+            }),
+            session_id: Some("s1"),
+            state_dir: Some(state_dir.path().to_path_buf()),
+            payload,
+            actions: Vec::new(),
+            scope: Vec::new(),
+            wake: WakeUpArgs::default(),
+            query: "",
+            store_content: "",
+        })
+        .await
+        .unwrap();
+        state_dir
+    }
+
+    fn wrote_ledger(state_dir: &tempfile::TempDir) -> bool {
+        state_dir.path().join("recall_session/s1.json").is_file()
+    }
+
+    fn adaptive_events() -> [(HookEvent, serde_json::Value); 4] {
+        [
+            (HookEvent::SessionStart, json!({"source": "startup"})),
+            (HookEvent::TurnStart, json!({"prompt": "hi"})),
+            (
+                HookEvent::PostToolUseFailure,
+                json!({"tool_name": "Bash", "error": "x"}),
+            ),
+            (
+                HookEvent::SubagentStart,
+                json!({"agent_id": "a1", "agent_type": "Explore"}),
+            ),
+        ]
+    }
+
+    #[tokio::test]
+    async fn adaptive_events_take_the_ledger_flow() {
+        for (event, payload) in adaptive_events() {
+            let dir = run(event, &payload, true).await;
+            assert!(wrote_ledger(&dir), "{event:?} must use the adaptive flow");
+        }
+    }
+
+    #[tokio::test]
+    async fn adaptive_recall_off_keeps_the_stateless_flow() {
+        for (event, payload) in adaptive_events() {
+            let dir = run(event, &payload, false).await;
+            assert!(!wrote_ledger(&dir), "{event:?} must stay stateless");
+        }
+    }
+
+    fn git_repo_with_origin() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for args in [
+            &["init", "-q"][..],
+            &["remote", "add", "origin", "git@github.com:me/wake-repo.git"],
+        ] {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        }
+        dir
+    }
+
+    #[test]
+    fn only_session_start_sends_a_wake_project() {
+        let repo = git_repo_with_origin();
+        let cwd = repo.path().to_str().unwrap();
+        let payload = json!({"cwd": cwd});
+        let start = wake_args(HookEvent::SessionStart, None, &payload, "/");
+        assert_eq!(start.project.as_deref(), Some("wake-repo"));
+        let turn = wake_args(HookEvent::TurnStart, None, &payload, "/");
+        assert_eq!(turn.project, None);
+    }
+
+    #[test]
+    fn hook_cwd_prefers_the_payload_then_the_fallback() {
+        assert_eq!(
+            hook_cwd(&json!({"cwd": "/from/payload"}), "/fallback"),
+            std::path::PathBuf::from("/from/payload")
+        );
+        assert_eq!(
+            hook_cwd(&json!({}), "/fallback"),
+            std::path::PathBuf::from("/fallback")
+        );
     }
 }
