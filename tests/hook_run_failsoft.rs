@@ -313,6 +313,10 @@ fn all_events_fail_soft_without_backend() {
         "session_end",
         "pre_tool_use",
         "stop",
+        "post_tool_batch",
+        "post_tool_use_failure",
+        "subagent_start",
+        "subagent_task",
     ] {
         hook_cmd(dir.path(), &config_path, event)
             .timeout(Duration::from_secs(10))
@@ -320,6 +324,56 @@ fn all_events_fail_soft_without_backend() {
             .success()
             .stdout(predicate::str::is_empty());
     }
+}
+
+#[test]
+fn adaptive_events_fail_soft_with_an_unreachable_backend() {
+    // #2249: with a session id, these events take the adaptive flow and write
+    // the recall ledger. A dead backend must still give exit 0 and no output.
+    let (dir, config_path) = setup_config(&config_with_memory_addr("127.0.0.1", 9));
+    for (event, payload) in [
+        (
+            "session_start",
+            r#"{"hook_event_name":"SessionStart","session_id":"s1","source":"startup"}"#,
+        ),
+        (
+            "turn_start",
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"hi"}"#,
+        ),
+        (
+            "post_tool_use_failure",
+            r#"{"hook_event_name":"PostToolUseFailure","session_id":"s1","tool_name":"Bash","error":"x"}"#,
+        ),
+        (
+            "subagent_start",
+            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_id":"a1","agent_type":"Explore"}"#,
+        ),
+        (
+            "post_tool_batch",
+            r#"{"hook_event_name":"PostToolBatch","session_id":"s1","tool_calls":[]}"#,
+        ),
+    ] {
+        hook_cmd(dir.path(), &config_path, event)
+            .write_stdin(payload)
+            .timeout(Duration::from_secs(20))
+            .assert()
+            .success()
+            .stdout(predicate::str::is_empty());
+    }
+}
+
+#[test]
+fn an_adaptive_turn_reports_a_dead_backend_on_stderr() {
+    let (dir, config_path) = setup_config(&config_with_memory_addr("127.0.0.1", 9));
+    hook_cmd(dir.path(), &config_path, "turn_start")
+        .write_stdin(r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"hi"}"#)
+        .timeout(Duration::from_secs(20))
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "llmenv: memory turn_start recall skipped: all",
+        ));
 }
 
 #[test]

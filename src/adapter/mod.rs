@@ -71,6 +71,29 @@ pub(crate) fn lifecycle_hook_registrations(
     ]
 }
 
+/// The adaptive ICM recall hooks (#2249), in the shape of
+/// [`lifecycle_hook_registrations`]. Only the Claude Code adapter registers them,
+/// so they stay out of that engine-neutral list.
+pub(crate) fn adaptive_recall_hook_registrations(
+    manifest: &MergedManifest,
+) -> Vec<(&'static str, bool, &'static str)> {
+    // An ICM entry without resolved settings uses the default, which is on.
+    let on = manifest
+        .mcps
+        .iter()
+        .any(|m| m.name == MEMORY_MCP_NAME && m.memory_hook.is_none_or(|h| h.adaptive_recall));
+    ["post_tool_batch", "post_tool_use_failure", "subagent_start"]
+        .into_iter()
+        .map(|event| {
+            (
+                event,
+                on,
+                "needs a memory backend with adaptive_recall on (features.memory)",
+            )
+        })
+        .collect()
+}
+
 /// True when this manifest wants the `#317` rules digest reinjected on every
 /// prompt. Separate from `lifecycle_hook_registrations` because it doesn't map
 /// to one neutral event of its own — it rides the adapter's
@@ -743,12 +766,16 @@ pub(crate) fn resolve_command_paths_against_files(
     if resolved { Some(result) } else { None }
 }
 
+/// The first line of every injected ICM memory block.
+const MEMORY_CONTEXT_HEADER: &str = "[ICM MEMORY CONTEXT (auto-injected)]";
+
 /// Format injected hook context in the adapter-native hook-output shape.
 ///
-/// Empty input always returns an empty string. Store-only events
-/// (SessionStart, SessionEnd) also return empty — they have no model turn
-/// to inject context into, and all known adapter schemas reject
-/// `additionalContext` in their `hookSpecificOutput` for these events.
+/// Empty input always returns an empty string. `SessionEnd` also returns
+/// empty: it has no model turn to inject context into, and Claude Code
+/// rejects `additionalContext` there (#558). `SessionStart` returns empty
+/// here because the other engines' schemas are not verified; the Claude
+/// Code adapter overrides it, since Claude Code accepts it (#2251).
 ///
 /// This is the shared implementation behind every adapter's
 /// [`AgentAdapter::emit_hook_context`], replacing the three copies that
@@ -766,13 +793,12 @@ pub(crate) fn emit_hook_context(hook_event_name: &str, text: &str) -> String {
     if text.trim().is_empty() {
         return String::new();
     }
-    // Store-only events (SessionStart, SessionEnd) have no model turn to inject
-    // context into, and most adapters' hook schemas reject additionalContext in
-    // hookSpecificOutput. Return empty so these events emit no output. (#558)
+    // SessionEnd rejects additionalContext (#558). SessionStart is not verified for
+    // the other engines; the Claude Code adapter handles it itself (#2251).
     if matches!(hook_event_name, "SessionStart" | "SessionEnd") {
         return String::new();
     }
-    let wrapped = format!("[ICM MEMORY CONTEXT (auto-injected)]\n{text}");
+    let wrapped = format!("{MEMORY_CONTEXT_HEADER}\n{text}");
     serde_json::json!({
         "hookSpecificOutput": {
             "hookEventName": hook_event_name,
@@ -1084,7 +1110,7 @@ mod tests {
                     timeout: None,
                     disabled_tools: vec![],
                     mcp_permissions: None,
-                    wakeup_max_tokens: None,
+                    memory_hook: None,
                 });
             }
             proptest::prop_assert_eq!(

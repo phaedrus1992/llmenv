@@ -1274,7 +1274,7 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
             }
             eprintln!();
             eprintln!("Lifecycle hooks ({engine}):");
-            for (event, registered, why) in crate::adapter::lifecycle_hook_registrations(manifest) {
+            for (event, registered, why) in engine_lifecycle_hooks(engine, manifest) {
                 if registered {
                     eprintln!("{pass} {event}");
                 } else {
@@ -1733,6 +1733,19 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     Ok(())
 }
 
+/// The lifecycle hooks `doctor` reports for `engine`: the engine-neutral set, plus
+/// the adaptive recall hooks that only Claude Code registers (#2249).
+fn engine_lifecycle_hooks(
+    engine: &str,
+    manifest: &crate::merge::MergedManifest,
+) -> Vec<(&'static str, bool, &'static str)> {
+    let mut hooks = crate::adapter::lifecycle_hook_registrations(manifest);
+    if engine == "claude_code" {
+        hooks.extend(crate::adapter::adaptive_recall_hook_registrations(manifest));
+    }
+    hooks
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -1875,6 +1888,7 @@ mod tests {
                 consolidation: None,
                 mcp_permissions: None,
                 wakeup_max_tokens: None,
+                adaptive_recall: true,
             }],
             ..Default::default()
         });
@@ -1912,6 +1926,7 @@ mod tests {
                 consolidation: None,
                 mcp_permissions: None,
                 wakeup_max_tokens: None,
+                adaptive_recall: true,
             }],
             ..Default::default()
         });
@@ -2832,6 +2847,7 @@ mod tests {
                     consolidation: None,
                     mcp_permissions: None,
                     wakeup_max_tokens: None,
+                    adaptive_recall: true,
                 }],
                 ..Features::default()
             }),
@@ -2864,6 +2880,7 @@ mod tests {
                     consolidation: None,
                     mcp_permissions: None,
                     wakeup_max_tokens: None,
+                    adaptive_recall: true,
                 }],
                 ..Features::default()
             }),
@@ -2998,5 +3015,20 @@ mod tests {
     #[test]
     fn tool_version_of_a_missing_binary_is_none_not_a_panic() {
         assert_eq!(tool_version("this-binary-does-not-exist-llmenv"), None);
+    }
+
+    #[test]
+    fn only_claude_code_reports_the_adaptive_recall_hooks() {
+        let manifest = crate::merge::MergedManifest::default();
+        let events = |engine: &str| -> Vec<&str> {
+            engine_lifecycle_hooks(engine, &manifest)
+                .into_iter()
+                .map(|(event, _, _)| event)
+                .collect()
+        };
+        assert!(events("claude_code").contains(&"subagent_start"));
+        assert!(!events("codex").contains(&"subagent_start"));
+        assert!(!events("opencode").contains(&"post_tool_batch"));
+        assert!(events("codex").contains(&"turn_start"));
     }
 }

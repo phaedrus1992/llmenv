@@ -7,7 +7,7 @@
 //! `hook_run`).
 
 use anyhow::Context as _;
-use llmenv_mcp::resolve::{MEMORY_MCP_NAME, ResolvedKind, resolve_mcps};
+use llmenv_mcp::resolve::{MEMORY_MCP_NAME, MemoryHookSettings, ResolvedKind, resolve_mcps};
 
 /// What memory-backend resolution found for the active scope.
 ///
@@ -22,11 +22,10 @@ use llmenv_mcp::resolve::{MEMORY_MCP_NAME, ResolvedKind, resolve_mcps};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemoryEndpoint {
     /// The memory backend resolved to this HTTP URL, carrying the active
-    /// `features.memory` entry's configured `wakeup_max_tokens` (#1216,
-    /// `None` if unset).
+    /// `features.memory` entry's hook settings (#1216, #2249).
     Active {
         url: String,
-        wakeup_max_tokens: Option<u32>,
+        settings: MemoryHookSettings,
     },
     /// No bundle fired for the active scopes and no top-level `features.memory`
     /// entry matched — nothing could have supplied a backend.
@@ -88,26 +87,29 @@ impl MemoryEndpoint {
         }
     }
 
-    /// The active entry's configured wake-up token budget (#1216). `None`
-    /// for every non-[`MemoryEndpoint::Active`] variant, and for `Active`
-    /// itself when `features.memory[].wakeup_max_tokens` is unset.
-    pub(crate) fn wakeup_max_tokens(&self) -> Option<u32> {
+    /// The active entry's hook settings (#1216, #2249). `None` for every
+    /// non-[`MemoryEndpoint::Active`] variant.
+    pub(crate) fn settings(&self) -> Option<MemoryHookSettings> {
         match self {
-            Self::Active {
-                wakeup_max_tokens, ..
-            } => *wakeup_max_tokens,
+            Self::Active { settings, .. } => Some(*settings),
             _ => None,
         }
     }
 
-    /// Consume into `(url, wakeup_max_tokens)`, erroring exactly as
-    /// [`Self::into_url`] — `into_url` itself keeps its existing signature
-    /// since it has several other callers that don't need the token budget.
-    pub(crate) fn into_url_and_wakeup_max_tokens(self) -> anyhow::Result<(String, Option<u32>)> {
-        let wakeup_max_tokens = self.wakeup_max_tokens();
-        Ok((self.into_url()?, wakeup_max_tokens))
+    /// Consume into `(url, settings)`, erroring exactly as [`Self::into_url`] —
+    /// `into_url` itself keeps its existing signature since it has several
+    /// other callers that don't need the settings.
+    pub(crate) fn into_url_and_settings(self) -> anyhow::Result<(String, MemoryHookSettings)> {
+        let settings = self.settings().unwrap_or(DEFAULT_MEMORY_HOOK);
+        Ok((self.into_url()?, settings))
     }
 }
+
+/// The settings of a `features.memory` entry that sets neither hook field.
+pub(crate) const DEFAULT_MEMORY_HOOK: MemoryHookSettings = MemoryHookSettings {
+    wakeup_max_tokens: None,
+    adaptive_recall: true,
+};
 
 /// Find the resolved memory backend's HTTP URL for the active tags, or the
 /// reason none resolved.
@@ -161,15 +163,13 @@ pub(crate) fn memory_url(
     let resolved = resolve_mcps(&config.mcp, &all_memory, &all_host, &active.tags)
         .map_err(|e| annotate_resolve_error(e, config, config_dir, active))?;
     let matched = resolved.into_iter().find_map(|m| match m.kind {
-        ResolvedKind::Remote { url, .. } if m.name == MEMORY_MCP_NAME => {
-            Some((url, m.wakeup_max_tokens))
-        }
+        ResolvedKind::Remote { url, .. } if m.name == MEMORY_MCP_NAME => Some((url, m.memory_hook)),
         _ => None,
     });
     Ok(match matched {
-        Some((url, wakeup_max_tokens)) => MemoryEndpoint::Active {
+        Some((url, settings)) => MemoryEndpoint::Active {
             url,
-            wakeup_max_tokens,
+            settings: settings.unwrap_or(DEFAULT_MEMORY_HOOK),
         },
         None => classify_missing_memory(
             config,
@@ -421,6 +421,7 @@ mod tests {
             consolidation: None,
             mcp_permissions: None,
             wakeup_max_tokens: None,
+            adaptive_recall: true,
         }
     }
 
