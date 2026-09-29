@@ -66,7 +66,9 @@ if [[ $PUSH_RC -eq 0 ]]; then
   echo "Pushed directly to $TARGET"
 else
   if [[ -n "$PUSH_STDERR" ]]; then
-    echo "::warning::push to $TARGET failed: $PUSH_STDERR"
+    PUSH_STDERR_SAFE="${PUSH_STDERR//$'\n'/ }"
+    PUSH_STDERR_SAFE="${PUSH_STDERR_SAFE//::/  }"
+    echo "::warning::push to $TARGET failed: $PUSH_STDERR_SAFE"
   else
     echo "::warning::push to $TARGET failed (exit $PUSH_RC; no stderr)"
   fi
@@ -2350,7 +2352,8 @@ test_1675_test_mirror_matches_production_source_branch_retry() {
       && grep -qF 'github.event.pull_request.head.repo.full_name == github.repository' "$workflow_file" \
       && grep -qF "startsWith(github.event.pull_request.base.ref, 'release/')" "$workflow_file" \
       && grep -qF 'if [[ ! "$source_branch" =~ ^(release/[0-9]+\.x|main)$ ]]; then' "$workflow_file" \
-      && grep -qF 'head_ref_display="${PR_HEAD_REF//::/  }"' "$workflow_file"; then
+      && grep -qF 'head_ref_display="${PR_HEAD_REF//::/  }"' "$workflow_file" \
+      && grep -qF "forward-merge PR head ref '\$head_ref_display'" "$workflow_file"; then
     return 0
   fi
   echo "  production's source-branch retry logic no longer matches the lines this file mirrors -- update determine_source_branch_block/job_admits_run above" >&2
@@ -2410,18 +2413,33 @@ test_2240_unversioned_branch_warning_is_sanitized() {
 # CURRENT is not one of those branches. The targets are then those branches
 # plus `main`.
 test_2240_cascade_targets_are_regex_bounded() {
-  local out
-  out=$(CURRENT="release/3.x" BRANCHES=$'release/3.x\nrelease/4.x' \
-    bash -c "$(target_list_block)" 2>&1)
+  local stubs branches out
+  stubs=$(mktemp -d)
+  cat > "$stubs/git" <<'STUB'
+#!/usr/bin/env bash
+printf '  origin/release/3.x\n  origin/release/x::stop-commands::tok\n  origin/release/4.x\n  origin/feature\n'
+STUB
+  chmod +x "$stubs/git"
+  branches=$(PATH="$stubs:$PATH" bash -c "$(detect_branches_block)" 2>&1)
+  trash "$stubs" 2>/dev/null || true
+  out=$(CURRENT="release/3.x" BRANCHES="$branches" bash -c "$(target_list_block)" 2>&1)
 
-  # shellcheck disable=SC2016 # literal grep -F pattern, not an expression to expand
-  if grep -qF "grep -E '^release/[0-9]+\.x\$'" "$WORKFLOW" \
-      && [[ "$out" == $'release/4.x\nmain' ]]; then
+  if [[ "$branches" == $'release/3.x\nrelease/4.x' ]] && [[ "$out" == $'release/4.x\nmain' ]]; then
     return 0
   fi
   echo "  the detect step no longer bounds branch names to release/X.x, or the target list changed shape -- re-check every ::error::/::warning:: echo of \$CURRENT/\$TARGET/\$SOURCE_DESC/\$MERGE_BRANCH for #2240" >&2
-  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  printf '  branches: %s\n  out: %s\n' "${branches//$'\n'/ | }" "${out//$'\n'/ | }" >&2
   return 1
+}
+
+# The detect step's BRANCHES pipeline, extracted from production. It prints
+# BRANCHES. Callers put a `git` stub on PATH that prints `git branch -r` output.
+detect_branches_block() {
+  echo "set -euo pipefail"
+  # shellcheck disable=SC2016 # literal sed address, not an expression to expand
+  sed -n '/^ *BRANCHES=\$(git branch -r/,/sort -V)$/p' "$WORKFLOW" | sed 's/^          //'
+  # shellcheck disable=SC2016 # literal text for the child shell to expand
+  echo 'printf "%s" "$BRANCHES"'
 }
 
 # ---------------------------------------------------------------------------
