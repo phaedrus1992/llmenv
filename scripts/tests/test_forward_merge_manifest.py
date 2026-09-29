@@ -151,6 +151,11 @@ class ForwardMergeManifestTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("cannot read", err)
 
+    def test_malformed_dependency_exits_two(self) -> None:
+        code, err = run(BASE, SOURCE.replace('"=4.6.11"', "1"), TARGET)
+        self.assertEqual(code, 2, err)
+        self.assertIn("cannot check", err)
+
 
 if __name__ == "__main__":
     unittest.main()

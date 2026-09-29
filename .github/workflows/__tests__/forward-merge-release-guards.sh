@@ -37,7 +37,9 @@ else
 fi
 if [[ $FETCH_RC -ne 0 ]]; then
   if [[ -n "$FETCH_STDERR" ]]; then
-    echo "::warning::fetch of $CURRENT $TARGET failed: $FETCH_STDERR"
+    FETCH_STDERR_SAFE="${FETCH_STDERR//$'\n'/ }"
+    FETCH_STDERR_SAFE="${FETCH_STDERR_SAFE//::/  }"
+    echo "::warning::fetch of $CURRENT $TARGET failed: $FETCH_STDERR_SAFE"
   else
     echo "::warning::fetch of $CURRENT $TARGET failed (exit $FETCH_RC; no stderr)"
   fi
@@ -64,7 +66,9 @@ if [[ $PUSH_RC -eq 0 ]]; then
   echo "Pushed directly to $TARGET"
 else
   if [[ -n "$PUSH_STDERR" ]]; then
-    echo "::warning::push to $TARGET failed: $PUSH_STDERR"
+    PUSH_STDERR_SAFE="${PUSH_STDERR//$'\n'/ }"
+    PUSH_STDERR_SAFE="${PUSH_STDERR_SAFE//::/  }"
+    echo "::warning::push to $TARGET failed: $PUSH_STDERR_SAFE"
   else
     echo "::warning::push to $TARGET failed (exit $PUSH_RC; no stderr)"
   fi
@@ -528,7 +532,7 @@ test_1381_version_only_conflict_keeps_target_version() {
 # ---------------------------------------------------------------------------
 test_1381_non_version_change_bails() {
   local repo out
-  repo=$(make_version_conflict_repo 'serde = { version = "1" }\n')
+  repo=$(make_version_conflict_repo $'serde = { version = "1" }\n')
 
   out=$(cd "$repo" && SOURCE_REF=source TARGET=main SOURCE_DESC=release/4.x \
     bash -c "$(resolve_block)" 2>&1 || true)
@@ -1114,6 +1118,7 @@ make_tool_stubs() {
   dir=$(mktemp -d)
   cat > "$dir/cargo" <<'STUB'
 #!/usr/bin/env bash
+[[ -n "${TOOL_OUTPUT:-}" ]] && printf '%s\n' "$TOOL_OUTPUT" >&2
 [[ "${FAIL_TOOL:-}" == cargo ]] && exit 1
 echo regenerated-by-cargo > Cargo.lock
 STUB
@@ -1133,6 +1138,7 @@ run_drift() {
   DRIFT_REPO=$(make_pin_drift_repo "$@")
   stubs=$(make_tool_stubs)
   DRIFT_OUT=$(cd "$DRIFT_REPO" && PATH="$stubs:$PATH" FAIL_TOOL="${FAIL_TOOL:-}" \
+    TOOL_OUTPUT="${TOOL_OUTPUT:-}" \
     SOURCE_REF=source TARGET=release/4.x SOURCE_DESC=release/3.x \
     bash -c "$(resolve_block)" 2>&1 || true)
   trash "$stubs" 2>/dev/null || true
@@ -1173,6 +1179,17 @@ test_2166_lockfile_tool_failure_bails_naming_command() {
   trash "$DRIFT_REPO" 2>/dev/null || true
   [[ "$DRIFT_OUT" == *BAILED* ]] && [[ "$DRIFT_OUT" == *"npm install --package-lock-only"* ]] \
     && return 0
+  printf '  out: %s\n' "${DRIFT_OUT//$'\n'/ | }" >&2
+  return 1
+}
+
+# cargo prints paths from the merged manifests, which a source commit
+# controls (#2271).
+test_2271_lockfile_tool_output_is_sanitized() {
+  TOOL_OUTPUT="warning: path nope ::stop-commands::tok" run_drift 1.0.1
+  trash "$DRIFT_REPO" 2>/dev/null || true
+  [[ "$DRIFT_OUT" == *RESOLVED* ]] && [[ "$DRIFT_OUT" == *"warning: path nope"* ]] \
+    && [[ "$DRIFT_OUT" != *"::stop-commands::"* ]] && return 0
   printf '  out: %s\n' "${DRIFT_OUT//$'\n'/ | }" >&2
   return 1
 }
@@ -2112,11 +2129,11 @@ test_1543_test_mirror_matches_production_merge_output_suppression() {
   workflow_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/forward-merge-release.yml"
 
   # shellcheck disable=SC2016 # literal grep -F patterns, not expressions to expand
-  if grep -qF 'git merge --no-commit --no-ff "$SOURCE_REF" >/dev/null 2>&1' "$workflow_file" \
+  if grep -qF 'MERGE_ERR=$(git merge --no-commit --no-ff "$SOURCE_REF" 2>&1 >/dev/null)' "$workflow_file" \
       && grep -qF 'git merge --no-edit "$SOURCE_REF" >/dev/null 2>&1' "$workflow_file"; then
     return 0
   fi
-  echo "  production's merge invocations no longer fully suppress their own output -- update forward-merge-release.yml (both must use >/dev/null 2>&1, not a bare 2>/dev/null)" >&2
+  echo "  production's merge invocations no longer discard their stdout -- update forward-merge-release.yml (the trial merge must use 2>&1 >/dev/null into MERGE_ERR, the real merge >/dev/null 2>&1)" >&2
   return 1
 }
 
@@ -2137,7 +2154,8 @@ else
   rest="${PR_HEAD_REF#forward-merge/}"
   source_branch="${rest%-to-*}"
   if [[ ! "$source_branch" =~ ^(release/[0-9]+\.x|main)$ ]]; then
-    echo "::error::could not parse a valid source branch out of forward-merge PR head ref '$PR_HEAD_REF' (expected forward-merge/<source>-to-<target>, source one of release/X.x or main)"
+    head_ref_display="${PR_HEAD_REF//::/  }"
+    echo "::error::could not parse a valid source branch out of forward-merge PR head ref '$head_ref_display' (expected forward-merge/<source>-to-<target>, source one of release/X.x or main)"
     exit 1
   fi
   echo "ref=$source_branch"
@@ -2333,10 +2351,415 @@ test_1675_test_mirror_matches_production_source_branch_retry() {
       && grep -qF 'github.event.pull_request.merged == true' "$workflow_file" \
       && grep -qF 'github.event.pull_request.head.repo.full_name == github.repository' "$workflow_file" \
       && grep -qF "startsWith(github.event.pull_request.base.ref, 'release/')" "$workflow_file" \
-      && grep -qF 'if [[ ! "$source_branch" =~ ^(release/[0-9]+\.x|main)$ ]]; then' "$workflow_file"; then
+      && grep -qF 'if [[ ! "$source_branch" =~ ^(release/[0-9]+\.x|main)$ ]]; then' "$workflow_file" \
+      && grep -qF 'head_ref_display="${PR_HEAD_REF//::/  }"' "$workflow_file" \
+      && grep -qF "forward-merge PR head ref '\$head_ref_display'" "$workflow_file"; then
     return 0
   fi
   echo "  production's source-branch retry logic no longer matches the lines this file mirrors -- update determine_source_branch_block/job_admits_run above" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Issue #2240: a branch name reaches a workflow-command echo raw at only two
+# sites, before the regex check. Every later echo reads a name that the
+# detect step's `grep -E '^release/[0-9]+\.x$'` (or the literal `main`)
+# already bounded, so a `::` cannot reach it.
+# ---------------------------------------------------------------------------
+
+# The target-list block of the cascade step, extracted from production (not
+# hand-copied) so it cannot drift. It prints TARGETS, one per line.
+target_list_block() {
+  echo "set -euo pipefail"
+  sed -n '/# Build target list/,/TARGETS+=("main")/p' "$WORKFLOW" | sed 's/^          //'
+  cat <<'SHELL'
+printf '%s\n' "${TARGETS[@]}"
+SHELL
+}
+
+test_2240_malformed_head_ref_error_is_sanitized() {
+  local out rc
+  out=$(EVENT_NAME="pull_request" PUSHED_REF="" \
+    PR_HEAD_REF="forward-merge/x::stop-commands::tok-to-main" \
+    bash -c "$(determine_source_branch_block)" 2>&1)
+  rc=$?
+
+  if [[ $rc -ne 0 ]] && [[ "$out" == *"::error::could not parse a valid source branch"* ]] \
+      && [[ "$out" != *"::stop-commands::"* ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "$out" >&2
+  printf '  rc: %s\n' "$rc" >&2
+  return 1
+}
+
+test_2240_unversioned_branch_warning_is_sanitized() {
+  local out rc
+  out=$(CURRENT="release/x::stop-commands::tok" BRANCHES="release/3.x" \
+    bash -c "$(target_list_block)" 2>&1)
+  rc=$?
+
+  if [[ $rc -eq 0 ]] && [[ "$out" == *"::warning::"*"is not a versioned release/X.x branch"* ]] \
+      && [[ "$out" != *"::stop-commands::"* ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  printf '  rc: %s\n' "$rc" >&2
+  return 1
+}
+
+# The later echoes stay safe only while two facts hold: the detect step
+# filters BRANCHES through the release-line regex, and the cascade stops when
+# CURRENT is not one of those branches. The targets are then those branches
+# plus `main`.
+test_2240_cascade_targets_are_regex_bounded() {
+  local stubs branches out
+  stubs=$(mktemp -d)
+  cat > "$stubs/git" <<'STUB'
+#!/usr/bin/env bash
+printf '  origin/release/3.x\n  origin/release/x::stop-commands::tok\n  origin/release/4.x\n  origin/feature\n'
+STUB
+  chmod +x "$stubs/git"
+  branches=$(PATH="$stubs:$PATH" bash -c "$(detect_branches_block)" 2>&1)
+  trash "$stubs" 2>/dev/null || true
+  out=$(CURRENT="release/3.x" BRANCHES="$branches" bash -c "$(target_list_block)" 2>&1)
+
+  if [[ "$branches" == $'release/3.x\nrelease/4.x' ]] && [[ "$out" == $'release/4.x\nmain' ]]; then
+    return 0
+  fi
+  echo "  the detect step no longer bounds branch names to release/X.x, or the target list changed shape -- re-check every ::error::/::warning:: echo of \$CURRENT/\$TARGET/\$SOURCE_DESC/\$MERGE_BRANCH for #2240" >&2
+  printf '  branches: %s\n  out: %s\n' "${branches//$'\n'/ | }" "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# The detect step's BRANCHES pipeline, extracted from production. It prints
+# BRANCHES. Callers put a `git` stub on PATH that prints `git branch -r` output.
+detect_branches_block() {
+  echo "set -euo pipefail"
+  # shellcheck disable=SC2016 # literal sed address, not an expression to expand
+  sed -n '/^ *BRANCHES=\$(git branch -r/,/sort -V)$/p' "$WORKFLOW" | sed 's/^          //'
+  # shellcheck disable=SC2016 # literal text for the child shell to expand
+  echo 'printf "%s" "$BRANCHES"'
+}
+
+# ---------------------------------------------------------------------------
+# Issue #2271: auto_resolve_conflicts runs inside `if`, so `set -e` does not
+# apply to it. Each failure below must return non-zero on its own.
+# ---------------------------------------------------------------------------
+
+# A merge can fail for a reason other than a conflict (unrelated histories,
+# a dirty tree). No file is then conflicted, and "nothing to resolve" must not
+# read as "resolved".
+test_2271_no_conflicted_files_bails() {
+  local repo out
+  repo=$(mktemp -d)
+  (
+    cd "$repo" || exit 1
+    git init -q -b target .
+    git config user.email t@t
+    git config user.name t
+    git config commit.gpgsign false
+    printf 'x\n' > file
+    git add file
+    git commit -q -m base
+  )
+  out=$(cd "$repo" && SOURCE_REF=target TARGET=release/4.x SOURCE_DESC=release/3.x \
+    bash -c "$(resolve_block)" 2>&1 || true)
+  trash "$repo" 2>/dev/null || true
+
+  [[ "$out" == *BAILED* ]] && [[ "$out" == *"no conflicted files"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# forward_merge_manifest.py exits 2 on a TOML file it cannot parse. That is
+# "could not check", not "found a real change".
+test_2271_manifest_parse_failure_is_could_not_check() {
+  local repo out
+  repo=$(make_version_conflict_repo '[broken')
+  out=$(cd "$repo" && SOURCE_REF=source TARGET=release/5.x SOURCE_DESC=release/4.x \
+    bash -c "$(resolve_block)" 2>&1 || true)
+  trash "$repo" 2>/dev/null || true
+
+  [[ "$out" == *BAILED* ]] && [[ "$out" == *"could not check whether keeping"* ]] \
+    && [[ "$out" != *"more than version numbers"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# If `checkout --ours` fails, a later `git add` stages the file with its
+# conflict markers, which clears the conflict and passes the closing check.
+test_2271_manifest_checkout_failure_bails() {
+  local repo stubs real_git out
+  repo=$(make_version_conflict_repo)
+  stubs=$(mktemp -d)
+  real_git=$(command -v git)
+  cat > "$stubs/git" <<STUB
+#!/usr/bin/env bash
+if [[ "\$1" == checkout && "\$2" == --ours ]]; then
+  exit 1
+fi
+exec "$real_git" "\$@"
+STUB
+  chmod +x "$stubs/git"
+  out=$(cd "$repo" && PATH="$stubs:$PATH" SOURCE_REF=source TARGET=release/5.x \
+    SOURCE_DESC=release/4.x bash -c "$(resolve_block)" 2>&1 || true)
+  trash "$repo" "$stubs" 2>/dev/null || true
+
+  [[ "$out" == *BAILED* ]] && [[ "$out" == *"git checkout --ours failed"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# The new-merge-branch path of the cascade, extracted from production: create
+# the branch, push it, open the PR. Prints HALTED. Callers put git and gh
+# stubs on PATH and export MERGE_BRANCH TARGET SOURCE_DESC.
+new_merge_branch_block() {
+  cat <<'SHELL'
+set -euo pipefail
+HALTED=""
+PUSH_SKIPPED=0
+push_with_pat() { git push "$@"; }
+approve_pending_runs() { :; }
+for _once in once; do
+SHELL
+  # shellcheck disable=SC2016 # literal sed address, not an expression to expand
+  sed -n '/^ *# Create the branch at HEAD (the merge commit made above)/,/^ *HALTED="PR opened for \$TARGET"$/p' \
+    "$WORKFLOW"
+  cat <<'SHELL'
+fi
+done
+echo "HALTED=$HALTED"
+SHELL
+}
+
+test_2271_failed_pr_create_is_not_reported_as_opened() {
+  local stubs out
+  stubs=$(mktemp -d)
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$stubs/git"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$stubs/gh"
+  chmod +x "$stubs/git" "$stubs/gh"
+  out=$(PATH="$stubs:$PATH" MERGE_BRANCH="forward-merge/release/3.x-to-release/4.x" \
+    TARGET=release/4.x SOURCE_DESC=release/3.x bash -c "$(new_merge_branch_block)" 2>&1 || true)
+  trash "$stubs" 2>/dev/null || true
+
+  [[ "$out" == *"::error::Failed to create PR for"* ]] \
+    && [[ "$out" == *"HALTED=PR creation failed for release/4.x"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2271_ls_remote_failure_without_stderr_says_so() {
+  local stubs out
+  stubs=$(mktemp -d)
+  cat > "$stubs/git" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == ls-remote ]] && exit 128
+exit 0
+STUB
+  chmod +x "$stubs/git"
+  out=$(PATH="$stubs:$PATH" MERGE_BRANCH="forward-merge/release/3.x-to-release/4.x" \
+    TARGET=release/4.x bash -c "$(ls_remote_block)" 2>&1 || true)
+  trash "$stubs" 2>/dev/null || true
+
+  [[ "$out" == *"::error::ls-remote for forward-merge/release/3.x-to-release/4.x failed (exit 128; no stderr)"* ]] \
+    && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# The trial merge of the cascade, extracted from production through its
+# "no merge in progress" arm. Prints HALTED.
+trial_merge_block() {
+  cat <<'SHELL'
+set -euo pipefail
+HALTED=""
+for _once in once; do
+SHELL
+  # shellcheck disable=SC2016 # literal sed address, not an expression to expand
+  sed -n '/^ *if ! MERGE_ERR=\$(git merge --no-commit --no-ff/,/^ *HALTED="merge failed at \$TARGET"$/p' \
+    "$WORKFLOW"
+  cat <<'SHELL'
+break
+fi
+fi
+done
+echo "HALTED=$HALTED"
+SHELL
+}
+
+# Unrelated histories make git refuse the merge before it writes MERGE_HEAD.
+# Then `git merge --abort` fails too, and the run must not report a
+# corrupt tree.
+test_2271_merge_without_merge_head_names_git_reason() {
+  local repo out
+  repo=$(mktemp -d)
+  (
+    cd "$repo" || exit 1
+    git init -q -b target .
+    git config user.email t@t
+    git config user.name t
+    git config commit.gpgsign false
+    printf 'a\n' > a
+    git add a
+    git commit -q -m target
+    git switch -q --orphan source
+    printf 'b\n' > b
+    git add b
+    git commit -q -m source
+    git switch -q target
+  )
+  out=$(cd "$repo" && SOURCE_REF=source TARGET=release/4.x SOURCE_DESC=release/3.x \
+    bash -c "$(trial_merge_block)" 2>&1 || true)
+  trash "$repo" 2>/dev/null || true
+
+  [[ "$out" == *"::error::git merge of release/3.x into release/4.x failed with no merge in progress: fatal: refusing to merge unrelated histories"* ]] \
+    && [[ "$out" == *"HALTED=merge failed at release/4.x"* ]] \
+    && [[ "$out" != *"Failed to abort merge"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2271_stale_branch_merge_without_merge_head_names_git_reason() {
+  local stubs out
+  stubs=$(mktemp -d)
+  cat > "$stubs/git" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  merge) echo "fatal: refusing to merge unrelated histories" >&2; exit 128 ;;
+  merge-base) exit 1 ;;
+  rev-parse) [[ "$*" == *MERGE_HEAD* ]] && exit 1 ;;
+esac
+exit 0
+STUB
+  chmod +x "$stubs/git"
+  out=$(PATH="$stubs:$PATH" SOURCE_REF=origin/source TARGET=release/4.x \
+    SOURCE_DESC=release/3.x MERGE_BRANCH="forward-merge/release/3.x-to-release/4.x" ls_rc=0 \
+    bash -c "$(existing_branch_update_block)
+echo \"HALTED=\$HALTED\"" 2>&1 || true)
+  trash "$stubs" 2>/dev/null || true
+
+  [[ "$out" == *"failed with no merge in progress: fatal: refusing to merge unrelated histories"* ]] \
+    && [[ "$out" == *"HALTED=merge failed updating forward-merge/release/3.x-to-release/4.x"* ]] \
+    && [[ "$out" != *"Failed to abort merge"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# GITHUB_TOKEN cannot push a change to .github/workflows/, so without the PAT
+# that is the likely cause of a failed merge-branch push.
+PAT_HINT="set FORWARD_MERGE_PAT (a fine-grained PAT for this repository only"
+
+# git and gh stubs for a merge-branch push that fails. `git diff --quiet`
+# exits with $1: 1 means the merge changes .github/workflows/, 0 means it does
+# not. Echoes the stub directory.
+push_failure_stubs() {
+  local dir
+  dir=$(mktemp -d)
+  cat > "$dir/git" <<STUB
+#!/usr/bin/env bash
+case "\$1" in
+  push) exit 1 ;;
+  diff) exit $1 ;;
+  merge-base) exit 1 ;;
+esac
+exit 0
+STUB
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/gh"
+  chmod +x "$dir/git" "$dir/gh"
+  printf '%s\n' "$dir"
+}
+
+test_2271_no_push_hint_without_workflow_change() {
+  local stubs out
+  stubs=$(push_failure_stubs 0)
+  out=$(PATH="$stubs:$PATH" MERGE_BRANCH="forward-merge/release/3.x-to-release/4.x" \
+    TARGET=release/4.x SOURCE_DESC=release/3.x bash -c "$(new_merge_branch_block)" 2>&1 || true)
+  trash "$stubs" 2>/dev/null || true
+
+  [[ "$out" == *"::error::Push to merge branch"* ]] && [[ "$out" != *"$PAT_HINT"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2271_no_push_hint_with_pat_set() {
+  local stubs out
+  stubs=$(push_failure_stubs 1)
+  out=$(PATH="$stubs:$PATH" _forward_merge_pat=set \
+    MERGE_BRANCH="forward-merge/release/3.x-to-release/4.x" \
+    TARGET=release/4.x SOURCE_DESC=release/3.x bash -c "$(new_merge_branch_block)" 2>&1 || true)
+  trash "$stubs" 2>/dev/null || true
+
+  [[ "$out" == *"::error::Push to merge branch"* ]] && [[ "$out" != *"$PAT_HINT"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2271_push_hint_on_stale_branch_update() {
+  local stubs out
+  stubs=$(push_failure_stubs 1)
+  out=$(PATH="$stubs:$PATH" SOURCE_REF=origin/source TARGET=release/4.x \
+    SOURCE_DESC=release/3.x MERGE_BRANCH="forward-merge/release/3.x-to-release/4.x" ls_rc=0 \
+    bash -c "$(existing_branch_update_block)" 2>&1 || true)
+  trash "$stubs" 2>/dev/null || true
+
+  [[ "$out" == *"::error::Push to update existing merge branch"* ]] \
+    && [[ "$out" == *"$PAT_HINT"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+test_2271_push_failure_without_pat_gives_hint() {
+  local stubs out
+  stubs=$(push_failure_stubs 1)
+  out=$(PATH="$stubs:$PATH" MERGE_BRANCH="forward-merge/release/3.x-to-release/4.x" \
+    TARGET=release/4.x SOURCE_DESC=release/3.x bash -c "$(new_merge_branch_block)" 2>&1 || true)
+  trash "$stubs" 2>/dev/null || true
+
+  [[ "$out" == *"::error::Push to merge branch"* ]] \
+    && [[ "$out" == *"$PAT_HINT"* ]] \
+    && [[ "$out" == *"HALTED=merge-branch push failed for release/4.x"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# The merge-branch lookup of the cascade, extracted from production through
+# its failure arm. Prints HALTED.
+ls_remote_block() {
+  cat <<'SHELL'
+set -euo pipefail
+HALTED=""
+for _once in once; do
+SHELL
+  # shellcheck disable=SC2016 # literal sed address, not an expression to expand
+  sed -n '/^ *if LS_STDERR=\$(git ls-remote/,/^ *HALTED="ls-remote failed at \$TARGET"$/p' "$WORKFLOW"
+  cat <<'SHELL'
+break
+fi
+done
+echo "HALTED=$HALTED"
+SHELL
+}
+
+test_2271_ls_remote_failure_prints_sanitized_stderr() {
+  local stubs out
+  stubs=$(mktemp -d)
+  cat > "$stubs/git" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1" == ls-remote ]]; then
+  echo "fatal: Authentication failed ::stop-commands::tok" >&2
+  exit 128
+fi
+exit 0
+STUB
+  chmod +x "$stubs/git"
+  out=$(PATH="$stubs:$PATH" MERGE_BRANCH="forward-merge/release/3.x-to-release/4.x" \
+    TARGET=release/4.x bash -c "$(ls_remote_block)" 2>&1 || true)
+  trash "$stubs" 2>/dev/null || true
+
+  [[ "$out" == *"::error::ls-remote for forward-merge/release/3.x-to-release/4.x failed (exit 128): fatal: Authentication failed"* ]] \
+    && [[ "$out" != *"::stop-commands::"* ]] \
+    && [[ "$out" == *"HALTED=ls-remote failed at release/4.x"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
   return 1
 }
 
@@ -2358,6 +2781,7 @@ approve_pending_runs() { :; }
 SHELL
   sed -n '/^ *bail_on_conflict() {/,/^ *for TARGET in/p' "$WORKFLOW" | sed '$d'
   echo 'for _once in once; do'
+  # shellcheck disable=SC2016 # literal sed address, not an expression to expand
   sed -n '/^ *if \[\[ \$ls_rc -eq 0 \]\]; then$/,/^ *elif \[\[ \$ls_rc -ne 2 \]\]; then$/p' "$WORKFLOW" | sed '$d'
   echo 'fi'
   echo 'done'
@@ -2465,7 +2889,7 @@ STUB
 
   if [[ $rc -ne 0 ]]; then
     echo "  block exited $rc, expected 0. Output:" >&2
-    echo "$out" | sed 's/^/    /' >&2
+    printf '    %s\n' "${out//$'\n'/$'\n'    }" >&2
     rm -rf "$work_dir" "$origin_dir"
     return 1
   fi
@@ -2529,7 +2953,7 @@ STUB
   fi
   if ! echo "$out" | grep -q "Merge conflict"; then
     echo "  expected a merge-conflict message; got:" >&2
-    echo "$out" | sed 's/^/    /' >&2
+    printf '    %s\n' "${out//$'\n'/$'\n'    }" >&2
     return 1
   fi
   return 0
@@ -2540,6 +2964,7 @@ STUB
 # above expect, so a future edit there fails loudly here instead of quietly
 # extracting nothing.
 test_2220_test_mirror_matches_production_stale_branch_update() {
+  # shellcheck disable=SC2016 # literal grep -F patterns, not expressions to expand
   if grep -qF 'if [[ $ls_rc -eq 0 ]]; then' "$WORKFLOW" \
       && grep -qF 'elif [[ $ls_rc -ne 2 ]]; then' "$WORKFLOW" \
       && grep -qF 'if ! git fetch origin "$MERGE_BRANCH"; then' "$WORKFLOW" \
@@ -2725,6 +3150,38 @@ run_test "Issue #2220: a conflicting update never force-pushes over a human's wo
   test_2220_conflicting_update_never_force_pushes
 run_test "Issue #2220: the test mirror still matches production's stale-branch-update logic" \
   test_2220_test_mirror_matches_production_stale_branch_update
+run_test "Issue #2240: a malformed PR head ref is printed with :: removed" \
+  test_2240_malformed_head_ref_error_is_sanitized
+run_test "Issue #2240: a branch that is not a release line is printed with :: removed" \
+  test_2240_unversioned_branch_warning_is_sanitized
+run_test "Issue #2240: every later echo reads only regex-bounded branch names" \
+  test_2240_cascade_targets_are_regex_bounded
+run_test "Issue #2271: a failed merge with no conflicted file bails, not resolves" \
+  test_2271_no_conflicted_files_bails
+run_test "Issue #2271: a manifest check that cannot parse a file says so" \
+  test_2271_manifest_parse_failure_is_could_not_check
+run_test "Issue #2271: a failed checkout --ours on a manifest bails" \
+  test_2271_manifest_checkout_failure_bails
+run_test "Issue #2271: a failed gh pr create is not reported as an opened PR" \
+  test_2271_failed_pr_create_is_not_reported_as_opened
+run_test "Issue #2271: a failed ls-remote prints git's sanitized stderr" \
+  test_2271_ls_remote_failure_prints_sanitized_stderr
+run_test "Issue #2271: a failed merge-branch push with no PAT names the workflow-file limit" \
+  test_2271_push_failure_without_pat_gives_hint
+run_test "Issue #2271: cargo output from merged manifests is printed with :: removed" \
+  test_2271_lockfile_tool_output_is_sanitized
+run_test "Issue #2271: a failed ls-remote with no stderr says so" \
+  test_2271_ls_remote_failure_without_stderr_says_so
+run_test "Issue #2271: no push hint when the merge changes no workflow file" \
+  test_2271_no_push_hint_without_workflow_change
+run_test "Issue #2271: no push hint when FORWARD_MERGE_PAT is set" \
+  test_2271_no_push_hint_with_pat_set
+run_test "Issue #2271: a failed stale-branch update push with no PAT gives the hint" \
+  test_2271_push_hint_on_stale_branch_update
+run_test "Issue #2271: a stale-branch merge with no MERGE_HEAD halts with git's reason" \
+  test_2271_stale_branch_merge_without_merge_head_names_git_reason
+run_test "Issue #2271: a merge that fails with no MERGE_HEAD halts with git's reason" \
+  test_2271_merge_without_merge_head_names_git_reason
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
