@@ -16,10 +16,23 @@ REPO_ROOT="$(cd "$WORKFLOWS_DIR/../.." && pwd)"
 # can run real cascade code, so run every test outside any git repo and with
 # no GitHub credentials: a stray `git push` or `gh` call then fails (#2299).
 HARNESS_SCRATCH="$(mktemp -d)"
+if [[ -z "$HARNESS_SCRATCH" || ! -d "$HARNESS_SCRATCH" ]]; then
+  echo "harness: mktemp -d failed; cannot isolate the tests" >&2
+  exit 1
+fi
 trap 'trash "$HARNESS_SCRATCH" 2>/dev/null || true' EXIT
-mkdir -p "$HARNESS_SCRATCH/gh-config"
+mkdir -p "$HARNESS_SCRATCH/gh-config" "$HARNESS_SCRATCH/bin" || exit 1
 export GH_CONFIG_DIR="$HARNESS_SCRATCH/gh-config"
-unset GH_TOKEN GITHUB_TOKEN
+unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
+# A gh wrapper can read a token from the OS keychain, so block every bare gh
+# call. A test that needs gh puts its own stub earlier on PATH.
+cat > "$HARNESS_SCRATCH/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+echo "harness: real gh blocked: gh $*" >&2
+exit 97
+STUB
+chmod +x "$HARNESS_SCRATCH/bin/gh" || exit 1
+export PATH="$HARNESS_SCRATCH/bin:$PATH"
 cd "$HARNESS_SCRATCH" || exit 1
 
 PASS=0
@@ -2532,6 +2545,14 @@ test_2299_harness_is_isolated() {
   fi
   if [[ "${GH_CONFIG_DIR:-}" != "$HARNESS_SCRATCH"/* ]]; then
     echo "  GH_CONFIG_DIR does not point into the harness scratch dir" >&2
+    return 1
+  fi
+  # A gh wrapper can read a token from the OS keychain, so an empty config
+  # alone does not stop it. The first gh on PATH must be the blocking stub.
+  local rc=0
+  gh auth token >/dev/null 2>&1 || rc=$?
+  if [[ $rc -ne 97 ]]; then
+    echo "  a bare gh call is not blocked (exit $rc, expected 97)" >&2
     return 1
   fi
   return 0
