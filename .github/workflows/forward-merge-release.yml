@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - 'release/**'
-  # #1912: a push-triggered run that finds forward-merge/<source>-to-<target>
+  # #1675: a push-triggered run that finds forward-merge/<source>-to-<target>
   # already open halts instead of retrying (see the ls-remote guard below).
   # Once that PR finally merges, nothing re-fires — every commit that piled
   # up on the source branch during the wait already fired-and-halted once,
@@ -18,32 +18,42 @@ permissions:
   contents: read
 
 concurrency:
-  # #1912: one shared group for every trigger, not one per source branch.
-  # Every cascade in this repo eventually reaches `main` (release/3.x ->
-  # release/4.x -> main; release/4.x -> main directly), so two cascades from
-  # different source branches already raced on `main` even before this
-  # trigger existed. Keying the group on the source branch (as upstream does)
-  # only avoids that race once FORWARD_MERGE_PAT forces every push through
-  # the PR path too (#1504) -- not ported here, so a push-triggered cascade
-  # still pushes directly. Adding the pull_request retry raises the odds of
-  # hitting that pre-existing race (a retry fires right as a new commit may
-  # also land on the source branch), so this port closes it with one global
-  # lock instead of copying the per-branch key upstream's fuller port relies on.
-  group: forward-merge-cascade
+  # #1675: a pull_request-triggered retry groups on its own head ref (the
+  # forward-merge/<source>-to-<target> branch name), not github.ref (which
+  # for a pull_request event is the synthetic refs/pull/<n>/merge ref, never
+  # equal to the push-triggered group for the same source branch). The two
+  # trigger types don't need to serialize against each other: push-triggered
+  # cascades already go through the PR path once FORWARD_MERGE_PAT is set,
+  # so a stray concurrent run costs wasted CI time, not a corrupted push.
+  group: forward-merge-${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
   cancel-in-progress: false
 
 jobs:
   forward-merge:
     runs-on: ubuntu-latest
-    # #1912: the second half of the OR admits only a merged, same-repo PR
+    # Stops the cascade's own push from re-triggering this workflow on the
+    # target branch. Only holds while pushes go out as GITHUB_TOKEN (which
+    # both skips the anti-recursion rule and is attributed to
+    # github-actions[bot]) — a FORWARD_MERGE_PAT-authenticated push (#1504)
+    # is neither. #1524 raised this as a gap once FORWARD_MERGE_PAT is set,
+    # but cff88a8c (#1504) closed it as a side effect: once the secret is
+    # set, a direct push to $TARGET is never attempted at all (PUSH_SKIPPED
+    # below) — push_with_pat only ever pushes to a forward-merge/* staging
+    # branch, which never matches this workflow's `release/**` trigger, so
+    # a PAT-authenticated push can no longer re-trigger this workflow.
+    # #1524 closed with that evidence; see test_1504_direct_push_never_
+    # attempted_with_pat_set in __tests__/forward-merge-release-guards.sh.
+    #
+    # #1675: the second half of the OR admits only a merged, same-repo PR
     # whose head is one of this workflow's own forward-merge/* staging
     # branches, opened against a release/main target — never an arbitrary
     # closed PR, and never a fork PR that merely names its own branch to
     # match the prefix. A fork PR can't reach this job's write permissions
-    # today regardless (this is `pull_request`, not `pull_request_target`,
-    # so GitHub itself withholds both from a fork-headed run) — the
-    # repo/base check is defense in depth against that platform default
-    # ever being loosened, not the only thing stopping it.
+    # or FORWARD_MERGE_PAT today regardless (this is `pull_request`, not
+    # `pull_request_target`, so GitHub itself withholds both from a
+    # fork-headed run) — the repo/base check is defense in depth against
+    # that platform default ever being loosened, not the only thing
+    # stopping it.
     if: >-
       github.actor != 'github-actions[bot]' &&
       (github.event_name == 'push' ||
@@ -58,7 +68,7 @@ jobs:
       issues: write
       actions: write
     steps:
-      # #1912: for a push, the branch that was pushed IS the cascade's
+      # #1675: for a push, the branch that was pushed IS the cascade's
       # source. For a merged forward-merge/* PR, that branch (and its PR)
       # are gone — the source is encoded in its own name,
       # forward-merge/<source>-to-<target>, with the `-to-` separator safe
@@ -69,13 +79,15 @@ jobs:
       # The parsed result feeds straight into the next step's `ref:` input,
       # so it must never reach actions/checkout unvalidated: an empty or
       # malformed parse (a head ref that passes the job-level prefix check
-      # above but isn't shaped forward-merge/<source>-to-<target>) is not a
+      # above but isn't shaped forward-merge/<source>-to-<target> — no
+      # separator, more than one, or nothing either side of it) is not a
       # theoretical case to shrug off. actions/checkout treats an empty
       # `ref:` as unset and falls back to the triggering event's own ref,
       # which for a closed pull_request is its *base* branch — so the job
-      # would silently check out and run the whole cascade against the
-      # wrong branch with no error anywhere. Validate against the only two
-      # shapes a real cascade source ever has and fail loudly on anything else.
+      # would silently check out and, if that base happens to be a real
+      # release/X.x line, run the whole cascade against the wrong branch
+      # with no error anywhere. Validate against the only two shapes a real
+      # cascade source ever has and fail loudly on anything else.
       - name: Determine source branch
         id: source
         env:
@@ -156,9 +168,209 @@ jobs:
         env:
           CURRENT: ${{ steps.detect.outputs.current }}
           BRANCHES: ${{ steps.detect.outputs.branches }}
+          # Deliberately left at step level, unlike FORWARD_MERGE_PAT below —
+          # any workspace code that runs still inherits GH_TOKEN via env and
+          # via the persisted checkout credential in .git/config either way,
+          # so scoping it here wouldn't contain anything. What actually
+          # closes that exposure is the #1532 fix itself: the changelog.md
+          # arm below only ever runs a pinned, already-verified copy of
+          # scripts/sync-changelog-doc.sh, never the merged tree's.
           GH_TOKEN: ${{ github.token }}
+          # Use a fine-grained PAT restricted to just this repository, with
+          # only `contents: write` + `workflows: write` — not a classic PAT.
+          # A classic repo-scoped PAT would let anyone who can land a commit
+          # on release/** exfiltrate access to every repository the PAT's
+          # owner can reach, not just this one — captured into a local
+          # variable and removed from this step's own env below (#1532) so it
+          # can't inherit into any script the cascade calls (e.g.
+          # scripts/sync-changelog-doc.sh, during conflict auto-resolution).
+          FORWARD_MERGE_PAT: ${{ secrets.FORWARD_MERGE_PAT }}
         run: |
           set -euo pipefail
+
+          # #1532: capture the PAT into a local (non-exported) shell variable,
+          # then unset it from this process's own environment immediately —
+          # only push_with_pat, which reads the local variable directly,
+          # still has access. Any subprocess this step spawns from here on
+          # (bash scripts/sync-changelog-doc.sh included) no longer inherits
+          # it.
+          _forward_merge_pat="${FORWARD_MERGE_PAT:-}"
+          unset FORWARD_MERGE_PAT
+
+          # GITHUB_TOKEN can never push a change that touches
+          # .github/workflows/*.yml (GitHub's own restriction, not this job's
+          # permissions). A source release branch's cascade only crosses that
+          # boundary when its own workflow files differ from a target's, but
+          # the cascade can't know that in advance, so every push below goes
+          # through this helper. Scoped to just the push (a `-c` override for
+          # one invocation), not the whole job's git credential, per #1504 —
+          # everything else (fetch, merge, checkout) still runs as the
+          # job-scoped GITHUB_TOKEN persisted by the checkout step. Falls back
+          # to the default token if the secret is unset, so the workflow keeps
+          # working (minus workflow-file pushes) before FORWARD_MERGE_PAT is added.
+          #
+          # #1540: `http.extraheader` is a multi-valued git config key, so a
+          # `-c` override does NOT replace the persisted header the checkout
+          # step wrote — it adds alongside it, and GitHub rejects the
+          # resulting double `Authorization` header with a 400. An empty
+          # `-c key=` override doesn't unset it either (proven against real
+          # git in __tests__/forward-merge-release-guards.sh) — it just adds
+          # a third, empty value.
+          #
+          # actions/checkout's persist-credentials: true does NOT write the
+          # header directly into .git/config (confirmed from a live run's
+          # own Checkout step log, after a first attempt at this fix that
+          # assumed it did still hit the same 400 in production). It writes
+          # the header into an external temp file and adds
+          # `includeIf.gitdir:*.path` entries in .git/config pointing at
+          # that file. A plain `--unset-all` on the extraheader key finds
+          # nothing directly in .git/config (exit 5, "no such key") and
+          # silently no-ops, while the header stays effectively active via
+          # the include. The includeIf entries themselves must be removed —
+          # the same cleanup actions/checkout's own "Post Checkout" step
+          # performs at job end, just done early. Because we're doing that
+          # cleanup ourselves ahead of time, Post Checkout's own pass finds
+          # no includeIf entries left and never gets to the file-deletion
+          # step it would otherwise run, so push_with_pat also deletes the
+          # underlying credentials file itself (matched narrowly by name
+          # under $RUNNER_TEMP) to avoid orphaning it. This is safe to do
+          # unconditionally here: push_with_pat's only call site is the last
+          # git network operation before the cascade halts (it's followed
+          # only by `gh pr create`, then `break`), so nothing downstream
+          # needs the persisted GITHUB_TOKEN credential again.
+          push_with_pat() {
+            # Enforces the single-call-site invariant above at runtime
+            # instead of leaving it to a comment: this exact assumption
+            # (about what's safe to tear down and when) has already been
+            # wrong once for this function (#1540). A second call in the
+            # same job would otherwise silently push with no credential at
+            # all, having already dropped it the first time.
+            if [[ "${_push_with_pat_credential_dropped:-0}" -eq 1 ]]; then
+              echo "::error::push_with_pat called more than once in this job after already dropping the persisted checkout credential -- update the caller, this function assumes a single last call"
+              exit 1
+            fi
+            if [[ -n "$_forward_merge_pat" ]]; then
+              _push_with_pat_credential_dropped=1
+              local auth
+              auth="$(printf 'x-access-token:%s' "$_forward_merge_pat" | base64 -w0)"
+              # GitHub's log scrubber masks the literal PAT value, not its
+              # base64 encoding — register the encoded form too, so a stray
+              # git trace or `set -x` can't print a trivially-reversible copy.
+              echo "::add-mask::$auth"
+              # This is expected to be a no-op in practice (exit 5, "no such
+              # key" — see the includeIf removal below for where the actual
+              # persisted header lives), kept as defense in depth in case a
+              # future checkout mechanism ever does write it directly. A bare
+              # `|| true` would also swallow a real config-write failure
+              # (e.g. exit 128 outside a git work tree, exit 255 if
+              # .git/config can't be locked), silently discarding the
+              # diagnostic for why.
+              # `if ! VAR=$(cmd); then RC=$?; fi` would be wrong here: with
+              # the `!` negation, `$?` inside the `then` block reflects the
+              # negated condition (always 0), not cmd's real exit code — see
+              # the FETCH_RC/PUSH_RC pattern above for why this if/else form
+              # is used instead.
+              if UNSET_OUT=$(git config --local --unset-all http.https://github.com/.extraheader 2>&1); then
+                UNSET_RC=0
+              else
+                UNSET_RC=$?
+              fi
+              if [[ $UNSET_RC -ne 0 && $UNSET_RC -ne 5 ]]; then
+                echo "::error::failed to clear persisted extraheader before PAT push (git config exit $UNSET_RC): $UNSET_OUT"
+                exit 1
+              fi
+              # `--get-regexp` exits 1 when nothing matches (e.g.
+              # persist-credentials: false) -- a normal empty result, not a
+              # failure. Anything else (e.g. exit 128 outside a git work
+              # tree) is a real failure and must halt, same reasoning as
+              # UNSET_RC above -- captured via if/else, not `2>/dev/null ||
+              # true`, which would swallow both cases identically.
+              if INCLUDE_KEYS=$(git config --local --name-only --get-regexp '^includeIf\.gitdir:' 2>&1); then
+                INCLUDE_KEYS_RC=0
+              else
+                INCLUDE_KEYS_RC=$?
+              fi
+              if [[ $INCLUDE_KEYS_RC -ne 0 && $INCLUDE_KEYS_RC -ne 1 ]]; then
+                echo "::error::failed to enumerate includeIf.gitdir entries before PAT push (git config exit $INCLUDE_KEYS_RC): $INCLUDE_KEYS"
+                exit 1
+              fi
+              if [[ $INCLUDE_KEYS_RC -eq 0 ]]; then
+                while IFS= read -r include_key; do
+                  [[ -n "$include_key" ]] || continue
+                  # Read the value (the credentials file path) before
+                  # unsetting the key -- actions/checkout's own Post
+                  # Checkout cleanup discovers that same path this same
+                  # way, then deletes the file. If we unset the key first,
+                  # Post Checkout finds no includeIf entries left and never
+                  # deletes it, orphaning it on the runner.
+                  if INCLUDE_VALUE=$(git config --local --get-all "$include_key" 2>&1); then
+                    INCLUDE_GET_RC=0
+                  else
+                    INCLUDE_GET_RC=$?
+                  fi
+                  if [[ $INCLUDE_GET_RC -ne 0 ]]; then
+                    echo "::error::failed to read $include_key before removing it (git config exit $INCLUDE_GET_RC): $INCLUDE_VALUE"
+                    exit 1
+                  fi
+                  if INCLUDE_UNSET_OUT=$(git config --local --unset-all "$include_key" 2>&1); then
+                    INCLUDE_UNSET_RC=0
+                  else
+                    INCLUDE_UNSET_RC=$?
+                  fi
+                  if [[ $INCLUDE_UNSET_RC -ne 0 ]]; then
+                    echo "::error::failed to remove $include_key before PAT push (git config exit $INCLUDE_UNSET_RC): $INCLUDE_UNSET_OUT"
+                    exit 1
+                  fi
+                  # Only delete a path that matches the file
+                  # actions/checkout itself creates under $RUNNER_TEMP --
+                  # never touch a value this job didn't create.
+                  while IFS= read -r include_value_line; do
+                    [[ -n "$include_value_line" ]] || continue
+                    if [[ -n "${RUNNER_TEMP:-}" \
+                        && "$include_value_line" == "$RUNNER_TEMP"/git-credentials-*.config ]]; then
+                      rm -f "$include_value_line"
+                    fi
+                  done <<< "$INCLUDE_VALUE"
+                done <<< "$INCLUDE_KEYS"
+              fi
+              git -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${auth}" push "$@"
+            else
+              git push "$@"
+            fi
+          }
+
+          # GitHub sometimes gates this PR's `pull_request`-triggered runs
+          # behind an `action_required` manual-approval check -- normally a
+          # fork-PR-only safety gate, but observed firing on this same-repo,
+          # non-first-time-contributor PR too (#1564; GitHub-side root cause
+          # not confirmed, and reproduction is intermittent -- most cascades
+          # that open a PR don't hit it). The entire reason this cascade opens
+          # a PR instead of pushing directly is so required checks run before
+          # merge, so a run stuck on that gate with nobody watching silently
+          # defeats the point. Poll briefly for a run against $1 (a commit
+          # SHA) sitting in that state and approve it.
+          #
+          # Never halts the cascade on failure: an approval miss here still
+          # leaves the PR in place for a human (or a later poll, e.g. the next
+          # push to this branch re-running this same check) to approve
+          # manually, so a warning is the right severity, not an error.
+          approve_pending_runs() {
+            local sha="$1" ids id
+            for _ in 1 2 3 4 5 6; do
+              ids=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${sha}" \
+                --jq '.workflow_runs[] | select(.conclusion == "action_required") | .id' 2>/dev/null) || ids=""
+              if [[ -n "$ids" ]]; then
+                while IFS= read -r id; do
+                  [[ -n "$id" ]] || continue
+                  echo "Approving action_required run $id for $sha"
+                  gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runs/${id}/approve" >/dev/null 2>&1 \
+                    || echo "::warning::failed to approve run $id for $sha -- approve it manually"
+                done <<< "$ids"
+                return 0
+              fi
+              sleep 10
+            done
+          }
 
           # Build target list: every newer release branch (semver order) + main.
           TARGETS=()
@@ -220,9 +432,11 @@ jobs:
           # Rules: docs/design/issue-2166-forward-merge-drift.md
           #
           # Runs the target's own copy (HEAD, before this merge) — never the
-          # source's or the merged tree's — matching release/4.x (#2177). A
-          # target without the script has no rule to apply, so the caller
-          # bails and a human merges once.
+          # source's or the merged tree's. This job holds FORWARD_MERGE_PAT, so
+          # it never runs a script from the merged tree or the source (#1532,
+          # #2171); release/3.x has no PAT but adopted the same rule for
+          # consistency (#2177). A target without the script has no rule to
+          # apply, so the caller bails and a human merges once.
           #
           # Return codes the caller (auto_resolve_conflicts) branches on:
           #   0 = keeping the target's copy is safe
@@ -262,22 +476,29 @@ jobs:
 
           # Rebuild the lockfiles from the target's copy and the merged manifests.
           # A hand merge of a lockfile is never right. A lockfile-only change on the
-          # source is not carried over; the target keeps its own.
+          # source is not carried over; the target keeps its own. `--ignore-scripts`
+          # keeps npm from running package code with the PAT in the environment.
           regenerate_lockfiles() {
             if [[ "$1" -eq 1 ]]; then
               echo "  Cargo.lock: regenerating from the merged manifests"
-              git checkout --ours -- Cargo.lock
+              git checkout --ours -- Cargo.lock || {
+                echo "::error::Cargo.lock: git checkout --ours failed" >&2
+                return 1
+              }
               if ! cargo update --workspace; then
-                echo "::error::Cargo.lock: 'cargo update --workspace' failed"
+                echo "::error::Cargo.lock: 'cargo update --workspace' failed" >&2
                 return 1
               fi
               git add -- Cargo.lock
             fi
             if [[ "$2" -eq 1 ]]; then
               echo "  website/package-lock.json: regenerating from the merged package.json"
-              git checkout --ours -- website/package-lock.json
+              git checkout --ours -- website/package-lock.json || {
+                echo "::error::website/package-lock.json: git checkout --ours failed" >&2
+                return 1
+              }
               if ! (cd website && npm install --package-lock-only --ignore-scripts); then
-                echo "::error::website/package-lock.json: 'npm install --package-lock-only --ignore-scripts' failed"
+                echo "::error::website/package-lock.json: 'npm install --package-lock-only --ignore-scripts' failed" >&2
                 return 1
               fi
               git add -- website/package-lock.json
@@ -292,26 +513,107 @@ jobs:
           #   * website/docs/changelog.md is generated by
           #     scripts/sync-changelog-doc.sh, so it's regenerated from the
           #     merged CHANGELOG-*.md rather than reconciled line by line.
-          #   * The Cargo manifests conflict structurally: two release lines
+          #   * The version manifests conflict structurally: two release lines
           #     always carry different versions, so `release/4.x` (4.0.0-alpha.1)
-          #     into `main` (5.0.0-alpha.1) collides on every one every time. A
+          #     into `main` (5.0.0-alpha.1) collides on all six every time. A
           #     forward-merge must never change the target's own version, so the
           #     target's side wins — but only after `manifest_keeps_target` proves
           #     the source's side holds nothing else.
           #   * Cargo.lock and website/package-lock.json are regenerated once every
           #     other conflict is resolved, never merged by hand.
           auto_resolve_conflicts() {
-            local file lock_cargo=0 lock_npm=0 mkt_rc file_display
+            local file conflicted_files remaining lock_cargo=0 lock_npm=0 mkt_rc
+            # Captured to a variable, with an explicit `|| { ...; return 1; }`
+            # handler — not streamed via `< <(git diff ...)`, and not relying
+            # on `set -e` to catch a bare failure, since this whole function
+            # is called as `if auto_resolve_conflicts; then` below, and bash
+            # suppresses `set -e` for a function's entire body when it's
+            # called as part of an if/while condition. A process
+            # substitution's exit status is also invisible to the while/read
+            # loop consuming it. Either way, an unchecked `git diff` failure
+            # would run the loop zero times and fall through to the closing
+            # re-check below.
+            conflicted_files="$(git diff --name-only --diff-filter=U)" || {
+              echo "::error::failed to list conflicted files" >&2
+              return 1
+            }
             while IFS= read -r file; do
               [[ -n "$file" ]] || continue
-              # #2227: sanitize :: in file paths to prevent log injection (#1543).
-              file_display="${file//::/  }"
+              # #1543: $file is an arbitrary path from the conflicting merge
+              # -- an attacker who can land a commit on release/** controls
+              # it (e.g. a crate directory matching `crates/*/Cargo.toml`,
+              # or any path falling into the no-auto-resolution case below).
+              # GitHub Actions' `::add-mask::` (used elsewhere in this job to
+              # mask the PAT in push_with_pat) can be bypassed by an injected
+              # `::stop-commands::` sequence in log output -- strip any `::`
+              # from the copy used in this loop's own echo/error lines so
+              # they can never be used to smuggle one in. Git operations
+              # below still use the raw, unsanitized $file.
+              local file_display="${file//::/  }"
               case "$file" in
                 website/docs/changelog.md)
                   echo "  $file_display: regenerating from the merged CHANGELOG-*.md sources"
-                  git checkout --ours -- "$file"
-                  bash scripts/sync-changelog-doc.sh
+                  # auto_resolve_conflicts is called as `if auto_resolve_conflicts;
+                  # then ...`, and bash suppresses `set -e` for the whole body of a
+                  # function called as part of an if/while condition — an
+                  # unchecked failure here wouldn't abort, it would just fall
+                  # through to `git add`, staging whatever sync-changelog-doc.sh
+                  # left behind. Check both explicitly instead.
+                  git checkout --ours -- "$file" || {
+                    echo "::error::$file: git checkout --ours failed" >&2
+                    return 1
+                  }
+                  # #1532: never run the merged working tree's copy of this
+                  # script — scripts/sync-changelog-doc.sh isn't itself
+                  # conflicted (only changelog.md is), so a source-branch
+                  # commit that edits the script would merge in silently and
+                  # then execute here with FORWARD_MERGE_PAT/GH_TOKEN in env.
+                  # Diff the source's copy against the target's own (HEAD,
+                  # i.e. before this merge) instead: identical means it's
+                  # safe to run the target's already-reviewed copy; any
+                  # difference means the script's logic changed as part of
+                  # this release and must be forward-merged and reconciled by
+                  # a human, not auto-run blind.
+                  local script_path="scripts/sync-changelog-doc.sh" target_script source_script tmp_script
+                  target_script=$(git show "HEAD:$script_path" 2>/dev/null) || {
+                    echo "::error::$file: failed to read $TARGET's copy of $script_path" >&2
+                    return 1
+                  }
+                  source_script=$(git show "$SOURCE_REF:$script_path" 2>/dev/null) || {
+                    echo "::error::$file: failed to read $SOURCE_DESC's copy of $script_path" >&2
+                    return 1
+                  }
+                  if [[ "$target_script" != "$source_script" ]]; then
+                    echo "::error::$file: $script_path differs between $SOURCE_DESC and $TARGET; a script-logic change must be forward-merged and reviewed by hand, not auto-run" >&2
+                    return 1
+                  fi
+                  # Materialized inside scripts/ (not /tmp) so the script's
+                  # own `cd "$(dirname "$0")/.."` still lands on the repo
+                  # root, and written from the already-verified
+                  # $target_script (not a second `git show`) so there's no
+                  # gap between what was compared and what runs.
+                  tmp_script=$(mktemp "$PWD/scripts/.sync-changelog-doc.XXXXXX") || {
+                    echo "::error::$file: failed to create temp file for $script_path" >&2
+                    return 1
+                  }
+                  printf '%s\n' "$target_script" > "$tmp_script" || {
+                    echo "::error::$file: failed to write pinned copy of $script_path" >&2
+                    rm -f "$tmp_script"
+                    return 1
+                  }
+                  if ! bash "$tmp_script"; then
+                    echo "::error::$file: scripts/sync-changelog-doc.sh failed to regenerate the changelog" >&2
+                    rm -f "$tmp_script"
+                    return 1
+                  fi
+                  rm -f "$tmp_script"
                   git add -- "$file"
+                  ;;
+                Cargo.lock)
+                  lock_cargo=1
+                  ;;
+                website/package-lock.json)
+                  lock_npm=1
                   ;;
                 Cargo.toml | crates/*/Cargo.toml)
                   # `if manifest_keeps_target ...; then mkt_rc=0; else mkt_rc=$?; fi` (not a
@@ -334,20 +636,21 @@ jobs:
                   git checkout --ours -- "$file"
                   git add -- "$file"
                   ;;
-                Cargo.lock)
-                  lock_cargo=1
-                  ;;
-                website/package-lock.json)
-                  lock_npm=1
-                  ;;
                 *)
                   echo "::error::$file_display: conflict has no auto-resolution rule"
                   return 1
                   ;;
               esac
-            done < <(git diff --name-only --diff-filter=U)
+            done <<< "$conflicted_files"
             regenerate_lockfiles "$lock_cargo" "$lock_npm" || return 1
-            [[ -z "$(git diff --name-only --diff-filter=U)" ]]
+            # Same explicit-handler reasoning as above: this re-check must
+            # not silently read as "nothing left" just because `git diff`
+            # failed — `set -e` can't catch that here either.
+            remaining="$(git diff --name-only --diff-filter=U)" || {
+              echo "::error::failed to verify remaining conflicts" >&2
+              return 1
+            }
+            [[ -z "$remaining" ]]
           }
 
           for TARGET in "${TARGETS[@]}"; do
@@ -393,7 +696,78 @@ jobs:
 
             MERGE_BRANCH="forward-merge/$SOURCE_DESC-to-$TARGET"
 
-            if ! git merge --no-commit --no-ff "$SOURCE_REF" 2>/dev/null; then
+            # #1534: the changelog.md conflict-arm's script-integrity check
+            # further down (inside auto_resolve_conflicts) only ever ran
+            # when the push happened to ALSO conflict on changelog.md --
+            # that arm's own entry condition. A source commit that changes
+            # only scripts/sync-changelog-doc.sh (not changelog.md) produces
+            # a clean, non-conflicting merge, so the gate never ran at all
+            # for that push -- the script's new content landed in $TARGET
+            # unverified. A later cascade that does conflict on changelog.md
+            # would then compare $TARGET's already-compromised copy against
+            # $SOURCE_REF's identical (attacker's) copy and pass trivially.
+            # Anchor the check to $TARGET's own pre-merge copy and run it
+            # for every target on every push, independent of whether this
+            # merge conflicts at all. Skipped when either side lacks the
+            # file (e.g. an older release line predating the script).
+            SYNC_SCRIPT_PATH="scripts/sync-changelog-doc.sh"
+            TARGET_HAS_SCRIPT=0
+            SOURCE_HAS_SCRIPT=0
+            git cat-file -e "origin/$TARGET:$SYNC_SCRIPT_PATH" 2>/dev/null && TARGET_HAS_SCRIPT=1
+            git cat-file -e "$SOURCE_REF:$SYNC_SCRIPT_PATH" 2>/dev/null && SOURCE_HAS_SCRIPT=1
+            # A script that exists on only ONE side (introduced or removed by
+            # this push) is exactly as dangerous as one that differs on both
+            # sides -- an attacker introducing scripts/sync-changelog-doc.sh
+            # for the first time bypassed this whole check before this fix,
+            # since the original `both sides must have it` AND-condition
+            # skipped the comparison entirely for that case, letting the new
+            # (unreviewed) script land in $TARGET unverified -- the same
+            # #1534 bypass, just entered via introduction instead of
+            # modification. Only skip when NEITHER side has it.
+            if [[ "$TARGET_HAS_SCRIPT" -eq 1 || "$SOURCE_HAS_SCRIPT" -eq 1 ]]; then
+              if [[ "$TARGET_HAS_SCRIPT" -ne "$SOURCE_HAS_SCRIPT" ]]; then
+                echo "::error::$SYNC_SCRIPT_PATH exists on only one of $SOURCE_DESC/$TARGET; a script addition or removal must be forward-merged and reviewed by hand, not auto-run"
+                echo "::endgroup::"
+                HALTED="script integrity check failed at $TARGET"
+                break
+              fi
+              # 2>/dev/null, not 2>&1 -- stderr must never fold into the value
+              # used for the exact-match comparison below (incidental git
+              # advice/hint output differing between the two reads could
+              # otherwise produce a false "differs" verdict); only the
+              # failure-handler's own message needs to say something went
+              # wrong, not reproduce git's stderr text.
+              SCRIPT_TARGET=$(git show "origin/$TARGET:$SYNC_SCRIPT_PATH" 2>/dev/null) || {
+                echo "::error::failed to read $TARGET's copy of $SYNC_SCRIPT_PATH"
+                echo "::endgroup::"
+                HALTED="script read failed at $TARGET"
+                break
+              }
+              SCRIPT_SOURCE=$(git show "$SOURCE_REF:$SYNC_SCRIPT_PATH" 2>/dev/null) || {
+                echo "::error::failed to read $SOURCE_DESC's copy of $SYNC_SCRIPT_PATH"
+                echo "::endgroup::"
+                HALTED="script read failed at $TARGET"
+                break
+              }
+              if [[ "$SCRIPT_TARGET" != "$SCRIPT_SOURCE" ]]; then
+                echo "::error::$SYNC_SCRIPT_PATH differs between $SOURCE_DESC and $TARGET; a script-logic change must be forward-merged and reviewed by hand, not auto-run"
+                echo "::endgroup::"
+                HALTED="script integrity check failed at $TARGET"
+                break
+              fi
+            fi
+
+            # #1543 follow-up: git's own merge output (not this workflow's
+            # echo lines) prints the conflicting/auto-merged path verbatim --
+            # "Auto-merging <path>" and "CONFLICT (content): Merge conflict
+            # in <path>" both go to STDOUT, so the earlier `2>/dev/null` here
+            # left them unsanitized and unsuppressed. Verified against real
+            # git: a path containing `::stop-commands::` is echoed raw by
+            # git itself, before auto_resolve_conflicts' own file_display
+            # sanitization ever runs. Neither invocation's own text output is
+            # used below (only the exit status is), so both are safe to
+            # fully suppress.
+            if ! git merge --no-commit --no-ff "$SOURCE_REF" >/dev/null 2>&1; then
               echo "Conflicts; attempting auto-resolution:"
               if auto_resolve_conflicts; then
                 git commit --no-edit
@@ -417,7 +791,11 @@ jobs:
                 break
               fi
               git checkout -q "origin/$TARGET"
-              if ! git merge --no-edit "$SOURCE_REF"; then
+              # Same reasoning as the trial merge above: this real merge
+              # commit is only reached once the trial merge already proved
+              # there's no conflict, but git still prints an "Auto-merging
+              # <path>" line per three-way-merged file, unsanitized.
+              if ! git merge --no-edit "$SOURCE_REF" >/dev/null 2>&1; then
                 echo "::error::Failed to merge $SOURCE_DESC into $TARGET"
                 echo "::endgroup::"
                 HALTED="merge failed at $TARGET"
@@ -430,8 +808,23 @@ jobs:
             # release branch, with no manual step. If a target is branch-protected
             # the push is rejected; fall back to opening a PR and halt so the
             # remaining (now un-merged) targets aren't silently skipped.
+            #
+            # That fallback assumes the pushing identity CAN'T bypass branch
+            # protection — true for GITHUB_TOKEN, not guaranteed for a PAT.
+            # This repo's ruleset (covering main and release/**, requiring
+            # test/deny/hawk + CodeQL/zizmor) has an admin bypass_actor with
+            # bypass_mode "always" — an admin-owned FORWARD_MERGE_PAT would
+            # silently land past those checks instead of tripping this
+            # fallback (#1504). So once the secret is set, skip the direct
+            # push entirely and always go through the PR path below, where
+            # required checks run before a human merges it.
+            PUSH_SKIPPED=0
+            if [[ -n "$_forward_merge_pat" ]]; then
+              PUSH_SKIPPED=1
+              PUSH_RC=1
+              PUSH_STDERR=""
             # See the FETCH_RC comment above — same set -e hazard.
-            if PUSH_STDERR=$(git push origin HEAD:"$TARGET" 2>&1 >/dev/null); then
+            elif PUSH_STDERR=$(git push origin HEAD:"$TARGET" 2>&1 >/dev/null); then
               PUSH_RC=0
             else
               PUSH_RC=$?
@@ -445,19 +838,24 @@ jobs:
               git update-ref "refs/remotes/origin/$TARGET" HEAD
               SOURCE_REF="origin/$TARGET"
               SOURCE_DESC="$TARGET"
-              # A push made with GITHUB_TOKEN deliberately doesn't trigger other
-              # workflows (GitHub's anti-recursion rule), so docs.yml's `push`
-              # trigger never fires for this forward-merge even though it landed
-              # on main. Dispatch it explicitly when website/ actually changed.
+              # This branch only runs when FORWARD_MERGE_PAT is unset (the PAT
+              # case always sets PUSH_SKIPPED above), so the push here was
+              # authenticated as GITHUB_TOKEN, which deliberately doesn't
+              # trigger other workflows (GitHub's anti-recursion rule) — so
+              # docs.yml's own `push` trigger never fires for this
+              # forward-merge even though it landed on main. Dispatch it
+              # explicitly when website/ actually changed.
               if [[ "$TARGET" == "main" ]] && [[ -n "$TARGET_SHA" ]] \
                   && ! git diff --quiet "$TARGET_SHA" HEAD -- website/; then
                 echo "website/ changed on main; triggering docs deploy"
                 gh workflow run docs.yml --ref main || echo "::warning::failed to dispatch docs.yml"
               fi
             else
-              # Log the actual error so operators can distinguish protection
-              # rejections from auth/network failures.
-              if [[ -n "$PUSH_STDERR" ]]; then
+              if [[ "$PUSH_SKIPPED" -eq 1 ]]; then
+                echo "Skipping direct push to $TARGET: FORWARD_MERGE_PAT may bypass branch protection; opening a PR instead so required checks still run"
+              elif [[ -n "$PUSH_STDERR" ]]; then
+                # Log the actual error so operators can distinguish protection
+                # rejections from auth/network failures.
                 # #2227: sanitize :: and newlines in stderr (attacker-controlled via
                 # error messages from git commands on malicious servers).
                 PUSH_STDERR_SAFE="${PUSH_STDERR//$'\n'/ }"
@@ -476,10 +874,11 @@ jobs:
               if [[ $ls_rc -eq 0 ]]; then
                 # #2220: a stale $MERGE_BRANCH used to halt the cascade
                 # forever -- every commit landing on $CURRENT while that PR
-                # sat open just never propagated, silently, until someone
-                # noticed and updated it by hand. Merge $SOURCE_REF onto the
-                # branch's existing tip instead. This is never a force-push
-                # (a human may be resolving a conflict on it by hand, and
+                # sat open (waiting on required checks, or on a human) just
+                # never propagated, silently, until someone noticed and
+                # updated it by hand. Merge $SOURCE_REF onto the branch's
+                # existing tip instead. This is never a force-push (#476: a
+                # human may be resolving a conflict on it by hand, and
                 # overwriting that would destroy their work) -- only a
                 # fast-forward of whatever's already there, so an in-progress
                 # manual resolution is preserved and simply gains the new
@@ -502,7 +901,7 @@ jobs:
                 if git merge-base --is-ancestor "$SOURCE_REF" HEAD; then
                   echo "$MERGE_BRANCH already contains $SOURCE_DESC; nothing to update"
                   echo "::endgroup::"
-                  HALTED="protected branch $TARGET"
+                  HALTED="PR already open for $TARGET"
                   break
                 fi
                 if ! git merge --no-edit "$SOURCE_REF" >/dev/null 2>&1; then
@@ -522,15 +921,17 @@ jobs:
                     break
                   fi
                 fi
-                if ! git push origin "$MERGE_BRANCH"; then
+                MERGE_SHA=$(git rev-parse HEAD)
+                if ! push_with_pat origin "$MERGE_BRANCH"; then
                   echo "::error::Push to update existing merge branch $MERGE_BRANCH failed"
                   echo "::endgroup::"
                   HALTED="merge-branch update push failed for $TARGET"
                   break
                 fi
+                approve_pending_runs "$MERGE_SHA"
                 echo "::error::Cascade halted: updated existing PR for $TARGET instead of pushing directly"
                 echo "::endgroup::"
-                HALTED="protected branch $TARGET (branch updated with $SOURCE_DESC)"
+                HALTED="PR already open for $TARGET (branch updated with $SOURCE_DESC)"
                 break
               elif [[ $ls_rc -ne 2 ]]; then
                 echo "::error::Network error checking if $MERGE_BRANCH exists (exit $ls_rc); halting cascade"
@@ -547,22 +948,28 @@ jobs:
                 HALTED="checkout failed at $TARGET"
                 break
               fi
-              if ! git push origin "$MERGE_BRANCH" --force-with-lease; then
+              MERGE_SHA=$(git rev-parse HEAD)
+              if ! push_with_pat origin "$MERGE_BRANCH" --force-with-lease; then
                 echo "::error::Push to merge branch $MERGE_BRANCH failed; cannot open PR"
                 echo "::endgroup::"
-                HALTED="protected branch $TARGET"
+                HALTED="merge-branch push failed for $TARGET"
                 break
               fi
 
+              PR_BODY="Direct push to $TARGET blocked by branch protection; opening PR."
+              if [[ "$PUSH_SKIPPED" -eq 1 ]]; then
+                PR_BODY="FORWARD_MERGE_PAT is set and may bypass branch protection, so direct push was skipped; opening PR so required checks still run before merge."
+              fi
               if ! gh pr create --base "$TARGET" --head "$MERGE_BRANCH" \
                 --title "Forward-merge $SOURCE_DESC into $TARGET" \
-                --body "Direct push to $TARGET blocked by branch protection; opening PR."; then
-                echo "::error::Failed to create PR for $MERGE_BRANCH after protected-branch push was rejected"
+                --body "$PR_BODY"; then
+                echo "::error::Failed to create PR for $MERGE_BRANCH"
               else
-                echo "::error::Cascade halted: $TARGET is protected, opened PR instead"
+                echo "::error::Cascade halted: opened PR for $TARGET instead of pushing directly"
+                approve_pending_runs "$MERGE_SHA"
               fi
               echo "::endgroup::"
-              HALTED="protected branch $TARGET"
+              HALTED="PR opened for $TARGET"
               break
             fi
 
