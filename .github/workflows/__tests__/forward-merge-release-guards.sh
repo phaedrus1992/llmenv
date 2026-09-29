@@ -2568,6 +2568,48 @@ STUB
   return 1
 }
 
+# The per-target "already contains" check of the cascade loop, extracted from
+# production. After it, the block prints which ref the next merge would use.
+up_to_date_skip_block() {
+  cat <<'SHELL'
+set -euo pipefail
+SOURCE_REF="origin/release/3.x"
+SOURCE_DESC="release/3.x"
+for TARGET in release/4.x main; do
+SHELL
+  # shellcheck disable=SC2016 # literal sed address, not an expression to expand
+  sed -n '/^ *TARGET_SHA=\$(git rev-parse "origin\/\$TARGET"/,/^ *continue$/p' "$WORKFLOW"
+  cat <<'SHELL'
+fi
+echo "MERGE_FROM:$SOURCE_REF INTO:$TARGET"
+done
+SHELL
+}
+
+# release/4.x already holds release/3.x (its forward-merge PR merged), but main
+# does not hold release/4.x yet. main must be merged from release/4.x, not
+# from release/3.x directly (#2285).
+test_2285_up_to_date_target_advances_the_chain() {
+  local stubs out
+  stubs=$(mktemp -d)
+  cat > "$stubs/git" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  rev-parse) echo deadbeef ;;
+  merge-base) [[ "$3" == origin/release/3.x && "$4" == origin/release/4.x ]] && exit 0; exit 1 ;;
+esac
+exit 0
+STUB
+  chmod +x "$stubs/git"
+  out=$(PATH="$stubs:$PATH" bash -c "$(up_to_date_skip_block)" 2>&1 || true)
+  trash "$stubs" 2>/dev/null || true
+
+  [[ "$out" == *"MERGE_FROM:origin/release/4.x INTO:main"* ]] \
+    && [[ "$out" != *"MERGE_FROM:origin/release/3.x INTO:main"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
 # The trial merge of the cascade, extracted from production through its
 # "no merge in progress" arm. Prints HALTED.
 trial_merge_block() {
@@ -3182,6 +3224,9 @@ run_test "Issue #2271: a stale-branch merge with no MERGE_HEAD halts with git's 
   test_2271_stale_branch_merge_without_merge_head_names_git_reason
 run_test "Issue #2271: a merge that fails with no MERGE_HEAD halts with git's reason" \
   test_2271_merge_without_merge_head_names_git_reason
+
+run_test "Issue #2285: an up-to-date target advances the chain to the next target" \
+  test_2285_up_to_date_target_advances_the_chain
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

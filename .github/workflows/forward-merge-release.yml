@@ -692,6 +692,11 @@ jobs:
                 && git merge-base --is-ancestor "$SOURCE_REF" "origin/$TARGET"; then
               echo "Target $TARGET already contains $SOURCE_DESC"
               echo "::endgroup::"
+              # Advance the chain as a pushed merge does. Otherwise the next
+              # target gets this source merged in directly, without $TARGET's
+              # own commits (#2285, the fan-out that #1380 removed).
+              SOURCE_REF="origin/$TARGET"
+              SOURCE_DESC="$TARGET"
               continue
             fi
 
