@@ -9,6 +9,19 @@
 # and these tests wouldn't catch it.
 set -uo pipefail
 
+WORKFLOWS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$WORKFLOWS_DIR/../.." && pwd)"
+
+# Several tests run blocks extracted from the workflow. A broken extraction
+# can run real cascade code, so run every test outside any git repo and with
+# no GitHub credentials: a stray `git push` or `gh` call then fails (#2299).
+HARNESS_SCRATCH="$(mktemp -d)"
+trap 'trash "$HARNESS_SCRATCH" 2>/dev/null || true' EXIT
+mkdir -p "$HARNESS_SCRATCH/gh-config"
+export GH_CONFIG_DIR="$HARNESS_SCRATCH/gh-config"
+unset GH_TOKEN GITHUB_TOKEN
+cd "$HARNESS_SCRATCH" || exit 1
+
 PASS=0
 FAIL=0
 
@@ -437,8 +450,7 @@ EOF
 # repo, because the whole point of the guard is what the source branch did to the
 # file in history.
 # Callers export: SOURCE_REF TARGET SOURCE_DESC and run it inside a conflicted merge.
-WORKFLOW="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/forward-merge-release.yml"
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+WORKFLOW="$WORKFLOWS_DIR/forward-merge-release.yml"
 
 resolve_block() {
   echo 'set -euo pipefail'
@@ -804,7 +816,7 @@ STUB
 # ---------------------------------------------------------------------------
 make_real_changelog_script_repo() {
   local real_script repo
-  real_script="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/scripts/sync-changelog-doc.sh"
+  real_script="$REPO_ROOT/scripts/sync-changelog-doc.sh"
   repo=$(mktemp -d)
   (
     cd "$repo" || exit 1
@@ -1054,7 +1066,7 @@ test_1534_script_missing_on_both_sides_skips_check() {
 # instead of drifting unnoticed.
 test_1534_test_mirror_matches_production_script_integrity_guard() {
   local workflow_file
-  workflow_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/forward-merge-release.yml"
+  workflow_file="$WORKFLOWS_DIR/forward-merge-release.yml"
 
   # shellcheck disable=SC2016 # literal grep -F patterns, not expressions to expand
   if grep -qF 'git cat-file -e "origin/$TARGET:$SYNC_SCRIPT_PATH" 2>/dev/null && TARGET_HAS_SCRIPT=1' "$workflow_file" \
@@ -1783,7 +1795,7 @@ push_with_pat config --get-all http.https://github.com/.extraheader"
 # ---------------------------------------------------------------------------
 test_1540_test_mirror_matches_production_push_with_pat() {
   local workflow_file
-  workflow_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/forward-merge-release.yml"
+  workflow_file="$WORKFLOWS_DIR/forward-merge-release.yml"
 
   # shellcheck disable=SC2016 # literal grep -F patterns, not expressions to expand
   if grep -qF 'git config --local --unset-all http.https://github.com/.extraheader 2>&1' "$workflow_file" \
@@ -1849,7 +1861,7 @@ test_1543_normal_filename_unchanged() {
 # expression independently (#2177) -- two declarations total, not one.
 test_1543_test_mirror_matches_production_file_display_sanitization() {
   local workflow_file count
-  workflow_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/forward-merge-release.yml"
+  workflow_file="$WORKFLOWS_DIR/forward-merge-release.yml"
 
   # shellcheck disable=SC2016 # literal grep -F patterns, not expressions to expand
   count=$(grep -c 'file_display="${file//::/  }"' "$workflow_file")
@@ -1921,7 +1933,7 @@ test_1543_git_merge_stdout_suppressed_on_conflict() {
 # print an attacker-controlled path to STDOUT unsanitized.
 test_1543_test_mirror_matches_production_merge_output_suppression() {
   local workflow_file
-  workflow_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/forward-merge-release.yml"
+  workflow_file="$WORKFLOWS_DIR/forward-merge-release.yml"
 
   # shellcheck disable=SC2016 # literal grep -F patterns, not expressions to expand
   if grep -qF 'MERGE_ERR=$(git merge --no-commit --no-ff "$SOURCE_REF" 2>&1 >/dev/null)' "$workflow_file" \
@@ -2137,7 +2149,7 @@ test_1675_job_admits_a_merged_same_repo_pr_targeting_a_release_branch() {
 # loudly here instead of drifting unnoticed.
 test_1675_test_mirror_matches_production_source_branch_retry() {
   local workflow_file
-  workflow_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/forward-merge-release.yml"
+  workflow_file="$WORKFLOWS_DIR/forward-merge-release.yml"
 
   # shellcheck disable=SC2016 # literal grep -F patterns, not expressions to expand
   if grep -qF "rest=\"\${PR_HEAD_REF#forward-merge/}\"" "$workflow_file" \
@@ -2505,6 +2517,24 @@ test_2273_invalid_sha_makes_no_api_call() {
   [[ -z "$listed" ]] && [[ "$out" == *"::warning::"*"no valid commit SHA"* ]] && return 0
   printf '  listed: %s\n  out: %s\n' "$listed" "${out//$'\n'/ | }" >&2
   return 1
+}
+
+# A test that runs a broken extraction can run real production code. Outside
+# any repo and with no GitHub credentials, a stray git or gh call fails (#2299).
+test_2299_harness_is_isolated() {
+  if git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "  the harness cwd ($PWD) is inside a git repo" >&2
+    return 1
+  fi
+  if [[ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]]; then
+    echo "  GH_TOKEN or GITHUB_TOKEN is set in the harness" >&2
+    return 1
+  fi
+  if [[ "${GH_CONFIG_DIR:-}" != "$HARNESS_SCRATCH"/* ]]; then
+    echo "  GH_CONFIG_DIR does not point into the harness scratch dir" >&2
+    return 1
+  fi
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -3506,6 +3536,9 @@ run_test "Issue #2280: a failed docs dispatch names gh's error" \
   test_2280_failed_docs_dispatch_names_gh_error
 run_test "Issue #2285: an up-to-date target advances the chain to the next target" \
   test_2285_up_to_date_target_advances_the_chain
+
+run_test "Issue #2299: the harness runs outside the repo with no GitHub credentials" \
+  test_2299_harness_is_isolated
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
