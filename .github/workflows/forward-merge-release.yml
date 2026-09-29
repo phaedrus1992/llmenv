@@ -940,20 +940,33 @@ jobs:
                 # #2272: the branch can outlive its PR. delete_branch_on_merge
                 # removes it only after a merge, so a PR closed without a merge
                 # leaves it behind. Look for an open PR instead of assuming one.
-                if ! OPEN_PRS=$(gh pr list --head "$MERGE_BRANCH" --base "$TARGET" --state open \
-                    --json number --jq length 2>&1); then
-                  OPEN_PRS_SAFE="${OPEN_PRS//$'\n'/ }"
-                  echo "::error::gh pr list for $MERGE_BRANCH failed: ${OPEN_PRS_SAFE//::/  }"
+                # stderr goes to a file, so a gh warning cannot corrupt the list.
+                GH_ERR_FILE=$(mktemp)
+                if ! OPEN_PRS_JSON=$(gh pr list --head "$MERGE_BRANCH" --base "$TARGET" --state open \
+                    --json number,isCrossRepository 2>"$GH_ERR_FILE"); then
+                  GH_ERR="$(<"$GH_ERR_FILE")"
+                  rm -f "$GH_ERR_FILE"
+                  GH_ERR="${GH_ERR//$'\n'/ }"
+                  echo "::error::gh pr list for $MERGE_BRANCH failed: ${GH_ERR//::/  }"
                   echo "::endgroup::"
                   HALTED="PR lookup failed for $TARGET"
                   break
                 fi
-                if [[ ! "$OPEN_PRS" =~ ^[0-9]{1,4}$ ]]; then
-                  echo "::error::gh pr list for $MERGE_BRANCH returned no PR count"
+                rm -f "$GH_ERR_FILE"
+                # --head matches the branch name only, so a fork PR from a branch
+                # with the same name also matches. Count same-repo PRs only.
+                if ! OPEN_PRS=$(jq '[.[] | select(.isCrossRepository | not)] | length' \
+                    <<< "$OPEN_PRS_JSON" 2>/dev/null) || [[ ! "$OPEN_PRS" =~ ^[0-9]{1,4}$ ]]; then
+                  OPEN_PRS_JSON="${OPEN_PRS_JSON:0:200}"
+                  OPEN_PRS_JSON="${OPEN_PRS_JSON//$'\n'/ }"
+                  echo "::error::gh pr list for $MERGE_BRANCH returned output that is not a PR list: ${OPEN_PRS_JSON//::/  }"
                   echo "::endgroup::"
                   HALTED="PR lookup failed for $TARGET"
                   break
                 fi
+                # A plain assignment, so a failure stops the step instead of
+                # passing an empty SHA to approve_pending_runs.
+                MERGE_SHA=$(git rev-parse HEAD)
                 BRANCH_CURRENT=0
                 if git merge-base --is-ancestor "$SOURCE_REF" HEAD; then
                   echo "$MERGE_BRANCH already contains $SOURCE_DESC; nothing to update"
@@ -1000,18 +1013,28 @@ jobs:
                     HALTED="merge-branch update push failed for $TARGET"
                     break
                   fi
-                  approve_pending_runs "$MERGE_SHA"
+                  # With no open PR, no run exists yet to approve.
+                  if [[ "$OPEN_PRS" -gt 0 ]]; then
+                    approve_pending_runs "$MERGE_SHA"
+                  fi
                 fi
                 if [[ "$OPEN_PRS" -eq 0 ]]; then
-                  echo "No open PR for $MERGE_BRANCH; its last PR closed without a merge. Opening one."
+                  echo "No open PR exists for $MERGE_BRANCH; opening one on the existing branch."
+                  # The branch can hold commits from an earlier PR that a reviewer
+                  # closed on purpose, so the new PR lists them for review.
+                  BRANCH_OWN=$(git log --no-merges --format='- %h %s' "$SOURCE_REF..HEAD" "^origin/$TARGET") \
+                    || BRANCH_OWN="- (the cascade could not list them)"
+                  PR_BODY="No open PR existed for $MERGE_BRANCH, so the cascade updated the existing branch and opened this PR."
+                  if [[ -n "$BRANCH_OWN" ]]; then
+                    PR_BODY+=$'\n\n'"The branch also holds these commits, which are not on $SOURCE_DESC or $TARGET. An earlier PR for this branch may have carried them. Review them before you merge:"$'\n'"$BRANCH_OWN"
+                  fi
                   if ! gh pr create --base "$TARGET" --head "$MERGE_BRANCH" \
-                    --title "Forward-merge $SOURCE_DESC into $TARGET" \
-                    --body "The previous PR for $MERGE_BRANCH closed without a merge, and its branch stayed. The cascade updated the branch and opened this PR so the change still lands."; then
+                    --title "Forward-merge $SOURCE_DESC into $TARGET" --body "$PR_BODY"; then
                     echo "::error::Failed to create PR for $MERGE_BRANCH"
                     HALTED="PR creation failed for $TARGET"
                   else
                     echo "::error::Cascade halted: opened PR for $TARGET on the existing $MERGE_BRANCH"
-                    approve_pending_runs "$(git rev-parse HEAD)"
+                    approve_pending_runs "$MERGE_SHA"
                     HALTED="PR opened for $TARGET"
                   fi
                   echo "::endgroup::"
