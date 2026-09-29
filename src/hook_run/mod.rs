@@ -287,7 +287,7 @@ fn dispatch(
 /// Whether a `SessionStart` payload continues an earlier conversation (#2142).
 /// Claude Code's `source` is `resume` or `fork` then; the conversation already
 /// holds the earlier wake-up pack, so a second one only doubles the context.
-pub(super) fn continues_session(payload: &serde_json::Value) -> bool {
+fn continues_session(payload: &serde_json::Value) -> bool {
     matches!(payload["source"].as_str(), Some("resume" | "fork"))
 }
 
