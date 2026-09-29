@@ -2688,6 +2688,79 @@ echo \"HALTED=\$HALTED\"" 2>&1 || true)
   return 1
 }
 
+# ---------------------------------------------------------------------------
+# Issue #2272: a forward-merge branch can outlive its PR. delete_branch_on_merge
+# removes it only after a merge, so a PR closed without a merge leaves it.
+# ---------------------------------------------------------------------------
+
+# git stub for the stale-branch arm. `merge-base --is-ancestor` exits with $1:
+# 0 means the branch already holds the source, 1 means it needs the merge.
+# Echoes the stub directory.
+stale_arm_git_stub() {
+  local dir
+  dir=$(mktemp -d)
+  cat > "$dir/git" <<STUB
+#!/usr/bin/env bash
+case "\$1" in
+  merge-base) exit $1 ;;
+  push) echo "PUSHED:\$*" ;;
+  rev-parse) echo deadbeef ;;
+esac
+exit 0
+STUB
+  chmod +x "$dir/git"
+  printf '%s\n' "$dir"
+}
+
+# Run the stale-branch arm. Args: merge-base exit code. Callers set
+# GH_OPEN_PRS or GH_FAIL. Prints the output, then HALTED.
+run_stale_arm() {
+  local stubs
+  stubs=$(stale_arm_git_stub "$1")
+  PATH="$stubs:$PATH" SOURCE_REF=origin/release/3.x TARGET=release/4.x \
+    SOURCE_DESC=release/3.x MERGE_BRANCH="forward-merge/release/3.x-to-release/4.x" ls_rc=0 \
+    bash -c "$(existing_branch_update_block)
+echo \"HALTED=\$HALTED\"" 2>&1 || true
+  trash "$stubs" 2>/dev/null || true
+}
+
+test_2272_orphan_branch_is_updated_and_gets_a_new_pr() {
+  local out
+  out=$(GH_OPEN_PRS=0 run_stale_arm 1)
+  [[ "$out" == *"PUSHED:"* ]] && [[ "$out" == *"GH_CALL:pr create --base release/4.x"* ]] \
+    && [[ "$out" == *"HALTED=PR opened for release/4.x"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2272_orphan_branch_already_current_gets_a_new_pr() {
+  local out
+  out=$(GH_OPEN_PRS=0 run_stale_arm 0)
+  [[ "$out" != *"PUSHED:"* ]] && [[ "$out" == *"GH_CALL:pr create --base release/4.x"* ]] \
+    && [[ "$out" == *"HALTED=PR opened for release/4.x"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2272_open_pr_is_updated_in_place() {
+  local out
+  out=$(GH_OPEN_PRS=1 run_stale_arm 1)
+  [[ "$out" == *"PUSHED:"* ]] && [[ "$out" != *"GH_CALL:pr create"* ]] \
+    && [[ "$out" == *"HALTED=PR already open for release/4.x"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2272_pr_lookup_failure_halts() {
+  local out
+  out=$(GH_FAIL=1 run_stale_arm 1)
+  [[ "$out" == *"::error::gh pr list for forward-merge/release/3.x-to-release/4.x failed: HTTP 502"* ]] \
+    && [[ "$out" != *"::stop-commands::"* ]] && [[ "$out" != *"PUSHED:"* ]] \
+    && [[ "$out" == *"HALTED=PR lookup failed for release/4.x"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
 # GITHUB_TOKEN cannot push a change to .github/workflows/, so without the PAT
 # that is the likely cause of a failed merge-branch push.
 PAT_HINT="set FORWARD_MERGE_PAT (a fine-grained PAT for this repository only"
@@ -2820,6 +2893,16 @@ existing_branch_update_block() {
   cat <<'SHELL'
 push_with_pat() { git push "$@"; }
 approve_pending_runs() { :; }
+# A function shadows any real gh on PATH, so a test can never reach GitHub.
+# GH_OPEN_PRS is the open-PR count `gh pr list` reports; GH_FAIL makes it fail.
+gh() {
+  if [[ "$1 $2" == "pr list" ]]; then
+    [[ -n "${GH_FAIL:-}" ]] && { echo "HTTP 502 ::stop-commands::tok" >&2; return 1; }
+    echo "${GH_OPEN_PRS:-1}"
+  else
+    echo "GH_CALL:$*"
+  fi
+}
 SHELL
   sed -n '/^ *bail_on_conflict() {/,/^ *for TARGET in/p' "$WORKFLOW" | sed '$d'
   echo 'for _once in once; do'
@@ -3225,6 +3308,14 @@ run_test "Issue #2271: a stale-branch merge with no MERGE_HEAD halts with git's 
 run_test "Issue #2271: a merge that fails with no MERGE_HEAD halts with git's reason" \
   test_2271_merge_without_merge_head_names_git_reason
 
+run_test "Issue #2272: an orphan merge branch is updated and gets a new PR" \
+  test_2272_orphan_branch_is_updated_and_gets_a_new_pr
+run_test "Issue #2272: an orphan merge branch that is already current gets a new PR" \
+  test_2272_orphan_branch_already_current_gets_a_new_pr
+run_test "Issue #2272: a branch with an open PR is updated in place" \
+  test_2272_open_pr_is_updated_in_place
+run_test "Issue #2272: a failed open-PR lookup halts with a sanitized error" \
+  test_2272_pr_lookup_failure_halts
 run_test "Issue #2285: an up-to-date target advances the chain to the next target" \
   test_2285_up_to_date_target_advances_the_chain
 
