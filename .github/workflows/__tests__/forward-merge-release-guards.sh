@@ -2568,6 +2568,53 @@ STUB
   return 1
 }
 
+# ---------------------------------------------------------------------------
+# Issue #2294: a pull_request retry and the push cascade from the retry PR's
+# target both used to chain on to the next target and race on its merge
+# branch. The retry now cascades only to its own PR's base.
+# ---------------------------------------------------------------------------
+
+# The target list plus the retry narrowing, extracted from production. It
+# prints TARGETS, one per line.
+retry_targets_block() {
+  echo "set -euo pipefail"
+  # shellcheck disable=SC2016 # literal sed address, not an expression to expand
+  sed -n '/# Build target list/,/^ *TARGETS=("\$RETRY_TARGET")$/p' "$WORKFLOW" | sed 's/^          //'
+  cat <<'SHELL'
+fi
+printf '%s\n' "${TARGETS[@]}"
+SHELL
+}
+
+test_2294_retry_cascades_only_to_its_own_target() {
+  local out
+  out=$(CURRENT=release/3.x BRANCHES=$'release/3.x\nrelease/4.x' RETRY_TARGET=release/4.x \
+    bash -c "$(retry_targets_block)" 2>&1)
+  [[ "$out" == "release/4.x" ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2294_push_cascade_keeps_every_target() {
+  local out
+  out=$(CURRENT=release/3.x BRANCHES=$'release/3.x\nrelease/4.x' RETRY_TARGET="" \
+    bash -c "$(retry_targets_block)" 2>&1)
+  [[ "$out" == $'release/4.x\nmain' ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2294_retry_target_not_downstream_fails() {
+  local out rc
+  out=$(CURRENT=release/4.x BRANCHES=$'release/3.x\nrelease/4.x' \
+    RETRY_TARGET="release/3.x::stop-commands::tok" bash -c "$(retry_targets_block)" 2>&1)
+  rc=$?
+  [[ $rc -ne 0 ]] && [[ "$out" == *"::error::retry target"*"is not downstream of release/4.x"* ]] \
+    && [[ "$out" != *"::stop-commands::"* ]] && return 0
+  printf '  out: %s\n  rc: %s\n' "${out//$'\n'/ | }" "$rc" >&2
+  return 1
+}
+
 # The per-target "already contains" check of the cascade loop, extracted from
 # production. After it, the block prints which ref the next merge would use.
 up_to_date_skip_block() {
@@ -3393,6 +3440,12 @@ run_test "Issue #2272: a failed gh pr create on an orphan branch halts" \
   test_2272_failed_pr_create_on_orphan_branch_halts
 run_test "Issue #2272: a failed open-PR lookup halts with a sanitized error" \
   test_2272_pr_lookup_failure_halts
+run_test "Issue #2294: a retry cascades only to its own PR's target" \
+  test_2294_retry_cascades_only_to_its_own_target
+run_test "Issue #2294: a push cascade keeps every downstream target" \
+  test_2294_push_cascade_keeps_every_target
+run_test "Issue #2294: a retry target that is not downstream fails loudly" \
+  test_2294_retry_target_not_downstream_fails
 run_test "Issue #2285: an up-to-date target advances the chain to the next target" \
   test_2285_up_to_date_target_advances_the_chain
 

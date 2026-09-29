@@ -160,6 +160,8 @@ jobs:
         env:
           CURRENT: ${{ steps.detect.outputs.current }}
           BRANCHES: ${{ steps.detect.outputs.branches }}
+          # Empty for a push. For a retry, the base of the merged forward-merge PR.
+          RETRY_TARGET: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || '' }}
           # Deliberately left at step level, unlike FORWARD_MERGE_PAT below —
           # any workspace code that runs still inherits GH_TOKEN via env and
           # via the persisted checkout credential in .git/config either way,
@@ -389,6 +391,24 @@ jobs:
           # release/X.x regex or are `main`, so a `::` cannot reach the echoes
           # of CURRENT, TARGET, SOURCE_DESC or MERGE_BRANCH below (#2240).
           TARGETS+=("main")
+
+          # #2294: a retry cascades only to its own PR's base. The merge of
+          # that PR pushes the base, and the push cascade from the base carries
+          # the change further. A retry that also chained on raced that push
+          # cascade on the next merge branch.
+          if [[ -n "${RETRY_TARGET:-}" ]]; then
+            RETRY_OK=0
+            for T in "${TARGETS[@]}"; do
+              if [[ "$T" == "$RETRY_TARGET" ]]; then
+                RETRY_OK=1
+              fi
+            done
+            if [[ "$RETRY_OK" -eq 0 ]]; then
+              echo "::error::retry target ${RETRY_TARGET//::/  } is not downstream of $CURRENT; not cascading"
+              exit 1
+            fi
+            TARGETS=("$RETRY_TARGET")
+          fi
 
           # Track whether the cascade halted early so the run fails visibly
           # rather than silently leaving downstream targets unmerged.
