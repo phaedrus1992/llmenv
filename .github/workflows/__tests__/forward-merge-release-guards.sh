@@ -2568,6 +2568,47 @@ STUB
   return 1
 }
 
+# The per-target "already contains" check of the cascade loop, extracted from
+# production. After it, the block prints which ref the next merge would use.
+up_to_date_skip_block() {
+  cat <<'SHELL'
+set -euo pipefail
+SOURCE_REF="origin/release/3.x"
+SOURCE_DESC="release/3.x"
+for TARGET in release/4.x main; do
+SHELL
+  # shellcheck disable=SC2016 # literal sed address, not an expression to expand
+  sed -n '/^ *TARGET_SHA=\$(git rev-parse "origin\/\$TARGET"/,/^ *continue$/p' "$WORKFLOW"
+  cat <<'SHELL'
+fi
+echo "MERGE_FROM:$SOURCE_REF DESC:$SOURCE_DESC INTO:$TARGET"
+done
+SHELL
+}
+
+# release/4.x already holds release/3.x (its forward-merge PR merged), but main
+# does not hold release/4.x yet. main must be merged from release/4.x, not
+# from release/3.x directly (#2285).
+test_2285_up_to_date_target_advances_the_chain() {
+  local stubs out
+  stubs=$(mktemp -d)
+  cat > "$stubs/git" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  rev-parse) echo deadbeef ;;
+  merge-base) [[ "$3" == origin/release/3.x && "$4" == origin/release/4.x ]] && exit 0; exit 1 ;;
+esac
+exit 0
+STUB
+  chmod +x "$stubs/git"
+  out=$(PATH="$stubs:$PATH" bash -c "$(up_to_date_skip_block)" 2>&1 || true)
+  trash "$stubs" 2>/dev/null || true
+
+  [[ "$out" == *"MERGE_FROM:origin/release/4.x DESC:release/4.x INTO:main"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
 # The trial merge of the cascade, extracted from production through its
 # "no merge in progress" arm. Prints HALTED.
 trial_merge_block() {
@@ -2642,6 +2683,141 @@ echo \"HALTED=\$HALTED\"" 2>&1 || true)
   [[ "$out" == *"failed with no merge in progress: fatal: refusing to merge unrelated histories"* ]] \
     && [[ "$out" == *"HALTED=merge failed updating forward-merge/release/3.x-to-release/4.x"* ]] \
     && [[ "$out" != *"Failed to abort merge"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Issue #2272: a forward-merge branch can outlive its PR. delete_branch_on_merge
+# removes it only after a merge, so a PR closed without a merge leaves it.
+# ---------------------------------------------------------------------------
+
+# git stub for the stale-branch arm. `merge-base --is-ancestor` exits with $1:
+# 0 means the branch already holds the source, 1 means it needs the merge.
+# Echoes the stub directory.
+stale_arm_git_stub() {
+  local dir
+  dir=$(mktemp -d)
+  cat > "$dir/git" <<STUB
+#!/usr/bin/env bash
+case "\$1" in
+  merge-base) exit $1 ;;
+  push) echo "PUSHED:\$*" ;;
+  rev-parse) echo deadbeef ;;
+  log) printf '%s' "\${GIT_LOG_OUT:-}" ;;
+esac
+exit 0
+STUB
+  # A second guard: if a call ever escapes the gh function, fail loudly.
+  printf '#!/usr/bin/env bash\necho "real gh reached from a test: $*" >&2\nexit 97\n' > "$dir/gh"
+  chmod +x "$dir/git" "$dir/gh"
+  printf '%s\n' "$dir"
+}
+
+# Run the stale-branch arm. Args: merge-base exit code. Callers set
+# GH_PRS_JSON, GH_FAIL or GH_CREATE_FAIL. Prints the output, then HALTED.
+run_stale_arm() {
+  local stubs
+  stubs=$(stale_arm_git_stub "$1")
+  env -u GH_TOKEN -u GITHUB_TOKEN PATH="$stubs:$PATH" SOURCE_REF=origin/release/3.x TARGET=release/4.x \
+    SOURCE_DESC=release/3.x MERGE_BRANCH="forward-merge/release/3.x-to-release/4.x" ls_rc=0 \
+    bash -c "$(existing_branch_update_block)
+echo \"HALTED=\$HALTED\"" 2>&1 || true
+  trash "$stubs" 2>/dev/null || true
+}
+
+test_2272_orphan_branch_is_updated_and_gets_a_new_pr() {
+  local out
+  out=$(GH_PRS_JSON="[]" run_stale_arm 1)
+  [[ "$out" == *"PUSHED:"* ]] && [[ "$out" == *"GH_CALL:pr create --base release/4.x"* ]] \
+    && [[ "$out" == *"HALTED=PR opened for release/4.x"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2272_orphan_branch_already_current_gets_a_new_pr() {
+  local out
+  out=$(GH_PRS_JSON="[]" run_stale_arm 0)
+  [[ "$out" != *"PUSHED:"* ]] && [[ "$out" == *"GH_CALL:pr create --base release/4.x"* ]] \
+    && [[ "$out" == *"HALTED=PR opened for release/4.x"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2272_open_pr_is_updated_in_place() {
+  local out
+  local log
+  log=$(mktemp)
+  out=$(GH_LOG="$log" run_stale_arm 1)
+  local calls
+  calls=$(cat "$log")
+  trash "$log" 2>/dev/null || true
+  [[ "$out" == *"PUSHED:"* ]] && [[ "$out" != *"GH_CALL:pr create"* ]] \
+    && [[ "$out" == *"HALTED=PR already open for release/4.x (branch updated with release/3.x)"* ]] \
+    && [[ "$calls" == *"pr list --head forward-merge/release/3.x-to-release/4.x --base release/4.x --state open"* ]] \
+    && return 0
+  printf '  calls: %s\n' "$calls" >&2
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# A fork can open a PR from a branch with the same name. It must not count as
+# the cascade's own open PR.
+test_2272_fork_pr_with_same_head_name_does_not_count() {
+  local out
+  out=$(GH_PRS_JSON='[{"number":9,"isCrossRepository":true}]' run_stale_arm 1)
+  [[ "$out" == *"GH_CALL:pr create --base release/4.x"* ]] \
+    && [[ "$out" == *"HALTED=PR opened for release/4.x"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# Commits that only the branch holds may come from a PR a reviewer closed on
+# purpose, so the new PR names them.
+test_2272_new_pr_lists_the_branch_own_commits() {
+  local out
+  out=$(GH_PRS_JSON="[]" GIT_LOG_OUT="- abc1234 hand-made resolution" run_stale_arm 1)
+  [[ "$out" == *"GH_CALL:pr create"*"Review them before you merge:"*"- abc1234 hand-made resolution"* ]] \
+    && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2272_current_branch_with_open_pr_halts_without_push() {
+  local out
+  out=$(run_stale_arm 0)
+  [[ "$out" != *"PUSHED:"* ]] && [[ "$out" != *"GH_CALL:pr create"* ]] \
+    && [[ "$out" == *"HALTED=PR already open for release/4.x"* ]] \
+    && [[ "$out" != *"(branch updated"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2272_unreadable_pr_list_halts() {
+  local out
+  out=$(GH_PRS_JSON="warning: x" run_stale_arm 1)
+  [[ "$out" == *"returned output that is not a PR list"* ]] && [[ "$out" != *"PUSHED:"* ]] \
+    && [[ "$out" != *"GH_CALL:pr create"* ]] \
+    && [[ "$out" == *"HALTED=PR lookup failed for release/4.x"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2272_failed_pr_create_on_orphan_branch_halts() {
+  local out
+  out=$(GH_PRS_JSON="[]" GH_CREATE_FAIL=1 run_stale_arm 1)
+  [[ "$out" == *"::error::Failed to create PR for forward-merge/release/3.x-to-release/4.x"* ]] \
+    && [[ "$out" == *"HALTED=PR creation failed for release/4.x"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2272_pr_lookup_failure_halts() {
+  local out
+  out=$(GH_FAIL=1 run_stale_arm 1)
+  [[ "$out" == *"::error::gh pr list for forward-merge/release/3.x-to-release/4.x failed: HTTP 502"* ]] \
+    && [[ "$out" != *"::stop-commands::"* ]] && [[ "$out" != *"PUSHED:"* ]] \
+    && [[ "$out" == *"HALTED=PR lookup failed for release/4.x"* ]] && return 0
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
   return 1
 }
@@ -2778,6 +2954,22 @@ existing_branch_update_block() {
   cat <<'SHELL'
 push_with_pat() { git push "$@"; }
 approve_pending_runs() { :; }
+# A function shadows any real gh on PATH, so a test never reaches GitHub.
+# GH_PRS_JSON is the JSON that `gh pr list` prints (default: one same-repo
+# open PR). GH_FAIL makes `pr list` fail, GH_CREATE_FAIL makes `pr create`
+# fail. Every call is logged to GH_LOG when it is set.
+gh() {
+  [[ -n "${GH_LOG:-}" ]] && echo "$*" >> "$GH_LOG"
+  if [[ "$1 $2" == "pr list" ]]; then
+    [[ -n "${GH_FAIL:-}" ]] && { echo "HTTP 502 ::stop-commands::tok" >&2; return 1; }
+    local default_prs='[{"number":7,"isCrossRepository":false}]'
+    printf '%s\n' "${GH_PRS_JSON-$default_prs}"
+  else
+    echo "GH_CALL:$*"
+    [[ "$1 $2" == "pr create" && -n "${GH_CREATE_FAIL:-}" ]] && return 1
+    return 0
+  fi
+}
 SHELL
   sed -n '/^ *bail_on_conflict() {/,/^ *for TARGET in/p' "$WORKFLOW" | sed '$d'
   echo 'for _once in once; do'
@@ -3182,6 +3374,27 @@ run_test "Issue #2271: a stale-branch merge with no MERGE_HEAD halts with git's 
   test_2271_stale_branch_merge_without_merge_head_names_git_reason
 run_test "Issue #2271: a merge that fails with no MERGE_HEAD halts with git's reason" \
   test_2271_merge_without_merge_head_names_git_reason
+
+run_test "Issue #2272: an orphan merge branch is updated and gets a new PR" \
+  test_2272_orphan_branch_is_updated_and_gets_a_new_pr
+run_test "Issue #2272: an orphan merge branch that is already current gets a new PR" \
+  test_2272_orphan_branch_already_current_gets_a_new_pr
+run_test "Issue #2272: a branch with an open PR is updated in place" \
+  test_2272_open_pr_is_updated_in_place
+run_test "Issue #2272: a fork PR with the same head name does not count as open" \
+  test_2272_fork_pr_with_same_head_name_does_not_count
+run_test "Issue #2272: a new PR on an existing branch lists the branch's own commits" \
+  test_2272_new_pr_lists_the_branch_own_commits
+run_test "Issue #2272: a current branch with an open PR halts without a push" \
+  test_2272_current_branch_with_open_pr_halts_without_push
+run_test "Issue #2272: unreadable gh pr list output halts" \
+  test_2272_unreadable_pr_list_halts
+run_test "Issue #2272: a failed gh pr create on an orphan branch halts" \
+  test_2272_failed_pr_create_on_orphan_branch_halts
+run_test "Issue #2272: a failed open-PR lookup halts with a sanitized error" \
+  test_2272_pr_lookup_failure_halts
+run_test "Issue #2285: an up-to-date target advances the chain to the next target" \
+  test_2285_up_to_date_target_advances_the_chain
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
