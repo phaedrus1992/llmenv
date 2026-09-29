@@ -2554,6 +2554,113 @@ test_2294_retry_target_not_downstream_fails() {
   return 1
 }
 
+# ---------------------------------------------------------------------------
+# Issue #2280: a failed rev-parse or merge-base read as a normal answer.
+# ---------------------------------------------------------------------------
+
+# The per-target ref checks, extracted from production through the
+# ancestry-failure arm. Prints HALTED, or NEXT when the loop would merge.
+target_check_block() {
+  cat <<'SHELL'
+set -euo pipefail
+HALTED=""
+SOURCE_REF="origin/release/3.x"
+SOURCE_DESC="release/3.x"
+for TARGET in release/4.x; do
+SHELL
+  # shellcheck disable=SC2016 # literal sed address, not an expression to expand
+  sed -n '/^ *if ! TARGET_SHA=\$(git rev-parse/,/^ *HALTED="ancestry check failed at \$TARGET"$/p' "$WORKFLOW"
+  cat <<'SHELL'
+break
+fi
+echo NEXT
+done
+echo "HALTED=$HALTED"
+SHELL
+}
+
+# Args: rev-parse exit code, merge-base exit code. Echoes the stub dir.
+target_check_stubs() {
+  local dir
+  dir=$(mktemp -d)
+  cat > "$dir/git" <<STUB
+#!/usr/bin/env bash
+case "\$1" in
+  rev-parse) [[ $1 -eq 0 ]] && echo deadbeef; exit $1 ;;
+  merge-base) exit $2 ;;
+esac
+exit 0
+STUB
+  chmod +x "$dir/git"
+  printf '%s\n' "$dir"
+}
+
+test_2280_unreadable_target_ref_halts() {
+  local dir out
+  dir=$(target_check_stubs 128 1)
+  out=$(PATH="$dir:$PATH" bash -c "$(target_check_block)" 2>&1 || true)
+  trash "$dir" 2>/dev/null || true
+  [[ "$out" == *"::error::cannot read origin/release/4.x"* ]] && [[ "$out" != *NEXT* ]] \
+    && [[ "$out" == *"HALTED=target ref unreadable at release/4.x"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2280_ancestry_check_failure_halts() {
+  local dir out
+  dir=$(target_check_stubs 0 128)
+  out=$(PATH="$dir:$PATH" bash -c "$(target_check_block)" 2>&1 || true)
+  trash "$dir" 2>/dev/null || true
+  [[ "$out" == *"::error::git merge-base --is-ancestor failed (exit 128)"* ]] && [[ "$out" != *NEXT* ]] \
+    && [[ "$out" == *"HALTED=ancestry check failed at release/4.x"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2280_not_an_ancestor_still_merges() {
+  local dir out
+  dir=$(target_check_stubs 0 1)
+  out=$(PATH="$dir:$PATH" bash -c "$(target_check_block)" 2>&1 || true)
+  trash "$dir" 2>/dev/null || true
+  [[ "$out" == *NEXT* ]] && [[ "$out" == *"HALTED="* ]] && [[ "$out" != *"::error::"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# The docs dispatch after a direct push to main, extracted from production.
+docs_dispatch_block() {
+  cat <<'SHELL'
+set -euo pipefail
+TARGET=main
+TARGET_SHA=deadbeef
+SHELL
+  # shellcheck disable=SC2016 # literal sed address, not an expression to expand
+  sed -n '/^ *if \[\[ "\$TARGET" == "main" \]\] && \[\[ -n "\$TARGET_SHA" \]\] \\$/,/^              fi$/p' "$WORKFLOW"
+  echo 'echo reached-end'
+}
+
+test_2280_failed_docs_dispatch_names_gh_error() {
+  local dir out
+  dir=$(mktemp -d)
+  cat > "$dir/git" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == diff ]] && exit 1
+exit 0
+STUB
+  cat > "$dir/gh" <<'STUB'
+#!/usr/bin/env bash
+echo "HTTP 403: Resource not accessible ::stop-commands::tok" >&2
+exit 1
+STUB
+  chmod +x "$dir/git" "$dir/gh"
+  out=$(PATH="$dir:$PATH" bash -c "$(docs_dispatch_block)" 2>&1 || true)
+  trash "$dir" 2>/dev/null || true
+  [[ "$out" == *"::warning::failed to dispatch docs.yml: HTTP 403: Resource not accessible"* ]] \
+    && [[ "$out" != *"::stop-commands::"* ]] && [[ "$out" == *reached-end* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
 # The per-target "already contains" check of the cascade loop, extracted from
 # production. After it, the block prints which ref the next merge would use.
 up_to_date_skip_block() {
@@ -2564,7 +2671,7 @@ SOURCE_DESC="release/3.x"
 for TARGET in release/4.x main; do
 SHELL
   # shellcheck disable=SC2016 # literal sed address, not an expression to expand
-  sed -n '/^ *TARGET_SHA=\$(git rev-parse "origin\/\$TARGET"/,/^ *continue$/p' "$WORKFLOW"
+  sed -n '/^ *if ! TARGET_SHA=\$(git rev-parse/,/^ *continue$/p' "$WORKFLOW"
   cat <<'SHELL'
 fi
 echo "MERGE_FROM:$SOURCE_REF DESC:$SOURCE_DESC INTO:$TARGET"
@@ -3389,6 +3496,14 @@ run_test "Issue #2294: a push cascade keeps every downstream target" \
   test_2294_push_cascade_keeps_every_target
 run_test "Issue #2294: a retry target that is not downstream fails loudly" \
   test_2294_retry_target_not_downstream_fails
+run_test "Issue #2280: an unreadable target ref halts" \
+  test_2280_unreadable_target_ref_halts
+run_test "Issue #2280: a failed ancestry check halts instead of merging" \
+  test_2280_ancestry_check_failure_halts
+run_test "Issue #2280: a target that lacks the source still merges" \
+  test_2280_not_an_ancestor_still_merges
+run_test "Issue #2280: a failed docs dispatch names gh's error" \
+  test_2280_failed_docs_dispatch_names_gh_error
 run_test "Issue #2285: an up-to-date target advances the chain to the next target" \
   test_2285_up_to_date_target_advances_the_chain
 

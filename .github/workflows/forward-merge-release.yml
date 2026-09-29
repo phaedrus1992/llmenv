@@ -732,15 +732,27 @@ jobs:
 
           for TARGET in "${TARGETS[@]}"; do
             echo "::group::Forward-merge $SOURCE_DESC → $TARGET"
-            TARGET_SHA=$(git rev-parse "origin/$TARGET" 2>/dev/null || echo "")
+            # #2280: an unreadable target ref is a failure, not an empty value.
+            if ! TARGET_SHA=$(git rev-parse --verify -q "origin/$TARGET^{commit}"); then
+              echo "::error::cannot read origin/$TARGET; halting cascade"
+              echo "::endgroup::"
+              HALTED="target ref unreadable at $TARGET"
+              break
+            fi
 
             # `--is-ancestor`, not sha equality: once the chain has merged into
             # an earlier target the heads are never equal, but the target can
             # still already contain everything the source has (e.g. a human
             # resolved the merge by hand first). Merging then would add an empty
             # commit for no reason.
-            if [[ -n "$TARGET_SHA" ]] \
-                && git merge-base --is-ancestor "$SOURCE_REF" "origin/$TARGET"; then
+            # Exit 1 means "not an ancestor". Any other code means git could not
+            # answer, which must not read as "merge anyway" (#2280).
+            if git merge-base --is-ancestor "$SOURCE_REF" "origin/$TARGET"; then
+              ANCESTOR_RC=0
+            else
+              ANCESTOR_RC=$?
+            fi
+            if [[ "$ANCESTOR_RC" -eq 0 ]]; then
               echo "Target $TARGET already contains $SOURCE_DESC"
               echo "::endgroup::"
               # Advance the chain as a pushed merge does. Otherwise the next
@@ -749,6 +761,11 @@ jobs:
               SOURCE_REF="origin/$TARGET"
               SOURCE_DESC="$TARGET"
               continue
+            elif [[ "$ANCESTOR_RC" -ne 1 ]]; then
+              echo "::error::git merge-base --is-ancestor failed (exit $ANCESTOR_RC) for $SOURCE_DESC and $TARGET; halting cascade"
+              echo "::endgroup::"
+              HALTED="ancestry check failed at $TARGET"
+              break
             fi
 
             # `if VAR=$(cmd); then` (not a bare `VAR=$(cmd); RC=$?`) — under
@@ -938,7 +955,11 @@ jobs:
               if [[ "$TARGET" == "main" ]] && [[ -n "$TARGET_SHA" ]] \
                   && ! git diff --quiet "$TARGET_SHA" HEAD -- website/; then
                 echo "website/ changed on main; triggering docs deploy"
-                gh workflow run docs.yml --ref main || echo "::warning::failed to dispatch docs.yml"
+                # A warning, not a halt: the merge itself landed (#2280).
+                if ! DISPATCH_ERR=$(gh workflow run docs.yml --ref main 2>&1 >/dev/null); then
+                  DISPATCH_ERR="${DISPATCH_ERR//$'\n'/ }"
+                  echo "::warning::failed to dispatch docs.yml: ${DISPATCH_ERR//::/  }. Run it by hand: gh workflow run docs.yml --ref main"
+                fi
               fi
             else
               if [[ "$PUSH_SKIPPED" -eq 1 ]]; then
