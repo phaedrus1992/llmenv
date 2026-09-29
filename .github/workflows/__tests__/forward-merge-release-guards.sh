@@ -2114,11 +2114,11 @@ test_1543_test_mirror_matches_production_merge_output_suppression() {
   workflow_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/forward-merge-release.yml"
 
   # shellcheck disable=SC2016 # literal grep -F patterns, not expressions to expand
-  if grep -qF 'git merge --no-commit --no-ff "$SOURCE_REF" >/dev/null 2>&1' "$workflow_file" \
+  if grep -qF 'MERGE_ERR=$(git merge --no-commit --no-ff "$SOURCE_REF" 2>&1 >/dev/null)' "$workflow_file" \
       && grep -qF 'git merge --no-edit "$SOURCE_REF" >/dev/null 2>&1' "$workflow_file"; then
     return 0
   fi
-  echo "  production's merge invocations no longer fully suppress their own output -- update forward-merge-release.yml (both must use >/dev/null 2>&1, not a bare 2>/dev/null)" >&2
+  echo "  production's merge invocations no longer discard their stdout -- update forward-merge-release.yml (the trial merge must use 2>&1 >/dev/null into MERGE_ERR, the real merge >/dev/null 2>&1)" >&2
   return 1
 }
 
@@ -2514,6 +2514,58 @@ test_2271_failed_pr_create_is_not_reported_as_opened() {
 
   [[ "$out" == *"::error::Failed to create PR for"* ]] \
     && [[ "$out" == *"HALTED=PR creation failed for release/4.x"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# The trial merge of the cascade, extracted from production through its
+# "no merge in progress" arm. Prints HALTED.
+trial_merge_block() {
+  cat <<'SHELL'
+set -euo pipefail
+HALTED=""
+for _once in once; do
+SHELL
+  # shellcheck disable=SC2016 # literal sed address, not an expression to expand
+  sed -n '/^ *if ! MERGE_ERR=\$(git merge --no-commit --no-ff/,/^ *HALTED="merge failed at \$TARGET"$/p' \
+    "$WORKFLOW"
+  cat <<'SHELL'
+break
+fi
+fi
+done
+echo "HALTED=$HALTED"
+SHELL
+}
+
+# Unrelated histories make git refuse the merge before it writes MERGE_HEAD.
+# Then `git merge --abort` fails too, and the run must not report a
+# corrupt tree.
+test_2271_merge_without_merge_head_names_git_reason() {
+  local repo out
+  repo=$(mktemp -d)
+  (
+    cd "$repo" || exit 1
+    git init -q -b target .
+    git config user.email t@t
+    git config user.name t
+    git config commit.gpgsign false
+    printf 'a\n' > a
+    git add a
+    git commit -q -m target
+    git switch -q --orphan source
+    printf 'b\n' > b
+    git add b
+    git commit -q -m source
+    git switch -q target
+  )
+  out=$(cd "$repo" && SOURCE_REF=source TARGET=release/4.x SOURCE_DESC=release/3.x \
+    bash -c "$(trial_merge_block)" 2>&1 || true)
+  trash "$repo" 2>/dev/null || true
+
+  [[ "$out" == *"::error::git merge of release/3.x into release/4.x failed with no merge in progress: fatal: refusing to merge unrelated histories"* ]] \
+    && [[ "$out" == *"HALTED=merge failed at release/4.x"* ]] \
+    && [[ "$out" != *"Failed to abort merge"* ]] && return 0
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
   return 1
 }
@@ -2987,6 +3039,8 @@ run_test "Issue #2271: a failed ls-remote prints git's sanitized stderr" \
   test_2271_ls_remote_failure_prints_sanitized_stderr
 run_test "Issue #2271: a failed merge-branch push with no PAT names the workflow-file limit" \
   test_2271_push_failure_without_pat_gives_hint
+run_test "Issue #2271: a merge that fails with no MERGE_HEAD halts with git's reason" \
+  test_2271_merge_without_merge_head_names_git_reason
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

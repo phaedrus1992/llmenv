@@ -778,10 +778,18 @@ jobs:
             # left them unsanitized and unsuppressed. Verified against real
             # git: a path containing `::stop-commands::` is echoed raw by
             # git itself, before auto_resolve_conflicts' own file_display
-            # sanitization ever runs. Neither invocation's own text output is
-            # used below (only the exit status is), so both are safe to
-            # fully suppress.
-            if ! git merge --no-commit --no-ff "$SOURCE_REF" >/dev/null 2>&1; then
+            # sanitization ever runs. So stdout is always discarded. stderr is
+            # kept only to name the cause when git refuses the merge before it
+            # starts one (no MERGE_HEAD, e.g. unrelated histories), and it is
+            # sanitized before it is printed (#2271).
+            if ! MERGE_ERR=$(git merge --no-commit --no-ff "$SOURCE_REF" 2>&1 >/dev/null); then
+              if ! git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+                MERGE_ERR_SAFE="${MERGE_ERR//$'\n'/ }"
+                echo "::error::git merge of $SOURCE_DESC into $TARGET failed with no merge in progress: ${MERGE_ERR_SAFE//::/  }"
+                echo "::endgroup::"
+                HALTED="merge failed at $TARGET"
+                break
+              fi
               echo "Conflicts; attempting auto-resolution:"
               if auto_resolve_conflicts; then
                 git commit --no-edit
@@ -918,7 +926,14 @@ jobs:
                   HALTED="PR already open for $TARGET"
                   break
                 fi
-                if ! git merge --no-edit "$SOURCE_REF" >/dev/null 2>&1; then
+                if ! MERGE_ERR=$(git merge --no-edit "$SOURCE_REF" 2>&1 >/dev/null); then
+                  if ! git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+                    MERGE_ERR_SAFE="${MERGE_ERR//$'\n'/ }"
+                    echo "::error::git merge of $SOURCE_DESC into existing $MERGE_BRANCH failed with no merge in progress: ${MERGE_ERR_SAFE//::/  }"
+                    echo "::endgroup::"
+                    HALTED="merge failed updating $MERGE_BRANCH"
+                    break
+                  fi
                   echo "Conflicts merging $SOURCE_DESC into existing $MERGE_BRANCH; attempting auto-resolution:"
                   if auto_resolve_conflicts; then
                     git commit --no-edit
