@@ -979,8 +979,12 @@ jobs:
                 echo "website/ changed on main; triggering docs deploy"
                 # A warning, not a halt: the merge itself landed (#2280).
                 if ! DISPATCH_ERR=$(gh workflow run docs.yml --ref main 2>&1 >/dev/null); then
-                  DISPATCH_ERR="${DISPATCH_ERR//$'\n'/ }"
-                  echo "::warning::failed to dispatch docs.yml: ${DISPATCH_ERR//::/  }. Run it by hand: gh workflow run docs.yml --ref main"
+                  if [[ -n "$DISPATCH_ERR" ]]; then
+                    DISPATCH_ERR="${DISPATCH_ERR//$'\n'/ }"
+                    echo "::warning::failed to dispatch docs.yml: ${DISPATCH_ERR//::/  }. Run it by hand: gh workflow run docs.yml --ref main"
+                  else
+                    echo "::warning::failed to dispatch docs.yml (no stderr). Run it by hand: gh workflow run docs.yml --ref main"
+                  fi
                 fi
               fi
             else

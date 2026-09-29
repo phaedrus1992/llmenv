@@ -2832,6 +2832,23 @@ STUB
   return 1
 }
 
+test_2280_failed_docs_dispatch_without_stderr_says_so() {
+  local dir out
+  dir=$(mktemp -d)
+  cat > "$dir/git" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == diff ]] && exit 1
+exit 0
+STUB
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$dir/gh"
+  chmod +x "$dir/git" "$dir/gh"
+  out=$(PATH="$dir:$PATH" bash -c "$(docs_dispatch_block)" 2>&1 || true)
+  trash "$dir" 2>/dev/null || true
+  [[ "$out" == *"::warning::failed to dispatch docs.yml (no stderr)"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
 # The per-target "already contains" check of the cascade loop, extracted from
 # production. After it, the block prints which ref the next merge would use.
 up_to_date_skip_block() {
@@ -3687,6 +3704,8 @@ run_test "Issue #2280: a target that lacks the source still merges" \
   test_2280_not_an_ancestor_still_merges
 run_test "Issue #2280: a failed docs dispatch names gh's error" \
   test_2280_failed_docs_dispatch_names_gh_error
+run_test "Issue #2280: a failed docs dispatch with no stderr says so" \
+  test_2280_failed_docs_dispatch_without_stderr_says_so
 run_test "Issue #2285: an up-to-date target advances the chain to the next target" \
   test_2285_up_to_date_target_advances_the_chain
 
