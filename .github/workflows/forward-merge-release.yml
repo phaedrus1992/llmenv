@@ -692,6 +692,11 @@ jobs:
                 && git merge-base --is-ancestor "$SOURCE_REF" "origin/$TARGET"; then
               echo "Target $TARGET already contains $SOURCE_DESC"
               echo "::endgroup::"
+              # Advance the chain as a pushed merge does. Otherwise the next
+              # target gets this source merged in directly, without $TARGET's
+              # own commits (#2285, the fan-out that #1380 removed).
+              SOURCE_REF="origin/$TARGET"
+              SOURCE_DESC="$TARGET"
               continue
             fi
 
@@ -932,48 +937,109 @@ jobs:
                   HALTED="checkout of existing merge branch failed for $TARGET"
                   break
                 fi
+                # #2272: the branch can outlive its PR. delete_branch_on_merge
+                # removes it only after a merge, so a PR closed without a merge
+                # leaves it behind. Look for an open PR instead of assuming one.
+                # stderr goes to a file, so a gh warning cannot corrupt the list.
+                GH_ERR_FILE=$(mktemp)
+                if ! OPEN_PRS_JSON=$(gh pr list --head "$MERGE_BRANCH" --base "$TARGET" --state open \
+                    --json number,isCrossRepository 2>"$GH_ERR_FILE"); then
+                  GH_ERR="$(<"$GH_ERR_FILE")"
+                  rm -f "$GH_ERR_FILE"
+                  GH_ERR="${GH_ERR//$'\n'/ }"
+                  echo "::error::gh pr list for $MERGE_BRANCH failed: ${GH_ERR//::/  }"
+                  echo "::endgroup::"
+                  HALTED="PR lookup failed for $TARGET"
+                  break
+                fi
+                rm -f "$GH_ERR_FILE"
+                # --head matches the branch name only, so a fork PR from a branch
+                # with the same name also matches. Count same-repo PRs only.
+                if ! OPEN_PRS=$(jq '[.[] | select(.isCrossRepository | not)] | length' \
+                    <<< "$OPEN_PRS_JSON" 2>/dev/null) || [[ ! "$OPEN_PRS" =~ ^[0-9]{1,4}$ ]]; then
+                  OPEN_PRS_JSON="${OPEN_PRS_JSON:0:200}"
+                  OPEN_PRS_JSON="${OPEN_PRS_JSON//$'\n'/ }"
+                  echo "::error::gh pr list for $MERGE_BRANCH returned output that is not a PR list: ${OPEN_PRS_JSON//::/  }"
+                  echo "::endgroup::"
+                  HALTED="PR lookup failed for $TARGET"
+                  break
+                fi
+                # A plain assignment, so a failure stops the step instead of
+                # passing an empty SHA to approve_pending_runs.
+                MERGE_SHA=$(git rev-parse HEAD)
+                BRANCH_CURRENT=0
                 if git merge-base --is-ancestor "$SOURCE_REF" HEAD; then
                   echo "$MERGE_BRANCH already contains $SOURCE_DESC; nothing to update"
-                  echo "::endgroup::"
-                  HALTED="PR already open for $TARGET"
-                  break
-                fi
-                if ! MERGE_ERR=$(git merge --no-edit "$SOURCE_REF" 2>&1 >/dev/null); then
-                  if ! git rev-parse -q --verify MERGE_HEAD >/dev/null; then
-                    MERGE_ERR_SAFE="${MERGE_ERR//$'\n'/ }"
-                    echo "::error::git merge of $SOURCE_DESC into existing $MERGE_BRANCH failed with no merge in progress: ${MERGE_ERR_SAFE//::/  }"
+                  BRANCH_CURRENT=1
+                  if [[ "$OPEN_PRS" -gt 0 ]]; then
                     echo "::endgroup::"
-                    HALTED="merge failed updating $MERGE_BRANCH"
+                    HALTED="PR already open for $TARGET"
                     break
                   fi
-                  echo "Conflicts merging $SOURCE_DESC into existing $MERGE_BRANCH; attempting auto-resolution:"
-                  if auto_resolve_conflicts; then
-                    git commit --no-edit
-                  else
-                    if ! git merge --abort; then
-                      echo "::error::Failed to abort merge; working tree may be inconsistent"
+                fi
+                if [[ "$BRANCH_CURRENT" -eq 0 ]]; then
+                  if ! MERGE_ERR=$(git merge --no-edit "$SOURCE_REF" 2>&1 >/dev/null); then
+                    if ! git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+                      MERGE_ERR_SAFE="${MERGE_ERR//$'\n'/ }"
+                      echo "::error::git merge of $SOURCE_DESC into existing $MERGE_BRANCH failed with no merge in progress: ${MERGE_ERR_SAFE//::/  }"
                       echo "::endgroup::"
-                      HALTED="merge abort failed updating $MERGE_BRANCH"
+                      HALTED="merge failed updating $MERGE_BRANCH"
                       break
                     fi
-                    bail_on_conflict "$SOURCE_DESC" "$MERGE_BRANCH" || true
+                    echo "Conflicts merging $SOURCE_DESC into existing $MERGE_BRANCH; attempting auto-resolution:"
+                    if auto_resolve_conflicts; then
+                      git commit --no-edit
+                    else
+                      if ! git merge --abort; then
+                        echo "::error::Failed to abort merge; working tree may be inconsistent"
+                        echo "::endgroup::"
+                        HALTED="merge abort failed updating $MERGE_BRANCH"
+                        break
+                      fi
+                      bail_on_conflict "$SOURCE_DESC" "$MERGE_BRANCH" || true
+                      echo "::endgroup::"
+                      HALTED="conflict updating existing $MERGE_BRANCH"
+                      break
+                    fi
+                  fi
+                  MERGE_SHA=$(git rev-parse HEAD)
+                  if ! push_with_pat origin "$MERGE_BRANCH"; then
+                    echo "::error::Push to update existing merge branch $MERGE_BRANCH failed"
+                    if [[ -z "${_forward_merge_pat:-}" ]] \
+                        && ! git diff --quiet "origin/$TARGET" HEAD -- .github/workflows/; then
+                      echo "::error::This merge changes .github/workflows/, which GITHUB_TOKEN cannot push. To fix, set FORWARD_MERGE_PAT (a fine-grained PAT for this repository only, with contents: write and workflows: write), or push $MERGE_BRANCH by hand."
+                    fi
                     echo "::endgroup::"
-                    HALTED="conflict updating existing $MERGE_BRANCH"
+                    HALTED="merge-branch update push failed for $TARGET"
                     break
                   fi
+                  # With no open PR, no run exists yet to approve.
+                  if [[ "$OPEN_PRS" -gt 0 ]]; then
+                    approve_pending_runs "$MERGE_SHA"
+                  fi
                 fi
-                MERGE_SHA=$(git rev-parse HEAD)
-                if ! push_with_pat origin "$MERGE_BRANCH"; then
-                  echo "::error::Push to update existing merge branch $MERGE_BRANCH failed"
-                  if [[ -z "${_forward_merge_pat:-}" ]] \
-                      && ! git diff --quiet "origin/$TARGET" HEAD -- .github/workflows/; then
-                    echo "::error::This merge changes .github/workflows/, which GITHUB_TOKEN cannot push. To fix, set FORWARD_MERGE_PAT (a fine-grained PAT for this repository only, with contents: write and workflows: write), or push $MERGE_BRANCH by hand."
+                if [[ "$OPEN_PRS" -eq 0 ]]; then
+                  echo "No open PR exists for $MERGE_BRANCH; opening one on the existing branch."
+                  # The branch can hold commits from an earlier PR that a reviewer
+                  # closed on purpose, so the new PR lists them for review.
+                  BRANCH_OWN=$(git log --no-merges --format='- %h %s' "$SOURCE_REF..HEAD" "^origin/$TARGET") \
+                    || BRANCH_OWN="- (the cascade could not list them)"
+                  PR_BODY="No open PR existed for $MERGE_BRANCH, so the cascade updated the existing branch and opened this PR."
+                  if [[ -n "$BRANCH_OWN" ]]; then
+                    PR_BODY+=$'\n\n'"The branch also holds these commits, which are not on $SOURCE_DESC or $TARGET. An earlier PR for this branch may have carried them. Review them before you merge:"$'\n'"$BRANCH_OWN"
+                  fi
+                  if ! gh pr create --base "$TARGET" --head "$MERGE_BRANCH" \
+                    --title "Forward-merge $SOURCE_DESC into $TARGET" --body "$PR_BODY"; then
+                    echo "::error::Failed to create PR for $MERGE_BRANCH"
+                    HALTED="PR creation failed for $TARGET"
+                  else
+                    echo "::error::Cascade halted: opened PR for $TARGET on the existing $MERGE_BRANCH"
+                    approve_pending_runs "$MERGE_SHA"
+                    HALTED="PR opened for $TARGET"
                   fi
                   echo "::endgroup::"
-                  HALTED="merge-branch update push failed for $TARGET"
                   break
                 fi
-                approve_pending_runs "$MERGE_SHA"
                 echo "::error::Cascade halted: updated existing PR for $TARGET instead of pushing directly"
                 echo "::endgroup::"
                 HALTED="PR already open for $TARGET (branch updated with $SOURCE_DESC)"
