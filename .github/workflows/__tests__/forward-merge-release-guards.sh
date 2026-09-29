@@ -2559,36 +2559,30 @@ test_2299_harness_is_isolated() {
 }
 
 # ---------------------------------------------------------------------------
-# Issue #2294: a pull_request retry and the push cascade from the retry PR's
-# target both used to chain on to the next target and race on its merge
-# branch. The retry now cascades only to its own PR's base.
+# Issue #2294: when a forward-merge PR merges, its pull_request retry and the
+# push cascade from the PR's base start together. The retry must stop at its
+# own target once that target already holds the source, or both chain on and
+# race on the next merge branch.
 # ---------------------------------------------------------------------------
 
-# The target list plus the retry narrowing, extracted from production. It
+# The target list plus the retry-target check, extracted from production. It
 # prints TARGETS, one per line.
 retry_targets_block() {
   echo "set -euo pipefail"
   # shellcheck disable=SC2016 # literal sed address, not an expression to expand
-  sed -n '/# Build target list/,/^ *TARGETS=("\$RETRY_TARGET")$/p' "$WORKFLOW" | sed 's/^          //'
+  sed -n '/# Build target list/,/^ *echo "::error::retry target/p' "$WORKFLOW" | sed 's/^          //'
   cat <<'SHELL'
+exit 1
+fi
 fi
 printf '%s\n' "${TARGETS[@]}"
 SHELL
 }
 
-test_2294_retry_cascades_only_to_its_own_target() {
+test_2294_valid_retry_keeps_every_target() {
   local out
   out=$(CURRENT=release/3.x BRANCHES=$'release/3.x\nrelease/4.x' RETRY_TARGET=release/4.x \
-    bash -c "$(retry_targets_block)" 2>&1)
-  [[ "$out" == "release/4.x" ]] && return 0
-  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
-  return 1
-}
-
-test_2294_push_cascade_keeps_every_target() {
-  local out
-  out=$(CURRENT=release/3.x BRANCHES=$'release/3.x\nrelease/4.x' RETRY_TARGET="" \
-    bash -c "$(retry_targets_block)" 2>&1)
+    RETRY_HEAD=forward-merge/release/3.x-to-release/4.x bash -c "$(retry_targets_block)" 2>&1)
   [[ "$out" == $'release/4.x\nmain' ]] && return 0
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
   return 1
@@ -2597,11 +2591,46 @@ test_2294_push_cascade_keeps_every_target() {
 test_2294_retry_target_not_downstream_fails() {
   local out rc
   out=$(CURRENT=release/4.x BRANCHES=$'release/3.x\nrelease/4.x' \
-    RETRY_TARGET="release/3.x::stop-commands::tok" bash -c "$(retry_targets_block)" 2>&1)
+    RETRY_TARGET="release/3.x::stop-commands::tok" \
+    RETRY_HEAD="forward-merge/release/4.x-to-release/3.x::stop-commands::tok" \
+    bash -c "$(retry_targets_block)" 2>&1)
   rc=$?
-  [[ $rc -ne 0 ]] && [[ "$out" == *"::error::retry target"*"is not downstream of release/4.x"* ]] \
+  [[ $rc -ne 0 ]] && [[ "$out" == *"::error::retry target"* ]] \
     && [[ "$out" != *"::stop-commands::"* ]] && return 0
   printf '  out: %s\n  rc: %s\n' "${out//$'\n'/ | }" "$rc" >&2
+  return 1
+}
+
+# A writer can change a forward-merge PR's base after it opens. The base must
+# still be the target that the head branch names.
+test_2294_retry_base_must_match_head_target() {
+  local out rc
+  out=$(CURRENT=release/3.x BRANCHES=$'release/3.x\nrelease/4.x' RETRY_TARGET=main \
+    RETRY_HEAD=forward-merge/release/3.x-to-release/4.x bash -c "$(retry_targets_block)" 2>&1)
+  rc=$?
+  [[ $rc -ne 0 ]] && [[ "$out" == *"::error::retry target main does not match"* ]] && return 0
+  printf '  out: %s\n  rc: %s\n' "${out//$'\n'/ | }" "$rc" >&2
+  return 1
+}
+
+# The race case: the retry finds its own target already holding the source.
+test_2294_retry_stops_at_its_up_to_date_target() {
+  local stubs out
+  stubs=$(mktemp -d)
+  cat > "$stubs/git" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  rev-parse) echo deadbeef ;;
+  merge-base) [[ "$3" == origin/release/3.x && "$4" == origin/release/4.x ]] && exit 0; exit 1 ;;
+esac
+exit 0
+STUB
+  chmod +x "$stubs/git"
+  out=$(PATH="$stubs:$PATH" RETRY_TARGET=release/4.x bash -c "$(up_to_date_skip_block)" 2>&1 || true)
+  trash "$stubs" 2>/dev/null || true
+  [[ "$out" == *"Retry reached its own target release/4.x"* ]] && [[ "$out" != *"INTO:main"* ]] \
+    && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
   return 1
 }
 
@@ -3541,12 +3570,14 @@ run_test "Issue #2273: a failed approval does not halt the cascade" \
   test_2273_approve_failure_does_not_halt
 run_test "Issue #2273: an invalid SHA makes no API call" \
   test_2273_invalid_sha_makes_no_api_call
-run_test "Issue #2294: a retry cascades only to its own PR's target" \
-  test_2294_retry_cascades_only_to_its_own_target
-run_test "Issue #2294: a push cascade keeps every downstream target" \
-  test_2294_push_cascade_keeps_every_target
+run_test "Issue #2294: a valid retry keeps every downstream target" \
+  test_2294_valid_retry_keeps_every_target
 run_test "Issue #2294: a retry target that is not downstream fails loudly" \
   test_2294_retry_target_not_downstream_fails
+run_test "Issue #2294: a retry base must be the target its head branch names" \
+  test_2294_retry_base_must_match_head_target
+run_test "Issue #2294: a retry stops at its own target once that target is current" \
+  test_2294_retry_stops_at_its_up_to_date_target
 run_test "Issue #2280: an unreadable target ref halts" \
   test_2280_unreadable_target_ref_halts
 run_test "Issue #2280: a failed ancestry check halts instead of merging" \

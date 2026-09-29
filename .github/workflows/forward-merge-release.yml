@@ -160,8 +160,10 @@ jobs:
         env:
           CURRENT: ${{ steps.detect.outputs.current }}
           BRANCHES: ${{ steps.detect.outputs.branches }}
-          # Empty for a push. For a retry, the base of the merged forward-merge PR.
+          # Empty for a push. For a retry, the base and the head branch of the
+          # merged forward-merge PR.
           RETRY_TARGET: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || '' }}
+          RETRY_HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || '' }}
           # Deliberately left at step level, unlike FORWARD_MERGE_PAT below —
           # any workspace code that runs still inherits GH_TOKEN via env and
           # via the persisted checkout credential in .git/config either way,
@@ -423,10 +425,10 @@ jobs:
           # of CURRENT, TARGET, SOURCE_DESC or MERGE_BRANCH below (#2240).
           TARGETS+=("main")
 
-          # #2294: a retry cascades only to its own PR's base. The merge of
-          # that PR pushes the base, and the push cascade from the base carries
-          # the change further. A retry that also chained on raced that push
-          # cascade on the next merge branch.
+          # #2294: a retry stops at its own target once that target holds the
+          # source (see the up-to-date check in the loop), so the target must be
+          # downstream of CURRENT and must be the one its head branch names. A
+          # writer can change a PR's base after it opens.
           if [[ -n "${RETRY_TARGET:-}" ]]; then
             RETRY_OK=0
             for T in "${TARGETS[@]}"; do
@@ -434,11 +436,13 @@ jobs:
                 RETRY_OK=1
               fi
             done
+            if [[ "${RETRY_HEAD:-}" != *"-to-$RETRY_TARGET" ]]; then
+              RETRY_OK=0
+            fi
             if [[ "$RETRY_OK" -eq 0 ]]; then
-              echo "::error::retry target ${RETRY_TARGET//::/  } is not downstream of $CURRENT; not cascading"
+              echo "::error::retry target ${RETRY_TARGET//::/  } does not match a downstream target of $CURRENT named by ${RETRY_HEAD//::/  }; not cascading"
               exit 1
             fi
-            TARGETS=("$RETRY_TARGET")
           fi
 
           # Track whether the cascade halted early so the run fails visibly
@@ -755,6 +759,13 @@ jobs:
             if [[ "$ANCESTOR_RC" -eq 0 ]]; then
               echo "Target $TARGET already contains $SOURCE_DESC"
               echo "::endgroup::"
+              # #2294: the merge of this retry's PR pushed $TARGET, and the
+              # push cascade from $TARGET carries the change further. Chaining
+              # on here raced that cascade on the next merge branch.
+              if [[ "$TARGET" == "${RETRY_TARGET:-}" ]]; then
+                echo "Retry reached its own target $TARGET, which already holds $SOURCE_DESC; the push cascade from $TARGET carries it further"
+                break
+              fi
               # Advance the chain as a pushed merge does. Otherwise the next
               # target gets this source merged in directly, without $TARGET's
               # own commits (#2285, the fan-out that #1380 removed).
