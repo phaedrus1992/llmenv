@@ -1773,189 +1773,6 @@ push_with_pat config --get-all http.https://github.com/.extraheader"
 }
 
 # ---------------------------------------------------------------------------
-# Issue #1564: approve_pending_runs() — this mirrors approve_pending_runs()
-# in forward-merge-release.yml (the auto-approve helper for a cascade PR's
-# runs stuck on GitHub's `action_required` gate). Callers export
-# GITHUB_REPOSITORY and provide a `gh`/`sleep` stub on PATH.
-# ---------------------------------------------------------------------------
-approve_pending_runs_block() {
-  cat <<'SHELL'
-approve_pending_runs() {
-  local sha="$1" ids id
-  for _ in 1 2 3 4 5 6; do
-    ids=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${sha}" \
-      --jq '.workflow_runs[] | select(.conclusion == "action_required") | .id' 2>/dev/null) || ids=""
-    if [[ -n "$ids" ]]; then
-      while IFS= read -r id; do
-        [[ -n "$id" ]] || continue
-        echo "Approving action_required run $id for $sha"
-        gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runs/${id}/approve" >/dev/null 2>&1 \
-          || echo "::warning::failed to approve run $id for $sha -- approve it manually"
-      done <<< "$ids"
-      return 0
-    fi
-    sleep 10
-  done
-}
-SHELL
-}
-
-test_1564_approves_an_action_required_run() {
-  local tmpdir log
-  tmpdir=$(mktemp -d)
-  log=$(mktemp)
-
-  # gh stub: the runs-list call always reports run 42 as action_required;
-  # the approve call logs which run it was asked to approve.
-  cat > "$tmpdir/gh" <<STUB
-#!/usr/bin/env bash
-if [[ "\$1" == "api" && "\$2" == "-X" && "\$3" == "POST" ]]; then
-  echo "APPROVED:\$4" >> "$log"
-  exit 0
-fi
-if [[ "\$1" == "api" ]]; then
-  echo "42"
-  exit 0
-fi
-exit 1
-STUB
-  chmod +x "$tmpdir/gh"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$tmpdir/sleep"
-  chmod +x "$tmpdir/sleep"
-
-  local script out
-  script="$(approve_pending_runs_block)
-approve_pending_runs deadbeef"
-  export GITHUB_REPOSITORY="owner/repo"
-  out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1)
-  rm -rf "$tmpdir"
-
-  if grep -qF "APPROVED:repos/owner/repo/actions/runs/42/approve" "$log"; then
-    rm -f "$log"
-    return 0
-  fi
-  echo "  out: ${out//$'\n'/ | }" >&2
-  rm -f "$log"
-  return 1
-}
-
-test_1564_no_action_required_runs_never_approves() {
-  local tmpdir log
-  tmpdir=$(mktemp -d)
-  log=$(mktemp)
-
-  # gh stub: runs-list always empty; approve must never be called.
-  cat > "$tmpdir/gh" <<STUB
-#!/usr/bin/env bash
-if [[ "\$1" == "api" && "\$2" == "-X" && "\$3" == "POST" ]]; then
-  echo "APPROVED:\$4" >> "$log"
-  exit 0
-fi
-if [[ "\$1" == "api" ]]; then
-  exit 0
-fi
-exit 1
-STUB
-  chmod +x "$tmpdir/gh"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$tmpdir/sleep"
-  chmod +x "$tmpdir/sleep"
-
-  local script
-  script="$(approve_pending_runs_block)
-approve_pending_runs deadbeef"
-  export GITHUB_REPOSITORY="owner/repo"
-  PATH="$tmpdir:$PATH" bash -c "$script" >/dev/null 2>&1
-  rm -rf "$tmpdir"
-
-  if [[ -s "$log" ]]; then
-    echo "  approve called despite no action_required run: $(cat "$log")" >&2
-    rm -f "$log"
-    return 1
-  fi
-  rm -f "$log"
-  return 0
-}
-
-test_1564_approves_every_run_when_multiple_are_pending() {
-  local tmpdir log
-  tmpdir=$(mktemp -d)
-  log=$(mktemp)
-
-  # gh stub: runs-list reports two runs (7 and 9) as action_required.
-  cat > "$tmpdir/gh" <<STUB
-#!/usr/bin/env bash
-if [[ "\$1" == "api" && "\$2" == "-X" && "\$3" == "POST" ]]; then
-  echo "APPROVED:\$4" >> "$log"
-  exit 0
-fi
-if [[ "\$1" == "api" ]]; then
-  printf '7\n9\n'
-  exit 0
-fi
-exit 1
-STUB
-  chmod +x "$tmpdir/gh"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$tmpdir/sleep"
-  chmod +x "$tmpdir/sleep"
-
-  local script
-  script="$(approve_pending_runs_block)
-approve_pending_runs deadbeef"
-  export GITHUB_REPOSITORY="owner/repo"
-  PATH="$tmpdir:$PATH" bash -c "$script" >/dev/null 2>&1
-  rm -rf "$tmpdir"
-
-  if grep -qF "APPROVED:repos/owner/repo/actions/runs/7/approve" "$log" \
-      && grep -qF "APPROVED:repos/owner/repo/actions/runs/9/approve" "$log"; then
-    rm -f "$log"
-    return 0
-  fi
-  echo "  log: $(cat "$log")" >&2
-  rm -f "$log"
-  return 1
-}
-
-test_1564_an_approve_failure_is_a_warning_not_a_halt() {
-  local tmpdir
-  tmpdir=$(mktemp -d)
-
-  # gh stub: runs-list reports run 42, but the approve call itself fails.
-  cat > "$tmpdir/gh" <<'STUB'
-#!/usr/bin/env bash
-if [[ "$1" == "api" && "$2" == "-X" && "$3" == "POST" ]]; then
-  exit 1
-fi
-if [[ "$1" == "api" ]]; then
-  echo "42"
-  exit 0
-fi
-exit 1
-STUB
-  chmod +x "$tmpdir/gh"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$tmpdir/sleep"
-  chmod +x "$tmpdir/sleep"
-
-  local script out rc
-  script="$(approve_pending_runs_block)
-set -euo pipefail
-approve_pending_runs deadbeef
-echo reached-end"
-  export GITHUB_REPOSITORY="owner/repo"
-  out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1)
-  rc=$?
-  rm -rf "$tmpdir"
-
-  if [[ $rc -eq 0 ]] \
-      && echo "$out" | grep -q "::warning::failed to approve run 42" \
-      && echo "$out" | grep -q "reached-end"; then
-    return 0
-  fi
-  echo "  rc: $rc" >&2
-  echo "  out: ${out//$'\n'/ | }" >&2
-  return 1
-}
-
-# ---------------------------------------------------------------------------
 # Drift guard (Issue #1540 code review): push_with_pat_header_block above is
 # a hand-maintained mirror of push_with_pat() in forward-merge-release.yml,
 # not an extraction — if production's fix-relevant lines change without this
@@ -1978,28 +1795,6 @@ test_1540_test_mirror_matches_production_push_with_pat() {
     return 0
   fi
   echo "  production's push_with_pat() no longer matches the lines this file mirrors — update push_with_pat_header_block and push_with_pat_block above" >&2
-  return 1
-}
-
-# ---------------------------------------------------------------------------
-# Drift guard (Issue #1564): approve_pending_runs_block above is a
-# hand-maintained mirror of approve_pending_runs() in
-# forward-merge-release.yml, not an extraction — assert the exact lines are
-# still present in production so an edit there fails loudly here instead of
-# drifting unnoticed.
-# ---------------------------------------------------------------------------
-test_1564_test_mirror_matches_production_approve_pending_runs() {
-  local workflow_file
-  workflow_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/forward-merge-release.yml"
-
-  # shellcheck disable=SC2016 # literal grep -F patterns, not expressions to expand
-  if grep -qF 'repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${sha}' "$workflow_file" \
-      && grep -qF ".workflow_runs[] | select(.conclusion == \"action_required\") | .id" "$workflow_file" \
-      && grep -qF 'repos/${GITHUB_REPOSITORY}/actions/runs/${id}/approve' "$workflow_file" \
-      && grep -qF 'approve_pending_runs "$MERGE_SHA"' "$workflow_file"; then
-    return 0
-  fi
-  echo "  production's approve_pending_runs() no longer matches the lines this file mirrors — update approve_pending_runs_block above" >&2
   return 1
 }
 
@@ -2565,6 +2360,150 @@ STUB
   [[ "$out" == *"::error::ls-remote for forward-merge/release/3.x-to-release/4.x failed (exit 128; no stderr)"* ]] \
     && return 0
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Issue #2273: approve_pending_runs, extracted from production. `sleep` is a
+# no-op. A PATH `gh` stub answers the run list from $STUB_DIR/runs.<round>
+# (empty when the file is missing) and records each approval.
+# ---------------------------------------------------------------------------
+approve_block() {
+  cat <<'SHELL'
+set -euo pipefail
+GITHUB_REPOSITORY=owner/repo
+sleep() { :; }
+SHELL
+  sed -n '/^ *approve_pending_runs() {$/,/^          }$/p' "$WORKFLOW"
+}
+
+make_approve_stubs() {
+  local dir
+  dir=$(mktemp -d)
+  cat > "$dir/gh" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1 $2" == "api -X" ]]; then
+  echo "$4" >> "$STUB_DIR/approved"
+  [[ -n "${APPROVE_FAIL:-}" ]] && { echo "HTTP 403 ::stop-commands::tok" >&2; exit 1; }
+  exit 0
+fi
+echo "$*" >> "$STUB_DIR/listed"
+n=$(( $(cat "$STUB_DIR/round" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$STUB_DIR/round"
+[[ -n "${LIST_FAIL:-}" ]] && { echo "HTTP 401 Bad credentials ::stop-commands::tok" >&2; exit 1; }
+if [[ -f "$STUB_DIR/runs.$n" ]]; then cat "$STUB_DIR/runs.$n"; else echo '{"workflow_runs":[]}'; fi
+STUB
+  chmod +x "$dir/gh"
+  printf '%s\n' "$dir"
+}
+
+SHA40=0123456789abcdef0123456789abcdef01234567
+MB="forward-merge/release/3.x-to-release/4.x"
+
+# One run of each kind: ours, a fork's, another branch's, and one not gated.
+runs_json() {
+  cat <<EOF
+{"workflow_runs":[
+ {"id":11,"conclusion":"action_required","head_branch":"$MB","head_repository":{"full_name":"owner/repo"}},
+ {"id":12,"conclusion":"action_required","head_branch":"$MB","head_repository":{"full_name":"evil/fork"}},
+ {"id":13,"conclusion":"action_required","head_branch":"other","head_repository":{"full_name":"owner/repo"}},
+ {"id":14,"conclusion":null,"head_branch":"$MB","head_repository":{"full_name":"owner/repo"}}
+]}
+EOF
+}
+
+run_approve() {
+  local dir="$1" sha="$2"
+  PATH="$dir:$PATH" STUB_DIR="$dir" bash -c "$(approve_block)
+approve_pending_runs '$sha' '$MB'" 2>&1 || true
+}
+
+test_2273_approves_only_own_runs_on_the_merge_branch() {
+  local dir out approved
+  dir=$(make_approve_stubs)
+  runs_json > "$dir/runs.1"
+  out=$(run_approve "$dir" "$SHA40")
+  approved=$(cat "$dir/approved" 2>/dev/null)
+  trash "$dir" 2>/dev/null || true
+  [[ "$approved" == "repos/owner/repo/actions/runs/11/approve" ]] && return 0
+  printf '  approved: %s\n  out: %s\n' "${approved//$'\n'/ | }" "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2273_approves_a_run_gated_after_the_first_hit() {
+  local dir out approved
+  dir=$(make_approve_stubs)
+  runs_json > "$dir/runs.1"
+  runs_json | sed 's/"id":13,"conclusion":"action_required","head_branch":"other"/"id":15,"conclusion":"action_required","head_branch":"'"${MB//\//\\/}"'"/' \
+    > "$dir/runs.3"
+  out=$(run_approve "$dir" "$SHA40")
+  approved=$(sort "$dir/approved" 2>/dev/null | tr '\n' ' ')
+  trash "$dir" 2>/dev/null || true
+  [[ "$approved" == "repos/owner/repo/actions/runs/11/approve repos/owner/repo/actions/runs/15/approve " ]] \
+    && return 0
+  printf '  approved: %s\n  out: %s\n' "$approved" "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2273_list_failure_is_a_sanitized_warning() {
+  local dir out
+  dir=$(make_approve_stubs)
+  out=$(LIST_FAIL=1 run_approve "$dir" "$SHA40")
+  trash "$dir" 2>/dev/null || true
+  [[ "$out" == *"::warning::"*"HTTP 401 Bad credentials"* ]] && [[ "$out" != *"::stop-commands::"* ]] \
+    && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2273_approve_failure_is_a_sanitized_warning() {
+  local dir out
+  dir=$(make_approve_stubs)
+  runs_json > "$dir/runs.1"
+  out=$(APPROVE_FAIL=1 run_approve "$dir" "$SHA40")
+  trash "$dir" 2>/dev/null || true
+  [[ "$out" == *"::warning::failed to approve run 11"*"HTTP 403"* ]] && [[ "$out" != *"::stop-commands::"* ]] \
+    && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2273_nothing_pending_never_approves() {
+  local dir out
+  dir=$(make_approve_stubs)
+  out=$(run_approve "$dir" "$SHA40")
+  local approved
+  approved=$(cat "$dir/approved" 2>/dev/null)
+  trash "$dir" 2>/dev/null || true
+  [[ -z "$approved" ]] && [[ "$out" == *"No run for $SHA40 waited for approval"* ]] \
+    && [[ "$out" != *"::warning::"* ]] && return 0
+  printf '  approved: %s\n  out: %s\n' "$approved" "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# A failed approval must never halt the cascade (#1564).
+test_2273_approve_failure_does_not_halt() {
+  local dir out
+  dir=$(make_approve_stubs)
+  runs_json > "$dir/runs.1"
+  out=$(PATH="$dir:$PATH" STUB_DIR="$dir" APPROVE_FAIL=1 bash -c "$(approve_block)
+approve_pending_runs '$SHA40' '$MB'
+echo reached-end" 2>&1)
+  local rc=$?
+  trash "$dir" 2>/dev/null || true
+  [[ $rc -eq 0 ]] && [[ "$out" == *"reached-end"* ]] && return 0
+  printf '  rc: %s\n  out: %s\n' "$rc" "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2273_invalid_sha_makes_no_api_call() {
+  local dir out listed
+  dir=$(make_approve_stubs)
+  out=$(run_approve "$dir" "")
+  listed=$(cat "$dir/listed" 2>/dev/null)
+  trash "$dir" 2>/dev/null || true
+  [[ -z "$listed" ]] && [[ "$out" == *"::warning::"*"no valid commit SHA"* ]] && return 0
+  printf '  listed: %s\n  out: %s\n' "$listed" "${out//$'\n'/ | }" >&2
   return 1
 }
 
@@ -3317,16 +3256,6 @@ run_test "Issue #1540: the benign no-such-key case is silently tolerated" \
 run_test "Issue #1540: the test mirror still matches production's push_with_pat()" \
   test_1540_test_mirror_matches_production_push_with_pat
 
-run_test "Issue #1564: approve_pending_runs approves an action_required run" \
-  test_1564_approves_an_action_required_run
-run_test "Issue #1564: approve_pending_runs never approves when nothing is pending" \
-  test_1564_no_action_required_runs_never_approves
-run_test "Issue #1564: approve_pending_runs approves every pending run" \
-  test_1564_approves_every_run_when_multiple_are_pending
-run_test "Issue #1564: an approve failure is a warning, not a halt" \
-  test_1564_an_approve_failure_is_a_warning_not_a_halt
-run_test "Issue #1564: the test mirror still matches production's approve_pending_runs()" \
-  test_1564_test_mirror_matches_production_approve_pending_runs
 
 run_test "Issue #1543: a stop-commands sequence in a filename is stripped from log display" \
   test_1543_stop_commands_sequence_stripped_from_display
@@ -3440,6 +3369,20 @@ run_test "Issue #2272: a failed gh pr create on an orphan branch halts" \
   test_2272_failed_pr_create_on_orphan_branch_halts
 run_test "Issue #2272: a failed open-PR lookup halts with a sanitized error" \
   test_2272_pr_lookup_failure_halts
+run_test "Issue #2273: only this repo's gated runs on the merge branch are approved" \
+  test_2273_approves_only_own_runs_on_the_merge_branch
+run_test "Issue #2273: a run gated after the first hit is still approved" \
+  test_2273_approves_a_run_gated_after_the_first_hit
+run_test "Issue #2273: a failed run list is a sanitized warning" \
+  test_2273_list_failure_is_a_sanitized_warning
+run_test "Issue #2273: a failed approval is a sanitized warning" \
+  test_2273_approve_failure_is_a_sanitized_warning
+run_test "Issue #2273: nothing pending means no approval and no warning" \
+  test_2273_nothing_pending_never_approves
+run_test "Issue #2273: a failed approval does not halt the cascade" \
+  test_2273_approve_failure_does_not_halt
+run_test "Issue #2273: an invalid SHA makes no API call" \
+  test_2273_invalid_sha_makes_no_api_call
 run_test "Issue #2294: a retry cascades only to its own PR's target" \
   test_2294_retry_cascades_only_to_its_own_target
 run_test "Issue #2294: a push cascade keeps every downstream target" \

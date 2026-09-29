@@ -341,29 +341,60 @@ jobs:
           # that open a PR don't hit it). The entire reason this cascade opens
           # a PR instead of pushing directly is so required checks run before
           # merge, so a run stuck on that gate with nobody watching silently
-          # defeats the point. Poll briefly for a run against $1 (a commit
-          # SHA) sitting in that state and approve it.
+          # defeats the point. Poll for runs against $1 (a commit SHA) on
+          # branch $2 sitting in that state and approve them. action_required
+          # is the fork gate, and a fork can push the same public SHA, so only
+          # this repository's own runs on the merge branch qualify (#2273).
           #
           # Never halts the cascade on failure: an approval miss here still
           # leaves the PR in place for a human (or a later poll, e.g. the next
           # push to this branch re-running this same check) to approve
           # manually, so a warning is the right severity, not an error.
           approve_pending_runs() {
-            local sha="$1" ids id
+            local sha="$1" branch="$2" runs ids id err_file err last_err="" tried=""
+            if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::warning::approve_pending_runs got no valid commit SHA; check the PR for runs that wait for approval"
+              return 0
+            fi
+            err_file=$(mktemp)
+            # Every round, not only until the first hit: a workflow can start,
+            # and be gated, after the others (#2273).
             for _ in 1 2 3 4 5 6; do
-              ids=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${sha}" \
-                --jq '.workflow_runs[] | select(.conclusion == "action_required") | .id' 2>/dev/null) || ids=""
-              if [[ -n "$ids" ]]; then
-                while IFS= read -r id; do
-                  [[ -n "$id" ]] || continue
-                  echo "Approving action_required run $id for $sha"
-                  gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runs/${id}/approve" >/dev/null 2>&1 \
-                    || echo "::warning::failed to approve run $id for $sha -- approve it manually"
-                done <<< "$ids"
-                return 0
+              ids=""
+              if runs=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${sha}" 2>"$err_file"); then
+                last_err=""
+                if ! ids=$(jq -r --arg repo "$GITHUB_REPOSITORY" --arg branch "$branch" \
+                    '.workflow_runs[] | select(.conclusion == "action_required"
+                      and .head_repository.full_name == $repo and .head_branch == $branch) | .id' \
+                    <<< "$runs" 2>"$err_file"); then
+                  last_err="$(<"$err_file")"
+                  ids=""
+                fi
+              else
+                last_err="$(<"$err_file")"
               fi
+              while IFS= read -r id; do
+                if [[ -z "$id" || " $tried " == *" $id "* ]]; then
+                  continue
+                fi
+                tried+=" $id"
+                echo "Approving action_required run $id for $sha"
+                if ! gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runs/${id}/approve" \
+                    >/dev/null 2>"$err_file"; then
+                  err="$(<"$err_file")"
+                  err="${err//$'\n'/ }"
+                  echo "::warning::failed to approve run $id for $sha: ${err//::/  }. Approve it by hand."
+                fi
+              done <<< "$ids"
               sleep 10
             done
+            rm -f "$err_file"
+            if [[ -n "$last_err" ]]; then
+              last_err="${last_err//$'\n'/ }"
+              echo "::warning::could not list runs for $sha: ${last_err//::/  }. Check the PR for runs that wait for approval."
+            elif [[ -z "$tried" ]]; then
+              echo "No run for $sha waited for approval"
+            fi
           }
 
           # Build target list: every newer release branch (semver order) + main.
@@ -1035,7 +1066,7 @@ jobs:
                   fi
                   # With no open PR, no run exists yet to approve.
                   if [[ "$OPEN_PRS" -gt 0 ]]; then
-                    approve_pending_runs "$MERGE_SHA"
+                    approve_pending_runs "$MERGE_SHA" "$MERGE_BRANCH"
                   fi
                 fi
                 if [[ "$OPEN_PRS" -eq 0 ]]; then
@@ -1054,7 +1085,7 @@ jobs:
                     HALTED="PR creation failed for $TARGET"
                   else
                     echo "::error::Cascade halted: opened PR for $TARGET on the existing $MERGE_BRANCH"
-                    approve_pending_runs "$MERGE_SHA"
+                    approve_pending_runs "$MERGE_SHA" "$MERGE_BRANCH"
                     HALTED="PR opened for $TARGET"
                   fi
                   echo "::endgroup::"
@@ -1109,7 +1140,7 @@ jobs:
                 HALTED="PR creation failed for $TARGET"
               else
                 echo "::error::Cascade halted: opened PR for $TARGET instead of pushing directly"
-                approve_pending_runs "$MERGE_SHA"
+                approve_pending_runs "$MERGE_SHA" "$MERGE_BRANCH"
                 HALTED="PR opened for $TARGET"
               fi
               echo "::endgroup::"
