@@ -95,8 +95,9 @@ pub enum Action {
     /// argument. `None` omits the argument entirely, letting icm's own MCP
     /// handler fall back to its hardcoded 200-token default.
     WakeUp(WakeUpArgs),
-    /// Inject recalled context for the active tags/project (`icm_memory_recall`).
-    /// Project-scoped (cwd default) natural-language recall.
+    /// Inject recalled context for the active tags (`icm_memory_recall`).
+    /// Natural-language recall across all projects: ICM's default filter is the
+    /// ICM server's cwd, which is unrelated to a session on another host (#2253).
     Recall,
     /// Recall tag-scoped memory for one active tag (`icm_memory_recall`),
     /// **project-unfiltered** and keyed on `llmenv-tag:<tag>`. This is what
@@ -133,7 +134,7 @@ impl Action {
     /// recall query (active tags/project), `chunk` is the llmenv context chunk
     /// used as store content. Unused fields are ignored per action.
     ///
-    /// `RecallTag` and `RecallBundle` pass `project: ""` to disable ICM's
+    /// `Recall`, `RecallTag` and `RecallBundle` pass `project: ""` to disable ICM's
     /// default cwd project filter (per the tool contract, an empty string
     /// searches all projects) and `keyword: llmenv-tag:<tag>` /
     /// `keyword: llmenv-bundle:<bundle>` to scope the recall.
@@ -149,7 +150,7 @@ impl Action {
                 }
                 args
             }
-            Action::Recall => json!({ "query": query }),
+            Action::Recall => json!({ "query": query, "project": "" }),
             Action::RecallTag(q) => json!({
                 "query": q.tag,
                 "project": "",
@@ -430,6 +431,17 @@ mod tests {
     fn recall_arguments_carry_query() {
         let args = Action::Recall.arguments("rust, work", "chunk");
         assert_eq!(args["query"], serde_json::json!("rust, work"));
+    }
+
+    // #2253: without `project`, ICM filters by the ICM server's cwd, which
+    // names an unrelated project when `icm serve` runs on another host.
+    #[test]
+    fn recall_disables_the_server_cwd_project_filter() {
+        let args = Action::Recall.arguments("rust, work", "chunk");
+        assert_eq!(
+            args,
+            serde_json::json!({ "query": "rust, work", "project": "" })
+        );
     }
 
     #[test]
