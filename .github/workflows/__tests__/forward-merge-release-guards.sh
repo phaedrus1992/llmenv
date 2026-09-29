@@ -2534,7 +2534,11 @@ test_2271_failed_pr_create_is_not_reported_as_opened() {
 test_2271_ls_remote_failure_without_stderr_says_so() {
   local stubs out
   stubs=$(mktemp -d)
-  printf '#!/usr/bin/env bash\n[[ "$1" == ls-remote ]] && exit 128\nexit 0\n' > "$stubs/git"
+  cat > "$stubs/git" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == ls-remote ]] && exit 128
+exit 0
+STUB
   chmod +x "$stubs/git"
   out=$(PATH="$stubs:$PATH" MERGE_BRANCH="forward-merge/release/3.x-to-release/4.x" \
     TARGET=release/4.x bash -c "$(ls_remote_block)" 2>&1 || true)
