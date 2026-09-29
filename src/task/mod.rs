@@ -614,7 +614,9 @@ pub(crate) fn start_task(state_dir: &Path, input: &str, force: bool) -> anyhow::
                 .blocked_on
                 .iter()
                 .map(String::as_str)
-                .filter(|blocker_slug| !is_done_including_descendants(blocker_slug, &by_slug))
+                .filter(|blocker_slug| {
+                    !is_done_including_descendants(blocker_slug, &slug, &by_slug)
+                })
                 .collect();
             if !unmet.is_empty() {
                 anyhow::bail!(
@@ -1065,7 +1067,7 @@ fn is_actionable(task: &Task, by_slug: &HashMap<&str, &Task>) -> bool {
         && task
             .blocked_on
             .iter()
-            .all(|b| is_done_including_descendants(b, by_slug))
+            .all(|b| is_done_including_descendants(b, &task.slug, by_slug))
 }
 
 /// True when the task named `slug` is `done` and every task transitively
@@ -1079,9 +1081,15 @@ fn is_actionable(task: &Task, by_slug: &HashMap<&str, &Task>) -> bool {
 /// [`append_forest`]'s guard) instead of recursing forever; a cycle is
 /// invalid data, not a case this needs to resolve "correctly" for, only
 /// safely.
-fn is_done_including_descendants(slug: &str, by_slug: &HashMap<&str, &Task>) -> bool {
+///
+/// The walk skips the subtree of `waiter`, the task that is blocked on
+/// `slug`. `task add` chains a new task under the previous one by default,
+/// so the waiter is often a descendant of its own blocker. Its subtree
+/// cannot be done before the waiter starts, and would block it forever (#2300).
+fn is_done_including_descendants(slug: &str, waiter: &str, by_slug: &HashMap<&str, &Task>) -> bool {
     fn go<'a>(
         slug: &'a str,
+        waiter: &str,
         by_slug: &HashMap<&'a str, &'a Task>,
         visited: &mut HashSet<&'a str>,
     ) -> bool {
@@ -1094,10 +1102,10 @@ fn is_done_including_descendants(slug: &str, by_slug: &HashMap<&str, &Task>) -> 
         task.state == TaskState::Done
             && by_slug
                 .values()
-                .filter(|t| t.parent.as_deref() == Some(slug))
-                .all(|child| go(&child.slug, by_slug, visited))
+                .filter(|t| t.parent.as_deref() == Some(slug) && t.slug != waiter)
+                .all(|child| go(&child.slug, waiter, by_slug, visited))
     }
-    go(slug, by_slug, &mut HashSet::new())
+    go(slug, waiter, by_slug, &mut HashSet::new())
 }
 
 /// Parent-before-children execution order for a single session's tasks —
@@ -1771,6 +1779,74 @@ mod tests {
         block_task(dir.path(), &downstream.slug, &parent.slug).expect("test");
         let started = start_task(dir.path(), &downstream.slug, false).expect("test");
         assert_eq!(started.state, TaskState::Wip);
+    }
+
+    // #2300: `task add` without `--parent` chains the new task under the one
+    // added before it, so a task blocked on its own parent is inside the
+    // blocker's subtree. That subtree cannot be done before the task starts.
+    #[test]
+    fn start_task_allows_when_blocked_on_own_done_parent() {
+        let dir = TempDir::new().expect("test");
+        let a = mk(dir.path(), "setup: A", None).expect("test");
+        let b = mk(dir.path(), "setup: B", Some(&a.slug)).expect("test");
+        block_task(dir.path(), &b.slug, &a.slug).expect("test");
+        start_task(dir.path(), &a.slug, false).expect("test");
+        done_task(dir.path(), &a.slug).expect("test");
+        let started = start_task(dir.path(), &b.slug, false).expect("test");
+        assert_eq!(started.state, TaskState::Wip);
+    }
+
+    #[test]
+    fn start_task_allows_every_link_of_an_implicit_chain() {
+        let dir = TempDir::new().expect("test");
+        let mut prev: Option<Task> = None;
+        let mut chain = Vec::new();
+        for title in ["step A", "step B", "step C", "step D"] {
+            let t = mk(dir.path(), title, prev.as_ref().map(|p| p.slug.as_str())).expect("test");
+            if let Some(p) = &prev {
+                block_task(dir.path(), &t.slug, &p.slug).expect("test");
+            }
+            chain.push(t.clone());
+            prev = Some(t);
+        }
+        for t in &chain {
+            start_task(dir.path(), &t.slug, false).expect("each link must start");
+            done_task(dir.path(), &t.slug).expect("test");
+        }
+    }
+
+    #[test]
+    fn start_task_still_blocks_on_undone_sibling_under_done_parent() {
+        let dir = TempDir::new().expect("test");
+        let a = mk(dir.path(), "Parent A", None).expect("test");
+        let b = mk(dir.path(), "Child B", Some(&a.slug)).expect("test");
+        mk(dir.path(), "Child C", Some(&a.slug)).expect("test");
+        block_task(dir.path(), &b.slug, &a.slug).expect("test");
+        done_task(dir.path(), &a.slug).expect("test");
+        let err = start_task(dir.path(), &b.slug, false).unwrap_err();
+        assert!(err.to_string().contains(&a.slug), "{err}");
+    }
+
+    #[test]
+    fn is_actionable_ignores_own_subtree_under_done_blocker() {
+        let dir = TempDir::new().expect("test");
+        let a = mk(dir.path(), "Parent A", None).expect("test");
+        let b = mk(dir.path(), "Child B", Some(&a.slug)).expect("test");
+        mk(dir.path(), "Grandchild", Some(&b.slug)).expect("test");
+        block_task(dir.path(), &b.slug, &a.slug).expect("test");
+        done_task(dir.path(), &a.slug).expect("test");
+        let tasks = list_tasks(dir.path());
+        let by_slug: HashMap<&str, &Task> = tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
+        assert!(is_actionable(by_slug[b.slug.as_str()], &by_slug));
+    }
+
+    #[test]
+    fn start_task_still_blocks_on_own_parent_that_is_not_done() {
+        let dir = TempDir::new().expect("test");
+        let a = mk(dir.path(), "Parent A", None).expect("test");
+        let b = mk(dir.path(), "Child B", Some(&a.slug)).expect("test");
+        block_task(dir.path(), &b.slug, &a.slug).expect("test");
+        assert!(start_task(dir.path(), &b.slug, false).is_err());
     }
 
     #[test]
@@ -3117,7 +3193,7 @@ mod tests {
                     let by_slug: HashMap<&str, &Task> =
                         tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
                     for blocker in &next.blocked_on {
-                        prop_assert!(is_done_including_descendants(blocker, &by_slug));
+                        prop_assert!(is_done_including_descendants(blocker, &next.slug, &by_slug));
                     }
                 }
             }
