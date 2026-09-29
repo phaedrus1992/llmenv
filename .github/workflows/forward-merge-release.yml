@@ -144,15 +144,6 @@ jobs:
             echo "$DELIM"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Ensure label exists
-        continue-on-error: true
-        run: |
-          gh label create forward-merge-conflict \
-            --description "Conflict in forward-merge release cascade" \
-            --color "d73a4a" || true
-        env:
-          GH_TOKEN: ${{ github.token }}
-
       # Lockfile conflicts are resolved by regenerating the lockfile, so the job
       # needs both toolchains. Pins match ci.yml and docs.yml. (#2166)
       - name: Install Rust toolchain
