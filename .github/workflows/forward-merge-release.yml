@@ -65,7 +65,6 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-      issues: write
       actions: write
     steps:
       # #1675: for a push, the branch that was pushed IS the cascade's
@@ -102,7 +101,9 @@ jobs:
             rest="${PR_HEAD_REF#forward-merge/}"
             source_branch="${rest%-to-*}"
             if [[ ! "$source_branch" =~ ^(release/[0-9]+\.x|main)$ ]]; then
-              echo "::error::could not parse a valid source branch out of forward-merge PR head ref '$PR_HEAD_REF' (expected forward-merge/<source>-to-<target>, source one of release/X.x or main)"
+              # #2240: this ref has not passed the regex yet, so strip `::` as in #1543.
+              head_ref_display="${PR_HEAD_REF//::/  }"
+              echo "::error::could not parse a valid source branch out of forward-merge PR head ref '$head_ref_display' (expected forward-merge/<source>-to-<target>, source one of release/X.x or main)"
               exit 1
             fi
             echo "ref=$source_branch" >> "$GITHUB_OUTPUT"
@@ -141,15 +142,6 @@ jobs:
             echo "$BRANCHES"
             echo "$DELIM"
           } >> "$GITHUB_OUTPUT"
-
-      - name: Ensure label exists
-        continue-on-error: true
-        run: |
-          gh label create forward-merge-conflict \
-            --description "Conflict in forward-merge release cascade" \
-            --color "d73a4a" || true
-        env:
-          GH_TOKEN: ${{ github.token }}
 
       # Lockfile conflicts are resolved by regenerating the lockfile, so the job
       # needs both toolchains. Pins match ci.yml and docs.yml. (#2166)
@@ -388,10 +380,14 @@ jobs:
           # The trigger (release/**) is broader than the X.x regex, so a branch
           # like release/foo would otherwise fall through and merge into main.
           if [[ "$FOUND" -eq 0 ]]; then
-            echo "::warning::$CURRENT is not a versioned release/X.x branch; skipping cascade"
+            # #2240: CURRENT failed the regex, so strip `::` as in #1543.
+            echo "::warning::${CURRENT//::/  } is not a versioned release/X.x branch; skipping cascade"
             exit 0
           fi
 
+          # From here on, CURRENT and every TARGET match the detect step's
+          # release/X.x regex or are `main`, so a `::` cannot reach the echoes
+          # of CURRENT, TARGET, SOURCE_DESC or MERGE_BRANCH below (#2240).
           TARGETS+=("main")
 
           # Track whether the cascade halted early so the run fails visibly
@@ -434,9 +430,8 @@ jobs:
           # Runs the target's own copy (HEAD, before this merge) — never the
           # source's or the merged tree's. This job holds FORWARD_MERGE_PAT, so
           # it never runs a script from the merged tree or the source (#1532,
-          # #2171); release/3.x has no PAT but adopted the same rule for
-          # consistency (#2177). A target without the script has no rule to
-          # apply, so the caller bails and a human merges once.
+          # #2171, #2177). A target without the script has no rule to apply,
+          # so the caller bails and a human merges once.
           #
           # Return codes the caller (auto_resolve_conflicts) branches on:
           #   0 = keeping the target's copy is safe
@@ -463,6 +458,12 @@ jobs:
             else
               python3 "$dir/check.py" "$dir/base.toml" "$dir/source.toml" "$dir/target.toml" \
                 2> "$dir/problems.txt" || rc=$?
+              # Only exit 1 means "found a real change". Exit 2 (the check could
+              # not run) and any other code, such as 127 for a missing python3,
+              # mean the check gave no answer.
+              if [[ "$rc" -ne 0 && "$rc" -ne 1 ]]; then
+                rc=3
+              fi
               # Log text comes from the source's files; strip `::` as in #1543.
               if [[ -s "$dir/problems.txt" ]]; then
                 sed -e "s/::/  /g" -e "s|^|  $file_display: |" "$dir/problems.txt"
@@ -478,6 +479,9 @@ jobs:
           # A hand merge of a lockfile is never right. A lockfile-only change on the
           # source is not carried over; the target keeps its own. `--ignore-scripts`
           # keeps npm from running package code with the PAT in the environment.
+          # Both tools print paths and names from the merged manifests, which a
+          # source commit controls, so their output goes through the same `::`
+          # filter as problems.txt (#1543). pipefail keeps the tool's exit code.
           regenerate_lockfiles() {
             if [[ "$1" -eq 1 ]]; then
               echo "  Cargo.lock: regenerating from the merged manifests"
@@ -485,11 +489,14 @@ jobs:
                 echo "::error::Cargo.lock: git checkout --ours failed" >&2
                 return 1
               }
-              if ! cargo update --workspace; then
+              if ! cargo update --workspace 2>&1 | sed -e 's/::/  /g'; then
                 echo "::error::Cargo.lock: 'cargo update --workspace' failed" >&2
                 return 1
               fi
-              git add -- Cargo.lock
+              git add -- Cargo.lock || {
+                echo "::error::Cargo.lock: git add failed" >&2
+                return 1
+              }
             fi
             if [[ "$2" -eq 1 ]]; then
               echo "  website/package-lock.json: regenerating from the merged package.json"
@@ -497,11 +504,15 @@ jobs:
                 echo "::error::website/package-lock.json: git checkout --ours failed" >&2
                 return 1
               }
-              if ! (cd website && npm install --package-lock-only --ignore-scripts); then
+              if ! (cd website && npm install --package-lock-only --ignore-scripts) 2>&1 \
+                  | sed -e 's/::/  /g'; then
                 echo "::error::website/package-lock.json: 'npm install --package-lock-only --ignore-scripts' failed" >&2
                 return 1
               fi
-              git add -- website/package-lock.json
+              git add -- website/package-lock.json || {
+                echo "::error::website/package-lock.json: git add failed" >&2
+                return 1
+              }
             fi
           }
 
@@ -537,6 +548,12 @@ jobs:
               echo "::error::failed to list conflicted files" >&2
               return 1
             }
+            # The merge can fail for a reason other than a conflict, such as
+            # unrelated histories. Then there is nothing to resolve.
+            if [[ -z "$conflicted_files" ]]; then
+              echo "::error::the merge failed but git reports no conflicted files" >&2
+              return 1
+            fi
             while IFS= read -r file; do
               [[ -n "$file" ]] || continue
               # #1543: $file is an arbitrary path from the conflicting merge
@@ -607,7 +624,10 @@ jobs:
                     return 1
                   fi
                   rm -f "$tmp_script"
-                  git add -- "$file"
+                  git add -- "$file" || {
+                    echo "::error::$file: git add failed" >&2
+                    return 1
+                  }
                   ;;
                 Cargo.lock)
                   lock_cargo=1
@@ -633,8 +653,14 @@ jobs:
                     return 1
                   fi
                   echo "  $file_display: keeping $TARGET's own version"
-                  git checkout --ours -- "$file"
-                  git add -- "$file"
+                  git checkout --ours -- "$file" || {
+                    echo "::error::$file_display: git checkout --ours failed" >&2
+                    return 1
+                  }
+                  git add -- "$file" || {
+                    echo "::error::$file_display: git add failed" >&2
+                    return 1
+                  }
                   ;;
                 *)
                   echo "::error::$file_display: conflict has no auto-resolution rule"
@@ -764,10 +790,18 @@ jobs:
             # left them unsanitized and unsuppressed. Verified against real
             # git: a path containing `::stop-commands::` is echoed raw by
             # git itself, before auto_resolve_conflicts' own file_display
-            # sanitization ever runs. Neither invocation's own text output is
-            # used below (only the exit status is), so both are safe to
-            # fully suppress.
-            if ! git merge --no-commit --no-ff "$SOURCE_REF" >/dev/null 2>&1; then
+            # sanitization ever runs. So stdout is always discarded. stderr is
+            # kept only to name the cause when git refuses the merge before it
+            # starts one (no MERGE_HEAD, e.g. unrelated histories), and it is
+            # sanitized before it is printed (#2271).
+            if ! MERGE_ERR=$(git merge --no-commit --no-ff "$SOURCE_REF" 2>&1 >/dev/null); then
+              if ! git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+                MERGE_ERR_SAFE="${MERGE_ERR//$'\n'/ }"
+                echo "::error::git merge of $SOURCE_DESC into $TARGET failed with no merge in progress: ${MERGE_ERR_SAFE//::/  }"
+                echo "::endgroup::"
+                HALTED="merge failed at $TARGET"
+                break
+              fi
               echo "Conflicts; attempting auto-resolution:"
               if auto_resolve_conflicts; then
                 git commit --no-edit
@@ -866,7 +900,7 @@ jobs:
               fi
               # Same set -e hazard as FETCH_RC above — a bare command's exit
               # status would kill the script before ls_rc=$? ever ran.
-              if git ls-remote --exit-code --heads origin "$MERGE_BRANCH" >/dev/null 2>&1; then
+              if LS_STDERR=$(git ls-remote --exit-code --heads origin "$MERGE_BRANCH" 2>&1 >/dev/null); then
                 ls_rc=0
               else
                 ls_rc=$?
@@ -904,7 +938,14 @@ jobs:
                   HALTED="PR already open for $TARGET"
                   break
                 fi
-                if ! git merge --no-edit "$SOURCE_REF" >/dev/null 2>&1; then
+                if ! MERGE_ERR=$(git merge --no-edit "$SOURCE_REF" 2>&1 >/dev/null); then
+                  if ! git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+                    MERGE_ERR_SAFE="${MERGE_ERR//$'\n'/ }"
+                    echo "::error::git merge of $SOURCE_DESC into existing $MERGE_BRANCH failed with no merge in progress: ${MERGE_ERR_SAFE//::/  }"
+                    echo "::endgroup::"
+                    HALTED="merge failed updating $MERGE_BRANCH"
+                    break
+                  fi
                   echo "Conflicts merging $SOURCE_DESC into existing $MERGE_BRANCH; attempting auto-resolution:"
                   if auto_resolve_conflicts; then
                     git commit --no-edit
@@ -924,6 +965,10 @@ jobs:
                 MERGE_SHA=$(git rev-parse HEAD)
                 if ! push_with_pat origin "$MERGE_BRANCH"; then
                   echo "::error::Push to update existing merge branch $MERGE_BRANCH failed"
+                  if [[ -z "${_forward_merge_pat:-}" ]] \
+                      && ! git diff --quiet "origin/$TARGET" HEAD -- .github/workflows/; then
+                    echo "::error::This merge changes .github/workflows/, which GITHUB_TOKEN cannot push. To fix, set FORWARD_MERGE_PAT (a fine-grained PAT for this repository only, with contents: write and workflows: write), or push $MERGE_BRANCH by hand."
+                  fi
                   echo "::endgroup::"
                   HALTED="merge-branch update push failed for $TARGET"
                   break
@@ -934,14 +979,21 @@ jobs:
                 HALTED="PR already open for $TARGET (branch updated with $SOURCE_DESC)"
                 break
               elif [[ $ls_rc -ne 2 ]]; then
-                echo "::error::Network error checking if $MERGE_BRANCH exists (exit $ls_rc); halting cascade"
+                # Exit 2 means "no such branch". Any other code (auth, network,
+                # bad remote) is a failure; git's own stderr names which one.
+                if [[ -n "$LS_STDERR" ]]; then
+                  LS_STDERR_SAFE="${LS_STDERR//$'\n'/ }"
+                  echo "::error::ls-remote for $MERGE_BRANCH failed (exit $ls_rc): ${LS_STDERR_SAFE//::/  }"
+                else
+                  echo "::error::ls-remote for $MERGE_BRANCH failed (exit $ls_rc; no stderr)"
+                fi
                 echo "::endgroup::"
-                HALTED="network error at $TARGET"
+                HALTED="ls-remote failed at $TARGET"
                 break
               fi
 
-              # Create branch pointing to current HEAD (the merge commit at line 205),
-              # not origin/$TARGET (which would discard the merge commit).
+              # Create the branch at HEAD (the merge commit made above), not at
+              # origin/$TARGET, which would discard the merge commit.
               if ! git checkout -B "$MERGE_BRANCH"; then
                 echo "::error::Failed to create merge branch $MERGE_BRANCH"
                 echo "::endgroup::"
@@ -951,6 +1003,10 @@ jobs:
               MERGE_SHA=$(git rev-parse HEAD)
               if ! push_with_pat origin "$MERGE_BRANCH" --force-with-lease; then
                 echo "::error::Push to merge branch $MERGE_BRANCH failed; cannot open PR"
+                if [[ -z "${_forward_merge_pat:-}" ]] \
+                    && ! git diff --quiet "origin/$TARGET" HEAD -- .github/workflows/; then
+                  echo "::error::This merge changes .github/workflows/, which GITHUB_TOKEN cannot push. To fix, set FORWARD_MERGE_PAT (a fine-grained PAT for this repository only, with contents: write and workflows: write), or push $MERGE_BRANCH by hand."
+                fi
                 echo "::endgroup::"
                 HALTED="merge-branch push failed for $TARGET"
                 break
@@ -964,12 +1020,13 @@ jobs:
                 --title "Forward-merge $SOURCE_DESC into $TARGET" \
                 --body "$PR_BODY"; then
                 echo "::error::Failed to create PR for $MERGE_BRANCH"
+                HALTED="PR creation failed for $TARGET"
               else
                 echo "::error::Cascade halted: opened PR for $TARGET instead of pushing directly"
                 approve_pending_runs "$MERGE_SHA"
+                HALTED="PR opened for $TARGET"
               fi
               echo "::endgroup::"
-              HALTED="PR opened for $TARGET"
               break
             fi
 

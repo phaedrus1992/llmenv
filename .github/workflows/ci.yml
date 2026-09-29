@@ -156,9 +156,9 @@ jobs:
   workflow-tests:
     # Not a required status check, so unlike test/deny/hawk above this can
     # safely gate on `needs.changes` rather than always running (#1522):
-    # neither forward-merge-release-guards.sh nor coverage-per-file-floor.sh
-    # ran anywhere in CI before this job, so a regression in the bash logic
-    # they cover shipped undetected.
+    # the bash tests under .github/workflows/__tests__/ ran nowhere in CI
+    # before this job, so a regression in the logic they cover shipped
+    # undetected.
     needs: changes
     if: needs.changes.outputs.workflow_tests == 'true'
     runs-on: ubuntu-latest
@@ -171,10 +171,18 @@ jobs:
           set -uo pipefail
           overall_rc=0
           for f in .github/workflows/__tests__/*.sh; do
-            echo "::group::$f"
+            # Strip newlines and `::` so a file name cannot break the group
+            # title (#1543). This is not a security boundary: the next line runs
+            # the PR's own script.
+            f_display="${f//$'\n'/ }"
+            echo "::group::${f_display//::/  }"
             bash "$f"
             rc=$?
             [[ $rc -eq 0 ]] || overall_rc=1
             echo "::endgroup::"
           done
           exit "$overall_rc"
+      # The manifest check that the forward-merge cascade runs had no CI
+      # coverage (#2271).
+      - name: Run scripts/tests
+        run: python3 -m unittest discover -s scripts/tests

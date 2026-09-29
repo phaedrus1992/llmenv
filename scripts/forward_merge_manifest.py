@@ -5,7 +5,8 @@ Usage: forward_merge_manifest.py <base.toml> <source.toml> <target.toml>
 
 Exit 0: keeping the target's file loses nothing the source changed.
 Exit 1: the source made a real change. Print one line per difference on stderr.
-Exit 2: a file could not be read or parsed. The caller treats this as exit 1.
+Exit 2: a file could not be read or parsed, or the check itself failed.
+        The caller refuses to auto-resolve and reports that it could not check.
 
 Design: docs/design/issue-2166-forward-merge-drift.md
 """
@@ -226,7 +227,13 @@ def main(argv: list[str]) -> int:
     except ValueError as err:
         print(err, file=sys.stderr)
         return 2
-    problems = check(base, source, target)
+    # Any failure in the check means "could not check", never "found a real
+    # change": exit 1 is reserved for a difference that the check found.
+    try:
+        problems = check(base, source, target)
+    except Exception as err:  # noqa: BLE001 - every failure maps to exit 2
+        print(f"cannot check: {type(err).__name__}: {err}", file=sys.stderr)
+        return 2
     for line in problems:
         print(line, file=sys.stderr)
     return 1 if problems else 0
