@@ -65,7 +65,6 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-      issues: write
       actions: write
     steps:
       # #1675: for a push, the branch that was pushed IS the cascade's
