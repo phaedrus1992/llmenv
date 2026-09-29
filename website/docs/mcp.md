@@ -79,6 +79,15 @@ neither is present, `llmenv export` fails with an error telling you to install
 one or remove the `memory:` block. Client hosts need neither — they only open an
 HTTP connection to the server.
 
+(changed in v3.12.0) llmenv starts `mcp-proxy` and `icm serve` in a fixed
+directory, `$XDG_STATE_HOME/llmenv/icm-serve` (or
+`~/.local/state/llmenv/icm-serve`), and stops git repository discovery at its
+parent. Since ICM 0.10.64, `icm serve` with no `ICM_DB` and no global
+`[store].path` opens `<git root>/.icm/memories.db` of its working directory. The
+fixed directory has no git root, so the served store is the one your own ICM
+configuration names, wherever `llmenv export` first started the proxy. To pick
+the database, set `ICM_DB` or `[store].path` in ICM's config.
+
 The server host's address comes from the top-level `host:` table:
 
 ```yaml
