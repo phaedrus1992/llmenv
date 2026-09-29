@@ -2405,17 +2405,27 @@ SHELL
 make_approve_stubs() {
   local dir
   dir=$(mktemp -d)
+  # APPROVE_FAIL makes every approval fail, APPROVE_FAIL_ONCE only the first.
+  # LIST_FAIL makes every list fail, LIST_FAIL_ROUND only that round.
   cat > "$dir/gh" <<'STUB'
 #!/usr/bin/env bash
-if [[ "$1 $2" == "api -X" ]]; then
+if [[ "$1 $2 $3" == "api -X POST" ]]; then
+  if [[ -n "${APPROVE_FAIL:-}" ]] \
+      || { [[ -n "${APPROVE_FAIL_ONCE:-}" ]] && [[ ! -f "$STUB_DIR/failed_once" ]]; }; then
+    touch "$STUB_DIR/failed_once"
+    echo "HTTP 403 ::stop-commands::tok" >&2
+    exit 1
+  fi
   echo "$4" >> "$STUB_DIR/approved"
-  [[ -n "${APPROVE_FAIL:-}" ]] && { echo "HTTP 403 ::stop-commands::tok" >&2; exit 1; }
   exit 0
 fi
 echo "$*" >> "$STUB_DIR/listed"
 n=$(( $(cat "$STUB_DIR/round" 2>/dev/null || echo 0) + 1 ))
 echo "$n" > "$STUB_DIR/round"
-[[ -n "${LIST_FAIL:-}" ]] && { echo "HTTP 401 Bad credentials ::stop-commands::tok" >&2; exit 1; }
+if [[ -n "${LIST_FAIL:-}" || "${LIST_FAIL_ROUND:-}" == "$n" ]]; then
+  echo "HTTP 401 Bad credentials ::stop-commands::tok" >&2
+  exit 1
+fi
 if [[ -f "$STUB_DIR/runs.$n" ]]; then cat "$STUB_DIR/runs.$n"; else echo '{"workflow_runs":[]}'; fi
 STUB
   chmod +x "$dir/gh"
@@ -2490,6 +2500,87 @@ test_2273_approve_failure_is_a_sanitized_warning() {
   [[ "$out" == *"::warning::failed to approve run 11"*"HTTP 403"* ]] && [[ "$out" != *"::stop-commands::"* ]] \
     && return 0
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# The server filters by status and branch and every page is read, so a flood
+# of fork runs on the same SHA cannot push this repo's run off page one.
+test_2273_list_is_filtered_and_paginated() {
+  local dir out listed
+  dir=$(make_approve_stubs)
+  out=$(run_approve "$dir" "$SHA40")
+  listed=$(head -1 "$dir/listed" 2>/dev/null)
+  trash "$dir" 2>/dev/null || true
+  [[ "$listed" == *"--paginate"* ]] && [[ "$listed" == *"head_sha=$SHA40"* ]] \
+    && [[ "$listed" == *"status=action_required"* ]] && [[ "$listed" == *"branch=$MB"* ]] \
+    && [[ "$listed" == *"per_page=100"* ]] && return 0
+  printf '  listed: %s\n  out: %s\n' "$listed" "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2273_failed_approval_is_retried() {
+  local dir out approved
+  dir=$(make_approve_stubs)
+  runs_json > "$dir/runs.1"
+  runs_json > "$dir/runs.2"
+  out=$(APPROVE_FAIL_ONCE=1 run_approve "$dir" "$SHA40")
+  approved=$(cat "$dir/approved" 2>/dev/null)
+  trash "$dir" 2>/dev/null || true
+  [[ "$approved" == "repos/owner/repo/actions/runs/11/approve" ]] && return 0
+  printf '  approved: %s\n  out: %s\n' "$approved" "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# One failed round after a good one is not "could not list runs".
+test_2273_one_failed_round_is_not_a_list_warning() {
+  local dir out
+  dir=$(make_approve_stubs)
+  runs_json > "$dir/runs.1"
+  out=$(LIST_FAIL_ROUND=6 run_approve "$dir" "$SHA40")
+  trash "$dir" 2>/dev/null || true
+  [[ "$out" != *"could not list runs"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# Runs with missing or null fields must neither crash the filter nor match.
+test_2273_filter_skips_runs_with_missing_fields() {
+  local dir out approved
+  dir=$(make_approve_stubs)
+  cat > "$dir/runs.1" <<EOF
+{"workflow_runs":[
+ {"id":21,"conclusion":"action_required","head_branch":"$MB","head_repository":null},
+ {"id":22,"conclusion":"action_required","head_branch":"$MB"},
+ {"id":23,"conclusion":"action_required"},
+ {"id":24,"conclusion":"action_required","head_branch":"$MB","head_repository":{"full_name":"owner/repo"}}
+]}
+EOF
+  out=$(run_approve "$dir" "$SHA40")
+  approved=$(cat "$dir/approved" 2>/dev/null)
+  trash "$dir" 2>/dev/null || true
+  [[ "$approved" == "repos/owner/repo/actions/runs/24/approve" ]] && [[ "$out" != *"::warning::"* ]] \
+    && return 0
+  printf '  approved: %s\n  out: %s\n' "$approved" "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# The SHA must be exactly 40 lowercase hex digits.
+test_2273_sha_shape_boundaries() {
+  local sha dir listed bad=""
+  for sha in "${SHA40:0:39}" "${SHA40}0" "${SHA40^^}" "${SHA40:0:39}g" " $SHA40"; do
+    dir=$(make_approve_stubs)
+    run_approve "$dir" "$sha" >/dev/null
+    listed=$(cat "$dir/listed" 2>/dev/null)
+    trash "$dir" 2>/dev/null || true
+    [[ -z "$listed" ]] || bad+=" [$sha]"
+  done
+  dir=$(make_approve_stubs)
+  run_approve "$dir" "$SHA40" >/dev/null
+  listed=$(cat "$dir/listed" 2>/dev/null)
+  trash "$dir" 2>/dev/null || true
+  [[ -n "$listed" ]] || bad+=" [valid SHA made no call]"
+  [[ -z "$bad" ]] && return 0
+  echo "  wrong result for:$bad" >&2
   return 1
 }
 
@@ -3564,6 +3655,16 @@ run_test "Issue #2273: a failed run list is a sanitized warning" \
   test_2273_list_failure_is_a_sanitized_warning
 run_test "Issue #2273: a failed approval is a sanitized warning" \
   test_2273_approve_failure_is_a_sanitized_warning
+run_test "Issue #2273: the run list is filtered on the server and paginated" \
+  test_2273_list_is_filtered_and_paginated
+run_test "Issue #2273: a failed approval is retried on a later round" \
+  test_2273_failed_approval_is_retried
+run_test "Issue #2273: one failed list round after a good one is not a warning" \
+  test_2273_one_failed_round_is_not_a_list_warning
+run_test "Issue #2273: runs with missing fields neither crash nor match" \
+  test_2273_filter_skips_runs_with_missing_fields
+run_test "Issue #2273: the SHA check accepts only 40 lowercase hex digits" \
+  test_2273_sha_shape_boundaries
 run_test "Issue #2273: nothing pending means no approval and no warning" \
   test_2273_nothing_pending_never_approves
 run_test "Issue #2273: a failed approval does not halt the cascade" \

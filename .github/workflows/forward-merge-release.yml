@@ -353,18 +353,26 @@ jobs:
           # push to this branch re-running this same check) to approve
           # manually, so a warning is the right severity, not an error.
           approve_pending_runs() {
-            local sha="$1" branch="$2" runs ids id err_file err last_err="" tried=""
+            local sha="$1" branch="$2" runs ids id err_file err last_err="" list_ok=0
+            local approved="" warned=""
             if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
               echo "::warning::approve_pending_runs got no valid commit SHA; check the PR for runs that wait for approval"
               return 0
             fi
-            err_file=$(mktemp)
+            if ! err_file=$(mktemp); then
+              echo "::warning::approve_pending_runs could not create a temp file; approve runs for $sha by hand"
+              return 0
+            fi
             # Every round, not only until the first hit: a workflow can start,
-            # and be gated, after the others (#2273).
+            # and be gated, after the others. The server filters by status and
+            # branch and every page is read, so a flood of fork runs on the same
+            # SHA cannot push this repo's run off the first page (#2273).
             for _ in 1 2 3 4 5 6; do
               ids=""
-              if runs=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${sha}" 2>"$err_file"); then
-                last_err=""
+              if runs=$(gh api -X GET "repos/${GITHUB_REPOSITORY}/actions/runs" --paginate \
+                  -f head_sha="$sha" -f status=action_required -f branch="$branch" \
+                  -f per_page=100 2>"$err_file"); then
+                list_ok=1
                 if ! ids=$(jq -r --arg repo "$GITHUB_REPOSITORY" --arg branch "$branch" \
                     '.workflow_runs[] | select(.conclusion == "action_required"
                       and .head_repository.full_name == $repo and .head_branch == $branch) | .id' \
@@ -376,25 +384,28 @@ jobs:
                 last_err="$(<"$err_file")"
               fi
               while IFS= read -r id; do
-                if [[ -z "$id" || " $tried " == *" $id "* ]]; then
+                if [[ -z "$id" || " $approved " == *" $id "* ]]; then
                   continue
                 fi
-                tried+=" $id"
                 echo "Approving action_required run $id for $sha"
-                if ! gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runs/${id}/approve" \
+                if gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runs/${id}/approve" \
                     >/dev/null 2>"$err_file"; then
+                  approved+=" $id"
+                elif [[ " $warned " != *" $id "* ]]; then
+                  # Warn once; a later round tries again.
+                  warned+=" $id"
                   err="$(<"$err_file")"
                   err="${err//$'\n'/ }"
-                  echo "::warning::failed to approve run $id for $sha: ${err//::/  }. Approve it by hand."
+                  echo "::warning::failed to approve run $id for $sha: ${err//::/  }. A later poll tries again; if none succeeds, approve it by hand."
                 fi
               done <<< "$ids"
               sleep 10
             done
             rm -f "$err_file"
-            if [[ -n "$last_err" ]]; then
+            if [[ "$list_ok" -eq 0 ]]; then
               last_err="${last_err//$'\n'/ }"
               echo "::warning::could not list runs for $sha: ${last_err//::/  }. Check the PR for runs that wait for approval."
-            elif [[ -z "$tried" ]]; then
+            elif [[ -z "$approved" && -z "$warned" ]]; then
               echo "No run for $sha waited for approval"
             fi
           }
