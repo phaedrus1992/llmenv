@@ -2620,6 +2620,32 @@ test_2271_merge_without_merge_head_names_git_reason() {
   return 1
 }
 
+test_2271_stale_branch_merge_without_merge_head_names_git_reason() {
+  local stubs out
+  stubs=$(mktemp -d)
+  cat > "$stubs/git" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  merge) echo "fatal: refusing to merge unrelated histories" >&2; exit 128 ;;
+  merge-base) exit 1 ;;
+  rev-parse) [[ "$*" == *MERGE_HEAD* ]] && exit 1 ;;
+esac
+exit 0
+STUB
+  chmod +x "$stubs/git"
+  out=$(PATH="$stubs:$PATH" SOURCE_REF=origin/source TARGET=release/4.x \
+    SOURCE_DESC=release/3.x MERGE_BRANCH="forward-merge/release/3.x-to-release/4.x" ls_rc=0 \
+    bash -c "$(existing_branch_update_block)
+echo \"HALTED=\$HALTED\"" 2>&1 || true)
+  trash "$stubs" 2>/dev/null || true
+
+  [[ "$out" == *"failed with no merge in progress: fatal: refusing to merge unrelated histories"* ]] \
+    && [[ "$out" == *"HALTED=merge failed updating forward-merge/release/3.x-to-release/4.x"* ]] \
+    && [[ "$out" != *"Failed to abort merge"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
 # GITHUB_TOKEN cannot push a change to .github/workflows/, so without the PAT
 # that is the likely cause of a failed merge-branch push.
 PAT_HINT="set FORWARD_MERGE_PAT (a fine-grained PAT for this repository only"
@@ -3152,6 +3178,8 @@ run_test "Issue #2271: no push hint when FORWARD_MERGE_PAT is set" \
   test_2271_no_push_hint_with_pat_set
 run_test "Issue #2271: a failed stale-branch update push with no PAT gives the hint" \
   test_2271_push_hint_on_stale_branch_update
+run_test "Issue #2271: a stale-branch merge with no MERGE_HEAD halts with git's reason" \
+  test_2271_stale_branch_merge_without_merge_head_names_git_reason
 run_test "Issue #2271: a merge that fails with no MERGE_HEAD halts with git's reason" \
   test_2271_merge_without_merge_head_names_git_reason
 
