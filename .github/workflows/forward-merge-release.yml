@@ -459,9 +459,9 @@ jobs:
             else
               python3 "$dir/check.py" "$dir/base.toml" "$dir/source.toml" "$dir/target.toml" \
                 2> "$dir/problems.txt" || rc=$?
-              # Only exit 1 means "found a real change". Exit 2 (a file it
-              # cannot parse), a traceback or a missing python3 means the check
-              # did not run.
+              # Only exit 1 means "found a real change". Exit 2 (the check could
+              # not run) and any other code, such as 127 for a missing python3,
+              # mean the check gave no answer.
               if [[ "$rc" -ne 0 && "$rc" -ne 1 ]]; then
                 rc=3
               fi
