@@ -481,7 +481,7 @@ impl AgentAdapter for CrushAdapter {
     }
 
     fn emit_hook_context(&self, hook_event_name: &str, text: &str) -> String {
-        super::emit_hook_context(hook_event_name, text)
+        super::emit_hook_context(hook_event_name, text, super::SessionStartContext::Rejected)
     }
 }
 
@@ -1421,6 +1421,12 @@ mod tests {
     #[test]
     fn emit_hook_context_empty_text_returns_empty() {
         assert_eq!(CrushAdapter.emit_hook_context("PreToolUse", ""), "");
+    }
+
+    // #2142: nothing shows Crush's hook schema accepts SessionStart context.
+    #[test]
+    fn emit_hook_context_suppresses_session_start() {
+        assert_eq!(CrushAdapter.emit_hook_context("SessionStart", "mem"), "");
     }
 
     #[test]

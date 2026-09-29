@@ -251,15 +251,18 @@ impl std::fmt::Display for HookEvent {
 /// last the natural-language `Recall`, because it has no project filter and is the least
 /// specific. Tag and bundle recalls are project-unfiltered (#197, #228). The turn-capture
 /// events carry no memory actions.
+///
+/// `wake` is `None` for a continued session (see [`continues_session`]), which gets no
+/// wake-up call.
 fn dispatch(
     event: HookEvent,
     tag_queries: &[TagRecallQuery],
     bundle_queries: &[BundleRecallQuery],
     ranks: &BTreeMap<String, u8>,
-    wake: &WakeUpArgs,
+    wake: Option<&WakeUpArgs>,
 ) -> Vec<Action> {
     match event {
-        HookEvent::SessionStart => vec![Action::WakeUp(wake.clone())],
+        HookEvent::SessionStart => wake.cloned().map(Action::WakeUp).into_iter().collect(),
         HookEvent::TurnStart => {
             let mut actions = scope_recall_actions(tag_queries, bundle_queries, ranks);
             actions.push(Action::Recall);
@@ -279,6 +282,13 @@ fn dispatch(
         | HookEvent::SubagentTask => vec![],
         HookEvent::PostSession => vec![], // consolidation runs as a separate step
     }
+}
+
+/// Whether a `SessionStart` payload continues an earlier conversation (#2142).
+/// Claude Code's `source` is `resume` or `fork` then; the conversation already
+/// holds the earlier wake-up pack, so a second one only doubles the context.
+pub(super) fn continues_session(payload: &serde_json::Value) -> bool {
+    matches!(payload["source"].as_str(), Some("resume" | "fork"))
 }
 
 /// The scope-tag recalls in specificity order (#2159): rank-1 tags, bundles, then
@@ -1377,7 +1387,8 @@ fn run_inner(
             if let Some(client) = &client
                 && !session_end_unchanged
             {
-                let actions = dispatch(event, &tag_queries, &bundle_queries, &tag_ranks, &wake);
+                let wake_call = (!continues_session(stdin_payload)).then_some(&wake);
+                let actions = dispatch(event, &tag_queries, &bundle_queries, &tag_ranks, wake_call);
                 // Use minimal chunk for storage to avoid duplication. (#1792)
                 let store_content = store_content_for_event(event, &chunk, &storage_chunk);
                 out = run_event_memory(MemoryCall {
@@ -2682,7 +2693,7 @@ mod tests {
             &tags,
             &[],
             &BTreeMap::new(),
-            &WakeUpArgs::default(),
+            Some(&WakeUpArgs::default()),
         );
         let scope = scope_recall_actions(&tags, &[], &BTreeMap::new());
         assert_eq!(turn.last(), Some(&Action::Recall));
@@ -2699,7 +2710,16 @@ mod tests {
         ] {
             assert_eq!(name.parse::<HookEvent>().unwrap(), event);
             assert_eq!(event.to_string(), name);
-            assert!(dispatch(event, &[], &[], &BTreeMap::new(), &WakeUpArgs::default()).is_empty());
+            assert!(
+                dispatch(
+                    event,
+                    &[],
+                    &[],
+                    &BTreeMap::new(),
+                    Some(&WakeUpArgs::default())
+                )
+                .is_empty()
+            );
             assert_eq!(event_to_log_kind(event), None);
         }
     }
@@ -4508,7 +4528,7 @@ mod tests {
             HookEvent::PreCompact,
         ] {
             assert_eq!(
-                dispatch(ev, &[], &[], &BTreeMap::new(), &WakeUpArgs::default()),
+                dispatch(ev, &[], &[], &BTreeMap::new(), Some(&WakeUpArgs::default())),
                 Vec::<Action>::new()
             );
         }
@@ -4584,7 +4604,7 @@ mod tests {
                 &[],
                 &[],
                 &BTreeMap::new(),
-                &WakeUpArgs::default()
+                Some(&WakeUpArgs::default())
             ),
             vec![Action::WakeUp(WakeUpArgs::default())]
         );
@@ -4594,7 +4614,7 @@ mod tests {
                 &[],
                 &[],
                 &BTreeMap::new(),
-                &WakeUpArgs::default()
+                Some(&WakeUpArgs::default())
             ),
             vec![Action::Recall]
         );
@@ -4604,7 +4624,7 @@ mod tests {
                 &[],
                 &[],
                 &BTreeMap::new(),
-                &WakeUpArgs::default()
+                Some(&WakeUpArgs::default())
             ),
             vec![Action::Store]
         );
@@ -4614,11 +4634,35 @@ mod tests {
                 &[],
                 &[],
                 &BTreeMap::new(),
-                &WakeUpArgs::default()
+                Some(&WakeUpArgs::default())
             ),
             vec![],
             "PostSession defers to consolidation module, no dispatch actions"
         );
+    }
+
+    // #2142: a continued session (resume, fork) gets no wake-up call.
+    #[test]
+    fn dispatch_skips_the_wake_up_without_wake_args() {
+        assert_eq!(
+            dispatch(HookEvent::SessionStart, &[], &[], &BTreeMap::new(), None),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn continues_session_only_for_resume_and_fork() {
+        for (payload, want) in [
+            (json!({"source": "resume"}), true),
+            (json!({"source": "fork"}), true),
+            (json!({"source": "startup"}), false),
+            (json!({"source": "clear"}), false),
+            (json!({"source": "compact"}), false),
+            (json!({"source": 7}), false),
+            (json!({}), false),
+        ] {
+            assert_eq!(continues_session(&payload), want, "{payload}");
+        }
     }
 
     #[test]
@@ -4633,13 +4677,19 @@ mod tests {
                 &[],
                 &[],
                 &BTreeMap::new(),
-                &wake_750
+                Some(&wake_750)
             ),
             vec![Action::WakeUp(wake_750.clone())]
         );
         // Not carried by any other event's actions — WakeUp only fires on SessionStart.
         assert_eq!(
-            dispatch(HookEvent::TurnStart, &[], &[], &BTreeMap::new(), &wake_750),
+            dispatch(
+                HookEvent::TurnStart,
+                &[],
+                &[],
+                &BTreeMap::new(),
+                Some(&wake_750)
+            ),
             vec![Action::Recall]
         );
     }
@@ -4715,7 +4765,7 @@ mod tests {
             &queries,
             &[],
             &BTreeMap::new(),
-            &WakeUpArgs::default(),
+            Some(&WakeUpArgs::default()),
         );
         assert_eq!(
             actions,
@@ -4743,7 +4793,7 @@ mod tests {
             &[],
             &queries,
             &BTreeMap::new(),
-            &WakeUpArgs::default(),
+            Some(&WakeUpArgs::default()),
         );
         assert_eq!(
             actions,
@@ -4772,7 +4822,7 @@ mod tests {
             &tag_qs,
             &bundle_qs,
             &ranks,
-            &WakeUpArgs::default(),
+            Some(&WakeUpArgs::default()),
         );
         // Order: rank-1 tag recalls, then bundle recalls, then project recall.
         assert!(matches!(actions[0], Action::RecallTag(_)));
@@ -4827,7 +4877,7 @@ mod tests {
             &tag_qs,
             &bundle_qs,
             &ranks,
-            &WakeUpArgs::default(),
+            Some(&WakeUpArgs::default()),
         );
         assert_eq!(actions.len(), 3);
         match &actions[0] {
@@ -4943,7 +4993,7 @@ mod tests {
         ) {
             let tag_qs = tag_recall_queries(&tags).expect("valid tags");
             let bundle_qs = bundle_recall_queries(&bundles).expect("valid bundles");
-            let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs, &BTreeMap::new(), &WakeUpArgs::default());
+            let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs, &BTreeMap::new(), Some(&WakeUpArgs::default()));
 
             prop_assert_eq!(actions.len(), 1 + tags.len() + bundles.len());
             for a in &actions[..bundles.len()] {
@@ -4983,7 +5033,7 @@ mod tests {
             &tag_qs,
             &bundle_qs,
             &ranks,
-            &WakeUpArgs::default(),
+            Some(&WakeUpArgs::default()),
         )
         .iter()
         .map(|a| match a {

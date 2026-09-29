@@ -1219,7 +1219,7 @@ impl AgentAdapter for OpencodeAdapter {
     }
 
     fn emit_hook_context(&self, hook_event_name: &str, text: &str) -> String {
-        super::emit_hook_context(hook_event_name, text)
+        super::emit_hook_context(hook_event_name, text, super::SessionStartContext::Rejected)
     }
 }
 
@@ -3665,10 +3665,8 @@ mod tests {
                 .supported_hook_events()
                 .contains(&"PreToolUse")
         );
-        assert_eq!(
-            OpencodeAdapter.emit_hook_context("SessionStart", "hi"),
-            super::super::emit_hook_context("SessionStart", "hi")
-        );
+        // #2142: nothing shows opencode's hook schema accepts SessionStart context.
+        assert_eq!(OpencodeAdapter.emit_hook_context("SessionStart", "hi"), "");
     }
 
     fn plugin_manifest(

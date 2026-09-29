@@ -424,7 +424,10 @@ llmenv provides engine-neutral lifecycle hooks (`hook-run` command) for three
 neutral events:
 
 - **SessionStart** — `hook-run session_start` injects the session wake-up pack
-  (`icm_wake_up`) containing your critical memories (by importance and recency)
+  (`icm_wake_up`) containing your critical memories (by importance and recency).
+  (changed in v3.12.0) Claude Code shows it under
+  `[ICM MEMORY CONTEXT (session start)]`; a resumed or forked session skips the
+  call, because its conversation already holds the earlier pack.
 - **TurnStart** — `hook-run turn_start` injects recalled context at the start of
   each agent turn (`icm_memory_recall`). It issues one **project-unfiltered**
   recall per active tag keyed on `llmenv-tag:<tag>`, and one per active bundle
