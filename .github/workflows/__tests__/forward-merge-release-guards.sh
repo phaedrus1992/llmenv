@@ -2518,6 +2518,21 @@ test_2271_failed_pr_create_is_not_reported_as_opened() {
   return 1
 }
 
+test_2271_ls_remote_failure_without_stderr_says_so() {
+  local stubs out
+  stubs=$(mktemp -d)
+  printf '#!/usr/bin/env bash\n[[ "$1" == ls-remote ]] && exit 128\nexit 0\n' > "$stubs/git"
+  chmod +x "$stubs/git"
+  out=$(PATH="$stubs:$PATH" MERGE_BRANCH="forward-merge/release/3.x-to-release/4.x" \
+    TARGET=release/4.x bash -c "$(ls_remote_block)" 2>&1 || true)
+  trash "$stubs" 2>/dev/null || true
+
+  [[ "$out" == *"::error::ls-remote for forward-merge/release/3.x-to-release/4.x failed (exit 128; no stderr)"* ]] \
+    && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
 # The trial merge of the cascade, extracted from production through its
 # "no merge in progress" arm. Prints HALTED.
 trial_merge_block() {
@@ -3092,6 +3107,8 @@ run_test "Issue #2271: a failed ls-remote prints git's sanitized stderr" \
   test_2271_ls_remote_failure_prints_sanitized_stderr
 run_test "Issue #2271: a failed merge-branch push with no PAT names the workflow-file limit" \
   test_2271_push_failure_without_pat_gives_hint
+run_test "Issue #2271: a failed ls-remote with no stderr says so" \
+  test_2271_ls_remote_failure_without_stderr_says_so
 run_test "Issue #2271: no push hint when the merge changes no workflow file" \
   test_2271_no_push_hint_without_workflow_change
 run_test "Issue #2271: no push hint when FORWARD_MERGE_PAT is set" \

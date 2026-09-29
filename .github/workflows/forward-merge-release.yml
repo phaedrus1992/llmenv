@@ -969,8 +969,12 @@ jobs:
               elif [[ $ls_rc -ne 2 ]]; then
                 # Exit 2 means "no such branch". Any other code (auth, network,
                 # bad remote) is a failure; git's own stderr names which one.
-                LS_STDERR_SAFE="${LS_STDERR//$'\n'/ }"
-                echo "::error::ls-remote for $MERGE_BRANCH failed (exit $ls_rc): ${LS_STDERR_SAFE//::/  }"
+                if [[ -n "$LS_STDERR" ]]; then
+                  LS_STDERR_SAFE="${LS_STDERR//$'\n'/ }"
+                  echo "::error::ls-remote for $MERGE_BRANCH failed (exit $ls_rc): ${LS_STDERR_SAFE//::/  }"
+                else
+                  echo "::error::ls-remote for $MERGE_BRANCH failed (exit $ls_rc; no stderr)"
+                fi
                 echo "::endgroup::"
                 HALTED="ls-remote failed at $TARGET"
                 break
