@@ -530,7 +530,7 @@ test_1381_version_only_conflict_keeps_target_version() {
 # ---------------------------------------------------------------------------
 test_1381_non_version_change_bails() {
   local repo out
-  repo=$(make_version_conflict_repo 'serde = { version = "1" }\n')
+  repo=$(make_version_conflict_repo $'serde = { version = "1" }\n')
 
   out=$(cd "$repo" && SOURCE_REF=source TARGET=main SOURCE_DESC=release/4.x \
     bash -c "$(resolve_block)" 2>&1 || true)
@@ -2411,6 +2411,154 @@ test_2240_cascade_targets_are_regex_bounded() {
   return 1
 }
 
+# ---------------------------------------------------------------------------
+# Issue #2271: auto_resolve_conflicts runs inside `if`, so `set -e` does not
+# apply to it. Each failure below must return non-zero on its own.
+# ---------------------------------------------------------------------------
+
+# A merge can fail for a reason other than a conflict (unrelated histories,
+# a dirty tree). No file is then conflicted, and "nothing to resolve" must not
+# read as "resolved".
+test_2271_no_conflicted_files_bails() {
+  local repo out
+  repo=$(mktemp -d)
+  (
+    cd "$repo" || exit 1
+    git init -q -b target .
+    git config user.email t@t
+    git config user.name t
+    git config commit.gpgsign false
+    printf 'x\n' > file
+    git add file
+    git commit -q -m base
+  )
+  out=$(cd "$repo" && SOURCE_REF=target TARGET=release/4.x SOURCE_DESC=release/3.x \
+    bash -c "$(resolve_block)" 2>&1 || true)
+  trash "$repo" 2>/dev/null || true
+
+  [[ "$out" == *BAILED* ]] && [[ "$out" == *"no conflicted files"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# forward_merge_manifest.py exits 2 on a TOML file it cannot parse. That is
+# "could not check", not "found a real change".
+test_2271_manifest_parse_failure_is_could_not_check() {
+  local repo out
+  repo=$(make_version_conflict_repo '[broken')
+  out=$(cd "$repo" && SOURCE_REF=source TARGET=release/5.x SOURCE_DESC=release/4.x \
+    bash -c "$(resolve_block)" 2>&1 || true)
+  trash "$repo" 2>/dev/null || true
+
+  [[ "$out" == *BAILED* ]] && [[ "$out" == *"could not check whether keeping"* ]] \
+    && [[ "$out" != *"more than version numbers"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# If `checkout --ours` fails, a later `git add` stages the file with its
+# conflict markers, which clears the conflict and passes the closing check.
+test_2271_manifest_checkout_failure_bails() {
+  local repo stubs real_git out
+  repo=$(make_version_conflict_repo)
+  stubs=$(mktemp -d)
+  real_git=$(command -v git)
+  cat > "$stubs/git" <<STUB
+#!/usr/bin/env bash
+if [[ "\$1" == checkout && "\$2" == --ours ]]; then
+  exit 1
+fi
+exec "$real_git" "\$@"
+STUB
+  chmod +x "$stubs/git"
+  out=$(cd "$repo" && PATH="$stubs:$PATH" SOURCE_REF=source TARGET=release/5.x \
+    SOURCE_DESC=release/4.x bash -c "$(resolve_block)" 2>&1 || true)
+  trash "$repo" "$stubs" 2>/dev/null || true
+
+  [[ "$out" == *BAILED* ]] && [[ "$out" == *"git checkout --ours failed"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# The new-merge-branch path of the cascade, extracted from production: create
+# the branch, push it, open the PR. Prints HALTED. Callers put git and gh
+# stubs on PATH and export MERGE_BRANCH TARGET SOURCE_DESC.
+new_merge_branch_block() {
+  cat <<'SHELL'
+set -euo pipefail
+HALTED=""
+PUSH_SKIPPED=0
+push_with_pat() { git push "$@"; }
+approve_pending_runs() { :; }
+for _once in once; do
+SHELL
+  # shellcheck disable=SC2016 # literal sed address, not an expression to expand
+  sed -n '/^ *# Create branch pointing to current HEAD/,/^ *HALTED="PR opened for \$TARGET"$/p' \
+    "$WORKFLOW"
+  cat <<'SHELL'
+fi
+done
+echo "HALTED=$HALTED"
+SHELL
+}
+
+test_2271_failed_pr_create_is_not_reported_as_opened() {
+  local stubs out
+  stubs=$(mktemp -d)
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$stubs/git"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$stubs/gh"
+  chmod +x "$stubs/git" "$stubs/gh"
+  out=$(PATH="$stubs:$PATH" MERGE_BRANCH="forward-merge/release/3.x-to-release/4.x" \
+    TARGET=release/4.x SOURCE_DESC=release/3.x bash -c "$(new_merge_branch_block)" 2>&1 || true)
+  trash "$stubs" 2>/dev/null || true
+
+  [[ "$out" == *"::error::Failed to create PR for"* ]] \
+    && [[ "$out" == *"HALTED=PR creation failed for release/4.x"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# The merge-branch lookup of the cascade, extracted from production through
+# its failure arm. Prints HALTED.
+ls_remote_block() {
+  cat <<'SHELL'
+set -euo pipefail
+HALTED=""
+for _once in once; do
+SHELL
+  # shellcheck disable=SC2016 # literal sed address, not an expression to expand
+  sed -n '/^ *if LS_STDERR=\$(git ls-remote/,/^ *HALTED="ls-remote failed at \$TARGET"$/p' "$WORKFLOW"
+  cat <<'SHELL'
+break
+fi
+done
+echo "HALTED=$HALTED"
+SHELL
+}
+
+test_2271_ls_remote_failure_prints_sanitized_stderr() {
+  local stubs out
+  stubs=$(mktemp -d)
+  cat > "$stubs/git" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1" == ls-remote ]]; then
+  echo "fatal: Authentication failed ::stop-commands::tok" >&2
+  exit 128
+fi
+exit 0
+STUB
+  chmod +x "$stubs/git"
+  out=$(PATH="$stubs:$PATH" MERGE_BRANCH="forward-merge/release/3.x-to-release/4.x" \
+    TARGET=release/4.x bash -c "$(ls_remote_block)" 2>&1 || true)
+  trash "$stubs" 2>/dev/null || true
+
+  [[ "$out" == *"::error::ls-remote for forward-merge/release/3.x-to-release/4.x failed (exit 128): fatal: Authentication failed"* ]] \
+    && [[ "$out" != *"::stop-commands::"* ]] \
+    && [[ "$out" == *"HALTED=ls-remote failed at release/4.x"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
 # Build the "update an existing stale merge branch" block: what runs when a
 # direct push to $TARGET fails and $MERGE_BRANCH already exists. Extracted
 # from production (not hand-copied) so the test can't drift from the real
@@ -2804,6 +2952,16 @@ run_test "Issue #2240: a branch that is not a release line is printed with :: re
   test_2240_unversioned_branch_warning_is_sanitized
 run_test "Issue #2240: every later echo reads only regex-bounded branch names" \
   test_2240_cascade_targets_are_regex_bounded
+run_test "Issue #2271: a failed merge with no conflicted file bails, not resolves" \
+  test_2271_no_conflicted_files_bails
+run_test "Issue #2271: a manifest check that cannot parse a file says so" \
+  test_2271_manifest_parse_failure_is_could_not_check
+run_test "Issue #2271: a failed checkout --ours on a manifest bails" \
+  test_2271_manifest_checkout_failure_bails
+run_test "Issue #2271: a failed gh pr create is not reported as an opened PR" \
+  test_2271_failed_pr_create_is_not_reported_as_opened
+run_test "Issue #2271: a failed ls-remote prints git's sanitized stderr" \
+  test_2271_ls_remote_failure_prints_sanitized_stderr
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

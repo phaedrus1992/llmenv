@@ -469,6 +469,12 @@ jobs:
             else
               python3 "$dir/check.py" "$dir/base.toml" "$dir/source.toml" "$dir/target.toml" \
                 2> "$dir/problems.txt" || rc=$?
+              # Only exit 1 means "found a real change". Exit 2 (a file it
+              # cannot parse), a traceback or a missing python3 means the check
+              # did not run.
+              if [[ "$rc" -ne 0 && "$rc" -ne 1 ]]; then
+                rc=3
+              fi
               # Log text comes from the source's files; strip `::` as in #1543.
               if [[ -s "$dir/problems.txt" ]]; then
                 sed -e "s/::/  /g" -e "s|^|  $file_display: |" "$dir/problems.txt"
@@ -543,6 +549,12 @@ jobs:
               echo "::error::failed to list conflicted files" >&2
               return 1
             }
+            # The merge can fail for a reason other than a conflict, such as
+            # unrelated histories. Then there is nothing to resolve.
+            if [[ -z "$conflicted_files" ]]; then
+              echo "::error::the merge failed but git reports no conflicted files" >&2
+              return 1
+            fi
             while IFS= read -r file; do
               [[ -n "$file" ]] || continue
               # #1543: $file is an arbitrary path from the conflicting merge
@@ -639,8 +651,14 @@ jobs:
                     return 1
                   fi
                   echo "  $file_display: keeping $TARGET's own version"
-                  git checkout --ours -- "$file"
-                  git add -- "$file"
+                  git checkout --ours -- "$file" || {
+                    echo "::error::$file_display: git checkout --ours failed" >&2
+                    return 1
+                  }
+                  git add -- "$file" || {
+                    echo "::error::$file_display: git add failed" >&2
+                    return 1
+                  }
                   ;;
                 *)
                   echo "::error::$file_display: conflict has no auto-resolution rule"
@@ -872,7 +890,7 @@ jobs:
               fi
               # Same set -e hazard as FETCH_RC above — a bare command's exit
               # status would kill the script before ls_rc=$? ever ran.
-              if git ls-remote --exit-code --heads origin "$MERGE_BRANCH" >/dev/null 2>&1; then
+              if LS_STDERR=$(git ls-remote --exit-code --heads origin "$MERGE_BRANCH" 2>&1 >/dev/null); then
                 ls_rc=0
               else
                 ls_rc=$?
@@ -940,9 +958,12 @@ jobs:
                 HALTED="PR already open for $TARGET (branch updated with $SOURCE_DESC)"
                 break
               elif [[ $ls_rc -ne 2 ]]; then
-                echo "::error::Network error checking if $MERGE_BRANCH exists (exit $ls_rc); halting cascade"
+                # Exit 2 means "no such branch". Any other code (auth, network,
+                # bad remote) is a failure; git's own stderr names which one.
+                LS_STDERR_SAFE="${LS_STDERR//$'\n'/ }"
+                echo "::error::ls-remote for $MERGE_BRANCH failed (exit $ls_rc): ${LS_STDERR_SAFE//::/  }"
                 echo "::endgroup::"
-                HALTED="network error at $TARGET"
+                HALTED="ls-remote failed at $TARGET"
                 break
               fi
 
@@ -970,12 +991,13 @@ jobs:
                 --title "Forward-merge $SOURCE_DESC into $TARGET" \
                 --body "$PR_BODY"; then
                 echo "::error::Failed to create PR for $MERGE_BRANCH"
+                HALTED="PR creation failed for $TARGET"
               else
                 echo "::error::Cascade halted: opened PR for $TARGET instead of pushing directly"
                 approve_pending_runs "$MERGE_SHA"
+                HALTED="PR opened for $TARGET"
               fi
               echo "::endgroup::"
-              HALTED="PR opened for $TARGET"
               break
             fi
 
