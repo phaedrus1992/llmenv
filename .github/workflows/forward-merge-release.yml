@@ -480,6 +480,9 @@ jobs:
           # A hand merge of a lockfile is never right. A lockfile-only change on the
           # source is not carried over; the target keeps its own. `--ignore-scripts`
           # keeps npm from running package code with the PAT in the environment.
+          # Both tools print paths and names from the merged manifests, which a
+          # source commit controls, so their output goes through the same `::`
+          # filter as problems.txt (#1543). pipefail keeps the tool's exit code.
           regenerate_lockfiles() {
             if [[ "$1" -eq 1 ]]; then
               echo "  Cargo.lock: regenerating from the merged manifests"
@@ -487,11 +490,14 @@ jobs:
                 echo "::error::Cargo.lock: git checkout --ours failed" >&2
                 return 1
               }
-              if ! cargo update --workspace; then
+              if ! cargo update --workspace 2>&1 | sed -e 's/::/  /g'; then
                 echo "::error::Cargo.lock: 'cargo update --workspace' failed" >&2
                 return 1
               fi
-              git add -- Cargo.lock
+              git add -- Cargo.lock || {
+                echo "::error::Cargo.lock: git add failed" >&2
+                return 1
+              }
             fi
             if [[ "$2" -eq 1 ]]; then
               echo "  website/package-lock.json: regenerating from the merged package.json"
@@ -499,11 +505,15 @@ jobs:
                 echo "::error::website/package-lock.json: git checkout --ours failed" >&2
                 return 1
               }
-              if ! (cd website && npm install --package-lock-only --ignore-scripts); then
+              if ! (cd website && npm install --package-lock-only --ignore-scripts) 2>&1 \
+                  | sed -e 's/::/  /g'; then
                 echo "::error::website/package-lock.json: 'npm install --package-lock-only --ignore-scripts' failed" >&2
                 return 1
               fi
-              git add -- website/package-lock.json
+              git add -- website/package-lock.json || {
+                echo "::error::website/package-lock.json: git add failed" >&2
+                return 1
+              }
             fi
           }
 
@@ -615,7 +625,10 @@ jobs:
                     return 1
                   fi
                   rm -f "$tmp_script"
-                  git add -- "$file"
+                  git add -- "$file" || {
+                    echo "::error::$file: git add failed" >&2
+                    return 1
+                  }
                   ;;
                 Cargo.lock)
                   lock_cargo=1

@@ -1116,6 +1116,7 @@ make_tool_stubs() {
   dir=$(mktemp -d)
   cat > "$dir/cargo" <<'STUB'
 #!/usr/bin/env bash
+[[ -n "${TOOL_OUTPUT:-}" ]] && printf '%s\n' "$TOOL_OUTPUT" >&2
 [[ "${FAIL_TOOL:-}" == cargo ]] && exit 1
 echo regenerated-by-cargo > Cargo.lock
 STUB
@@ -1135,6 +1136,7 @@ run_drift() {
   DRIFT_REPO=$(make_pin_drift_repo "$@")
   stubs=$(make_tool_stubs)
   DRIFT_OUT=$(cd "$DRIFT_REPO" && PATH="$stubs:$PATH" FAIL_TOOL="${FAIL_TOOL:-}" \
+    TOOL_OUTPUT="${TOOL_OUTPUT:-}" \
     SOURCE_REF=source TARGET=release/4.x SOURCE_DESC=release/3.x \
     bash -c "$(resolve_block)" 2>&1 || true)
   trash "$stubs" 2>/dev/null || true
@@ -1175,6 +1177,17 @@ test_2166_lockfile_tool_failure_bails_naming_command() {
   trash "$DRIFT_REPO" 2>/dev/null || true
   [[ "$DRIFT_OUT" == *BAILED* ]] && [[ "$DRIFT_OUT" == *"npm install --package-lock-only"* ]] \
     && return 0
+  printf '  out: %s\n' "${DRIFT_OUT//$'\n'/ | }" >&2
+  return 1
+}
+
+# cargo prints paths from the merged manifests, which a source commit
+# controls (#2271).
+test_2271_lockfile_tool_output_is_sanitized() {
+  TOOL_OUTPUT="warning: path nope ::stop-commands::tok" run_drift 1.0.1
+  trash "$DRIFT_REPO" 2>/dev/null || true
+  [[ "$DRIFT_OUT" == *RESOLVED* ]] && [[ "$DRIFT_OUT" == *"warning: path nope"* ]] \
+    && [[ "$DRIFT_OUT" != *"::stop-commands::"* ]] && return 0
   printf '  out: %s\n' "${DRIFT_OUT//$'\n'/ | }" >&2
   return 1
 }
@@ -3107,6 +3120,8 @@ run_test "Issue #2271: a failed ls-remote prints git's sanitized stderr" \
   test_2271_ls_remote_failure_prints_sanitized_stderr
 run_test "Issue #2271: a failed merge-branch push with no PAT names the workflow-file limit" \
   test_2271_push_failure_without_pat_gives_hint
+run_test "Issue #2271: cargo output from merged manifests is printed with :: removed" \
+  test_2271_lockfile_tool_output_is_sanitized
 run_test "Issue #2271: a failed ls-remote with no stderr says so" \
   test_2271_ls_remote_failure_without_stderr_says_so
 run_test "Issue #2271: no push hint when the merge changes no workflow file" \
