@@ -2572,22 +2572,75 @@ test_2271_merge_without_merge_head_names_git_reason() {
 
 # GITHUB_TOKEN cannot push a change to .github/workflows/, so without the PAT
 # that is the likely cause of a failed merge-branch push.
-test_2271_push_failure_without_pat_gives_hint() {
-  local stubs out
-  stubs=$(mktemp -d)
-  cat > "$stubs/git" <<'STUB'
+PAT_HINT="set FORWARD_MERGE_PAT (a fine-grained PAT for this repository only"
+
+# git and gh stubs for a merge-branch push that fails. `git diff --quiet`
+# exits with $1: 1 means the merge changes .github/workflows/, 0 means it does
+# not. Echoes the stub directory.
+push_failure_stubs() {
+  local dir
+  dir=$(mktemp -d)
+  cat > "$dir/git" <<STUB
 #!/usr/bin/env bash
-[[ "$1" == push ]] && exit 1
+case "\$1" in
+  push) exit 1 ;;
+  diff) exit $1 ;;
+  merge-base) exit 1 ;;
+esac
 exit 0
 STUB
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$stubs/gh"
-  chmod +x "$stubs/git" "$stubs/gh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/gh"
+  chmod +x "$dir/git" "$dir/gh"
+  printf '%s\n' "$dir"
+}
+
+test_2271_no_push_hint_without_workflow_change() {
+  local stubs out
+  stubs=$(push_failure_stubs 0)
+  out=$(PATH="$stubs:$PATH" MERGE_BRANCH="forward-merge/release/3.x-to-release/4.x" \
+    TARGET=release/4.x SOURCE_DESC=release/3.x bash -c "$(new_merge_branch_block)" 2>&1 || true)
+  trash "$stubs" 2>/dev/null || true
+
+  [[ "$out" == *"::error::Push to merge branch"* ]] && [[ "$out" != *"$PAT_HINT"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2271_no_push_hint_with_pat_set() {
+  local stubs out
+  stubs=$(push_failure_stubs 1)
+  out=$(PATH="$stubs:$PATH" _forward_merge_pat=set \
+    MERGE_BRANCH="forward-merge/release/3.x-to-release/4.x" \
+    TARGET=release/4.x SOURCE_DESC=release/3.x bash -c "$(new_merge_branch_block)" 2>&1 || true)
+  trash "$stubs" 2>/dev/null || true
+
+  [[ "$out" == *"::error::Push to merge branch"* ]] && [[ "$out" != *"$PAT_HINT"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2271_push_hint_on_stale_branch_update() {
+  local stubs out
+  stubs=$(push_failure_stubs 1)
+  out=$(PATH="$stubs:$PATH" SOURCE_REF=origin/source TARGET=release/4.x \
+    SOURCE_DESC=release/3.x MERGE_BRANCH="forward-merge/release/3.x-to-release/4.x" ls_rc=0 \
+    bash -c "$(existing_branch_update_block)" 2>&1 || true)
+  trash "$stubs" 2>/dev/null || true
+
+  [[ "$out" == *"::error::Push to update existing merge branch"* ]] \
+    && [[ "$out" == *"$PAT_HINT"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+test_2271_push_failure_without_pat_gives_hint() {
+  local stubs out
+  stubs=$(push_failure_stubs 1)
   out=$(PATH="$stubs:$PATH" MERGE_BRANCH="forward-merge/release/3.x-to-release/4.x" \
     TARGET=release/4.x SOURCE_DESC=release/3.x bash -c "$(new_merge_branch_block)" 2>&1 || true)
   trash "$stubs" 2>/dev/null || true
 
   [[ "$out" == *"::error::Push to merge branch"* ]] \
-    && [[ "$out" == *"set FORWARD_MERGE_PAT"* ]] \
+    && [[ "$out" == *"$PAT_HINT"* ]] \
     && [[ "$out" == *"HALTED=merge-branch push failed for release/4.x"* ]] && return 0
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
   return 1
@@ -3039,6 +3092,12 @@ run_test "Issue #2271: a failed ls-remote prints git's sanitized stderr" \
   test_2271_ls_remote_failure_prints_sanitized_stderr
 run_test "Issue #2271: a failed merge-branch push with no PAT names the workflow-file limit" \
   test_2271_push_failure_without_pat_gives_hint
+run_test "Issue #2271: no push hint when the merge changes no workflow file" \
+  test_2271_no_push_hint_without_workflow_change
+run_test "Issue #2271: no push hint when FORWARD_MERGE_PAT is set" \
+  test_2271_no_push_hint_with_pat_set
+run_test "Issue #2271: a failed stale-branch update push with no PAT gives the hint" \
+  test_2271_push_hint_on_stale_branch_update
 run_test "Issue #2271: a merge that fails with no MERGE_HEAD halts with git's reason" \
   test_2271_merge_without_merge_head_names_git_reason
 

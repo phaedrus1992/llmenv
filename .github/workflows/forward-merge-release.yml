@@ -953,8 +953,9 @@ jobs:
                 MERGE_SHA=$(git rev-parse HEAD)
                 if ! push_with_pat origin "$MERGE_BRANCH"; then
                   echo "::error::Push to update existing merge branch $MERGE_BRANCH failed"
-                  if [[ -z "${_forward_merge_pat:-}" ]]; then
-                    echo "::error::GITHUB_TOKEN cannot push a change to .github/workflows/. If this merge touches a workflow file, set FORWARD_MERGE_PAT or push $MERGE_BRANCH by hand."
+                  if [[ -z "${_forward_merge_pat:-}" ]] \
+                      && ! git diff --quiet "origin/$TARGET" HEAD -- .github/workflows/; then
+                    echo "::error::This merge changes .github/workflows/, which GITHUB_TOKEN cannot push. To fix, set FORWARD_MERGE_PAT (a fine-grained PAT for this repository only, with contents: write and workflows: write), or push $MERGE_BRANCH by hand."
                   fi
                   echo "::endgroup::"
                   HALTED="merge-branch update push failed for $TARGET"
@@ -986,8 +987,9 @@ jobs:
               MERGE_SHA=$(git rev-parse HEAD)
               if ! push_with_pat origin "$MERGE_BRANCH" --force-with-lease; then
                 echo "::error::Push to merge branch $MERGE_BRANCH failed; cannot open PR"
-                if [[ -z "${_forward_merge_pat:-}" ]]; then
-                  echo "::error::GITHUB_TOKEN cannot push a change to .github/workflows/. If this merge touches a workflow file, set FORWARD_MERGE_PAT or push $MERGE_BRANCH by hand."
+                if [[ -z "${_forward_merge_pat:-}" ]] \
+                    && ! git diff --quiet "origin/$TARGET" HEAD -- .github/workflows/; then
+                  echo "::error::This merge changes .github/workflows/, which GITHUB_TOKEN cannot push. To fix, set FORWARD_MERGE_PAT (a fine-grained PAT for this repository only, with contents: write and workflows: write), or push $MERGE_BRANCH by hand."
                 fi
                 echo "::endgroup::"
                 HALTED="merge-branch push failed for $TARGET"
