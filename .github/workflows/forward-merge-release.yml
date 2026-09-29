@@ -160,6 +160,10 @@ jobs:
         env:
           CURRENT: ${{ steps.detect.outputs.current }}
           BRANCHES: ${{ steps.detect.outputs.branches }}
+          # Empty for a push. For a retry, the base and the head branch of the
+          # merged forward-merge PR.
+          RETRY_TARGET: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || '' }}
+          RETRY_HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || '' }}
           # Deliberately left at step level, unlike FORWARD_MERGE_PAT below —
           # any workspace code that runs still inherits GH_TOKEN via env and
           # via the persisted checkout credential in .git/config either way,
@@ -339,29 +343,71 @@ jobs:
           # that open a PR don't hit it). The entire reason this cascade opens
           # a PR instead of pushing directly is so required checks run before
           # merge, so a run stuck on that gate with nobody watching silently
-          # defeats the point. Poll briefly for a run against $1 (a commit
-          # SHA) sitting in that state and approve it.
+          # defeats the point. Poll for runs against $1 (a commit SHA) on
+          # branch $2 sitting in that state and approve them. action_required
+          # is the fork gate, and a fork can push the same public SHA, so only
+          # this repository's own runs on the merge branch qualify (#2273).
           #
           # Never halts the cascade on failure: an approval miss here still
           # leaves the PR in place for a human (or a later poll, e.g. the next
           # push to this branch re-running this same check) to approve
           # manually, so a warning is the right severity, not an error.
           approve_pending_runs() {
-            local sha="$1" ids id
+            local sha="$1" branch="$2" runs ids id err_file err last_err="" list_ok=0
+            local approved="" warned=""
+            if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::warning::approve_pending_runs got no valid commit SHA; check the PR for runs that wait for approval"
+              return 0
+            fi
+            if ! err_file=$(mktemp); then
+              echo "::warning::approve_pending_runs could not create a temp file; approve runs for $sha by hand"
+              return 0
+            fi
+            # Every round, not only until the first hit: a workflow can start,
+            # and be gated, after the others. The server filters by status and
+            # branch and every page is read, so a flood of fork runs on the same
+            # SHA cannot push this repo's run off the first page (#2273).
             for _ in 1 2 3 4 5 6; do
-              ids=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${sha}" \
-                --jq '.workflow_runs[] | select(.conclusion == "action_required") | .id' 2>/dev/null) || ids=""
-              if [[ -n "$ids" ]]; then
-                while IFS= read -r id; do
-                  [[ -n "$id" ]] || continue
-                  echo "Approving action_required run $id for $sha"
-                  gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runs/${id}/approve" >/dev/null 2>&1 \
-                    || echo "::warning::failed to approve run $id for $sha -- approve it manually"
-                done <<< "$ids"
-                return 0
+              ids=""
+              if runs=$(gh api -X GET "repos/${GITHUB_REPOSITORY}/actions/runs" --paginate \
+                  -f head_sha="$sha" -f status=action_required -f branch="$branch" \
+                  -f per_page=100 2>"$err_file"); then
+                list_ok=1
+                if ! ids=$(jq -r --arg repo "$GITHUB_REPOSITORY" --arg branch "$branch" \
+                    '.workflow_runs[] | select(.conclusion == "action_required"
+                      and .head_repository.full_name == $repo and .head_branch == $branch) | .id' \
+                    <<< "$runs" 2>"$err_file"); then
+                  last_err="$(<"$err_file")"
+                  ids=""
+                fi
+              else
+                last_err="$(<"$err_file")"
               fi
+              while IFS= read -r id; do
+                if [[ -z "$id" || " $approved " == *" $id "* ]]; then
+                  continue
+                fi
+                echo "Approving action_required run $id for $sha"
+                if gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runs/${id}/approve" \
+                    >/dev/null 2>"$err_file"; then
+                  approved+=" $id"
+                elif [[ " $warned " != *" $id "* ]]; then
+                  # Warn once; a later round tries again.
+                  warned+=" $id"
+                  err="$(<"$err_file")"
+                  err="${err//$'\n'/ }"
+                  echo "::warning::failed to approve run $id for $sha: ${err//::/  }. A later poll tries again; if none succeeds, approve it by hand."
+                fi
+              done <<< "$ids"
               sleep 10
             done
+            rm -f "$err_file"
+            if [[ "$list_ok" -eq 0 ]]; then
+              last_err="${last_err//$'\n'/ }"
+              echo "::warning::could not list runs for $sha: ${last_err//::/  }. Check the PR for runs that wait for approval."
+            elif [[ -z "$approved" && -z "$warned" ]]; then
+              echo "No run for $sha waited for approval"
+            fi
           }
 
           # Build target list: every newer release branch (semver order) + main.
@@ -389,6 +435,26 @@ jobs:
           # release/X.x regex or are `main`, so a `::` cannot reach the echoes
           # of CURRENT, TARGET, SOURCE_DESC or MERGE_BRANCH below (#2240).
           TARGETS+=("main")
+
+          # #2294: a retry stops at its own target once that target holds the
+          # source (see the up-to-date check in the loop), so the target must be
+          # downstream of CURRENT and must be the one its head branch names. A
+          # writer can change a PR's base after it opens.
+          if [[ -n "${RETRY_TARGET:-}" ]]; then
+            RETRY_OK=0
+            for T in "${TARGETS[@]}"; do
+              if [[ "$T" == "$RETRY_TARGET" ]]; then
+                RETRY_OK=1
+              fi
+            done
+            if [[ "${RETRY_HEAD:-}" != *"-to-$RETRY_TARGET" ]]; then
+              RETRY_OK=0
+            fi
+            if [[ "$RETRY_OK" -eq 0 ]]; then
+              echo "::error::retry target ${RETRY_TARGET//::/  } does not match a downstream target of $CURRENT named by ${RETRY_HEAD//::/  }; not cascading"
+              exit 1
+            fi
+          fi
 
           # Track whether the cascade halted early so the run fails visibly
           # rather than silently leaving downstream targets unmerged.
@@ -681,23 +747,47 @@ jobs:
 
           for TARGET in "${TARGETS[@]}"; do
             echo "::group::Forward-merge $SOURCE_DESC → $TARGET"
-            TARGET_SHA=$(git rev-parse "origin/$TARGET" 2>/dev/null || echo "")
+            # #2280: an unreadable target ref is a failure, not an empty value.
+            if ! TARGET_SHA=$(git rev-parse --verify -q "origin/$TARGET^{commit}"); then
+              echo "::error::cannot read origin/$TARGET; halting cascade"
+              echo "::endgroup::"
+              HALTED="target ref unreadable at $TARGET"
+              break
+            fi
 
             # `--is-ancestor`, not sha equality: once the chain has merged into
             # an earlier target the heads are never equal, but the target can
             # still already contain everything the source has (e.g. a human
             # resolved the merge by hand first). Merging then would add an empty
             # commit for no reason.
-            if [[ -n "$TARGET_SHA" ]] \
-                && git merge-base --is-ancestor "$SOURCE_REF" "origin/$TARGET"; then
+            # Exit 1 means "not an ancestor". Any other code means git could not
+            # answer, which must not read as "merge anyway" (#2280).
+            if git merge-base --is-ancestor "$SOURCE_REF" "origin/$TARGET"; then
+              ANCESTOR_RC=0
+            else
+              ANCESTOR_RC=$?
+            fi
+            if [[ "$ANCESTOR_RC" -eq 0 ]]; then
               echo "Target $TARGET already contains $SOURCE_DESC"
               echo "::endgroup::"
+              # #2294: the merge of this retry's PR pushed $TARGET, and the
+              # push cascade from $TARGET carries the change further. Chaining
+              # on here raced that cascade on the next merge branch.
+              if [[ "$TARGET" == "${RETRY_TARGET:-}" ]]; then
+                echo "Retry reached its own target $TARGET, which already holds $SOURCE_DESC; the push cascade from $TARGET carries it further"
+                break
+              fi
               # Advance the chain as a pushed merge does. Otherwise the next
               # target gets this source merged in directly, without $TARGET's
               # own commits (#2285, the fan-out that #1380 removed).
               SOURCE_REF="origin/$TARGET"
               SOURCE_DESC="$TARGET"
               continue
+            elif [[ "$ANCESTOR_RC" -ne 1 ]]; then
+              echo "::error::git merge-base --is-ancestor failed (exit $ANCESTOR_RC) for $SOURCE_DESC and $TARGET; halting cascade"
+              echo "::endgroup::"
+              HALTED="ancestry check failed at $TARGET"
+              break
             fi
 
             # `if VAR=$(cmd); then` (not a bare `VAR=$(cmd); RC=$?`) — under
@@ -887,7 +977,15 @@ jobs:
               if [[ "$TARGET" == "main" ]] && [[ -n "$TARGET_SHA" ]] \
                   && ! git diff --quiet "$TARGET_SHA" HEAD -- website/; then
                 echo "website/ changed on main; triggering docs deploy"
-                gh workflow run docs.yml --ref main || echo "::warning::failed to dispatch docs.yml"
+                # A warning, not a halt: the merge itself landed (#2280).
+                if ! DISPATCH_ERR=$(gh workflow run docs.yml --ref main 2>&1 >/dev/null); then
+                  if [[ -n "$DISPATCH_ERR" ]]; then
+                    DISPATCH_ERR="${DISPATCH_ERR//$'\n'/ }"
+                    echo "::warning::failed to dispatch docs.yml: ${DISPATCH_ERR//::/  }. Run it by hand: gh workflow run docs.yml --ref main"
+                  else
+                    echo "::warning::failed to dispatch docs.yml (no stderr). Run it by hand: gh workflow run docs.yml --ref main"
+                  fi
+                fi
               fi
             else
               if [[ "$PUSH_SKIPPED" -eq 1 ]]; then
@@ -1015,7 +1113,7 @@ jobs:
                   fi
                   # With no open PR, no run exists yet to approve.
                   if [[ "$OPEN_PRS" -gt 0 ]]; then
-                    approve_pending_runs "$MERGE_SHA"
+                    approve_pending_runs "$MERGE_SHA" "$MERGE_BRANCH"
                   fi
                 fi
                 if [[ "$OPEN_PRS" -eq 0 ]]; then
@@ -1034,7 +1132,7 @@ jobs:
                     HALTED="PR creation failed for $TARGET"
                   else
                     echo "::error::Cascade halted: opened PR for $TARGET on the existing $MERGE_BRANCH"
-                    approve_pending_runs "$MERGE_SHA"
+                    approve_pending_runs "$MERGE_SHA" "$MERGE_BRANCH"
                     HALTED="PR opened for $TARGET"
                   fi
                   echo "::endgroup::"
@@ -1089,7 +1187,7 @@ jobs:
                 HALTED="PR creation failed for $TARGET"
               else
                 echo "::error::Cascade halted: opened PR for $TARGET instead of pushing directly"
-                approve_pending_runs "$MERGE_SHA"
+                approve_pending_runs "$MERGE_SHA" "$MERGE_BRANCH"
                 HALTED="PR opened for $TARGET"
               fi
               echo "::endgroup::"
