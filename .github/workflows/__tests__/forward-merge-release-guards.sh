@@ -2493,7 +2493,7 @@ approve_pending_runs() { :; }
 for _once in once; do
 SHELL
   # shellcheck disable=SC2016 # literal sed address, not an expression to expand
-  sed -n '/^ *# Create branch pointing to current HEAD/,/^ *HALTED="PR opened for \$TARGET"$/p' \
+  sed -n '/^ *# Create the branch at HEAD (the merge commit made above)/,/^ *HALTED="PR opened for \$TARGET"$/p' \
     "$WORKFLOW"
   cat <<'SHELL'
 fi
@@ -2514,6 +2514,29 @@ test_2271_failed_pr_create_is_not_reported_as_opened() {
 
   [[ "$out" == *"::error::Failed to create PR for"* ]] \
     && [[ "$out" == *"HALTED=PR creation failed for release/4.x"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# GITHUB_TOKEN cannot push a change to .github/workflows/, so without the PAT
+# that is the likely cause of a failed merge-branch push.
+test_2271_push_failure_without_pat_gives_hint() {
+  local stubs out
+  stubs=$(mktemp -d)
+  cat > "$stubs/git" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == push ]] && exit 1
+exit 0
+STUB
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$stubs/gh"
+  chmod +x "$stubs/git" "$stubs/gh"
+  out=$(PATH="$stubs:$PATH" MERGE_BRANCH="forward-merge/release/3.x-to-release/4.x" \
+    TARGET=release/4.x SOURCE_DESC=release/3.x bash -c "$(new_merge_branch_block)" 2>&1 || true)
+  trash "$stubs" 2>/dev/null || true
+
+  [[ "$out" == *"::error::Push to merge branch"* ]] \
+    && [[ "$out" == *"set FORWARD_MERGE_PAT"* ]] \
+    && [[ "$out" == *"HALTED=merge-branch push failed for release/4.x"* ]] && return 0
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
   return 1
 }
@@ -2962,6 +2985,8 @@ run_test "Issue #2271: a failed gh pr create is not reported as an opened PR" \
   test_2271_failed_pr_create_is_not_reported_as_opened
 run_test "Issue #2271: a failed ls-remote prints git's sanitized stderr" \
   test_2271_ls_remote_failure_prints_sanitized_stderr
+run_test "Issue #2271: a failed merge-branch push with no PAT names the workflow-file limit" \
+  test_2271_push_failure_without_pat_gives_hint
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
