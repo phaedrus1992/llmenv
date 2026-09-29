@@ -447,7 +447,10 @@ unambiguous prefix of one.
   tasks (e.g. several parallel analyzer tasks under one parent step), block
   on the **parent** rather than hand-wiring a `block` edge to each sibling —
   a `blocked_on` reference isn't satisfied until the target task *and every
-  one of its descendants* are done.
+  one of its descendants* are done. (changed in v3.12.0) The blocked task's
+  own subtree doesn't count: `task add` parents each new task under the
+  previous one, so a task blocked on its predecessor is usually that
+  predecessor's child, and it can start once the predecessor is done.
 - `task edit <id> [--title <t>] [--parent SLUG | --no-parent] [--block-on
   <id>]... [--unblock <id>]... [--add-note <text>] [--delete-note
   <index-or-timestamp>]` — mutate an existing task. (added in v3.10.0) Every
