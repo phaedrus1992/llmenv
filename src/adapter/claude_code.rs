@@ -1961,7 +1961,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         out,
         &mut settings_value,
         &manifest.capabilities,
-    );
+    )?;
 
     // #991: the hooks llmenv is rendering this round, captured before reconcile
     // consumes `settings_value`. Persisted to a sidecar so the *next* reconcile
@@ -1993,7 +1993,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         prev_owned_hooks.as_ref(),
         prev_plugin_paths.as_ref(),
     )?;
-    model_effort.apply(&mut reconciled);
+    model_effort.apply(&mut reconciled)?;
     let json_str = serde_json::to_string_pretty(&reconciled)?;
 
     crate::paths::write_owner_only_atomic(&settings_path, json_str.as_bytes()).with_context(

@@ -34,27 +34,39 @@ impl ModelSettingsMerge {
     /// Take `modelSettings` out of the fresh `settings` doc and read the
     /// companion file. The companion file is read only when `settings.json`
     /// exists, because a first render has no earlier llmenv entries.
-    pub(crate) fn prepare(out: &Path, settings: &mut Value, caps: &Capabilities) -> Self {
+    ///
+    /// # Errors
+    /// Returns an error when the companion file exists but cannot be read.
+    pub(crate) fn prepare(
+        out: &Path,
+        settings: &mut Value,
+        caps: &Capabilities,
+    ) -> anyhow::Result<Self> {
         let native = settings
             .as_object_mut()
             .and_then(|o| o.remove(MODEL_SETTINGS_KEY));
         let prev = if out.join("settings.json").exists() {
-            read_owned(out)
+            read_owned(out)?
         } else {
             Map::new()
         };
-        Self {
+        Ok(Self {
             managed: managed_entries(caps),
             prev,
             native,
-        }
+        })
     }
 
     /// Merge the managed entries into the reconciled doc. A native
     /// `modelSettings` goes on top, because native is the highest-precedence layer.
-    pub(crate) fn apply(&self, reconciled: &mut Value) {
+    ///
+    /// # Errors
+    /// Returns an error when `reconciled` is not a JSON object.
+    pub(crate) fn apply(&self, reconciled: &mut Value) -> anyhow::Result<()> {
         let Some(obj) = reconciled.as_object_mut() else {
-            return;
+            anyhow::bail!(
+                "rendered settings.json is not a JSON object; cannot merge modelSettings"
+            );
         };
         merge_model_settings(obj, &self.managed, &self.prev);
         if let Some(native) = &self.native {
@@ -63,14 +75,22 @@ impl ModelSettingsMerge {
                 .or_insert_with(|| Value::Object(Map::new()));
             merge_json(target, native.clone());
         }
+        Ok(())
     }
 
     /// Record the managed entries for the next render.
     ///
     /// # Errors
-    /// Returns an error when the companion file write fails.
+    /// Returns an error when the companion file write or remove fails.
     pub(crate) fn persist(&self, out: &Path) -> anyhow::Result<()> {
-        write_owned(out, &self.managed)
+        write_owned(out, &self.managed).map_err(|e| {
+            anyhow::anyhow!(
+                "{e:#}. settings.json is updated, but llmenv has no record of its \
+                 modelSettings entries; check the permissions of {} and run \
+                 `llmenv regenerate` again",
+                out.display()
+            )
+        })
     }
 }
 
@@ -112,10 +132,18 @@ fn merge_model_settings(
     managed: &Map<String, Value>,
     prev: &Map<String, Value>,
 ) {
+    // With nothing to write or clean up, the key belongs to Claude Code alone.
+    if managed.is_empty() && prev.is_empty() {
+        return;
+    }
     let mut current = match settings.remove(MODEL_SETTINGS_KEY) {
         Some(Value::Object(map)) => map,
         Some(other) => {
-            tracing::warn!("settings.json modelSettings is not an object ({other}); replacing it");
+            // The default log filter drops warn!, so print the loss on stderr.
+            eprintln!(
+                "llmenv: settings.json modelSettings is not a JSON object ({other}); \
+                 replacing it with the entries from llmenv config"
+            );
             Map::new()
         }
         None => Map::new(),
@@ -168,23 +196,35 @@ fn merge_model_settings(
     }
 }
 
-/// Read the companion file in `out`. Returns an empty map when the file is
-/// absent or corrupt, because a bad companion file must not stop the render.
-fn read_owned(out: &Path) -> Map<String, Value> {
+/// Read the companion file in `out`. An absent file gives an empty map.
+///
+/// A file that does not parse also gives an empty map, with a message on
+/// stderr: the next write replaces it, so the render goes on.
+///
+/// # Errors
+/// Returns an error when the file exists but cannot be read.
+fn read_owned(out: &Path) -> anyhow::Result<Map<String, Value>> {
     let path = out.join(OWNED_MODEL_SETTINGS_FILE);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Map::new(),
-        Err(e) => {
-            tracing::warn!("cannot read {} (treated as empty): {e}", path.display());
-            return Map::new();
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
+        Err(e) => anyhow::bail!(
+            "cannot read {}: {e}; check its permissions, or remove it and check \
+             modelSettings in settings.json by hand",
+            path.display()
+        ),
     };
     match serde_json::from_str::<Map<String, Value>>(&text) {
-        Ok(map) => map,
+        Ok(map) => Ok(map),
         Err(e) => {
-            tracing::warn!("cannot parse {} (treated as empty): {e}", path.display());
-            Map::new()
+            // The default log filter drops warn!, so print this on stderr.
+            eprintln!(
+                "llmenv: cannot parse {} ({e}); llmenv cannot tell its own modelSettings \
+                 entries from /effort entries this time. Check modelSettings in \
+                 settings.json by hand",
+                path.display()
+            );
+            Ok(Map::new())
         }
     }
 }
@@ -193,14 +233,15 @@ fn read_owned(out: &Path) -> Map<String, Value> {
 /// `managed` is empty.
 ///
 /// # Errors
-/// Returns an error when the atomic write fails.
+/// Returns an error when the atomic write or the remove fails. A stale file
+/// would claim fields that a later `/effort` writes, and delete them.
 fn write_owned(out: &Path, managed: &Map<String, Value>) -> anyhow::Result<()> {
     let path = out.join(OWNED_MODEL_SETTINGS_FILE);
     if managed.is_empty() {
         match std::fs::remove_file(&path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => tracing::warn!("cannot remove {}: {e}", path.display()),
+            Err(e) => anyhow::bail!("cannot remove {}: {e}", path.display()),
         }
         return Ok(());
     }
@@ -210,7 +251,12 @@ fn write_owned(out: &Path, managed: &Map<String, Value>) -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
-#[expect(clippy::expect_used, clippy::panic, reason = "test scaffolding")]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "test scaffolding"
+)]
 mod tests {
     use super::*;
     use crate::config::ModelEffort;
@@ -365,12 +411,49 @@ mod tests {
     }
 
     #[test]
+    fn foreign_model_settings_is_untouched_when_nothing_is_managed() {
+        let mut settings = obj(json!({"modelSettings": "future-shape"}));
+        merge_model_settings(&mut settings, &Map::new(), &Map::new());
+        assert_eq!(settings["modelSettings"], json!("future-shape"));
+    }
+
+    // A companion path that cannot be read must stop the render, not reset the record.
+    #[test]
+    fn unreadable_owned_file_is_an_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join(OWNED_MODEL_SETTINGS_FILE)).expect("mkdir");
+        let err = read_owned(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("cannot read"), "{err}");
+    }
+
+    // A stale companion that cannot be removed would later delete an /effort save.
+    #[test]
+    fn owned_file_remove_failure_is_an_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(OWNED_MODEL_SETTINGS_FILE);
+        std::fs::create_dir(&path).expect("mkdir");
+        std::fs::write(path.join("x"), "").expect("write");
+        let err = write_owned(dir.path(), &Map::new()).unwrap_err();
+        assert!(err.to_string().contains("cannot remove"), "{err}");
+    }
+
+    #[test]
+    fn apply_rejects_a_non_object_doc() {
+        let merge = ModelSettingsMerge {
+            managed: Map::new(),
+            prev: Map::new(),
+            native: None,
+        };
+        assert!(merge.apply(&mut json!([])).is_err());
+    }
+
+    #[test]
     fn owned_file_round_trips_and_clears() {
         let dir = tempfile::tempdir().expect("tempdir");
-        assert!(read_owned(dir.path()).is_empty());
+        assert!(read_owned(dir.path()).expect("read").is_empty());
         let managed = obj(json!({"claude-opus-5-5": {"effortLevel": "high"}}));
         write_owned(dir.path(), &managed).expect("write");
-        assert_eq!(read_owned(dir.path()), managed);
+        assert_eq!(read_owned(dir.path()).expect("read"), managed);
         write_owned(dir.path(), &Map::new()).expect("clear");
         assert!(!dir.path().join(OWNED_MODEL_SETTINGS_FILE).exists());
     }
@@ -379,7 +462,7 @@ mod tests {
     fn corrupt_owned_file_reads_as_empty() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join(OWNED_MODEL_SETTINGS_FILE), "[1,").expect("write");
-        assert!(read_owned(dir.path()).is_empty());
+        assert!(read_owned(dir.path()).expect("read").is_empty());
     }
 
     fn level() -> impl Strategy<Value = Value> {
