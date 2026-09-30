@@ -6,6 +6,7 @@
 //! - `diff`   — show what changed since last session
 //! - `prune`  — TTL-based memory forgetting (R4)
 
+pub(crate) mod project;
 pub mod prune;
 
 use std::path::Path;
@@ -75,13 +76,22 @@ pub(crate) fn stats() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The `icm_memory_recall` arguments for the project that `cwd` belongs to.
+/// ICM's default filter is the ICM server's cwd, which is unrelated to this
+/// process when ICM runs on another host (#2253). No cwd searches all projects.
+fn scope_recall_args(cwd: Option<&std::path::Path>) -> serde_json::Value {
+    let project = cwd.and_then(project::session_project).unwrap_or_default();
+    serde_json::json!({ "query": "", "project": project })
+}
+
 /// Run the `list` subcommand: list stored memories for the active scope.
 pub(crate) fn list() -> anyhow::Result<()> {
     let client = connect()?;
+    let cwd = std::env::current_dir().ok();
     let result = call_tool_blocking(
         client,
         "icm_memory_recall",
-        serde_json::json!({ "query": "" }),
+        scope_recall_args(cwd.as_deref()),
     )?;
     println!("{result}");
     Ok(())
@@ -116,10 +126,11 @@ pub(crate) fn diff() -> anyhow::Result<()> {
 
     let current = {
         let client = connect()?;
+        let cwd = std::env::current_dir().ok();
         call_tool_blocking(
             client,
             "icm_memory_recall",
-            serde_json::json!({ "query": "" }),
+            scope_recall_args(cwd.as_deref()),
         )?
     };
 
@@ -167,7 +178,28 @@ pub(crate) fn prune(dry_run: bool) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-    use super::read_or_init_snapshot;
+    use super::{read_or_init_snapshot, scope_recall_args};
+
+    // #2253 variant: without `project`, ICM filters by the ICM server's cwd,
+    // not by the project that `llmenv memory list` runs in.
+    #[test]
+    fn scope_recall_args_name_the_cwd_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("some-project");
+        std::fs::create_dir(&dir).unwrap();
+        assert_eq!(
+            scope_recall_args(Some(&dir)),
+            serde_json::json!({ "query": "", "project": "some-project" })
+        );
+    }
+
+    #[test]
+    fn scope_recall_args_search_all_projects_without_a_cwd() {
+        assert_eq!(
+            scope_recall_args(None),
+            serde_json::json!({ "query": "", "project": "" })
+        );
+    }
 
     #[test]
     fn first_run_writes_baseline_and_returns_none() {

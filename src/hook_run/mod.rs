@@ -13,7 +13,6 @@ pub(crate) mod cd_guard;
 pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
 pub(crate) mod mcp_client;
-mod project;
 pub(crate) mod read_once;
 mod recall;
 mod relevance;
@@ -251,18 +250,22 @@ impl std::fmt::Display for HookEvent {
 /// last the natural-language `Recall`, because it has no project filter and is the least
 /// specific. Tag and bundle recalls are project-unfiltered (#197, #228). The turn-capture
 /// events carry no memory actions.
+///
+/// `wake` is `None` for a continued session (see [`continues_session`]), which gets no
+/// wake-up call.
 fn dispatch(
     event: HookEvent,
     tag_queries: &[TagRecallQuery],
     bundle_queries: &[BundleRecallQuery],
     ranks: &BTreeMap<String, u8>,
-    wake: &WakeUpArgs,
+    wake: Option<&WakeUpArgs>,
 ) -> Vec<Action> {
     match event {
-        HookEvent::SessionStart => vec![Action::WakeUp(wake.clone())],
+        HookEvent::SessionStart => wake.cloned().map(Action::WakeUp).into_iter().collect(),
         HookEvent::TurnStart => {
             let mut actions = scope_recall_actions(tag_queries, bundle_queries, ranks);
-            actions.push(Action::Recall);
+            let project = wake.and_then(|w| w.project.clone()).unwrap_or_default();
+            actions.push(Action::Recall(project));
             actions
         }
         HookEvent::SessionEnd => vec![Action::Store],
@@ -279,6 +282,13 @@ fn dispatch(
         | HookEvent::SubagentTask => vec![],
         HookEvent::PostSession => vec![], // consolidation runs as a separate step
     }
+}
+
+/// Whether a `SessionStart` payload continues an earlier conversation (#2142).
+/// Claude Code's `source` is `resume` or `fork` then; the conversation already
+/// holds the earlier wake-up pack, so a second one only doubles the context.
+fn continues_session(payload: &serde_json::Value) -> bool {
+    matches!(payload["source"].as_str(), Some("resume" | "fork"))
 }
 
 /// The scope-tag recalls in specificity order (#2159): rank-1 tags, bundles, then
@@ -462,18 +472,26 @@ fn hook_cwd(payload: &serde_json::Value, fallback: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(payload["cwd"].as_str().unwrap_or(fallback))
 }
 
-/// The `icm_wake_up` arguments for `event`. The project lookup runs git, so only
-/// `SessionStart`, the one event that wakes up, pays for it.
+/// The `icm_wake_up` arguments for `event`, whose project also scopes the
+/// stateless `TurnStart` recall (#2253). The project lookup runs git, so only
+/// `SessionStart` and a stateless `TurnStart` pay for it; the adaptive
+/// `TurnStart` reads the project from its session ledger.
 fn wake_args(
     event: HookEvent,
     settings: Option<MemoryHookSettings>,
     payload: &serde_json::Value,
     cwd: &str,
 ) -> WakeUpArgs {
+    let adaptive = settings.is_some_and(|s| s.adaptive_recall);
+    let wants_project = match event {
+        HookEvent::SessionStart => true,
+        HookEvent::TurnStart => !adaptive,
+        _ => false,
+    };
     WakeUpArgs {
         max_tokens: settings.and_then(|s| s.wakeup_max_tokens),
-        project: (event == HookEvent::SessionStart)
-            .then(|| project::session_project(&hook_cwd(payload, cwd)))
+        project: wants_project
+            .then(|| crate::memory::project::session_project(&hook_cwd(payload, cwd)))
             .flatten(),
     }
 }
@@ -1377,7 +1395,8 @@ fn run_inner(
             if let Some(client) = &client
                 && !session_end_unchanged
             {
-                let actions = dispatch(event, &tag_queries, &bundle_queries, &tag_ranks, &wake);
+                let wake_call = (!continues_session(stdin_payload)).then_some(&wake);
+                let actions = dispatch(event, &tag_queries, &bundle_queries, &tag_ranks, wake_call);
                 // Use minimal chunk for storage to avoid duplication. (#1792)
                 let store_content = store_content_for_event(event, &chunk, &storage_chunk);
                 out = run_event_memory(MemoryCall {
@@ -2682,10 +2701,10 @@ mod tests {
             &tags,
             &[],
             &BTreeMap::new(),
-            &WakeUpArgs::default(),
+            Some(&WakeUpArgs::default()),
         );
         let scope = scope_recall_actions(&tags, &[], &BTreeMap::new());
-        assert_eq!(turn.last(), Some(&Action::Recall));
+        assert_eq!(turn.last(), Some(&Action::Recall(String::new())));
         assert_eq!(scope, turn[..turn.len() - 1]);
     }
 
@@ -2699,7 +2718,16 @@ mod tests {
         ] {
             assert_eq!(name.parse::<HookEvent>().unwrap(), event);
             assert_eq!(event.to_string(), name);
-            assert!(dispatch(event, &[], &[], &BTreeMap::new(), &WakeUpArgs::default()).is_empty());
+            assert!(
+                dispatch(
+                    event,
+                    &[],
+                    &[],
+                    &BTreeMap::new(),
+                    Some(&WakeUpArgs::default())
+                )
+                .is_empty()
+            );
             assert_eq!(event_to_log_kind(event), None);
         }
     }
@@ -4508,7 +4536,7 @@ mod tests {
             HookEvent::PreCompact,
         ] {
             assert_eq!(
-                dispatch(ev, &[], &[], &BTreeMap::new(), &WakeUpArgs::default()),
+                dispatch(ev, &[], &[], &BTreeMap::new(), Some(&WakeUpArgs::default())),
                 Vec::<Action>::new()
             );
         }
@@ -4584,7 +4612,7 @@ mod tests {
                 &[],
                 &[],
                 &BTreeMap::new(),
-                &WakeUpArgs::default()
+                Some(&WakeUpArgs::default())
             ),
             vec![Action::WakeUp(WakeUpArgs::default())]
         );
@@ -4594,9 +4622,9 @@ mod tests {
                 &[],
                 &[],
                 &BTreeMap::new(),
-                &WakeUpArgs::default()
+                Some(&WakeUpArgs::default())
             ),
-            vec![Action::Recall]
+            vec![Action::Recall(String::new())]
         );
         assert_eq!(
             dispatch(
@@ -4604,7 +4632,7 @@ mod tests {
                 &[],
                 &[],
                 &BTreeMap::new(),
-                &WakeUpArgs::default()
+                Some(&WakeUpArgs::default())
             ),
             vec![Action::Store]
         );
@@ -4614,11 +4642,35 @@ mod tests {
                 &[],
                 &[],
                 &BTreeMap::new(),
-                &WakeUpArgs::default()
+                Some(&WakeUpArgs::default())
             ),
             vec![],
             "PostSession defers to consolidation module, no dispatch actions"
         );
+    }
+
+    // #2142: a continued session (resume, fork) gets no wake-up call.
+    #[test]
+    fn dispatch_skips_the_wake_up_without_wake_args() {
+        assert_eq!(
+            dispatch(HookEvent::SessionStart, &[], &[], &BTreeMap::new(), None),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn continues_session_only_for_resume_and_fork() {
+        for (payload, want) in [
+            (json!({"source": "resume"}), true),
+            (json!({"source": "fork"}), true),
+            (json!({"source": "startup"}), false),
+            (json!({"source": "clear"}), false),
+            (json!({"source": "compact"}), false),
+            (json!({"source": 7}), false),
+            (json!({}), false),
+        ] {
+            assert_eq!(continues_session(&payload), want, "{payload}");
+        }
     }
 
     #[test]
@@ -4633,14 +4685,20 @@ mod tests {
                 &[],
                 &[],
                 &BTreeMap::new(),
-                &wake_750
+                Some(&wake_750)
             ),
             vec![Action::WakeUp(wake_750.clone())]
         );
-        // Not carried by any other event's actions — WakeUp only fires on SessionStart.
+        // WakeUp only fires on SessionStart; TurnStart takes just the project (#2253).
         assert_eq!(
-            dispatch(HookEvent::TurnStart, &[], &[], &BTreeMap::new(), &wake_750),
-            vec![Action::Recall]
+            dispatch(
+                HookEvent::TurnStart,
+                &[],
+                &[],
+                &BTreeMap::new(),
+                Some(&wake_750)
+            ),
+            vec![Action::Recall("llmenv".into())]
         );
     }
 
@@ -4699,9 +4757,14 @@ mod tests {
             .await;
         let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("URL");
 
-        let text = run_memory_actions(&client, vec![Action::Recall, Action::Recall], "q", "chunk")
-            .await
-            .expect("recall succeeds");
+        let text = run_memory_actions(
+            &client,
+            vec![Action::Recall(String::new()), Action::Recall(String::new())],
+            "q",
+            "chunk",
+        )
+        .await
+        .expect("recall succeeds");
 
         assert_eq!(text, "[t] one\n\n[t] two");
     }
@@ -4715,7 +4778,7 @@ mod tests {
             &queries,
             &[],
             &BTreeMap::new(),
-            &WakeUpArgs::default(),
+            Some(&WakeUpArgs::default()),
         );
         assert_eq!(
             actions,
@@ -4728,7 +4791,7 @@ mod tests {
                     tag: "work-vpn".to_string(),
                     keyword: "llmenv-tag:work-vpn".to_string(),
                 }),
-                Action::Recall,
+                Action::Recall(String::new()),
             ],
             "TurnStart must run one tag recall per active tag, then the project recall"
         );
@@ -4743,7 +4806,7 @@ mod tests {
             &[],
             &queries,
             &BTreeMap::new(),
-            &WakeUpArgs::default(),
+            Some(&WakeUpArgs::default()),
         );
         assert_eq!(
             actions,
@@ -4756,7 +4819,7 @@ mod tests {
                     bundle: "rust-defaults".to_string(),
                     keyword: "llmenv-bundle:rust-defaults".to_string(),
                 }),
-                Action::Recall,
+                Action::Recall(String::new()),
             ],
             "TurnStart must emit one bundle recall per active bundle"
         );
@@ -4772,12 +4835,12 @@ mod tests {
             &tag_qs,
             &bundle_qs,
             &ranks,
-            &WakeUpArgs::default(),
+            Some(&WakeUpArgs::default()),
         );
         // Order: rank-1 tag recalls, then bundle recalls, then project recall.
         assert!(matches!(actions[0], Action::RecallTag(_)));
         assert!(matches!(actions[1], Action::RecallBundle(_)));
-        assert_eq!(actions[2], Action::Recall);
+        assert_eq!(actions[2], Action::Recall(String::new()));
         assert_eq!(actions.len(), 3);
     }
 
@@ -4827,7 +4890,7 @@ mod tests {
             &tag_qs,
             &bundle_qs,
             &ranks,
-            &WakeUpArgs::default(),
+            Some(&WakeUpArgs::default()),
         );
         assert_eq!(actions.len(), 3);
         match &actions[0] {
@@ -4943,7 +5006,7 @@ mod tests {
         ) {
             let tag_qs = tag_recall_queries(&tags).expect("valid tags");
             let bundle_qs = bundle_recall_queries(&bundles).expect("valid bundles");
-            let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs, &BTreeMap::new(), &WakeUpArgs::default());
+            let actions = dispatch(HookEvent::TurnStart, &tag_qs, &bundle_qs, &BTreeMap::new(), Some(&WakeUpArgs::default()));
 
             prop_assert_eq!(actions.len(), 1 + tags.len() + bundles.len());
             for a in &actions[..bundles.len()] {
@@ -4955,7 +5018,7 @@ mod tests {
             for a in &actions[bundles.len()..bundles.len() + tags.len()] {
                 prop_assert!(matches!(a, Action::RecallTag(_)), "expected RecallTag, got {a:?}");
             }
-            prop_assert!(matches!(actions.last(), Some(Action::Recall)));
+            prop_assert!(matches!(actions.last(), Some(Action::Recall(_))));
         }
     }
 
@@ -4983,7 +5046,7 @@ mod tests {
             &tag_qs,
             &bundle_qs,
             &ranks,
-            &WakeUpArgs::default(),
+            Some(&WakeUpArgs::default()),
         )
         .iter()
         .map(|a| match a {
@@ -5001,7 +5064,7 @@ mod tests {
                 "ccc-user",
                 "aaa-host",
                 "eee-loose",
-                "Recall",
+                "Recall(\"\")",
             ]
         );
     }
@@ -5943,14 +6006,39 @@ mod adaptive_routing_tests {
     }
 
     #[test]
-    fn only_session_start_sends_a_wake_project() {
+    fn project_lookup_runs_for_session_start_and_stateless_turn_start_only() {
         let repo = git_repo_with_origin();
         let cwd = repo.path().to_str().unwrap();
         let payload = json!({"cwd": cwd});
-        let start = wake_args(HookEvent::SessionStart, None, &payload, "/");
+        let adaptive = Some(MemoryHookSettings {
+            wakeup_max_tokens: None,
+            adaptive_recall: true,
+        });
+        let start = wake_args(HookEvent::SessionStart, adaptive, &payload, "/");
         assert_eq!(start.project.as_deref(), Some("wake-repo"));
-        let turn = wake_args(HookEvent::TurnStart, None, &payload, "/");
-        assert_eq!(turn.project, None);
+        // #2253: the stateless TurnStart recall is scoped to the session project.
+        let stateless = wake_args(HookEvent::TurnStart, None, &payload, "/");
+        assert_eq!(stateless.project.as_deref(), Some("wake-repo"));
+        let adaptive_turn = wake_args(HookEvent::TurnStart, adaptive, &payload, "/");
+        assert_eq!(adaptive_turn.project, None, "the ledger holds the project");
+        let other = wake_args(HookEvent::PostToolUse, None, &payload, "/");
+        assert_eq!(other.project, None);
+    }
+
+    #[test]
+    fn stateless_turn_start_recall_carries_the_session_project() {
+        let wake = WakeUpArgs {
+            max_tokens: None,
+            project: Some("llmenv".into()),
+        };
+        let turn = dispatch(
+            HookEvent::TurnStart,
+            &[],
+            &[],
+            &BTreeMap::new(),
+            Some(&wake),
+        );
+        assert_eq!(turn, vec![Action::Recall("llmenv".into())]);
     }
 
     #[test]

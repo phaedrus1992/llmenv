@@ -1219,7 +1219,9 @@ impl AgentAdapter for OpencodeAdapter {
     }
 
     fn emit_hook_context(&self, hook_event_name: &str, text: &str) -> String {
-        super::emit_hook_context(hook_event_name, text)
+        // The generated shim adds SessionStart context to the first message
+        // (`session.created` in SHIM_TEMPLATE).
+        super::emit_hook_context(hook_event_name, text, super::SessionStartContext::Accepted)
     }
 }
 
@@ -3665,9 +3667,12 @@ mod tests {
                 .supported_hook_events()
                 .contains(&"PreToolUse")
         );
+        // The shim reads hookSpecificOutput.additionalContext on SessionStart.
+        let out = OpencodeAdapter.emit_hook_context("SessionStart", "hi");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(
-            OpencodeAdapter.emit_hook_context("SessionStart", "hi"),
-            super::super::emit_hook_context("SessionStart", "hi")
+            v["hookSpecificOutput"]["additionalContext"],
+            "[ICM MEMORY CONTEXT (session start)]\nhi"
         );
     }
 

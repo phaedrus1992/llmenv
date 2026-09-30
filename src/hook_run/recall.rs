@@ -203,7 +203,7 @@ impl RecallBudget {
 fn is_recall(action: &Action) -> bool {
     matches!(
         action,
-        Action::Recall | Action::RecallTag(_) | Action::RecallBundle(_) | Action::RecallQuery(_)
+        Action::Recall(_) | Action::RecallTag(_) | Action::RecallBundle(_) | Action::RecallQuery(_)
     )
 }
 
@@ -321,7 +321,10 @@ mod tests {
     }
 
     async fn run_texts(texts: Vec<String>) -> (String, RecallBudget) {
-        let actions = texts.iter().map(|_| Action::Recall).collect();
+        let actions = texts
+            .iter()
+            .map(|_| Action::Recall(String::new()))
+            .collect();
         let index = Cell::new(0);
         run_with_budget(actions, |_| {
             let text = texts[index.get()].clone();
@@ -379,7 +382,11 @@ mod tests {
     #[tokio::test]
     async fn later_recalls_are_skipped_once_the_budget_is_full() {
         let calls = Cell::new(0);
-        let actions = vec![Action::Recall, Action::Recall, Action::Recall];
+        let actions = vec![
+            Action::Recall(String::new()),
+            Action::Recall(String::new()),
+            Action::Recall(String::new()),
+        ];
         let (text, budget) = run_with_budget(actions, |_| {
             calls.set(calls.get() + 1);
             async {
@@ -516,7 +523,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failing_action_propagates_its_error() {
-        let result = run_with_budget(vec![Action::Recall], |_| async {
+        let result = run_with_budget(vec![Action::Recall(String::new())], |_| async {
             Err::<String, _>(anyhow::anyhow!("boom"))
         })
         .await;

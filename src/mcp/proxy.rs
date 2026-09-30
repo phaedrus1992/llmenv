@@ -479,12 +479,20 @@ fn write_pidfile_atomic(pid_path: &Path, pid: u32) -> anyhow::Result<()> {
 /// pidfile to a relative path in the caller's CWD would silently scatter state
 /// across whatever directories `llmenv` happens to be invoked from.
 pub(crate) fn default_pid_path() -> anyhow::Result<PathBuf> {
-    if let Ok(xdg) = std::env::var("XDG_STATE_HOME")
-        && !xdg.is_empty()
+    pid_path_from_env(|k| std::env::var(k).ok())
+}
+
+/// [`default_pid_path`] with an injected environment, for tests.
+///
+/// A relative `XDG_STATE_HOME` is ignored, as the XDG Base Directory spec
+/// requires: it would resolve against the caller's cwd.
+fn pid_path_from_env(get_env: impl Fn(&str) -> Option<String>) -> anyhow::Result<PathBuf> {
+    if let Some(xdg) = get_env("XDG_STATE_HOME")
+        && Path::new(&xdg).is_absolute()
     {
         return Ok(PathBuf::from(xdg).join("llmenv").join("mcp-proxy.pid"));
     }
-    if let Ok(home) = std::env::var("HOME")
+    if let Some(home) = get_env("HOME")
         && !home.is_empty()
     {
         return Ok(PathBuf::from(home)
@@ -501,14 +509,62 @@ fn log_path_for(pid_path: &Path) -> PathBuf {
     pid_path.with_file_name("mcp-proxy.log")
 }
 
-/// Default path for the proxy's stderr log —
-/// `$XDG_STATE_HOME/llmenv/mcp-proxy.log`, falling back to
-/// `~/.local/state/llmenv/mcp-proxy.log`.
+/// Working directory of the `icm serve` process, a sibling of the pidfile (#2262).
+fn icm_serve_dir_for(pid_path: &Path) -> PathBuf {
+    pid_path.with_file_name("icm-serve")
+}
+
+/// Start `cmd` in `serve_dir` and stop git discovery at its parent (#2262).
+///
+/// Without `ICM_DB` or a global `[store].path`, `icm serve` opens
+/// `<git root of its cwd>/.icm/memories.db`. A proxy started from inside such a
+/// repository would serve that one project's database to every session on the
+/// host. With no git root, ICM falls through to the user's own configuration.
 ///
 /// # Errors
-/// Returns an error if neither `XDG_STATE_HOME` nor `HOME` is set.
-fn default_log_path() -> anyhow::Result<PathBuf> {
-    Ok(log_path_for(&default_pid_path()?))
+/// Errors when `serve_dir` is relative or has no parent, or when the parent
+/// contains the path-list separator. Without the ceiling, git walks up from
+/// `serve_dir`, and a repository above the state dir brings the bug back.
+fn pin_icm_serve_dir(cmd: &mut Command, serve_dir: &Path) -> anyhow::Result<()> {
+    let parent = serve_dir
+        .parent()
+        .filter(|_| serve_dir.is_absolute())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "icm serve working directory {} must be an absolute path with a parent; \
+             set XDG_STATE_HOME to an absolute path or unset it",
+                serve_dir.display()
+            )
+        })?;
+    let existing = std::env::var_os("GIT_CEILING_DIRECTORIES").unwrap_or_default();
+    let inherited = std::env::split_paths(&existing).filter(|p| !p.as_os_str().is_empty());
+    let joined = std::env::join_paths(std::iter::once(parent.to_path_buf()).chain(inherited))
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "cannot stop git discovery for icm serve: {} contains the path-list \
+                 separator ({e}); set ICM_DB or a global ICM [store].path, or move the \
+                 llmenv state directory",
+                parent.display()
+            )
+        })?;
+    cmd.current_dir(serve_dir)
+        .env("GIT_CEILING_DIRECTORIES", joined);
+    Ok(())
+}
+
+/// Create the `icm serve` working directory, private to the user.
+fn create_icm_serve_dir(serve_dir: &Path) -> anyhow::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(serve_dir).with_context(|| {
+        format!(
+            "cannot create the icm serve working directory {}; check the permissions \
+             of the llmenv state directory",
+            serve_dir.display()
+        )
+    })
 }
 
 /// Opens the proxy's stderr log for appending, rotating it to `mcp-proxy.log.1`
@@ -787,8 +843,9 @@ fn parse_bind(bind: &str) -> anyhow::Result<std::net::SocketAddr> {
 ///
 /// # Errors
 /// Returns an error if `bind` has no `:port` suffix, if neither `mcp-proxy` nor
-/// `uvx` is on `PATH`, or if the child cannot be spawned.
-pub(crate) fn spawn_mcp_proxy(bind: &str) -> anyhow::Result<Child> {
+/// `uvx` is on `PATH`, if the `icm serve` working directory next to `pid_path`
+/// cannot be created or pinned, or if the child cannot be spawned.
+pub(crate) fn spawn_mcp_proxy(bind: &str, pid_path: &Path) -> anyhow::Result<Child> {
     let addr = parse_bind(bind)?;
     let (program, leading) = mcp_proxy_command()?;
     let mut cmd = Command::new(program);
@@ -802,10 +859,13 @@ pub(crate) fn spawn_mcp_proxy(bind: &str) -> anyhow::Result<Child> {
         .arg("--")
         .arg("icm")
         .arg("serve");
+    let serve_dir = icm_serve_dir_for(pid_path);
+    create_icm_serve_dir(&serve_dir)?;
+    pin_icm_serve_dir(&mut cmd, &serve_dir)?;
     // Point stderr at the log so a startup failure is diagnosable (#1086). If the
     // log can't be opened we still spawn — a missing diagnostic is a smaller
     // problem than no memory backend — but say so rather than degrading silently.
-    let stderr = match default_log_path().and_then(|p| open_proxy_log(&p)) {
+    let stderr = match open_proxy_log(&log_path_for(pid_path)) {
         Ok(file) => Stdio::from(file),
         Err(e) => {
             // `eprintln!` rather than `tracing::warn!`: the default subscriber
@@ -1030,6 +1090,86 @@ mod tests {
         assert!(
             !is_executable(dir.path()),
             "a directory should not count as an executable file"
+        );
+    }
+
+    // #2262: `icm serve` reads `<git root>/.icm/` when no `ICM_DB` or global
+    // `[store].path` is set. The pinned working dir must not resolve to any
+    // git root, even when the llmenv state dir sits inside a repository.
+    #[test]
+    fn pinned_icm_serve_dir_finds_no_git_root() {
+        use super::{icm_serve_dir_for, pin_icm_serve_dir};
+
+        let repo = tempfile::tempdir().expect("tempdir");
+        let init = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo.path())
+            .status()
+            .expect("git init");
+        assert!(init.success());
+        std::fs::create_dir_all(repo.path().join(".icm")).expect("mkdir .icm");
+        std::fs::write(repo.path().join(".icm/memories.db"), b"").expect("write db");
+
+        let pid_path = repo.path().join("state/llmenv/mcp-proxy.pid");
+        let serve_dir = icm_serve_dir_for(&pid_path);
+        std::fs::create_dir_all(&serve_dir).expect("mkdir serve dir");
+
+        let mut cmd = Command::new("git");
+        cmd.args(["rev-parse", "--show-toplevel"]);
+        pin_icm_serve_dir(&mut cmd, &serve_dir).unwrap();
+        let out = cmd.output().expect("git rev-parse");
+        assert!(
+            !out.status.success(),
+            "git root must not resolve from the pinned dir, got {:?} envs {:?} cwd {:?}",
+            String::from_utf8_lossy(&out.stdout),
+            cmd.get_envs().collect::<Vec<_>>(),
+            cmd.get_current_dir()
+        );
+        assert_eq!(cmd.get_current_dir(), Some(serve_dir.as_path()));
+    }
+
+    // The XDG spec says to ignore a relative path. A relative serve dir would
+    // resolve against the caller's cwd, often inside a repository (#2262).
+    #[test]
+    fn pid_path_ignores_a_relative_xdg_state_home() {
+        use super::pid_path_from_env;
+        let env = |xdg: &'static str| {
+            move |k: &str| match k {
+                "XDG_STATE_HOME" => Some(xdg.to_string()),
+                "HOME" => Some("/home/u".to_string()),
+                _ => None,
+            }
+        };
+        assert_eq!(
+            pid_path_from_env(env("rel/state")).unwrap(),
+            Path::new("/home/u/.local/state/llmenv/mcp-proxy.pid")
+        );
+        assert_eq!(
+            pid_path_from_env(env("/abs/state")).unwrap(),
+            Path::new("/abs/state/llmenv/mcp-proxy.pid")
+        );
+    }
+
+    #[test]
+    fn pin_icm_serve_dir_rejects_a_relative_dir() {
+        let mut cmd = Command::new("true");
+        let err = super::pin_icm_serve_dir(&mut cmd, Path::new("state/icm-serve")).unwrap_err();
+        assert!(err.to_string().contains("absolute"), "{err}");
+    }
+
+    #[test]
+    fn pin_icm_serve_dir_errors_when_the_ceiling_cannot_be_set() {
+        let mut cmd = Command::new("true");
+        let err = super::pin_icm_serve_dir(&mut cmd, Path::new("/a:b/icm-serve")).unwrap_err();
+        assert!(err.to_string().contains("ICM_DB"), "{err}");
+    }
+
+    #[test]
+    fn icm_serve_dir_is_a_sibling_of_the_pidfile() {
+        let pid = Path::new("/state/llmenv/mcp-proxy.pid");
+        assert_eq!(
+            super::icm_serve_dir_for(pid),
+            Path::new("/state/llmenv/icm-serve")
         );
     }
 

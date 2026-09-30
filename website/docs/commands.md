@@ -269,7 +269,13 @@ recall events also need `adaptive_recall` on):
   and resets the per-session recall state after a compaction or `/clear`; also
   creates the correlated ICM transcript session and emits the baseline
   `lifecycle_start` + scope-header session-log events. Before v3.12.0, Claude
-  Code fetched the wake-up pack but never showed it to the model.
+  Code fetched the wake-up pack but never showed it to the model. (changed in
+  v3.12.0) In Claude Code and opencode the block starts with
+  `[ICM MEMORY CONTEXT (session start)]`, so it reads as different from the
+  per-prompt `[ICM MEMORY CONTEXT (auto-injected)]` recall. A resumed or forked
+  session (`source` `resume` or `fork`) makes no `icm_wake_up` call, because
+  the conversation already holds the earlier pack. opencode receives the block
+  in its first message; Crush runs no `SessionStart` hook.
 - `turn_start` — with `adaptive_recall` (changed in v3.12.0), injects memories
   that match the prompt and recent session activity, plus related topics, and
   skips memories already sent in this context; without it, injects the
@@ -441,7 +447,10 @@ unambiguous prefix of one.
   tasks (e.g. several parallel analyzer tasks under one parent step), block
   on the **parent** rather than hand-wiring a `block` edge to each sibling —
   a `blocked_on` reference isn't satisfied until the target task *and every
-  one of its descendants* are done.
+  one of its descendants* are done. (changed in v3.12.0) The blocked task's
+  own subtree doesn't count: `task add` parents each new task under the
+  previous one, so a task blocked on its predecessor is usually that
+  predecessor's child, and it can start once the predecessor is done.
 - `task edit <id> [--title <t>] [--parent SLUG | --no-parent] [--block-on
   <id>]... [--unblock <id>]... [--add-note <text>] [--delete-note
   <index-or-timestamp>]` — mutate an existing task. (added in v3.10.0) Every

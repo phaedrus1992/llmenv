@@ -582,18 +582,8 @@ impl AgentAdapter for ClaudeCodeAdapter {
     }
 
     fn emit_hook_context(&self, hook_event_name: &str, text: &str) -> String {
-        // Claude Code accepts additionalContext on SessionStart (#2251). The shared
-        // helper suppresses it, because the other engines are not verified.
-        if hook_event_name == "SessionStart" && !text.trim().is_empty() {
-            return serde_json::json!({
-                "hookSpecificOutput": {
-                    "hookEventName": hook_event_name,
-                    "additionalContext": format!("{}\n{text}", super::MEMORY_CONTEXT_HEADER),
-                }
-            })
-            .to_string();
-        }
-        super::emit_hook_context(hook_event_name, text)
+        // Claude Code accepts additionalContext on SessionStart (#2251).
+        super::emit_hook_context(hook_event_name, text, super::SessionStartContext::Accepted)
     }
 }
 
@@ -7195,20 +7185,14 @@ mod tests {
             parsed["hookSpecificOutput"]["hookEventName"],
             "SessionStart"
         );
-        assert!(
-            parsed["hookSpecificOutput"]["additionalContext"]
-                .as_str()
-                .expect("must have additionalContext")
-                .contains("wake data")
+        // #2142: a distinct header tells the one-time summary from per-prompt recall.
+        assert_eq!(
+            parsed["hookSpecificOutput"]["additionalContext"],
+            "[ICM MEMORY CONTEXT (session start)]\nwake data"
         );
         assert_eq!(
             ClaudeCodeAdapter.emit_hook_context("SessionStart", "  "),
             ""
-        );
-        assert_eq!(
-            super::super::emit_hook_context("SessionStart", "x"),
-            "",
-            "shared path unchanged"
         );
     }
 
