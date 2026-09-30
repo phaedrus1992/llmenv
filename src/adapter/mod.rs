@@ -2,6 +2,7 @@ pub mod claude_code;
 pub mod codex;
 pub mod crush;
 pub(crate) mod llmenv_skill;
+pub(crate) mod model_settings;
 pub(crate) mod native_keys;
 pub mod opencode;
 pub(crate) mod output_styles;

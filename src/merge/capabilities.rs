@@ -17,8 +17,8 @@
 use std::collections::BTreeMap;
 
 use crate::config::{
-    Capabilities, CodebaseMemory, Features, HostEntry, Memory, NativePermissionRules,
-    PermissionMode, PermissionPreset, PermissionRule, Permissions, Throttle,
+    Capabilities, CodebaseMemory, Features, Memory, NativePermissionRules, PermissionMode,
+    PermissionPreset, PermissionRule, Permissions, Throttle,
 };
 use crate::util::{dedup, merge_yaml, normalize_yaml};
 
@@ -87,8 +87,10 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         deny.extend(safe_readonly_deny_rules_for(preset));
     }
 
-    let env = resolve_env(contributors)?;
-    let default_models = resolve_default_models(contributors)?;
+    let env = resolve_per_key(contributors, "env key", |c| &c.env)?;
+    let default_models =
+        resolve_per_key(contributors, "default_models role", |c| &c.default_models)?;
+    let model_effort = resolve_per_key(contributors, "model_effort model", |c| &c.model_effort)?;
 
     dedup(&mut hooks);
     dedup(&mut plugins);
@@ -113,7 +115,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     let native_model_providers = merge_native_feature(contributors, |c| &c.native_model_providers);
     let native_default_models = merge_native_feature(contributors, |c| &c.native_default_models);
     let native = merge_native_flat(contributors);
-    let host = resolve_host_map(contributors)?;
+    let host = resolve_per_key(contributors, "host entry", |c| &c.host)?;
 
     // Scalar resolution: highest precedence wins (not positional order), via
     // the shared `highest_precedence` helper (#1023/#1025).
@@ -206,6 +208,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         env,
         auto_memory_enabled,
         effort_level,
+        model_effort,
         advisor_size,
         native_permissions,
         native_hooks,
@@ -392,63 +395,23 @@ fn merge_native_flat(
     merge_native_feature(contributors, |c| &c.native)
 }
 
-/// Merge the `host` address table across contributors: per key, highest-precedence
-/// contributor wins. Same-precedence disagreement on a single key is a hard error,
-/// matching the `default_mode` and `env` scalar policy.
-fn resolve_host_map(
+/// Merge one map field across contributors: per key, the highest-precedence
+/// contributor wins. Same-precedence disagreement on one key is a hard error
+/// that names both contributors, the same policy as the scalar fields.
+fn resolve_per_key<V: Clone + PartialEq + std::fmt::Debug>(
     contributors: &[CapabilityContributor],
-) -> anyhow::Result<BTreeMap<String, HostEntry>> {
-    let mut result: BTreeMap<String, (&CapabilityContributor, &HostEntry)> = BTreeMap::new();
+    label: &str,
+    pick: impl Fn(&Capabilities) -> &BTreeMap<String, V>,
+) -> anyhow::Result<BTreeMap<String, V>> {
+    let mut result: BTreeMap<String, (&CapabilityContributor, &V)> = BTreeMap::new();
     for c in contributors {
-        for (name, entry) in &c.capabilities.host {
-            match result.get(name) {
-                None => {
-                    result.insert(name.clone(), (c, entry));
-                }
-                Some((prev_c, prev_entry)) => {
-                    if c.precedence > prev_c.precedence {
-                        result.insert(name.clone(), (c, entry));
-                    } else if c.precedence == prev_c.precedence && entry != *prev_entry {
+        for (key, value) in pick(&c.capabilities) {
+            match result.get(key) {
+                Some((prev_c, _)) if c.precedence < prev_c.precedence => {}
+                Some((prev_c, prev_value)) if c.precedence == prev_c.precedence => {
+                    if value != *prev_value {
                         anyhow::bail!(
-                            "conflicting host entry '{name}' at the same precedence: \
-                             '{}' and '{}' — resolve by giving one a higher-precedence scope",
-                            prev_c.name,
-                            c.name,
-                        );
-                    }
-                    // c.precedence < prev: prev keeps winning.
-                    // c.precedence == prev, same value: agreement, no-op.
-                }
-            }
-        }
-    }
-    Ok(result
-        .into_iter()
-        .map(|(k, (_, v))| (k, v.clone()))
-        .collect())
-}
-
-/// Resolve the `env` map across contributors: per key, highest-precedence
-/// contributor wins. Same-precedence disagreement on any key is a hard error,
-/// matching the `default_mode` scalar policy.
-fn resolve_env(contributors: &[CapabilityContributor]) -> anyhow::Result<BTreeMap<String, String>> {
-    // Track the winning (contributor, value) per key. Order-independent: all
-    // four precedence cases (higher wins, lower loses, same+agree, same+conflict)
-    // are handled by comparing stored vs incoming precedence.
-    let mut env: BTreeMap<String, (&CapabilityContributor, &str)> = BTreeMap::new();
-
-    for c in contributors {
-        for (key, value) in &c.capabilities.env {
-            match env.get(key) {
-                None => {
-                    env.insert(key.clone(), (c, value.as_str()));
-                }
-                Some((prev_c, prev_value)) => {
-                    if c.precedence > prev_c.precedence {
-                        env.insert(key.clone(), (c, value.as_str()));
-                    } else if c.precedence == prev_c.precedence && value.as_str() != *prev_value {
-                        anyhow::bail!(
-                            "conflicting env key '{key}' at the same precedence: \
+                            "conflicting {label} '{key}' at the same precedence: \
                              '{}' sets {:?} but '{}' sets {:?} — no scope can break \
                              the tie; resolve by giving one a higher-precedence scope",
                             prev_c.name,
@@ -457,54 +420,14 @@ fn resolve_env(contributors: &[CapabilityContributor]) -> anyhow::Result<BTreeMa
                             value,
                         );
                     }
-                    // c.precedence < prev: prev keeps winning.
-                    // c.precedence == prev, same value: agreement, no-op.
+                }
+                _ => {
+                    result.insert(key.clone(), (c, value));
                 }
             }
         }
     }
-
-    Ok(env
-        .into_iter()
-        .map(|(k, (_, v))| (k, v.to_string()))
-        .collect())
-}
-
-/// Resolve `default_models` across contributors: highest precedence wins
-/// per role key; same-precedence disagreement on a role is a hard error.
-/// Matches `resolve_env`'s per-key scalar policy.
-fn resolve_default_models(
-    contributors: &[CapabilityContributor],
-) -> anyhow::Result<BTreeMap<String, crate::config::ModelRef>> {
-    let mut roles: BTreeMap<String, (&CapabilityContributor, &crate::config::ModelRef)> =
-        BTreeMap::new();
-
-    for c in contributors {
-        for (role, r#ref) in &c.capabilities.default_models {
-            match roles.get(role) {
-                None => {
-                    roles.insert(role.clone(), (c, r#ref));
-                }
-                Some((prev_c, prev_ref)) => {
-                    if c.precedence > prev_c.precedence {
-                        roles.insert(role.clone(), (c, r#ref));
-                    } else if c.precedence == prev_c.precedence && r#ref != *prev_ref {
-                        anyhow::bail!(
-                            "conflicting default_models role '{role}' at the same precedence: \
-                             '{}' sets {:?} but '{}' sets {:?} — no scope can break \
-                             the tie; resolve by giving one a higher-precedence scope",
-                            prev_c.name,
-                            prev_ref,
-                            c.name,
-                            r#ref,
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(roles
+    Ok(result
         .into_iter()
         .map(|(k, (_, v))| (k, v.clone()))
         .collect())
@@ -1586,7 +1509,7 @@ mod tests {
                 );
             }
 
-            // resolve_host_map: disjoint keys from N contributors all survive.
+            // host map: disjoint keys from N contributors all survive.
             #[test]
             fn host_disjoint_keys_all_survive(
                 entries in prop::collection::vec(
@@ -1617,7 +1540,32 @@ mod tests {
                 prop_assert_eq!(out.host.len(), contribs.len());
             }
 
-            // resolve_host_map: highest precedence wins per key, regardless of input order.
+            // #2144: model_effort takes the highest-precedence entry per model ID,
+            // whatever the order of the contributors.
+            #[test]
+            fn model_effort_winner_is_order_independent(
+                order in Just((1u8..=6).collect::<Vec<u8>>()).prop_shuffle(),
+            ) {
+                let levels = ["low", "medium", "high", "xhigh", "low", "high"];
+                let contribs: Vec<CapabilityContributor> = order
+                    .iter()
+                    .map(|&prec| {
+                        let level = levels[usize::from(prec - 1)];
+                        contributor(
+                            &format!("c{prec}"),
+                            prec,
+                            with_model_effort("claude-opus-5-5", level),
+                        )
+                    })
+                    .collect();
+                let out = merge_capabilities(&contribs).unwrap();
+                prop_assert_eq!(
+                    out.model_effort["claude-opus-5-5"].effort_level.as_deref(),
+                    Some(levels[5])
+                );
+            }
+
+            // host map: highest precedence wins per key, regardless of input order.
             #[test]
             fn host_highest_precedence_wins(
                 low_count in 0usize..5,
@@ -1856,6 +1804,66 @@ mod tests {
         let a = contributor("a", 1, Capabilities::default());
         let out = merge_capabilities(&[a]).unwrap();
         assert_eq!(out.effort_level, None);
+    }
+
+    fn with_model_effort(model: &str, effort: &str) -> Capabilities {
+        let entry = crate::config::ModelEffort {
+            effort_level: Some(effort.into()),
+            max_effort_level: None,
+        };
+        Capabilities {
+            model_effort: [(model.to_string(), entry)].into_iter().collect(),
+            ..Capabilities::default()
+        }
+    }
+
+    // #2144: model_effort merges per model ID; the whole entry of the
+    // highest-precedence contributor wins.
+    #[test]
+    fn model_effort_highest_precedence_wins_per_model() {
+        let mut high = with_model_effort("claude-opus-5-5", "xhigh");
+        high.model_effort.insert(
+            "claude-fable-5-1".into(),
+            crate::config::ModelEffort {
+                effort_level: None,
+                max_effort_level: Some("high".into()),
+            },
+        );
+        let low = with_model_effort("claude-opus-5-5", "low");
+        let out =
+            merge_capabilities(&[contributor("hi", 2, high), contributor("lo", 1, low)]).unwrap();
+        let opus = &out.model_effort["claude-opus-5-5"];
+        assert_eq!(opus.effort_level.as_deref(), Some("xhigh"));
+        assert_eq!(opus.max_effort_level, None);
+        assert_eq!(
+            out.model_effort["claude-fable-5-1"]
+                .max_effort_level
+                .as_deref(),
+            Some("high")
+        );
+    }
+
+    #[test]
+    fn model_effort_same_precedence_conflict_names_both() {
+        let a = contributor("a", 1, with_model_effort("claude-opus-5-5", "low"));
+        let b = contributor("b", 1, with_model_effort("claude-opus-5-5", "high"));
+        let err = merge_capabilities(&[a, b]).unwrap_err().to_string();
+        assert!(
+            err.contains("conflicting model_effort model 'claude-opus-5-5'"),
+            "{err}"
+        );
+        assert!(err.contains("'a'") && err.contains("'b'"), "{err}");
+    }
+
+    #[test]
+    fn model_effort_same_precedence_agreement_is_fine() {
+        let a = contributor("a", 1, with_model_effort("claude-opus-5-5", "low"));
+        let b = contributor("b", 1, with_model_effort("claude-opus-5-5", "low"));
+        let out = merge_capabilities(&[a, b]).unwrap();
+        assert_eq!(
+            out.model_effort["claude-opus-5-5"].effort_level.as_deref(),
+            Some("low")
+        );
     }
 
     /// #1215: `highest_precedence` (backing `effort_level` and every other
