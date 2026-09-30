@@ -13,7 +13,6 @@ pub(crate) mod cd_guard;
 pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
 pub(crate) mod mcp_client;
-mod project;
 pub(crate) mod read_once;
 mod recall;
 mod relevance;
@@ -492,7 +491,7 @@ fn wake_args(
     WakeUpArgs {
         max_tokens: settings.and_then(|s| s.wakeup_max_tokens),
         project: wants_project
-            .then(|| project::session_project(&hook_cwd(payload, cwd)))
+            .then(|| crate::memory::project::session_project(&hook_cwd(payload, cwd)))
             .flatten(),
     }
 }
