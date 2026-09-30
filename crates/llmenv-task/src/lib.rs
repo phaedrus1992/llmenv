@@ -633,11 +633,17 @@ pub fn start_task(state_dir: &Path, input: &str, force: bool) -> anyhow::Result<
             let all_tasks = list_tasks(state_dir);
             let by_slug: HashMap<&str, &Task> =
                 all_tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
-            let unmet: Vec<&str> = task
+            let unmet: Vec<String> = task
                 .blocked_on
                 .iter()
-                .map(String::as_str)
-                .filter(|blocker_slug| !is_done_including_descendants(blocker_slug, &by_slug))
+                .filter_map(|blocker| {
+                    let undone = first_undone_in_subtree(blocker, &slug, &by_slug)?;
+                    Some(if undone == blocker.as_str() {
+                        blocker.clone()
+                    } else {
+                        format!("{blocker} (its descendant '{undone}' is not done)")
+                    })
+                })
                 .collect();
             if !unmet.is_empty() {
                 anyhow::bail!(
@@ -1080,7 +1086,7 @@ fn is_actionable(task: &Task, by_slug: &HashMap<&str, &Task>) -> bool {
         && task
             .blocked_on
             .iter()
-            .all(|b| is_done_including_descendants(b, by_slug))
+            .all(|b| is_done_including_descendants(b, &task.slug, by_slug))
 }
 
 /// True when the task named `slug` is `done` and every task transitively
@@ -1094,25 +1100,50 @@ fn is_actionable(task: &Task, by_slug: &HashMap<&str, &Task>) -> bool {
 /// [`append_forest`]'s guard) instead of recursing forever; a cycle is
 /// invalid data, not a case this needs to resolve "correctly" for, only
 /// safely.
-fn is_done_including_descendants(slug: &str, by_slug: &HashMap<&str, &Task>) -> bool {
+///
+/// The walk skips the subtree of `waiter`, the task that is blocked on
+/// `slug`. `task add` chains a new task under the previous one by default,
+/// so the waiter is often a descendant of its own blocker. Its subtree
+/// cannot be done before the waiter starts, and would block it forever (#2300).
+fn is_done_including_descendants(slug: &str, waiter: &str, by_slug: &HashMap<&str, &Task>) -> bool {
+    first_undone_in_subtree(slug, waiter, by_slug).is_none()
+}
+
+/// The first task in `slug`'s subtree (skipping `waiter`'s) that holds
+/// [`is_done_including_descendants`] false: `slug` itself when it is dangling
+/// or not done, else the first undone descendant in slug order. `None` when
+/// the whole subtree is done.
+fn first_undone_in_subtree<'a>(
+    slug: &'a str,
+    waiter: &str,
+    by_slug: &HashMap<&'a str, &'a Task>,
+) -> Option<&'a str> {
     fn go<'a>(
         slug: &'a str,
+        waiter: &str,
         by_slug: &HashMap<&'a str, &'a Task>,
         visited: &mut HashSet<&'a str>,
-    ) -> bool {
+    ) -> Option<&'a str> {
         if !visited.insert(slug) {
-            return true;
+            return None;
         }
         let Some(&task) = by_slug.get(slug) else {
-            return false;
+            return Some(slug);
         };
-        task.state == TaskState::Done
-            && by_slug
-                .values()
-                .filter(|t| t.parent.as_deref() == Some(slug))
-                .all(|child| go(&child.slug, by_slug, visited))
+        if task.state != TaskState::Done {
+            return Some(slug);
+        }
+        let mut children: Vec<&'a str> = by_slug
+            .values()
+            .filter(|t| t.parent.as_deref() == Some(slug) && t.slug != waiter)
+            .map(|t| t.slug.as_str())
+            .collect();
+        children.sort_unstable();
+        children
+            .into_iter()
+            .find_map(|child| go(child, waiter, by_slug, visited))
     }
-    go(slug, by_slug, &mut HashSet::new())
+    go(slug, waiter, by_slug, &mut HashSet::new())
 }
 
 /// Parent-before-children execution order for a single session's tasks —
@@ -1806,6 +1837,78 @@ mod tests {
         block_task(dir.path(), &downstream.slug, &parent.slug).expect("test");
         let started = start_task(dir.path(), &downstream.slug, false).expect("test");
         assert_eq!(started.state, TaskState::Wip);
+    }
+
+    // #2300: `task add` without `--parent` chains the new task under the one
+    // added before it, so a task blocked on its own parent is inside the
+    // blocker's subtree. That subtree cannot be done before the task starts.
+    #[test]
+    fn start_task_allows_when_blocked_on_own_done_parent() {
+        let dir = TempDir::new().expect("test");
+        let a = mk(dir.path(), "setup: A", None).expect("test");
+        let b = mk(dir.path(), "setup: B", Some(&a.slug)).expect("test");
+        block_task(dir.path(), &b.slug, &a.slug).expect("test");
+        start_task(dir.path(), &a.slug, false).expect("test");
+        done_task(dir.path(), &a.slug).expect("test");
+        let started = start_task(dir.path(), &b.slug, false).expect("test");
+        assert_eq!(started.state, TaskState::Wip);
+    }
+
+    #[test]
+    fn start_task_allows_every_link_of_an_implicit_chain() {
+        let dir = TempDir::new().expect("test");
+        let mut prev: Option<Task> = None;
+        let mut chain = Vec::new();
+        for title in ["step A", "step B", "step C", "step D"] {
+            let t = mk(dir.path(), title, prev.as_ref().map(|p| p.slug.as_str())).expect("test");
+            if let Some(p) = &prev {
+                block_task(dir.path(), &t.slug, &p.slug).expect("test");
+            }
+            chain.push(t.clone());
+            prev = Some(t);
+        }
+        for t in &chain {
+            start_task(dir.path(), &t.slug, false).expect("each link must start");
+            done_task(dir.path(), &t.slug).expect("test");
+        }
+    }
+
+    #[test]
+    fn start_task_still_blocks_on_undone_sibling_under_done_parent() {
+        let dir = TempDir::new().expect("test");
+        let a = mk(dir.path(), "Parent A", None).expect("test");
+        let b = mk(dir.path(), "Child B", Some(&a.slug)).expect("test");
+        let c = mk(dir.path(), "Child C", Some(&a.slug)).expect("test");
+        block_task(dir.path(), &b.slug, &a.slug).expect("test");
+        done_task(dir.path(), &a.slug).expect("test");
+        let err = start_task(dir.path(), &b.slug, false)
+            .unwrap_err()
+            .to_string();
+        // A is done, so the error must name the descendant that holds it open.
+        let want = format!("{} (its descendant '{}' is not done)", a.slug, c.slug);
+        assert!(err.contains(&want), "{err}");
+    }
+
+    #[test]
+    fn is_actionable_ignores_own_subtree_under_done_blocker() {
+        let dir = TempDir::new().expect("test");
+        let a = mk(dir.path(), "Parent A", None).expect("test");
+        let b = mk(dir.path(), "Child B", Some(&a.slug)).expect("test");
+        mk(dir.path(), "Grandchild", Some(&b.slug)).expect("test");
+        block_task(dir.path(), &b.slug, &a.slug).expect("test");
+        done_task(dir.path(), &a.slug).expect("test");
+        let tasks = list_tasks(dir.path());
+        let by_slug: HashMap<&str, &Task> = tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
+        assert!(is_actionable(by_slug[b.slug.as_str()], &by_slug));
+    }
+
+    #[test]
+    fn start_task_still_blocks_on_own_parent_that_is_not_done() {
+        let dir = TempDir::new().expect("test");
+        let a = mk(dir.path(), "Parent A", None).expect("test");
+        let b = mk(dir.path(), "Child B", Some(&a.slug)).expect("test");
+        block_task(dir.path(), &b.slug, &a.slug).expect("test");
+        assert!(start_task(dir.path(), &b.slug, false).is_err());
     }
 
     #[test]
@@ -2843,6 +2946,23 @@ mod tests {
                 })
         }
 
+        /// True when `slug` is `root` or one of its descendants, by walking
+        /// `slug`'s parent chain. Bounded by the task count for safety.
+        fn in_subtree(slug: &str, root: &str, tasks: &[Task]) -> bool {
+            let mut cur = Some(slug.to_string());
+            for _ in 0..=tasks.len() {
+                let Some(s) = cur else { return false };
+                if s == root {
+                    return true;
+                }
+                cur = tasks
+                    .iter()
+                    .find(|t| t.slug == s)
+                    .and_then(|t| t.parent.clone());
+            }
+            false
+        }
+
         /// Like [`arb_forest`], but each task also carries 0..2 `blocked_on`
         /// refs to earlier-or-equal indices (including itself, exercising
         /// [`is_done_including_descendants`]'s cycle guard) — the shape
@@ -3157,8 +3277,56 @@ mod tests {
                     let by_slug: HashMap<&str, &Task> =
                         tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
                     for blocker in &next.blocked_on {
-                        prop_assert!(is_done_including_descendants(blocker, &by_slug));
+                        prop_assert!(is_done_including_descendants(blocker, &next.slug, &by_slug));
                     }
+                }
+            }
+
+            // #2300: the waiter's own subtree never decides whether its blocker is done.
+            #[test]
+            fn waiter_subtree_states_never_change_the_blocker_result(
+                tasks in arb_forest(),
+                b in 0usize..8,
+                w in 0usize..8,
+            ) {
+                let blocker = format!("t{}", b % tasks.len());
+                let waiter = format!("t{}", w % tasks.len());
+                prop_assume!(blocker != waiter);
+                prop_assume!(!in_subtree(&blocker, &waiter, &tasks));
+                let with_states = |state: TaskState| {
+                    let mut ts = tasks.clone();
+                    for t in &mut ts {
+                        if in_subtree(&t.slug, &waiter, &tasks) {
+                            t.state = state;
+                        }
+                    }
+                    ts
+                };
+                let (open, done) = (with_states(TaskState::Open), with_states(TaskState::Done));
+                let index = |ts: &[Task]| -> bool {
+                    let by_slug: HashMap<&str, &Task> =
+                        ts.iter().map(|t| (t.slug.as_str(), t)).collect();
+                    is_done_including_descendants(&blocker, &waiter, &by_slug)
+                };
+                prop_assert_eq!(index(&open), index(&done));
+            }
+
+            #[test]
+            fn first_undone_is_an_undone_task_outside_the_waiter_subtree(
+                tasks in arb_forest(),
+                b in 0usize..8,
+                w in 0usize..8,
+            ) {
+                let blocker = format!("t{}", b % tasks.len());
+                let waiter = format!("t{}", w % tasks.len());
+                prop_assume!(blocker != waiter);
+                prop_assume!(!in_subtree(&blocker, &waiter, &tasks));
+                let by_slug: HashMap<&str, &Task> =
+                    tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
+                if let Some(undone) = first_undone_in_subtree(&blocker, &waiter, &by_slug) {
+                    prop_assert!(in_subtree(undone, &blocker, &tasks));
+                    prop_assert!(!in_subtree(undone, &waiter, &tasks));
+                    prop_assert_ne!(by_slug[undone].state, TaskState::Done);
                 }
             }
 

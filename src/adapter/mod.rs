@@ -769,36 +769,53 @@ pub(crate) fn resolve_command_paths_against_files(
 /// The first line of every injected ICM memory block.
 const MEMORY_CONTEXT_HEADER: &str = "[ICM MEMORY CONTEXT (auto-injected)]";
 
+/// The first line of the one-time `SessionStart` block, so the model can tell
+/// it from per-prompt recall (#2142).
+const SESSION_START_CONTEXT_HEADER: &str = "[ICM MEMORY CONTEXT (session start)]";
+
+/// Whether an engine accepts `additionalContext` on `SessionStart` (#2142).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionStartContext {
+    Accepted,
+    Rejected,
+}
+
 /// Format injected hook context in the adapter-native hook-output shape.
 ///
 /// Empty input always returns an empty string. `SessionEnd` also returns
 /// empty: it has no model turn to inject context into, and Claude Code
 /// rejects `additionalContext` there (#558). `SessionStart` returns empty
-/// here because the other engines' schemas are not verified; the Claude
-/// Code adapter overrides it, since Claude Code accepts it (#2251).
+/// unless the engine accepts it (`session_start`): Claude Code (#2251), Codex
+/// and the opencode shim do. Crush runs no `SessionStart` hook (#2142).
 ///
 /// This is the shared implementation behind every adapter's
-/// [`AgentAdapter::emit_hook_context`], replacing the three copies that
-/// previously existed in claude_code.rs, crush.rs, and opencode.rs.
+/// [`AgentAdapter::emit_hook_context`].
 ///
 /// # Arguments
 /// * `hook_event_name` — the event name (e.g. `"SessionStart"`), echoed
 ///   back as `hookEventName` inside `hookSpecificOutput`.
 /// * `text` — the injected context, placed as `additionalContext`.
+/// * `session_start` — whether the engine accepts `SessionStart` context.
 #[must_use]
-pub(crate) fn emit_hook_context(hook_event_name: &str, text: &str) -> String {
+pub(crate) fn emit_hook_context(
+    hook_event_name: &str,
+    text: &str,
+    session_start: SessionStartContext,
+) -> String {
     // Whitespace-only counts as empty: an all-advisory recall (stripped by
     // strip_advisory) can leave blank lines behind, and wrapping those would
     // inject an empty "[ICM MEMORY CONTEXT]" block on every turn (#978).
     if text.trim().is_empty() {
         return String::new();
     }
-    // SessionEnd rejects additionalContext (#558). SessionStart is not verified for
-    // the other engines; the Claude Code adapter handles it itself (#2251).
-    if matches!(hook_event_name, "SessionStart" | "SessionEnd") {
-        return String::new();
-    }
-    let wrapped = format!("{MEMORY_CONTEXT_HEADER}\n{text}");
+    let header = match (hook_event_name, session_start) {
+        ("SessionEnd", _) | ("SessionStart", SessionStartContext::Rejected) => {
+            return String::new();
+        }
+        ("SessionStart", SessionStartContext::Accepted) => SESSION_START_CONTEXT_HEADER,
+        _ => MEMORY_CONTEXT_HEADER,
+    };
+    let wrapped = format!("{header}\n{text}");
     serde_json::json!({
         "hookSpecificOutput": {
             "hookEventName": hook_event_name,
@@ -867,11 +884,11 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        AgentAdapter, MEMORY_MCP_NAME, active_adapter_from, adapter_for_launch_target,
-        emit_hook_context, engine_id, known_engine_ids, lifecycle_event_registered,
-        lifecycle_hook_registrations, modeled_key_redirect, overlay_native_json,
-        registered_adapters, remote_transport_type_str, resolve_bundle_relative_paths,
-        resolve_command_paths_against_files, strip_json_nulls,
+        AgentAdapter, MEMORY_MCP_NAME, SessionStartContext, active_adapter_from,
+        adapter_for_launch_target, emit_hook_context, engine_id, known_engine_ids,
+        lifecycle_event_registered, lifecycle_hook_registrations, modeled_key_redirect,
+        overlay_native_json, registered_adapters, remote_transport_type_str,
+        resolve_bundle_relative_paths, resolve_command_paths_against_files, strip_json_nulls,
     };
     use crate::merge::MergedManifest;
 
@@ -999,8 +1016,52 @@ mod tests {
 
     #[test]
     fn emit_hook_context_treats_whitespace_only_as_empty() {
-        assert!(emit_hook_context("UserPromptSubmit", "\n\n").is_empty());
-        assert!(emit_hook_context("UserPromptSubmit", "   ").is_empty());
+        for ss in [SessionStartContext::Accepted, SessionStartContext::Rejected] {
+            assert!(emit_hook_context("UserPromptSubmit", "\n\n", ss).is_empty());
+            assert!(emit_hook_context("SessionStart", "   ", ss).is_empty());
+        }
+    }
+
+    // #2142: per event and per engine capability, the header that wraps the
+    // text, or `None` for no output.
+    #[test]
+    fn emit_hook_context_event_table() {
+        use SessionStartContext::{Accepted, Rejected};
+        let cases = [
+            (
+                "SessionStart",
+                Accepted,
+                Some("[ICM MEMORY CONTEXT (session start)]"),
+            ),
+            ("SessionStart", Rejected, None),
+            ("SessionEnd", Accepted, None),
+            ("SessionEnd", Rejected, None),
+            (
+                "UserPromptSubmit",
+                Accepted,
+                Some("[ICM MEMORY CONTEXT (auto-injected)]"),
+            ),
+            (
+                "UserPromptSubmit",
+                Rejected,
+                Some("[ICM MEMORY CONTEXT (auto-injected)]"),
+            ),
+        ];
+        for (event, ss, header) in cases {
+            let out = emit_hook_context(event, "body", ss);
+            match header {
+                None => assert_eq!(out, "", "{event} {ss:?}"),
+                Some(header) => {
+                    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+                    assert_eq!(v["hookSpecificOutput"]["hookEventName"], event);
+                    assert_eq!(
+                        v["hookSpecificOutput"]["additionalContext"],
+                        format!("{header}\nbody"),
+                        "{event} {ss:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
