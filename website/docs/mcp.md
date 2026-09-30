@@ -79,14 +79,24 @@ neither is present, `llmenv export` fails with an error telling you to install
 one or remove the `memory:` block. Client hosts need neither — they only open an
 HTTP connection to the server.
 
-(changed in v3.12.0) llmenv starts `mcp-proxy` and `icm serve` in a fixed
-directory, `$XDG_STATE_HOME/llmenv/icm-serve` (or
-`~/.local/state/llmenv/icm-serve`), and stops git repository discovery at its
-parent. Since ICM 0.10.64, `icm serve` with no `ICM_DB` and no global
-`[store].path` opens `<git root>/.icm/memories.db` of its working directory. The
-fixed directory has no git root, so the served store is the one your own ICM
-configuration names, wherever `llmenv export` first started the proxy. To pick
-the database, set `ICM_DB` or `[store].path` in ICM's config.
+(changed in v3.12.0) llmenv starts `mcp-proxy` and `icm serve` in the
+filesystem root, `/`. ICM takes two defaults from its working directory:
+
+- Since ICM 0.10.64, `icm serve` with no `ICM_DB` and no global `[store].path`
+  opens `<git root>/.icm/memories.db` of its working directory. `/` has no git
+  root, so the served store is the one your own ICM configuration names,
+  wherever `llmenv export` first started the proxy. To pick the database, set
+  `ICM_DB` or `[store].path` in ICM's config.
+- An `icm_memory_recall` or `icm_wake_up` call with no `project` argument is
+  filtered to the project that ICM names after its working directory. `/` gives
+  no name, so such a call searches all projects, the same as `project: ""`.
+  llmenv's own hooks always send `project`; this default applies to an agent
+  that calls the ICM tools directly.
+
+If `/.git` exists, llmenv refuses to start the proxy, because ICM would treat
+`/` as a repository. This applies only to the `icm serve` that llmenv starts; an
+ICM server that you run yourself keeps the defaults of its own working
+directory.
 
 The server host's address comes from the top-level `host:` table:
 
