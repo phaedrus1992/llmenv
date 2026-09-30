@@ -3295,12 +3295,10 @@ mod tests {
             },
             ..minimal_config()
         };
+        let result = cfg.validate();
         assert!(
-            matches!(
-                cfg.validate(),
-                Err(ValidateError::InvalidEffortLevel { .. })
-            ),
-            "effort_level: max must be rejected"
+            matches!(result, Err(ValidateError::InvalidEffortLevel { .. })),
+            "effort_level: max must be rejected, got {result:?}"
         );
     }
 

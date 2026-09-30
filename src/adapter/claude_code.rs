@@ -4,6 +4,7 @@ use anyhow::Context;
 use serde_json::json;
 
 use super::AgentAdapter;
+use super::model_settings;
 use super::resolve_bundle_relative_paths;
 use super::resolve_command_paths_against_files;
 use super::skills::{create_dir_owner_only, reject_hardcoded_config_path};
@@ -1954,6 +1955,14 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
 
     let settings_path = out.join("settings.json");
 
+    // #2144: `modelSettings` is shared with Claude Code's `/effort`, so it must
+    // not pass through reconcile as a wholesale replace. It merges after reconcile.
+    let model_effort = model_settings::ModelSettingsMerge::prepare(
+        out,
+        &mut settings_value,
+        &manifest.capabilities,
+    );
+
     // #991: the hooks llmenv is rendering this round, captured before reconcile
     // consumes `settings_value`. Persisted to a sidecar so the *next* reconcile
     // can tell an llmenv-owned hook that was dropped from config (must be purged)
@@ -1978,12 +1987,13 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     // already on disk, while making llmenv authoritative over the keys it owns.
     // In strict mode the file never pre-exists (fresh content-hashed folder), so
     // this is a no-op there.
-    let reconciled = reconcile_settings(
+    let mut reconciled = reconcile_settings(
         &settings_path,
         settings_value,
         prev_owned_hooks.as_ref(),
         prev_plugin_paths.as_ref(),
     )?;
+    model_effort.apply(&mut reconciled);
     let json_str = serde_json::to_string_pretty(&reconciled)?;
 
     crate::paths::write_owner_only_atomic(&settings_path, json_str.as_bytes()).with_context(
@@ -1994,6 +2004,8 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             )
         },
     )?;
+
+    model_effort.persist(out)?;
 
     // Record what llmenv rendered this round for the next reconcile's owned-vs-
     // foreign diff. Best-effort: a missing/failed sidecar just degrades reconcile
@@ -3491,6 +3503,90 @@ mod tests {
         generate_settings_json(tmp.path(), manifest).unwrap();
         let bytes = std::fs::read(tmp.path().join("settings.json")).unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn read_json(path: &std::path::Path) -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    // #2144: Opus 5.5 ignores a top-level effortLevel in user settings, so the
+    // level must also land in modelSettings, and the companion file records it.
+    #[test]
+    fn effort_level_renders_into_model_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = crate::merge::MergedManifest::default();
+        manifest.capabilities.effort_level = Some("high".into());
+        generate_settings_json(tmp.path(), &manifest).unwrap();
+        let settings = read_json(&tmp.path().join("settings.json"));
+        assert_eq!(settings["effortLevel"], serde_json::json!("high"));
+        assert_eq!(
+            settings["modelSettings"],
+            serde_json::json!({"claude-opus-5-5": {"effortLevel": "high"}})
+        );
+        let owned = tmp
+            .path()
+            .join(super::model_settings::OWNED_MODEL_SETTINGS_FILE);
+        assert_eq!(
+            read_json(&owned),
+            serde_json::json!({"claude-opus-5-5": {"effortLevel": "high"}})
+        );
+    }
+
+    // #2144: an `/effort` save for a model llmenv does not manage survives a
+    // re-render, and a second render with the same config changes nothing.
+    #[test]
+    fn effort_command_save_survives_rerender() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        let mut manifest = crate::merge::MergedManifest::default();
+        manifest.capabilities.effort_level = Some("high".into());
+        generate_settings_json(tmp.path(), &manifest).unwrap();
+        let mut settings = read_json(&path);
+        settings["modelSettings"]["claude-sonnet-5"] = serde_json::json!({"effortLevel": "low"});
+        std::fs::write(&path, serde_json::to_vec(&settings).unwrap()).unwrap();
+
+        generate_settings_json(tmp.path(), &manifest).unwrap();
+        let first = std::fs::read(&path).unwrap();
+        generate_settings_json(tmp.path(), &manifest).unwrap();
+        assert_eq!(
+            first,
+            std::fs::read(&path).unwrap(),
+            "render must be idempotent"
+        );
+        let settings = read_json(&path);
+        assert_eq!(
+            settings["modelSettings"],
+            serde_json::json!({
+                "claude-sonnet-5": {"effortLevel": "low"},
+                "claude-opus-5-5": {"effortLevel": "high"},
+            })
+        );
+
+        // Dropping effort_level removes llmenv's entry and keeps the user's.
+        manifest.capabilities.effort_level = None;
+        generate_settings_json(tmp.path(), &manifest).unwrap();
+        assert_eq!(
+            read_json(&path)["modelSettings"],
+            serde_json::json!({"claude-sonnet-5": {"effortLevel": "low"}})
+        );
+        let owned = tmp
+            .path()
+            .join(super::model_settings::OWNED_MODEL_SETTINGS_FILE);
+        assert!(!owned.exists());
+    }
+
+    // #2144: native.claude_code is the highest-precedence layer, so a native
+    // modelSettings value wins over the managed one for the same field.
+    #[test]
+    fn native_model_settings_overlays_the_managed_entries() {
+        let native: serde_yaml::Value =
+            serde_yaml::from_str("claude-opus-5-5:\n  effortLevel: low\n").unwrap();
+        let manifest = manifest_with_native_override("modelSettings", native);
+        let settings = render_settings_for_test(&manifest);
+        assert_eq!(
+            settings["modelSettings"],
+            serde_json::json!({"claude-opus-5-5": {"effortLevel": "low"}})
+        );
     }
 
     /// A manifest whose catch-all `native.claude_code` block sets `key` to

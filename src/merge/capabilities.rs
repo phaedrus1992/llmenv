@@ -1774,7 +1774,7 @@ mod tests {
     }
 
     fn with_model_effort(model: &str, effort: &str) -> Capabilities {
-        let entry = llmenv_config::ModelEffort {
+        let entry = crate::config::ModelEffort {
             effort_level: Some(effort.into()),
             max_effort_level: None,
         };
@@ -1791,7 +1791,7 @@ mod tests {
         let mut high = with_model_effort("claude-opus-5-5", "xhigh");
         high.model_effort.insert(
             "claude-fable-5-1".into(),
-            llmenv_config::ModelEffort {
+            crate::config::ModelEffort {
                 effort_level: None,
                 max_effort_level: Some("high".into()),
             },
