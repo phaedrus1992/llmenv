@@ -118,10 +118,14 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 ### Changed
 
 - The Claude Code adapter now disables claude.ai account skill and plugin sync by default (`syncClaudeAiSkills`/`syncClaudeAiPlugins: false`). Since Claude Code 2.1.275, a signed-in session downloads the skills and plugins enabled on that account and loads them into every scope, going around llmenv's own scope rules. Set `native.claude_code.syncClaudeAiSkills: true` (and the plugins equivalent) to opt back in; on the first render after upgrade, Claude Code moves already-synced items into `skills/.trash/`/`plugins/.trash/` rather than deleting them. See [What the Claude Code adapter emits](https://phaedrus1992.github.io/llmenv/docs/engines#what-the-claude-code-adapter-emits) (#2146)
+- The session-start memory block in Claude Code and opencode now starts with `[ICM MEMORY CONTEXT (session start)]`, so the model can tell it apart from per-prompt recall. A resumed or forked session no longer fetches and injects a second wake-up pack, since its conversation already holds the first one. opencode also receives the block now, in its first message; llmenv used to drop it. See [`hook-run`](https://phaedrus1992.github.io/llmenv/docs/commands#hook-run) (#2142)
+- With `adaptive_recall: false`, the per-prompt natural-language recall now names the session's project. It used to be filtered by whatever directory the `icm serve` process happened to run in, which on a remote ICM server meant memories from an unrelated project (#2253)
 
 ### Fixed
 
 - The session-start wake-up pack now reaches the model in Claude Code. llmenv fetched it from ICM at every session start and then threw it away, because the output for `SessionStart` was suppressed along with `SessionEnd`. The wake-up call now also names the session's project, so a remote ICM server returns this project's context instead of whichever project its own working directory points at (#2251)
+- `llmenv task start` no longer refuses a task that's blocked on the task added right before it once that blocker is done. `task add` parents each new task under the previous one, so the block check was waiting on the blocked task itself and could never pass without `--force` (#2300)
+- On the ICM server host, `icm serve` now always serves the store your ICM config names. Since ICM 0.10.64 it picks `<git root>/.icm/memories.db` from its working directory, so a proxy that first started inside such a repo served that one project's database to every session on the host. llmenv now starts it in a fixed directory under its state dir. See [Memory backend](https://phaedrus1992.github.io/llmenv/docs/mcp) (#2262)
 
 ## [3.11.2] - 2026-09-27
 

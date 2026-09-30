@@ -379,7 +379,9 @@ impl AgentAdapter for CodexAdapter {
     }
 
     fn emit_hook_context(&self, hook_event_name: &str, text: &str) -> String {
-        super::emit_hook_context(hook_event_name, text)
+        // Codex turns SessionStart additionalContext into model context
+        // (codex-rs hooks/src/events/session_start.rs).
+        super::emit_hook_context(hook_event_name, text, super::SessionStartContext::Accepted)
     }
 }
 
@@ -1359,6 +1361,18 @@ mod tests {
     /// Code (#1108). They point at `hook-run --engine codex`, which is safe
     /// because Codex reads the same `hookSpecificOutput`/`additionalContext`
     /// shape `emit_hook_context` produces.
+    // #2142: Codex registers a SessionStart hook-run and reads its context, so
+    // suppressing it would drop the wake-up pack the adaptive ledger marks sent.
+    #[test]
+    fn emit_hook_context_delivers_session_start_context() {
+        let out = CodexAdapter.emit_hook_context("SessionStart", "wake");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v["hookSpecificOutput"]["additionalContext"],
+            "[ICM MEMORY CONTEXT (session start)]\nwake"
+        );
+    }
+
     #[test]
     fn baseline_hooks_are_registered_without_any_declared_hooks() {
         let manifest = MergedManifest::default();
