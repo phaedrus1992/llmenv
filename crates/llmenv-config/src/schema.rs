@@ -526,10 +526,14 @@ pub struct Capabilities {
     /// between memory systems, but can be overridden here if needed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_memory_enabled: Option<bool>,
-    /// Agent reasoning effort level (e.g., "low", "medium", "high"). Optional scalar
-    /// — resolves by scope precedence. Engine-specific via native override.
+    /// Agent reasoning effort level: `low`, `medium`, `high`, or `xhigh`.
+    /// Optional scalar — resolves by scope precedence. Engine-specific via native override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort_level: Option<String>,
+    /// Per-model effort settings, keyed by canonical Claude model ID (#2144).
+    /// Merged per key: the highest-precedence contributor's whole entry wins.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub model_effort: std::collections::BTreeMap<String, ModelEffort>,
     /// Advisor/expert capability size ("small", "medium", "large"). Optional scalar — resolves by
     /// scope precedence. Adapters map to their engine-specific models via native overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -602,6 +606,18 @@ pub struct Capabilities {
     pub default_models: std::collections::BTreeMap<String, ModelRef>,
 }
 
+/// Effort settings for one model (#2144). Values are validated in `validate.rs`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelEffort {
+    /// Start effort for the model: `low`, `medium`, `high`, or `xhigh`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_level: Option<String>,
+    /// Highest effort the model may use: `low`, `medium`, `high`, `xhigh`, or `max`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_effort_level: Option<String>,
+}
+
 impl Capabilities {
     /// True when no capability is declared — lets callers skip empty fragments.
     pub fn is_empty(&self) -> bool {
@@ -611,9 +627,11 @@ impl Capabilities {
             && self.mcp.is_empty()
             && self.lsp.is_empty()
             && self.skills.is_empty()
+            && self.output_styles.is_empty()
             && self.env.is_empty()
             && self.auto_memory_enabled.is_none()
             && self.effort_level.is_none()
+            && self.model_effort.is_empty()
             && self.advisor_size.is_none()
             && self.native_permissions.is_empty()
             && self.native_hooks.is_empty()
@@ -3128,6 +3146,22 @@ forward_ssh_agent: false
             !caps.is_empty(),
             "is_empty must be false when lsp is non-empty"
         );
+    }
+
+    /// `merge()` drops an empty top-level contributor, so every field must count.
+    #[test]
+    fn capabilities_is_empty_false_with_output_styles_or_model_effort() {
+        assert!(Capabilities::default().is_empty(), "default must be empty");
+        let styles: Capabilities = serde_yaml::from_str(
+            "output_styles:\n  - name: terse\n    description: d\n    content: c\n",
+        )
+        .unwrap();
+        assert!(!styles.output_styles.is_empty());
+        assert!(!styles.is_empty(), "output_styles must count");
+        let effort: Capabilities =
+            serde_yaml::from_str("model_effort:\n  claude-opus-5-5:\n    effort_level: high\n")
+                .unwrap();
+        assert!(!effort.is_empty(), "model_effort must count");
     }
 
     /// Capabilities::is_empty() returns false when task_tracker is set — a

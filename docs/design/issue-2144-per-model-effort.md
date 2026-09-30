@@ -135,12 +135,15 @@ It holds a JSON object: the exact `managed` map llmenv wrote on the previous ren
 
 On each render, with `current` = `modelSettings` from the existing `settings.json` (or `{}`), and `prev` = the companion file (or `{}`):
 
-1. For each ID in `prev` but not in `managed`: if `current[id]` equals `prev[id]` exactly, remove `current[id]`. Otherwise the user changed it with `/effort`; leave it.
+1. For each field in `prev[id]` that llmenv does not set now for that ID: remove the field from `current[id]` if its value equals `prev[id][field]`. A different value came from `/effort`; leave it. This is per field, also for an ID llmenv no longer manages at all, so a field the user added with `/effort` survives while llmenv's own stale field goes.
 2. For each ID in `managed`: for each field llmenv manages for that ID, set `current[id][field]`. Keep any other field in `current[id]`.
-3. For each field llmenv managed last time for an ID it still manages but no longer sets: remove that field from `current[id]` if its value equals `prev[id][field]`.
-4. Remove an ID whose object is empty after steps 1 to 3.
-5. Write `modelSettings` only if `current` is not empty; else remove the key.
-6. Write the companion file with `managed`, or delete it if `managed` is empty.
+3. Remove an ID in `prev` or `managed` whose object is empty after steps 1 and 2. Other IDs are not touched.
+4. Write `modelSettings` only if `current` is not empty; else remove the key.
+5. Write the companion file with `managed`, or delete it if `managed` is empty.
+
+A `native.claude_code.modelSettings` block is taken out of the fresh doc before `reconcile_settings`, because reconcile would write it over the file wholesale and drop `/effort` entries.
+It is merged on top after the steps above, because native is the highest-precedence layer.
+The code is in `src/adapter/model_settings.rs`.
 
 A config value for a model wins over an earlier `/effort` save for that model at the next render.
 State this in the docs: to keep a level picked with `/effort`, do not also set it in llmenv config.

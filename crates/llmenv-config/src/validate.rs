@@ -128,6 +128,23 @@ pub enum ValidateError {
         tags: String,
         contributors: String,
     },
+    #[error("{context}: {field} is '{value}'; allowed values: {allowed}.{hint}")]
+    InvalidEffortLevel {
+        context: String,
+        field: String,
+        value: String,
+        allowed: String,
+        hint: String,
+    },
+    #[error(
+        "{context}: model_effort.{model} sets no field; set effort_level, max_effort_level, or both"
+    )]
+    ModelEffortEmpty { context: String, model: String },
+    #[error(
+        "{context}: model_effort key '{model}' is not a canonical Claude model ID; use the \
+         canonical model ID, such as claude-opus-5-5; Claude Code matches aliases to that entry itself."
+    )]
+    ModelEffortKey { context: String, model: String },
     #[error(
         "{context}: capabilities.env key '{key}' is reserved — it is emitted by the \
          adapter or state system and must not be overridden here. \
@@ -496,6 +513,7 @@ impl Config {
         for key in self.capabilities.env.keys() {
             validate_capabilities_env_key("config.yaml: capabilities", key)?;
         }
+        crate::effort::validate_effort("config.yaml: capabilities", &self.capabilities)?;
         self.validate_mcps()?;
         self.validate_hooks()?;
         self.validate_lsp()?;
@@ -3363,6 +3381,23 @@ mod tests {
                 "valid env key should be accepted: {key}"
             );
         }
+    }
+
+    // #2144: config.yaml effort values go through validate_effort.
+    #[test]
+    fn capabilities_effort_level_is_validated() {
+        let cfg = crate::Config {
+            capabilities: Capabilities {
+                effort_level: Some("max".into()),
+                ..Default::default()
+            },
+            ..minimal_config()
+        };
+        let result = cfg.validate();
+        assert!(
+            matches!(result, Err(ValidateError::InvalidEffortLevel { .. })),
+            "effort_level: max must be rejected, got {result:?}"
+        );
     }
 
     // ===== #354: capabilities.env reserved key validation =====
