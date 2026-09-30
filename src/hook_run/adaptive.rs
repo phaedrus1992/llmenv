@@ -225,7 +225,11 @@ pub(super) async fn session_start(
         Ok(text) => text,
         Err(e) if outcome.all_failed() || scope_len == 0 => return Err(e),
         Err(e) => {
-            tracing::warn!("icm_wake_up failed, the scope set still goes out: {e}");
+            // eprintln, as in `report`: the default tracing filter is ERROR-only.
+            eprintln!(
+                "llmenv: memory wake-up skipped: icm_wake_up failed ({e}); \
+                 the scope set still goes out"
+            );
             String::new()
         }
     };
