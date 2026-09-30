@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - The Claude Code adapter now disables claude.ai account skill and plugin sync by default (`syncClaudeAiSkills`/`syncClaudeAiPlugins: false`). Since Claude Code 2.1.275, a signed-in session downloads the skills and plugins enabled on that account and loads them into every scope, going around llmenv's own scope rules. Set `native.claude_code.syncClaudeAiSkills: true` (and the plugins equivalent) to opt back in; on the first render after upgrade, Claude Code moves already-synced items into `skills/.trash/`/`plugins/.trash/` rather than deleting them. See [What the Claude Code adapter emits](https://phaedrus1992.github.io/llmenv/docs/engines#what-the-claude-code-adapter-emits) (#2146)
 - The session-start memory block in Claude Code now starts with `[ICM MEMORY CONTEXT (session start)]`, so the model can tell it apart from per-prompt recall. A resumed or forked session no longer fetches and injects a second wake-up pack, since its conversation already holds the first one. See [`hook-run`](https://phaedrus1992.github.io/llmenv/docs/commands#hook-run) (#2142)
-- With `adaptive_recall: false`, the per-prompt natural-language recall now searches all projects, like the tag and bundle recalls already did. It used to be filtered by whatever directory the `icm serve` process happened to run in, which on a remote ICM server meant memories from an unrelated project (#2253)
+- With `adaptive_recall: false`, the per-prompt natural-language recall now names the session's project. It used to be filtered by whatever directory the `icm serve` process happened to run in, which on a remote ICM server meant memories from an unrelated project (#2253)
 
 ### Fixed
 

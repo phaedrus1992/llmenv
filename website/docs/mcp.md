@@ -433,10 +433,12 @@ neutral events:
   recall per active tag keyed on `llmenv-tag:<tag>`, and one per active bundle
   keyed on `llmenv-bundle:<bundle>` — so memory stored under a tag or bundle in
   one project surfaces when the same tag or bundle activates in another. It
-  finishes with a natural-language recall on the active tags, also across all
-  projects (changed in v3.12.0: before, ICM filtered it by the working
-  directory of the `icm serve` process, which names an unrelated project when
-  ICM runs on another host). (changed in v3.11.2) Recalls run from most to least specific scope: tags from the
+  finishes with a natural-language recall on the active tags, filtered to the
+  session's project (changed in v3.12.0: before, ICM filtered it by the
+  working directory of the `icm serve` process, which names an unrelated
+  project when ICM runs on another host). With `adaptive_recall` on, the
+  adaptive flow replaces this recall. (changed in v3.11.2) Recalls run from
+  most to least specific scope: tags from the
   project's `.llmenv.yaml` and `$LLMENV_EXTRA_TAGS`, then bundles, then tags
   from content, network, user and host scopes, then tags no scope supplied (such
   as the OS tag), then the natural-language recall. The injected text is capped
