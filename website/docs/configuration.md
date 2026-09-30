@@ -291,6 +291,56 @@ capabilities:
 
 See Claude Code's [permission modes](https://www.anthropic.com/documentation/permissions) documentation for the full reference.
 
+### `effort_level` and `model_effort` (Claude Code)
+
+`effort_level` (added in v2.0.0; changed in v3.12.0) sets the reasoning effort that a Claude Code session starts with.
+It is a scalar, so the highest-precedence contributor wins.
+
+`model_effort` (added in v3.12.0) sets effort for one model at a time.
+Its keys are canonical Claude model IDs, such as `claude-opus-5-5`.
+It merges per model ID: the highest-precedence contributor's whole entry for a model wins.
+
+```yaml
+capabilities:
+  effort_level: high                    # default for every model
+  model_effort:
+    claude-opus-5-5:
+      effort_level: xhigh               # start effort for this model
+      max_effort_level: xhigh           # highest effort this model may use
+    claude-fable-5-1:
+      max_effort_level: high
+```
+
+Allowed values:
+
+| Field | Values |
+| --- | --- |
+| `effort_level`, `features.slippage.effort_level`, `model_effort.<id>.effort_level` | `low`, `medium`, `high`, `xhigh` |
+| `model_effort.<id>.max_effort_level` | `low`, `medium`, `high`, `xhigh`, `max` (`max` means no cap) |
+
+Since v3.12.0, any other value fails validation.
+`max` as a start level applies to one session only, so set `CLAUDE_CODE_EFFORT_LEVEL=max` in `native.claude_code.env` instead.
+For `ultracode`, set `native.claude_code.ultracode: true`.
+A `model_effort` entry must set at least one of the two fields.
+A `model_effort` key must be the canonical model ID, not an alias such as `opus` and not an ID with `[1m]`, because Claude Code matches those to the canonical entry itself.
+
+How llmenv renders these into `settings.json`:
+
+1. `effort_level` goes to the top-level `effortLevel` key. Opus 5, Fable 5.1, and earlier models read that key.
+2. Opus 5.5 and later models ignore the top-level key in the user settings file, and llmenv's rendered `settings.json` is that file. So llmenv also writes `effort_level` to `modelSettings.<id>.effortLevel` for each of those models.
+3. Each `model_effort` entry goes to `modelSettings.<id>` as `effortLevel` and `maxEffortLevel`. For its model, it replaces the value from step 2.
+
+Claude Code's `/effort` command also writes to `modelSettings`.
+llmenv keeps an `/effort` save for any model and field that your config does not set.
+llmenv records what it wrote in `settings.json.llmenv-owned-model-settings`, next to `settings.json`.
+When you remove a value from your config, llmenv removes its own field at the next render, but only if the field still holds the value that llmenv wrote.
+A config value wins over an earlier `/effort` save for the same model at the next render.
+To keep a level that you picked with `/effort`, do not also set it in llmenv config.
+A `native.claude_code.modelSettings` block goes on top of all of this.
+
+The list of models that ignore the top-level key is `PER_MODEL_EFFORT_MODELS` in `src/adapter/model_settings.rs`.
+Each new Claude model that ignores the top-level key must be added to that list when it ships.
+
 ### `model_providers` / `default_models`
 
 (added in v3.3.0; Crush rendering added in v3.6.1, opencode rendering added in
@@ -1004,7 +1054,7 @@ features:
 | Field                | Required | Notes                                                                                                                                                                                                                                       |
 |----------------------|----------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `enabled`            | no       | Default `false` (opt-in master switch).                                                                                                                                                                                                     |
-| `effort_level`       | no       | Reasoning-effort value injected into generated engine settings (e.g. `"xhigh"`, `"high"`); omitted means untouched.                                                                                                                         |
+| `effort_level`       | no       | One of `low`, `medium`, `high`, `xhigh` (validated since v3.12.0). Used when `capabilities.effort_level` is unset; see [`effort_level`](#effort_level-and-model_effort-claude-code).                                                        |
 | `compact_survival`   | no       | Default `true`. Merges a short rules fragment into the generated CLAUDE.md reminding the agent to re-read its rules after context compaction.                                                                                               |
 | `diagnose_command`   | no       | Default `true`. Materializes a `/diagnose` skill: a structured symptoms → evidence → hypotheses → test → act checklist.                                                                                                                     |
 | `rule_reinjection`   | no       | Default `true` (added in v3.11.0). Injects a short standing-rules digest on each `UserPromptSubmit`. Deliberately small — it is re-sent every turn. Not sent at session start, where CLAUDE.md already carries the rules.                   |
