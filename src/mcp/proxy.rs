@@ -518,37 +518,74 @@ fn log_path_for(pid_path: &Path) -> PathBuf {
 /// store from the user's configuration and applies no default project filter.
 const ICM_SERVE_DIR: &str = "/";
 
+/// Git variables that point git at a repository whatever the cwd is. An
+/// inherited `GIT_DIR` and `GIT_WORK_TREE` make `git rev-parse --show-toplevel`
+/// in `/` return that work tree, which brings back #2262.
+const GIT_LOCATION_VARS: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_NAMESPACE",
+];
+
 /// Start `cmd` in `serve_dir`, which must give ICM no project name and no git root.
 ///
 /// # Errors
-/// Errors when `serve_dir` has a last path component, or when it holds `.git`.
+/// Errors when `serve_dir` is not the filesystem root, when it holds `.git`, or
+/// when `ICM_DB` is a relative path, which ICM would resolve against `serve_dir`.
 fn pin_icm_serve_dir(cmd: &mut Command, serve_dir: &Path) -> anyhow::Result<()> {
-    if serve_dir.file_name().is_some() {
+    if !serve_dir.is_absolute() || serve_dir.parent().is_some() {
         anyhow::bail!(
-            "icm serve working directory {} gives ICM a default project filter; \
-             use the filesystem root",
+            "icm serve working directory {} is not the filesystem root, so ICM would \
+             name a default project filter after it",
             serve_dir.display()
         );
     }
     check_no_git_repo(serve_dir)?;
+    check_icm_db(std::env::var_os("ICM_DB").as_deref())?;
     cmd.current_dir(serve_dir);
+    for var in GIT_LOCATION_VARS {
+        cmd.env_remove(var);
+    }
     Ok(())
 }
 
-/// Error when `dir` is itself a git work tree, because ICM would then open
+/// Error when `dir` holds `.git`, because ICM would then open
 /// `<dir>/.icm/memories.db` and name its default project after the repo.
+/// A metadata error other than "not found" also fails, so the check never
+/// passes when it cannot tell.
 fn check_no_git_repo(dir: &Path) -> anyhow::Result<()> {
     let git = dir.join(".git");
-    if git.exists() {
-        anyhow::bail!(
+    match std::fs::symlink_metadata(&git) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => anyhow::bail!(
             "cannot start icm serve in {}: {} exists, so ICM would serve that \
-             repository's database; set ICM_DB or a global ICM [store].path, or remove {}",
+             repository's database and filter memories to its project; remove {}",
             dir.display(),
             git.display(),
             git.display()
-        );
+        ),
+        Err(e) => anyhow::bail!(
+            "cannot start icm serve in {}: cannot check {}: {e}",
+            dir.display(),
+            git.display()
+        ),
     }
-    Ok(())
+}
+
+/// Error when `ICM_DB` is relative, because icm serve runs in `/` and would
+/// resolve it there instead of where the user expects.
+fn check_icm_db(icm_db: Option<&std::ffi::OsStr>) -> anyhow::Result<()> {
+    match icm_db {
+        Some(db) if !db.is_empty() && !Path::new(db).is_absolute() => anyhow::bail!(
+            "ICM_DB is the relative path {}; icm serve runs in / and would open it \
+             there. Set ICM_DB to an absolute path",
+            Path::new(db).display()
+        ),
+        _ => Ok(()),
+    }
 }
 
 /// Opens the proxy's stderr log for appending, rotating it to `mcp-proxy.log.1`
@@ -1107,10 +1144,44 @@ mod tests {
     }
 
     #[test]
-    fn pin_icm_serve_dir_rejects_a_dir_with_a_name() {
+    fn pin_icm_serve_dir_rejects_a_dir_that_is_not_the_root() {
+        for dir in ["/state/icm-serve", "", ".", "..", "a/.."] {
+            let mut cmd = Command::new("true");
+            let err = super::pin_icm_serve_dir(&mut cmd, Path::new(dir)).unwrap_err();
+            assert!(
+                err.to_string().contains("not the filesystem root"),
+                "{dir:?}: {err}"
+            );
+        }
+    }
+
+    // An inherited GIT_DIR/GIT_WORK_TREE would point git at a repo from `/`.
+    #[test]
+    fn pin_icm_serve_dir_clears_git_location_vars() {
         let mut cmd = Command::new("true");
-        let err = super::pin_icm_serve_dir(&mut cmd, Path::new("/state/icm-serve")).unwrap_err();
-        assert!(err.to_string().contains("project"), "{err}");
+        cmd.env("GIT_DIR", "/repo/.git")
+            .env("GIT_WORK_TREE", "/repo");
+        super::pin_icm_serve_dir(&mut cmd, Path::new(super::ICM_SERVE_DIR)).unwrap();
+        for var in super::GIT_LOCATION_VARS {
+            let set = cmd
+                .get_envs()
+                .find(|(k, _)| *k == std::ffi::OsStr::new(var));
+            assert_eq!(
+                set,
+                Some((std::ffi::OsStr::new(var), None)),
+                "{var} must be removed"
+            );
+        }
+    }
+
+    #[test]
+    fn check_icm_db_rejects_a_relative_path() {
+        use std::ffi::OsStr;
+        let err = super::check_icm_db(Some(OsStr::new("db/memories.db"))).unwrap_err();
+        assert!(err.to_string().contains("absolute"), "{err}");
+        super::check_icm_db(Some(OsStr::new("/data/memories.db"))).unwrap();
+        super::check_icm_db(Some(OsStr::new(""))).unwrap();
+        super::check_icm_db(None).unwrap();
     }
 
     #[test]

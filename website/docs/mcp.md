@@ -93,8 +93,11 @@ filesystem root, `/`. ICM takes two defaults from its working directory:
   llmenv's own hooks always send `project`; this default applies to an agent
   that calls the ICM tools directly.
 
-If `/.git` exists, llmenv refuses to start the proxy, because ICM would treat
-`/` as a repository. This applies only to the `icm serve` that llmenv starts; an
+If `/.git` exists, or `ICM_DB` is a relative path, llmenv refuses to start the
+proxy, because ICM would treat `/` as a repository or open the database in `/`.
+llmenv also removes `GIT_DIR`, `GIT_WORK_TREE`, and the other git location
+variables from the environment of `icm serve`, so an inherited value cannot point
+ICM at a repository. This applies only to the `icm serve` that llmenv starts; an
 ICM server that you run yourself keeps the defaults of its own working
 directory.
 
