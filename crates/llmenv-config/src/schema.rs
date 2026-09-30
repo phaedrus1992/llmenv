@@ -632,6 +632,7 @@ impl Capabilities {
             && self.mcp.is_empty()
             && self.lsp.is_empty()
             && self.skills.is_empty()
+            && self.output_styles.is_empty()
             && self.env.is_empty()
             && self.auto_memory_enabled.is_none()
             && self.effort_level.is_none()
@@ -2849,6 +2850,21 @@ force_for_plugin: true
             !caps.is_empty(),
             "is_empty must be false when lsp is non-empty"
         );
+    }
+
+    /// `merge()` drops an empty top-level contributor, so every field must count.
+    #[test]
+    fn capabilities_is_empty_false_with_output_styles_or_model_effort() {
+        let styles: Capabilities = serde_yaml::from_str(
+            "output_styles:\n  - name: terse\n    description: d\n    content: c\n",
+        )
+        .unwrap();
+        assert!(!styles.output_styles.is_empty());
+        assert!(!styles.is_empty(), "output_styles must count");
+        let effort: Capabilities =
+            serde_yaml::from_str("model_effort:\n  claude-opus-5-5:\n    effort_level: high\n")
+                .unwrap();
+        assert!(!effort.is_empty(), "model_effort must count");
     }
 
     /// Capabilities::is_empty() returns false when task_tracker is set — a
