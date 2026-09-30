@@ -1532,6 +1532,31 @@ mod tests {
                 prop_assert_eq!(out.host.len(), contribs.len());
             }
 
+            // #2144: model_effort takes the highest-precedence entry per model ID,
+            // whatever the order of the contributors.
+            #[test]
+            fn model_effort_winner_is_order_independent(
+                order in Just((1u8..=6).collect::<Vec<u8>>()).prop_shuffle(),
+            ) {
+                let levels = ["low", "medium", "high", "xhigh", "low", "high"];
+                let contribs: Vec<CapabilityContributor> = order
+                    .iter()
+                    .map(|&prec| {
+                        let level = levels[usize::from(prec - 1)];
+                        contributor(
+                            &format!("c{prec}"),
+                            prec,
+                            with_model_effort("claude-opus-5-5", level),
+                        )
+                    })
+                    .collect();
+                let out = merge_capabilities(&contribs).unwrap();
+                prop_assert_eq!(
+                    out.model_effort["claude-opus-5-5"].effort_level.as_deref(),
+                    Some(levels[5])
+                );
+            }
+
             // host map: highest precedence wins per key, regardless of input order.
             #[test]
             fn host_highest_precedence_wins(

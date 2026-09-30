@@ -79,8 +79,17 @@ fn check_level(
 
 /// Claude Code matches an alias (`opus`), a `[1m]` suffix, or a provider ID to
 /// the canonical model ID entry itself, so only the canonical ID is a valid key.
+/// A canonical ID is `claude-` and then lowercase ASCII words joined by `-`.
 fn check_model_id(context: &str, model: &str) -> Result<(), ValidateError> {
-    if model.starts_with("claude-") && !model.contains('[') {
+    let canonical = model.strip_prefix("claude-").is_some_and(|rest| {
+        rest.split('-').all(|word| {
+            !word.is_empty()
+                && word
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        })
+    });
+    if canonical {
         return Ok(());
     }
     Err(ValidateError::ModelEffortKey {
@@ -193,7 +202,18 @@ mod tests {
 
     #[test]
     fn model_effort_key_must_be_a_canonical_id() {
-        for key in ["opus", "claude-opus-5-5[1m]", "gpt-5", "", "default"] {
+        for key in [
+            "opus",
+            "claude-opus-5-5[1m]",
+            "gpt-5",
+            "",
+            "default",
+            "claude-",
+            "claude-Opus-5-5",
+            "claude-opus-5-5 ",
+            "claude-opus--5",
+            "claude-opus-5-",
+        ] {
             let err = validate_effort("t", &caps_with_model(key, Some("high"), None)).unwrap_err();
             assert!(
                 err.to_string().contains("canonical model ID"),
@@ -205,5 +225,36 @@ mod tests {
             &caps_with_model("claude-fable-5-1", Some("high"), None),
         )
         .expect("canonical ID");
+    }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        // A value passes exactly when it is in the allowed set, for every field.
+        #[test]
+        fn level_check_matches_the_allowed_set(value in "[a-z]{0,8}|max|xhigh|ultracode") {
+            let start_ok = EFFORT_LEVELS.contains(&value.as_str());
+            let cap_ok = MAX_EFFORT_LEVELS.contains(&value.as_str());
+            prop_assert_eq!(validate_effort("t", &caps_with_level(&value)).is_ok(), start_ok);
+            let start = caps_with_model("claude-opus-5-5", Some(&value), None);
+            prop_assert_eq!(validate_effort("t", &start).is_ok(), start_ok);
+            let cap = caps_with_model("claude-opus-5-5", None, Some(&value));
+            prop_assert_eq!(validate_effort("t", &cap).is_ok(), cap_ok);
+        }
+
+        // ModelEffort survives a YAML round trip, the format of config.yaml.
+        #[test]
+        fn model_effort_yaml_round_trip(
+            effort in proptest::option::of(prop::sample::select(EFFORT_LEVELS)),
+            max in proptest::option::of(prop::sample::select(MAX_EFFORT_LEVELS)),
+        ) {
+            let entry = ModelEffort {
+                effort_level: effort.map(str::to_string),
+                max_effort_level: max.map(str::to_string),
+            };
+            let yaml = serde_yaml::to_string(&entry).unwrap();
+            let back: ModelEffort = serde_yaml::from_str(&yaml).unwrap();
+            prop_assert_eq!(back, entry);
+        }
     }
 }
