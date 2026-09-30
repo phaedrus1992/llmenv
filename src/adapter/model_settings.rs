@@ -14,7 +14,7 @@ use crate::util::merge_json;
 
 /// Models that ignore a top-level `effortLevel` in user settings (Claude Code
 /// docs, `effortLevel`). Add each new Claude model here when it ships.
-pub(crate) const PER_MODEL_EFFORT_MODELS: &[&str] = &["claude-opus-5-5"];
+const PER_MODEL_EFFORT_MODELS: &[&str] = &["claude-opus-5-5"];
 
 /// Companion file next to `settings.json`: the `modelSettings` entries llmenv
 /// wrote on the previous render, as one JSON object.
