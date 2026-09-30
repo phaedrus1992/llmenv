@@ -537,8 +537,8 @@ pub(crate) enum SessionStartContext {
 /// Empty input always returns an empty string. `SessionEnd` also returns
 /// empty: it has no model turn to inject context into, and Claude Code
 /// rejects `additionalContext` there (#558). `SessionStart` returns empty
-/// unless the engine accepts it (`session_start`); Claude Code does (#2251),
-/// and nothing shows that Crush or opencode do (#2142).
+/// unless the engine accepts it (`session_start`): Claude Code (#2251) and the
+/// opencode shim do. Crush runs no `SessionStart` hook (#2142).
 ///
 /// This is the shared implementation behind every adapter's
 /// [`AgentAdapter::emit_hook_context`].

@@ -270,12 +270,12 @@ recall events also need `adaptive_recall` on):
   creates the correlated ICM transcript session and emits the baseline
   `lifecycle_start` + scope-header session-log events. Before v3.12.0, Claude
   Code fetched the wake-up pack but never showed it to the model. (changed in
-  v3.12.0) In Claude Code the block starts with
+  v3.12.0) In Claude Code and opencode the block starts with
   `[ICM MEMORY CONTEXT (session start)]`, so it reads as different from the
   per-prompt `[ICM MEMORY CONTEXT (auto-injected)]` recall. A resumed or forked
   session (`source` `resume` or `fork`) makes no `icm_wake_up` call, because
-  the conversation already holds the earlier pack. Crush and opencode get no
-  `SessionStart` output.
+  the conversation already holds the earlier pack. opencode receives the block
+  in its first message; Crush runs no `SessionStart` hook.
 - `turn_start` — with `adaptive_recall` (changed in v3.12.0), injects memories
   that match the prompt and recent session activity, plus related topics, and
   skips memories already sent in this context; without it, injects the
