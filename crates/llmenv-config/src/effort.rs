@@ -99,6 +99,7 @@ fn check_model_id(context: &str, model: &str) -> Result<(), ValidateError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::schema::{Features, ModelEffort, SlippageControl};

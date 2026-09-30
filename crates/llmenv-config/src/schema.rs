@@ -2855,6 +2855,7 @@ force_for_plugin: true
     /// `merge()` drops an empty top-level contributor, so every field must count.
     #[test]
     fn capabilities_is_empty_false_with_output_styles_or_model_effort() {
+        assert!(Capabilities::default().is_empty(), "default must be empty");
         let styles: Capabilities = serde_yaml::from_str(
             "output_styles:\n  - name: terse\n    description: d\n    content: c\n",
         )
