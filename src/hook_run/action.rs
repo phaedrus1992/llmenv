@@ -72,9 +72,11 @@ pub enum Action {
     /// argument. `None` omits the argument entirely, letting icm's own MCP
     /// handler fall back to its hardcoded 200-token default.
     WakeUp(WakeUpArgs),
-    /// Inject recalled context for the active tags/project (`icm_memory_recall`).
-    /// Project-scoped (cwd default) natural-language recall.
-    Recall,
+    /// Inject recalled context for the active tags (`icm_memory_recall`),
+    /// filtered to the carried session project. An empty project searches all
+    /// projects. The project is always sent: ICM's default filter is the ICM
+    /// server's cwd, which is unrelated to a session on another host (#2253).
+    Recall(String),
     /// Recall tag-scoped memory for one active tag (`icm_memory_recall`),
     /// **project-unfiltered** and keyed on `llmenv-tag:<tag>`. This is what
     /// makes memory stored under a tag in one project surface when the same tag
@@ -98,7 +100,7 @@ impl Action {
     pub fn tool_name(&self) -> &'static str {
         match self {
             Action::WakeUp(_) => "icm_wake_up",
-            Action::Recall
+            Action::Recall(_)
             | Action::RecallTag(_)
             | Action::RecallBundle(_)
             | Action::RecallQuery(_) => "icm_memory_recall",
@@ -110,6 +112,7 @@ impl Action {
     /// recall query (active tags/project), `chunk` is the llmenv context chunk
     /// used as store content. Unused fields are ignored per action.
     ///
+    /// `Recall` always passes its project (see [`Action::Recall`]).
     /// `RecallTag` and `RecallBundle` pass `project: ""` to disable ICM's
     /// default cwd project filter (per the tool contract, an empty string
     /// searches all projects) and `keyword: llmenv-tag:<tag>` /
@@ -126,7 +129,7 @@ impl Action {
                 }
                 args
             }
-            Action::Recall => json!({ "query": query }),
+            Action::Recall(project) => json!({ "query": query, "project": project }),
             Action::RecallTag(q) => json!({
                 "query": q.tag,
                 "project": "",
@@ -382,7 +385,10 @@ mod tests {
             Action::WakeUp(WakeUpArgs::default()).tool_name(),
             "icm_wake_up"
         );
-        assert_eq!(Action::Recall.tool_name(), "icm_memory_recall");
+        assert_eq!(
+            Action::Recall(String::new()).tool_name(),
+            "icm_memory_recall"
+        );
         assert_eq!(Action::Store.tool_name(), "icm_memory_store");
         assert_eq!(recall_bundle("base").tool_name(), "icm_memory_recall");
     }
@@ -405,8 +411,28 @@ mod tests {
 
     #[test]
     fn recall_arguments_carry_query() {
-        let args = Action::Recall.arguments("rust, work", "chunk");
+        let args = Action::Recall(String::new()).arguments("rust, work", "chunk");
         assert_eq!(args["query"], serde_json::json!("rust, work"));
+    }
+
+    // #2253: without `project`, ICM filters by the ICM server's cwd, which
+    // names an unrelated project when `icm serve` runs on another host.
+    #[test]
+    fn recall_sends_the_session_project() {
+        let args = Action::Recall("llmenv".into()).arguments("rust, work", "chunk");
+        assert_eq!(
+            args,
+            serde_json::json!({ "query": "rust, work", "project": "llmenv" })
+        );
+    }
+
+    #[test]
+    fn recall_without_a_known_project_searches_all_projects() {
+        let args = Action::Recall(String::new()).arguments("rust, work", "chunk");
+        assert_eq!(
+            args,
+            serde_json::json!({ "query": "rust, work", "project": "" })
+        );
     }
 
     #[test]

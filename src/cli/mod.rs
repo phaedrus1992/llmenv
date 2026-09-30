@@ -1105,11 +1105,9 @@ pub(crate) fn resolve_env(
         let bind = memory_bind_address(mem);
         match crate::mcp::proxy::default_pid_path() {
             Ok(pid_path) => {
-                match crate::mcp::proxy::ensure_running(
-                    &bind,
-                    &pid_path,
-                    crate::mcp::proxy::spawn_mcp_proxy,
-                ) {
+                match crate::mcp::proxy::ensure_running(&bind, &pid_path, |bind| {
+                    crate::mcp::proxy::spawn_mcp_proxy(bind, &pid_path)
+                }) {
                     Ok(outcome) => {
                         // Warn when binding to all interfaces only on startup — the ICM
                         // daemon is unauthenticated.

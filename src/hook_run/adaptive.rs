@@ -185,6 +185,7 @@ async fn run_scope(
 }
 
 /// `SessionStart`: reset per `source`, then send the wake-up pack and the scope set.
+/// A continued session (resume, fork) gets no wake-up pack (#2142).
 pub(super) async fn session_start(
     ctx: &AdaptiveCtx<'_>,
     wake: Action,
@@ -208,7 +209,11 @@ pub(super) async fn session_start(
             l.sent_for(MAIN_AGENT)
         })
         .unwrap_or_default();
-    let wake = wake.run(ctx.client, "", "").await;
+    let wake = if super::continues_session(ctx.payload) {
+        Ok(String::new())
+    } else {
+        wake.run(ctx.client, "", "").await
+    };
     // Claude Code spills output over about 10 KB to a file, so the scope set gets
     // only the room that the wake-up pack leaves.
     let wake_bytes = wake.as_ref().map_or(0, |t| t.len() + 2);
@@ -220,7 +225,11 @@ pub(super) async fn session_start(
         Ok(text) => text,
         Err(e) if outcome.all_failed() || scope_len == 0 => return Err(e),
         Err(e) => {
-            tracing::warn!("icm_wake_up failed, the scope set still goes out: {e}");
+            // eprintln, as in `report`: the default tracing filter is ERROR-only.
+            eprintln!(
+                "llmenv: memory wake-up skipped: icm_wake_up failed ({e}); \
+                 the scope set still goes out"
+            );
             String::new()
         }
     };
@@ -539,6 +548,31 @@ mod tests {
             [true, false, true],
             "startup sends, resume keeps, compact resets"
         );
+    }
+
+    // #2142: a resumed or forked session already holds the earlier wake-up pack.
+    #[tokio::test]
+    async fn resume_and_fork_skip_the_wake_up_call() {
+        for source in ["resume", "fork"] {
+            let server = server_with(&[("llmenv-tag:proj", "[context-p] scope fact")]).await;
+            Mock::given(method("POST"))
+                .and(body_string_contains("icm_wake_up"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(text("wake pack")))
+                .expect(0)
+                .mount(&server)
+                .await;
+            let f = fixture(&server);
+            let payload = json!({ "source": source });
+            let out = session_start(
+                &ctx(&f, &payload),
+                Action::WakeUp(crate::hook_run::action::WakeUpArgs::default()),
+                vec![tag_action("proj")],
+            )
+            .await
+            .unwrap();
+            assert!(!out.contains("wake pack"), "{source}: {out}");
+            server.verify().await;
+        }
     }
 
     #[tokio::test]

@@ -79,6 +79,15 @@ neither is present, `llmenv export` fails with an error telling you to install
 one or remove the `memory:` block. Client hosts need neither — they only open an
 HTTP connection to the server.
 
+(changed in v3.12.0) llmenv starts `mcp-proxy` and `icm serve` in a fixed
+directory, `$XDG_STATE_HOME/llmenv/icm-serve` (or
+`~/.local/state/llmenv/icm-serve`), and stops git repository discovery at its
+parent. Since ICM 0.10.64, `icm serve` with no `ICM_DB` and no global
+`[store].path` opens `<git root>/.icm/memories.db` of its working directory. The
+fixed directory has no git root, so the served store is the one your own ICM
+configuration names, wherever `llmenv export` first started the proxy. To pick
+the database, set `ICM_DB` or `[store].path` in ICM's config.
+
 The server host's address comes from the top-level `host:` table:
 
 ```yaml
@@ -415,14 +424,21 @@ llmenv provides engine-neutral lifecycle hooks (`hook-run` command) for three
 neutral events:
 
 - **SessionStart** — `hook-run session_start` injects the session wake-up pack
-  (`icm_wake_up`) containing your critical memories (by importance and recency)
+  (`icm_wake_up`) containing your critical memories (by importance and recency).
+  (changed in v3.12.0) Claude Code shows it under
+  `[ICM MEMORY CONTEXT (session start)]`; a resumed or forked session skips the
+  call, because its conversation already holds the earlier pack.
 - **TurnStart** — `hook-run turn_start` injects recalled context at the start of
   each agent turn (`icm_memory_recall`). It issues one **project-unfiltered**
   recall per active tag keyed on `llmenv-tag:<tag>`, and one per active bundle
   keyed on `llmenv-bundle:<bundle>` — so memory stored under a tag or bundle in
   one project surfaces when the same tag or bundle activates in another. It
-  finishes with a natural-language recall on the active tags. (changed in
-  v3.11.2) Recalls run from most to least specific scope: tags from the
+  finishes with a natural-language recall on the active tags, filtered to the
+  session's project (changed in v3.12.0: before, ICM filtered it by the
+  working directory of the `icm serve` process, which names an unrelated
+  project when ICM runs on another host). With `adaptive_recall` on, the
+  adaptive flow replaces this recall. (changed in v3.11.2) Recalls run from
+  most to least specific scope: tags from the
   project's `.llmenv.yaml` and `$LLMENV_EXTRA_TAGS`, then bundles, then tags
   from content, network, user and host scopes, then tags no scope supplied (such
   as the OS tag), then the natural-language recall. The injected text is capped
