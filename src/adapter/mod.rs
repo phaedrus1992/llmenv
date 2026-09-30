@@ -803,7 +803,7 @@ mod tests {
             match header {
                 None => assert_eq!(out, "", "{event} {ss:?}"),
                 Some(header) => {
-                    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+                    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
                     assert_eq!(v["hookSpecificOutput"]["hookEventName"], event);
                     assert_eq!(
                         v["hookSpecificOutput"]["additionalContext"],
