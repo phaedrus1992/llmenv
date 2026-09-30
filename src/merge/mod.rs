@@ -146,6 +146,7 @@ pub fn merge(
     {
         merged_caps.effort_level = s.effort_level.clone();
     }
+    llmenv_config::validate_effort("merged capabilities", &merged_caps)?;
 
     // Merge bundle native: blocks (lower precedence) with the top-level native:
     // block (highest precedence). Start with bundle contributions, then overlay
@@ -249,6 +250,7 @@ const BUNDLE_YAML_KNOWN_KEYS: &[&str] = &[
     "env",
     "auto_memory_enabled",
     "effort_level",
+    "model_effort",
     "advisor_size",
     "native_permissions",
     "native_hooks",
@@ -321,6 +323,7 @@ pub(crate) fn read_bundle_yaml(
     for key in caps.env.keys() {
         crate::config::validate_capabilities_env_key(&context, key)?;
     }
+    llmenv_config::validate_effort(&context, &caps)?;
     let permission_rules = caps
         .permissions
         .allow
@@ -854,6 +857,32 @@ mod tests {
             "bundle host: entry must appear in merged capabilities"
         );
         assert_eq!(manifest.capabilities.host["still"].addr, "still.local");
+    }
+
+    // #2144: bundle effort values go through validate_effort.
+    #[test]
+    fn bundle_model_effort_is_validated() {
+        let tmp = tempdir().unwrap();
+        let bundle_dir = tmp.path().join("b");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(
+            bundle_dir.join("bundle.yaml"),
+            "model_effort:\n  opus:\n    effort_level: high\n",
+        )
+        .unwrap();
+        let bundle = BundleRef {
+            name: "b".into(),
+            path: bundle_dir,
+            precedence: 1,
+        };
+        let err = merge(&Capabilities::default(), &BTreeMap::new(), &[bundle]).unwrap_err();
+        let ve = err
+            .downcast_ref::<crate::config::ValidateError>()
+            .expect("should be ValidateError");
+        assert!(
+            matches!(ve, crate::config::ValidateError::ModelEffortKey { model, .. } if model == "opus"),
+            "unexpected variant: {ve}"
+        );
     }
 
     // #373: reserved env key must produce an error matching ValidateError::CapabilitiesReservedEnvKey.
