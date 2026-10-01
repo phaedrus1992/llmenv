@@ -168,6 +168,10 @@ prek install --hook-type pre-commit --hook-type pre-push
 
 Install `prek` from <https://github.com/j178/prek> if you don't have it.
 
+## Contributing
+
+Agent instructions for this repo are in AGENTS.md; Claude Code 2.1.277 or later reads it directly.
+
 ## Releases
 
 llmenv follows [Semantic Versioning](https://semver.org/) and a

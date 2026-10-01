@@ -186,6 +186,15 @@ It also:
   performs the drift check alongside memory wake-up (folded into one process in
   v3.11.0 — it was a separate `llmenv check-stale` hook before).
 
+### Skipping CLAUDE.md in a subagent (Claude Code)
+
+(added in v3.12.0)
+
+`omitClaudeMd: true` in an agent's frontmatter makes Claude Code start that subagent without the user, project and local `CLAUDE.md` files.
+Under llmenv the user `CLAUDE.md` is the rendered file with every bundle rule, so such a subagent runs without llmenv's rules.
+Use it only for narrow agents that get everything they need from the delegation prompt, such as report-only analyzers.
+Other engines ignore the field; opencode prints a warning and drops it.
+
 ## Where capabilities are declared
 
 Capabilities can be declared at two levels with identical shape:

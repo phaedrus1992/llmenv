@@ -1,3 +1,4 @@
+use crate::adapter::AgentAdapter;
 use crate::config::{Bundle, Capabilities, Config};
 use crate::paths;
 use crate::plugins::cache;
@@ -32,6 +33,7 @@ fn run_doctor_token_efficiency(
     warn: &str,
     cm_enabled: bool,
     native_claude_env: Option<&serde_yaml::Value>,
+    native_claude_settings: Option<&serde_yaml::Value>,
 ) {
     let info = super::doctor_info(use_color);
     eprintln!();
@@ -53,10 +55,34 @@ fn run_doctor_token_efficiency(
         ),
     }
 
-    match get("BASH_MAX_OUTPUT_LENGTH").map(|v| v.parse::<u64>()) {
-        Some(Ok(n)) => eprintln!("{pass} BASH_MAX_OUTPUT_LENGTH={n}"),
-        Some(Err(_)) => eprintln!("{warn} BASH_MAX_OUTPUT_LENGTH has invalid (non-numeric) value"),
-        None => eprintln!("{warn} BASH_MAX_OUTPUT_LENGTH not set (recommend 10000)"),
+    // Check bashOutputMaxChars first; it takes precedence over BASH_MAX_OUTPUT_LENGTH
+    if let Some(settings) = native_claude_settings {
+        if let Some(bash_output_chars) = settings.get("bashOutputMaxChars") {
+            if let Some(n) = bash_output_chars.as_i64() {
+                eprintln!(
+                    "{pass} bashOutputMaxChars={n} (BASH_MAX_OUTPUT_LENGTH is ignored while it is set)"
+                );
+            } else {
+                eprintln!("{warn} bashOutputMaxChars has invalid (non-numeric) value");
+            }
+        } else {
+            // bashOutputMaxChars not set, fall back to BASH_MAX_OUTPUT_LENGTH check
+            match get("BASH_MAX_OUTPUT_LENGTH").map(|v| v.parse::<u64>()) {
+                Some(Ok(n)) => eprintln!("{pass} BASH_MAX_OUTPUT_LENGTH={n}"),
+                Some(Err(_)) => {
+                    eprintln!("{warn} BASH_MAX_OUTPUT_LENGTH has invalid (non-numeric) value")
+                }
+                None => eprintln!("{warn} BASH_MAX_OUTPUT_LENGTH not set (recommend 10000)"),
+            }
+        }
+    } else {
+        match get("BASH_MAX_OUTPUT_LENGTH").map(|v| v.parse::<u64>()) {
+            Some(Ok(n)) => eprintln!("{pass} BASH_MAX_OUTPUT_LENGTH={n}"),
+            Some(Err(_)) => {
+                eprintln!("{warn} BASH_MAX_OUTPUT_LENGTH has invalid (non-numeric) value")
+            }
+            None => eprintln!("{warn} BASH_MAX_OUTPUT_LENGTH not set (recommend 10000)"),
+        }
     }
 
     match get("MAX_MCP_OUTPUT_TOKENS").map(|v| v.parse::<u64>()) {
@@ -65,6 +91,11 @@ fn run_doctor_token_efficiency(
         None => eprintln!("{warn} MAX_MCP_OUTPUT_TOKENS not set (recommend 10000)"),
     }
 
+    // Check CLAUDE_CODE_PROMPT_CACHE_TTL (subscription users get 1h automatically)
+    let has_cache_ttl = get("CLAUDE_CODE_PROMPT_CACHE_TTL")
+        .map(|v| v.eq_ignore_ascii_case("1h"))
+        .unwrap_or(false);
+
     match get("ENABLE_PROMPT_CACHING_1H") {
         Some(val) if val.eq_ignore_ascii_case("true") || val == "1" => {
             eprintln!("{pass} ENABLE_PROMPT_CACHING_1H=true (1h cache TTL enabled)")
@@ -72,8 +103,13 @@ fn run_doctor_token_efficiency(
         Some(_) => {
             eprintln!("{warn} ENABLE_PROMPT_CACHING_1H has unexpected value (recommend true)")
         }
+        None if has_cache_ttl => {
+            eprintln!("{pass} CLAUDE_CODE_PROMPT_CACHE_TTL=1h (1h cache TTL enabled)")
+        }
         None => {
-            eprintln!("{warn} ENABLE_PROMPT_CACHING_1H not set (recommend true for 1h cache reuse)")
+            eprintln!(
+                "{info} prompt cache TTL not set: subscription plans get 1h on the main conversation automatically; API-key and cloud-provider users can set CLAUDE_CODE_PROMPT_CACHE_TTL=1h"
+            )
         }
     }
 
@@ -1036,12 +1072,61 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
             }
         }
     }
+
+    // Retired Claude Code settings detection
+    if let Some((_manifest, _)) = &doctor_manifest
+        && super::installed_adapters(&config).any(|a| a.name() == "claude_code")
+    {
+        let adapter_root = cache_dir.join(crate::adapter::claude_code::ClaudeCodeAdapter.name());
+        let settings_path = adapter_root.join("settings.json");
+        let claude_json_path = adapter_root.join(".claude.json");
+
+        let settings: serde_json::Value = std::fs::read_to_string(&settings_path)
+            .ok()
+            .and_then(|content| serde_json::from_str(&content).ok())
+            .unwrap_or(serde_json::json!({}));
+
+        let claude_json: serde_json::Value = std::fs::read_to_string(&claude_json_path)
+            .ok()
+            .and_then(|content| serde_json::from_str(&content).ok())
+            .unwrap_or(serde_json::json!({}));
+
+        let hits = crate::adapter::claude_code::retired::scan(&settings, &claude_json);
+        if !hits.is_empty() {
+            eprintln!();
+            eprintln!("Retired Claude Code settings:");
+            for hit in hits {
+                let msg = if hit.entry.no_effect {
+                    if let Some(since) = hit.entry.since {
+                        format!(
+                            "{} has no effect since Claude Code {}. Remove it.",
+                            hit.entry.name, since
+                        )
+                    } else {
+                        format!("{} has no effect. Remove it.", hit.entry.name)
+                    }
+                } else {
+                    if let Some(replacement) = hit.entry.replacement {
+                        format!("{} is deprecated. Use {}.", hit.entry.name, replacement)
+                    } else {
+                        format!("{} is deprecated.", hit.entry.name)
+                    }
+                };
+                eprintln!("{warn} {}: {}", hit.location, msg);
+            }
+        }
+    }
+
     // Resolved native.claude_code.env, for the token-efficiency checks below
     // to treat as equally "set" alongside the process environment (#543 follow-up).
     let native_claude_env = doctor_manifest
         .as_ref()
         .and_then(|(manifest, _)| manifest.native.get("claude_code"))
         .and_then(|v| v.get("env"));
+
+    let native_claude_settings = doctor_manifest
+        .as_ref()
+        .and_then(|(manifest, _)| manifest.native.get("claude_code"));
 
     if all {
         // Orphan detection
@@ -1344,7 +1429,14 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
         }
     }
 
-    run_doctor_token_efficiency(use_color, &pass, &warn, cm_enabled, native_claude_env);
+    run_doctor_token_efficiency(
+        use_color,
+        &pass,
+        &warn,
+        cm_enabled,
+        native_claude_env,
+        native_claude_settings,
+    );
 
     run_doctor_tool_availability(use_color, &config);
     run_doctor_dependent_tools(use_color);

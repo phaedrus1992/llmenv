@@ -1698,6 +1698,24 @@ fn translate_agent_md(source: &str, _name: &str) -> anyhow::Result<String> {
                 new_fm.insert((*tool_key).into(), val.clone());
             }
         }
+
+        // Warn about dropped agent frontmatter keys (except "name", which opencode takes from file name)
+        let mut kept_keys: std::collections::HashSet<&str> = keep
+            .iter()
+            .chain(&["tools", "allowed_tools"])
+            .copied()
+            .collect();
+        kept_keys.insert("name");
+        for key in map.keys() {
+            if let serde_yaml::Value::String(key_str) = key {
+                if !kept_keys.contains(key_str.as_str()) {
+                    eprintln!(
+                        "warning: opencode adapter does not support '{key_str}' in \
+                         agent frontmatter — dropping this field"
+                    );
+                }
+            }
+        }
     }
 
     new_fm.insert("mode".into(), serde_yaml::Value::String("subagent".into()));
@@ -3607,6 +3625,20 @@ mod tests {
         let result = translate_agent_md(src, "test").unwrap();
         assert!(result.contains("allowed_tools:"));
         assert!(result.contains("mode: subagent"));
+    }
+
+    #[test]
+    fn translate_agent_md_drops_unsupported_keys() {
+        let src = "---\ndescription: My agent\nmodel: claude-sonnet-4-20250514\nomitClaudeMd: true\neffort: high\nmaxTurns: 5\n---\n\nBody.";
+        let result = translate_agent_md(src, "test").unwrap();
+        // Supported keys should be present
+        assert!(result.contains("description: My agent"));
+        assert!(result.contains("model: claude-sonnet-4-20250514"));
+        assert!(result.contains("mode: subagent"));
+        // Dropped keys should not be present
+        assert!(!result.contains("omitClaudeMd"));
+        assert!(!result.contains("effort"));
+        assert!(!result.contains("maxTurns"));
     }
 
     #[test]
