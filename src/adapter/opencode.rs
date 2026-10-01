@@ -3674,6 +3674,33 @@ mod tests {
         assert_eq!(dropped_agent_keys(&map), ["1", "true"]);
     }
 
+    proptest::proptest! {
+        /// The output is exactly the source keys outside the allowlist, in source order.
+        #[test]
+        fn dropped_agent_keys_is_the_ordered_complement_of_the_allowlist(
+            keys in proptest::collection::vec(
+                proptest::prop_oneof![
+                    proptest::sample::select(OPENCODE_AGENT_KEYS.to_vec()).prop_map(String::from),
+                    "[a-zA-Z]{1,10}",
+                ],
+                0..10,
+            ),
+        ) {
+            use proptest::prelude::*;
+            let mut map = serde_yaml::Mapping::new();
+            for k in &keys {
+                map.insert(serde_yaml::Value::from(k.as_str()), serde_yaml::Value::from(1));
+            }
+            let expected: Vec<String> = map
+                .keys()
+                .filter_map(serde_yaml::Value::as_str)
+                .filter(|k| !OPENCODE_AGENT_KEYS.contains(k))
+                .map(String::from)
+                .collect();
+            prop_assert_eq!(dropped_agent_keys(&map), expected);
+        }
+    }
+
     #[test]
     fn dropped_agent_keys_is_empty_for_supported_keys_only() {
         let map: serde_yaml::Mapping =

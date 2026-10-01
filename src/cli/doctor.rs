@@ -1926,6 +1926,40 @@ mod tests {
         );
     }
 
+    proptest! {
+        /// The verdict depends only on where the version falls against the two floors.
+        #[test]
+        fn icm_server_check_is_monotonic(a in 0u64..3, b in 0u64..20, c in 0u64..100) {
+            let (level, _) = icm_server_check(&format!("{a}.{b}.{c}"));
+            let expected = if (a, b, c) >= ICM_SERVER_RANKING_FIX {
+                CheckLevel::Pass
+            } else {
+                CheckLevel::Warn
+            };
+            prop_assert_eq!(level, expected);
+        }
+
+        /// A 1h TTL passes in any letter case and whatever ENABLE_PROMPT_CACHING_1H holds.
+        #[test]
+        fn prompt_cache_ttl_1h_always_passes(
+            upper_h in any::<bool>(),
+            enable in proptest::option::of("[a-z0-9]{0,5}"),
+        ) {
+            let ttl = if upper_h { "1H" } else { "1h" };
+            prop_assert_eq!(prompt_cache_check(enable, Some(ttl.into())).0, CheckLevel::Pass);
+        }
+
+        /// Any file content gives a value, never a panic: valid JSON parses, anything else is {}.
+        #[test]
+        fn read_rendered_json_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..64)) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("f.json");
+            std::fs::write(&path, &bytes).unwrap();
+            let value = read_rendered_json(&path, "!");
+            prop_assert!(value.is_some());
+        }
+    }
+
     // -- read_rendered_json / rendered_claude_dir (#2145) --
 
     #[test]

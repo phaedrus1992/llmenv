@@ -436,4 +436,44 @@ mod tests {
             );
         }
     }
+
+    mod props {
+        use super::super::*;
+        use proptest::prelude::*;
+        use serde_json::json;
+
+        proptest! {
+            /// Any JSON shape is safe, and every hit names a real table row and a location in
+            /// one of the two files.
+            #[test]
+            fn scan_never_panics_and_hits_are_well_formed(
+                settings in llmenv_util::testkit::arb_json(),
+                claude in llmenv_util::testkit::arb_json(),
+            ) {
+                for hit in scan(&settings, &claude) {
+                    prop_assert!(RETIRED.iter().any(|r| std::ptr::eq(r, hit.entry)));
+                    prop_assert!(
+                        hit.location.starts_with("settings.json")
+                            || hit.location.starts_with(".claude.json")
+                    );
+                }
+            }
+
+            /// Unrelated keys next to a retired env var never hide it or add hits.
+            #[test]
+            fn retired_env_var_is_found_among_unrelated_keys(
+                extra in proptest::collection::btree_map("[a-z]{1,8}", "[a-z0-9]{0,8}", 0..6),
+                row in 0..RETIRED.len(),
+            ) {
+                let r = &RETIRED[row];
+                prop_assume!(r.kind == EnvVar);
+                let mut env: serde_json::Map<String, Value> =
+                    extra.into_iter().map(|(k, v)| (k, json!(v))).collect();
+                env.insert(r.name.to_string(), json!("1"));
+                let hits = scan(&json!({ "env": env }), &json!({}));
+                prop_assert_eq!(hits.len(), 1);
+                prop_assert_eq!(hits[0].entry.name, r.name);
+            }
+        }
+    }
 }
