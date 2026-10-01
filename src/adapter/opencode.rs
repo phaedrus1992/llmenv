@@ -1682,6 +1682,19 @@ fn translate_command_md(source: &str, _name: &str) -> anyhow::Result<String> {
 ///
 /// Keeps `description`, `model`, `tools` / `allowed_tools`, and adds
 /// `mode: subagent` so opencode runs the agent as a sub-process.
+/// Agent frontmatter keys that `translate_agent_md` keeps. `name` is absent on purpose: opencode
+/// takes the agent name from the file name, so dropping the key loses nothing.
+const OPENCODE_AGENT_KEYS: &[&str] = &["description", "model", "tools", "allowed_tools", "name"];
+
+/// Source frontmatter keys that opencode has no field for (#2150), in source order.
+fn dropped_agent_keys(map: &serde_yaml::Mapping) -> Vec<String> {
+    map.keys()
+        .filter_map(serde_yaml::Value::as_str)
+        .filter(|key| !OPENCODE_AGENT_KEYS.contains(key))
+        .map(str::to_owned)
+        .collect()
+}
+
 fn translate_agent_md(source: &str, _name: &str) -> anyhow::Result<String> {
     let (fm, body) = split_frontmatter(source);
     let mut new_fm = serde_yaml::Mapping::new();
@@ -1699,22 +1712,11 @@ fn translate_agent_md(source: &str, _name: &str) -> anyhow::Result<String> {
             }
         }
 
-        // Warn about dropped agent frontmatter keys (except "name", which opencode takes from file name)
-        let mut kept_keys: std::collections::HashSet<&str> = keep
-            .iter()
-            .chain(&["tools", "allowed_tools"])
-            .copied()
-            .collect();
-        kept_keys.insert("name");
-        for key in map.keys() {
-            if let serde_yaml::Value::String(key_str) = key {
-                if !kept_keys.contains(key_str.as_str()) {
-                    eprintln!(
-                        "warning: opencode adapter does not support '{key_str}' in \
-                         agent frontmatter — dropping this field"
-                    );
-                }
-            }
+        for key in dropped_agent_keys(map) {
+            eprintln!(
+                "warning: opencode adapter does not support '{key}' in \
+                 agent frontmatter — dropping this field"
+            );
         }
     }
 
@@ -3639,6 +3641,26 @@ mod tests {
         assert!(!result.contains("omitClaudeMd"));
         assert!(!result.contains("effort"));
         assert!(!result.contains("maxTurns"));
+    }
+
+    #[test]
+    fn dropped_agent_keys_lists_unsupported_keys_in_source_order() {
+        let map: serde_yaml::Mapping = serde_yaml::from_str(
+            "name: a\ndescription: d\nomitClaudeMd: true\nmodel: m\neffort: high\n\
+             tools: [Bash]\npermissionMode: plan\n",
+        )
+        .unwrap();
+        assert_eq!(
+            dropped_agent_keys(&map),
+            ["omitClaudeMd", "effort", "permissionMode"]
+        );
+    }
+
+    #[test]
+    fn dropped_agent_keys_is_empty_for_supported_keys_only() {
+        let map: serde_yaml::Mapping =
+            serde_yaml::from_str("name: a\ndescription: d\nallowed_tools: [Read]\n").unwrap();
+        assert!(dropped_agent_keys(&map).is_empty());
     }
 
     #[test]
