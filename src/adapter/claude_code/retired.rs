@@ -53,7 +53,7 @@ const fn with_note(mut r: Retired, note: &'static str) -> Retired {
 
 /// Every row comes from Claude Code's settings reference, its environment-variable reference, or
 /// its changelog (verified 2026-09-26). Add a new row at the top of its kind's group.
-pub(crate) const RETIRED: &[Retired] = &[
+const RETIRED: &[Retired] = &[
     with_note(
         row(
             SettingsKey,
