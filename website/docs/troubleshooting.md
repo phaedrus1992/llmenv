@@ -83,8 +83,9 @@ llmenv doctor --gc                # diagnostics + GC in one pass
 
 Claude Code retires settings keys, environment variables, and tools over time.
 A retired entry in your config does nothing, and Claude Code does not tell you.
-`llmenv doctor` reads the rendered `settings.json` and `.claude.json`, and prints a
-`Retired Claude Code settings:` section when it finds one.
+`llmenv doctor` reads the rendered `settings.json` and `.claude.json` in the folder that `CLAUDE_CONFIG_DIR`
+points to, and prints a `Retired Claude Code settings:` section when it finds one.
+Run doctor in a shell that has the llmenv hook; without `CLAUDE_CONFIG_DIR`, doctor skips the check and says so.
 Each line names where the entry is, the Claude Code version that dropped it, and what to use
 instead:
 

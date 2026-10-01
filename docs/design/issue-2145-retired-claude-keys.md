@@ -130,8 +130,11 @@ pub(crate) fn scan(settings: &serde_json::Value, claude_json: &serde_json::Value
 
 In `src/cli/doctor.rs`, after the lifecycle-hook section, when the Claude Code adapter is installed:
 
-1. Read `settings.json` and `.claude.json` from the same `adapter_root` doctor already computes for the credentials check (near line 753).
-2. A missing file counts as `{}`. A file that is not valid JSON prints one `{warn}` line naming the file and the parse error, and the scan continues with `{}` for it.
+1. Read `settings.json` and `.claude.json` from the folder in `CLAUDE_CONFIG_DIR`, but only when that folder is under the Claude Code adapter root.
+   The rendered files live in `<adapter_root>/<version>/<folder>/`, not in `adapter_root` itself; only the credentials cache lives there.
+   The folder name depends on the hashing mode, and strict mode hashes the filtered manifest, so doctor uses the folder the shell hook exported, as `check-stale` does.
+   When `CLAUDE_CONFIG_DIR` is unset or outside the adapter root, print one `{info}` line and skip the check.
+2. A missing file prints one `{info}` line that names it and `llmenv export`, and counts as `{}`. A file that cannot be read or is not valid JSON prints one `{warn}` line naming the file and the error, and the scan continues with `{}` for it.
 3. Print a heading `Retired Claude Code settings:` only when there is at least one hit.
 4. One line per hit, format:
    - no effect: `{warn} <location>: <name> has no effect since Claude Code <since>. <advice>`, where the advice is `Use <replacement> instead.`, `Remove it; <note>.`, or `Remove it.`

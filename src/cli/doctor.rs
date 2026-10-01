@@ -990,33 +990,64 @@ fn has_engine(installed: &[Box<dyn crate::adapter::AgentAdapter>], engine: &str)
         .any(|a| crate::adapter::engine_id(a.as_ref()) == engine)
 }
 
-/// Read a rendered Claude Code JSON file for the retired-settings scan (#2145). A missing file
-/// counts as `{}`. A file that does not parse gets one warning, then also counts as `{}`.
-fn read_rendered_json(path: &Path, warn: &str) -> serde_json::Value {
+/// The rendered Claude Code folder this shell uses: `CLAUDE_CONFIG_DIR`, but only when it sits
+/// under llmenv's adapter root. The shell hook sets it to the exact folder export wrote, which
+/// doctor cannot recompute cheaply in strict hashing mode (#2145).
+fn rendered_claude_dir(adapter_root: &Path, claude_config_dir: Option<String>) -> Option<PathBuf> {
+    claude_config_dir
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .filter(|p| p.starts_with(adapter_root))
+}
+
+/// Read a rendered Claude Code JSON file for the retired-settings scan (#2145). `None` means the
+/// file does not exist. A file that cannot be read or parsed gets one warning and counts as `{}`.
+fn read_rendered_json(path: &Path, warn: &str) -> Option<serde_json::Value> {
     let empty = serde_json::Value::Object(serde_json::Map::new());
+    let skip = "the retired-settings check skips it; run `llmenv export` to regenerate it";
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return empty,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(e) => {
-            eprintln!("{warn} Cannot read {}: {e}", path.display());
-            return empty;
+            eprintln!("{warn} Cannot read {} ({e}); {skip}", path.display());
+            return Some(empty);
         }
     };
-    serde_json::from_str(&text).unwrap_or_else(|e| {
-        eprintln!(
-            "{warn} {} is not valid JSON ({e}); the retired-settings check skips it",
-            path.display()
-        );
+    Some(serde_json::from_str(&text).unwrap_or_else(|e| {
+        eprintln!("{warn} {} is not valid JSON ({e}); {skip}", path.display());
         empty
-    })
+    }))
 }
 
 /// Warn about retired Claude Code entries in the rendered `settings.json` and `.claude.json`
 /// (#2145). Prints nothing when there is no hit.
-fn report_retired_claude_settings(adapter_root: &Path, warn: &str) {
-    let settings = read_rendered_json(&adapter_root.join("settings.json"), warn);
-    let claude_json = read_rendered_json(&adapter_root.join(".claude.json"), warn);
-    let hits = crate::adapter::claude_code::retired::scan(&settings, &claude_json);
+fn report_retired_claude_settings(adapter_root: &Path, warn: &str, info: &str) {
+    let Some(dir) = rendered_claude_dir(adapter_root, std::env::var("CLAUDE_CONFIG_DIR").ok())
+    else {
+        eprintln!(
+            "{info} Retired-settings check skipped: CLAUDE_CONFIG_DIR does not point to an llmenv \
+             folder under {}. Run doctor in a shell that has the llmenv hook.",
+            adapter_root.display()
+        );
+        return;
+    };
+    let mut files = [("settings.json", None), (".claude.json", None)];
+    for (name, value) in &mut files {
+        let path = dir.join(*name);
+        *value = read_rendered_json(&path, warn);
+        if value.is_none() {
+            eprintln!(
+                "{info} {} does not exist; run `llmenv export` to render it",
+                path.display()
+            );
+        }
+    }
+    let [(_, settings), (_, claude_json)] = files;
+    let empty = serde_json::Value::Object(serde_json::Map::new());
+    let hits = crate::adapter::claude_code::retired::scan(
+        settings.as_ref().unwrap_or(&empty),
+        claude_json.as_ref().unwrap_or(&empty),
+    );
     if hits.is_empty() {
         return;
     }
@@ -1243,7 +1274,7 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
 
     if claude_installed {
         let adapter_root = cache_dir.join(crate::adapter::claude_code::ClaudeCodeAdapter.name());
-        report_retired_claude_settings(&adapter_root, &warn);
+        report_retired_claude_settings(&adapter_root, &warn, &info);
     }
 
     // Resolved native.claude_code.env, for the token-efficiency checks below
@@ -1792,22 +1823,37 @@ mod tests {
         assert_eq!(icm_server_check(Some("dev")).0, CheckLevel::Info);
     }
 
-    // -- read_rendered_json (#2145) --
+    // -- read_rendered_json / rendered_claude_dir (#2145) --
 
     #[test]
-    fn read_rendered_json_missing_and_invalid_count_as_empty() {
+    fn read_rendered_json_missing_is_none_and_invalid_is_empty() {
         let dir = tempfile::tempdir().unwrap();
-        let empty = serde_json::json!({});
         assert_eq!(
             read_rendered_json(&dir.path().join("absent.json"), "!"),
-            empty
+            None
         );
         let bad = dir.path().join("bad.json");
         std::fs::write(&bad, "{ not json").unwrap();
-        assert_eq!(read_rendered_json(&bad, "!"), empty);
+        assert_eq!(read_rendered_json(&bad, "!"), Some(serde_json::json!({})));
         let good = dir.path().join("good.json");
         std::fs::write(&good, r#"{"env":{"A":"1"}}"#).unwrap();
-        assert_eq!(read_rendered_json(&good, "!")["env"]["A"], "1");
+        assert_eq!(read_rendered_json(&good, "!").unwrap()["env"]["A"], "1");
+    }
+
+    #[test]
+    fn rendered_claude_dir_requires_a_folder_under_the_adapter_root() {
+        let root = Path::new("/cache/claude-code");
+        let inside = "/cache/claude-code/3/65470f3c02b7".to_string();
+        assert_eq!(
+            rendered_claude_dir(root, Some(inside.clone())),
+            Some(PathBuf::from(inside))
+        );
+        assert_eq!(
+            rendered_claude_dir(root, Some("/home/u/.claude".into())),
+            None
+        );
+        assert_eq!(rendered_claude_dir(root, Some(String::new())), None);
+        assert_eq!(rendered_claude_dir(root, None), None);
     }
 
     // -- network_scope_cannot_match --
