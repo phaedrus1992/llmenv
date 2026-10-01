@@ -146,7 +146,7 @@ In `src/cli/doctor.rs`, after the lifecycle-hook section, when the Claude Code a
 
 1. `BASH_MAX_OUTPUT_LENGTH`: if `native.claude_code.bashOutputMaxChars` is set, print `{pass} bashOutputMaxChars=<n> (BASH_MAX_OUTPUT_LENGTH is ignored while it is set)` and skip the variable check.
    Otherwise keep today's check.
-2. `ENABLE_PROMPT_CACHING_1H`: pass if it is `1` or `true`, or if `CLAUDE_CODE_PROMPT_CACHE_TTL` is `1h` (process env or `native.claude_code.env`).
+2. `ENABLE_PROMPT_CACHING_1H`: `CLAUDE_CODE_PROMPT_CACHE_TTL` takes precedence (process env or `native.claude_code.env`). Pass when it is `1h`, warn when it is set to another value, and check `ENABLE_PROMPT_CACHING_1H` (`1` or `true` passes) only when it is unset.
    When none is set, change the text from a warning to `{info} prompt cache TTL not set: subscription plans get 1h on the main conversation automatically; API-key and cloud-provider users can set CLAUDE_CODE_PROMPT_CACHE_TTL=1h`.
 
 Use the existing `effective_token_efficiency_var` helper for every lookup.

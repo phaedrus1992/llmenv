@@ -107,9 +107,10 @@ Two token-efficiency recommendations also changed in v3.12.0:
 
 - When `native.claude_code.bashOutputMaxChars` is set, doctor reports it and skips
   `BASH_MAX_OUTPUT_LENGTH`, because Claude Code ignores the variable while the setting is set.
-- The prompt-cache check passes when `CLAUDE_CODE_PROMPT_CACHE_TTL=1h` or
-  `ENABLE_PROMPT_CACHING_1H` is set. When neither is set, it prints an info line instead of a
-  warning: subscription plans get the 1-hour TTL on the main conversation without any variable.
+- `CLAUDE_CODE_PROMPT_CACHE_TTL` takes precedence over `ENABLE_PROMPT_CACHING_1H`. The prompt-cache check
+  passes when the TTL is `1h`, and warns when it is set to another value. When the TTL is unset, it checks
+  `ENABLE_PROMPT_CACHING_1H`. When neither is set, it prints an info line instead of a warning:
+  subscription plans get the 1-hour TTL on the main conversation without any variable.
 
 ## Memory backend issues
 

@@ -59,7 +59,10 @@ fn bash_output_check(
             ),
             None => (
                 CheckLevel::Warn,
-                "bashOutputMaxChars has invalid (non-numeric) value".to_string(),
+                format!(
+                    "bashOutputMaxChars must be a non-negative integer, got {}",
+                    serde_yaml::to_string(value).unwrap_or_default().trim()
+                ),
             ),
         };
     }
@@ -79,11 +82,21 @@ fn bash_output_check(
 /// Subscription plans get the 1-hour cache TTL on the main conversation without any variable,
 /// and `CLAUDE_CODE_PROMPT_CACHE_TTL` takes precedence over `ENABLE_PROMPT_CACHING_1H` (#2145).
 fn prompt_cache_check(enable_1h: Option<String>, ttl: Option<String>) -> (CheckLevel, String) {
-    if ttl.as_deref().is_some_and(|v| v.eq_ignore_ascii_case("1h")) {
-        return (
-            CheckLevel::Pass,
-            "CLAUDE_CODE_PROMPT_CACHE_TTL=1h (1h cache TTL enabled)".to_string(),
-        );
+    if let Some(ttl) = ttl {
+        return if ttl.eq_ignore_ascii_case("1h") {
+            (
+                CheckLevel::Pass,
+                "CLAUDE_CODE_PROMPT_CACHE_TTL=1h (1h cache TTL enabled)".to_string(),
+            )
+        } else {
+            (
+                CheckLevel::Warn,
+                format!(
+                    "CLAUDE_CODE_PROMPT_CACHE_TTL={ttl} overrides ENABLE_PROMPT_CACHING_1H; set \
+                     it to 1h for the 1-hour cache TTL"
+                ),
+            )
+        };
     }
     match enable_1h {
         Some(v) if v.eq_ignore_ascii_case("true") || v == "1" => (
@@ -1771,9 +1784,15 @@ mod tests {
     }
 
     #[test]
-    fn bash_output_max_chars_non_numeric_warns() {
-        let chars = serde_yaml::Value::from("lots");
-        assert_eq!(bash_output_check(Some(&chars), None).0, CheckLevel::Warn);
+    fn bash_output_max_chars_non_numeric_warns_with_the_value() {
+        for (value, shown) in [
+            (serde_yaml::Value::from("lots"), "lots"),
+            (serde_yaml::Value::from(-1), "-1"),
+        ] {
+            let (level, text) = bash_output_check(Some(&value), None);
+            assert_eq!(level, CheckLevel::Warn);
+            assert!(text.ends_with(&format!("got {shown}")), "{text}");
+        }
     }
 
     #[test]
@@ -1808,9 +1827,19 @@ mod tests {
                 "{v}"
             );
         }
+        let (level, text) = prompt_cache_check(Some("1".into()), Some("5m".into()));
         assert_eq!(
-            prompt_cache_check(Some("1".into()), Some("5m".into())).0,
-            CheckLevel::Pass
+            level,
+            CheckLevel::Warn,
+            "a non-1h TTL overrides ENABLE_PROMPT_CACHING_1H"
+        );
+        assert!(
+            text.contains("CLAUDE_CODE_PROMPT_CACHE_TTL=5m overrides"),
+            "{text}"
+        );
+        assert_eq!(
+            prompt_cache_check(None, Some("5m".into())).0,
+            CheckLevel::Warn
         );
     }
 
