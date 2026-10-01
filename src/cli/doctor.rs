@@ -27,6 +27,83 @@ fn effective_token_efficiency_var(
         .or_else(|| value.as_i64().map(|n| n.to_string()))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckLevel {
+    Pass,
+    Warn,
+    Info,
+}
+
+fn print_check((level, text): (CheckLevel, String), pass: &str, warn: &str, info: &str) {
+    let prefix = match level {
+        CheckLevel::Pass => pass,
+        CheckLevel::Warn => warn,
+        CheckLevel::Info => info,
+    };
+    eprintln!("{prefix} {text}");
+}
+
+/// Claude Code ignores `BASH_MAX_OUTPUT_LENGTH` while the `bashOutputMaxChars` setting is set,
+/// so the setting decides the result when it is present (#2145).
+fn bash_output_check(
+    bash_output_max_chars: Option<&serde_yaml::Value>,
+    bash_max_output_length: Option<String>,
+) -> (CheckLevel, String) {
+    if let Some(value) = bash_output_max_chars {
+        return match value.as_u64() {
+            Some(n) => (
+                CheckLevel::Pass,
+                format!(
+                    "bashOutputMaxChars={n} (BASH_MAX_OUTPUT_LENGTH is ignored while it is set)"
+                ),
+            ),
+            None => (
+                CheckLevel::Warn,
+                "bashOutputMaxChars has invalid (non-numeric) value".to_string(),
+            ),
+        };
+    }
+    match bash_max_output_length.map(|v| v.parse::<u64>()) {
+        Some(Ok(n)) => (CheckLevel::Pass, format!("BASH_MAX_OUTPUT_LENGTH={n}")),
+        Some(Err(_)) => (
+            CheckLevel::Warn,
+            "BASH_MAX_OUTPUT_LENGTH has invalid (non-numeric) value".to_string(),
+        ),
+        None => (
+            CheckLevel::Warn,
+            "BASH_MAX_OUTPUT_LENGTH not set (recommend 10000)".to_string(),
+        ),
+    }
+}
+
+/// Subscription plans get the 1-hour cache TTL on the main conversation without any variable,
+/// and `CLAUDE_CODE_PROMPT_CACHE_TTL` takes precedence over `ENABLE_PROMPT_CACHING_1H` (#2145).
+fn prompt_cache_check(enable_1h: Option<String>, ttl: Option<String>) -> (CheckLevel, String) {
+    if ttl.as_deref().is_some_and(|v| v.eq_ignore_ascii_case("1h")) {
+        return (
+            CheckLevel::Pass,
+            "CLAUDE_CODE_PROMPT_CACHE_TTL=1h (1h cache TTL enabled)".to_string(),
+        );
+    }
+    match enable_1h {
+        Some(v) if v.eq_ignore_ascii_case("true") || v == "1" => (
+            CheckLevel::Pass,
+            "ENABLE_PROMPT_CACHING_1H=true (1h cache TTL enabled)".to_string(),
+        ),
+        Some(_) => (
+            CheckLevel::Warn,
+            "ENABLE_PROMPT_CACHING_1H has unexpected value (recommend true)".to_string(),
+        ),
+        None => (
+            CheckLevel::Info,
+            "prompt cache TTL not set: subscription plans get 1h on the main conversation \
+             automatically; API-key and cloud-provider users can set \
+             CLAUDE_CODE_PROMPT_CACHE_TTL=1h"
+                .to_string(),
+        ),
+    }
+}
+
 fn run_doctor_token_efficiency(
     use_color: bool,
     pass: &str,
@@ -55,35 +132,13 @@ fn run_doctor_token_efficiency(
         ),
     }
 
-    // Check bashOutputMaxChars first; it takes precedence over BASH_MAX_OUTPUT_LENGTH
-    if let Some(settings) = native_claude_settings {
-        if let Some(bash_output_chars) = settings.get("bashOutputMaxChars") {
-            if let Some(n) = bash_output_chars.as_i64() {
-                eprintln!(
-                    "{pass} bashOutputMaxChars={n} (BASH_MAX_OUTPUT_LENGTH is ignored while it is set)"
-                );
-            } else {
-                eprintln!("{warn} bashOutputMaxChars has invalid (non-numeric) value");
-            }
-        } else {
-            // bashOutputMaxChars not set, fall back to BASH_MAX_OUTPUT_LENGTH check
-            match get("BASH_MAX_OUTPUT_LENGTH").map(|v| v.parse::<u64>()) {
-                Some(Ok(n)) => eprintln!("{pass} BASH_MAX_OUTPUT_LENGTH={n}"),
-                Some(Err(_)) => {
-                    eprintln!("{warn} BASH_MAX_OUTPUT_LENGTH has invalid (non-numeric) value")
-                }
-                None => eprintln!("{warn} BASH_MAX_OUTPUT_LENGTH not set (recommend 10000)"),
-            }
-        }
-    } else {
-        match get("BASH_MAX_OUTPUT_LENGTH").map(|v| v.parse::<u64>()) {
-            Some(Ok(n)) => eprintln!("{pass} BASH_MAX_OUTPUT_LENGTH={n}"),
-            Some(Err(_)) => {
-                eprintln!("{warn} BASH_MAX_OUTPUT_LENGTH has invalid (non-numeric) value")
-            }
-            None => eprintln!("{warn} BASH_MAX_OUTPUT_LENGTH not set (recommend 10000)"),
-        }
-    }
+    let bash_max_chars = native_claude_settings.and_then(|v| v.get("bashOutputMaxChars"));
+    print_check(
+        bash_output_check(bash_max_chars, get("BASH_MAX_OUTPUT_LENGTH")),
+        pass,
+        warn,
+        &info,
+    );
 
     match get("MAX_MCP_OUTPUT_TOKENS").map(|v| v.parse::<u64>()) {
         Some(Ok(n)) => eprintln!("{pass} MAX_MCP_OUTPUT_TOKENS={n}"),
@@ -91,27 +146,15 @@ fn run_doctor_token_efficiency(
         None => eprintln!("{warn} MAX_MCP_OUTPUT_TOKENS not set (recommend 10000)"),
     }
 
-    // Check CLAUDE_CODE_PROMPT_CACHE_TTL (subscription users get 1h automatically)
-    let has_cache_ttl = get("CLAUDE_CODE_PROMPT_CACHE_TTL")
-        .map(|v| v.eq_ignore_ascii_case("1h"))
-        .unwrap_or(false);
-
-    match get("ENABLE_PROMPT_CACHING_1H") {
-        Some(val) if val.eq_ignore_ascii_case("true") || val == "1" => {
-            eprintln!("{pass} ENABLE_PROMPT_CACHING_1H=true (1h cache TTL enabled)")
-        }
-        Some(_) => {
-            eprintln!("{warn} ENABLE_PROMPT_CACHING_1H has unexpected value (recommend true)")
-        }
-        None if has_cache_ttl => {
-            eprintln!("{pass} CLAUDE_CODE_PROMPT_CACHE_TTL=1h (1h cache TTL enabled)")
-        }
-        None => {
-            eprintln!(
-                "{info} prompt cache TTL not set: subscription plans get 1h on the main conversation automatically; API-key and cloud-provider users can set CLAUDE_CODE_PROMPT_CACHE_TTL=1h"
-            )
-        }
-    }
+    print_check(
+        prompt_cache_check(
+            get("ENABLE_PROMPT_CACHING_1H"),
+            get("CLAUDE_CODE_PROMPT_CACHE_TTL"),
+        ),
+        pass,
+        warn,
+        &info,
+    );
 
     match get("CLAUDE_CODE_SUBAGENT_MODEL") {
         Some(_) => eprintln!("{info} CLAUDE_CODE_SUBAGENT_MODEL is set"),
@@ -861,6 +904,43 @@ fn report_credential_cache(cache_dir: &Path, pass: &str, info: &str, warn: &str)
     }
 }
 
+/// Read a rendered Claude Code JSON file for the retired-settings scan (#2145). A missing file
+/// counts as `{}`. A file that does not parse gets one warning, then also counts as `{}`.
+fn read_rendered_json(path: &Path, warn: &str) -> serde_json::Value {
+    let empty = serde_json::Value::Object(serde_json::Map::new());
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return empty,
+        Err(e) => {
+            eprintln!("{warn} Cannot read {}: {e}", path.display());
+            return empty;
+        }
+    };
+    serde_json::from_str(&text).unwrap_or_else(|e| {
+        eprintln!(
+            "{warn} {} is not valid JSON ({e}); the retired-settings check skips it",
+            path.display()
+        );
+        empty
+    })
+}
+
+/// Warn about retired Claude Code entries in the rendered `settings.json` and `.claude.json`
+/// (#2145). Prints nothing when there is no hit.
+fn report_retired_claude_settings(adapter_root: &Path, warn: &str) {
+    let settings = read_rendered_json(&adapter_root.join("settings.json"), warn);
+    let claude_json = read_rendered_json(&adapter_root.join(".claude.json"), warn);
+    let hits = crate::adapter::claude_code::retired::scan(&settings, &claude_json);
+    if hits.is_empty() {
+        return;
+    }
+    eprintln!();
+    eprintln!("Retired Claude Code settings:");
+    for hit in hits {
+        eprintln!("{warn} {}", hit.message());
+    }
+}
+
 pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result<()> {
     let pass = super::doctor_pass(use_color);
     let warn = super::doctor_warning(use_color);
@@ -1073,48 +1153,9 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
         }
     }
 
-    // Retired Claude Code settings detection
-    if let Some((_manifest, _)) = &doctor_manifest
-        && super::installed_adapters(&config).any(|a| a.name() == "claude_code")
-    {
+    if super::installed_adapters(&config).any(|a| a.name() == "claude_code") {
         let adapter_root = cache_dir.join(crate::adapter::claude_code::ClaudeCodeAdapter.name());
-        let settings_path = adapter_root.join("settings.json");
-        let claude_json_path = adapter_root.join(".claude.json");
-
-        let settings: serde_json::Value = std::fs::read_to_string(&settings_path)
-            .ok()
-            .and_then(|content| serde_json::from_str(&content).ok())
-            .unwrap_or(serde_json::json!({}));
-
-        let claude_json: serde_json::Value = std::fs::read_to_string(&claude_json_path)
-            .ok()
-            .and_then(|content| serde_json::from_str(&content).ok())
-            .unwrap_or(serde_json::json!({}));
-
-        let hits = crate::adapter::claude_code::retired::scan(&settings, &claude_json);
-        if !hits.is_empty() {
-            eprintln!();
-            eprintln!("Retired Claude Code settings:");
-            for hit in hits {
-                let msg = if hit.entry.no_effect {
-                    if let Some(since) = hit.entry.since {
-                        format!(
-                            "{} has no effect since Claude Code {}. Remove it.",
-                            hit.entry.name, since
-                        )
-                    } else {
-                        format!("{} has no effect. Remove it.", hit.entry.name)
-                    }
-                } else {
-                    if let Some(replacement) = hit.entry.replacement {
-                        format!("{} is deprecated. Use {}.", hit.entry.name, replacement)
-                    } else {
-                        format!("{} is deprecated.", hit.entry.name)
-                    }
-                };
-                eprintln!("{warn} {}: {}", hit.location, msg);
-            }
-        }
+        report_retired_claude_settings(&adapter_root, &warn);
     }
 
     // Resolved native.claude_code.env, for the token-efficiency checks below
@@ -1556,6 +1597,90 @@ mod tests {
     };
     use proptest::prelude::*;
     use std::collections::BTreeMap;
+
+    // -- bash_output_check / prompt_cache_check (#2145) --
+
+    #[test]
+    fn bash_output_max_chars_wins_over_the_env_var() {
+        let chars = serde_yaml::Value::from(20_000_u64);
+        let (level, text) = bash_output_check(Some(&chars), Some("not-a-number".into()));
+        assert_eq!(level, CheckLevel::Pass);
+        assert!(text.starts_with("bashOutputMaxChars=20000"), "{text}");
+        assert!(text.contains("BASH_MAX_OUTPUT_LENGTH is ignored"), "{text}");
+    }
+
+    #[test]
+    fn bash_output_max_chars_non_numeric_warns() {
+        let chars = serde_yaml::Value::from("lots");
+        assert_eq!(bash_output_check(Some(&chars), None).0, CheckLevel::Warn);
+    }
+
+    #[test]
+    fn bash_output_falls_back_to_the_env_var() {
+        assert_eq!(
+            bash_output_check(None, Some("10000".into())),
+            (CheckLevel::Pass, "BASH_MAX_OUTPUT_LENGTH=10000".to_string())
+        );
+        assert_eq!(
+            bash_output_check(None, Some("x".into())).0,
+            CheckLevel::Warn
+        );
+        assert_eq!(bash_output_check(None, None).0, CheckLevel::Warn);
+    }
+
+    #[test]
+    fn prompt_cache_ttl_1h_passes_even_with_a_bad_enable_value() {
+        let (level, text) = prompt_cache_check(Some("maybe".into()), Some("1H".into()));
+        assert_eq!(level, CheckLevel::Pass);
+        assert!(
+            text.starts_with("CLAUDE_CODE_PROMPT_CACHE_TTL=1h"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn prompt_cache_enable_1h_passes() {
+        for v in ["1", "true", "TRUE"] {
+            assert_eq!(
+                prompt_cache_check(Some(v.into()), None).0,
+                CheckLevel::Pass,
+                "{v}"
+            );
+        }
+        assert_eq!(
+            prompt_cache_check(Some("1".into()), Some("5m".into())).0,
+            CheckLevel::Pass
+        );
+    }
+
+    #[test]
+    fn prompt_cache_unset_is_info_not_warn() {
+        let (level, text) = prompt_cache_check(None, None);
+        assert_eq!(level, CheckLevel::Info);
+        assert!(text.contains("subscription plans get 1h"), "{text}");
+        assert_eq!(
+            prompt_cache_check(Some("no".into()), None).0,
+            CheckLevel::Warn
+        );
+    }
+
+    // -- read_rendered_json (#2145) --
+
+    #[test]
+    fn read_rendered_json_missing_and_invalid_count_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = serde_json::json!({});
+        assert_eq!(
+            read_rendered_json(&dir.path().join("absent.json"), "!"),
+            empty
+        );
+        let bad = dir.path().join("bad.json");
+        std::fs::write(&bad, "{ not json").unwrap();
+        assert_eq!(read_rendered_json(&bad, "!"), empty);
+        let good = dir.path().join("good.json");
+        std::fs::write(&good, r#"{"env":{"A":"1"}}"#).unwrap();
+        assert_eq!(read_rendered_json(&good, "!")["env"]["A"], "1");
+    }
 
     // -- network_scope_cannot_match --
 

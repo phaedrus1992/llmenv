@@ -1,9 +1,10 @@
-//! Retired Claude Code settings detection.
+//! Retired Claude Code settings keys, environment variables, permission tools and MCP server
+//! types, and a scan of the rendered config files for them (#2145).
 //!
-//! Claude Code periodically retires settings keys, environment variables, permission tools, and
-//! MCP server types. This module detects them in rendered configuration files and warns the user.
+//! Design: docs/design/issue-2145-retired-claude-keys.md
 
-use std::fmt;
+use RetiredKind::{EnvVar, McpType, PermissionTool, SettingsKey};
+use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum RetiredKind {
@@ -13,252 +14,250 @@ pub(crate) enum RetiredKind {
     McpType,
 }
 
-impl fmt::Display for RetiredKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::SettingsKey => write!(f, "settings key"),
-            Self::EnvVar => write!(f, "environment variable"),
-            Self::PermissionTool => write!(f, "permission tool"),
-            Self::McpType => write!(f, "MCP server type"),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Retired {
     pub kind: RetiredKind,
     /// Exact name as Claude Code spells it.
     pub name: &'static str,
-    /// `true` when Claude Code ignores it; `false` when it still reads it but is deprecated.
+    /// `true` when Claude Code ignores it; `false` when it still reads it but it is deprecated.
     pub no_effect: bool,
     /// Claude Code version, or `None` when the docs give none.
     pub since: Option<&'static str>,
-    /// Replacement, or `None`.
+    /// The setting or value to use instead, or `None`.
     pub replacement: Option<&'static str>,
+    /// Extra advice for a row with no replacement, or `None`.
+    pub note: Option<&'static str>,
 }
 
-/// Retired Claude Code entries.
-///
-/// Sources: Claude Code settings reference and environment-variable reference
-/// (code.claude.com/docs/en/settings-reference.md, env-vars.md), and the Claude Code changelog.
-/// New rows should be added at the top of each section.
+const fn row(
+    kind: RetiredKind,
+    name: &'static str,
+    no_effect: bool,
+    since: Option<&'static str>,
+    replacement: Option<&'static str>,
+) -> Retired {
+    Retired {
+        kind,
+        name,
+        no_effect,
+        since,
+        replacement,
+        note: None,
+    }
+}
+
+const fn with_note(mut r: Retired, note: &'static str) -> Retired {
+    r.note = Some(note);
+    r
+}
+
+/// Every row comes from Claude Code's settings reference, its environment-variable reference, or
+/// its changelog (verified 2026-09-26). Add a new row at the top of its kind's group.
 pub(crate) const RETIRED: &[Retired] = &[
-    // Settings keys (removed or deprecated at top level of settings.json)
-    Retired {
-        kind: RetiredKind::SettingsKey,
-        name: "taskOutputMaxChars",
-        no_effect: true,
-        since: Some("2.1.277"),
-        replacement: None,
-    },
-    Retired {
-        kind: RetiredKind::SettingsKey,
-        name: "permissionExplainerEnabled",
-        no_effect: true,
-        since: Some("2.1.257"),
-        replacement: None,
-    },
-    Retired {
-        kind: RetiredKind::SettingsKey,
-        name: "teammateDefaultModel",
-        no_effect: true,
-        since: Some("2.1.234"),
-        replacement: None,
-    },
-    Retired {
-        kind: RetiredKind::SettingsKey,
-        name: "keybindingFlavor",
-        no_effect: true,
-        since: Some("2.1.261"),
-        replacement: None,
-    },
-    Retired {
-        kind: RetiredKind::SettingsKey,
-        name: "includeCoAuthoredBy",
-        no_effect: false,
-        since: Some("2.0.62"),
-        replacement: Some("attribution"),
-    },
-    Retired {
-        kind: RetiredKind::SettingsKey,
-        name: "disableArtifact",
-        no_effect: false,
-        since: None,
-        replacement: Some("enableArtifact: false"),
-    },
-    Retired {
-        kind: RetiredKind::SettingsKey,
-        name: "voiceEnabled",
-        no_effect: false,
-        since: Some("2.1.92"),
-        replacement: Some("voice.enabled"),
-    },
-    // Environment variables (in the env object of settings.json)
-    Retired {
-        kind: RetiredKind::EnvVar,
-        name: "TASK_MAX_OUTPUT_LENGTH",
-        no_effect: true,
-        since: Some("2.1.277"),
-        replacement: None,
-    },
-    Retired {
-        kind: RetiredKind::EnvVar,
-        name: "CLAUDE_SUBAGENT_BG_SHELL_MAX_MS",
-        no_effect: true,
-        since: Some("2.1.260"),
-        replacement: None,
-    },
-    Retired {
-        kind: RetiredKind::EnvVar,
-        name: "CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION",
-        no_effect: true,
-        since: Some("2.1.224"),
-        replacement: None,
-    },
-    Retired {
-        kind: RetiredKind::EnvVar,
-        name: "CLAUDE_CODE_CONNECT_TIMEOUT_MS",
-        no_effect: true,
-        since: Some("2.1.186"),
-        replacement: Some("API_TIMEOUT_MS"),
-    },
-    Retired {
-        kind: RetiredKind::EnvVar,
-        name: "CLAUDE_CODE_OPUS_4_6_FAST_MODE_OVERRIDE",
-        no_effect: true,
-        since: Some("2.1.160"),
-        replacement: None,
-    },
-    Retired {
-        kind: RetiredKind::EnvVar,
-        name: "CLAUDE_CODE_ENABLE_OPUS_4_7_FAST_MODE",
-        no_effect: true,
-        since: Some("2.1.142"),
-        replacement: None,
-    },
-    Retired {
-        kind: RetiredKind::EnvVar,
-        name: "ANTHROPIC_SMALL_FAST_MODEL",
-        no_effect: false,
-        since: None,
-        replacement: Some("ANTHROPIC_DEFAULT_HAIKU_MODEL"),
-    },
-    Retired {
-        kind: RetiredKind::EnvVar,
-        name: "ENABLE_PROMPT_CACHING_1H_BEDROCK",
-        no_effect: false,
-        since: None,
-        replacement: Some("ENABLE_PROMPT_CACHING_1H"),
-    },
-    // Permission tools (in permissions.allow/ask/deny)
-    Retired {
-        kind: RetiredKind::PermissionTool,
-        name: "TaskOutput",
-        no_effect: true,
-        since: Some("2.1.277"),
-        replacement: None,
-    },
-    // MCP server types (in mcpServers)
-    Retired {
-        kind: RetiredKind::McpType,
-        name: "sdk",
-        no_effect: true,
-        since: Some("2.1.274"),
-        replacement: Some(
-            "use stdio or http; only an SDK host application can register in-process servers",
+    with_note(
+        row(
+            SettingsKey,
+            "taskOutputMaxChars",
+            true,
+            Some("2.1.277"),
+            None,
         ),
-    },
+        "Claude reads a background task's output file with Read",
+    ),
+    row(
+        SettingsKey,
+        "permissionExplainerEnabled",
+        true,
+        Some("2.1.257"),
+        None,
+    ),
+    with_note(
+        row(
+            SettingsKey,
+            "teammateDefaultModel",
+            true,
+            Some("2.1.234"),
+            None,
+        ),
+        "see Claude Code's agent-teams docs",
+    ),
+    with_note(
+        row(SettingsKey, "keybindingFlavor", true, Some("2.1.261"), None),
+        "word-editing keys always follow readline",
+    ),
+    row(
+        SettingsKey,
+        "includeCoAuthoredBy",
+        false,
+        Some("2.0.62"),
+        Some("attribution"),
+    ),
+    row(
+        SettingsKey,
+        "disableArtifact",
+        false,
+        None,
+        Some("enableArtifact: false"),
+    ),
+    row(
+        SettingsKey,
+        "voiceEnabled",
+        false,
+        Some("2.1.92"),
+        Some("voice.enabled"),
+    ),
+    row(
+        EnvVar,
+        "TASK_MAX_OUTPUT_LENGTH",
+        true,
+        Some("2.1.277"),
+        None,
+    ),
+    row(
+        EnvVar,
+        "CLAUDE_SUBAGENT_BG_SHELL_MAX_MS",
+        true,
+        Some("2.1.260"),
+        None,
+    ),
+    row(
+        EnvVar,
+        "CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION",
+        true,
+        Some("2.1.224"),
+        None,
+    ),
+    row(
+        EnvVar,
+        "CLAUDE_CODE_CONNECT_TIMEOUT_MS",
+        true,
+        Some("2.1.186"),
+        Some("API_TIMEOUT_MS"),
+    ),
+    row(
+        EnvVar,
+        "CLAUDE_CODE_OPUS_4_6_FAST_MODE_OVERRIDE",
+        true,
+        Some("2.1.160"),
+        None,
+    ),
+    row(
+        EnvVar,
+        "CLAUDE_CODE_ENABLE_OPUS_4_7_FAST_MODE",
+        true,
+        Some("2.1.142"),
+        None,
+    ),
+    row(
+        EnvVar,
+        "ANTHROPIC_SMALL_FAST_MODEL",
+        false,
+        None,
+        Some("ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+    ),
+    row(
+        EnvVar,
+        "ENABLE_PROMPT_CACHING_1H_BEDROCK",
+        false,
+        None,
+        Some("ENABLE_PROMPT_CACHING_1H"),
+    ),
+    row(PermissionTool, "TaskOutput", true, Some("2.1.277"), None),
+    row(
+        McpType,
+        "sdk",
+        true,
+        Some("2.1.274"),
+        Some("type stdio or http"),
+    ),
 ];
 
 #[derive(Debug, Clone)]
 pub(crate) struct RetiredHit {
     pub entry: &'static Retired,
-    /// Where it was found, such as `settings.json env` or `settings.json permissions.deny[3]`.
+    /// Where the entry was found, such as `settings.json env` or
+    /// `settings.json permissions.deny[3]`.
     pub location: String,
 }
 
-impl fmt::Display for RetiredHit {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.location, self.entry.name)
+impl RetiredHit {
+    /// The doctor line for this hit, without the status prefix.
+    #[must_use]
+    pub(crate) fn message(&self) -> String {
+        let Retired {
+            name,
+            no_effect,
+            since,
+            replacement,
+            note,
+            ..
+        } = *self.entry;
+        let location = &self.location;
+        if no_effect {
+            let since = since.map_or(String::new(), |v| format!(" since Claude Code {v}"));
+            let advice = match (replacement, note) {
+                (Some(r), _) => format!("Use {r} instead."),
+                (None, Some(n)) => format!("Remove it; {n}."),
+                (None, None) => "Remove it.".to_string(),
+            };
+            format!("{location}: {name} has no effect{since}. {advice}")
+        } else {
+            let advice = replacement.map_or(String::new(), |r| format!(" Use {r}."));
+            format!("{location}: {name} is deprecated.{advice}")
+        }
     }
 }
 
-/// Scan settings.json and .claude.json for retired Claude Code entries.
+fn lookup(kind: RetiredKind, name: &str) -> Option<&'static Retired> {
+    RETIRED.iter().find(|r| r.kind == kind && r.name == name)
+}
+
+/// Scan a rendered `settings.json` and `.claude.json` for retired entries.
 ///
-/// Returns a list of found entries, in file order. Non-object or missing parts are skipped.
-pub(crate) fn scan(
-    settings: &serde_json::Value,
-    claude_json: &serde_json::Value,
-) -> Vec<RetiredHit> {
+/// Output order: settings keys, env vars, permission rules, MCP servers. Object keys come in
+/// `serde_json`'s map order (sorted), and permission rules in array order. A part that is
+/// missing or has the wrong JSON type is skipped. The function does no file I/O.
+#[must_use]
+pub(crate) fn scan(settings: &Value, claude_json: &Value) -> Vec<RetiredHit> {
     let mut hits = Vec::new();
+    let hit = |entry, location: String| RetiredHit { entry, location };
 
-    // Settings keys (top-level keys of settings.json)
-    if let serde_json::Value::Object(obj) = settings {
-        for retired in RETIRED {
-            if retired.kind == RetiredKind::SettingsKey && obj.contains_key(retired.name) {
-                hits.push(RetiredHit {
-                    entry: retired,
-                    location: format!("settings.json"),
-                });
-            }
+    if let Some(obj) = settings.as_object() {
+        hits.extend(
+            obj.keys()
+                .filter_map(|k| lookup(SettingsKey, k))
+                .map(|e| hit(e, "settings.json".to_string())),
+        );
+        if let Some(env) = obj.get("env").and_then(Value::as_object) {
+            hits.extend(
+                env.keys()
+                    .filter_map(|k| lookup(EnvVar, k))
+                    .map(|e| hit(e, "settings.json env".to_string())),
+            );
         }
-
-        // Env vars (keys of settings.env)
-        if let Some(serde_json::Value::Object(env_obj)) = obj.get("env") {
-            for retired in RETIRED {
-                if retired.kind == RetiredKind::EnvVar && env_obj.contains_key(retired.name) {
-                    hits.push(RetiredHit {
-                        entry: retired,
-                        location: format!("settings.json env"),
-                    });
-                }
-            }
-        }
-
-        // Permission tools (strings in settings.permissions.allow/ask/deny)
-        if let Some(perms) = obj.get("permissions") {
-            if let serde_json::Value::Object(perms_obj) = perms {
-                for perm_tier in &["allow", "ask", "deny"] {
-                    if let Some(serde_json::Value::Array(rules)) = perms_obj.get(*perm_tier) {
-                        for (idx, rule) in rules.iter().enumerate() {
-                            if let serde_json::Value::String(tool_name) = rule {
-                                // Extract the tool name before any '('
-                                let base_tool = tool_name.split('(').next().unwrap_or(tool_name);
-                                for retired in RETIRED {
-                                    if retired.kind == RetiredKind::PermissionTool
-                                        && retired.name == base_tool
-                                    {
-                                        hits.push(RetiredHit {
-                                            entry: retired,
-                                            location: format!(
-                                                "settings.json permissions.{}[{}]",
-                                                perm_tier, idx
-                                            ),
-                                        });
-                                    }
-                                }
-                            }
-                        }
+        if let Some(perms) = obj.get("permissions").and_then(Value::as_object) {
+            for tier in ["allow", "ask", "deny"] {
+                let Some(rules) = perms.get(tier).and_then(Value::as_array) else {
+                    continue;
+                };
+                for (idx, rule) in rules.iter().enumerate() {
+                    let Some(rule) = rule.as_str() else { continue };
+                    let tool = rule.split('(').next().unwrap_or(rule);
+                    if let Some(e) = lookup(PermissionTool, tool) {
+                        hits.push(hit(e, format!("settings.json permissions.{tier}[{idx}]")));
                     }
                 }
             }
         }
     }
 
-    // MCP server types (values in .claude.json mcpServers)
-    if let Some(mcp_servers) = claude_json.get("mcpServers") {
-        if let serde_json::Value::Object(servers_obj) = mcp_servers {
-            for (idx, (_, server_config)) in servers_obj.iter().enumerate() {
-                if let Some(serde_json::Value::String(mcp_type)) = server_config.get("type") {
-                    for retired in RETIRED {
-                        if retired.kind == RetiredKind::McpType && retired.name == mcp_type {
-                            hits.push(RetiredHit {
-                                entry: retired,
-                                location: format!(".claude.json mcpServers[{}]", idx),
-                            });
-                        }
-                    }
-                }
+    if let Some(servers) = claude_json.get("mcpServers").and_then(Value::as_object) {
+        for (server, config) in servers {
+            let Some(kind) = config.get("type").and_then(Value::as_str) else {
+                continue;
+            };
+            if let Some(e) = lookup(McpType, kind) {
+                hits.push(hit(e, format!(".claude.json mcpServers.{server}")));
             }
         }
     }
@@ -269,109 +268,136 @@ pub(crate) fn scan(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use std::collections::{HashMap, HashSet};
 
-    #[test]
-    fn scan_finds_settings_key() {
-        let settings = serde_json::json!({ "taskOutputMaxChars": 1000 });
-        let claude = serde_json::json!({});
-        let hits = scan(&settings, &claude);
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].entry.name, "taskOutputMaxChars");
-        assert_eq!(hits[0].location, "settings.json");
+    fn names(hits: &[RetiredHit]) -> Vec<&str> {
+        hits.iter().map(|h| h.entry.name).collect()
     }
 
     #[test]
-    fn scan_finds_env_var() {
-        let settings = serde_json::json!({ "env": { "TASK_MAX_OUTPUT_LENGTH": "1000" } });
-        let claude = serde_json::json!({});
-        let hits = scan(&settings, &claude);
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].entry.name, "TASK_MAX_OUTPUT_LENGTH");
-        assert_eq!(hits[0].location, "settings.json env");
+    fn every_row_is_found_by_its_own_kind() {
+        for r in RETIRED {
+            let (settings, claude) = match r.kind {
+                SettingsKey => (json!({ r.name: 1 }), json!({})),
+                EnvVar => (json!({ "env": { r.name: "1" } }), json!({})),
+                PermissionTool => (json!({ "permissions": { "deny": [r.name] } }), json!({})),
+                McpType => (
+                    json!({}),
+                    json!({ "mcpServers": { "s": { "type": r.name } } }),
+                ),
+            };
+            let hits = scan(&settings, &claude);
+            assert_eq!(names(&hits), vec![r.name], "row {} {:?}", r.name, r.kind);
+        }
     }
 
     #[test]
-    fn scan_finds_permission_tool() {
-        let settings = serde_json::json!({
-            "permissions": {
-                "allow": ["Bash", "TaskOutput"]
-            }
+    fn locations_name_the_part_that_holds_the_entry() {
+        let settings = json!({
+            "voiceEnabled": true,
+            "env": { "TASK_MAX_OUTPUT_LENGTH": "1" },
+            "permissions": { "allow": ["Bash", "TaskOutput"] },
         });
-        let claude = serde_json::json!({});
-        let hits = scan(&settings, &claude);
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].entry.name, "TaskOutput");
-        assert_eq!(hits[0].location, "settings.json permissions.allow[1]");
-    }
-
-    #[test]
-    fn scan_handles_tool_with_args() {
-        let settings = serde_json::json!({
-            "permissions": {
-                "deny": ["Bash(rm)", "TaskOutput(*)"]
-            }
-        });
-        let claude = serde_json::json!({});
-        let hits = scan(&settings, &claude);
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].entry.name, "TaskOutput");
-    }
-
-    #[test]
-    fn scan_finds_mcp_type() {
-        let settings = serde_json::json!({});
-        let claude = serde_json::json!({
-            "mcpServers": {
-                "my_server": { "type": "sdk", "command": "..." }
-            }
-        });
-        let hits = scan(&settings, &claude);
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].entry.name, "sdk");
-    }
-
-    #[test]
-    fn scan_handles_empty_or_malformed() {
-        let hits = scan(&serde_json::json!({}), &serde_json::json!({}));
-        assert_eq!(hits.len(), 0);
-
-        let hits = scan(&serde_json::json!({ "env": [] }), &serde_json::json!({}));
-        assert_eq!(hits.len(), 0);
-
-        let hits = scan(
-            &serde_json::json!({ "permissions": "invalid" }),
-            &serde_json::json!({}),
+        let claude = json!({ "mcpServers": { "inproc": { "type": "sdk" } } });
+        let locations: Vec<String> = scan(&settings, &claude)
+            .into_iter()
+            .map(|h| h.location)
+            .collect();
+        assert_eq!(
+            locations,
+            [
+                "settings.json",
+                "settings.json env",
+                "settings.json permissions.allow[1]",
+                ".claude.json mcpServers.inproc",
+            ]
         );
-        assert_eq!(hits.len(), 0);
     }
 
     #[test]
-    fn table_uniqueness_and_validity() {
-        let mut seen_by_kind: std::collections::HashMap<
-            RetiredKind,
-            std::collections::HashSet<&str>,
-        > = std::collections::HashMap::new();
+    fn permission_match_uses_the_exact_tool_name() {
+        let settings = json!({ "permissions": { "ask": [
+            "TaskOutputFoo", "Bash(TaskOutput)", "TaskOutput", "TaskOutput(*)"
+        ] } });
+        let hits = scan(&settings, &json!({}));
+        let locations: Vec<&str> = hits.iter().map(|h| h.location.as_str()).collect();
+        assert_eq!(
+            locations,
+            [
+                "settings.json permissions.ask[2]",
+                "settings.json permissions.ask[3]"
+            ]
+        );
+    }
 
-        for retired in RETIRED {
-            let names = seen_by_kind
-                .entry(retired.kind)
-                .or_insert_with(std::collections::HashSet::new);
+    #[test]
+    fn wrong_json_types_give_no_hits() {
+        for settings in [
+            json!({}),
+            json!([]),
+            json!({ "env": ["TASK_MAX_OUTPUT_LENGTH"] }),
+            json!({ "permissions": "TaskOutput" }),
+            json!({ "permissions": { "deny": "TaskOutput" } }),
+            json!({ "permissions": { "deny": [42] } }),
+        ] {
+            assert!(scan(&settings, &json!({})).is_empty(), "{settings}");
+        }
+        assert!(scan(&json!({}), &json!({ "mcpServers": [] })).is_empty());
+        assert!(scan(&json!({}), &json!({ "mcpServers": { "s": { "type": 1 } } })).is_empty());
+    }
+
+    #[test]
+    fn message_formats() {
+        let msg = |kind, name| {
+            RetiredHit {
+                entry: lookup(kind, name).unwrap(),
+                location: "loc".to_string(),
+            }
+            .message()
+        };
+        assert_eq!(
+            msg(EnvVar, "TASK_MAX_OUTPUT_LENGTH"),
+            "loc: TASK_MAX_OUTPUT_LENGTH has no effect since Claude Code 2.1.277. Remove it."
+        );
+        assert_eq!(
+            msg(EnvVar, "CLAUDE_CODE_CONNECT_TIMEOUT_MS"),
+            "loc: CLAUDE_CODE_CONNECT_TIMEOUT_MS has no effect since Claude Code 2.1.186. \
+             Use API_TIMEOUT_MS instead."
+        );
+        assert_eq!(
+            msg(SettingsKey, "keybindingFlavor"),
+            "loc: keybindingFlavor has no effect since Claude Code 2.1.261. \
+             Remove it; word-editing keys always follow readline."
+        );
+        assert_eq!(
+            msg(SettingsKey, "voiceEnabled"),
+            "loc: voiceEnabled is deprecated. Use voice.enabled."
+        );
+    }
+
+    #[test]
+    fn table_shape() {
+        let mut seen: HashMap<RetiredKind, HashSet<&str>> = HashMap::new();
+        for r in RETIRED {
             assert!(
-                names.insert(retired.name),
-                "Duplicate entry: {} {} in table",
-                retired.kind,
-                retired.name
+                seen.entry(r.kind).or_default().insert(r.name),
+                "duplicate {:?} {}",
+                r.kind,
+                r.name
             );
-
-            // If no_effect is false, there must be a replacement
-            if !retired.no_effect {
+            if !r.no_effect {
                 assert!(
-                    retired.replacement.is_some(),
-                    "Deprecated (no_effect=false) {} {} has no replacement",
-                    retired.kind,
-                    retired.name
+                    r.replacement.is_some(),
+                    "deprecated {} needs a replacement",
+                    r.name
                 );
             }
+            assert!(
+                r.replacement.is_none() || r.note.is_none(),
+                "{} has both a replacement and a note",
+                r.name
+            );
         }
     }
 }
