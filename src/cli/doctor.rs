@@ -407,13 +407,7 @@ const ICM_SERVER_FILTER_FIX: (u64, u64, u64) = (0, 10, 60);
 const ICM_SERVER_RANKING_FIX: (u64, u64, u64) = (0, 10, 64);
 
 /// Doctor's verdict on the version of the `icm` binary that serves memory (#2261).
-fn icm_server_check(version: Option<&str>) -> (CheckLevel, String) {
-    let Some(version) = version else {
-        return (
-            CheckLevel::Info,
-            "ICM server version unknown: `icm --version` gave no version".to_string(),
-        );
-    };
+fn icm_server_check(version: &str) -> (CheckLevel, String) {
     let upgrade = "Run `icm upgrade --apply`.";
     match parse_semver_triple(version) {
         None => (
@@ -438,43 +432,90 @@ fn icm_server_check(version: Option<&str>) -> (CheckLevel, String) {
     }
 }
 
+/// The local `icm` version for a host that serves memory, or the reason it is unknown.
+fn local_icm_version() -> Result<String, String> {
+    if !crate::adapter::binary_on_path("icm") {
+        return Err("icm is not on PATH, but this host serves ICM memory".to_string());
+    }
+    tool_version("icm").ok_or_else(|| "`icm --version` failed or printed no version".to_string())
+}
+
+/// Where the ICM memory server for the active scope runs, as far as doctor can tell.
+#[derive(Debug, PartialEq, Eq)]
+enum IcmServerScope {
+    /// The active scope has no memory backend.
+    NoBackend,
+    /// This host serves memory.
+    Local,
+    /// Another host serves memory.
+    Remote,
+    /// Memory resolution failed with this error.
+    Unresolved(String),
+}
+
+/// Classify the memory server for the active scope. Uses the same bundle-merged memory list as
+/// endpoint resolution, so a bundle-declared server on this host counts as local.
+fn icm_server_scope(
+    config: &Config,
+    config_dir: &Path,
+    active: &crate::scope::ActiveScopes,
+) -> IcmServerScope {
+    let resolved = crate::hook_run::memory_url(config, config_dir, active).and_then(|endpoint| {
+        Ok((
+            endpoint,
+            crate::hook_run::merged_memory(config, config_dir, active)?,
+        ))
+    });
+    match resolved {
+        Ok((crate::hook_run::MemoryEndpoint::Active { .. }, merged)) => {
+            if super::find_local_memory_entry(&merged.memory, active).is_some() {
+                IcmServerScope::Local
+            } else {
+                IcmServerScope::Remote
+            }
+        }
+        Ok(_) => IcmServerScope::NoBackend,
+        Err(e) => IcmServerScope::Unresolved(format!("{e:#}")),
+    }
+}
+
 /// Report the ICM server version (#2261). The MCP `initialize` reply cannot carry it, because
 /// `mcp-proxy` puts its own `mcp` library version in `serverInfo.version`. So doctor reads the
 /// local `icm` binary when this host serves memory, and says the version is unknown otherwise.
-/// Like `export`, this reads top-level `features.memory` only (#335). Prints nothing when the
-/// active scope has no memory backend.
+/// Prints nothing when the active scope has no memory backend.
 fn run_doctor_icm_server(
     use_color: bool,
     config: &Config,
     config_dir: &Path,
     active: &crate::scope::ActiveScopes,
 ) {
-    if crate::hook_run::memory_url(config, config_dir, active).is_err() {
-        return;
-    }
     let pass = super::doctor_pass(use_color);
     let warn = super::doctor_warning(use_color);
     let info = super::doctor_info(use_color);
+    let local = match icm_server_scope(config, config_dir, active) {
+        IcmServerScope::NoBackend => return,
+        IcmServerScope::Unresolved(e) => {
+            eprintln!();
+            eprintln!("ICM server:");
+            eprintln!("{warn} ICM server check skipped: cannot resolve the memory backend: {e}");
+            return;
+        }
+        IcmServerScope::Local => true,
+        IcmServerScope::Remote => false,
+    };
     eprintln!();
     eprintln!("ICM server:");
-    let top_memory = config
-        .features
-        .as_ref()
-        .map(|f| f.memory.as_slice())
-        .unwrap_or_default();
-    if super::find_local_memory_entry(top_memory, active).is_some() {
-        print_check(
-            icm_server_check(tool_version("icm").as_deref()),
-            &pass,
-            &warn,
-            &info,
-        );
-    } else {
+    if !local {
         eprintln!(
             "{info} ICM server version unknown: the memory server is another host, and \
              mcp-proxy does not forward the icm version (#2161). Run `icm --version` on that \
              host; recall needs 0.10.64 or later."
         );
+        return;
+    }
+    match local_icm_version() {
+        Ok(version) => print_check(icm_server_check(&version), &pass, &warn, &info),
+        Err(reason) => eprintln!("{warn} {reason}"),
     }
 }
 
@@ -1799,28 +1840,61 @@ mod tests {
 
     #[test]
     fn icm_server_check_boundaries() {
-        let level = |v| icm_server_check(Some(v)).0;
+        let level = |v| icm_server_check(v).0;
         assert_eq!(level("0.10.59"), CheckLevel::Warn);
         assert_eq!(level("0.10.60"), CheckLevel::Warn);
         assert_eq!(level("0.10.63"), CheckLevel::Warn);
         assert_eq!(level("0.10.64"), CheckLevel::Pass);
         assert_eq!(level("0.11.0"), CheckLevel::Pass);
         assert_eq!(level("v1.0.0"), CheckLevel::Pass);
+        assert_eq!(level("dev"), CheckLevel::Info);
     }
 
     #[test]
     fn icm_server_check_names_the_fix_the_server_lacks() {
-        let (_, old) = icm_server_check(Some("0.10.59"));
+        let (_, old) = icm_server_check("0.10.59");
         assert!(old.contains("older than 0.10.60"), "{old}");
         assert!(old.contains("icm upgrade --apply"), "{old}");
-        let (_, mid) = icm_server_check(Some("0.10.62"));
+        let (_, mid) = icm_server_check("0.10.62");
         assert!(mid.contains("older than 0.10.64"), "{mid}");
     }
 
+    // -- icm_server_scope (#2261) --
+
     #[test]
-    fn icm_server_check_unknown_version_is_info() {
-        assert_eq!(icm_server_check(None).0, CheckLevel::Info);
-        assert_eq!(icm_server_check(Some("dev")).0, CheckLevel::Info);
+    fn icm_server_scope_without_memory_is_no_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let active = crate::cli::tests::active_as_server();
+        assert_eq!(
+            icm_server_scope(&Config::default(), dir.path(), &active),
+            IcmServerScope::NoBackend
+        );
+    }
+
+    #[test]
+    fn icm_server_scope_tells_server_from_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::cli::tests::memory_config("127.0.0.1", 9092);
+        assert_eq!(
+            icm_server_scope(&config, dir.path(), &crate::cli::tests::active_as_server()),
+            IcmServerScope::Local
+        );
+        assert_eq!(
+            icm_server_scope(&config, dir.path(), &crate::cli::tests::active_as_client()),
+            IcmServerScope::Remote
+        );
+    }
+
+    #[test]
+    fn icm_server_scope_reports_a_resolution_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::cli::tests::memory_config("127.0.0.1", 9092);
+        config.host.clear();
+        let scope = icm_server_scope(&config, dir.path(), &crate::cli::tests::active_as_server());
+        assert!(
+            matches!(&scope, IcmServerScope::Unresolved(e) if e.contains("srv")),
+            "{scope:?}"
+        );
     }
 
     // -- read_rendered_json / rendered_claude_dir (#2145) --

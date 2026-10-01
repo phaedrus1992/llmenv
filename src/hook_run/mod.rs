@@ -2024,11 +2024,25 @@ fn resolve_memory_client(
 ///
 /// # Errors
 /// A bundle merge failure (#1132) or an unresolvable MCP/memory declaration.
-pub(crate) fn memory_url(
-    config: &crate::config::Config,
+/// Top-level and firing-bundle `features.memory` and `host` entries, merged the way
+/// `build_manifest` merges them.
+pub(crate) struct MergedMemory<'a> {
+    pub(crate) firing: Vec<&'a crate::config::Bundle>,
+    pub(crate) bundle_refs: Vec<crate::merge::BundleRef>,
+    pub(crate) memory: Vec<crate::config::Memory>,
+    pub(crate) host: std::collections::BTreeMap<String, crate::config::HostEntry>,
+}
+
+/// Merge the memory and host entries for the active scopes. Endpoint resolution and
+/// `llmenv doctor` both use it, so neither one misses a bundle-declared memory server.
+///
+/// # Errors
+/// A firing bundle's `bundle.yaml` cannot be read or merged.
+pub(crate) fn merged_memory<'a>(
+    config: &'a crate::config::Config,
     config_dir: &std::path::Path,
     active: &crate::scope::ActiveScopes,
-) -> anyhow::Result<MemoryEndpoint> {
+) -> anyhow::Result<MergedMemory<'a>> {
     let top_memory = config
         .features
         .as_ref()
@@ -2046,18 +2060,37 @@ pub(crate) fn memory_url(
     let bundle_refs = crate::cli::build_bundle_refs(config_dir, active, &firing);
     let (bundle_memory, bundle_host) = resolve_bundle_memory_host(config, &bundle_refs)?;
 
-    let mut all_memory: Vec<crate::config::Memory> = top_memory
+    let mut memory: Vec<crate::config::Memory> = top_memory
         .iter()
         .chain(bundle_memory.iter())
         .cloned()
         .collect();
-    crate::util::dedup(&mut all_memory);
+    crate::util::dedup(&mut memory);
 
     // Merged host: bundle contributions first, top-level overwrites (same as build_manifest).
-    let mut all_host = bundle_host;
+    let mut host = bundle_host;
     for (k, v) in &config.host {
-        all_host.insert(k.clone(), v.clone());
+        host.insert(k.clone(), v.clone());
     }
+    Ok(MergedMemory {
+        firing,
+        bundle_refs,
+        memory,
+        host,
+    })
+}
+
+pub(crate) fn memory_url(
+    config: &crate::config::Config,
+    config_dir: &std::path::Path,
+    active: &crate::scope::ActiveScopes,
+) -> anyhow::Result<MemoryEndpoint> {
+    let MergedMemory {
+        firing,
+        bundle_refs,
+        memory: all_memory,
+        host: all_host,
+    } = merged_memory(config, config_dir, active)?;
 
     // Full `active.tags` (not `non_project_tags()`) on purpose: this resolves
     // the memory backend for the *live* hook-run session, which is legitimately
