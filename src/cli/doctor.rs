@@ -982,6 +982,14 @@ fn report_credential_cache(cache_dir: &Path, pass: &str, info: &str, warn: &str)
     }
 }
 
+/// Whether `installed` holds the adapter with this engine id. `AgentAdapter::name` is the
+/// hyphenated display name (`claude-code`), so a comparison must go through `engine_id`.
+fn has_engine(installed: &[Box<dyn crate::adapter::AgentAdapter>], engine: &str) -> bool {
+    installed
+        .iter()
+        .any(|a| crate::adapter::engine_id(a.as_ref()) == engine)
+}
+
 /// Read a rendered Claude Code JSON file for the retired-settings scan (#2145). A missing file
 /// counts as `{}`. A file that does not parse gets one warning, then also counts as `{}`.
 fn read_rendered_json(path: &Path, warn: &str) -> serde_json::Value {
@@ -1182,13 +1190,15 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     // about it and this is where a user looks instead. Plain `doctor`, not
     // `--all`: "why isn't my permission rule working on opencode" is the
     // question doctor exists to answer.
+    // Collected once: each `installed_adapters` call repeats its disabled_engines warning.
+    let installed: Vec<Box<dyn crate::adapter::AgentAdapter>> =
+        super::installed_adapters(&config).collect();
+    let claude_installed = has_engine(&installed, "claude_code");
     {
         let caps = doctor_manifest
             .as_ref()
             .map_or(&config.capabilities, |(m, _)| &m.capabilities);
-        let active_engines: Vec<&str> = super::installed_adapters(&config)
-            .map(|a| a.name())
-            .collect();
+        let active_engines: Vec<&str> = installed.iter().map(|a| a.name()).collect();
         for hit in inexact_tool_mappings(caps, &active_engines) {
             eprintln!("{warn} {}", hit.message());
         }
@@ -1199,7 +1209,7 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     // start/end, per-turn recall, or the Stop reminder would fire — the only
     // check was reading the generated settings.json by hand.
     if let Some((manifest, _)) = &doctor_manifest
-        && super::installed_adapters(&config).any(|a| a.name() == "claude_code")
+        && claude_installed
     {
         eprintln!();
         eprintln!("Lifecycle hooks (claude_code):");
@@ -1215,7 +1225,7 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     }
 
     if let Some((manifest, _)) = &doctor_manifest {
-        for adapter in super::installed_adapters(&config) {
+        for adapter in &installed {
             let supported = adapter.supported_hook_events();
             for hook in &manifest.capabilities.hooks {
                 if !supported.contains(&hook.event.as_str()) {
@@ -1231,7 +1241,7 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
         }
     }
 
-    if super::installed_adapters(&config).any(|a| a.name() == "claude_code") {
+    if claude_installed {
         let adapter_root = cache_dir.join(crate::adapter::claude_code::ClaudeCodeAdapter.name());
         report_retired_claude_settings(&adapter_root, &warn);
     }
@@ -1741,6 +1751,17 @@ mod tests {
             prompt_cache_check(Some("no".into()), None).0,
             CheckLevel::Warn
         );
+    }
+
+    // -- has_engine --
+
+    #[test]
+    fn has_engine_matches_the_engine_id_not_the_display_name() {
+        let installed: Vec<Box<dyn crate::adapter::AgentAdapter>> =
+            vec![Box::new(crate::adapter::claude_code::ClaudeCodeAdapter)];
+        assert!(has_engine(&installed, "claude_code"));
+        assert!(!has_engine(&installed, "crush"));
+        assert!(!has_engine(&[], "claude_code"));
     }
 
     // -- icm_server_check (#2261) --

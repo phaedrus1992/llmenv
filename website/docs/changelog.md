@@ -38,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- `llmenv doctor` shows the `Lifecycle hooks (claude_code):` section again. Since v3.11.0 it compared the adapter's display name `claude-code` to `claude_code`, so the section never printed.
 - The session-start wake-up pack now reaches the model in Claude Code. llmenv fetched it from ICM at every session start and then threw it away, because the output for `SessionStart` was suppressed along with `SessionEnd`. The wake-up call now also names the session's project, so a remote ICM server returns this project's context instead of whichever project its own working directory points at (#2251)
 - `llmenv task start` no longer refuses a task that's blocked on the task added right before it once that blocker is done. `task add` parents each new task under the previous one, so the block check was waiting on the blocked task itself and could never pass without `--force` (#2300)
 - On the ICM server host, `icm serve` now always serves the store your ICM config names. Since ICM 0.10.64 it picks `<git root>/.icm/memories.db` from its working directory, so a proxy that first started inside such a repo served that one project's database to every session on the host. llmenv now starts it in the filesystem root, which has no git root. See [Memory backend](https://phaedrus1992.github.io/llmenv/docs/mcp) (#2262)
