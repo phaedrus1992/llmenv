@@ -1678,23 +1678,32 @@ fn translate_command_md(source: &str, _name: &str) -> anyhow::Result<String> {
     }
 }
 
+/// Frontmatter keys that produce no drop warning: the keys `translate_agent_md` copies, plus
+/// `name`, because opencode takes the agent name from the file name.
+const OPENCODE_AGENT_KEYS: &[&str] = &["description", "model", "tools", "allowed_tools", "name"];
+
+/// Source frontmatter keys that opencode has no field for (#2150), in source order. A key that
+/// is not a string (`1: x`) is rendered as YAML, so it is reported instead of dropped silently.
+fn dropped_agent_keys(map: &serde_yaml::Mapping) -> Vec<String> {
+    map.keys()
+        .filter(|key| {
+            key.as_str()
+                .is_none_or(|k| !OPENCODE_AGENT_KEYS.contains(&k))
+        })
+        .map(|key| match key.as_str() {
+            Some(k) => k.to_owned(),
+            None => serde_yaml::to_string(key)
+                .unwrap_or_default()
+                .trim()
+                .to_owned(),
+        })
+        .collect()
+}
+
 /// Translate an agent markdown file from Claude frontmatter to opencode format.
 ///
 /// Keeps `description`, `model`, `tools` / `allowed_tools`, and adds
 /// `mode: subagent` so opencode runs the agent as a sub-process.
-/// Agent frontmatter keys that `translate_agent_md` keeps. `name` is absent on purpose: opencode
-/// takes the agent name from the file name, so dropping the key loses nothing.
-const OPENCODE_AGENT_KEYS: &[&str] = &["description", "model", "tools", "allowed_tools", "name"];
-
-/// Source frontmatter keys that opencode has no field for (#2150), in source order.
-fn dropped_agent_keys(map: &serde_yaml::Mapping) -> Vec<String> {
-    map.keys()
-        .filter_map(serde_yaml::Value::as_str)
-        .filter(|key| !OPENCODE_AGENT_KEYS.contains(key))
-        .map(str::to_owned)
-        .collect()
-}
-
 fn translate_agent_md(source: &str, _name: &str) -> anyhow::Result<String> {
     let (fm, body) = split_frontmatter(source);
     let mut new_fm = serde_yaml::Mapping::new();
@@ -1713,6 +1722,8 @@ fn translate_agent_md(source: &str, _name: &str) -> anyhow::Result<String> {
         }
 
         for key in dropped_agent_keys(map) {
+            // Agent files come from third-party plugins, so a key can hold terminal escapes.
+            let key = crate::util::escape_control(&key);
             eprintln!(
                 "warning: opencode adapter does not support '{key}' in \
                  agent frontmatter — dropping this field"
@@ -3654,6 +3665,13 @@ mod tests {
             dropped_agent_keys(&map),
             ["omitClaudeMd", "effort", "permissionMode"]
         );
+    }
+
+    #[test]
+    fn dropped_agent_keys_reports_non_string_keys() {
+        let map: serde_yaml::Mapping =
+            serde_yaml::from_str("description: d\n1: x\ntrue: y\n").unwrap();
+        assert_eq!(dropped_agent_keys(&map), ["1", "true"]);
     }
 
     #[test]
