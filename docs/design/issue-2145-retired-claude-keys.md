@@ -123,6 +123,8 @@ pub(crate) fn scan(settings: &serde_json::Value, claude_json: &serde_json::Value
   Within a JSON object the order is `serde_json`'s map order (sorted), because the crate is built without `preserve_order`, so file order is not available.
   Permission rules keep their array order.
 - An MCP hit names the server by its key (`.claude.json mcpServers.<name>`), not by an index.
+- The scan also reads per-project servers under `projects.<path>.mcpServers`, where Claude Code keeps project-scoped MCP entries.
+- Server names and project paths come from user and third-party config, so control characters in them are escaped before doctor prints them.
 
 `scan` is pure and has no file I/O.
 

@@ -3,6 +3,7 @@
 //!
 //! Design: docs/design/issue-2145-retired-claude-keys.md
 
+use crate::util::escape_control;
 use RetiredKind::{EnvVar, McpType, PermissionTool, SettingsKey};
 use serde_json::Value;
 
@@ -212,6 +213,25 @@ fn lookup(kind: RetiredKind, name: &str) -> Option<&'static Retired> {
     RETIRED.iter().find(|r| r.kind == kind && r.name == name)
 }
 
+/// Add a hit for each server in `holder["mcpServers"]` whose `type` is retired. Server names
+/// come from user and third-party config, so control characters are escaped before printing.
+fn scan_mcp_servers(holder: &Value, prefix: &str, hits: &mut Vec<RetiredHit>) {
+    let Some(servers) = holder.get("mcpServers").and_then(Value::as_object) else {
+        return;
+    };
+    for (server, config) in servers {
+        let Some(kind) = config.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Some(entry) = lookup(McpType, kind) {
+            hits.push(RetiredHit {
+                entry,
+                location: format!("{prefix} mcpServers.{}", escape_control(server)),
+            });
+        }
+    }
+}
+
 /// Scan a rendered `settings.json` and `.claude.json` for retired entries.
 ///
 /// Output order: settings keys, env vars, permission rules, MCP servers. Object keys come in
@@ -251,14 +271,12 @@ pub(crate) fn scan(settings: &Value, claude_json: &Value) -> Vec<RetiredHit> {
         }
     }
 
-    if let Some(servers) = claude_json.get("mcpServers").and_then(Value::as_object) {
-        for (server, config) in servers {
-            let Some(kind) = config.get("type").and_then(Value::as_str) else {
-                continue;
-            };
-            if let Some(e) = lookup(McpType, kind) {
-                hits.push(hit(e, format!(".claude.json mcpServers.{server}")));
-            }
+    scan_mcp_servers(claude_json, ".claude.json", &mut hits);
+    // Claude Code also keeps per-project MCP servers under `projects.<path>.mcpServers`.
+    if let Some(projects) = claude_json.get("projects").and_then(Value::as_object) {
+        for (project, entry) in projects {
+            let prefix = format!(".claude.json projects.{}", escape_control(project));
+            scan_mcp_servers(entry, &prefix, &mut hits);
         }
     }
 
@@ -330,6 +348,23 @@ mod tests {
                 "settings.json permissions.ask[3]"
             ]
         );
+    }
+
+    #[test]
+    fn per_project_mcp_servers_are_scanned_and_names_are_escaped() {
+        let claude = json!({
+            "projects": {
+                "/repo": { "mcpServers": { "evil\u{1b}[2J": { "type": "sdk" } } },
+                "/other": { "mcpServers": { "ok": { "type": "stdio" } } },
+            }
+        });
+        let hits = scan(&json!({}), &claude);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits[0].location,
+            r".claude.json projects./repo mcpServers.evil\u{1b}[2J"
+        );
+        assert!(!hits[0].message().contains('\u{1b}'));
     }
 
     #[test]
