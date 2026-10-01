@@ -91,8 +91,10 @@ pub(crate) struct Retired {
     pub no_effect: bool,
     /// Claude Code version, or `None` when the docs give none.
     pub since: Option<&'static str>,
-    /// Replacement, or `None`.
+    /// The setting or value to use instead, or `None`.
     pub replacement: Option<&'static str>,
+    /// Extra advice for a row with no replacement, such as "word-editing keys always follow readline".
+    pub note: Option<&'static str>,
 }
 
 pub(crate) const RETIRED: &[Retired] = &[ /* rows from the tables above */ ];
@@ -117,7 +119,10 @@ pub(crate) fn scan(settings: &serde_json::Value, claude_json: &serde_json::Value
 - Permission tools: each string in `settings["permissions"]["allow"|"ask"|"deny"]`.
 - MCP types: each value in `claude_json["mcpServers"]` whose `type` is the string `sdk`.
 - Non-object or missing parts are skipped, never an error.
-- Output order: settings keys, env, permissions, MCP; within each, the file order.
+- Output order: settings keys, env, permissions, MCP.
+  Within a JSON object the order is `serde_json`'s map order (sorted), because the crate is built without `preserve_order`, so file order is not available.
+  Permission rules keep their array order.
+- An MCP hit names the server by its key (`.claude.json mcpServers.<name>`), not by an index.
 
 `scan` is pure and has no file I/O.
 
@@ -129,7 +134,7 @@ In `src/cli/doctor.rs`, after the lifecycle-hook section, when the Claude Code a
 2. A missing file counts as `{}`. A file that is not valid JSON prints one `{warn}` line naming the file and the parse error, and the scan continues with `{}` for it.
 3. Print a heading `Retired Claude Code settings:` only when there is at least one hit.
 4. One line per hit, format:
-   - no effect: `{warn} <location>: <name> has no effect since Claude Code <since>. <replacement text or "Remove it.">`
+   - no effect: `{warn} <location>: <name> has no effect since Claude Code <since>. <advice>`, where the advice is `Use <replacement> instead.`, `Remove it; <note>.`, or `Remove it.`
    - deprecated: `{warn} <location>: <name> is deprecated. Use <replacement>.`
    - when `since` is `None`, omit `since Claude Code <since>`.
 5. When there are no hits, print nothing.

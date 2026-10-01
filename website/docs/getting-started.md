@@ -88,6 +88,11 @@ llmenv doctor
 - git remote connectivity,
 - orphans — scopes/tags/bundles/MCP/plugins that can never activate, a memory
   `server_host` missing from `host:`, and unknown fields in project markers.
+- retired Claude Code settings, environment variables, permission tools, and MCP server types in
+  the rendered config (added in v3.12.0) — see
+  [Troubleshooting](troubleshooting#doctor-warns-about-retired-claude-code-settings);
+- the ICM server version, when this host serves memory (added in v3.12.0) — see
+  [Troubleshooting](troubleshooting#memory-backend-issues).
 
 Then inspect what resolves for your current directory:
 
