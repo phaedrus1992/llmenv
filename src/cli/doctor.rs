@@ -400,6 +400,84 @@ fn cbm_floor_warning(version: &str) -> Option<String> {
     })
 }
 
+/// ICM server releases that fix recall behavior llmenv depends on (#2261): 0.10.60 applies the
+/// keyword/topic filter before the limit (adaptive recall fanout needs it), and 0.10.64 changes
+/// the full-text query from AND to OR and fixes topic starvation.
+const ICM_SERVER_FILTER_FIX: (u64, u64, u64) = (0, 10, 60);
+const ICM_SERVER_RANKING_FIX: (u64, u64, u64) = (0, 10, 64);
+
+/// Doctor's verdict on the version of the `icm` binary that serves memory (#2261).
+fn icm_server_check(version: Option<&str>) -> (CheckLevel, String) {
+    let Some(version) = version else {
+        return (
+            CheckLevel::Info,
+            "ICM server version unknown: `icm --version` gave no version".to_string(),
+        );
+    };
+    let upgrade = "Run `icm upgrade --apply`.";
+    match parse_semver_triple(version) {
+        None => (
+            CheckLevel::Info,
+            format!("ICM server reports version {version:?}, which is not semver"),
+        ),
+        Some(v) if v < ICM_SERVER_FILTER_FIX => (
+            CheckLevel::Warn,
+            format!(
+                "ICM server {version} is older than 0.10.60: it filters recall by keyword and \
+                 topic after the limit, so adaptive recall returns little or nothing. {upgrade}"
+            ),
+        ),
+        Some(v) if v < ICM_SERVER_RANKING_FIX => (
+            CheckLevel::Warn,
+            format!(
+                "ICM server {version} is older than 0.10.64: recall ranking is weaker (AND \
+                 full-text query, topic starvation). {upgrade}"
+            ),
+        ),
+        Some(_) => (CheckLevel::Pass, format!("ICM server {version}")),
+    }
+}
+
+/// Report the ICM server version (#2261). The MCP `initialize` reply cannot carry it, because
+/// `mcp-proxy` puts its own `mcp` library version in `serverInfo.version`. So doctor reads the
+/// local `icm` binary when this host serves memory, and says the version is unknown otherwise.
+/// Like `export`, this reads top-level `features.memory` only (#335). Prints nothing when the
+/// active scope has no memory backend.
+fn run_doctor_icm_server(
+    use_color: bool,
+    config: &Config,
+    config_dir: &Path,
+    active: &crate::scope::ActiveScopes,
+) {
+    if crate::hook_run::memory_url(config, config_dir, active).is_err() {
+        return;
+    }
+    let pass = super::doctor_pass(use_color);
+    let warn = super::doctor_warning(use_color);
+    let info = super::doctor_info(use_color);
+    eprintln!();
+    eprintln!("ICM server:");
+    let top_memory = config
+        .features
+        .as_ref()
+        .map(|f| f.memory.as_slice())
+        .unwrap_or_default();
+    if super::find_local_memory_entry(top_memory, active).is_some() {
+        print_check(
+            icm_server_check(tool_version("icm").as_deref()),
+            &pass,
+            &warn,
+            &info,
+        );
+    } else {
+        eprintln!(
+            "{info} ICM server version unknown: the memory server is another host, and \
+             mcp-proxy does not forward the icm version (#2161). Run `icm --version` on that \
+             host; recall needs 0.10.64 or later."
+        );
+    }
+}
+
 /// Report installed versions and update commands for the tools llmenv depends
 /// on but doesn't ship (#1185). Tools that aren't installed are skipped —
 /// `run_doctor_tool_availability` already reports those, and repeating it here
@@ -1481,6 +1559,7 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
 
     run_doctor_tool_availability(use_color, &config);
     run_doctor_dependent_tools(use_color);
+    run_doctor_icm_server(use_color, &config, &config_dir, &active);
 
     // When context-mode is enabled, verify the marketplace clone exists so
     // inject_context_mode can actually resolve the plugin. A missing clone is
@@ -1662,6 +1741,34 @@ mod tests {
             prompt_cache_check(Some("no".into()), None).0,
             CheckLevel::Warn
         );
+    }
+
+    // -- icm_server_check (#2261) --
+
+    #[test]
+    fn icm_server_check_boundaries() {
+        let level = |v| icm_server_check(Some(v)).0;
+        assert_eq!(level("0.10.59"), CheckLevel::Warn);
+        assert_eq!(level("0.10.60"), CheckLevel::Warn);
+        assert_eq!(level("0.10.63"), CheckLevel::Warn);
+        assert_eq!(level("0.10.64"), CheckLevel::Pass);
+        assert_eq!(level("0.11.0"), CheckLevel::Pass);
+        assert_eq!(level("v1.0.0"), CheckLevel::Pass);
+    }
+
+    #[test]
+    fn icm_server_check_names_the_fix_the_server_lacks() {
+        let (_, old) = icm_server_check(Some("0.10.59"));
+        assert!(old.contains("older than 0.10.60"), "{old}");
+        assert!(old.contains("icm upgrade --apply"), "{old}");
+        let (_, mid) = icm_server_check(Some("0.10.62"));
+        assert!(mid.contains("older than 0.10.64"), "{mid}");
+    }
+
+    #[test]
+    fn icm_server_check_unknown_version_is_info() {
+        assert_eq!(icm_server_check(None).0, CheckLevel::Info);
+        assert_eq!(icm_server_check(Some("dev")).0, CheckLevel::Info);
     }
 
     // -- read_rendered_json (#2145) --
