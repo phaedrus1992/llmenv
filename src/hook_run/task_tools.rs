@@ -333,6 +333,9 @@ fn ensure_session(
             )));
         }
     };
+    let detected = std::env::current_dir()
+        .map(|cwd| crate::task::resume::ResumeContext::detected(&cwd))
+        .unwrap_or_default();
     if open_sessions.is_empty()
         && let Err(e) = session::start_session_as(
             state_dir,
@@ -341,6 +344,7 @@ fn ensure_session(
                 description: None,
                 project,
                 owner,
+                resume: &detected,
             },
             session::StartDecision::Auto,
         )
@@ -732,6 +736,7 @@ mod tests {
                 description: None,
                 project: PROJECT,
                 owner: &owner,
+                resume: &crate::task::resume::ResumeContext::default(),
             };
             match session::start_session_as(dir.path(), &request, session::StartDecision::New)
                 .unwrap()

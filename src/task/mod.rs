@@ -12,6 +12,7 @@
 //! ever becomes a real bottleneck — unlikely for a CLI task tracker.
 
 pub(crate) mod project;
+pub(crate) mod resume;
 pub mod session;
 
 use std::collections::{HashMap, HashSet};

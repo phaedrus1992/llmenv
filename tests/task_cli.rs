@@ -2436,3 +2436,234 @@ fn reopen_that_cannot_start_says_the_task_is_reopened() {
             predicates::str::contains("now reopened").and(predicates::str::contains("blocked on")),
         );
 }
+
+// -- resume context (#2339) --
+
+/// A scratch working directory that is not a git repo, so no branch is auto-detected.
+fn plain_cwd() -> TempDir {
+    TempDir::new().unwrap()
+}
+
+fn stdout_of(cmd: &mut assert_cmd::Command) -> String {
+    let out = cmd.assert().success().get_output().stdout.clone();
+    String::from_utf8(out).unwrap()
+}
+
+#[test]
+fn session_start_flags_are_recorded_and_shown() {
+    let (dir, cwd) = (TempDir::new().unwrap(), plain_cwd());
+    llmenv(dir.path())
+        .current_dir(cwd.path())
+        .args([
+            "task",
+            "session",
+            "start",
+            "sprint",
+            "--context",
+            "pick up at step 4",
+            "--issue",
+            "2337",
+            "--issue",
+            "2339",
+            "--doc",
+            "docs/design/x.md",
+            "--memory-topic",
+            "decisions-llmenv",
+            "--branch",
+            "feat/x",
+            "--base",
+            "release/3.x",
+        ])
+        .assert()
+        .success();
+    let shown = stdout_of(
+        llmenv(dir.path())
+            .current_dir(cwd.path())
+            .args(["task", "session", "show"]),
+    );
+    for needle in [
+        "pick up at step 4",
+        "gh issue view 2337",
+        "gh issue view 2339",
+        "docs/design/x.md",
+        "decisions-llmenv",
+        "icm_memory_recall",
+        "feat/x",
+        "release/3.x",
+    ] {
+        assert!(shown.contains(needle), "missing {needle:?} in:\n{shown}");
+    }
+}
+
+#[test]
+fn session_start_reads_context_from_a_file() {
+    let (dir, cwd) = (TempDir::new().unwrap(), plain_cwd());
+    let file = cwd.path().join("ctx.md");
+    std::fs::write(&file, "from a file\nsecond line").unwrap();
+    llmenv(dir.path())
+        .current_dir(cwd.path())
+        .args(["task", "session", "start", "s", "--context-file"])
+        .arg(&file)
+        .assert()
+        .success();
+    let shown = stdout_of(
+        llmenv(dir.path())
+            .current_dir(cwd.path())
+            .args(["task", "session", "show"]),
+    );
+    assert!(
+        shown.contains("from a file") && shown.contains("second line"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn session_start_rejects_a_missing_context_file_with_the_path() {
+    let (dir, cwd) = (TempDir::new().unwrap(), plain_cwd());
+    llmenv(dir.path())
+        .current_dir(cwd.path())
+        .args([
+            "task",
+            "session",
+            "start",
+            "s",
+            "--context-file",
+            "/no/such/ctx.md",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("/no/such/ctx.md"));
+}
+
+#[test]
+fn session_start_in_a_git_repo_records_the_branch_and_issue() {
+    let (dir, repo) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    let init = std::process::Command::new("git")
+        .args(["init", "-q", "-b", "feat/2337-foo"])
+        .current_dir(repo.path())
+        .status()
+        .unwrap();
+    assert!(init.success());
+    llmenv(dir.path())
+        .current_dir(repo.path())
+        .args(["task", "session", "start", "s"])
+        .assert()
+        .success();
+    let shown = stdout_of(
+        llmenv(dir.path())
+            .current_dir(repo.path())
+            .args(["task", "session", "show"]),
+    );
+    assert!(
+        shown.contains("feat/2337-foo") && shown.contains("gh issue view 2337"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn session_start_never_overwrites_an_explicit_issue_with_a_detected_one() {
+    let (dir, repo) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    std::process::Command::new("git")
+        .args(["init", "-q", "-b", "feat/2337-foo"])
+        .current_dir(repo.path())
+        .status()
+        .unwrap();
+    llmenv(dir.path())
+        .current_dir(repo.path())
+        .args(["task", "session", "start", "s", "--issue", "9"])
+        .assert()
+        .success();
+    let shown = stdout_of(
+        llmenv(dir.path())
+            .current_dir(repo.path())
+            .args(["task", "session", "show"]),
+    );
+    assert!(
+        shown.contains("gh issue view 9") && !shown.contains("2337 "),
+        "{shown}"
+    );
+}
+
+#[test]
+fn session_edit_and_note_change_the_context_after_start() {
+    let (dir, cwd) = (TempDir::new().unwrap(), plain_cwd());
+    llmenv(dir.path())
+        .current_dir(cwd.path())
+        .args(["task", "session", "start", "s", "--context", "first"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .current_dir(cwd.path())
+        .args([
+            "task",
+            "session",
+            "edit",
+            "--issue",
+            "77",
+            "--doc",
+            "docs/a.md",
+        ])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .current_dir(cwd.path())
+        .args(["task", "session", "note", "second"])
+        .assert()
+        .success();
+    let shown = stdout_of(
+        llmenv(dir.path())
+            .current_dir(cwd.path())
+            .args(["task", "session", "show"]),
+    );
+    for needle in ["first", "second", "gh issue view 77", "docs/a.md"] {
+        assert!(shown.contains(needle), "missing {needle:?} in:\n{shown}");
+    }
+}
+
+#[test]
+fn session_note_reads_stdin_when_no_text_is_given() {
+    let (dir, cwd) = (TempDir::new().unwrap(), plain_cwd());
+    start_session_in(dir.path(), cwd.path(), "s");
+    llmenv(dir.path())
+        .current_dir(cwd.path())
+        .args(["task", "session", "note"])
+        .write_stdin("from stdin")
+        .assert()
+        .success();
+    let shown = stdout_of(
+        llmenv(dir.path())
+            .current_dir(cwd.path())
+            .args(["task", "session", "show"]),
+    );
+    assert!(shown.contains("from stdin"), "{shown}");
+}
+
+fn start_session_in(dir: &std::path::Path, cwd: &std::path::Path, name: &str) {
+    llmenv(dir)
+        .current_dir(cwd)
+        .args(["task", "session", "start", name])
+        .assert()
+        .success();
+}
+
+#[test]
+fn session_start_without_context_prints_the_nudge_that_names_the_flags() {
+    let (dir, cwd) = (TempDir::new().unwrap(), plain_cwd());
+    llmenv(dir.path())
+        .current_dir(cwd.path())
+        .args(["task", "session", "start", "s"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("--context").and(predicates::str::contains("--issue")));
+}
+
+#[test]
+fn session_start_with_context_prints_no_nudge() {
+    let (dir, cwd) = (TempDir::new().unwrap(), plain_cwd());
+    llmenv(dir.path())
+        .current_dir(cwd.path())
+        .args(["task", "session", "start", "s", "--issue", "5"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No resume context").not());
+}

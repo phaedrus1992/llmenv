@@ -532,6 +532,22 @@ enum TaskSessionCommand {
         /// this project untouched — true concurrency.
         #[arg(long, conflicts_with_all = ["resume", "replace"])]
         new: bool,
+        #[command(flatten)]
+        resume_context: ResumeArgs,
+    },
+    /// Change a session's resume context after it started. Lists gain the entries they lack;
+    /// a scalar flag replaces its value. Auto-resolves like `finish`.
+    Edit {
+        id: Option<String>,
+        #[command(flatten)]
+        resume_context: ResumeArgs,
+    },
+    /// Append a line to a session's resume context. Reads stdin when `text` is omitted.
+    /// Auto-resolves the session like `finish`, or pass `--id`.
+    Note {
+        text: Option<String>,
+        #[arg(long)]
+        id: Option<String>,
     },
     /// Finish a session by id. Auto-resolves when exactly one session is
     /// open for the current project.
@@ -548,6 +564,55 @@ enum TaskSessionCommand {
     },
     /// List every currently open session, current-project matches first.
     Ls,
+}
+
+/// The resume-context flags shared by `session start` and `session edit` (#2339).
+#[derive(clap::Args, Default)]
+struct ResumeArgs {
+    /// What the work is and where to pick it up. Multi-line text is fine.
+    #[arg(long, conflicts_with = "context_file")]
+    context: Option<String>,
+    /// Read the resume notes from a file.
+    #[arg(long, value_name = "PATH")]
+    context_file: Option<std::path::PathBuf>,
+    /// A GitHub issue number the session works on. Repeatable.
+    #[arg(long = "issue", value_name = "N")]
+    issues: Vec<u32>,
+    /// The git branch. Detected from git when omitted.
+    #[arg(long)]
+    branch: Option<String>,
+    /// The branch the work merges into.
+    #[arg(long)]
+    base: Option<String>,
+    /// An ICM topic to recall when resuming. Repeatable.
+    #[arg(long = "memory-topic")]
+    memory_topics: Vec<String>,
+    /// A plan or spec file, relative to the repo root. Repeatable.
+    #[arg(long = "doc")]
+    docs: Vec<String>,
+}
+
+impl ResumeArgs {
+    fn into_context(self) -> anyhow::Result<crate::task::resume::ResumeContext> {
+        use anyhow::Context as _;
+        let context = match (self.context, self.context_file) {
+            (_, Some(path)) => Some(
+                std::fs::read_to_string(&path)
+                    .with_context(|| format!("cannot read --context-file {}", path.display()))?
+                    .trim_end()
+                    .to_string(),
+            ),
+            (text, None) => text,
+        };
+        Ok(crate::task::resume::ResumeContext {
+            context,
+            issues: self.issues,
+            branch: self.branch,
+            base: self.base,
+            memory_topics: self.memory_topics,
+            docs: self.docs,
+        })
+    }
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -3618,7 +3683,14 @@ fn run_task_session_command(
             resume,
             replace,
             new,
+            resume_context,
         } => {
+            let explicit = resume_context.into_context()?;
+            let mut detected = explicit.clone();
+            detected.fill_detected(
+                crate::task::resume::git_branch(&std::env::current_dir()?).as_deref(),
+            );
+            let is_resume = resume.is_some();
             let decision = match (resume, replace, new) {
                 (Some(id), false, false) => StartDecision::Resume(id),
                 (None, true, false) => StartDecision::Replace,
@@ -3632,8 +3704,11 @@ fn run_task_session_command(
                 description: description.as_deref(),
                 project: &project,
                 owner: &owner,
+                // A resumed session keeps what it has: only explicit flags change it.
+                resume: if is_resume { &explicit } else { &detected },
             };
             let outcome = session::start_session_as(state_dir, &request, decision)?;
+            let nudge = start_outcome_lacks_context(&outcome);
             match outcome {
                 StartOutcome::Created(s) => println!(
                     "Started session '{}'{}",
@@ -3654,6 +3729,29 @@ fn run_task_session_command(
                     println!("Started session '{}'", session.id);
                 }
             }
+            if nudge {
+                println!("{}", crate::task::resume::MISSING_CONTEXT_NUDGE);
+            }
+        }
+        TaskSessionCommand::Edit { id, resume_context } => {
+            let update = resume_context.into_context()?;
+            let id = resolve_session_id(state_dir, &project, id)?;
+            let session = session::update_resume(state_dir, &id, |r| r.apply(&update))?;
+            println!("Updated resume context for session '{}'", session.id);
+        }
+        TaskSessionCommand::Note { text, id } => {
+            let text = match text {
+                Some(text) => text,
+                None => std::io::read_to_string(std::io::stdin())?,
+            };
+            let text = text.trim_end();
+            anyhow::ensure!(
+                !text.is_empty(),
+                "the note is empty: pass text or pipe it on stdin"
+            );
+            let id = resolve_session_id(state_dir, &project, id)?;
+            let session = session::update_resume(state_dir, &id, |r| r.append_note(text))?;
+            println!("Noted session '{}'", session.id);
         }
         TaskSessionCommand::Finish { id } => {
             let id = resolve_session_id(state_dir, &project, id)?;
@@ -3686,6 +3784,10 @@ fn run_task_session_command(
                     .map(|n| format!(" ({n})"))
                     .unwrap_or_default(),
             );
+            let resume = session.resume.render();
+            if !resume.is_empty() {
+                println!("{resume}");
+            }
         }
         TaskSessionCommand::Summary { id, format } => {
             let id = resolve_session_id(state_dir, &project, id)?;
@@ -3723,6 +3825,15 @@ fn run_task_session_command(
         }
     }
     Ok(())
+}
+
+/// Whether the session that `session start` produced has nothing a cold reader could use.
+fn start_outcome_lacks_context(outcome: &crate::task::session::StartOutcome) -> bool {
+    use crate::task::session::StartOutcome;
+    match outcome {
+        StartOutcome::Created(s) | StartOutcome::Resumed(s) => s.resume.needs_nudge(),
+        StartOutcome::Replaced { session, .. } => session.resume.needs_nudge(),
+    }
 }
 
 /// Resolve an explicit-or-omitted session id the same way `add_task` does:

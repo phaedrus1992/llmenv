@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::resume::ResumeContext;
 use super::{
     Task, TaskNote, TaskState, list_tasks, now_rfc3339, slugify, task_path, tasks_dir, unique_slug,
 };
@@ -56,27 +57,10 @@ pub struct Session {
     /// `session start` checkpoint can say "this was yours" (#2365).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     owner_pid: Option<u32>,
-    /// Free-text resume context: git branch, issue numbers, plan docs, memory topics.
-    /// Set via `session start --context` or `session edit --context`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    context: Option<String>,
-    /// GitHub issue numbers relevant to this session (e.g., [2358, 2339]).
-    /// Auto-detected from branch name (feat/<N>-...) or set via `--issue` (repeatable).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    issues: Vec<u32>,
-    /// Git branch this session is working on (auto-detected at `session start`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    branch: Option<String>,
-    /// Base branch (e.g., main, release/3.x) for the work. Auto-detected from branch/milestone.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    base: Option<String>,
-    /// ICM memory topics to recall (e.g., ["decisions-llmenv", "context-servarr"]).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    memory_topics: Vec<String>,
-    /// Plan/spec docs relevant to this session (e.g., ["docs/design/plan.md"]).
-    /// Paths should be relative to repo root.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    docs: Vec<String>,
+    /// What a cold reader needs to resume this session: notes, issues, branch, memory topics,
+    /// and plan docs (#2339). Empty for a session that predates the field.
+    #[serde(default, skip_serializing_if = "ResumeContext::is_empty")]
+    pub(crate) resume: ResumeContext,
 }
 
 /// Who is calling: the engine conversation and process, when the engine
@@ -203,6 +187,8 @@ pub(crate) struct StartRequest<'a> {
     pub(crate) description: Option<&'a str>,
     pub(crate) project: &'a str,
     pub(crate) owner: &'a EngineIdentity,
+    /// Resume context to record on a new session, or to fold into a resumed one (#2339).
+    pub(crate) resume: &'a ResumeContext,
 }
 
 impl Session {
@@ -468,6 +454,7 @@ pub(crate) fn start_session_as(
             }
             session.last_activity = now_rfc3339();
             session.claim(request.owner);
+            session.resume.apply(request.resume);
             save_session(state_dir, &session)?;
             Ok(StartOutcome::Resumed(session))
         }
@@ -500,6 +487,7 @@ pub(crate) fn start_session(
         description,
         project,
         owner: &owner,
+        resume: &ResumeContext::default(),
     };
     start_session_as(state_dir, &request, decision)
 }
@@ -525,12 +513,7 @@ fn create_session(state_dir: &Path, request: &StartRequest<'_>) -> anyhow::Resul
         abandoned_at: None,
         owner_session: None,
         owner_pid: None,
-        context: None,
-        issues: Vec::new(),
-        branch: None,
-        base: None,
-        memory_topics: Vec::new(),
-        docs: Vec::new(),
+        resume: request.resume.clone(),
     };
     session.claim(request.owner);
     save_session(state_dir, &session)?;
@@ -673,6 +656,28 @@ pub(crate) fn finish_session(state_dir: &Path, id: &str) -> anyhow::Result<Sessi
     })
 }
 
+/// Change the resume context of an open session and bump its activity time.
+///
+/// # Errors
+/// The session does not exist, is closed, or cannot be saved.
+pub(crate) fn update_resume(
+    state_dir: &Path,
+    id: &str,
+    change: impl FnOnce(&mut ResumeContext),
+) -> anyhow::Result<Session> {
+    super::with_store_lock(state_dir, || {
+        let mut session = load_session(state_dir, id)
+            .map_err(|e| anyhow::anyhow!("no session '{id}' found: {e}"))?;
+        if !session.is_open() {
+            anyhow::bail!("session '{id}' is closed and cannot be changed");
+        }
+        change(&mut session.resume);
+        session.last_activity = now_rfc3339();
+        save_session(state_dir, &session)?;
+        Ok(session)
+    })
+}
+
 /// `(done, total)` counts for tasks tagged with `session_id`.
 #[must_use]
 pub(crate) fn session_progress(state_dir: &Path, session_id: &str) -> (u64, u64) {
@@ -794,6 +799,7 @@ mod tests {
             description: None,
             project: PROJECT_A,
             owner: who,
+            resume: &ResumeContext::default(),
         };
         match start_session_as(dir, &request, decision).expect("test") {
             StartOutcome::Created(s) | StartOutcome::Resumed(s) => s,
@@ -845,13 +851,108 @@ mod tests {
             abandoned_at: None,
             owner_session,
             owner_pid,
-            context: None,
-            issues: Vec::new(),
-            branch: None,
-            base: None,
-            memory_topics: Vec::new(),
-            docs: Vec::new(),
+            resume: ResumeContext::default(),
         }
+    }
+
+    fn full_resume_context() -> ResumeContext {
+        ResumeContext {
+            context: Some("line one\nline two".to_string()),
+            issues: vec![2337, 2339],
+            branch: Some("feat/2337-foo".to_string()),
+            base: Some("release/3.x".to_string()),
+            memory_topics: vec!["decisions-llmenv".to_string()],
+            docs: vec!["docs/design/x.md".to_string()],
+        }
+    }
+
+    fn start_with_resume(dir: &Path, resume: &ResumeContext, decision: StartDecision) -> Session {
+        let owner = EngineIdentity::default();
+        let request = StartRequest {
+            name: Some("s"),
+            description: None,
+            project: PROJECT_A,
+            owner: &owner,
+            resume,
+        };
+        match start_session_as(dir, &request, decision).expect("start") {
+            StartOutcome::Created(s) | StartOutcome::Resumed(s) => s,
+            StartOutcome::Replaced { session, .. } => session,
+        }
+    }
+
+    #[test]
+    fn starting_a_session_records_the_resume_context() {
+        let dir = TempDir::new().expect("tempdir");
+        let created = start_with_resume(dir.path(), &full_resume_context(), StartDecision::Auto);
+        assert_eq!(created.resume, full_resume_context());
+        let stored = load_session(dir.path(), &created.id).expect("load");
+        assert_eq!(stored.resume, full_resume_context());
+    }
+
+    #[test]
+    fn resuming_a_session_folds_in_the_new_context() {
+        let dir = TempDir::new().expect("tempdir");
+        let created = start_with_resume(dir.path(), &full_resume_context(), StartDecision::Auto);
+        let update = ResumeContext {
+            docs: vec!["docs/b.md".to_string()],
+            ..ResumeContext::default()
+        };
+        let resumed = start_with_resume(dir.path(), &update, StartDecision::Resume(created.id));
+        assert_eq!(resumed.resume.docs, ["docs/design/x.md", "docs/b.md"]);
+        assert_eq!(resumed.resume.issues, [2337, 2339]);
+    }
+
+    #[test]
+    fn update_resume_changes_a_stored_session_and_bumps_activity() {
+        let dir = TempDir::new().expect("tempdir");
+        let created = start_with_resume(dir.path(), &ResumeContext::default(), StartDecision::Auto);
+        let updated =
+            update_resume(dir.path(), &created.id, |r| r.append_note("hello")).expect("update");
+        assert_eq!(updated.resume.context.as_deref(), Some("hello"));
+        assert!(updated.last_activity >= created.last_activity);
+        let stored = load_session(dir.path(), &created.id).expect("load");
+        assert_eq!(stored.resume.context.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn update_resume_rejects_an_unknown_session() {
+        let dir = TempDir::new().expect("tempdir");
+        let err = update_resume(dir.path(), "nope", |_| {}).expect_err("unknown id");
+        assert!(err.to_string().contains("no session 'nope'"), "{err}");
+    }
+
+    #[test]
+    fn update_resume_rejects_a_closed_session() {
+        let dir = TempDir::new().expect("tempdir");
+        let created = start_with_resume(dir.path(), &ResumeContext::default(), StartDecision::Auto);
+        finish_session(dir.path(), &created.id).expect("finish");
+        let err = update_resume(dir.path(), &created.id, |_| {}).expect_err("closed");
+        assert!(err.to_string().contains("closed"), "{err}");
+    }
+
+    #[test]
+    fn resume_context_round_trips_through_the_state_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut session = bare_session(1, None, None);
+        session.resume = full_resume_context();
+        save_session(dir.path(), &session).expect("save");
+        let loaded = load_session(dir.path(), &session.id).expect("load");
+        assert_eq!(loaded.resume, full_resume_context());
+    }
+
+    #[test]
+    fn a_state_file_written_before_resume_context_still_loads() {
+        let old = r#"{"id":"old","name":null,"project":"p",
+            "started_at":"2026-01-01T00:00:00Z","last_activity":"2026-01-01T00:00:00Z"}"#;
+        let session: Session = serde_json::from_str(old).expect("old file loads");
+        assert!(session.resume.is_empty());
+    }
+
+    #[test]
+    fn an_empty_resume_context_is_not_written_to_the_state_file() {
+        let json = serde_json::to_string(&bare_session(1, None, None)).expect("serialize");
+        assert!(!json.contains("resume"), "{json}");
     }
 
     proptest! {
@@ -1053,6 +1154,7 @@ mod tests {
             description: None,
             project: PROJECT_A,
             owner: &owner("conv-after-clear", 9),
+            resume: &ResumeContext::default(),
         };
         let err = start_session_as(dir.path(), &request, StartDecision::Auto)
             .unwrap_err()
@@ -1099,6 +1201,7 @@ mod tests {
             description: None,
             project: PROJECT_A,
             owner: &owner("conv-after-clear", 9),
+            resume: &ResumeContext::default(),
         };
         let err = start_session_as(dir.path(), &request, StartDecision::Auto)
             .unwrap_err()
@@ -1132,6 +1235,7 @@ mod tests {
             description: None,
             project: PROJECT_A,
             owner: &EngineIdentity::default(),
+            resume: &ResumeContext::default(),
         };
         let err = start_session_as(dir.path(), &request, StartDecision::Auto)
             .unwrap_err()
