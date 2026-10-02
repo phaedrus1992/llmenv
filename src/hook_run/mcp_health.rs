@@ -35,7 +35,7 @@ pub(crate) struct DownServer {
 }
 
 /// Probe one server with a real MCP `initialize`.
-pub(crate) async fn probe(server: &ResolvedMcp, timeout: Duration) -> anyhow::Result<()> {
+async fn probe(server: &ResolvedMcp, timeout: Duration) -> anyhow::Result<()> {
     match &server.kind {
         ResolvedKind::Remote { url, .. } => McpHttpClient::new(url.clone(), timeout)?.probe().await,
         ResolvedKind::Stdio { command, args, env } => {
@@ -213,7 +213,7 @@ pub(super) fn session_start_notice(
 }
 
 /// The context text that tells the agent which servers are down and how to bring them back.
-pub(crate) fn down_notice(down: &[DownServer]) -> Option<String> {
+fn down_notice(down: &[DownServer]) -> Option<String> {
     if down.is_empty() {
         return None;
     }

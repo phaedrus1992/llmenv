@@ -76,7 +76,7 @@ pub struct Task {
     notes: Vec<TaskNote>,
     /// What a cold reader needs to do the task: files, acceptance criteria, gotchas (#2339).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) detail: Option<String>,
+    detail: Option<String>,
     /// Id of the session active when this task was created (`None` for a
     /// task added outside any session, or created before sessions existed —
     /// `#[serde(default)]` keeps old task files loadable). Set once at

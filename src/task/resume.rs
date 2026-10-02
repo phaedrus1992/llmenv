@@ -139,7 +139,7 @@ impl ResumeContext {
 /// `ranger/fix/2337-foo`. `None` when the last path segment does not start with 1 to 7 ASCII
 /// digits followed by `-` or the end of the name.
 #[must_use]
-pub(crate) fn detect_issue(branch: &str) -> Option<u32> {
+fn detect_issue(branch: &str) -> Option<u32> {
     let (_, last) = branch.rsplit_once('/')?;
     let digit_count = last.bytes().take_while(u8::is_ascii_digit).count();
     // ASCII digits are one byte each, so `digit_count` is always a char boundary.
