@@ -21,15 +21,14 @@ const CONSOLIDATION_TIMEOUT: Duration = Duration::from_secs(30);
 /// # Errors
 /// Malformed or missing config, no active memory backend, invalid backend URL,
 /// or an MCP call failure.
-pub fn run_consolidation() -> anyhow::Result<()> {
-    run_consolidation_inner().inspect_err(|e| {
+pub fn run_consolidation(config_path: &std::path::Path) -> anyhow::Result<()> {
+    run_consolidation_at(config_path).inspect_err(|e| {
         tracing::error!("consolidation-run: detached consolidation failed: {e:#}");
     })
 }
 
-fn run_consolidation_inner() -> anyhow::Result<()> {
-    let config_path = crate::paths::config_path()?;
-    let config = crate::config::Config::load(&config_path)?;
+fn run_consolidation_at(config_path: &std::path::Path) -> anyhow::Result<()> {
+    let config = crate::config::Config::load(config_path)?;
     let env = crate::scope::matcher::Env::detect_for_config(&config);
     let active = crate::scope::evaluate(&config, &env);
     let config_dir = config_path
@@ -58,21 +57,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn run_consolidation_inner_does_not_panic() {
-        // The inner function returns a `Result` and never unwraps internally,
-        // so it either succeeds or returns a descriptive error — either is
-        // valid and the important invariant is no unwrap/panic.
-        let result = run_consolidation_inner();
-        match result {
-            Ok(()) => {} // all good — config was found and consolidation ran
-            Err(e) => assert!(!e.to_string().is_empty(), "expected a descriptive error"),
-        }
+    fn run_consolidation_reports_a_missing_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = run_consolidation(&dir.path().join("config.yaml")).unwrap_err();
+        assert!(!format!("{err:#}").is_empty());
     }
 
     #[test]
-    fn run_consolidation_entrypoint_safe() {
-        // Outer entrypoint must not panic even when inner fails (errors are
-        // caught by inspect_err and logged at warn level).
-        let _ = run_consolidation();
+    fn run_consolidation_is_a_no_op_without_enabled_consolidation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "adapter:\n  engine: claude-code\n").unwrap();
+        run_consolidation(&path).unwrap();
     }
 }

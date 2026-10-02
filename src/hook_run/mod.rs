@@ -1352,7 +1352,13 @@ fn run_inner(
                 if !log_cfg.any_sink_enabled() {
                     // An unchanged chunk skips the store, not the consolidation.
                     if client.is_some() {
-                        maybe_start_consolidation(event, &config, config_dir, &active);
+                        maybe_start_consolidation(
+                            event,
+                            &config,
+                            config_dir,
+                            &active,
+                            post_session_consolidation,
+                        );
                     }
                     emit_trace_timing(t0, t_config, Some(t_scope), None, None);
                     return Ok(String::new());
@@ -1479,7 +1485,13 @@ fn run_inner(
         // After the store, so the child's recall can see this session's chunk,
         // and before `?`, so a failed dedup write or log step does not skip it.
         if client.is_some() {
-            maybe_start_consolidation(event, &config, config_dir, &active);
+            maybe_start_consolidation(
+                event,
+                &config,
+                config_dir,
+                &active,
+                post_session_consolidation,
+            );
         }
         let out = out?;
         let t_end = std::time::Instant::now();
@@ -2653,11 +2665,15 @@ fn starts_consolidation(event: HookEvent) -> bool {
 /// the active memory entry enables consolidation. The check reads the same
 /// merged memory list as endpoint resolution, so a bundle-declared entry
 /// counts. Fail-soft: a merge error is logged and skips consolidation.
+///
+/// `spawn` is [`post_session_consolidation`] in production; tests pass a
+/// counter, because a detached child is not visible from inside the test.
 fn maybe_start_consolidation(
     event: HookEvent,
     config: &crate::config::Config,
     config_dir: &std::path::Path,
     active: &crate::scope::ActiveScopes,
+    spawn: fn(),
 ) {
     let guard = std::env::var_os(crate::consolidation::CHILD_GUARD_ENV);
     if !starts_consolidation(event) || is_consolidation_child(guard.as_deref()) {
@@ -2666,7 +2682,7 @@ fn maybe_start_consolidation(
     match merged_memory(config, config_dir, active) {
         Ok(merged) => {
             if crate::consolidation::active_consolidation(&merged.memory, &active.tags).is_some() {
-                post_session_consolidation();
+                spawn();
             }
         }
         Err(e) => tracing::error!("consolidation: cannot read merged memory entries: {e:#}"),
@@ -2682,6 +2698,16 @@ fn is_consolidation_child(guard: Option<&std::ffi::OsStr>) -> bool {
     guard.is_some_and(|v| !v.is_empty())
 }
 
+/// The `llmenv consolidation-run` child, before its stderr log and process
+/// group are set.
+fn consolidation_run_command(exe: std::path::PathBuf) -> std::process::Command {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("consolidation-run")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null());
+    cmd
+}
+
 /// Spawn a detached child to run post-session consolidation. Best-effort
 /// fire-and-forget — spawn failures are logged at error level and the caller
 /// never waits on the child. The child's stderr goes to the shared bounded log
@@ -2691,10 +2717,7 @@ fn post_session_consolidation() {
         tracing::error!("consolidation-run: cannot resolve current_exe; consolidation skipped");
         return;
     };
-    let mut cmd = std::process::Command::new(exe);
-    cmd.arg("consolidation-run")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null());
+    let mut cmd = consolidation_run_command(exe);
     redirect_stderr_to_detached_log(&mut cmd);
     crate::mcp::proxy::detach_process_group(&mut cmd);
     if let Err(e) = cmd.spawn() {
@@ -2740,6 +2763,53 @@ mod tests {
         // Claude Code registers `session_end` once and never `post_session`,
         // so one session end starts one child (#2355).
         assert_eq!(starting, ["session_end", "post_session"]);
+    }
+
+    thread_local! {
+        static SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn count_spawn() {
+        SPAWNS.with(|c| c.set(c.get() + 1));
+    }
+
+    /// Spawns for one `event` against a config whose only memory entry
+    /// (tag `mem`) has consolidation set to `enabled`.
+    fn consolidation_spawns(event: HookEvent, enabled: bool) -> usize {
+        let config: crate::config::Config = serde_yaml::from_str(&format!(
+            "features:\n  memory:\n    - server_host: h\n      port: 1\n      when: [mem]\n      \
+             consolidation:\n        enabled: {enabled}\n"
+        ))
+        .unwrap();
+        let active = crate::scope::ActiveScopes {
+            tags: std::collections::BTreeSet::from(["mem".to_string()]),
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        SPAWNS.with(|c| c.set(0));
+        maybe_start_consolidation(event, &config, dir.path(), &active, count_spawn);
+        SPAWNS.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn session_end_with_consolidation_enabled_spawns_exactly_one_child() {
+        assert_eq!(consolidation_spawns(HookEvent::SessionEnd, true), 1);
+        assert_eq!(consolidation_spawns(HookEvent::PostSession, true), 1);
+    }
+
+    #[test]
+    fn no_child_for_other_events_or_disabled_consolidation() {
+        assert_eq!(consolidation_spawns(HookEvent::Stop, true), 0);
+        assert_eq!(consolidation_spawns(HookEvent::SessionStart, true), 0);
+        assert_eq!(consolidation_spawns(HookEvent::SessionEnd, false), 0);
+    }
+
+    #[test]
+    fn consolidation_run_command_runs_the_consolidation_subcommand() {
+        let cmd = consolidation_run_command("/bin/llmenv".into());
+        assert_eq!(cmd.get_program(), "/bin/llmenv");
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, ["consolidation-run"]);
     }
 
     #[test]
@@ -5438,6 +5508,22 @@ mod tests {
             out.contains("<!-- llmenv-type: semantic -->"),
             "should add semantic type marker: {out}"
         );
+    }
+
+    #[test]
+    fn apply_memory_defaults_adds_importance_marker_once() {
+        let settings = MemoryHookSettings {
+            default_importance: Some(llmenv_config::ImportanceLevel::High),
+            ..memory_settings(None)
+        };
+        let out = apply_memory_config_defaults("## context".to_string(), Some(&settings));
+        assert!(out.contains("<!-- llmenv-importance: high -->"), "{out}");
+        let kept = apply_memory_config_defaults(
+            "## context\n<!-- llmenv-importance: low -->".to_string(),
+            Some(&settings),
+        );
+        assert!(!kept.contains("high"), "an existing marker wins: {kept}");
+        assert!(apply_memory_config_defaults("x".to_string(), None) == "x");
     }
 
     #[test]

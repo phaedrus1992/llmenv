@@ -735,7 +735,7 @@ pub fn run() -> anyhow::Result<()> {
             crate::hook_run::detached_store::run_icm_store(&payload_json)?;
         }
         Some(Command::ConsolidationRun) => {
-            crate::hook_run::detached_consolidation::run_consolidation()?;
+            crate::hook_run::detached_consolidation::run_consolidation(&paths::config_path()?)?;
         }
         Some(Command::Login { global }) => {
             run_login(global)?;
