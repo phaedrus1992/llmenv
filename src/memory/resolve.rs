@@ -109,6 +109,8 @@ impl MemoryEndpoint {
 pub(crate) const DEFAULT_MEMORY_HOOK: MemoryHookSettings = MemoryHookSettings {
     wakeup_max_tokens: None,
     adaptive_recall: true,
+    default_type: None,
+    default_importance: None,
 };
 
 /// Top-level and firing-bundle `features.memory` and `host` entries, merged the way

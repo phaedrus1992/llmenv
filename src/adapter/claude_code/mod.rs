@@ -4360,6 +4360,8 @@ mod tests {
                 memory_hook: Some(crate::mcp::resolve::MemoryHookSettings {
                     wakeup_max_tokens: None,
                     adaptive_recall: false,
+                    default_type: None,
+                    default_importance: None,
                 }),
             }],
             ..Default::default()
