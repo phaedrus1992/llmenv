@@ -377,6 +377,24 @@ fn normalize_json(value: &mut serde_json::Value) {
     }
 }
 
+/// Replace every control character in `s` with its Rust-literal escape (a newline becomes the
+/// two characters `\n`) and leave every other character, including non-ASCII text, as it is.
+/// Use it on text from files or the network before it reaches a terminal or a line-based log:
+/// a raw newline can forge an extra line, and a raw ESC byte reaches the terminal as a control
+/// sequence.
+#[must_use]
+pub fn escape_control(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| {
+            if c.is_control() {
+                c.escape_default().collect::<Vec<_>>()
+            } else {
+                vec![c]
+            }
+        })
+        .collect()
+}
+
 /// Shared `proptest` generators for llmenv's own tests and, via the
 /// `test-util` feature, for other workspace crates' dev-dependencies
 /// (`llmenv-config`, the main `llmenv` crate). Exists so generators that
@@ -564,7 +582,41 @@ pub mod testkit {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::{dedup, merge_json, merge_yaml, normalize_json};
+    use super::{dedup, escape_control, merge_json, merge_yaml, normalize_json};
+
+    // A newline must not forge a second log line, and an ESC byte must not reach the terminal.
+    #[test]
+    fn escape_control_neutralizes_newline_and_escape_bytes() {
+        let forged = "path=a\n[LLMENV_CACHE] content_hash hit 0.001ms";
+        let escaped = escape_control(forged);
+        assert!(!escaped.contains('\n'), "newline must not survive escaping");
+        assert_eq!(escaped, r"path=a\n[LLMENV_CACHE] content_hash hit 0.001ms");
+        assert!(!escape_control("a\u{1b}[2Jb").contains('\u{1b}'));
+    }
+
+    #[test]
+    fn escape_control_leaves_non_control_unicode_untouched() {
+        let path = "path=café_日本語_📄.md";
+        assert_eq!(escape_control(path), path);
+    }
+
+    mod escape_control_props {
+        use super::escape_control;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn output_has_no_control_chars(s in any::<String>()) {
+                prop_assert!(!escape_control(&s).chars().any(char::is_control));
+            }
+
+            #[test]
+            fn control_free_text_is_unchanged(s in "\\PC{0,40}") {
+                prop_assume!(!s.chars().any(char::is_control));
+                prop_assert_eq!(escape_control(&s), s);
+            }
+        }
+    }
 
     fn yaml(s: &str) -> serde_yaml::Value {
         serde_yaml::from_str(s).unwrap()

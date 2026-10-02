@@ -201,6 +201,10 @@ export RUSTFLAGS="-C link-arg=-fuse-ld=$(brew --prefix lld)/bin/ld64.lld"
 Both env vars only affect `cargo`/`rustc` invocations — nothing else changes on
 your system. Skip either one if you'd rather not install the tool.
 
+## Contributing
+
+Agent instructions for this repo are in AGENTS.md; Claude Code 2.1.277 or later reads it directly.
+
 ## Releases
 
 llmenv follows [Semantic Versioning](https://semver.org/) and a

@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use llmenv_mcp::mcp_client::McpHttpClient;
 
-pub(crate) use resolve::{MemoryEndpoint, memory_url, suppressed_memory_bundles};
+pub(crate) use resolve::{MemoryEndpoint, memory_url, merged_memory, suppressed_memory_bundles};
 
 /// CLI timeout — longer than hook timeout since users are waiting.
 const CLI_TIMEOUT: Duration = Duration::from_secs(10);
