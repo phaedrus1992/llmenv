@@ -3338,7 +3338,15 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             if reopen {
                 crate::task::reopen_task(&state_dir, &id)?;
             }
-            let task = crate::task::start_task(&state_dir, &id, force)?;
+            let task = crate::task::start_task(&state_dir, &id, force).map_err(|e| {
+                if reopen {
+                    e.context(format!(
+                        "task '{id}' is now reopened (open), but it did not start"
+                    ))
+                } else {
+                    e
+                }
+            })?;
             // Parent is a soft-block (#1164): unlike an unmet blocked_on
             // (hard-blocked inside start_task itself), an undone parent
             // only warns here, mirroring Add's own wip-in-progress warning

@@ -283,7 +283,12 @@ fn todowrite(
                 }
             }
             "completed" if !existing.is_some_and(|t| t.state == task::TaskState::Done) => {
-                match task::done_task(state_dir, &slug) {
+                match task::complete_task(state_dir, &slug) {
+                    // A todo added and completed in this same call is not a
+                    // skipped start; one that sat `open` before is (#2338).
+                    Ok(c) if existing.is_some() && c.never_started_warning().is_some() => {
+                        finished.push(format!("{slug} (never started)"));
+                    }
                     Ok(_) => finished.push(slug.clone()),
                     Err(e) => failures.push(format!("'{title}' couldn't be completed ({e})")),
                 }
@@ -458,7 +463,10 @@ fn update(input: Option<&Value>, state_dir: &Path) -> String {
             })
         }
         Some("completed") => {
-            task::done_task(state_dir, &slug).map(|_| format!("completed '{slug}'"))
+            task::complete_task(state_dir, &slug).map(|c| match c.never_started_warning() {
+                Some(warning) => format!("completed '{slug}'. {warning}"),
+                None => format!("completed '{slug}'"),
+            })
         }
         Some("deleted") => task::delete_task(state_dir, &slug).map(|_| format!("deleted '{slug}'")),
         // Name the unrecognized value rather than silently reporting "unchanged"
@@ -577,6 +585,38 @@ mod tests {
             tasks.iter().any(|t| t.title == "write the tests"),
             "a pending todo is still tracked, just not started"
         );
+    }
+
+    // #2338: a todo that sat `pending` and then arrives `completed` skipped
+    // its start; one added and completed in the same call did not sit open.
+    #[test]
+    fn todowrite_flags_pending_to_completed_but_not_added_completed() {
+        let dir = tmp();
+        handle_inner(
+            "todowrite",
+            todowrite_payload(json!([todo("waited", "pending")])).get("tool_input"),
+            dir.path(),
+            PROJECT,
+        );
+        let out = handle_inner(
+            "todowrite",
+            todowrite_payload(json!([
+                todo("waited", "completed"),
+                todo("instant", "completed")
+            ]))
+            .get("tool_input"),
+            dir.path(),
+            PROJECT,
+        );
+        let waited = task::list_tasks(dir.path())
+            .into_iter()
+            .find(|t| t.title == "waited")
+            .expect("test");
+        assert!(
+            out.contains(&format!("{} (never started)", waited.slug)),
+            "{out}"
+        );
+        assert_eq!(out.matches("(never started)").count(), 1, "{out}");
     }
 
     // Re-sending an unchanged list is opencode's normal behaviour — every edit
@@ -871,12 +911,41 @@ mod tests {
             PROJECT,
         );
         assert!(out.starts_with("__DENY__:"), "{out}");
+        assert!(
+            out.contains("never started"),
+            "open -> done must warn (#2338): {out}"
+        );
         let t = &task::list_tasks(dir.path())[0];
         assert_eq!(
             t.state,
             task::TaskState::Done,
             "state should be Done: {t:?}"
         );
+    }
+
+    #[test]
+    fn update_completed_after_start_has_no_never_started_warning() {
+        let dir = tmp();
+        handle_inner(
+            "TaskCreate",
+            Some(&json!({ "subject": "ship it" })),
+            dir.path(),
+            PROJECT,
+        );
+        let slug = task::list_tasks(dir.path())[0].slug.clone();
+        handle_inner(
+            "TaskUpdate",
+            Some(&json!({ "taskId": slug, "status": "in_progress" })),
+            dir.path(),
+            PROJECT,
+        );
+        let out = handle_inner(
+            "TaskUpdate",
+            Some(&json!({ "taskId": slug, "status": "completed" })),
+            dir.path(),
+            PROJECT,
+        );
+        assert!(!out.contains("never started"), "{out}");
     }
 
     #[test]
