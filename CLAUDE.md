@@ -1,3 +1,0 @@
-# llmenv
-
-@./AGENTS.md

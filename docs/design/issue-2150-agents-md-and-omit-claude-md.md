@@ -35,6 +35,7 @@ A subagent with `omitClaudeMd: true` therefore runs without any llmenv rule.
 | --- | --- |
 | Repo shim | `CLAUDE.md` |
 | Example shim; no code or docs reference it by path | `examples/config-llmenv-dir/CLAUDE.md` |
+| The repo shim is linked from `docs/env-vars.md` "See Also"; that link now points to `AGENTS.md` | `docs/env-vars.md` |
 | `translate_agent_md` keeps only `description`, `model`, `tools`, `allowed_tools`, adds `mode: subagent`, and drops everything else silently | `src/adapter/opencode.rs` near line 1683 |
 | Command translation prints `warning: opencode adapter does not support '<key>' in command frontmatter — dropping this field` for dropped keys | `src/adapter/opencode.rs` near line 1660 |
 | `llmenv setup` touches `~/.claude/CLAUDE.md` (user file), not a project shim | `src/cli/setup.rs` line 37 |
