@@ -124,6 +124,9 @@ features:
    a remote client at `http://<addr>:<port>` built from the host-table address.
 3. If this host matches `server_host` (its id is among the matched host scopes),
    the CLI also launches the local `mcp-proxy` bound to `0.0.0.0:<port>`.
+   (changed in v3.12.0) The `memory:` entry can come from `config.yaml` or
+   from a firing bundle's `bundle.yaml`; `llmenv export` reads the same merged
+   list that the hooks use.
 
 ### Proxy lifecycle on the server host
 

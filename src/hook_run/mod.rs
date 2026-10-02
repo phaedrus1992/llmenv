@@ -1301,12 +1301,6 @@ fn run_inner(
         let mut chunk = crate::icm::generate_context_chunk(&active, &bundles);
         let mut storage_chunk = crate::icm::generate_minimal_chunk(&active, &bundles);
 
-        // Apply default type/importance markers from config (R1, R3) when no explicit
-        // marker is present in the generated chunk.
-        chunk = apply_memory_config_defaults(chunk, &config, &active);
-        // Apply markers to storage chunk too (not just injection chunk).
-        storage_chunk = apply_memory_config_defaults(storage_chunk, &config, &active);
-
         // #317: folded into the chunk the SessionEnd store already sends,
         // rather than issuing a second `icm_memory_store` — one store per
         // session end keeps the memory readable and halves the round trips.
@@ -1334,6 +1328,10 @@ fn run_inner(
         let resolved_client =
             resolve_memory_client(&config, config_dir, &active, event, &MCP_CLIENT_CACHE);
         let settings = resolved_client.as_ref().map(|r| r.settings);
+        // Default type/importance markers (R1, R3) from the resolved entry, which
+        // can be top-level or bundle-declared, when the chunk has none of its own.
+        chunk = apply_memory_config_defaults(chunk, settings.as_ref());
+        storage_chunk = apply_memory_config_defaults(storage_chunk, settings.as_ref());
         let wake = wake_args(event, settings, stdin_payload, &env.cwd);
         let client = resolved_client.map(|r| r.client);
         let state_path = Some(state::state_path());
@@ -1370,6 +1368,16 @@ fn run_inner(
             if is_unchanged {
                 debug!("chunk unchanged since last store, skipping");
                 if !log_cfg.any_sink_enabled() {
+                    // An unchanged chunk skips the store, not the consolidation.
+                    if client.is_some() {
+                        maybe_start_consolidation(
+                            event,
+                            &config,
+                            config_dir,
+                            &active,
+                            start_consolidation_child,
+                        );
+                    }
                     emit_trace_timing(t0, t_config, Some(t_scope), None, None);
                     return Ok(String::new());
                 }
@@ -1436,14 +1444,6 @@ fn run_inner(
                 })
                 .await?;
 
-                // PostSession: run reflective consolidation (R5) in a detached
-                // child process so the hook returns immediately instead of
-                // blocking on MCP. The result is fire-and-forget — PostSession is
-                // the final event, so no caller needs its output.
-                if is_post_session_consolidation_event(event) {
-                    drop(post_session_consolidation());
-                }
-
                 // PostToolUse WebFetch/WebSearch: auto-store fetched content in ICM
                 // with fast-falloff memory (topic: web-fetch, importance: low) so it
                 // survives session compactions but decays quickly. (#579)
@@ -1499,7 +1499,19 @@ fn run_inner(
             }
 
             Ok::<String, anyhow::Error>(out)
-        })?;
+        });
+        // After the store, so the child's recall can see this session's chunk,
+        // and before `?`, so a failed dedup write or log step does not skip it.
+        if client.is_some() {
+            maybe_start_consolidation(
+                event,
+                &config,
+                config_dir,
+                &active,
+                start_consolidation_child,
+            );
+        }
+        let out = out?;
         let t_end = std::time::Instant::now();
         emit_trace_timing(t0, t_config, Some(t_scope), Some(t_chunk), Some(t_end));
         Ok(out)
@@ -1924,36 +1936,33 @@ fn resolve_memory_client(
     Some(ResolvedMemoryClient { client, settings })
 }
 
-/// Apply default memory type/importance markers from the active memory config (R1, R3).
+/// Apply default memory type/importance markers from the resolved memory
+/// entry's `settings` (R1, R3). `None` (no backend resolved) leaves the chunk
+/// unchanged.
 ///
 /// If the chunk already contains an `<!-- llmenv-type: -->` or
 /// `<!-- llmenv-importance: -->` marker, the inline value takes precedence and
-/// no default is appended. Otherwise the config's `default_type` /
+/// no default is appended. Otherwise the entry's `default_type` /
 /// `default_importance` are appended as markers at the end of the chunk.
 ///
 /// ponytail: `type_importance` per-type overrides are not yet applied here —
 /// they will be resolved when the Store action runs against the ICM backend.
 fn apply_memory_config_defaults(
     mut chunk: String,
-    config: &crate::config::Config,
-    active: &crate::scope::ActiveScopes,
+    settings: Option<&MemoryHookSettings>,
 ) -> String {
-    let Some(mem) = config.features.as_ref().and_then(|f| {
-        f.memory
-            .iter()
-            .find(|m| m.when.iter().any(|t| active.tags.contains(t)))
-    }) else {
+    let Some(settings) = settings else {
         return chunk;
     };
 
     if !chunk.contains("<!-- llmenv-type:")
-        && let Some(ty) = &mem.default_type
+        && let Some(ty) = &settings.default_type
     {
         chunk.push_str(&format!("\n<!-- llmenv-type: {} -->", ty.as_marker_str()));
     }
 
     if !chunk.contains("<!-- llmenv-importance:")
-        && let Some(imp) = &mem.default_importance
+        && let Some(imp) = &settings.default_importance
     {
         chunk.push_str(&format!(
             "\n<!-- llmenv-importance: {} -->",
@@ -2170,33 +2179,81 @@ fn trigger_codebase_memory_index(
     }
 }
 
-/// Whether `event` should trigger [`post_session_consolidation`] — only
-/// `PostSession`, the final event of a session. Extracted as its own
-/// directly-testable predicate (#1465): the call site sits inside
-/// `run_inner`'s async, MCP-client-mocked block, too heavy a harness to
-/// exercise just for this one routing decision.
-fn is_post_session_consolidation_event(event: HookEvent) -> bool {
-    event == HookEvent::PostSession
+/// True for the event that ends a session and so starts consolidation.
+/// Claude Code's `SessionEnd` arrives as `session_end`, and no adapter emits
+/// `post_session`, so consolidation keyed on `PostSession` alone never ran
+/// (#2355). One event per session end means one child per session end.
+fn starts_consolidation(event: HookEvent) -> bool {
+    matches!(event, HookEvent::SessionEnd | HookEvent::PostSession)
 }
 
-/// Spawn a detached child to run post-session consolidation. Best-effort
-/// fire-and-forget — spawn failures are logged at debug level and the caller
-/// never waits on the child. The child's stderr goes to the shared bounded log
-/// rather than `/dev/null` so its own failures are diagnosable (#1133).
+/// Start the detached consolidation child when `event` ends the session and
+/// the active memory entry enables consolidation. The check reads the same
+/// merged memory list as endpoint resolution, so a bundle-declared entry
+/// counts. Fail-soft: a merge error is logged and skips consolidation.
 ///
-/// Returns the spawned [`std::process::Child`] purely so callers such as
-/// tests can reap it (#1095) — production intentionally drops it unwaited,
-/// identical to the previous behavior, since the child is
-/// process-group-detached and outlives this process regardless.
-fn post_session_consolidation() -> Option<std::process::Child> {
-    let Ok(exe) = std::env::current_exe() else {
-        tracing::debug!("consolidation-run: cannot resolve current_exe");
-        return None;
-    };
+/// `spawn` is [`start_consolidation_child`] in production; tests pass a
+/// counter, because a detached child is not visible from inside the test.
+fn maybe_start_consolidation(
+    event: HookEvent,
+    config: &crate::config::Config,
+    config_dir: &std::path::Path,
+    active: &crate::scope::ActiveScopes,
+    spawn: fn(),
+) {
+    let guard = std::env::var_os(crate::consolidation::CHILD_GUARD_ENV);
+    if !starts_consolidation(event) || is_consolidation_child(guard.as_deref()) {
+        return;
+    }
+    match crate::memory::merged_memory(config, config_dir, active) {
+        Ok(merged) => {
+            if crate::consolidation::active_consolidation(&merged.memory, &active.tags).is_some() {
+                spawn();
+            }
+        }
+        Err(e) => tracing::error!("consolidation: cannot read merged memory entries: {e:#}"),
+    }
+}
+
+/// True when this `hook-run` runs inside the `claude -p` child that
+/// consolidation starts. Such a run starts no consolidation, so the child
+/// cannot loop even if its hooks run (#2355). Only the consolidation start
+/// checks it: a stray value must not turn off PreToolUse denies or the
+/// session log.
+fn is_consolidation_child(guard: Option<&std::ffi::OsStr>) -> bool {
+    guard.is_some_and(|v| !v.is_empty())
+}
+
+/// The `llmenv consolidation-run` child, before its stderr log and process
+/// group are set.
+fn consolidation_run_command(exe: std::path::PathBuf) -> std::process::Command {
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("consolidation-run")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null());
+    cmd
+}
+
+/// The production `spawn` for [`maybe_start_consolidation`]: start the child
+/// and drop its handle, because no caller waits on it.
+fn start_consolidation_child() {
+    drop(post_session_consolidation());
+}
+
+/// Spawn a detached child to run post-session consolidation. Best-effort
+/// fire-and-forget — spawn failures are logged at error level and the caller
+/// never waits on the child. The child's stderr goes to the shared bounded log
+/// rather than `/dev/null` so its own failures are diagnosable (#1133).
+///
+/// Returns the spawned [`std::process::Child`] purely so callers such as
+/// tests can reap it (#1095) — production drops it unwaited, since the child
+/// is process-group-detached and outlives this process regardless.
+fn post_session_consolidation() -> Option<std::process::Child> {
+    let Ok(exe) = std::env::current_exe() else {
+        tracing::error!("consolidation-run: cannot resolve current_exe; consolidation skipped");
+        return None;
+    };
+    let mut cmd = consolidation_run_command(exe);
     crate::session_log::redirect_stderr_to_detached_log(
         &mut cmd,
         crate::session_log::detached_child_log_path,
@@ -2205,7 +2262,9 @@ fn post_session_consolidation() -> Option<std::process::Child> {
     match cmd.spawn() {
         Ok(child) => Some(child),
         Err(e) => {
-            tracing::debug!("consolidation-run: failed to spawn detached child: {e}");
+            tracing::error!(
+                "consolidation-run: cannot spawn the detached child: {e}; consolidation skipped"
+            );
             None
         }
     }
@@ -2259,14 +2318,84 @@ mod tests {
     ];
 
     #[test]
+    fn only_session_end_and_post_session_start_consolidation() {
+        let starting: Vec<&str> = ALL_HOOK_EVENTS
+            .iter()
+            .copied()
+            .filter(|e| starts_consolidation(HookEvent::from_str(e).unwrap()))
+            .collect();
+        // Claude Code registers `session_end` once and never `post_session`,
+        // so one session end starts one child (#2355).
+        assert_eq!(starting, ["session_end", "post_session"]);
+    }
+
+    thread_local! {
+        static SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn count_spawn() {
+        SPAWNS.with(|c| c.set(c.get() + 1));
+    }
+
+    /// Spawns for one `event` against a config whose only memory entry
+    /// (tag `mem`) has consolidation set to `enabled`.
+    fn consolidation_spawns(event: HookEvent, enabled: bool) -> usize {
+        let config: crate::config::Config = serde_yaml::from_str(&format!(
+            "features:\n  memory:\n    - server_host: h\n      port: 1\n      when: [mem]\n      \
+             consolidation:\n        enabled: {enabled}\n"
+        ))
+        .unwrap();
+        let active = crate::scope::ActiveScopes {
+            tags: std::collections::BTreeSet::from(["mem".to_string()]),
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        SPAWNS.with(|c| c.set(0));
+        maybe_start_consolidation(event, &config, dir.path(), &active, count_spawn);
+        SPAWNS.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn session_end_with_consolidation_enabled_spawns_exactly_one_child() {
+        assert_eq!(consolidation_spawns(HookEvent::SessionEnd, true), 1);
+        assert_eq!(consolidation_spawns(HookEvent::PostSession, true), 1);
+    }
+
+    #[test]
+    fn no_child_for_other_events_or_disabled_consolidation() {
+        assert_eq!(consolidation_spawns(HookEvent::Stop, true), 0);
+        assert_eq!(consolidation_spawns(HookEvent::SessionStart, true), 0);
+        assert_eq!(consolidation_spawns(HookEvent::SessionEnd, false), 0);
+    }
+
+    #[test]
+    fn consolidation_run_command_runs_the_consolidation_subcommand() {
+        let cmd = consolidation_run_command("/bin/llmenv".into());
+        assert_eq!(cmd.get_program(), "/bin/llmenv");
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, ["consolidation-run"]);
+    }
+
+    #[test]
+    fn consolidation_guard_needs_a_non_empty_value() {
+        assert!(!is_consolidation_child(None));
+        assert!(!is_consolidation_child(Some(std::ffi::OsStr::new(""))));
+        assert!(is_consolidation_child(Some(std::ffi::OsStr::new("1"))));
+    }
+
+    #[test]
     fn adaptive_applies_only_to_its_events_with_a_valid_session() {
         let on = Some(MemoryHookSettings {
             wakeup_max_tokens: None,
             adaptive_recall: true,
+            default_type: None,
+            default_importance: None,
         });
         let off = Some(MemoryHookSettings {
             wakeup_max_tokens: None,
             adaptive_recall: false,
+            default_type: None,
+            default_importance: None,
         });
         for event in [
             HookEvent::SessionStart,
@@ -2486,7 +2615,7 @@ mod tests {
             state_dir.path(),
             "finish the parser",
             crate::task::ParentSpec::Auto,
-            None,
+            crate::task::SessionChoice::Resolve(&crate::task::session::EngineIdentity::default()),
             &project,
         )
         .expect("test");
@@ -4712,56 +4841,29 @@ mod tests {
 
     // ===== #592: apply_memory_config_defaults idempotence =====
 
-    fn memory_config(default_type: Option<llmenv_config::MemoryType>) -> crate::config::Config {
-        let mut config = crate::config::Config::default();
-        config.features = Some(crate::config::Features {
-            memory: vec![llmenv_config::Memory {
-                server_host: "test-host".into(),
-                port: 0,
-                listen_host: "127.0.0.1".into(),
-                when: vec!["test".into()],
-                default_topics: vec![],
-                default_type,
-                default_importance: None,
-                type_importance: Default::default(),
-                retention: None,
-                auto_prune: false,
-                consolidation: None,
-                mcp_permissions: None,
-                wakeup_max_tokens: None,
-                adaptive_recall: true,
-            }],
-            ..Default::default()
-        });
-        config
-    }
-
-    fn active_with_tag(tag: &str) -> crate::scope::ActiveScopes {
-        let mut tags = std::collections::BTreeSet::new();
-        tags.insert(tag.to_string());
-        crate::scope::ActiveScopes {
-            tags,
-            scopes: vec![],
-            ..Default::default()
+    fn memory_settings(default_type: Option<llmenv_config::MemoryType>) -> MemoryHookSettings {
+        MemoryHookSettings {
+            wakeup_max_tokens: None,
+            adaptive_recall: true,
+            default_type,
+            default_importance: None,
         }
     }
 
     #[test]
     fn apply_memory_defaults_idempotent_no_type() {
-        let config = memory_config(None);
-        let active = active_with_tag("test");
+        let settings = memory_settings(None);
         let input = "## context\nno markers".to_string();
-        let once = apply_memory_config_defaults(input, &config, &active);
-        let twice = apply_memory_config_defaults(once.clone(), &config, &active);
+        let once = apply_memory_config_defaults(input, Some(&settings));
+        let twice = apply_memory_config_defaults(once.clone(), Some(&settings));
         assert_eq!(once, twice, "applying defaults twice must be idempotent");
     }
 
     #[test]
     fn apply_memory_defaults_adds_type_marker_when_present() {
-        let config = memory_config(Some(llmenv_config::MemoryType::Semantic));
-        let active = active_with_tag("test");
+        let settings = memory_settings(Some(llmenv_config::MemoryType::Semantic));
         let input = "## context".to_string();
-        let out = apply_memory_config_defaults(input, &config, &active);
+        let out = apply_memory_config_defaults(input, Some(&settings));
         assert!(
             out.contains("<!-- llmenv-type: semantic -->"),
             "should add semantic type marker: {out}"
@@ -4769,11 +4871,26 @@ mod tests {
     }
 
     #[test]
+    fn apply_memory_defaults_adds_importance_marker_once() {
+        let settings = MemoryHookSettings {
+            default_importance: Some(llmenv_config::ImportanceLevel::High),
+            ..memory_settings(None)
+        };
+        let out = apply_memory_config_defaults("## context".to_string(), Some(&settings));
+        assert!(out.contains("<!-- llmenv-importance: high -->"), "{out}");
+        let kept = apply_memory_config_defaults(
+            "## context\n<!-- llmenv-importance: low -->".to_string(),
+            Some(&settings),
+        );
+        assert!(!kept.contains("high"), "an existing marker wins: {kept}");
+        assert!(apply_memory_config_defaults("x".to_string(), None) == "x");
+    }
+
+    #[test]
     fn apply_memory_defaults_skips_existing_marker() {
-        let config = memory_config(Some(llmenv_config::MemoryType::Semantic));
-        let active = active_with_tag("test");
+        let settings = memory_settings(Some(llmenv_config::MemoryType::Semantic));
         let input = "## context\n<!-- llmenv-type: episodic -->".to_string();
-        let out = apply_memory_config_defaults(input, &config, &active);
+        let out = apply_memory_config_defaults(input, Some(&settings));
         assert!(
             !out.contains("semantic"),
             "must not override existing episodic marker"
@@ -4967,28 +5084,6 @@ mod tests {
         let mut child =
             child.expect("current_exe() resolving must spawn a detached consolidation child");
         reap_test_child(&mut child, std::time::Duration::from_secs(5));
-    }
-
-    #[test]
-    fn is_post_session_consolidation_event_fires_only_for_post_session() {
-        assert!(is_post_session_consolidation_event(HookEvent::PostSession));
-        for other in [
-            HookEvent::SessionStart,
-            HookEvent::TurnStart,
-            HookEvent::SessionEnd,
-            HookEvent::UserPromptSubmit,
-            HookEvent::PreToolUse,
-            HookEvent::PostToolUse,
-            HookEvent::Notification,
-            HookEvent::Stop,
-            HookEvent::SubagentStop,
-            HookEvent::PreCompact,
-        ] {
-            assert!(
-                !is_post_session_consolidation_event(other),
-                "{other:?} must not trigger post-session consolidation"
-            );
-        }
     }
 
     /// Wait for `child` to exit, bounded by `timeout`; force-kill and wait
@@ -5381,6 +5476,8 @@ mod adaptive_routing_tests {
             settings: Some(MemoryHookSettings {
                 wakeup_max_tokens: None,
                 adaptive_recall,
+                default_type: None,
+                default_importance: None,
             }),
             session_id: Some("s1"),
             state_dir: Some(state_dir.path().to_path_buf()),
@@ -5456,6 +5553,8 @@ mod adaptive_routing_tests {
         let adaptive = Some(MemoryHookSettings {
             wakeup_max_tokens: None,
             adaptive_recall: true,
+            default_type: None,
+            default_importance: None,
         });
         let start = wake_args(HookEvent::SessionStart, adaptive, &payload, "/");
         assert_eq!(start.project.as_deref(), Some("wake-repo"));

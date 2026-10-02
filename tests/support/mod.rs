@@ -24,6 +24,11 @@ pub fn isolated_llmenv_cmd(dir: &Path) -> Command {
         .env("LLMENV_STATE_DIR", dir)
         .env("XDG_STATE_HOME", dir)
         .env("XDG_CACHE_HOME", dir)
-        .env("HOME", dir);
+        .env("HOME", dir)
+        // An agent that runs the tests exports these; a test that needs an
+        // engine identity sets them itself.
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CLAUDE_PID")
+        .env_remove("LLMENV_CONSOLIDATION_CHILD");
     cmd
 }

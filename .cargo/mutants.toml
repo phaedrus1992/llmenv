@@ -23,4 +23,8 @@ examine_globs = [
 exclude_re = [
   "replace < with <= in waves",
   "replace > with >= in LedgerStore::prune_orphan_locks",
+  # A detached spawn with no in-process effect. Its command
+  # (consolidation_run_command) and the decision to call it
+  # (maybe_start_consolidation) are tested.
+  "replace post_session_consolidation with \\(\\)",
 ]
