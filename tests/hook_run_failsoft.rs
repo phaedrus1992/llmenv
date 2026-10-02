@@ -974,11 +974,11 @@ impl Drop for ProxyReaper {
     }
 }
 
-// #2358: a stopped proxy on the host that owns ICM is restarted at session start, so no
-// notice is needed.
+/// Run session start on a host that owns ICM, with nothing listening and the given stand-in
+/// `mcp-proxy` first on `PATH`. The hook starts that stand-in when it finds ICM down.
 #[cfg(unix)]
-#[test]
-fn session_start_restarts_a_stopped_proxy_on_the_icm_host() {
+fn session_start_on_the_icm_host(fake_proxy: &str) -> assert_cmd::assert::Assert {
+    use std::os::unix::fs::PermissionsExt;
     let port = {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.local_addr().unwrap().port()
@@ -991,18 +991,36 @@ fn session_start_restarts_a_stopped_proxy_on_the_icm_host() {
     let _reaper = ProxyReaper(dir.path().join("llmenv").join("mcp-proxy.pid"));
     let bin = TempDir::new().unwrap();
     let script = bin.path().join("mcp-proxy");
-    fs::write(&script, FAKE_MCP_PROXY).unwrap();
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    fs::write(&script, fake_proxy).unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
     let old_path = std::env::var("PATH").unwrap_or_default();
     hook_cmd(dir.path(), &config_path, "session_start")
         .env("PATH", format!("{}:{old_path}", bin.path().display()))
         .timeout(Duration::from_secs(30))
         .assert()
         .success()
+}
+
+// #2358: a stopped proxy on the host that owns ICM is restarted at session start, so no
+// notice is needed.
+#[cfg(unix)]
+#[test]
+fn session_start_restarts_a_stopped_proxy_on_the_icm_host() {
+    session_start_on_the_icm_host(FAKE_MCP_PROXY)
         .stdout(predicate::str::contains("MCP health check failed").not());
+}
+
+// #2358 review: a restart that starts a proxy which still does not answer must leave ICM in the
+// notice, with the reason from the second probe.
+#[cfg(unix)]
+#[test]
+fn session_start_still_reports_icm_when_the_restarted_proxy_does_not_answer() {
+    let broken = FAKE_MCP_PROXY.replace("self.send_response(200)", "self.send_response(500)");
+    assert_ne!(broken, FAKE_MCP_PROXY);
+    session_start_on_the_icm_host(&broken)
+        .stdout(predicate::str::contains("MCP health check failed"))
+        .stdout(predicate::str::contains("icm"))
+        .stdout(predicate::str::contains("500"));
 }
 
 fn config_with_task_tracker() -> String {
@@ -1252,4 +1270,37 @@ fn session_start_shows_the_memory_error_when_another_server_needs_a_notice() {
         .success()
         .stdout(predicate::str::contains("codebase-memory-mcp"))
         .stdout(predicate::str::contains("memory session_start failed"));
+}
+
+// #2358 review: with no health notice, a failing memory call stays a stderr warning and adds
+// nothing to stdout. Only a notice for another server brings the memory error into the output.
+#[cfg(unix)]
+#[test]
+fn session_start_prints_nothing_when_only_the_memory_call_fails() {
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let script_dir = TempDir::new().unwrap();
+    let script = script_dir.path().join("fake_icm.py");
+    fs::write(&script, FAKE_ICM_FAILING_CALLS).unwrap();
+    let server = std::process::Command::new("python3")
+        .arg(&script)
+        .arg(port.to_string())
+        .spawn()
+        .unwrap();
+    let _guard = ChildGuard(server);
+    for _ in 0..100 {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let (dir, config_path) = setup_config(&config_with_memory_addr("127.0.0.1", port));
+    hook_cmd(dir.path(), &config_path, "session_start")
+        .timeout(Duration::from_secs(25))
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("session_start skipped"));
 }
