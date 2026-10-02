@@ -766,6 +766,33 @@ pub(crate) fn session_summary(
     })
 }
 
+/// Stop text for each open session in `project` that has unfinished tasks and nothing recorded
+/// that tells a fresh agent what the work is (#2339). Does not presume the session is the
+/// reader's own (#1028).
+#[must_use]
+pub(crate) fn missing_context_reminders(state_dir: &Path, project: &str) -> String {
+    open_sessions_for_project(state_dir, project)
+        .iter()
+        .filter(|session| session.resume.needs_nudge())
+        .filter(|session| {
+            tasks_in_session(state_dir, &session.id)
+                .iter()
+                .any(|task| task.state != TaskState::Done)
+        })
+        .map(|session| {
+            let id = &session.id;
+            format!(
+                "Session '{label}' ({id}) has no resume context. If you recognize it as your \
+                 own, run `llmenv task session edit {id} --context \"...\" --issue N` so a \
+                 fresh agent can pick it up after /clear. If you don't recognize it, it \
+                 belongs to a different session — leave it alone.",
+                label = session.name.as_deref().unwrap_or(id.as_str()),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 /// SessionStart text for each open session in `project` that has resume context (#2339).
 /// Like the other reminders it does not presume the session is the reader's own (#1028).
 #[must_use]

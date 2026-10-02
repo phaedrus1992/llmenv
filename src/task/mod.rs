@@ -1021,7 +1021,7 @@ fn reject_cycle(state_dir: &Path, slug: &str, new_parent: &str) -> anyhow::Resul
 pub(crate) fn session_start_reminder(state_dir: &Path) -> String {
     let tasks = tasks_for_current_project(state_dir, list_tasks(state_dir));
     combine_reminders([
-        session_resume_reminders(state_dir),
+        for_current_project(|project| session::resume_reminders(state_dir, project)),
         wip_reminder(
             &tasks,
             "In-progress task(s) in this project",
@@ -1074,6 +1074,7 @@ pub(crate) fn stop_hook_reminder(state_dir: &Path) -> String {
         ),
         session_finish_reminders(state_dir),
         idle_session_reminders(state_dir),
+        for_current_project(|project| session::missing_context_reminders(state_dir, project)),
     ])
 }
 
@@ -1132,14 +1133,11 @@ fn idle_sessions(state_dir: &Path, project: &str) -> Vec<IdleSession> {
 /// [`session_finish_reminders`], it cannot tell whose session it names
 /// (#1028), so the nudge is conditioned on the agent recognizing it.
 fn idle_session_reminders(state_dir: &Path) -> String {
-    let project = match project::current_tag() {
-        Ok(project) => project,
-        Err(e) => {
-            tracing::error!("project::current_tag failed, so the task reminder is skipped: {e:#}");
-            return String::new();
-        }
-    };
-    idle_sessions(state_dir, &project)
+    for_current_project(|project| idle_reminder_lines(state_dir, project))
+}
+
+fn idle_reminder_lines(state_dir: &Path, project: &str) -> String {
+    idle_sessions(state_dir, project)
         .iter()
         .map(|idle| {
             let id = &idle.session.id;
@@ -1329,15 +1327,12 @@ fn execution_order(tasks: &[Task]) -> Vec<Task> {
 /// their bookkeeping, so the nudge is conditioned on recognizing the session
 /// rather than issued as a bare command.
 fn session_finish_reminders(state_dir: &Path) -> String {
-    let project = match project::current_tag() {
-        Ok(project) => project,
-        Err(e) => {
-            tracing::error!("project::current_tag failed, so the task reminder is skipped: {e:#}");
-            return String::new();
-        }
-    };
+    for_current_project(|project| finish_reminder_lines(state_dir, project))
+}
+
+fn finish_reminder_lines(state_dir: &Path, project: &str) -> String {
     let mut lines = Vec::new();
-    for session in session::open_sessions_for_project(state_dir, &project) {
+    for session in session::open_sessions_for_project(state_dir, project) {
         let (done, total) = session::session_progress(state_dir, &session.id);
         if total == 0 || done < total {
             continue;
@@ -1354,14 +1349,13 @@ fn session_finish_reminders(state_dir: &Path) -> String {
     lines.join("\n\n")
 }
 
-/// The resume context of each open session in the current project (#2339).
-fn session_resume_reminders(state_dir: &Path) -> String {
+/// Run `reminder` for the current project. A project tag that cannot be resolved is logged, and
+/// the reminder is skipped: a hook must never block the agent.
+fn for_current_project(reminder: impl FnOnce(&str) -> String) -> String {
     match project::current_tag() {
-        Ok(project) => session::resume_reminders(state_dir, &project),
+        Ok(project) => reminder(&project),
         Err(e) => {
-            tracing::error!(
-                "project::current_tag failed, so the resume reminder is skipped: {e:#}"
-            );
+            tracing::error!("project::current_tag failed, so the task reminder is skipped: {e:#}");
             String::new()
         }
     }
@@ -2495,6 +2489,66 @@ mod tests {
         let reminder = session_start_reminder(dir.path());
         assert!(reminder.contains("pick up at step 4"), "{reminder}");
         assert!(reminder.contains("gh issue view 2339"), "{reminder}");
+    }
+
+    fn start_session_here(dir: &Path, resume: &resume::ResumeContext) -> session::Session {
+        let project = project::current_tag().expect("project tag");
+        let owner = session::EngineIdentity::default();
+        let request = session::StartRequest {
+            name: Some("s"),
+            description: None,
+            project: &project,
+            owner: &owner,
+            resume,
+        };
+        match session::start_session_as(dir, &request, session::StartDecision::Auto).expect("start")
+        {
+            session::StartOutcome::Created(s) => s,
+            other => panic!("expected Created, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stop_reminder_names_a_session_with_open_tasks_and_no_resume_context() {
+        let dir = TempDir::new().expect("test");
+        let created = start_session_here(dir.path(), &resume::ResumeContext::default());
+        add_task_for_session(dir.path(), "Step", ParentSpec::Detached, &created.id).expect("add");
+        let reminder = stop_hook_reminder(dir.path());
+        assert!(reminder.contains("no resume context"), "{reminder}");
+        assert!(reminder.contains("task session edit"), "{reminder}");
+        assert!(
+            reminder.contains("recognize"),
+            "must not presume ownership: {reminder}"
+        );
+    }
+
+    #[test]
+    fn stop_reminder_stays_quiet_about_context_when_it_is_set_or_no_task_is_open() {
+        let with_context = TempDir::new().expect("test");
+        let resume = resume::ResumeContext {
+            issues: vec![1],
+            ..Default::default()
+        };
+        let created = start_session_here(with_context.path(), &resume);
+        add_task_for_session(
+            with_context.path(),
+            "Step",
+            ParentSpec::Detached,
+            &created.id,
+        )
+        .expect("add");
+        assert!(!stop_hook_reminder(with_context.path()).contains("no resume context"));
+
+        let no_tasks = TempDir::new().expect("test");
+        start_session_here(no_tasks.path(), &resume::ResumeContext::default());
+        assert!(!stop_hook_reminder(no_tasks.path()).contains("no resume context"));
+
+        let all_done = TempDir::new().expect("test");
+        let created = start_session_here(all_done.path(), &resume::ResumeContext::default());
+        let task = add_task_for_session(all_done.path(), "Step", ParentSpec::Detached, &created.id)
+            .expect("add");
+        complete_task(all_done.path(), &task.slug).expect("done");
+        assert!(!stop_hook_reminder(all_done.path()).contains("no resume context"));
     }
 
     #[test]
