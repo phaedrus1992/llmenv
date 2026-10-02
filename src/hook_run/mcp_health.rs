@@ -333,17 +333,13 @@ fn down_notice(down: &[DownServer]) -> Option<String> {
 
 pub(crate) fn effect_and_fix(name: &str) -> (&'static str, String) {
     match name {
-        MEMORY_MCP_NAME => {
-            let pidfile = crate::mcp::proxy::default_pid_path()
-                .map_or_else(|_| "the mcp-proxy pidfile".to_string(), |p| p.display().to_string());
-            (
-                "Memory recall and store do not work in this session.",
-                format!(
-                    "Run `llmenv export > /dev/null` to restart a stopped proxy. If the proxy runs \
-                     but does not answer, stop it with `kill $(cat {pidfile})` first."
-                ),
-            )
-        }
+        MEMORY_MCP_NAME => (
+            "Memory recall and store do not work in this session.",
+            "Run `llmenv export > /dev/null` to restart a stopped proxy. If the proxy runs but \
+             does not answer, stop it with `pkill -f 'mcp-proxy .*-- icm serve'` first. That \
+             matches the proxy by its command line, so it cannot hit a reused process id."
+                .to_string(),
+        ),
         CODEBASE_MEMORY_MCP_NAME => (
             "Code graph tools do not work in this session.",
             "Stop the stuck daemon with `pkill -f cbm-daemon-internal`, then run `/mcp` to reconnect."
@@ -664,6 +660,14 @@ mod tests {
         let text = down_notice(&down).expect("notice");
         assert!(text.contains("connection refused") && text.contains("timed out"));
         assert!(text.contains("llmenv export"), "ICM fix missing: {text}");
+        assert!(
+            text.contains("pkill -f"),
+            "ICM stop must match by command line: {text}"
+        );
+        assert!(
+            !text.contains("kill $(cat"),
+            "a recycled pid must not be signalled: {text}"
+        );
         assert!(
             text.contains("cbm-daemon-internal"),
             "CBM fix missing: {text}"
