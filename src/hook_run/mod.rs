@@ -1477,11 +1477,13 @@ fn run_inner(
             }
 
             Ok::<String, anyhow::Error>(out)
-        })?;
-        // After the store, so the child's recall can see this session's chunk.
+        });
+        // After the store, so the child's recall can see this session's chunk,
+        // and before `?`, so a failed dedup write or log step does not skip it.
         if client.is_some() {
             maybe_start_consolidation(event, &config, config_dir, &active);
         }
+        let out = out?;
         let t_end = std::time::Instant::now();
         emit_trace_timing(t0, t_config, Some(t_scope), Some(t_chunk), Some(t_end));
         Ok(out)
