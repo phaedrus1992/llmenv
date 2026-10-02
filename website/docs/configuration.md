@@ -630,7 +630,8 @@ semantic rules and store them back in ICM.
 (changed in v3.12.0) It reads only the memories of the current project, which it names the same way the session start does.
 It stores each rule under the topic `llmenv-consolidation-<project>`, so the rule comes back in that project's recall.
 Rules stored before v3.12.0 stay under the topic `llmenv-consolidation`.
-Before it stores a rule, it recalls the five closest rules in that topic and skips the new rule when one shares at least 80% of its words. It is off by default and skips a session with fewer than
+Before it stores a rule, it recalls the five closest rules in the project topic and in the old topic.
+It skips the new rule when one of them shares at least 80% of its words and has the same negation words, such as `not` or `never`. It is off by default and skips a session with fewer than
 three memories.
 
 (changed in v3.12.0) The trigger is the `session_end` hook (Claude Code's `SessionEnd`).
@@ -995,7 +996,7 @@ Fail-soft — any cache/IO error passes the read through silently rather than
 blocking.
 
 (changed in v3.12.0) The cache of a session resets on `/clear` and after a compaction, because the model no longer holds the file contents.
-The same reset applies to the `read_before_edit` record of `features.slippage`.
+The same reset applies to the `read_before_edit` record of `features.slippage` and to the `repeat_detect` counter.
 
 ```yaml
 features:
