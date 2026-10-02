@@ -4181,7 +4181,8 @@ fn find_local_memory_entry<'a>(
 ) -> Option<&'a crate::config::Memory> {
     let host_ids = active_host_ids(active);
     memory.iter().find(|m| {
-        m.when.iter().any(|t| active.tags.contains(t)) && host_ids.contains(&m.server_host)
+        crate::mcp::resolve::memory_is_tag_active(m, &active.tags)
+            && host_ids.contains(&m.server_host)
     })
 }
 
