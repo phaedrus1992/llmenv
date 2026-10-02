@@ -73,33 +73,35 @@ Session observations:
 #[derive(Debug)]
 struct MemoryRecord {
     summary: String,
+    topic: Option<String>,
 }
 
 /// Parse the non-compact `icm_memory_recall` output into structured records.
 /// Extracts the `summary` field from each record.
 fn parse_recall_output(text: &str) -> Vec<MemoryRecord> {
     let mut records = Vec::new();
-    let mut current_summary: Option<String> = None;
+    // A record counts only when it carries a `summary:` line.
+    let mut summary: Option<String> = None;
+    let mut topic: Option<String> = None;
     let mut in_record = false;
 
     for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("--- ") && trimmed.ends_with(" ---") {
-            if let Some(s) = current_summary.take() {
-                records.push(MemoryRecord { summary: s });
-            }
+            records.extend(summary.take().map(|summary| MemoryRecord {
+                summary,
+                topic: topic.take(),
+            }));
+            topic = None;
             in_record = true;
-            current_summary = None;
         } else if in_record && let Some(rest) = trimmed.strip_prefix("summary:") {
-            current_summary = Some(rest.trim().to_string());
+            summary = Some(rest.trim().to_string());
+        } else if in_record && let Some(rest) = trimmed.strip_prefix("topic:") {
+            topic = Some(rest.trim().to_string());
         }
     }
 
-    // Finalize the last record
-    if let Some(s) = current_summary {
-        records.push(MemoryRecord { summary: s });
-    }
-
+    records.extend(summary.map(|summary| MemoryRecord { summary, topic }));
     records
 }
 
@@ -411,7 +413,10 @@ async fn store_new_rules(client: &McpHttpClient, project: &str, rules: &[&str]) 
                 continue;
             }
             Err(e) => {
-                tracing::error!("consolidation: duplicate check failed, rule skipped: {e:#}");
+                tracing::error!(
+                    project,
+                    "consolidation: duplicate check failed, rule skipped: {e:#}"
+                );
                 continue;
             }
         }
@@ -680,6 +685,23 @@ mod tests {
         let text = "--- id-1 ---\n  importance: high\n  weight: 0.5\n";
         let records = parse_recall_output(text);
         assert_eq!(records.len(), 0);
+    }
+
+    #[test]
+    fn parse_recall_output_keeps_each_record_topic() {
+        let text =
+            "--- a ---\n  topic: t1\n  summary: one\n--- b ---\n  summary: two\n  topic: t2\n";
+        let got: Vec<_> = parse_recall_output(text)
+            .into_iter()
+            .map(|r| (r.summary, r.topic))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("one".to_string(), Some("t1".to_string())),
+                ("two".to_string(), Some("t2".to_string()))
+            ]
+        );
     }
 
     #[test]

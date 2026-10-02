@@ -46,7 +46,9 @@ fn run_consolidation_at(config_path: &std::path::Path) -> anyhow::Result<()> {
 
     // The parent starts this child in the session's directory, the same one the
     // scope detection above reads.
-    let cwd = std::env::current_dir()?;
+    let cwd = std::env::current_dir().map_err(|e| {
+        anyhow::anyhow!("cannot read the working directory to name the project: {e}")
+    })?;
     let Some(project) = crate::memory::project::session_project(&cwd) else {
         tracing::error!(
             "consolidation-run: no project name for {}; consolidation skipped",
