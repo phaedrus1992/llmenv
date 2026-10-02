@@ -33,7 +33,7 @@ const MAX_REASON_CHARS: usize = 300;
 
 /// Make `text` safe to put in the notice: one line, no control, bidirectional, or zero-width
 /// characters, and at most [`MAX_REASON_CHARS`] characters.
-fn tidy_reason(text: &str) -> String {
+pub(super) fn tidy_reason(text: &str) -> String {
     let spaced: String = text
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })

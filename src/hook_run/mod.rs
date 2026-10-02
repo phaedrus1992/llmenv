@@ -1450,10 +1450,15 @@ fn run_inner(
                 .await
                 {
                     Ok(text) => text,
-                    // The health notice below still has to reach the agent when memory is down.
+                    // The health notice below still has to reach the agent. So does this error:
+                    // the notice may be about another server, and the agent would otherwise
+                    // read an empty memory block as "nothing to recall".
                     Err(e) if health_notice.is_some() => {
                         eprintln!("llmenv: memory {event} skipped: {e}");
-                        String::new()
+                        format!(
+                            "llmenv: memory {event} failed: {}\n",
+                            mcp_health::tidy_reason(&format!("{e:#}"))
+                        )
                     }
                     Err(e) => return Err(e),
                 };

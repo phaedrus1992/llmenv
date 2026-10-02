@@ -1173,3 +1173,83 @@ fn session_start_says_when_the_health_check_could_not_run() {
         .success()
         .stdout(predicate::str::contains("MCP health check could not run"));
 }
+
+/// A stand-in ICM endpoint: it answers `initialize`, then fails every other request with a 500.
+#[cfg(unix)]
+const FAKE_ICM_FAILING_CALLS: &str = r#"#!/usr/bin/env python3
+import http.server, sys
+port = int(sys.argv[1])
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("content-length", 0)))
+        if b'"initialize"' in body:
+            self.send_response(200)
+            self.send_header("mcp-session-id", "s")
+            self.send_header("content-length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+        elif b"notifications/initialized" in body:
+            self.send_response(202)
+            self.send_header("content-length", "0")
+            self.end_headers()
+        else:
+            self.send_response(500)
+            self.send_header("content-length", "16")
+            self.end_headers()
+            self.wfile.write(b"upstream failure")
+    def log_message(self, *args):
+        pass
+http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
+"#;
+
+/// Kills the fake server when the test ends.
+#[cfg(unix)]
+struct ChildGuard(std::process::Child);
+
+#[cfg(unix)]
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+// #2358 review: with a notice for one server, a memory error from a different cause must
+// still reach the agent, not only stderr.
+#[cfg(unix)]
+#[test]
+fn session_start_shows_the_memory_error_when_another_server_needs_a_notice() {
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let script_dir = TempDir::new().unwrap();
+    let script = script_dir.path().join("fake_icm.py");
+    fs::write(&script, FAKE_ICM_FAILING_CALLS).unwrap();
+    let server = std::process::Command::new("python3")
+        .arg(&script)
+        .arg(port.to_string())
+        .spawn()
+        .unwrap();
+    let _guard = ChildGuard(server);
+    for _ in 0..100 {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let config = config_with_memory_addr("127.0.0.1", port).replace(
+        "      when: [test]\n\ncache:",
+        "      when: [test]\n  codebase_memory:\n    - when: [test]\n\ncache:",
+    );
+    assert!(config.contains("codebase_memory"), "{config}");
+    let (dir, config_path) = setup_config(&config);
+    let bin = TempDir::new().unwrap();
+    let mut cmd = hook_cmd(dir.path(), &config_path, "session_start");
+    with_fake_cbm(&mut cmd, bin.path(), "exit 1");
+    cmd.timeout(Duration::from_secs(25))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("codebase-memory-mcp"))
+        .stdout(predicate::str::contains("memory session_start failed"));
+}
