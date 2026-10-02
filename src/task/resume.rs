@@ -156,12 +156,29 @@ fn detect_issue(branch: &str) -> Option<u32> {
 /// The checked-out branch in `cwd`. `None` outside a git repo and on a detached HEAD.
 #[must_use]
 pub(crate) fn git_branch(cwd: &Path) -> Option<String> {
-    let output = llmenv_git::secure_git()
+    let output = match llmenv_git::secure_git()
         .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
         .current_dir(cwd)
         .output()
-        .ok()?;
+    {
+        Ok(output) => output,
+        Err(e) => {
+            eprintln!(
+                "llmenv: cannot run git in {} to detect the branch: {e}",
+                cwd.display()
+            );
+            return None;
+        }
+    };
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if branch_failure_is_unexpected(output.status.code(), &stderr) {
+            eprintln!(
+                "llmenv: git could not report the branch in {}: {}",
+                cwd.display(),
+                stderr.trim()
+            );
+        }
         return None;
     }
     let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -172,6 +189,14 @@ pub(crate) fn git_branch(cwd: &Path) -> Option<String> {
 /// terminal output.
 fn clean(text: &str) -> String {
     crate::util::strip_unsafe_chars(text)
+}
+
+/// Whether a failed `git symbolic-ref --quiet --short HEAD` is worth telling the user about.
+/// Exit 1 is a detached HEAD, and "not a git repository" is a directory outside git. Both are
+/// normal. Anything else, such as "dubious ownership" or a kill by signal, hides the branch
+/// for a reason the user can fix.
+fn branch_failure_is_unexpected(code: Option<i32>, stderr: &str) -> bool {
+    code != Some(1) && !stderr.contains("not a git repository")
 }
 
 fn extend_unique<T: PartialEq + Clone>(into: &mut Vec<T>, from: &[T]) {
@@ -373,6 +398,25 @@ mod tests {
         let detected = ResumeContext::detected(repo.path());
         assert_eq!(detected.branch.as_deref(), Some("fix/2358-bar"));
         assert_eq!(detected.issues, [2358]);
+    }
+
+    #[test]
+    fn branch_failure_is_unexpected_ignores_a_detached_head_and_a_directory_outside_git() {
+        assert!(!branch_failure_is_unexpected(Some(1), ""));
+        assert!(!branch_failure_is_unexpected(
+            Some(128),
+            "fatal: not a git repository (or any of the parent directories): .git"
+        ));
+    }
+
+    #[test]
+    fn branch_failure_is_unexpected_flags_ownership_and_signal_failures() {
+        assert!(branch_failure_is_unexpected(
+            Some(128),
+            "fatal: detected dubious ownership in repository at '/x'"
+        ));
+        assert!(branch_failure_is_unexpected(None, ""));
+        assert!(branch_failure_is_unexpected(Some(2), "usage: git"));
     }
 
     #[test]
