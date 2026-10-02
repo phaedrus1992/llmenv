@@ -459,24 +459,34 @@ pub enum ParentSpec<'a> {
     Detached,
 }
 
+/// Which session a new task joins.
+#[derive(Debug, Clone, Copy)]
+pub enum SessionChoice<'a> {
+    /// `--session <id>` given explicitly.
+    Named(&'a str),
+    /// No `--session`: the project's only open session, else the one the
+    /// caller owns ([`session::pick_open_session`], #2365).
+    Resolve(&'a session::EngineIdentity),
+}
+
 /// Create a new task in `open` state and persist it, tagged to a resolved
 /// session (mandatory-sessions design).
 ///
 /// # Errors
 /// Errors if `parent` is [`ParentSpec::Explicit`] and doesn't resolve to an
-/// existing task. Errors on session resolution: `session_id` explicit but
-/// unknown/closed → error; omitted with zero or 2+ open sessions for
-/// `project` → error telling the agent to run `llmenv task session start`
-/// or pass `--session`; omitted with exactly one open session for `project`
-/// → auto-resolved.
+/// existing task. Errors on session resolution: [`SessionChoice::Named`]
+/// unknown/closed → error; [`SessionChoice::Resolve`] with no open session
+/// for `project`, or with 2+ open and not exactly one owned by the caller →
+/// error telling the agent to run `llmenv task session start` or pass
+/// `--session`; otherwise auto-resolved.
 pub fn add_task(
     state_dir: &Path,
     title: &str,
     parent: ParentSpec<'_>,
-    session_id: Option<&str>,
+    session: SessionChoice<'_>,
     project: &str,
 ) -> anyhow::Result<Task> {
-    let resolved_session = resolve_session_for_add(state_dir, session_id, project)?;
+    let resolved_session = resolve_session_for_add(state_dir, session, project)?;
     let task = add_task_for_session(state_dir, title, parent, &resolved_session)?;
     touch_task_session(state_dir, &task);
     Ok(task)
@@ -533,39 +543,42 @@ pub fn add_task_for_session(
 }
 
 /// Resolve which session a `task add` belongs to, per the mandatory-sessions
-/// rules. An explicit `session_id` is honored as long as it names an
-/// existing, open session (any project — an explicit id is a deliberate
-/// choice). Omitted, it auto-resolves to the current project's single open
-/// session, or errors on zero/2+.
+/// rules. An explicit id is honored as long as it names an existing, open
+/// session (any project — an explicit id is a deliberate choice). Otherwise
+/// it resolves through [`session::pick_open_session`].
 fn resolve_session_for_add(
     state_dir: &Path,
-    session_id: Option<&str>,
+    session: SessionChoice<'_>,
     project: &str,
 ) -> anyhow::Result<String> {
-    if let Some(id) = session_id {
-        // Fallible `try_list_sessions` rather than the tolerant `list_sessions`:
-        // an unreadable store must error out here rather than be misread as "no
-        // such session" (#1112) — this is the same resolution step `TaskCreate`
-        // (via `add_task`) runs through, so the hook redirect's own unreadable-
-        // store guard in `task_tools::create` would otherwise be undone here.
-        let exists_open = session::try_list_sessions(state_dir)?
-            .into_iter()
-            .any(|s| s.id == id && s.is_open());
-        if !exists_open {
-            anyhow::bail!("session '{id}' does not exist or is not open");
+    let owner = match session {
+        SessionChoice::Named(id) => {
+            // Fallible `try_list_sessions` rather than the tolerant `list_sessions`:
+            // an unreadable store must error out here rather than be misread as "no
+            // such session" (#1112) — this is the same resolution step `TaskCreate`
+            // (via `add_task`) runs through, so the hook redirect's own unreadable-
+            // store guard in `task_tools::create` would otherwise be undone here.
+            let exists_open = session::try_list_sessions(state_dir)?
+                .into_iter()
+                .any(|s| s.id == id && s.is_open());
+            if !exists_open {
+                anyhow::bail!("session '{id}' does not exist or is not open");
+            }
+            return Ok(id.to_string());
         }
-        return Ok(id.to_string());
-    }
+        SessionChoice::Resolve(owner) => owner,
+    };
     let open = session::try_open_sessions_for_project(state_dir, project)?;
-    match open.len() {
-        0 => anyhow::bail!(
+    match session::pick_open_session(open, owner) {
+        Ok(session) => Ok(session.id),
+        Err(session::PickError::NoneOpen) => anyhow::bail!(
             "no open session for this project — run `llmenv task session start` first, \
              or pass --session <id>"
         ),
-        1 => Ok(open[0].id.clone()),
-        n => anyhow::bail!(
-            "{n} open sessions for this project — pass --session <id>, or see \
-             `llmenv task session ls`"
+        Err(e) => anyhow::bail!(
+            "{}",
+            e.ambiguity_message("pass --session <id>, or see `llmenv task session ls`")
+                .unwrap_or_default()
         ),
     }
 }
@@ -627,7 +640,10 @@ pub fn start_task(state_dir: &Path, input: &str, force: bool) -> anyhow::Result<
         let slug = resolve_identifier(state_dir, input)?;
         let mut task = load_task(state_dir, &slug)?;
         if task.state == TaskState::Done {
-            anyhow::bail!("task '{slug}' is already done; cannot start it again");
+            anyhow::bail!(
+                "task '{slug}' is already done; pass --reopen to move it back to open and \
+                 start it again"
+            );
         }
         if !force && !task.blocked_on.is_empty() {
             let all_tasks = list_tasks(state_dir);
@@ -719,12 +735,74 @@ pub fn delete_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
 }
 
 /// Mark a task done. Idempotent from any prior state (fast-path completion).
-pub fn done_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
+/// Production callers use [`complete_task`], which also reports the prior
+/// state; tests use this shorter form.
+#[cfg(test)]
+pub(crate) fn done_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
+    complete_task(state_dir, input).map(|c| c.task)
+}
+
+/// The result of [`complete_task`]: the saved task and the state it left.
+#[derive(Debug, Clone)]
+pub struct Completed {
+    pub task: Task,
+    prior: TaskState,
+}
+
+impl Completed {
+    /// A warning when the task went from `open` straight to `done`. That jump
+    /// often means a step was closed without its work (#2338), so the CLI
+    /// says so and names the way back.
+    #[must_use]
+    pub fn never_started_warning(&self) -> Option<String> {
+        (self.prior == TaskState::Open).then(|| {
+            format!(
+                "Note: '{slug}' was never started (open -> done). If its work is not \
+                 finished, run `llmenv task start --reopen {slug}`.",
+                slug = self.task.slug
+            )
+        })
+    }
+}
+
+/// [`done_task`], but also returns the state the task was in before.
+///
+/// # Errors
+/// Errors if `input` does not resolve to a task, or the save fails.
+pub fn complete_task(state_dir: &Path, input: &str) -> anyhow::Result<Completed> {
+    let completed = with_store_lock(state_dir, || {
+        let slug = resolve_identifier(state_dir, input)?;
+        let mut task = load_task(state_dir, &slug)?;
+        let prior = task.state;
+        task.state = TaskState::Done;
+        task.updated_at = now_rfc3339();
+        save_task(state_dir, &task)?;
+        Ok(Completed { task, prior })
+    })?;
+    touch_task_session(state_dir, &completed.task);
+    Ok(completed)
+}
+
+/// Move a `done` task back to `open`, with a note that records the reopen. A
+/// task in any other state is returned unchanged, so `task start --reopen`
+/// works on a task that is not done.
+///
+/// # Errors
+/// Errors if `input` does not resolve to a task, or the save fails.
+pub fn reopen_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
     let task = with_store_lock(state_dir, || {
         let slug = resolve_identifier(state_dir, input)?;
         let mut task = load_task(state_dir, &slug)?;
-        task.state = TaskState::Done;
-        task.updated_at = now_rfc3339();
+        if task.state != TaskState::Done {
+            return Ok(task);
+        }
+        let now = now_rfc3339();
+        task.state = TaskState::Open;
+        task.notes.push(TaskNote {
+            at: now.clone(),
+            text: "Reopened (`task start --reopen`) after it was marked done.".to_string(),
+        });
+        task.updated_at = now;
         save_task(state_dir, &task)?;
         Ok(task)
     })?;
@@ -967,8 +1045,10 @@ pub fn session_start_reminder(state_dir: &Path) -> String {
 /// Stop hook (end-of-turn skip detection): if `wip` tasks remain at the end
 /// of a turn, list them so the agent can update or finish its own.
 ///
-/// Only `wip` tasks are actionable at end-of-turn, so only they surface here.
-/// `waiting` tasks are deliberately silent on Stop — they're correctly paused
+/// Only `wip` tasks are listed one by one. A session with `open` tasks and
+/// nothing in progress gets one line that names its next task
+/// ([`idle_sessions`], #2338), because an agent that adds steps and never
+/// starts them needs the reminder most. `waiting` tasks are deliberately silent on Stop — they're correctly paused
 /// on something outside the agent's control, and re-injecting their FYI on
 /// every turn nags about a state that is meant to be quiet (they still show at
 /// session start via [`session_start_reminder`]).
@@ -1000,7 +1080,90 @@ pub fn stop_hook_reminder(state_dir: &Path) -> String {
              `llmenv task note <slug> \"...\"` the blocker instead of repeating status.",
         ),
         session_finish_reminders(state_dir),
+        idle_session_reminders(state_dir),
     ])
+}
+
+/// An open session that holds `open` tasks while none of its tasks is `wip`
+/// or `waiting`: work is planned, but nothing is in progress (#2338).
+#[derive(Debug, Clone)]
+struct IdleSession {
+    session: session::Session,
+    /// The task to start next: the first actionable `open` task in execution
+    /// order, else the first `open` task when every one is blocked.
+    next: Task,
+    open_count: usize,
+}
+
+/// Every open session for `project` that [`IdleSession`] describes. Kept
+/// separate from the Stop wording so other end-of-turn checks can share it
+/// (#2339). A `waiting` task makes a session quiet on purpose, so such a
+/// session is not idle.
+#[must_use]
+fn idle_sessions(state_dir: &Path, project: &str) -> Vec<IdleSession> {
+    let all_tasks = list_tasks(state_dir);
+    let by_slug: HashMap<&str, &Task> = all_tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
+    session::open_sessions_for_project(state_dir, project)
+        .into_iter()
+        .filter_map(|session| {
+            let tasks: Vec<Task> = all_tasks
+                .iter()
+                .filter(|t| t.session.as_deref() == Some(session.id.as_str()))
+                .cloned()
+                .collect();
+            if tasks
+                .iter()
+                .any(|t| matches!(t.state, TaskState::Wip | TaskState::Waiting))
+            {
+                return None;
+            }
+            let order = execution_order(&tasks);
+            let open: Vec<&Task> = order
+                .iter()
+                .filter(|t| t.state == TaskState::Open)
+                .collect();
+            let next = open
+                .iter()
+                .find(|t| is_actionable(t, &by_slug))
+                .or_else(|| open.first())?;
+            Some(IdleSession {
+                next: (*next).clone(),
+                open_count: open.len(),
+                session,
+            })
+        })
+        .collect()
+}
+
+/// The Stop reminder for each [`IdleSession`] in the current project. Like
+/// [`session_finish_reminders`], it cannot tell whose session it names
+/// (#1028), so the nudge is conditioned on the agent recognizing it.
+fn idle_session_reminders(state_dir: &Path) -> String {
+    let project = match project::current_tag() {
+        Ok(project) => project,
+        Err(e) => {
+            tracing::error!("project::current_tag failed, so the task reminder is skipped: {e:#}");
+            return String::new();
+        }
+    };
+    idle_sessions(state_dir, &project)
+        .iter()
+        .map(|idle| {
+            let id = &idle.session.id;
+            let label = idle.session.name.as_deref().unwrap_or(id.as_str());
+            format!(
+                "Session '{label}' ({id}) has {count} open task(s) and none in progress. If \
+                 you recognize this as your own session, run `llmenv task start {next}` \
+                 ({title}) before you work on that step, or close finished work with \
+                 `llmenv task done <slug>` / `llmenv task session finish {id}`. If you don't \
+                 recognize it, it belongs to a different session — leave it alone.",
+                count = idle.open_count,
+                next = idle.next.slug,
+                title = idle.next.title,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// Filter `tasks` down to those attributable to the current project
@@ -1014,7 +1177,7 @@ fn tasks_for_current_project(state_dir: &Path, tasks: Vec<Task>) -> Vec<Task> {
     let project = match project::current_tag() {
         Ok(project) => project,
         Err(e) => {
-            tracing::debug!("project::current_tag failed (non-fatal): {e}");
+            tracing::error!("project::current_tag failed, so the task reminder is skipped: {e:#}");
             return Vec::new();
         }
     };
@@ -1172,7 +1335,7 @@ fn session_finish_reminders(state_dir: &Path) -> String {
     let project = match project::current_tag() {
         Ok(project) => project,
         Err(e) => {
-            tracing::debug!("project::current_tag failed (non-fatal): {e}");
+            tracing::error!("project::current_tag failed, so the task reminder is skipped: {e:#}");
             return String::new();
         }
     };
@@ -1279,6 +1442,13 @@ mod tests {
     use tempfile::TempDir;
 
     const PROJECT: &str = "test-project-0000000000";
+
+    /// A caller with no engine identity, as from a plain terminal.
+    static NO_OWNER: session::EngineIdentity = session::EngineIdentity {
+        session_id: None,
+        pid: None,
+    };
+    const ANYONE: SessionChoice<'static> = SessionChoice::Resolve(&NO_OWNER);
 
     /// Create a task tagged to a fixed test session id, exercising the same
     /// creation logic (`add_task_for_session`) the mandatory-session path
@@ -2268,9 +2438,209 @@ mod tests {
     }
 
     #[test]
-    fn stop_hook_reminder_empty_when_no_wip_tasks() {
+    fn stop_hook_reminder_empty_when_store_is_empty() {
         let dir = TempDir::new().expect("test");
         assert!(stop_hook_reminder(dir.path()).is_empty());
+    }
+
+    // --- open tasks, nothing started (#2338) ---
+
+    /// A real session in `project` holding two `open` tasks, chained the way
+    /// `task add` chains them by default. Returns (session id, first, second).
+    fn idle_session_in_project(dir: &Path, project: &str) -> (String, Task, Task) {
+        let session_id = session_for_project(dir, project);
+        let first =
+            add_task_for_session(dir, "Step 1", ParentSpec::Auto, &session_id).expect("test");
+        let second =
+            add_task_for_session(dir, "Step 2", ParentSpec::Auto, &session_id).expect("test");
+        (session_id, first, second)
+    }
+
+    #[test]
+    fn stop_hook_reminder_flags_open_tasks_when_none_is_wip() {
+        let dir = TempDir::new().expect("test");
+        let (session_id, first, second) = idle_session_in_project(dir.path(), &current_project());
+
+        let reminder = stop_hook_reminder(dir.path());
+        assert!(
+            reminder.contains(&session_id),
+            "must name the session: {reminder}"
+        );
+        assert!(
+            reminder.contains(&format!("llmenv task start {}", first.slug)),
+            "must name the next open task to start: {reminder}"
+        );
+        assert!(
+            !reminder.contains(&second.slug),
+            "names the next task only: {reminder}"
+        );
+        assert!(reminder.contains("2 open task(s)"), "{reminder}");
+        assert!(
+            reminder.contains("recognize"),
+            "must not presume ownership: {reminder}"
+        );
+    }
+
+    #[test]
+    fn stop_hook_reminder_skips_idle_check_for_session_with_wip_task() {
+        let dir = TempDir::new().expect("test");
+        let (session_id, first, second) = idle_session_in_project(dir.path(), &current_project());
+        start_task(dir.path(), &first.slug, false).expect("test");
+
+        let reminder = stop_hook_reminder(dir.path());
+        assert!(
+            reminder.contains(&first.slug),
+            "wip reminder still fires: {reminder}"
+        );
+        assert!(!reminder.contains(&second.slug), "{reminder}");
+        assert!(!reminder.contains("none in progress"), "{reminder}");
+        assert!(reminder.contains(&session_id));
+    }
+
+    #[test]
+    fn stop_hook_reminder_skips_idle_check_for_session_with_waiting_task() {
+        let dir = TempDir::new().expect("test");
+        let (_, first, second) = idle_session_in_project(dir.path(), &current_project());
+        start_task(dir.path(), &first.slug, false).expect("test");
+        wait_task(dir.path(), &first.slug, "spec review").expect("test");
+
+        // A `waiting` task means the session is paused on purpose; stay quiet.
+        let reminder = stop_hook_reminder(dir.path());
+        assert!(!reminder.contains(&second.slug), "{reminder}");
+    }
+
+    #[test]
+    fn stop_hook_reminder_skips_idle_session_from_other_project() {
+        let dir = TempDir::new().expect("test");
+        let (_, first, _) = idle_session_in_project(dir.path(), "other-project-0000000000");
+        assert!(!stop_hook_reminder(dir.path()).contains(&first.slug));
+    }
+
+    #[test]
+    fn idle_sessions_prefers_first_unblocked_open_task() {
+        let dir = TempDir::new().expect("test");
+        let project = current_project();
+        let (session_id, first, second) = idle_session_in_project(dir.path(), &project);
+        block_task(dir.path(), &first.slug, &second.slug).expect("test");
+
+        let idle = idle_sessions(dir.path(), &project);
+        assert_eq!(idle.len(), 1);
+        assert_eq!(idle[0].session.id, session_id);
+        assert_eq!(idle[0].next.slug, second.slug);
+        assert_eq!(idle[0].open_count, 2);
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(32))]
+
+        // For any mix of task states per session: a session is idle exactly
+        // when it has an open task and no wip or waiting task, and its next
+        // task is open (#2338).
+        #[test]
+        fn idle_sessions_invariants(
+            plan in proptest::collection::vec(
+                proptest::collection::vec(0u8..4, 0..5),
+                1..4,
+            ),
+        ) {
+            let dir = TempDir::new().unwrap();
+            let mut expected = std::collections::BTreeMap::new();
+            for states in &plan {
+                let sid = session_for_project(dir.path(), PROJECT);
+                for (i, state) in states.iter().enumerate() {
+                    let t = add_task_for_session(
+                        dir.path(),
+                        &format!("t{i}"),
+                        ParentSpec::Detached,
+                        &sid,
+                    )
+                    .unwrap();
+                    match state {
+                        1 => drop(start_task(dir.path(), &t.slug, true).unwrap()),
+                        2 => {
+                            start_task(dir.path(), &t.slug, true).unwrap();
+                            wait_task(dir.path(), &t.slug, "r").unwrap();
+                        }
+                        3 => drop(done_task(dir.path(), &t.slug).unwrap()),
+                        _ => {}
+                    }
+                }
+                let open = states.iter().filter(|s| **s == 0).count();
+                let busy = states.iter().any(|s| matches!(s, 1 | 2));
+                if open > 0 && !busy {
+                    expected.insert(sid, open);
+                }
+            }
+            let idle = idle_sessions(dir.path(), PROJECT);
+            let got: std::collections::BTreeMap<String, usize> = idle
+                .iter()
+                .map(|i| (i.session.id.clone(), i.open_count))
+                .collect();
+            proptest::prop_assert_eq!(got, expected);
+            for i in &idle {
+                proptest::prop_assert_eq!(i.next.state, TaskState::Open);
+                proptest::prop_assert_eq!(i.next.session.as_deref(), Some(i.session.id.as_str()));
+            }
+        }
+    }
+
+    // --- done without start, reopen (#2338) ---
+
+    #[test]
+    fn complete_task_reports_prior_state() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Never started", None).expect("test");
+        let completed = complete_task(dir.path(), &task.slug).expect("test");
+        assert_eq!(completed.prior, TaskState::Open);
+        assert_eq!(completed.task.state, TaskState::Done);
+        let warning = completed
+            .never_started_warning()
+            .expect("open -> done must warn");
+        assert!(warning.contains(&format!("llmenv task start --reopen {}", task.slug)));
+    }
+
+    #[test]
+    fn complete_task_after_start_has_no_warning() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Started", None).expect("test");
+        start_task(dir.path(), &task.slug, false).expect("test");
+        let completed = complete_task(dir.path(), &task.slug).expect("test");
+        assert_eq!(completed.prior, TaskState::Wip);
+        assert!(completed.never_started_warning().is_none());
+    }
+
+    #[test]
+    fn start_task_on_done_task_points_at_reopen() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Closed early", None).expect("test");
+        done_task(dir.path(), &task.slug).expect("test");
+        let err = start_task(dir.path(), &task.slug, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--reopen"), "{err}");
+    }
+
+    #[test]
+    fn reopen_task_moves_done_task_back_to_open_with_note() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Closed early", None).expect("test");
+        done_task(dir.path(), &task.slug).expect("test");
+
+        let reopened = reopen_task(dir.path(), &task.slug).expect("test");
+        assert_eq!(reopened.state, TaskState::Open);
+        assert!(reopened.notes.iter().any(|n| n.text.contains("Reopened")));
+        let started = start_task(dir.path(), &task.slug, false).expect("test");
+        assert_eq!(started.state, TaskState::Wip);
+    }
+
+    #[test]
+    fn reopen_task_leaves_non_done_task_unchanged() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Working", None).expect("test");
+        let started = start_task(dir.path(), &task.slug, false).expect("test");
+        let after = reopen_task(dir.path(), &task.slug).expect("test");
+        assert_eq!(after.state, TaskState::Wip);
+        assert_eq!(after.notes, started.notes);
     }
 
     #[test]
@@ -2736,7 +3106,7 @@ mod tests {
             dir.path(),
             "Do thing",
             ParentSpec::Detached,
-            Some(&session.id),
+            SessionChoice::Named(&session.id),
             PROJECT,
         )
         .expect("test");
@@ -2751,7 +3121,7 @@ mod tests {
                 dir.path(),
                 "Do thing",
                 ParentSpec::Detached,
-                Some("no-such-session"),
+                SessionChoice::Named("no-such-session"),
                 PROJECT
             )
             .is_err()
@@ -2764,16 +3134,28 @@ mod tests {
         let session = created(
             start_session(dir.path(), Some("s"), None, PROJECT, StartDecision::Auto).expect("test"),
         );
-        let task =
-            add_task(dir.path(), "Do thing", ParentSpec::Detached, None, PROJECT).expect("test");
+        let task = add_task(
+            dir.path(),
+            "Do thing",
+            ParentSpec::Detached,
+            ANYONE,
+            PROJECT,
+        )
+        .expect("test");
         assert_eq!(task.session, Some(session.id));
     }
 
     #[test]
     fn add_task_errors_with_zero_open_sessions_for_project() {
         let dir = TempDir::new().expect("test");
-        let err =
-            add_task(dir.path(), "Do thing", ParentSpec::Detached, None, PROJECT).unwrap_err();
+        let err = add_task(
+            dir.path(),
+            "Do thing",
+            ParentSpec::Detached,
+            ANYONE,
+            PROJECT,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("session start"));
     }
 
@@ -2796,8 +3178,14 @@ mod tests {
             StartDecision::New,
         )
         .expect("test");
-        let err =
-            add_task(dir.path(), "Do thing", ParentSpec::Detached, None, PROJECT).unwrap_err();
+        let err = add_task(
+            dir.path(),
+            "Do thing",
+            ParentSpec::Detached,
+            ANYONE,
+            PROJECT,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("--session"));
     }
 
@@ -2812,7 +3200,16 @@ mod tests {
             StartDecision::Auto,
         )
         .expect("test");
-        assert!(add_task(dir.path(), "Do thing", ParentSpec::Detached, None, PROJECT).is_err());
+        assert!(
+            add_task(
+                dir.path(),
+                "Do thing",
+                ParentSpec::Detached,
+                ANYONE,
+                PROJECT
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2826,7 +3223,7 @@ mod tests {
             dir.path(),
             "Do thing",
             ParentSpec::Detached,
-            Some(&session.id),
+            SessionChoice::Named(&session.id),
             PROJECT,
         )
         .expect("test");

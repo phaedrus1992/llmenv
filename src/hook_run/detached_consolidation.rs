@@ -21,27 +21,32 @@ const CONSOLIDATION_TIMEOUT: Duration = Duration::from_secs(30);
 /// # Errors
 /// Malformed or missing config, no active memory backend, invalid backend URL,
 /// or an MCP call failure.
-pub fn run_consolidation() -> anyhow::Result<()> {
-    run_consolidation_inner().inspect_err(|e| {
-        tracing::error!("consolidation-run: detached consolidation failed: {e}");
+pub fn run_consolidation(config_path: &std::path::Path) -> anyhow::Result<()> {
+    run_consolidation_at(config_path).inspect_err(|e| {
+        tracing::error!("consolidation-run: detached consolidation failed: {e:#}");
     })
 }
 
 // Real config load, scope detection, and a live MCP network call end to end
-// — there's no seam here to inject a fake config/client without a larger
+// — there is no seam here to inject a fake config/client without a larger
 // dependency-injection refactor, so mutation testing (which would otherwise
-// flag a mutant that replaces this whole body with `Ok(())`) can't say
-// anything useful about it. `run_consolidation_inner_does_not_panic` below
-// still exercises the real function and asserts the no-panic invariant.
+// flag a mutant that replaces this whole body with `Ok(())`) cannot say
+// anything useful about it. The tests below still exercise the real function
+// through `run_consolidation` and assert the no-panic invariant.
 #[mutants::skip]
-fn run_consolidation_inner() -> anyhow::Result<()> {
-    let config_path = crate::paths::config_path()?;
-    let config = crate::config::Config::load(&config_path)?;
+fn run_consolidation_at(config_path: &std::path::Path) -> anyhow::Result<()> {
+    let config = crate::config::Config::load(config_path)?;
     let env = crate::scope::matcher::Env::detect_for_config(&config);
     let active = crate::scope::evaluate(&config, &env);
     let config_dir = config_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
+    // The merged list, so a bundle-declared memory entry's consolidation
+    // settings count (#2355), the same as its endpoint does.
+    let merged = crate::memory::merged_memory(&config, config_dir, &active)?;
+    let Some(cc) = consolidation::active_consolidation(&merged.memory, &active.tags) else {
+        return Ok(());
+    };
     let url = crate::memory::memory_url(&config, config_dir, &active)?.into_url()?;
     let client = McpHttpClient::new(url, CONSOLIDATION_TIMEOUT)
         .map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))?;
@@ -49,7 +54,7 @@ fn run_consolidation_inner() -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    let _result = rt.block_on(consolidation::run(&config, &client))?;
+    let _result = rt.block_on(consolidation::run(cc, &client))?;
     Ok(())
 }
 
@@ -59,21 +64,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn run_consolidation_inner_does_not_panic() {
-        // The inner function returns a `Result` and never unwraps internally,
-        // so it either succeeds or returns a descriptive error — either is
-        // valid and the important invariant is no unwrap/panic.
-        let result = run_consolidation_inner();
-        match result {
-            Ok(()) => {} // all good — config was found and consolidation ran
-            Err(e) => assert!(!e.to_string().is_empty(), "expected a descriptive error"),
-        }
+    fn run_consolidation_reports_a_missing_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = run_consolidation(&dir.path().join("config.yaml")).unwrap_err();
+        assert!(!format!("{err:#}").is_empty());
     }
 
     #[test]
-    fn run_consolidation_entrypoint_safe() {
-        // Outer entrypoint must not panic even when inner fails (errors are
-        // caught by inspect_err and logged at warn level).
-        let _ = run_consolidation();
+    fn run_consolidation_is_a_no_op_without_enabled_consolidation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "adapter:\n  engine: claude-code\n").unwrap();
+        run_consolidation(&path).unwrap();
     }
 }

@@ -46,9 +46,157 @@ pub struct Session {
     /// explicitly finished.
     #[serde(default)]
     abandoned_at: Option<String>,
+    /// The engine session (conversation) id that started or last resumed
+    /// this session. With two or more sessions open, auto-resolution picks
+    /// the one this conversation owns (#2365).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner_session: Option<String>,
+    /// The engine process id that started or last resumed this session.
+    /// It survives a `/clear`, which starts a new conversation id, so the
+    /// `session start` checkpoint can say "this was yours" (#2365).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner_pid: Option<u32>,
+}
+
+/// Who is calling: the engine conversation and process, when the engine
+/// exposes them. Both are `None` outside an engine (a plain terminal), and
+/// resolution then works as before ownership existed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EngineIdentity {
+    pub(crate) session_id: Option<String>,
+    pub(crate) pid: Option<u32>,
+}
+
+impl EngineIdentity {
+    /// Read the identity from the environment. Claude Code sets
+    /// `CLAUDE_CODE_SESSION_ID` and `CLAUDE_PID` for every tool subprocess.
+    /// An empty or non-numeric value counts as absent.
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self::from_vars(
+            std::env::var("CLAUDE_CODE_SESSION_ID").ok().as_deref(),
+            std::env::var("CLAUDE_PID").ok().as_deref(),
+        )
+    }
+
+    /// The parse behind [`Self::from_env`], split out so tests need no env.
+    #[must_use]
+    fn from_vars(session_id: Option<&str>, pid: Option<&str>) -> Self {
+        Self {
+            session_id: session_id
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            pid: pid.and_then(|p| p.trim().parse().ok()),
+        }
+    }
+
+    /// An identity with only a conversation id, as a hook payload gives it.
+    #[must_use]
+    pub fn from_session_id(session_id: Option<&str>) -> Self {
+        Self::from_vars(session_id, None)
+    }
+}
+
+/// How [`pick_open_session`] failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickError {
+    /// No session is open for the project.
+    NoneOpen,
+    /// Two or more sessions are open, and not exactly one belongs to the
+    /// caller. `owned` counts the ones that do; `identified` says whether the
+    /// caller has a conversation id at all.
+    Ambiguous {
+        open: usize,
+        owned: usize,
+        identified: bool,
+    },
+}
+
+impl PickError {
+    /// The error text for [`Self::Ambiguous`], ending in `fix` (the caller's
+    /// own "pass an id" wording). `None` for [`Self::NoneOpen`], whose text
+    /// each caller words itself.
+    #[must_use]
+    pub fn ambiguity_message(self, fix: &str) -> Option<String> {
+        let Self::Ambiguous {
+            open,
+            owned,
+            identified,
+        } = self
+        else {
+            return None;
+        };
+        Some(if !identified {
+            format!("{open} open sessions for this project — {fix}")
+        } else if owned == 0 {
+            format!(
+                "{open} open sessions for this project, and none of them is owned by this \
+                 conversation — {fix}"
+            )
+        } else {
+            format!(
+                "{open} open sessions for this project, and this conversation owns {owned} of \
+                 them — {fix}"
+            )
+        })
+    }
+}
+
+/// Pick the session an id-less command means: the only open one, else the
+/// only open one that `owner`'s conversation started or resumed (#2365).
+///
+/// # Errors
+/// [`PickError::NoneOpen`] when `open` is empty. [`PickError::Ambiguous`]
+/// when two or more are open and zero or two or more belong to `owner`.
+pub fn pick_open_session(
+    mut open: Vec<Session>,
+    owner: &EngineIdentity,
+) -> Result<Session, PickError> {
+    match open.len() {
+        0 => return Err(PickError::NoneOpen),
+        1 => return Ok(open.remove(0)),
+        _ => {}
+    }
+    let count = open.len();
+    let mut owned: Vec<Session> = open
+        .into_iter()
+        .filter(|s| {
+            owner.session_id.is_some() && s.owner_session.as_deref() == owner.session_id.as_deref()
+        })
+        .collect();
+    if owned.len() == 1 {
+        return Ok(owned.remove(0));
+    }
+    Err(PickError::Ambiguous {
+        open: count,
+        owned: owned.len(),
+        identified: owner.session_id.is_some(),
+    })
+}
+
+/// The fields `session start` writes into a new or resumed session.
+#[derive(Debug, Clone, Copy)]
+pub struct StartRequest<'a> {
+    pub name: Option<&'a str>,
+    pub description: Option<&'a str>,
+    pub project: &'a str,
+    pub owner: &'a EngineIdentity,
 }
 
 impl Session {
+    /// Record `owner` as the caller that owns this session. A `None` field
+    /// in `owner` keeps the stored value, so a call from outside an engine
+    /// does not erase what an engine wrote.
+    fn claim(&mut self, owner: &EngineIdentity) {
+        if let Some(id) = &owner.session_id {
+            self.owner_session = Some(id.clone());
+        }
+        if let Some(pid) = owner.pid {
+            self.owner_pid = Some(pid);
+        }
+    }
+
     /// A session is open when it has been neither finished nor abandoned.
     /// The single source of truth for the predicate — callers outside this
     /// module (the CLI's `session ls` filter, `add_task`'s resolver) reuse
@@ -267,31 +415,29 @@ fn is_not_found(err: &anyhow::Error) -> bool {
 }
 
 /// Start, resume, replace, or create-alongside a session per `decision` —
-/// the `session start` resume/replace/new checkpoint.
+/// the `session start` resume/replace/new checkpoint. The created or resumed
+/// session records `request.owner` as its owner (#2365).
 ///
 /// # Errors
 /// `Auto`: errors listing every existing open same-project session (with
-/// id/name/description/idle duration) when one or more already exist.
+/// id/name/description/idle duration, and which ones `request.owner`
+/// started) when one or more already exist.
 /// `Resume`: errors if the named session doesn't exist or isn't open.
-pub fn start_session(
+pub fn start_session_as(
     state_dir: &Path,
-    name: Option<&str>,
-    description: Option<&str>,
-    project: &str,
+    request: &StartRequest<'_>,
     decision: StartDecision,
 ) -> anyhow::Result<StartOutcome> {
+    let project = request.project;
     super::with_store_lock(state_dir, || match decision {
         StartDecision::Auto => {
-            let existing = open_sessions_for_project(state_dir, project);
+            // Fallible read: an unreadable store must not look empty and get a
+            // duplicate session on top of it (#1112).
+            let existing = try_open_sessions_for_project(state_dir, project)?;
             if !existing.is_empty() {
-                anyhow::bail!(checkpoint_error(&existing));
+                anyhow::bail!(checkpoint_error(&existing, request.owner));
             }
-            Ok(StartOutcome::Created(create_session(
-                state_dir,
-                name,
-                description,
-                project,
-            )?))
+            Ok(StartOutcome::Created(create_session(state_dir, request)?))
         }
         StartDecision::Resume(id) => {
             let mut session = load_session(state_dir, &id)
@@ -300,51 +446,65 @@ pub fn start_session(
                 anyhow::bail!("session '{id}' is closed and cannot be resumed");
             }
             session.last_activity = now_rfc3339();
+            session.claim(request.owner);
             save_session(state_dir, &session)?;
             Ok(StartOutcome::Resumed(session))
         }
         StartDecision::Replace => {
-            let existing = open_sessions_for_project(state_dir, project);
+            let existing = try_open_sessions_for_project(state_dir, project)?;
             let mut abandoned = Vec::with_capacity(existing.len());
             for session in existing {
                 abandoned.push(abandon_session(state_dir, session)?);
             }
-            let session = create_session(state_dir, name, description, project)?;
+            let session = create_session(state_dir, request)?;
             Ok(StartOutcome::Replaced { session, abandoned })
         }
-        StartDecision::New => Ok(StartOutcome::Created(create_session(
-            state_dir,
-            name,
-            description,
-            project,
-        )?)),
+        StartDecision::New => Ok(StartOutcome::Created(create_session(state_dir, request)?)),
     })
 }
 
-fn create_session(
+/// [`start_session_as`] with no engine identity, for tests that do not
+/// exercise ownership.
+pub fn start_session(
     state_dir: &Path,
     name: Option<&str>,
     description: Option<&str>,
     project: &str,
-) -> anyhow::Result<Session> {
+    decision: StartDecision,
+) -> anyhow::Result<StartOutcome> {
+    let owner = EngineIdentity::default();
+    let request = StartRequest {
+        name,
+        description,
+        project,
+        owner: &owner,
+    };
+    start_session_as(state_dir, &request, decision)
+}
+
+fn create_session(state_dir: &Path, request: &StartRequest<'_>) -> anyhow::Result<Session> {
     let dir = sessions_dir(state_dir);
     llmenv_paths::create_dir_owner_only(&dir)?;
-    let base_slug = name
+    let base_slug = request
+        .name
         .map(slugify)
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "session".to_string());
     let id = unique_slug(&dir, &base_slug);
     let now = now_rfc3339();
-    let session = Session {
+    let mut session = Session {
         id,
-        name: name.map(str::to_string),
-        project: project.to_string(),
-        description: description.map(str::to_string),
+        name: request.name.map(str::to_string),
+        project: request.project.to_string(),
+        description: request.description.map(str::to_string),
         started_at: now.clone(),
         last_activity: now,
         finished_at: None,
         abandoned_at: None,
+        owner_session: None,
+        owner_pid: None,
     };
+    session.claim(request.owner);
     save_session(state_dir, &session)?;
     Ok(session)
 }
@@ -366,29 +526,67 @@ pub fn idle_display(last_activity: &str) -> String {
 
 /// Build the `session start` checkpoint error message: lists every existing
 /// open same-project session with enough detail (id, name, description,
-/// idle duration) that the agent or a human can decide `--resume`,
-/// `--replace`, or `--new` without needing to inspect anything further.
-fn checkpoint_error(existing: &[Session]) -> String {
+/// idle duration, and whether `owner` started it) that the agent or a human
+/// can decide `--resume`, `--replace`, or `--new` without needing to inspect
+/// anything further.
+fn checkpoint_error(existing: &[Session], owner: &EngineIdentity) -> String {
     let lines: Vec<String> = existing
         .iter()
         .map(|s| {
             let idle = idle_display(&s.last_activity);
             format!(
-                "  - {} ({}){} — idle {idle}",
+                "  - {} ({}){} — idle {idle}{}",
                 s.id,
                 s.name.as_deref().unwrap_or("unnamed"),
                 s.description
                     .as_deref()
                     .map(|d| format!(": {d}"))
                     .unwrap_or_default(),
+                ownership_note(s, owner),
             )
         })
         .collect();
+    let yours = existing
+        .iter()
+        .filter(|s| !ownership_note(s, owner).is_empty())
+        .count();
+    // `--replace` abandons every listed session, so it is only offered as the
+    // way to drop "yours" when every listed session is yours.
+    let hint = if yours == 0 {
+        String::new()
+    } else if yours == existing.len() {
+        "\nEvery listed session is yours: pass --resume <id> to continue one, or --replace \
+         to drop them all. Use --new only for a second, parallel window."
+            .to_string()
+    } else {
+        format!(
+            "\nA session marked as yours holds your own earlier work: pass --resume <id> to \
+             continue it, or close it with `llmenv task session finish <id>`. --replace \
+             abandons all {} listed sessions, including the ones that are not yours.",
+            existing.len()
+        )
+    };
     format!(
         "session(s) already open for this project:\n{}\n\
-         pass one of --resume <id>, --replace, or --new",
+         pass one of --resume <id>, --replace, or --new{hint}",
         lines.join("\n")
     )
+}
+
+/// The checkpoint's note on whether `owner` started `session`. The same
+/// engine process with a different conversation id is the state after a
+/// `/clear` or a compaction (#2365).
+fn ownership_note(session: &Session, owner: &EngineIdentity) -> &'static str {
+    let same_conversation = owner.session_id.is_some()
+        && session.owner_session.as_deref() == owner.session_id.as_deref();
+    let same_process = owner.pid.is_some() && session.owner_pid == owner.pid;
+    if same_conversation {
+        " — yours: started by this conversation"
+    } else if same_process {
+        " — yours: started by this engine process, most likely before a /clear or a compaction"
+    } else {
+        ""
+    }
 }
 
 /// Every task currently tagged with `session_id`. `pub(super)` so
@@ -546,6 +744,360 @@ mod tests {
 
     const PROJECT_A: &str = "project-a-0000000000";
     const PROJECT_B: &str = "project-b-0000000000";
+
+    // --- engine ownership (#2365) ---
+
+    fn owner(session_id: &str, pid: u32) -> EngineIdentity {
+        EngineIdentity {
+            session_id: Some(session_id.to_string()),
+            pid: Some(pid),
+        }
+    }
+
+    fn start_as(dir: &Path, name: &str, who: &EngineIdentity, decision: StartDecision) -> Session {
+        let request = StartRequest {
+            name: Some(name),
+            description: None,
+            project: PROJECT_A,
+            owner: who,
+        };
+        match start_session_as(dir, &request, decision).expect("test") {
+            StartOutcome::Created(s) | StartOutcome::Resumed(s) => s,
+            StartOutcome::Replaced { session, .. } => session,
+        }
+    }
+
+    #[test]
+    fn engine_identity_from_vars_drops_empty_and_bad_values() {
+        assert_eq!(
+            EngineIdentity::from_vars(None, None),
+            EngineIdentity::default()
+        );
+        assert_eq!(
+            EngineIdentity::from_vars(Some("  "), Some("not-a-pid")),
+            EngineIdentity::default()
+        );
+        assert_eq!(
+            EngineIdentity::from_vars(Some(" abc "), Some(" 42 ")),
+            owner("abc", 42)
+        );
+        assert_eq!(EngineIdentity::from_vars(None, Some("-1")).pid, None);
+    }
+
+    proptest! {
+        #[test]
+        fn engine_identity_pid_round_trips(pid in any::<u32>()) {
+            let parsed = EngineIdentity::from_vars(None, Some(&pid.to_string()));
+            prop_assert_eq!(parsed.pid, Some(pid));
+        }
+
+        #[test]
+        fn engine_identity_from_vars_never_keeps_blank_session_id(s in "\\PC*") {
+            let parsed = EngineIdentity::from_vars(Some(&s), Some(&s));
+            prop_assert!(parsed.session_id.as_deref().is_none_or(|id| !id.trim().is_empty()));
+        }
+    }
+
+    /// A session built in memory, for the properties that need no store.
+    fn bare_session(id: usize, owner_session: Option<String>, owner_pid: Option<u32>) -> Session {
+        Session {
+            id: format!("s{id}"),
+            name: None,
+            project: PROJECT_A.to_string(),
+            description: None,
+            started_at: "2026-10-02T00:00:00Z".to_string(),
+            last_activity: "2026-10-02T00:00:00Z".to_string(),
+            finished_at: None,
+            abandoned_at: None,
+            owner_session,
+            owner_pid,
+        }
+    }
+
+    proptest! {
+        // The owner fields are optional and skipped when absent; any mix must
+        // survive a save and a load unchanged (#2365).
+        #[test]
+        fn session_serde_round_trips_any_owner(
+            owner_session in proptest::option::of("[a-z0-9-]{1,12}"),
+            owner_pid in proptest::option::of(any::<u32>()),
+            finished in any::<bool>(),
+        ) {
+            let mut session = bare_session(0, owner_session, owner_pid);
+            if finished {
+                session.finished_at = Some("2026-10-02T01:00:00Z".to_string());
+            }
+            let json = serde_json::to_string(&session).unwrap();
+            let back: Session = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(back, session);
+        }
+
+        // Oracle check: the only open session wins; else the only one the
+        // caller's conversation owns; else an error that counts both.
+        #[test]
+        fn pick_open_session_matches_oracle(
+            owners in proptest::collection::vec(proptest::option::of(0u8..3), 0..6),
+            caller in proptest::option::of(0u8..3),
+        ) {
+            let sessions: Vec<Session> = owners
+                .iter()
+                .enumerate()
+                .map(|(i, o)| bare_session(i, o.map(|c| format!("conv-{c}")), None))
+                .collect();
+            let identity = EngineIdentity {
+                session_id: caller.map(|c| format!("conv-{c}")),
+                pid: None,
+            };
+            let owned: Vec<&Session> = sessions
+                .iter()
+                .filter(|s| caller.is_some() && s.owner_session == identity.session_id)
+                .collect();
+            let expected = match sessions.len() {
+                0 => Err(PickError::NoneOpen),
+                1 => Ok(sessions[0].clone()),
+                _ if owned.len() == 1 => Ok(owned[0].clone()),
+                n => Err(PickError::Ambiguous {
+                    open: n,
+                    owned: owned.len(),
+                    identified: caller.is_some(),
+                }),
+            };
+            prop_assert_eq!(pick_open_session(sessions.clone(), &identity), expected);
+        }
+    }
+
+    #[test]
+    fn start_session_as_records_owner() {
+        let dir = TempDir::new().expect("test");
+        let session = start_as(dir.path(), "a", &owner("conv-1", 7), StartDecision::Auto);
+        let reloaded = load_session(dir.path(), &session.id).expect("test");
+        assert_eq!(reloaded.owner_session.as_deref(), Some("conv-1"));
+        assert_eq!(reloaded.owner_pid, Some(7));
+    }
+
+    #[test]
+    fn resume_moves_ownership_to_the_resuming_conversation() {
+        let dir = TempDir::new().expect("test");
+        let session = start_as(dir.path(), "a", &owner("conv-1", 7), StartDecision::Auto);
+        let resumed = start_as(
+            dir.path(),
+            "a",
+            &owner("conv-2", 7),
+            StartDecision::Resume(session.id.clone()),
+        );
+        assert_eq!(resumed.owner_session.as_deref(), Some("conv-2"));
+    }
+
+    #[test]
+    fn resume_without_identity_keeps_stored_owner() {
+        let dir = TempDir::new().expect("test");
+        let session = start_as(dir.path(), "a", &owner("conv-1", 7), StartDecision::Auto);
+        let resumed = start_as(
+            dir.path(),
+            "a",
+            &EngineIdentity::default(),
+            StartDecision::Resume(session.id.clone()),
+        );
+        assert_eq!(resumed.owner_session.as_deref(), Some("conv-1"));
+        assert_eq!(resumed.owner_pid, Some(7));
+    }
+
+    #[test]
+    fn session_without_owner_fields_still_loads() {
+        let dir = TempDir::new().expect("test");
+        let session = start_as(
+            dir.path(),
+            "a",
+            &EngineIdentity::default(),
+            StartDecision::Auto,
+        );
+        let raw = std::fs::read_to_string(session_path(dir.path(), &session.id)).expect("test");
+        assert!(
+            !raw.contains("owner_session"),
+            "None owner is not written: {raw}"
+        );
+        assert_eq!(
+            load_session(dir.path(), &session.id).expect("test"),
+            session
+        );
+    }
+
+    #[test]
+    fn pick_open_session_cases() {
+        let dir = TempDir::new().expect("test");
+        let me = owner("conv-me", 1);
+        assert_eq!(pick_open_session(Vec::new(), &me), Err(PickError::NoneOpen));
+
+        let other = start_as(
+            dir.path(),
+            "other",
+            &owner("conv-other", 2),
+            StartDecision::Auto,
+        );
+        let only = pick_open_session(vec![other.clone()], &me).expect("one open session wins");
+        assert_eq!(only.id, other.id);
+
+        let mine = start_as(dir.path(), "mine", &me, StartDecision::New);
+        let picked = pick_open_session(vec![other.clone(), mine.clone()], &me).expect("test");
+        assert_eq!(picked.id, mine.id);
+
+        let stranger = owner("conv-stranger", 3);
+        assert_eq!(
+            pick_open_session(vec![other.clone(), mine.clone()], &stranger),
+            Err(PickError::Ambiguous {
+                open: 2,
+                owned: 0,
+                identified: true
+            })
+        );
+        // Two sessions with no owner must not match a caller with no identity.
+        let a = start_as(
+            dir.path(),
+            "a",
+            &EngineIdentity::default(),
+            StartDecision::New,
+        );
+        let b = start_as(
+            dir.path(),
+            "b",
+            &EngineIdentity::default(),
+            StartDecision::New,
+        );
+        assert_eq!(
+            pick_open_session(vec![a, b], &EngineIdentity::default()),
+            Err(PickError::Ambiguous {
+                open: 2,
+                owned: 0,
+                identified: false
+            })
+        );
+        let mine_again = start_as(dir.path(), "mine-2", &me, StartDecision::New);
+        assert_eq!(
+            pick_open_session(vec![other, mine, mine_again], &me),
+            Err(PickError::Ambiguous {
+                open: 3,
+                owned: 2,
+                identified: true
+            })
+        );
+    }
+
+    #[test]
+    fn ambiguity_message_names_the_real_cause() {
+        let msg = |owned, identified| {
+            PickError::Ambiguous {
+                open: 3,
+                owned,
+                identified,
+            }
+            .ambiguity_message("pass --session <id>")
+            .expect("ambiguous has a message")
+        };
+        assert!(msg(0, true).contains("none of them is owned by this conversation"));
+        let two = msg(2, true);
+        assert!(two.contains("owns 2 of them"), "{two}");
+        assert!(!two.contains("none"), "{two}");
+        let anon = msg(0, false);
+        assert!(!anon.contains("conversation"), "{anon}");
+        assert!(anon.ends_with("pass --session <id>"), "{anon}");
+        assert!(PickError::NoneOpen.ambiguity_message("x").is_none());
+    }
+
+    #[test]
+    fn checkpoint_offers_replace_only_when_every_session_is_yours() {
+        let dir = TempDir::new().expect("test");
+        let me = owner("conv-before-clear", 9);
+        start_as(dir.path(), "old", &me, StartDecision::Auto);
+        let request = StartRequest {
+            name: None,
+            description: None,
+            project: PROJECT_A,
+            owner: &owner("conv-after-clear", 9),
+        };
+        let err = start_session_as(dir.path(), &request, StartDecision::Auto)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Every listed session is yours"), "{err}");
+        assert!(err.contains("--replace to drop them all"), "{err}");
+    }
+
+    #[test]
+    fn add_task_after_start_new_resolves_to_callers_session() {
+        // The #2365 repro: `session start a`, `session start b --new`, `task add`.
+        let dir = TempDir::new().expect("test");
+        start_as(dir.path(), "a", &owner("conv-old", 9), StartDecision::Auto);
+        let me = owner("conv-new", 9);
+        let b = start_as(dir.path(), "b", &me, StartDecision::New);
+        let task = crate::add_task(
+            dir.path(),
+            "x",
+            ParentSpec::Auto,
+            crate::SessionChoice::Resolve(&me),
+            PROJECT_A,
+        )
+        .expect("the caller's own session must resolve");
+        assert_eq!(task.session.as_deref(), Some(b.id.as_str()));
+    }
+
+    #[test]
+    fn checkpoint_error_marks_same_process_session_after_clear() {
+        let dir = TempDir::new().expect("test");
+        let old = start_as(
+            dir.path(),
+            "old",
+            &owner("conv-before-clear", 9),
+            StartDecision::Auto,
+        );
+        start_as(
+            dir.path(),
+            "unrelated",
+            &owner("conv-x", 4),
+            StartDecision::New,
+        );
+        let request = StartRequest {
+            name: Some("next"),
+            description: None,
+            project: PROJECT_A,
+            owner: &owner("conv-after-clear", 9),
+        };
+        let err = start_session_as(dir.path(), &request, StartDecision::Auto)
+            .unwrap_err()
+            .to_string();
+        let old_line = err
+            .lines()
+            .find(|l| l.contains(&old.id))
+            .expect("old session listed");
+        assert!(old_line.contains("started by this engine process"), "{err}");
+        let other_line = err.lines().find(|l| l.contains("unrelated")).expect("test");
+        assert!(!other_line.contains("yours"), "{err}");
+        assert!(err.contains("--resume <id> to continue it"), "{err}");
+        assert!(
+            err.contains("--replace abandons all 2 listed sessions"),
+            "mixed ownership must warn that --replace drops the other window's session: {err}"
+        );
+        assert!(!err.contains("--replace to drop"), "{err}");
+    }
+
+    #[test]
+    fn checkpoint_error_without_identity_has_no_ownership_hint() {
+        let dir = TempDir::new().expect("test");
+        start_as(
+            dir.path(),
+            "old",
+            &EngineIdentity::default(),
+            StartDecision::Auto,
+        );
+        let request = StartRequest {
+            name: None,
+            description: None,
+            project: PROJECT_A,
+            owner: &EngineIdentity::default(),
+        };
+        let err = start_session_as(dir.path(), &request, StartDecision::Auto)
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("yours"), "{err}");
+    }
 
     #[test]
     fn list_sessions_empty_store_is_empty() {
