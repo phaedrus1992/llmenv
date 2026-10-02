@@ -3715,15 +3715,17 @@ fn resolve_session_id(
     if let Some(id) = id {
         return Ok(id);
     }
-    let open = session::open_sessions_for_project(state_dir, project);
+    // Fallible read: an unreadable store must not read as "no open session" (#1112).
+    let open = session::try_open_sessions_for_project(state_dir, project)?;
     match session::pick_open_session(open, &EngineIdentity::from_env()) {
         Ok(session) => Ok(session.id),
         Err(PickError::NoneOpen) => {
             anyhow::bail!("no open session for this project — pass an id explicitly")
         }
-        Err(PickError::Ambiguous(n)) => anyhow::bail!(
-            "{n} open sessions for this project, and none of them is owned by this \
-             conversation — pass an id explicitly"
+        Err(e) => anyhow::bail!(
+            "{}",
+            e.ambiguity_message("pass an id explicitly")
+                .unwrap_or_default()
         ),
     }
 }

@@ -103,8 +103,44 @@ impl EngineIdentity {
 pub(crate) enum PickError {
     /// No session is open for the project.
     NoneOpen,
-    /// This many sessions are open, and not exactly one belongs to the caller.
-    Ambiguous(usize),
+    /// Two or more sessions are open, and not exactly one belongs to the
+    /// caller. `owned` counts the ones that do; `identified` says whether the
+    /// caller has a conversation id at all.
+    Ambiguous {
+        open: usize,
+        owned: usize,
+        identified: bool,
+    },
+}
+
+impl PickError {
+    /// The error text for [`Self::Ambiguous`], ending in `fix` (the caller's
+    /// own "pass an id" wording). `None` for [`Self::NoneOpen`], whose text
+    /// each caller words itself.
+    #[must_use]
+    pub(crate) fn ambiguity_message(self, fix: &str) -> Option<String> {
+        let Self::Ambiguous {
+            open,
+            owned,
+            identified,
+        } = self
+        else {
+            return None;
+        };
+        Some(if !identified {
+            format!("{open} open sessions for this project — {fix}")
+        } else if owned == 0 {
+            format!(
+                "{open} open sessions for this project, and none of them is owned by this \
+                 conversation — {fix}"
+            )
+        } else {
+            format!(
+                "{open} open sessions for this project, and this conversation owns {owned} of \
+                 them — {fix}"
+            )
+        })
+    }
 }
 
 /// Pick the session an id-less command means: the only open one, else the
@@ -123,13 +159,20 @@ pub(crate) fn pick_open_session(
         _ => {}
     }
     let count = open.len();
-    let mut owned = open.into_iter().filter(|s| {
-        owner.session_id.is_some() && s.owner_session.as_deref() == owner.session_id.as_deref()
-    });
-    match (owned.next(), owned.next()) {
-        (Some(session), None) => Ok(session),
-        _ => Err(PickError::Ambiguous(count)),
+    let mut owned: Vec<Session> = open
+        .into_iter()
+        .filter(|s| {
+            owner.session_id.is_some() && s.owner_session.as_deref() == owner.session_id.as_deref()
+        })
+        .collect();
+    if owned.len() == 1 {
+        return Ok(owned.remove(0));
     }
+    Err(PickError::Ambiguous {
+        open: count,
+        owned: owned.len(),
+        identified: owner.session_id.is_some(),
+    })
 }
 
 /// The fields `session start` writes into a new or resumed session.
@@ -388,7 +431,9 @@ pub(crate) fn start_session_as(
     let project = request.project;
     super::with_store_lock(state_dir, || match decision {
         StartDecision::Auto => {
-            let existing = open_sessions_for_project(state_dir, project);
+            // Fallible read: an unreadable store must not look empty and get a
+            // duplicate session on top of it (#1112).
+            let existing = try_open_sessions_for_project(state_dir, project)?;
             if !existing.is_empty() {
                 anyhow::bail!(checkpoint_error(&existing, request.owner));
             }
@@ -406,7 +451,7 @@ pub(crate) fn start_session_as(
             Ok(StartOutcome::Resumed(session))
         }
         StartDecision::Replace => {
-            let existing = open_sessions_for_project(state_dir, project);
+            let existing = try_open_sessions_for_project(state_dir, project)?;
             let mut abandoned = Vec::with_capacity(existing.len());
             for session in existing {
                 abandoned.push(abandon_session(state_dir, session)?);
@@ -502,14 +547,25 @@ fn checkpoint_error(existing: &[Session], owner: &EngineIdentity) -> String {
             )
         })
         .collect();
-    let hint = if existing
+    let yours = existing
         .iter()
-        .any(|s| !ownership_note(s, owner).is_empty())
-    {
-        "\nA session marked as yours holds your own earlier work: pass --resume <id> to \
-         continue it, or --replace to drop it. Use --new only for a second, parallel window."
+        .filter(|s| !ownership_note(s, owner).is_empty())
+        .count();
+    // `--replace` abandons every listed session, so it is only offered as the
+    // way to drop "yours" when every listed session is yours.
+    let hint = if yours == 0 {
+        String::new()
+    } else if yours == existing.len() {
+        "\nEvery listed session is yours: pass --resume <id> to continue one, or --replace \
+         to drop them all. Use --new only for a second, parallel window."
+            .to_string()
     } else {
-        ""
+        format!(
+            "\nA session marked as yours holds your own earlier work: pass --resume <id> to \
+             continue it, or close it with `llmenv task session finish <id>`. --replace \
+             abandons all {} listed sessions, including the ones that are not yours.",
+            existing.len()
+        )
     };
     format!(
         "session(s) already open for this project:\n{}\n\
@@ -827,7 +883,11 @@ mod tests {
         let stranger = owner("conv-stranger", 3);
         assert_eq!(
             pick_open_session(vec![other.clone(), mine.clone()], &stranger),
-            Err(PickError::Ambiguous(2))
+            Err(PickError::Ambiguous {
+                open: 2,
+                owned: 0,
+                identified: true
+            })
         );
         // Two sessions with no owner must not match a caller with no identity.
         let a = start_as(
@@ -844,13 +904,60 @@ mod tests {
         );
         assert_eq!(
             pick_open_session(vec![a, b], &EngineIdentity::default()),
-            Err(PickError::Ambiguous(2))
+            Err(PickError::Ambiguous {
+                open: 2,
+                owned: 0,
+                identified: false
+            })
         );
         let mine_again = start_as(dir.path(), "mine-2", &me, StartDecision::New);
         assert_eq!(
             pick_open_session(vec![other, mine, mine_again], &me),
-            Err(PickError::Ambiguous(3))
+            Err(PickError::Ambiguous {
+                open: 3,
+                owned: 2,
+                identified: true
+            })
         );
+    }
+
+    #[test]
+    fn ambiguity_message_names_the_real_cause() {
+        let msg = |owned, identified| {
+            PickError::Ambiguous {
+                open: 3,
+                owned,
+                identified,
+            }
+            .ambiguity_message("pass --session <id>")
+            .expect("ambiguous has a message")
+        };
+        assert!(msg(0, true).contains("none of them is owned by this conversation"));
+        let two = msg(2, true);
+        assert!(two.contains("owns 2 of them"), "{two}");
+        assert!(!two.contains("none"), "{two}");
+        let anon = msg(0, false);
+        assert!(!anon.contains("conversation"), "{anon}");
+        assert!(anon.ends_with("pass --session <id>"), "{anon}");
+        assert!(PickError::NoneOpen.ambiguity_message("x").is_none());
+    }
+
+    #[test]
+    fn checkpoint_offers_replace_only_when_every_session_is_yours() {
+        let dir = TempDir::new().expect("test");
+        let me = owner("conv-before-clear", 9);
+        start_as(dir.path(), "old", &me, StartDecision::Auto);
+        let request = StartRequest {
+            name: None,
+            description: None,
+            project: PROJECT_A,
+            owner: &owner("conv-after-clear", 9),
+        };
+        let err = start_session_as(dir.path(), &request, StartDecision::Auto)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Every listed session is yours"), "{err}");
+        assert!(err.contains("--replace to drop them all"), "{err}");
     }
 
     #[test]
@@ -903,6 +1010,11 @@ mod tests {
         let other_line = err.lines().find(|l| l.contains("unrelated")).expect("test");
         assert!(!other_line.contains("yours"), "{err}");
         assert!(err.contains("--resume <id> to continue it"), "{err}");
+        assert!(
+            err.contains("--replace abandons all 2 listed sessions"),
+            "mixed ownership must warn that --replace drops the other window's session: {err}"
+        );
+        assert!(!err.contains("--replace to drop"), "{err}");
     }
 
     #[test]

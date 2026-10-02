@@ -552,10 +552,10 @@ fn resolve_session_for_add(
             "no open session for this project — run `llmenv task session start` first, \
              or pass --session <id>"
         ),
-        Err(session::PickError::Ambiguous(n)) => anyhow::bail!(
-            "{n} open sessions for this project, and none of them is owned by this \
-             conversation — pass --session <id>, resume yours with `llmenv task session \
-             start --resume <id>`, or see `llmenv task session ls`"
+        Err(e) => anyhow::bail!(
+            "{}",
+            e.ambiguity_message("pass --session <id>, or see `llmenv task session ls`")
+                .unwrap_or_default()
         ),
     }
 }
