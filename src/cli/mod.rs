@@ -1039,15 +1039,8 @@ fn run_export(
     // local `mcp-proxy` is alive before agents try to reach it. Failures here
     // are logged but non-fatal — the export must still emit env vars so the
     // shell hook stays usable.
-    // NOTE: only top-level config.features.memory is used here; bundle-contributed
-    // memory entries are merged later in build_manifest and affect resolve_mcps but
-    // not the proxy startup check (#335).
-    let top_memory: &[_] = config
-        .features
-        .as_ref()
-        .map(|f| f.memory.as_slice())
-        .unwrap_or_default();
-    if let Some(mem) = find_local_memory_entry(top_memory, &active) {
+    if let Some(mem) = export_local_memory_entry(&config, &config_dir, &active) {
+        let mem = &mem;
         let bind = memory_bind_address(mem);
         match crate::mcp::proxy::default_pid_path() {
             Ok(pid_path) => {
@@ -4192,6 +4185,35 @@ fn find_local_memory_entry<'a>(
     })
 }
 
+/// The memory entry that `export` starts a local `mcp-proxy` for. It reads the
+/// same top-level plus bundle-contributed list as `hook_run::memory_url`, so a
+/// server that a firing bundle declares for this host starts too (#2344). The
+/// bundle merge uses the on-disk merge cache when it is current.
+///
+/// A merge failure falls back to the top-level entries with a warning, because
+/// `export` must still emit its env vars for the shell hook.
+fn export_local_memory_entry(
+    config: &Config,
+    config_dir: &Path,
+    active: &ActiveScopes,
+) -> Option<crate::config::Memory> {
+    let memory = match crate::hook_run::merged_memory(config, config_dir, active) {
+        Ok(merged) => merged.memory,
+        Err(e) => {
+            eprintln!(
+                "warning: cannot read bundle memory entries, so only config.yaml memory \
+                 entries can start the local mcp-proxy: {e:#}"
+            );
+            config
+                .features
+                .as_ref()
+                .map(|f| f.memory.clone())
+                .unwrap_or_default()
+        }
+    };
+    find_local_memory_entry(&memory, active).cloned()
+}
+
 /// The `listen_host:port` address a local memory server binds to.
 fn memory_bind_address(mem: &crate::config::Memory) -> String {
     // Built through SocketAddr so an IPv6 listen_host comes out bracketed.
@@ -6220,6 +6242,65 @@ mod tests {
         active: &ActiveScopes,
     ) -> Option<String> {
         find_local_memory_entry(memory, active).map(memory_bind_address)
+    }
+
+    /// A config root whose bundle `b` (tag `mem`) declares the memory server
+    /// for host `srv`, with no top-level memory entry (#2344).
+    fn bundle_memory_server_fixture(bundle_yaml: Option<&str>) -> (tempfile::TempDir, Config) {
+        let root = tempfile::tempdir().unwrap();
+        let bundle_dir = root.path().join("bundles").join("b");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        if let Some(yaml) = bundle_yaml {
+            std::fs::write(bundle_dir.join("bundle.yaml"), yaml).unwrap();
+        }
+        let cache = root.path().join("cache");
+        let config = Config {
+            bundle: vec![Bundle {
+                name: "b".into(),
+                when: vec!["mem".into()],
+            }],
+            cache: crate::config::Cache {
+                cache_dir: cache.to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        (root, config)
+    }
+
+    const BUNDLE_MEMORY_SERVER: &str = concat!(
+        "features:\n",
+        "  memory:\n",
+        "    - server_host: srv\n",
+        "      port: 7979\n",
+        "      when: [mem]\n",
+        "host:\n",
+        "  srv:\n",
+        "    addr: srv.local\n",
+    );
+
+    #[test]
+    fn export_starts_proxy_for_bundle_declared_memory_server() {
+        let (root, config) = bundle_memory_server_fixture(Some(BUNDLE_MEMORY_SERVER));
+        assert!(config_memory(&config).is_empty(), "no top-level entry");
+        let mem = export_local_memory_entry(&config, root.path(), &active_as_server())
+            .expect("bundle-declared server on this host must start");
+        assert_eq!(mem.port, 7979);
+    }
+
+    #[test]
+    fn export_skips_bundle_declared_memory_server_on_a_client_host() {
+        let (root, config) = bundle_memory_server_fixture(Some(BUNDLE_MEMORY_SERVER));
+        assert!(export_local_memory_entry(&config, root.path(), &active_as_client()).is_none());
+    }
+
+    #[test]
+    fn export_still_uses_top_level_memory_entry() {
+        let config = memory_config("127.0.0.1", 7878);
+        let root = tempfile::tempdir().unwrap();
+        let mem = export_local_memory_entry(&config, root.path(), &active_as_server())
+            .expect("top-level entry still starts");
+        assert_eq!(mem.port, 7878);
     }
 
     #[test]
