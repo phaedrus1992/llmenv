@@ -354,7 +354,7 @@ re-ingestion on the next turn.
 
 ```text
 llmenv task add <title> [--parent SLUG | --no-parent] [--session <id>]
-llmenv task start <id> [--force]
+llmenv task start <id> [--force] [--reopen]
 llmenv task done <id>
 llmenv task wait <id> [reason]
 llmenv task ls [--format json] (--session <id> | --all) [--current-project]
@@ -398,8 +398,12 @@ unambiguous prefix of one.
   dependency the user configured on purpose; pass `--force` to override. A
   `blocked_on` reference resolves as done only once the target task *and
   every one of its descendants* are done, so blocking on a parent task alone
-  covers its whole child set (see `task block`, below).
-- `task done <id>` — mark a task complete.
+  covers its whole child set (see `task block`, below). `--reopen` (added
+  in v3.12.0) moves a `done` task back to `open` with a note, then starts
+  it; without it, `start` refuses a `done` task.
+- `task done <id>` — mark a task complete. (changed in v3.12.0) Prints a
+  note when the task was never started (`open` straight to `done`), because
+  that jump often means a step was closed before its work was finished.
 - `task wait <id> [reason]` — mark a task `waiting` on something outside the
   agent's control (a human review, a decision, external system access)
   instead of `wip`. `reason` is recorded as a note; reads from stdin if
@@ -534,7 +538,10 @@ terminals in the same project is a normal pattern), the reminder never
 presumes ownership — it conditions resuming/finishing a task on the agent
 recognizing it as its own earlier work. Separately, once every task in an
 open session is done, the reminder nudges to close out that session or add
-more work to it (see above), likewise conditioned on recognizing it:
+more work to it (see above), likewise conditioned on recognizing it. (added
+in v3.12.0) On Stop, an open session that holds `open` tasks but no `wip` or
+`waiting` task gets one line naming its next task to `task start` — an agent
+that adds steps and never starts them otherwise gets no reminder at all:
 
 ```yaml
 features:

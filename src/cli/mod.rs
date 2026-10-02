@@ -404,8 +404,11 @@ enum TaskCommand {
         id: String,
         #[arg(long)]
         force: bool,
+        /// Move a `done` task back to `open` first, then start it.
+        #[arg(long)]
+        reopen: bool,
     },
-    /// Mark a task done.
+    /// Mark a task done. Warns when the task was never started.
     Done { id: String },
     /// List tasks. Requires `--session <id>` or `--all` (#1124) — no silent
     /// default to every session's tasks. `--state`/`--hide-done` filter by
@@ -3339,7 +3342,10 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             )?;
             println!("Added task '{}' ({})", task.slug, task.title);
         }
-        TaskCommand::Start { id, force } => {
+        TaskCommand::Start { id, force, reopen } => {
+            if reopen {
+                crate::task::reopen_task(&state_dir, &id)?;
+            }
             let task = crate::task::start_task(&state_dir, &id, force)?;
             // Parent is a soft-block (#1164): unlike an unmet blocked_on
             // (hard-blocked inside start_task itself), an undone parent
@@ -3351,8 +3357,11 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             println!("Started '{}' — now {:?}", task.slug, task.state);
         }
         TaskCommand::Done { id } => {
-            let task = crate::task::done_task(&state_dir, &id)?;
-            println!("Completed '{}'", task.slug);
+            let completed = crate::task::complete_task(&state_dir, &id)?;
+            println!("Completed '{}'", completed.task.slug);
+            if let Some(warning) = completed.never_started_warning() {
+                println!("{warning}");
+            }
         }
         TaskCommand::Ls {
             format,
