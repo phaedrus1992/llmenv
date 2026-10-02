@@ -1375,7 +1375,7 @@ fn run_inner(
                             &config,
                             config_dir,
                             &active,
-                            start_consolidation_child,
+                            post_session_consolidation,
                         );
                     }
                     emit_trace_timing(t0, t_config, Some(t_scope), None, None);
@@ -1508,7 +1508,7 @@ fn run_inner(
                 &config,
                 config_dir,
                 &active,
-                start_consolidation_child,
+                post_session_consolidation,
             );
         }
         let out = out?;
@@ -2192,14 +2192,14 @@ fn starts_consolidation(event: HookEvent) -> bool {
 /// merged memory list as endpoint resolution, so a bundle-declared entry
 /// counts. Fail-soft: a merge error is logged and skips consolidation.
 ///
-/// `spawn` is [`start_consolidation_child`] in production; tests pass a
+/// `spawn` is [`post_session_consolidation`] in production; tests pass a
 /// counter, because a detached child is not visible from inside the test.
 fn maybe_start_consolidation(
     event: HookEvent,
     config: &crate::config::Config,
     config_dir: &std::path::Path,
     active: &crate::scope::ActiveScopes,
-    spawn: fn(),
+    spawn: fn() -> Option<std::process::Child>,
 ) {
     let guard = std::env::var_os(crate::consolidation::CHILD_GUARD_ENV);
     if !starts_consolidation(event) || is_consolidation_child(guard.as_deref()) {
@@ -2208,7 +2208,7 @@ fn maybe_start_consolidation(
     match crate::memory::merged_memory(config, config_dir, active) {
         Ok(merged) => {
             if crate::consolidation::active_consolidation(&merged.memory, &active.tags).is_some() {
-                spawn();
+                drop(spawn());
             }
         }
         Err(e) => tracing::error!("consolidation: cannot read merged memory entries: {e:#}"),
@@ -2232,12 +2232,6 @@ fn consolidation_run_command(exe: std::path::PathBuf) -> std::process::Command {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null());
     cmd
-}
-
-/// The production `spawn` for [`maybe_start_consolidation`]: start the child
-/// and drop its handle, because no caller waits on it.
-fn start_consolidation_child() {
-    drop(post_session_consolidation());
 }
 
 /// Spawn a detached child to run post-session consolidation. Best-effort
@@ -2333,8 +2327,9 @@ mod tests {
         static SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 
-    fn count_spawn() {
+    fn count_spawn() -> Option<std::process::Child> {
         SPAWNS.with(|c| c.set(c.get() + 1));
+        None
     }
 
     /// Spawns for one `event` against a config whose only memory entry
