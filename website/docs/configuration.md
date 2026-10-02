@@ -631,9 +631,9 @@ three memories.
 (changed in v3.12.0) The trigger is the `session_end` hook (Claude Code's `SessionEnd`).
 Before v3.12.0 consolidation waited for a `post_session` event that no adapter sent, so it never ran.
 The settings come from the active `memory:` entry, which can be in `config.yaml` or in a firing bundle's `bundle.yaml`.
-The `claude-cli` backend runs `claude -p --setting-sources "" --strict-mcp-config --tools "" --no-session-persistence`.
-That child loads no hooks, no plugins, and no MCP servers, and it keeps its Claude subscription login.
-llmenv also sets `LLMENV_CONSOLIDATION_CHILD=1` on the child, and `llmenv hook-run` does nothing under that variable, so the child cannot start consolidation again.
+The `claude-cli` backend runs `claude -p` with `disableAllHooks`, the default output style, `--strict-mcp-config`, no tools, no skills, and `--no-session-persistence`.
+That child runs no hooks and no MCP servers. It still reads your Claude Code settings and login, so auth from `env`, `apiKeyHelper`, or a Bedrock or Vertex provider keeps working.
+llmenv also sets `LLMENV_CONSOLIDATION_CHILD=1` on the child, and `llmenv hook-run` starts no consolidation under that variable, so the child cannot start consolidation again.
 
 ```yaml
 features:

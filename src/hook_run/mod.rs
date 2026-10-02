@@ -638,9 +638,6 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
         .ok()
         .unwrap_or_default();
 
-    if is_consolidation_child(std::env::var_os(crate::consolidation::CHILD_GUARD_ENV).as_deref()) {
-        return Ok(HookExit::Success);
-    }
     let parsed = match HookEvent::from_str(event) {
         Ok(e) => e,
         Err(e) => {
@@ -2663,7 +2660,8 @@ fn maybe_start_consolidation(
     config_dir: &std::path::Path,
     active: &crate::scope::ActiveScopes,
 ) {
-    if !starts_consolidation(event) {
+    let guard = std::env::var_os(crate::consolidation::CHILD_GUARD_ENV);
+    if !starts_consolidation(event) || is_consolidation_child(guard.as_deref()) {
         return;
     }
     match merged_memory(config, config_dir, active) {
@@ -2677,8 +2675,10 @@ fn maybe_start_consolidation(
 }
 
 /// True when this `hook-run` runs inside the `claude -p` child that
-/// consolidation starts. Such a run does nothing, so an older Claude Code that
-/// ignores the child's isolation flags still cannot loop (#2355).
+/// consolidation starts. Such a run starts no consolidation, so the child
+/// cannot loop even if its hooks run (#2355). Only the consolidation start
+/// checks it: a stray value must not turn off PreToolUse denies or the
+/// session log.
 fn is_consolidation_child(guard: Option<&std::ffi::OsStr>) -> bool {
     guard.is_some_and(|v| !v.is_empty())
 }
