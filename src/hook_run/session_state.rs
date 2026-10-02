@@ -58,6 +58,32 @@ pub(crate) fn prune_stale_json_files(dir: &Path, max_age_days: u64) {
     }
 }
 
+/// Whether a `SessionStart` `source` means the model's context was emptied, so
+/// state that records what the model has seen no longer holds (#2381).
+pub(crate) fn context_was_lost(source: Option<&str>) -> bool {
+    matches!(source, Some("startup" | "clear" | "compact"))
+}
+
+/// Delete the read-once cache and the read-before-edit record of one session.
+/// After a compaction the model holds none of the file contents it read, so a
+/// stale record would deny a re-read or excuse an edit of an unseen file.
+/// Fail-soft: a file that cannot be removed is logged and the hook goes on.
+pub(crate) fn reset_read_state(state_dir: &Path, session_id: &str) {
+    if !crate::paths::is_valid_short_name(session_id) {
+        return;
+    }
+    for path in [
+        super::read_once::session_cache_path(state_dir, session_id),
+        super::slippage::stats_path(state_dir, session_id),
+    ] {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!("reset_read_state: cannot remove {}: {e}", path.display()),
+        }
+    }
+}
+
 /// Seconds since the Unix epoch; 0 for a clock set before 1970.
 pub(crate) fn unix_now() -> i64 {
     std::time::SystemTime::now()
@@ -98,6 +124,37 @@ mod tests {
     fn missing_dir_is_a_noop() {
         let dir = TempDir::new().expect("test");
         prune_stale_json_files(&dir.path().join("does-not-exist"), 7);
+    }
+
+    #[test]
+    fn reset_read_state_removes_both_files_of_one_session_only() {
+        let dir = TempDir::new().expect("test");
+        let own = [
+            super::super::read_once::session_cache_path(dir.path(), "s1"),
+            super::super::slippage::stats_path(dir.path(), "s1"),
+        ];
+        let other = super::super::read_once::session_cache_path(dir.path(), "s2");
+        for p in own.iter().chain([&other]) {
+            std::fs::create_dir_all(p.parent().expect("test")).expect("test");
+            std::fs::write(p, "{}").expect("test");
+        }
+
+        reset_read_state(dir.path(), "s1");
+
+        assert!(own.iter().all(|p| !p.exists()), "own state must go");
+        assert!(other.exists(), "another session's state must stay");
+        reset_read_state(dir.path(), "s1");
+        reset_read_state(dir.path(), "../escape");
+    }
+
+    #[test]
+    fn only_context_losing_sources_reset() {
+        let got: Vec<bool> = ["startup", "clear", "compact", "resume", "fork"]
+            .iter()
+            .map(|s| context_was_lost(Some(s)))
+            .collect();
+        assert_eq!(got, [true, true, true, false, false]);
+        assert!(!context_was_lost(None));
     }
 
     #[test]

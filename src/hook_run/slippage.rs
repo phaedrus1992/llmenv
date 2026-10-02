@@ -82,7 +82,7 @@ struct SessionStats {
     tools: std::collections::BTreeMap<String, u64>,
 }
 
-fn stats_path(state_dir: &std::path::Path, session_id: &str) -> std::path::PathBuf {
+pub(super) fn stats_path(state_dir: &std::path::Path, session_id: &str) -> std::path::PathBuf {
     state_dir
         .join("slippage")
         .join(format!("{session_id}.json"))

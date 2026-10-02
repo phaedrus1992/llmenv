@@ -1109,6 +1109,15 @@ fn run_inner(
         );
     }
 
+    // #2381: a compaction empties the model's context, so the per-session "already read" state
+    // must go before the first Read or Edit of the new context.
+    if event == HookEvent::SessionStart
+        && session_state::context_was_lost(stdin_payload["source"].as_str())
+        && let (Some(session_id), Ok(state_dir)) = (claude_session_id, crate::paths::state_dir())
+    {
+        session_state::reset_read_state(&state_dir, session_id);
+    }
+
     let pre_tool_text = if event == HookEvent::PreToolUse {
         // `state_dir()` is passed in rather than resolved there so its failure
         // stays a degradation instead of an abort — see the doc comment on
