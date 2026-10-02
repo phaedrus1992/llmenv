@@ -60,7 +60,9 @@ async fn probe_stdio(
         .with_context(|| format!("cannot start `{command}`"))?;
     let answered = tokio::time::timeout(timeout, handshake(&mut child, command)).await;
     // Reap the probe process now. `kill_on_drop` is only the backstop for an early return.
-    let _ = child.kill().await;
+    if let Err(e) = child.kill().await {
+        tracing::warn!(command, error = %e, "cannot stop the MCP health probe process");
+    }
     answered.unwrap_or_else(|_| {
         Err(anyhow!(
             "`{command}` did not answer MCP initialize within {} ms",
