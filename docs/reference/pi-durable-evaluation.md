@@ -328,18 +328,20 @@ Re-evaluate pi-durable when all of these hold:
 - The API drops the experimental label.
 - Claude access terms change, or API-rate Claude becomes acceptable for the channel use case.
 
-## 10. Candidate follow-up issues
+## 10. Follow-up issues
 
-File these only if the recommendation stands.
+Filed 2026-10-02 after the recommendation was accepted.
+Work that applies to Claude Code sessions on `release/3.x` went to v3.12.0; work that exists only to run pi as an alternate engine went to v4.1.0.
 
-| Title | Milestone hint | Labels |
+| Issue | Title | Milestone |
 | --- | --- | --- |
-| feat(adapter): pi engine adapter with hook-run shim | v4.1.0 | area:adapter, area:hook, type:feature, size/L |
-| feat(config): engine and model routing by project tag and task kind | v4.1.0 | area:config, area:adapter, type:feature, size/M |
-| feat(skills): delegate a step to `pi -p` with a configured model | v4.1.0 | area:adapter, type:feature, size/S |
-| fix(hook): checkpoint and resume detached background work | v3.12.0 | area:hook, bug, size/M |
-| feat(hook): requestId idempotency for detached recorders | v3.12.0 | area:hook, enhancement, size/S |
-| feat(task): per-session agent-config document in state dir | v4.1.0 | area:task, area:config, type:feature, size/S |
+| #2393 | feat(adapter): pi engine adapter with hook-run shim | v4.1.0 |
+| #2394 | feat(config): engine and model routing by project tag and task kind | v4.1.0 |
+| #2395 | feat(skills): delegate a step to pi -p with a configured model | v4.1.0 |
+| #2389 | feat(adapter): pi engine ships pi-clm guidance and cache caveats | v4.1.0, from the context report |
+| #2396 | fix(hook): checkpoint and resume detached background work | v3.12.0 |
+| #2397 | feat(hook): requestId idempotency for detached recorders | v3.12.0 |
+| #2398 | feat(task): per-session agent-config document in state dir | v3.12.0, pairs with #2339 |
 
 ## Sources
 
