@@ -170,6 +170,16 @@ fn assert_fail_soft(mut cmd: Command, stderr_needle: &str) {
         .stderr(predicate::str::contains(stderr_needle));
 }
 
+/// Assert the session-start contract for a dead backend (#2358): exit 0, a stderr warning
+/// containing `stderr_needle`, and the health notice on stdout so the agent sees it.
+fn assert_fail_soft_with_health_notice(mut cmd: Command, stderr_needle: &str) {
+    cmd.timeout(Duration::from_secs(25))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MCP health check failed"))
+        .stderr(predicate::str::contains(stderr_needle));
+}
+
 #[test]
 fn unknown_event_exits_zero_with_warning() {
     // The event name is rejected before any config load, so a near-empty config
@@ -202,7 +212,7 @@ fn malformed_backend_url_exits_zero_with_warning() {
     // reserved by RFC 2606 and guaranteed to never resolve.
     let (dir, config_path) = setup_config(&config_with_memory_addr("no-such-host.invalid", 9));
 
-    assert_fail_soft(
+    assert_fail_soft_with_health_notice(
         hook_cmd(dir.path(), &config_path, "session_start"),
         "invalid memory backend URL",
     );
@@ -217,7 +227,7 @@ fn loopback_url_is_allowed_not_ssrf_rejected() {
     // fail-soft ("skipped"), not an "invalid ... SSRF" rejection.
     let (dir, config_path) = setup_config(&config_with_memory_addr("127.0.0.1", 9));
 
-    assert_fail_soft(
+    assert_fail_soft_with_health_notice(
         hook_cmd(dir.path(), &config_path, "session_start"),
         "session_start skipped",
     );
@@ -229,7 +239,7 @@ fn private_network_url_is_allowed_not_ssrf_rejected() {
     // `icm serve` (AGENTS.md) and must not be SSRF-rejected.
     let (dir, config_path) = setup_config(&config_with_memory_addr("10.0.0.1", 8080));
 
-    assert_fail_soft(
+    assert_fail_soft_with_health_notice(
         hook_cmd(dir.path(), &config_path, "session_start"),
         "session_start skipped",
     );
@@ -244,7 +254,7 @@ fn unreachable_public_backend_exits_zero_with_warning() {
     // host.
     let (dir, config_path) = setup_config(&config_with_memory_addr("192.0.2.1", 9));
 
-    assert_fail_soft(
+    assert_fail_soft_with_health_notice(
         hook_cmd(dir.path(), &config_path, "session_start"),
         "session_start skipped",
     );
@@ -277,7 +287,7 @@ fn all_events_fail_soft_without_backend() {
 #[test]
 fn adaptive_events_fail_soft_with_an_unreachable_backend() {
     // #2249: with a session id, these events take the adaptive flow and write
-    // the recall ledger. A dead backend must still give exit 0 and no output.
+    // the recall ledger. A dead backend must still give exit 0.
     let (dir, config_path) = setup_config(&config_with_memory_addr("127.0.0.1", 9));
     for (event, payload) in [
         (
@@ -301,12 +311,17 @@ fn adaptive_events_fail_soft_with_an_unreachable_backend() {
             r#"{"hook_event_name":"PostToolBatch","session_id":"s1","tool_calls":[]}"#,
         ),
     ] {
-        hook_cmd(dir.path(), &config_path, event)
+        let assert = hook_cmd(dir.path(), &config_path, event)
             .write_stdin(payload)
-            .timeout(Duration::from_secs(20))
+            .timeout(Duration::from_secs(25))
             .assert()
-            .success()
-            .stdout(predicate::str::is_empty());
+            .success();
+        // Only session start prints on a dead backend: the health notice (#2358).
+        if event == "session_start" {
+            assert.stdout(predicate::str::contains("MCP health check failed"));
+        } else {
+            assert.stdout(predicate::str::is_empty());
+        }
     }
 }
 
@@ -836,6 +851,52 @@ fn session_start_with_codebase_memory_exits_zero_without_binary() {
         .success();
 }
 
+/// Put a fake `codebase-memory-mcp` with the given shell body first on `PATH`.
+#[cfg(unix)]
+fn with_fake_cbm(cmd: &mut Command, bin_dir: &std::path::Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let script = bin_dir.join("codebase-memory-mcp");
+    fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    cmd.env("PATH", format!("{}:{old_path}", bin_dir.display()));
+}
+
+// #2358: a codebase-memory server that exits at once is named on stdout, with its fix.
+#[cfg(unix)]
+#[test]
+fn session_start_names_a_dead_codebase_memory_server() {
+    let (dir, config_path) = setup_config(&config_with_codebase_memory());
+    let bin = TempDir::new().unwrap();
+    let mut cmd = hook_cmd(dir.path(), &config_path, "session_start");
+    with_fake_cbm(&mut cmd, bin.path(), "exit 1");
+    cmd.timeout(Duration::from_secs(20))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MCP health check failed"))
+        .stdout(predicate::str::contains("codebase-memory-mcp"))
+        .stdout(predicate::str::contains("cbm-daemon-internal"));
+}
+
+// #2358: a healthy server adds nothing to the session start output.
+#[cfg(unix)]
+#[test]
+fn session_start_is_silent_when_codebase_memory_answers() {
+    let (dir, config_path) = setup_config(&config_with_codebase_memory());
+    let bin = TempDir::new().unwrap();
+    let mut cmd = hook_cmd(dir.path(), &config_path, "session_start");
+    let reply = r#"{"jsonrpc":"2.0","id":0,"result":{}}"#;
+    with_fake_cbm(
+        &mut cmd,
+        bin.path(),
+        &format!("read line\nprintf '%s\\n' '{reply}'"),
+    );
+    cmd.timeout(Duration::from_secs(20))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MCP health check failed").not());
+}
+
 fn config_with_task_tracker() -> String {
     format!(
         r#"
@@ -973,4 +1034,16 @@ fn stop_with_task_tracker_enabled_exits_zero() {
         .timeout(Duration::from_secs(10))
         .assert()
         .success();
+}
+
+#[test]
+fn session_start_names_a_dead_backend_on_stdout_with_the_fix() {
+    let (dir, config_path) = setup_config(&config_with_memory_addr("127.0.0.1", 9));
+    hook_cmd(dir.path(), &config_path, "session_start")
+        .write_stdin(r#"{"hook_event_name":"SessionStart","session_id":"s1","source":"startup"}"#)
+        .timeout(Duration::from_secs(25))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("icm"))
+        .stdout(predicate::str::contains("llmenv export"));
 }
