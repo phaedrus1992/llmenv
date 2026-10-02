@@ -157,7 +157,7 @@ pub(crate) async fn find_down(servers: &[ResolvedMcp], timeout: Duration) -> Vec
 }
 
 /// The memory and codebase-memory servers that the active scopes resolve to.
-fn managed_servers(
+pub(crate) fn managed_servers(
     config: &crate::config::Config,
     config_dir: &Path,
     active: &crate::scope::ActiveScopes,
@@ -228,7 +228,7 @@ pub(crate) fn down_notice(down: &[DownServer]) -> Option<String> {
     Some(text)
 }
 
-fn effect_and_fix(name: &str) -> (&'static str, String) {
+pub(crate) fn effect_and_fix(name: &str) -> (&'static str, String) {
     match name {
         MEMORY_MCP_NAME => {
             let pidfile = crate::mcp::proxy::default_pid_path()
@@ -302,7 +302,7 @@ mod tests {
 
     #[tokio::test]
     async fn stdio_probe_fails_when_server_never_answers() {
-        let err = probe(&sh("sleep 5"), SHORT).await.expect_err("wedged");
+        let err = probe(&sh("exec sleep 5"), SHORT).await.expect_err("wedged");
         assert!(err.to_string().contains("did not answer"), "got: {err}");
     }
 
@@ -361,7 +361,7 @@ mod tests {
     #[tokio::test]
     async fn find_down_returns_only_failures_in_input_order() {
         let servers = [
-            sh("sleep 5"),
+            sh("exec sleep 5"),
             answers(INIT_REPLY),
             server(
                 "gone",
