@@ -720,7 +720,7 @@ pub(crate) fn done_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
 #[derive(Debug, Clone)]
 pub(crate) struct Completed {
     pub(crate) task: Task,
-    pub(crate) prior: TaskState,
+    prior: TaskState,
 }
 
 impl Completed {
@@ -1065,12 +1065,12 @@ pub(crate) fn stop_hook_reminder(state_dir: &Path) -> String {
 /// An open session that holds `open` tasks while none of its tasks is `wip`
 /// or `waiting`: work is planned, but nothing is in progress (#2338).
 #[derive(Debug, Clone)]
-pub(crate) struct IdleSession {
-    pub(crate) session: session::Session,
+struct IdleSession {
+    session: session::Session,
     /// The task to start next: the first actionable `open` task in execution
     /// order, else the first `open` task when every one is blocked.
-    pub(crate) next: Task,
-    pub(crate) open_count: usize,
+    next: Task,
+    open_count: usize,
 }
 
 /// Every open session for `project` that [`IdleSession`] describes. Kept
@@ -1078,7 +1078,7 @@ pub(crate) struct IdleSession {
 /// (#2339). A `waiting` task makes a session quiet on purpose, so such a
 /// session is not idle.
 #[must_use]
-pub(crate) fn idle_sessions(state_dir: &Path, project: &str) -> Vec<IdleSession> {
+fn idle_sessions(state_dir: &Path, project: &str) -> Vec<IdleSession> {
     let all_tasks = list_tasks(state_dir);
     let by_slug: HashMap<&str, &Task> = all_tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
     session::open_sessions_for_project(state_dir, project)

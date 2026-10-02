@@ -50,12 +50,12 @@ pub struct Session {
     /// this session. With two or more sessions open, auto-resolution picks
     /// the one this conversation owns (#2365).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) owner_session: Option<String>,
+    owner_session: Option<String>,
     /// The engine process id that started or last resumed this session.
     /// It survives a `/clear`, which starts a new conversation id, so the
     /// `session start` checkpoint can say "this was yours" (#2365).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) owner_pid: Option<u32>,
+    owner_pid: Option<u32>,
 }
 
 /// Who is calling: the engine conversation and process, when the engine
@@ -81,7 +81,7 @@ impl EngineIdentity {
 
     /// The parse behind [`Self::from_env`], split out so tests need no env.
     #[must_use]
-    pub(crate) fn from_vars(session_id: Option<&str>, pid: Option<&str>) -> Self {
+    fn from_vars(session_id: Option<&str>, pid: Option<&str>) -> Self {
         Self {
             session_id: session_id
                 .map(str::trim)
