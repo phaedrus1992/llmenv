@@ -655,6 +655,7 @@ The context appears in these places:
 - The SessionStart reminder lists the context of each open session in the current project.
   It names the command for each reference: `gh issue view N`, and `icm_memory_recall` with the stored topics.
   The reminder does not claim that the session is yours.
+  It labels the notes as data, not instructions, and it cuts each session at 2,000 characters.
   The SessionStart and Stop reminders need `features.task_tracker.enabled`.
 - `task show --current` prints it on stderr.
 
