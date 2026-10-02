@@ -27,6 +27,28 @@ use crate::mcp::resolve::{
 /// Probes run in parallel, so this is also the worst-case delay a session start pays.
 pub(crate) const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The most characters of a failure reason that the notice carries. A server controls part of
+/// the text, such as an HTTP error body, and the notice goes into the agent's context.
+const MAX_REASON_CHARS: usize = 300;
+
+/// Make `text` safe to put in the notice: one line, no control, bidirectional, or zero-width
+/// characters, and at most [`MAX_REASON_CHARS`] characters.
+fn tidy_reason(text: &str) -> String {
+    let spaced: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let one_line = crate::util::strip_unsafe_chars(&spaced)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if one_line.chars().count() <= MAX_REASON_CHARS {
+        return one_line;
+    }
+    let kept: String = one_line.chars().take(MAX_REASON_CHARS - 1).collect();
+    format!("{kept}…")
+}
+
 /// A managed server that failed its probe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DownServer {
@@ -167,10 +189,13 @@ where
     for (name, handle) in handles {
         match handle.await {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => down.push(DownServer {
-                name,
-                reason: format!("{e:#}"),
-            }),
+            Ok(Err(e)) => {
+                tracing::debug!(server = %name, error = %format!("{e:#}"), "MCP health probe failed");
+                down.push(DownServer {
+                    name,
+                    reason: tidy_reason(&format!("{e:#}")),
+                });
+            }
             Err(crashed) => down.push(DownServer {
                 name,
                 reason: format!("health probe crashed: {crashed}"),
@@ -284,8 +309,9 @@ fn restart_note(outcome: &ProxyStart) -> Option<String> {
 /// would turn itself off, and the agent would take silence for health.
 fn unresolved_notice(error: &anyhow::Error) -> String {
     format!(
-        "llmenv: MCP health check could not run: {error:#}\n  Fix: run `llmenv doctor` to see the \
-         config problem.\n"
+        "llmenv: MCP health check could not run: {}\n  Fix: run `llmenv doctor` to see the \
+         config problem.\n",
+        tidy_reason(&format!("{error:#}"))
     )
 }
 
@@ -576,6 +602,41 @@ mod tests {
     }
 
     #[test]
+    fn tidy_reason_makes_one_clean_line() {
+        let messy = "HTTP 500:\n<html>\u{1b}[31mboom\u{202E}\u{200B}</html>\r\n\tend";
+        assert_eq!(tidy_reason(messy), "HTTP 500: <html> [31mboom</html> end");
+    }
+
+    #[test]
+    fn tidy_reason_caps_the_length_and_marks_the_cut() {
+        let long = "x".repeat(MAX_REASON_CHARS * 3);
+        let tidy = tidy_reason(&long);
+        assert_eq!(tidy.chars().count(), MAX_REASON_CHARS);
+        assert!(tidy.ends_with('…'));
+        let exact = "y".repeat(MAX_REASON_CHARS);
+        assert_eq!(tidy_reason(&exact), exact);
+    }
+
+    #[tokio::test]
+    async fn find_down_cleans_a_server_supplied_reason() {
+        let servers = [server("srv", stdio_kind("true"))];
+        let down = find_down_with(&servers, |_| async {
+            Err(anyhow::anyhow!("body:\n{}\u{1b}[2J", "z".repeat(5_000)))
+        })
+        .await;
+        assert!(
+            down[0].reason.chars().count() <= MAX_REASON_CHARS,
+            "{}",
+            down[0].reason
+        );
+        assert!(
+            !down[0].reason.chars().any(char::is_control),
+            "{:?}",
+            down[0].reason
+        );
+    }
+
+    #[test]
     fn unresolved_notice_names_the_cause_and_the_fix() {
         let text = unresolved_notice(&anyhow::anyhow!("two entries are active"));
         assert!(text.contains("could not run"), "{text}");
@@ -611,10 +672,19 @@ mod tests {
 
     mod props {
         use super::super::parse_reply;
+        use super::super::{MAX_REASON_CHARS, tidy_reason};
         use proptest::prelude::*;
         use serde_json::json;
 
         proptest! {
+            #[test]
+            fn tidy_reason_is_bounded_single_line_and_idempotent(text in ".*") {
+                let tidy = tidy_reason(&text);
+                prop_assert!(tidy.chars().count() <= MAX_REASON_CHARS);
+                prop_assert!(!tidy.chars().any(char::is_control));
+                prop_assert_eq!(tidy_reason(&tidy), tidy);
+            }
+
             #[test]
             fn parse_reply_never_panics(line in ".*") {
                 let _ = parse_reply(&line);
