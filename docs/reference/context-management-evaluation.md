@@ -169,7 +169,7 @@ The inventory covered every context feature on `release/4.x`.
 | Budget pressure | `doctor` advises `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` at or below 70 | No readout of context use during a session, no nudges |
 | Recall | 8 KB byte budget (`RECALL_BUDGET_BYTES`), specificity order, adaptive recall on tool failures and subagents, per-session ledger | Byte cap vs ICM token cap never reconciled; first-fit packing; records matched by text, not id |
 | Session memory | SessionEnd stores the scope chunk plus one metrics line | Stores what the scope was, not what happened. Transcripts are captured but never read back |
-| Consolidation | ExpeL-style rules from `claude -p`, stored as `semantic/high` | Recall has no project filter; no dedup against earlier rules; 120 s model timeout inside a 30 s child timeout |
+| Consolidation | ExpeL-style rules from `claude -p`, stored as `semantic/high` | Recall has no project filter; no dedup against earlier rules |
 | Pruning | `llmenv memory prune`, `auto_prune` | `RetentionConfig` durations are never read; the importance proxy deletes every low and medium record in the top 100 |
 | Rules | path-gated frontmatter copied verbatim for Claude Code; `RULES_DIGEST` re-injected per turn | Digest is a fixed generic string, not derived from the user's rules. Codex folds every rule into AGENTS.md and loses the gating |
 | Measurement | `[LLMENV_CONTEXT]` trace, read-once `tokens_saved`, reads-per-edit line | Debug stderr only; never persisted or trended. No ICM feedback tool is called by any hook |
@@ -181,7 +181,7 @@ Two of these are bugs rather than gaps: pruning that ignores retention and delet
 
 | Technique | Goal 1 determinism | Goal 2 tokens | Goal 3 projects | Goal 4 over time | Goal 5 models | Claude Code | pi |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 4.1 editable context | model decides content, harness enforces budget | strong | neutral | neutral | any | not possible: hooks cannot rewrite messages | direct, via pi-clm |
+| 4.1 editable context | model decides content, harness enforces budget | strong | neutral | neutral | any | partial: `PostToolUse` can replace a tool result before the model sees it; no edit of prior messages | direct, via pi-clm |
 | 4.2 budget pressure | strong, all harness-side | strong | neutral | neutral | any | yes, from transcript usage on PostToolUse | yes |
 | 4.3 retention contract and voice | strong | medium | neutral | medium | any | yes, PreCompact can inject instructions and task state | yes, `session_before_compact` |
 | 4.4 salience evidence | strong | neutral | neutral | strong | any | yes, as post-compaction checks | yes |
@@ -192,7 +192,12 @@ Two of these are bugs rather than gaps: pruning that ignores retention and delet
 | 4.9 SCR | neutral | strong on self-hosted | neutral | neutral | local only | no | local Qwen only |
 | 4.10 self-steering | conflicts | unclear | neutral | risky | shared base model required | no | no |
 
-The Claude Code column has one hard limit that shapes everything: a hook can add context and deny a tool, but cannot remove or rewrite messages.
+The Claude Code column has one hard limit that shapes everything: a hook edits context only at the point of ingestion.
+A hook can add context, deny a tool, and rewrite a tool's arguments before it runs (`updatedInput`).
+A `PostToolUse` hook can replace the tool result text the model sees (`updatedToolOutput`, capped at 10,000 characters, last write wins; all tools since 2.1.121, MCP tools before that).
+The stdout of a non-blocking `PreCompact` hook is appended to the compaction instructions; the hooks docs do not state this, the 2.1.287 binary does it (`newCustomInstructions`).
+No event removes or rewrites a prior message, replaces the user prompt, or edits the compaction summary; `PostCompact` only reads `compact_summary`.
+Verified against Claude Code 2.1.287 on 2026-10-02 (#2390).
 So every technique that edits history belongs to pi, and every technique that applies pressure, injects rules, or measures belongs to llmenv's hooks on both engines.
 
 ## 7. Cache and cost caveats
@@ -242,21 +247,24 @@ Watch criteria:
 - Claude Code gains a hook or setting that lets a hook shape compaction output beyond instructions, or exposes context usage in hook payloads.
 - SCR or an equivalent lands in vLLM or llama.cpp, which would make context editing cheap on local models.
 
-## 10. Candidate follow-up issues
+## 10. Follow-up issues
 
-File these only if the recommendation stands.
+Filed 2026-10-02 after the recommendation was accepted.
+Everything that `release/3.x` can carry without a refactor went to v3.12.0; that branch already has the PreCompact event, the transcript reader, the session log, prune, consolidation, and `RetentionConfig`.
 
-| Title | Milestone hint | Labels |
+| Issue | Title | Milestone |
 | --- | --- | --- |
-| feat(hook): PreCompact retention contract and task state; reset read-once on compact | v3.12.0 | area:hook, enhancement, size/M |
-| fix(hook): read-once and read-before-edit keep pre-compaction state in deny mode | v3.12.0 | area:hook, bug, size/S |
-| feat(hook): context-pressure readout and nudges from transcript usage | v4.1.0 | area:hook, type:feature, size/M |
-| feat(hook): cache-verdict ledger from transcript usage, doctor summary | v4.1.0 | area:hook, area:cli, type:feature, size/M |
-| feat(memory): session journal with predictions at SessionEnd, project-scoped | v4.1.0 | area:hook, area:mcp, type:feature, size/M |
-| fix(memory): prune ignores RetentionConfig and deletes fresh medium records | v3.12.0 | area:mcp, bug, P1, size/S |
-| fix(consolidation): add project filter and dedup against stored rules | v3.12.0 | area:hook, bug, size/S |
-| feat(hook): adaptive recall queries from tool arguments, snippet records | v4.1.0 | area:hook, type:feature, size/M |
-| feat(adapter): pi engine ships pi-clm guidance and cache caveats | v4.1.0 | area:adapter, type:feature, size/S |
+| #2382 | feat(hook): PreCompact injects the retention contract and task state | v3.12.0 |
+| #2381 | fix(hook): read-once and read-before-edit keep stale state across compaction | v3.12.0 |
+| #2383 | feat(hook): context-pressure readout and nudges from transcript usage | v3.12.0 |
+| #2384 | feat(hook): cache-verdict ledger from transcript usage | v3.12.0 |
+| #2385 | feat(memory): session journal with predictions at SessionEnd | v3.12.0 |
+| #2386 | fix(memory): prune ignores RetentionConfig and deletes fresh medium records | v3.12.0 |
+| #2387 | fix(consolidation): add a project filter and dedup against stored rules | v3.12.0 |
+| #2391 | feat(hook): trim bulky tool results at ingestion with updatedToolOutput | v3.12.0 |
+| #2388 | feat(hook): adaptive recall toward ambient memory | Blocked — Upstream (rtk-ai/icm#476) |
+| #2389 | feat(adapter): pi engine ships pi-clm guidance and cache caveats | v4.1.0, after the pi engine issue |
+| #2390 | docs(reference): context report misstates what Claude Code hooks can rewrite | v4.0.0 |
 
 ## Sources
 
