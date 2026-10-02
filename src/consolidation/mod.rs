@@ -141,21 +141,26 @@ async fn call_claude(prompt: &str) -> anyhow::Result<String> {
 pub(crate) const CHILD_GUARD_ENV: &str = "LLMENV_CONSOLIDATION_CHILD";
 
 /// The isolated `claude -p` call. The child inherits `CLAUDE_CONFIG_DIR`, so
-/// without these flags it loads every llmenv hook and MCP server, and its own
-/// `SessionEnd` hook starts consolidation again (#2355). `--bare` would
-/// isolate it too, but `--bare` reads only `ANTHROPIC_API_KEY`, and this
-/// backend exists for subscription (OAuth) users.
+/// without these flags it runs every llmenv hook and MCP server, and its own
+/// `SessionEnd` hook starts consolidation again (#2355).
+///
+/// The user's settings still load, because they can hold the auth (`env`,
+/// `apiKeyHelper`, a Bedrock or Vertex provider). `--bare` and
+/// `--setting-sources ""` both drop that auth, and `--bare` also drops the
+/// OAuth login this backend exists for. `disableAllHooks` stops the hooks,
+/// and the default output style keeps the reply in the bullet format that
+/// [`parse_bullets`] reads.
 fn claude_command() -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("claude");
     cmd.args([
         "-p",
-        // No user/project/local settings: no hooks, no plugins.
-        "--setting-sources",
-        "",
+        "--settings",
+        r#"{"disableAllHooks":true,"outputStyle":"default"}"#,
         // No --mcp-config is given, so no MCP server starts.
         "--strict-mcp-config",
         "--tools",
         "",
+        "--disable-slash-commands",
         "--no-session-persistence",
     ])
     .env(CHILD_GUARD_ENV, "1");
@@ -663,8 +668,16 @@ mod tests {
             args.windows(2)
                 .any(|w| w[0] == std::ffi::OsStr::new(flag) && w[1] == std::ffi::OsStr::new(value))
         };
-        assert!(has_pair("--setting-sources", ""), "{args:?}");
+        assert!(
+            has_pair(
+                "--settings",
+                r#"{"disableAllHooks":true,"outputStyle":"default"}"#
+            ),
+            "{args:?}"
+        );
         assert!(has_pair("--tools", ""), "{args:?}");
+        // Dropping the setting sources would drop auth held in settings.
+        assert!(!args.contains(&std::ffi::OsStr::new("--setting-sources")));
         assert!(args.contains(&std::ffi::OsStr::new("--strict-mcp-config")));
         assert!(args.contains(&std::ffi::OsStr::new("-p")));
         // `--bare` would drop OAuth auth, which this backend exists for.
