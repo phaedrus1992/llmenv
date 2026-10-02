@@ -2027,10 +2027,10 @@ fn resolve_memory_client(
 /// Top-level and firing-bundle `features.memory` and `host` entries, merged the way
 /// `build_manifest` merges them.
 pub(crate) struct MergedMemory<'a> {
-    pub(crate) firing: Vec<&'a crate::config::Bundle>,
-    pub(crate) bundle_refs: Vec<crate::merge::BundleRef>,
+    firing: Vec<&'a crate::config::Bundle>,
+    bundle_refs: Vec<crate::merge::BundleRef>,
     pub(crate) memory: Vec<crate::config::Memory>,
-    pub(crate) host: std::collections::BTreeMap<String, crate::config::HostEntry>,
+    host: std::collections::BTreeMap<String, crate::config::HostEntry>,
 }
 
 /// Merge the memory and host entries for the active scopes. Endpoint resolution and
