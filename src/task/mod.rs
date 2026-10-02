@@ -524,7 +524,7 @@ pub(crate) fn add_task_for_session(
 ///
 /// # Errors
 /// The same errors as [`add_task_for_session`].
-pub(crate) fn add_task_for_session_with(
+fn add_task_for_session_with(
     state_dir: &Path,
     new: &NewTask<'_>,
     parent: ParentSpec<'_>,
