@@ -3491,21 +3491,14 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 Some(id) => crate::task::SessionChoice::Named(id),
                 None => crate::task::SessionChoice::Resolve(&owner),
             };
-            let mut task =
-                crate::task::add_task(&state_dir, &title, parent_spec, choice, &project)?;
-            if let Some(text) = detail.as_deref().filter(|t| !t.is_empty()) {
-                let edit = crate::task::TaskEdit {
-                    detail: Some(text),
-                    ..Default::default()
-                };
-                task = crate::task::edit_task(&state_dir, &task.slug, &edit).map_err(|e| {
-                    e.context(format!(
-                        "task '{}' was added, but its detail was not saved; \
-                         run `llmenv task edit {} --detail ...`",
-                        task.slug, task.slug
-                    ))
-                })?;
+            if detail.as_deref().is_some_and(str::is_empty) {
+                eprintln!("llmenv: the task detail is empty, so none was saved");
             }
+            let new = crate::task::NewTask {
+                title: &title,
+                detail: detail.as_deref(),
+            };
+            let task = crate::task::add_task_with(&state_dir, &new, parent_spec, choice, &project)?;
             println!("Added task '{}' ({})", task.slug, task.title);
         }
         TaskCommand::Start { id, force, reopen } => {

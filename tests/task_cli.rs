@@ -2922,3 +2922,20 @@ fn file_flags_accept_a_file_at_the_limit_and_refuse_one_byte_over() {
         .failure()
         .stderr(predicates::str::contains("larger than").and(predicates::str::contains("65536")));
 }
+
+#[test]
+fn task_add_with_an_empty_detail_warns_and_stores_none() {
+    let (dir, cwd) = (TempDir::new().unwrap(), plain_cwd());
+    start_session_in(dir.path(), cwd.path(), "s");
+    llmenv(dir.path())
+        .current_dir(cwd.path())
+        .args(["task", "add", "Empty", "--detail", ""])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("detail is empty"));
+    assert!(
+        task_json(dir.path(), cwd.path(), "empty")
+            .get("detail")
+            .is_none()
+    );
+}

@@ -467,26 +467,70 @@ pub(crate) fn add_task(
     session: SessionChoice<'_>,
     project: &str,
 ) -> anyhow::Result<Task> {
+    let new = NewTask {
+        title,
+        detail: None,
+    };
+    add_task_with(state_dir, &new, parent, session, project)
+}
+
+/// What a new task starts with.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct NewTask<'a> {
+    pub(crate) title: &'a str,
+    /// What a cold reader needs to do the task. Written in the same save that creates the task.
+    /// An empty string means no detail.
+    pub(crate) detail: Option<&'a str>,
+}
+
+/// [`add_task`] for a task that starts with a detail (#2339).
+///
+/// # Errors
+/// The same errors as [`add_task`].
+pub(crate) fn add_task_with(
+    state_dir: &Path,
+    new: &NewTask<'_>,
+    parent: ParentSpec<'_>,
+    session: SessionChoice<'_>,
+    project: &str,
+) -> anyhow::Result<Task> {
     let resolved_session = resolve_session_for_add(state_dir, session, project)?;
-    let task = add_task_for_session(state_dir, title, parent, &resolved_session)?;
+    let task = add_task_for_session_with(state_dir, new, parent, &resolved_session)?;
     touch_task_session(state_dir, &task);
     Ok(task)
 }
 
-/// `add_task`, but with the session id already resolved — skips the
-/// mandatory-session lookup dance. Used by `add_task` itself, and directly by
-/// `session.rs`'s own tests (and any caller that already has a validated
-/// session id in hand, e.g. the CLI's `--session <id>` path).
+/// A test convenience: add a task with no detail to a session whose id is already known, which
+/// skips the mandatory-session lookup. Production code calls [`add_task_for_session_with`].
 ///
 /// # Errors
 /// Errors if `parent` is [`ParentSpec::Explicit`] and doesn't resolve to an
 /// existing task — same eager-validation reasoning as `block_task`'s `on`.
+#[cfg(test)]
 pub(crate) fn add_task_for_session(
     state_dir: &Path,
     title: &str,
     parent: ParentSpec<'_>,
     session_id: &str,
 ) -> anyhow::Result<Task> {
+    let new = NewTask {
+        title,
+        detail: None,
+    };
+    add_task_for_session_with(state_dir, &new, parent, session_id)
+}
+
+/// [`add_task_for_session`] for a task that starts with a detail (#2339).
+///
+/// # Errors
+/// The same errors as [`add_task_for_session`].
+pub(crate) fn add_task_for_session_with(
+    state_dir: &Path,
+    new: &NewTask<'_>,
+    parent: ParentSpec<'_>,
+    session_id: &str,
+) -> anyhow::Result<Task> {
+    let title = new.title;
     with_store_lock(state_dir, || {
         let dir = tasks_dir(state_dir);
         let parent_slug = match parent {
@@ -514,7 +558,7 @@ pub(crate) fn add_task_for_session(
             parent: parent_slug,
             blocked_on: Vec::new(),
             notes: Vec::new(),
-            detail: None,
+            detail: new.detail.filter(|d| !d.is_empty()).map(str::to_string),
             session: Some(session_id.to_string()),
             created_at: now.clone(),
             updated_at: now,
@@ -2135,6 +2179,51 @@ mod tests {
         };
         let updated = edit_task(dir.path(), &task.slug, &edit).expect("test");
         assert_eq!(updated.title, "New title");
+    }
+
+    #[test]
+    fn a_task_added_with_a_detail_stores_it_in_the_same_save() {
+        let dir = TempDir::new().expect("test");
+        let session = session::start_session(
+            dir.path(),
+            Some("s"),
+            None,
+            "p",
+            session::StartDecision::Auto,
+        )
+        .expect("start");
+        let session::StartOutcome::Created(session) = session else {
+            panic!("expected Created");
+        };
+        let new = NewTask {
+            title: "With detail",
+            detail: Some("files: a.rs"),
+        };
+        let task = add_task_for_session_with(dir.path(), &new, ParentSpec::Detached, &session.id)
+            .expect("add");
+        assert_eq!(task.detail.as_deref(), Some("files: a.rs"));
+        assert_eq!(
+            load_task(dir.path(), &task.slug)
+                .expect("load")
+                .detail
+                .as_deref(),
+            Some("files: a.rs")
+        );
+    }
+
+    #[test]
+    fn an_empty_detail_on_a_new_task_means_no_detail() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Plain", None).expect("test");
+        assert_eq!(task.detail, None);
+        let new = NewTask {
+            title: "Empty detail",
+            detail: Some(""),
+        };
+        let session_id = task.session.clone().expect("session");
+        let added = add_task_for_session_with(dir.path(), &new, ParentSpec::Detached, &session_id)
+            .expect("add");
+        assert_eq!(added.detail, None);
     }
 
     #[test]
