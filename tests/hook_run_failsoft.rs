@@ -1155,3 +1155,20 @@ fn session_start_names_a_dead_backend_on_stdout_with_the_fix() {
         .stdout(predicate::str::contains("icm"))
         .stdout(predicate::str::contains("llmenv export"));
 }
+
+// #2358 review: a config that stops the managed servers from resolving must not turn the
+// health check off in silence. Two active codebase-memory entries are ambiguous.
+#[test]
+fn session_start_says_when_the_health_check_could_not_run() {
+    let config = config_with_codebase_memory().replace(
+        "  codebase_memory:\n    - when: [test]\n",
+        "  codebase_memory:\n    - when: [test]\n    - when: [test]\n",
+    );
+    assert!(config.matches("when: [test]").count() >= 2, "{config}");
+    let (dir, config_path) = setup_config(&config);
+    hook_cmd(dir.path(), &config_path, "session_start")
+        .timeout(Duration::from_secs(20))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MCP health check could not run"));
+}

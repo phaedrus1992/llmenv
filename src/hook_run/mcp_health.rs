@@ -214,9 +214,13 @@ pub(super) fn session_start_notice(
     config_dir: &Path,
     active: &crate::scope::ActiveScopes,
 ) -> Option<String> {
-    let servers = managed_servers(config, config_dir, active)
-        .inspect_err(|e| eprintln!("llmenv: MCP health check skipped: {e:#}"))
-        .ok()?;
+    let servers = match managed_servers(config, config_dir, active) {
+        Ok(servers) => servers,
+        Err(e) => {
+            tracing::warn!(error = %e, "MCP health check could not run");
+            return Some(unresolved_notice(&e));
+        }
+    };
     if servers.is_empty() {
         return None;
     }
@@ -233,6 +237,15 @@ pub(super) fn session_start_notice(
         down.extend(rt.block_on(find_down(&memory, DEFAULT_PROBE_TIMEOUT)));
     }
     down_notice(&down)
+}
+
+/// The notice for a config that stops the managed servers from resolving. Without it the check
+/// would turn itself off, and the agent would take silence for health.
+fn unresolved_notice(error: &anyhow::Error) -> String {
+    format!(
+        "llmenv: MCP health check could not run: {error:#}\n  Fix: run `llmenv doctor` to see the \
+         config problem.\n"
+    )
 }
 
 /// The context text that tells the agent which servers are down and how to bring them back.
@@ -474,6 +487,14 @@ mod tests {
             args: Vec::new(),
             env: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn unresolved_notice_names_the_cause_and_the_fix() {
+        let text = unresolved_notice(&anyhow::anyhow!("two entries are active"));
+        assert!(text.contains("could not run"), "{text}");
+        assert!(text.contains("two entries are active"), "{text}");
+        assert!(text.contains("llmenv doctor"), "{text}");
     }
 
     #[test]
