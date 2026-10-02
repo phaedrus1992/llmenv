@@ -1022,6 +1022,56 @@ fn installed_adapters(config: &Config) -> impl Iterator<Item = Box<dyn AgentAdap
         })
 }
 
+/// Start the local `mcp-proxy` when this host is the memory server and nothing serves its
+/// address. A failure prints a warning and is not fatal: the caller goes on without a proxy.
+/// Returns `true` when this call started a new proxy.
+pub(crate) fn ensure_local_memory_proxy(
+    config: &Config,
+    config_dir: &Path,
+    active: &ActiveScopes,
+) -> bool {
+    let Some(mem) = export_local_memory_entry(config, config_dir, active) else {
+        return false;
+    };
+    let mut spawned = false;
+    let mem = &mem;
+    let bind = memory_bind_address(mem);
+    match crate::mcp::proxy::default_pid_path() {
+        Ok(pid_path) => {
+            match crate::mcp::proxy::ensure_running(&bind, &pid_path, |bind| {
+                crate::mcp::proxy::spawn_mcp_proxy(bind, &pid_path)
+            }) {
+                Ok(outcome) => {
+                    spawned = outcome == crate::mcp::proxy::EnsureOutcome::Spawned;
+                    // Warn when binding to all interfaces only on startup — the ICM
+                    // daemon is unauthenticated.
+                    if spawned
+                        && let Ok(addr) = mem.listen_host.parse::<std::net::IpAddr>()
+                        && addr.is_unspecified()
+                    {
+                        eprintln!(
+                            "warning: memory.listen_host is '{}' — the ICM proxy \
+                             will accept connections on ALL network interfaces. \
+                             Set a specific IP to restrict access.",
+                            mem.listen_host
+                        );
+                    }
+                }
+                Err(e) => {
+                    // `{e:#}` so anyhow's context chain is shown: the outermost layer is a
+                    // label like "waiting on mcp-proxy child" and the io::Error
+                    // underneath it is the actual diagnosis.
+                    eprintln!("warning: failed to ensure mcp-proxy running: {e:#}");
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("warning: cannot locate mcp-proxy pidfile: {e:#}");
+        }
+    }
+    spawned
+}
+
 fn run_export(
     scope: Option<String>,
     tag: Option<String>,
@@ -1036,45 +1086,9 @@ fn run_export(
     let active = crate::scope::evaluate(&config, &env);
 
     // When the memory backend designates *this* host as its server, ensure the
-    // local `mcp-proxy` is alive before agents try to reach it. Failures here
-    // are logged but non-fatal — the export must still emit env vars so the
-    // shell hook stays usable.
-    if let Some(mem) = export_local_memory_entry(&config, &config_dir, &active) {
-        let mem = &mem;
-        let bind = memory_bind_address(mem);
-        match crate::mcp::proxy::default_pid_path() {
-            Ok(pid_path) => {
-                match crate::mcp::proxy::ensure_running(&bind, &pid_path, |bind| {
-                    crate::mcp::proxy::spawn_mcp_proxy(bind, &pid_path)
-                }) {
-                    Ok(outcome) => {
-                        // Warn when binding to all interfaces only on startup — the ICM
-                        // daemon is unauthenticated.
-                        if outcome == crate::mcp::proxy::EnsureOutcome::Spawned
-                            && let Ok(addr) = mem.listen_host.parse::<std::net::IpAddr>()
-                            && addr.is_unspecified()
-                        {
-                            eprintln!(
-                                "warning: memory.listen_host is '{}' — the ICM proxy \
-                                 will accept connections on ALL network interfaces. \
-                                 Set a specific IP to restrict access.",
-                                mem.listen_host
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        // `{e:#}` so anyhow's context chain is shown: the outermost layer is a
-                        // label like "waiting on mcp-proxy child" and the io::Error
-                        // underneath it is the actual diagnosis.
-                        eprintln!("warning: failed to ensure mcp-proxy running: {e:#}");
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("warning: cannot locate mcp-proxy pidfile: {e:#}");
-            }
-        }
-    }
+    // local `mcp-proxy` is alive before agents try to reach it. A failure is logged but
+    // not fatal: the export must still emit env vars so the shell hook stays usable.
+    ensure_local_memory_proxy(&config, &config_dir, &active);
 
     // Throttled pull: check sync interval and fetch+pull if enough time has elapsed.
     // Skipped entirely when remote_sync is disabled (e.g. 1Password locked).

@@ -197,7 +197,19 @@ pub(super) fn session_start_notice(
     if servers.is_empty() {
         return None;
     }
-    down_notice(&rt.block_on(find_down(&servers, DEFAULT_PROBE_TIMEOUT)))
+    let mut down = rt.block_on(find_down(&servers, DEFAULT_PROBE_TIMEOUT));
+    if down.iter().any(|d| d.name == MEMORY_MCP_NAME)
+        && crate::cli::ensure_local_memory_proxy(config, config_dir, active)
+    {
+        // This call started the proxy that was down, so ask it again before reporting.
+        let memory: Vec<ResolvedMcp> = servers
+            .into_iter()
+            .filter(|s| s.name == MEMORY_MCP_NAME)
+            .collect();
+        down.retain(|d| d.name != MEMORY_MCP_NAME);
+        down.extend(rt.block_on(find_down(&memory, DEFAULT_PROBE_TIMEOUT)));
+    }
+    down_notice(&down)
 }
 
 /// The context text that tells the agent which servers are down and how to bring them back.

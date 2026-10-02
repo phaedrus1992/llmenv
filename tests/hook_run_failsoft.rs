@@ -897,6 +897,114 @@ fn session_start_is_silent_when_codebase_memory_answers() {
         .stdout(predicate::str::contains("MCP health check failed").not());
 }
 
+/// A config whose host scope matches `hostname`, so this host owns the ICM server.
+fn config_with_local_memory_server(port: u16, hostname: &str) -> String {
+    format!(
+        r#"
+scope:
+  network: []
+  host:
+    - id: me
+      match:
+        hostname: "{hostname}"
+      tags: []
+  user:
+    - id: test-user
+      match:
+        user: {user}
+      tags: [test]
+
+tag:
+  test: ""
+
+host:
+  me:
+    addr: "127.0.0.1"
+
+features:
+  memory:
+    - server_host: me
+      port: {port}
+      listen_host: "127.0.0.1"
+      when: [test]
+
+cache:
+  sync_interval_minutes: 60
+
+adapter:
+  engine: claude-code
+"#,
+        user = current_user(),
+        port = port,
+        hostname = hostname,
+    )
+}
+
+/// A stand-in `mcp-proxy`: serves HTTP on `--host`/`--port` and answers every POST with 200.
+#[cfg(unix)]
+const FAKE_MCP_PROXY: &str = r#"#!/usr/bin/env python3
+import http.server, sys
+a = sys.argv
+host, port = a[a.index("--host") + 1], int(a[a.index("--port") + 1])
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("content-length", 0)))
+        self.send_response(200)
+        self.send_header("mcp-session-id", "s")
+        self.send_header("content-length", "2")
+        self.end_headers()
+        self.wfile.write(b"{}")
+    def log_message(self, *args):
+        pass
+http.server.HTTPServer((host, port), H).serve_forever()
+"#;
+
+/// Kills the proxy that the hook started, so the test leaves no process behind.
+#[cfg(unix)]
+struct ProxyReaper(std::path::PathBuf);
+
+#[cfg(unix)]
+impl Drop for ProxyReaper {
+    fn drop(&mut self) {
+        if let Ok(pid) = fs::read_to_string(&self.0) {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", pid.trim()])
+                .status();
+        }
+    }
+}
+
+// #2358: a stopped proxy on the host that owns ICM is restarted at session start, so no
+// notice is needed.
+#[cfg(unix)]
+#[test]
+fn session_start_restarts_a_stopped_proxy_on_the_icm_host() {
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let hostname = rustix::system::uname()
+        .nodename()
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    let (dir, config_path) = setup_config(&config_with_local_memory_server(port, &hostname));
+    let _reaper = ProxyReaper(dir.path().join("llmenv").join("mcp-proxy.pid"));
+    let bin = TempDir::new().unwrap();
+    let script = bin.path().join("mcp-proxy");
+    fs::write(&script, FAKE_MCP_PROXY).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    hook_cmd(dir.path(), &config_path, "session_start")
+        .env("PATH", format!("{}:{old_path}", bin.path().display()))
+        .timeout(Duration::from_secs(30))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MCP health check failed").not());
+}
+
 fn config_with_task_tracker() -> String {
     format!(
         r#"
