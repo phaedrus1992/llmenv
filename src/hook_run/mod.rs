@@ -13,6 +13,7 @@ pub(crate) mod cd_guard;
 pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
 pub(crate) mod mcp_client;
+mod mcp_health;
 pub(crate) mod read_once;
 mod recall;
 mod relevance;
