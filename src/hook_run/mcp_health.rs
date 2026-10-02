@@ -13,7 +13,6 @@ use anyhow::{Context, anyhow};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::task::JoinSet;
 
 use crate::hook_run::mcp_client::McpHttpClient;
 use crate::mcp::resolve::{
@@ -131,29 +130,39 @@ fn parse_reply(line: &str) -> Option<anyhow::Result<()>> {
 
 /// Probe every server in parallel and return the ones that failed, in input order.
 pub(crate) async fn find_down(servers: &[ResolvedMcp], timeout: Duration) -> Vec<DownServer> {
-    let mut probes = JoinSet::new();
-    for (index, server) in servers.iter().cloned().enumerate() {
-        probes.spawn(async move {
-            let outcome = probe(&server, timeout).await;
-            (index, server.name, outcome)
-        });
-    }
+    find_down_with(servers, move |server| async move {
+        probe(&server, timeout).await
+    })
+    .await
+}
+
+/// [`find_down`] with the probe injected, so a test can make a probe crash.
+async fn find_down_with<F, Fut>(servers: &[ResolvedMcp], probe: F) -> Vec<DownServer>
+where
+    F: Fn(ResolvedMcp) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+{
+    // Each handle keeps its server name, so a probe task that crashes still names its server.
+    let handles: Vec<_> = servers
+        .iter()
+        .cloned()
+        .map(|server| (server.name.clone(), tokio::spawn(probe(server))))
+        .collect();
     let mut down = Vec::new();
-    while let Some(joined) = probes.join_next().await {
-        match joined {
-            Ok((index, name, Err(e))) => down.push((
-                index,
-                DownServer {
-                    name,
-                    reason: format!("{e:#}"),
-                },
-            )),
-            Ok(_) => {}
-            Err(e) => tracing::error!(error = %e, "MCP health probe task failed"),
+    for (name, handle) in handles {
+        match handle.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => down.push(DownServer {
+                name,
+                reason: format!("{e:#}"),
+            }),
+            Err(crashed) => down.push(DownServer {
+                name,
+                reason: format!("health probe crashed: {crashed}"),
+            }),
         }
     }
-    down.sort_by_key(|(index, _)| *index);
-    down.into_iter().map(|(_, server)| server).collect()
+    down
 }
 
 /// The memory and codebase-memory servers that the active scopes resolve to.
@@ -376,6 +385,34 @@ mod tests {
         let names: Vec<&str> = down.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(names, ["stdio-test", "gone"]);
         assert!(down.iter().all(|d| !d.reason.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn a_probe_that_crashes_counts_as_down_and_the_order_is_kept() {
+        let servers = [
+            server("ok-1", stdio_kind("true")),
+            server("boom", stdio_kind("true")),
+            server("late", stdio_kind("true")),
+        ];
+        let down = find_down_with(&servers, |s| async move {
+            match s.name.as_str() {
+                "boom" => panic!("probe bug"),
+                "late" => Err(anyhow::anyhow!("no answer")),
+                _ => Ok(()),
+            }
+        })
+        .await;
+        let names: Vec<&str> = down.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["boom", "late"]);
+        assert!(down[0].reason.contains("crashed"), "{}", down[0].reason);
+    }
+
+    fn stdio_kind(command: &str) -> ResolvedKind {
+        ResolvedKind::Stdio {
+            command: command.to_string(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+        }
     }
 
     #[test]
