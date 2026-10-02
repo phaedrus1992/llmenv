@@ -1,3 +1,4 @@
+use crate::adapter::AgentAdapter;
 use crate::config::{Bundle, Capabilities, Config};
 use crate::paths;
 use crate::plugins::cache;
@@ -26,12 +27,103 @@ fn effective_token_efficiency_var(
         .or_else(|| value.as_i64().map(|n| n.to_string()))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckLevel {
+    Pass,
+    Warn,
+    Info,
+}
+
+fn print_check((level, text): (CheckLevel, String), pass: &str, warn: &str, info: &str) {
+    let prefix = match level {
+        CheckLevel::Pass => pass,
+        CheckLevel::Warn => warn,
+        CheckLevel::Info => info,
+    };
+    eprintln!("{prefix} {text}");
+}
+
+/// Claude Code ignores `BASH_MAX_OUTPUT_LENGTH` while the `bashOutputMaxChars` setting is set,
+/// so the setting decides the result when it is present (#2145).
+fn bash_output_check(
+    bash_output_max_chars: Option<&serde_yaml::Value>,
+    bash_max_output_length: Option<String>,
+) -> (CheckLevel, String) {
+    if let Some(value) = bash_output_max_chars {
+        return match value.as_u64() {
+            Some(n) => (
+                CheckLevel::Pass,
+                format!(
+                    "bashOutputMaxChars={n} (BASH_MAX_OUTPUT_LENGTH is ignored while it is set)"
+                ),
+            ),
+            None => (
+                CheckLevel::Warn,
+                format!(
+                    "bashOutputMaxChars must be a non-negative integer, got {}",
+                    serde_yaml::to_string(value).unwrap_or_default().trim()
+                ),
+            ),
+        };
+    }
+    match bash_max_output_length.map(|v| v.parse::<u64>()) {
+        Some(Ok(n)) => (CheckLevel::Pass, format!("BASH_MAX_OUTPUT_LENGTH={n}")),
+        Some(Err(_)) => (
+            CheckLevel::Warn,
+            "BASH_MAX_OUTPUT_LENGTH has invalid (non-numeric) value".to_string(),
+        ),
+        None => (
+            CheckLevel::Warn,
+            "BASH_MAX_OUTPUT_LENGTH not set (recommend 10000)".to_string(),
+        ),
+    }
+}
+
+/// Subscription plans get the 1-hour cache TTL on the main conversation without any variable,
+/// and `CLAUDE_CODE_PROMPT_CACHE_TTL` takes precedence over `ENABLE_PROMPT_CACHING_1H` (#2145).
+fn prompt_cache_check(enable_1h: Option<String>, ttl: Option<String>) -> (CheckLevel, String) {
+    if let Some(ttl) = ttl {
+        return if ttl.eq_ignore_ascii_case("1h") {
+            (
+                CheckLevel::Pass,
+                "CLAUDE_CODE_PROMPT_CACHE_TTL=1h (1h cache TTL enabled)".to_string(),
+            )
+        } else {
+            (
+                CheckLevel::Warn,
+                format!(
+                    "CLAUDE_CODE_PROMPT_CACHE_TTL={ttl} overrides ENABLE_PROMPT_CACHING_1H; set \
+                     it to 1h for the 1-hour cache TTL"
+                ),
+            )
+        };
+    }
+    match enable_1h {
+        Some(v) if v.eq_ignore_ascii_case("true") || v == "1" => (
+            CheckLevel::Pass,
+            "ENABLE_PROMPT_CACHING_1H=true (1h cache TTL enabled)".to_string(),
+        ),
+        Some(_) => (
+            CheckLevel::Warn,
+            "ENABLE_PROMPT_CACHING_1H has unexpected value (recommend true)".to_string(),
+        ),
+        None => (
+            CheckLevel::Info,
+            "prompt cache TTL not set: subscription plans get 1h on the main conversation \
+             automatically; API-key and cloud-provider users can set \
+             CLAUDE_CODE_PROMPT_CACHE_TTL=1h"
+                .to_string(),
+        ),
+    }
+}
+
 fn run_doctor_token_efficiency(
     use_color: bool,
     pass: &str,
     warn: &str,
     cm_enabled: bool,
     native_claude_env: Option<&serde_yaml::Value>,
+    native_claude_settings: Option<&serde_yaml::Value>,
 ) {
     let info = super::doctor_info(use_color);
     eprintln!();
@@ -53,11 +145,13 @@ fn run_doctor_token_efficiency(
         ),
     }
 
-    match get("BASH_MAX_OUTPUT_LENGTH").map(|v| v.parse::<u64>()) {
-        Some(Ok(n)) => eprintln!("{pass} BASH_MAX_OUTPUT_LENGTH={n}"),
-        Some(Err(_)) => eprintln!("{warn} BASH_MAX_OUTPUT_LENGTH has invalid (non-numeric) value"),
-        None => eprintln!("{warn} BASH_MAX_OUTPUT_LENGTH not set (recommend 10000)"),
-    }
+    let bash_max_chars = native_claude_settings.and_then(|v| v.get("bashOutputMaxChars"));
+    print_check(
+        bash_output_check(bash_max_chars, get("BASH_MAX_OUTPUT_LENGTH")),
+        pass,
+        warn,
+        &info,
+    );
 
     match get("MAX_MCP_OUTPUT_TOKENS").map(|v| v.parse::<u64>()) {
         Some(Ok(n)) => eprintln!("{pass} MAX_MCP_OUTPUT_TOKENS={n}"),
@@ -65,17 +159,15 @@ fn run_doctor_token_efficiency(
         None => eprintln!("{warn} MAX_MCP_OUTPUT_TOKENS not set (recommend 10000)"),
     }
 
-    match get("ENABLE_PROMPT_CACHING_1H") {
-        Some(val) if val.eq_ignore_ascii_case("true") || val == "1" => {
-            eprintln!("{pass} ENABLE_PROMPT_CACHING_1H=true (1h cache TTL enabled)")
-        }
-        Some(_) => {
-            eprintln!("{warn} ENABLE_PROMPT_CACHING_1H has unexpected value (recommend true)")
-        }
-        None => {
-            eprintln!("{warn} ENABLE_PROMPT_CACHING_1H not set (recommend true for 1h cache reuse)")
-        }
-    }
+    print_check(
+        prompt_cache_check(
+            get("ENABLE_PROMPT_CACHING_1H"),
+            get("CLAUDE_CODE_PROMPT_CACHE_TTL"),
+        ),
+        pass,
+        warn,
+        &info,
+    );
 
     match get("CLAUDE_CODE_SUBAGENT_MODEL") {
         Some(_) => eprintln!("{info} CLAUDE_CODE_SUBAGENT_MODEL is set"),
@@ -438,6 +530,125 @@ fn cbm_floor_warning(version: &str) -> Option<String> {
              rebuilds each project once."
         )
     })
+}
+
+/// ICM server releases that fix recall behavior llmenv depends on (#2261): 0.10.60 applies the
+/// keyword/topic filter before the limit (adaptive recall fanout needs it), and 0.10.64 changes
+/// the full-text query from AND to OR and fixes topic starvation.
+const ICM_SERVER_FILTER_FIX: (u64, u64, u64) = (0, 10, 60);
+const ICM_SERVER_RANKING_FIX: (u64, u64, u64) = (0, 10, 64);
+
+/// Doctor's verdict on the version of the `icm` binary that serves memory (#2261).
+fn icm_server_check(version: &str) -> (CheckLevel, String) {
+    let upgrade = "Run `icm upgrade --apply`.";
+    match parse_semver_triple(version) {
+        None => (
+            CheckLevel::Info,
+            format!("ICM server reports version {version:?}, which is not semver"),
+        ),
+        Some(v) if v < ICM_SERVER_FILTER_FIX => (
+            CheckLevel::Warn,
+            format!(
+                "ICM server {version} is older than 0.10.60: it filters recall by keyword and \
+                 topic after the limit, so adaptive recall returns little or nothing. {upgrade}"
+            ),
+        ),
+        Some(v) if v < ICM_SERVER_RANKING_FIX => (
+            CheckLevel::Warn,
+            format!(
+                "ICM server {version} is older than 0.10.64: recall ranking is weaker (AND \
+                 full-text query, topic starvation). {upgrade}"
+            ),
+        ),
+        Some(_) => (CheckLevel::Pass, format!("ICM server {version}")),
+    }
+}
+
+/// The local `icm` version for a host that serves memory, or the reason it is unknown.
+fn local_icm_version() -> Result<String, String> {
+    if !crate::paths::binary_on_path("icm") {
+        return Err("icm is not on PATH, but this host serves ICM memory".to_string());
+    }
+    tool_version("icm").ok_or_else(|| "`icm --version` failed or printed no version".to_string())
+}
+
+/// Where the ICM memory server for the active scope runs, as far as doctor can tell.
+#[derive(Debug, PartialEq, Eq)]
+enum IcmServerScope {
+    /// The active scope has no memory backend.
+    NoBackend,
+    /// This host serves memory.
+    Local,
+    /// Another host serves memory.
+    Remote,
+    /// Memory resolution failed with this error.
+    Unresolved(String),
+}
+
+/// Classify the memory server for the active scope. Uses the same bundle-merged memory list as
+/// endpoint resolution, so a bundle-declared server on this host counts as local.
+fn icm_server_scope(
+    config: &Config,
+    config_dir: &Path,
+    active: &crate::scope::ActiveScopes,
+) -> IcmServerScope {
+    let resolved = crate::memory::memory_url(config, config_dir, active).and_then(|endpoint| {
+        Ok((
+            endpoint,
+            crate::memory::merged_memory(config, config_dir, active)?,
+        ))
+    });
+    match resolved {
+        Ok((crate::memory::MemoryEndpoint::Active { .. }, merged)) => {
+            if super::find_local_memory_entry(&merged.memory, active).is_some() {
+                IcmServerScope::Local
+            } else {
+                IcmServerScope::Remote
+            }
+        }
+        Ok(_) => IcmServerScope::NoBackend,
+        Err(e) => IcmServerScope::Unresolved(format!("{e:#}")),
+    }
+}
+
+/// Report the ICM server version (#2261). The MCP `initialize` reply cannot carry it, because
+/// `mcp-proxy` puts its own `mcp` library version in `serverInfo.version`. So doctor reads the
+/// local `icm` binary when this host serves memory, and says the version is unknown otherwise.
+/// Prints nothing when the active scope has no memory backend.
+fn run_doctor_icm_server(
+    use_color: bool,
+    config: &Config,
+    config_dir: &Path,
+    active: &crate::scope::ActiveScopes,
+) {
+    let pass = super::doctor_pass(use_color);
+    let warn = super::doctor_warning(use_color);
+    let info = super::doctor_info(use_color);
+    let local = match icm_server_scope(config, config_dir, active) {
+        IcmServerScope::NoBackend => return,
+        IcmServerScope::Unresolved(e) => {
+            eprintln!();
+            eprintln!("ICM server:");
+            eprintln!("{warn} ICM server check skipped: cannot resolve the memory backend: {e}");
+            return;
+        }
+        IcmServerScope::Local => true,
+        IcmServerScope::Remote => false,
+    };
+    eprintln!();
+    eprintln!("ICM server:");
+    if !local {
+        eprintln!(
+            "{info} ICM server version unknown: the memory server is another host, and \
+             mcp-proxy does not forward the icm version (#2161). Run `icm --version` on that \
+             host; recall needs 0.10.64 or later."
+        );
+        return;
+    }
+    match local_icm_version() {
+        Ok(version) => print_check(icm_server_check(&version), &pass, &warn, &info),
+        Err(reason) => eprintln!("{warn} {reason}"),
+    }
 }
 
 /// Report installed versions and update commands for the tools llmenv depends
@@ -1100,6 +1311,82 @@ fn report_credential_cache(cache_dir: &Path, pass: &str, info: &str, warn: &str)
     }
 }
 
+/// Whether `installed` holds the adapter with this engine id. `AgentAdapter::name` is the
+/// hyphenated display name (`claude-code`), so a comparison must go through `engine_id`.
+fn has_engine(installed: &[Box<dyn crate::adapter::AgentAdapter>], engine: &str) -> bool {
+    installed
+        .iter()
+        .any(|a| crate::adapter::engine_id(a.as_ref()) == engine)
+}
+
+/// The rendered Claude Code folder this shell uses: `CLAUDE_CONFIG_DIR`, but only when it sits
+/// under llmenv's adapter root. The shell hook sets it to the exact folder export wrote, which
+/// doctor cannot recompute cheaply in strict hashing mode (#2145).
+fn rendered_claude_dir(adapter_root: &Path, claude_config_dir: Option<String>) -> Option<PathBuf> {
+    claude_config_dir
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .filter(|p| p.starts_with(adapter_root))
+}
+
+/// Read a rendered Claude Code JSON file for the retired-settings scan (#2145). `None` means the
+/// file does not exist. A file that cannot be read or parsed gets one warning and counts as `{}`.
+fn read_rendered_json(path: &Path, warn: &str) -> Option<serde_json::Value> {
+    let empty = serde_json::Value::Object(serde_json::Map::new());
+    let skip = "the retired-settings check skips it; run `llmenv export` to regenerate it";
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            eprintln!("{warn} Cannot read {} ({e}); {skip}", path.display());
+            return Some(empty);
+        }
+    };
+    Some(serde_json::from_str(&text).unwrap_or_else(|e| {
+        eprintln!("{warn} {} is not valid JSON ({e}); {skip}", path.display());
+        empty
+    }))
+}
+
+/// Warn about retired Claude Code entries in the rendered `settings.json` and `.claude.json`
+/// (#2145). Prints nothing when there is no hit.
+fn report_retired_claude_settings(adapter_root: &Path, warn: &str, info: &str) {
+    let Some(dir) = rendered_claude_dir(adapter_root, std::env::var("CLAUDE_CONFIG_DIR").ok())
+    else {
+        eprintln!(
+            "{info} Retired-settings check skipped: CLAUDE_CONFIG_DIR does not point to an llmenv \
+             folder under {}. Run doctor in a shell that has the llmenv hook.",
+            adapter_root.display()
+        );
+        return;
+    };
+    let mut files = [("settings.json", None), (".claude.json", None)];
+    for (name, value) in &mut files {
+        let path = dir.join(*name);
+        *value = read_rendered_json(&path, warn);
+        if value.is_none() {
+            eprintln!(
+                "{info} {} does not exist; run `llmenv export` to render it",
+                path.display()
+            );
+        }
+    }
+    let [(_, settings), (_, claude_json)] = files;
+    let empty = serde_json::Value::Object(serde_json::Map::new());
+    let hits = crate::adapter::claude_code::retired::scan(
+        settings.as_ref().unwrap_or(&empty),
+        claude_json.as_ref().unwrap_or(&empty),
+    );
+    if hits.is_empty() {
+        return;
+    }
+    eprintln!();
+    eprintln!("Retired Claude Code settings:");
+    for hit in hits {
+        eprintln!("{warn} {}", hit.message());
+    }
+}
+
 pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result<()> {
     let pass = super::doctor_pass(use_color);
     let warn = super::doctor_warning(use_color);
@@ -1248,13 +1535,15 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     // about it and this is where a user looks instead. Plain `doctor`, not
     // `--all`: "why isn't my permission rule working on opencode" is the
     // question doctor exists to answer.
+    // Collected once: each `installed_adapters` call repeats its disabled_engines warning.
+    let installed: Vec<Box<dyn crate::adapter::AgentAdapter>> =
+        super::installed_adapters(&config).collect();
+    let claude_installed = has_engine(&installed, "claude_code");
     {
         let caps = doctor_manifest
             .as_ref()
             .map_or(&config.capabilities, |(m, _)| &m.capabilities);
-        let active_engines: Vec<&str> = super::installed_adapters(&config)
-            .map(|a| a.name())
-            .collect();
+        let active_engines: Vec<&str> = installed.iter().map(|a| a.name()).collect();
         for hit in inexact_tool_mappings(caps, &active_engines) {
             eprintln!("{warn} {}", hit.message());
         }
@@ -1269,7 +1558,7 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     // the same way rather than only the first adapter to land this check.
     if let Some((manifest, _)) = &doctor_manifest {
         for engine in ["claude_code", "codex", "opencode"] {
-            if !super::installed_adapters(&config).any(|a| a.name() == engine) {
+            if !has_engine(&installed, engine) {
                 continue;
             }
             eprintln!();
@@ -1285,7 +1574,7 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     }
 
     if let Some((manifest, _)) = &doctor_manifest {
-        for adapter in super::installed_adapters(&config) {
+        for adapter in &installed {
             let supported = adapter.supported_hook_events();
             for hook in &manifest.capabilities.hooks {
                 if !supported.contains(&hook.event.as_str()) {
@@ -1303,12 +1592,21 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
 
     run_doctor_codex(use_color, &config, &cache_dir, doctor_manifest.as_ref());
 
+    if claude_installed {
+        let adapter_root = cache_dir.join(crate::adapter::claude_code::ClaudeCodeAdapter.name());
+        report_retired_claude_settings(&adapter_root, &warn, &info);
+    }
+
     // Resolved native.claude_code.env, for the token-efficiency checks below
     // to treat as equally "set" alongside the process environment (#543 follow-up).
     let native_claude_env = doctor_manifest
         .as_ref()
         .and_then(|(manifest, _)| manifest.native.get("claude_code"))
         .and_then(|v| v.get("env"));
+
+    let native_claude_settings = doctor_manifest
+        .as_ref()
+        .and_then(|(manifest, _)| manifest.native.get("claude_code"));
 
     if all {
         // Orphan detection
@@ -1611,11 +1909,19 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
         }
     }
 
-    run_doctor_token_efficiency(use_color, &pass, &warn, cm_enabled, native_claude_env);
+    run_doctor_token_efficiency(
+        use_color,
+        &pass,
+        &warn,
+        cm_enabled,
+        native_claude_env,
+        native_claude_settings,
+    );
 
     run_doctor_tool_availability(use_color, &config);
     run_doctor_dependent_tools(use_color);
     run_doctor_sandbox(use_color, &config);
+    run_doctor_icm_server(use_color, &config, &config_dir, &active);
 
     // When context-mode is enabled, verify the marketplace clone exists so
     // inject_context_mode can actually resolve the plugin. A missing clone is
@@ -1761,6 +2067,227 @@ mod tests {
     };
     use proptest::prelude::*;
     use std::collections::BTreeMap;
+
+    // -- bash_output_check / prompt_cache_check (#2145) --
+
+    #[test]
+    fn bash_output_max_chars_wins_over_the_env_var() {
+        let chars = serde_yaml::Value::from(20_000_u64);
+        let (level, text) = bash_output_check(Some(&chars), Some("not-a-number".into()));
+        assert_eq!(level, CheckLevel::Pass);
+        assert!(text.starts_with("bashOutputMaxChars=20000"), "{text}");
+        assert!(text.contains("BASH_MAX_OUTPUT_LENGTH is ignored"), "{text}");
+    }
+
+    #[test]
+    fn bash_output_max_chars_non_numeric_warns_with_the_value() {
+        for (value, shown) in [
+            (serde_yaml::Value::from("lots"), "lots"),
+            (serde_yaml::Value::from(-1), "-1"),
+        ] {
+            let (level, text) = bash_output_check(Some(&value), None);
+            assert_eq!(level, CheckLevel::Warn);
+            assert!(text.ends_with(&format!("got {shown}")), "{text}");
+        }
+    }
+
+    #[test]
+    fn bash_output_falls_back_to_the_env_var() {
+        assert_eq!(
+            bash_output_check(None, Some("10000".into())),
+            (CheckLevel::Pass, "BASH_MAX_OUTPUT_LENGTH=10000".to_string())
+        );
+        assert_eq!(
+            bash_output_check(None, Some("x".into())).0,
+            CheckLevel::Warn
+        );
+        assert_eq!(bash_output_check(None, None).0, CheckLevel::Warn);
+    }
+
+    #[test]
+    fn prompt_cache_ttl_1h_passes_even_with_a_bad_enable_value() {
+        let (level, text) = prompt_cache_check(Some("maybe".into()), Some("1H".into()));
+        assert_eq!(level, CheckLevel::Pass);
+        assert!(
+            text.starts_with("CLAUDE_CODE_PROMPT_CACHE_TTL=1h"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn prompt_cache_enable_1h_passes() {
+        for v in ["1", "true", "TRUE"] {
+            assert_eq!(
+                prompt_cache_check(Some(v.into()), None).0,
+                CheckLevel::Pass,
+                "{v}"
+            );
+        }
+        let (level, text) = prompt_cache_check(Some("1".into()), Some("5m".into()));
+        assert_eq!(
+            level,
+            CheckLevel::Warn,
+            "a non-1h TTL overrides ENABLE_PROMPT_CACHING_1H"
+        );
+        assert!(
+            text.contains("CLAUDE_CODE_PROMPT_CACHE_TTL=5m overrides"),
+            "{text}"
+        );
+        assert_eq!(
+            prompt_cache_check(None, Some("5m".into())).0,
+            CheckLevel::Warn
+        );
+    }
+
+    #[test]
+    fn prompt_cache_unset_is_info_not_warn() {
+        let (level, text) = prompt_cache_check(None, None);
+        assert_eq!(level, CheckLevel::Info);
+        assert!(text.contains("subscription plans get 1h"), "{text}");
+        assert_eq!(
+            prompt_cache_check(Some("no".into()), None).0,
+            CheckLevel::Warn
+        );
+    }
+
+    // -- has_engine --
+
+    #[test]
+    fn has_engine_matches_the_engine_id_not_the_display_name() {
+        let installed: Vec<Box<dyn crate::adapter::AgentAdapter>> =
+            vec![Box::new(crate::adapter::claude_code::ClaudeCodeAdapter)];
+        assert!(has_engine(&installed, "claude_code"));
+        assert!(!has_engine(&installed, "crush"));
+        assert!(!has_engine(&[], "claude_code"));
+    }
+
+    // -- icm_server_check (#2261) --
+
+    #[test]
+    fn icm_server_check_boundaries() {
+        let level = |v| icm_server_check(v).0;
+        assert_eq!(level("0.10.59"), CheckLevel::Warn);
+        assert_eq!(level("0.10.60"), CheckLevel::Warn);
+        assert_eq!(level("0.10.63"), CheckLevel::Warn);
+        assert_eq!(level("0.10.64"), CheckLevel::Pass);
+        assert_eq!(level("0.11.0"), CheckLevel::Pass);
+        assert_eq!(level("v1.0.0"), CheckLevel::Pass);
+        assert_eq!(level("dev"), CheckLevel::Info);
+    }
+
+    #[test]
+    fn icm_server_check_names_the_fix_the_server_lacks() {
+        let (_, old) = icm_server_check("0.10.59");
+        assert!(old.contains("older than 0.10.60"), "{old}");
+        assert!(old.contains("icm upgrade --apply"), "{old}");
+        let (_, mid) = icm_server_check("0.10.62");
+        assert!(mid.contains("older than 0.10.64"), "{mid}");
+    }
+
+    // -- icm_server_scope (#2261) --
+
+    #[test]
+    fn icm_server_scope_without_memory_is_no_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let active = crate::cli::tests::active_as_server();
+        assert_eq!(
+            icm_server_scope(&Config::default(), dir.path(), &active),
+            IcmServerScope::NoBackend
+        );
+    }
+
+    #[test]
+    fn icm_server_scope_tells_server_from_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::cli::tests::memory_config("127.0.0.1", 9092);
+        assert_eq!(
+            icm_server_scope(&config, dir.path(), &crate::cli::tests::active_as_server()),
+            IcmServerScope::Local
+        );
+        assert_eq!(
+            icm_server_scope(&config, dir.path(), &crate::cli::tests::active_as_client()),
+            IcmServerScope::Remote
+        );
+    }
+
+    #[test]
+    fn icm_server_scope_reports_a_resolution_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::cli::tests::memory_config("127.0.0.1", 9092);
+        config.host.clear();
+        let scope = icm_server_scope(&config, dir.path(), &crate::cli::tests::active_as_server());
+        assert!(
+            matches!(&scope, IcmServerScope::Unresolved(e) if e.contains("srv")),
+            "{scope:?}"
+        );
+    }
+
+    proptest! {
+        /// The verdict depends only on where the version falls against the two floors.
+        #[test]
+        fn icm_server_check_is_monotonic(a in 0u64..3, b in 0u64..20, c in 0u64..100) {
+            let (level, _) = icm_server_check(&format!("{a}.{b}.{c}"));
+            let expected = if (a, b, c) >= ICM_SERVER_RANKING_FIX {
+                CheckLevel::Pass
+            } else {
+                CheckLevel::Warn
+            };
+            prop_assert_eq!(level, expected);
+        }
+
+        /// A 1h TTL passes in any letter case and whatever ENABLE_PROMPT_CACHING_1H holds.
+        #[test]
+        fn prompt_cache_ttl_1h_always_passes(
+            upper_h in any::<bool>(),
+            enable in proptest::option::of("[a-z0-9]{0,5}"),
+        ) {
+            let ttl = if upper_h { "1H" } else { "1h" };
+            prop_assert_eq!(prompt_cache_check(enable, Some(ttl.into())).0, CheckLevel::Pass);
+        }
+
+        /// Any file content gives a value, never a panic: valid JSON parses, anything else is {}.
+        #[test]
+        fn read_rendered_json_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..64)) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("f.json");
+            std::fs::write(&path, &bytes).unwrap();
+            let value = read_rendered_json(&path, "!");
+            prop_assert!(value.is_some());
+        }
+    }
+
+    // -- read_rendered_json / rendered_claude_dir (#2145) --
+
+    #[test]
+    fn read_rendered_json_missing_is_none_and_invalid_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            read_rendered_json(&dir.path().join("absent.json"), "!"),
+            None
+        );
+        let bad = dir.path().join("bad.json");
+        std::fs::write(&bad, "{ not json").unwrap();
+        assert_eq!(read_rendered_json(&bad, "!"), Some(serde_json::json!({})));
+        let good = dir.path().join("good.json");
+        std::fs::write(&good, r#"{"env":{"A":"1"}}"#).unwrap();
+        assert_eq!(read_rendered_json(&good, "!").unwrap()["env"]["A"], "1");
+    }
+
+    #[test]
+    fn rendered_claude_dir_requires_a_folder_under_the_adapter_root() {
+        let root = Path::new("/cache/claude-code");
+        let inside = "/cache/claude-code/3/65470f3c02b7".to_string();
+        assert_eq!(
+            rendered_claude_dir(root, Some(inside.clone())),
+            Some(PathBuf::from(inside))
+        );
+        assert_eq!(
+            rendered_claude_dir(root, Some("/home/u/.claude".into())),
+            None
+        );
+        assert_eq!(rendered_claude_dir(root, Some(String::new())), None);
+        assert_eq!(rendered_claude_dir(root, None), None);
+    }
 
     // -- network_scope_cannot_match --
 

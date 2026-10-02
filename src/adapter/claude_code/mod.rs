@@ -14,6 +14,8 @@ use crate::merge::MergedManifest;
 use crate::plugins::resolve::ResolvedMarketplace;
 use crate::util::{dedup, merge_json};
 
+pub(crate) mod retired;
+
 /// Command the auto-emitted SessionStart hook runs to inject source config paths
 /// into agent context (#289). Outputs `hookSpecificOutput.additionalContext` JSON
 /// so the agent always knows where to edit config rather than touching the cache.

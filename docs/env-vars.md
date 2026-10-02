@@ -108,5 +108,5 @@ When auditing for new or inconsistent variables:
 
 ## See Also
 
-- [`CLAUDE.md`](../CLAUDE.md) — global development standards
+- [`AGENTS.md`](../AGENTS.md) — agent rules for this repo
 - [`RELEASING.md`](../RELEASING.md) — release checklist and version management
