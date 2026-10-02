@@ -682,6 +682,27 @@ mod tests {
 
         proptest! {
             #[test]
+            fn a_reply_with_id_zero_and_a_result_is_success(
+                result in prop_oneof![
+                    Just(json!({})),
+                    any::<i64>().prop_map(|n| json!(n)),
+                    ".*".prop_map(|text| json!(text)),
+                ],
+            ) {
+                let line = json!({"jsonrpc": "2.0", "id": 0, "result": result}).to_string();
+                prop_assert!(matches!(parse_reply(&line), Some(Ok(()))));
+            }
+
+            #[test]
+            fn an_error_wins_over_a_result_in_the_same_reply(msg in "[a-z ]{1,20}") {
+                let line = json!({
+                    "jsonrpc": "2.0", "id": 0, "result": {}, "error": {"code": -1, "message": msg}
+                })
+                .to_string();
+                prop_assert!(matches!(parse_reply(&line), Some(Err(_))));
+            }
+
+            #[test]
             fn tidy_reason_is_bounded_single_line_and_idempotent(text in ".*") {
                 let tidy = tidy_reason(&text);
                 prop_assert!(tidy.chars().count() <= MAX_REASON_CHARS);
