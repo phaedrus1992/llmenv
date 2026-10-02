@@ -168,9 +168,10 @@ pub(crate) fn git_branch(cwd: &Path) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-/// Drop control characters, so agent-written text cannot spoof terminal output.
+/// Drop control, bidirectional, and zero-width characters, so agent-written text cannot spoof
+/// terminal output.
 fn clean(text: &str) -> String {
-    text.chars().filter(|c| !c.is_control()).collect()
+    crate::util::strip_unsafe_chars(text)
 }
 
 fn extend_unique<T: PartialEq + Clone>(into: &mut Vec<T>, from: &[T]) {
@@ -393,6 +394,19 @@ mod tests {
             "{text:?}"
         );
         assert!(text.contains("second"), "{text}");
+    }
+
+    #[test]
+    fn render_strips_bidi_overrides_and_zero_width_characters() {
+        let text = ResumeContext {
+            context: Some("run\u{202E}fdp.exe\u{200B}".to_string()),
+            docs: vec!["a\u{FEFF}.md".to_string()],
+            ..ResumeContext::default()
+        }
+        .render();
+        for hidden in ['\u{202E}', '\u{200B}', '\u{FEFF}'] {
+            assert!(!text.contains(hidden), "{hidden:?} survived in {text:?}");
+        }
     }
 
     #[test]
