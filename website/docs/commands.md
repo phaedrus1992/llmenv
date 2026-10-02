@@ -386,8 +386,10 @@ unambiguous prefix of one.
   crosses sessions — a new session's first task always starts with no
   parent, regardless of what was last added in a different session. **A
   task must belong to a session** (see below): with exactly one session open
-  for the current project it auto-resolves; pass `--session <id>` when two
-  or more are open; errors with actionable guidance when none is open.
+  for the current project it auto-resolves; with two or more open it picks
+  the one this conversation started or resumed (changed in v3.12.0; see
+  "Session ownership" below), else asks for `--session <id>`; errors with
+  actionable guidance when none is open.
 - `task start <id> [--force]` — claim a task, moving it to `wip`. Also the
   resume action for a `waiting` task — it accepts any non-`done` state as its
   starting point. `parent` and `blocked_on` (added in v3.8.0) are enforced
@@ -506,8 +508,21 @@ project's hook.
 
   Tasks created with `task add` while a session is open are tagged with it
   permanently, so a task's session membership reflects when it was created.
+
+  **Session ownership** (added in v3.12.0): `session start` records the
+  engine conversation (`CLAUDE_CODE_SESSION_ID`) and engine process
+  (`CLAUDE_PID`) that started the session; `--resume` moves it to the
+  resuming conversation. When two or more sessions are open, `task add`,
+  `session finish`, `session show`, and `session summary` without an id pick
+  the one this conversation owns. The checkpoint error marks a session as
+  yours when this conversation started it, or when this same engine process
+  started it under an earlier conversation id — the state after a `/clear`
+  or a compaction — so `--resume` is the safe choice instead of `--new`.
+  Outside an engine (no such variables) nothing is recorded, and resolution
+  works as before.
 - `task session finish [<id>]` — close out a session; auto-resolves when
-  exactly one is open for the current project, otherwise pass an id. Never
+  exactly one is open for the current project, or to the one this
+  conversation owns, otherwise pass an id. Never
   touches its tasks' session tag — a finished session (even with incomplete
   tasks) is a legitimate historical record.
 - `task session show [<id>]` — print a session's progress; auto-resolves

@@ -2916,7 +2916,7 @@ mod tests {
             state_dir.path(),
             "finish the parser",
             crate::task::ParentSpec::Auto,
-            None,
+            crate::task::SessionChoice::Resolve(&crate::task::session::EngineIdentity::default()),
             &project,
         )
         .expect("test");

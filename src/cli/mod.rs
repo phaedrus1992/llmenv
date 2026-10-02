@@ -3333,13 +3333,12 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 (None, false) => crate::task::ParentSpec::Auto,
             };
             let project = current_project_tag()?;
-            let task = crate::task::add_task(
-                &state_dir,
-                &title,
-                parent_spec,
-                session.as_deref(),
-                &project,
-            )?;
+            let owner = crate::task::session::EngineIdentity::from_env();
+            let choice = match session.as_deref() {
+                Some(id) => crate::task::SessionChoice::Named(id),
+                None => crate::task::SessionChoice::Resolve(&owner),
+            };
+            let task = crate::task::add_task(&state_dir, &title, parent_spec, choice, &project)?;
             println!("Added task '{}' ({})", task.slug, task.title);
         }
         TaskCommand::Start { id, force, reopen } => {
@@ -3612,13 +3611,14 @@ fn run_task_session_command(
                 (None, false, false) => StartDecision::Auto,
                 _ => unreachable!("clap's conflicts_with_all enforces at most one"),
             };
-            let outcome = session::start_session(
-                state_dir,
-                name.as_deref(),
-                description.as_deref(),
-                &project,
-                decision,
-            )?;
+            let owner = session::EngineIdentity::from_env();
+            let request = session::StartRequest {
+                name: name.as_deref(),
+                description: description.as_deref(),
+                project: &project,
+                owner: &owner,
+            };
+            let outcome = session::start_session_as(state_dir, &request, decision)?;
             match outcome {
                 StartOutcome::Created(s) => println!(
                     "Started session '{}'{}",
@@ -3711,21 +3711,27 @@ fn run_task_session_command(
 }
 
 /// Resolve an explicit-or-omitted session id the same way `add_task` does:
-/// omitted + exactly one open session for `project` auto-resolves, omitted +
-/// zero/2+ errors.
+/// omitted resolves through [`crate::task::session::pick_open_session`], so
+/// with two or more open the caller's own session wins (#2365).
 fn resolve_session_id(
     state_dir: &std::path::Path,
     project: &str,
     id: Option<String>,
 ) -> anyhow::Result<String> {
+    use crate::task::session::{self, EngineIdentity, PickError};
     if let Some(id) = id {
         return Ok(id);
     }
-    let open = crate::task::session::open_sessions_for_project(state_dir, project);
-    match open.len() {
-        0 => anyhow::bail!("no open session for this project — pass an id explicitly"),
-        1 => Ok(open[0].id.clone()),
-        n => anyhow::bail!("{n} open sessions for this project — pass an id explicitly"),
+    let open = session::open_sessions_for_project(state_dir, project);
+    match session::pick_open_session(open, &EngineIdentity::from_env()) {
+        Ok(session) => Ok(session.id),
+        Err(PickError::NoneOpen) => {
+            anyhow::bail!("no open session for this project — pass an id explicitly")
+        }
+        Err(PickError::Ambiguous(n)) => anyhow::bail!(
+            "{n} open sessions for this project, and none of them is owned by this \
+             conversation — pass an id explicitly"
+        ),
     }
 }
 

@@ -57,11 +57,16 @@ pub(crate) fn handle_pre_tool_use(payload: &Value, state_dir: &Path) -> Option<S
             )));
         }
     };
-    Some(handle_inner(
+    // The payload's `session_id` is the conversation that owns any session
+    // the redirect starts, and picks that session when several are open (#2365).
+    let owner =
+        session::EngineIdentity::from_session_id(payload.get("session_id").and_then(Value::as_str));
+    Some(handle_inner_as(
         tool,
         payload.get("tool_input"),
         state_dir,
         &project,
+        &owner,
     ))
 }
 
@@ -82,12 +87,31 @@ fn task_tool_name(payload: &Value) -> Option<&str> {
     (TASK_TOOLS.contains(&tool) || tool == OPENCODE_TASK_TOOL).then_some(tool)
 }
 
-/// Testable core: perform the tracker operation for an already-validated task
-/// tool name.
+/// [`handle_inner_as`] with no engine identity, for tests that do not
+/// exercise session ownership.
+#[cfg(test)]
 fn handle_inner(tool: &str, input: Option<&Value>, state_dir: &Path, project: &str) -> String {
+    handle_inner_as(
+        tool,
+        input,
+        state_dir,
+        project,
+        &session::EngineIdentity::default(),
+    )
+}
+
+/// Testable core: perform the tracker operation for an already-validated task
+/// tool name, on behalf of `owner`.
+fn handle_inner_as(
+    tool: &str,
+    input: Option<&Value>,
+    state_dir: &Path,
+    project: &str,
+    owner: &session::EngineIdentity,
+) -> String {
     match tool {
-        OPENCODE_TASK_TOOL => todowrite(input, state_dir, project),
-        "TaskCreate" => create(input, state_dir, project),
+        OPENCODE_TASK_TOOL => todowrite(input, state_dir, project, owner),
+        "TaskCreate" => create(input, state_dir, project, owner),
         "TaskList" => list(state_dir),
         "TaskUpdate" => update(input, state_dir),
         // Unreachable: `task_tool_name` admits only TASK_TOOLS.
@@ -97,17 +121,28 @@ fn handle_inner(tool: &str, input: Option<&Value>, state_dir: &Path, project: &s
     }
 }
 
-fn create(input: Option<&Value>, state_dir: &Path, project: &str) -> String {
+fn create(
+    input: Option<&Value>,
+    state_dir: &Path,
+    project: &str,
+    owner: &session::EngineIdentity,
+) -> String {
     let Some(subject) = str_field(input, "subject")
         .map(str::trim)
         .filter(|s| !s.is_empty())
     else {
         return deny("TaskCreate carried no `subject`; use `llmenv task add \"<title>\"`.");
     };
-    if let Err(msg) = ensure_session(state_dir, project) {
+    if let Err(msg) = ensure_session(state_dir, project, owner) {
         return msg;
     }
-    match task::add_task(state_dir, subject, task::ParentSpec::Auto, None, project) {
+    match task::add_task(
+        state_dir,
+        subject,
+        task::ParentSpec::Auto,
+        task::SessionChoice::Resolve(owner),
+        project,
+    ) {
         Ok(t) => {
             let mut msg = format!(
                 "Tracked in the llmenv task tracker as '{slug}' — do NOT stop tracking and do \
@@ -163,7 +198,12 @@ fn create(input: Option<&Value>, state_dir: &Path, project: &str) -> String {
 /// list and forgot one" are indistinguishable. Closing tasks on that signal
 /// would silently lose work the user still cares about, so absent tasks stay
 /// open and the reply says how many there were.
-fn todowrite(input: Option<&Value>, state_dir: &Path, project: &str) -> String {
+fn todowrite(
+    input: Option<&Value>,
+    state_dir: &Path,
+    project: &str,
+    owner: &session::EngineIdentity,
+) -> String {
     let Some(todos) = input.and_then(|v| v.get("todos")).and_then(Value::as_array) else {
         return deny(
             "todowrite carried no `todos` array; track this with `llmenv task add \"<title>\"`.",
@@ -173,7 +213,7 @@ fn todowrite(input: Option<&Value>, state_dir: &Path, project: &str) -> String {
     // Same auto-start as `create`: without an open session the first `add`
     // fails, which is the cold-start friction that made the manual fallback
     // unusable (#985).
-    if let Err(msg) = ensure_session(state_dir, project) {
+    if let Err(msg) = ensure_session(state_dir, project, owner) {
         return msg;
     }
 
@@ -213,7 +253,13 @@ fn todowrite(input: Option<&Value>, state_dir: &Path, project: &str) -> String {
         let existing = tracked.iter().find(|t| t.title == title);
         let slug = match existing {
             Some(t) => t.slug.clone(),
-            None => match task::add_task(state_dir, title, task::ParentSpec::Auto, None, project) {
+            None => match task::add_task(
+                state_dir,
+                title,
+                task::ParentSpec::Auto,
+                task::SessionChoice::Resolve(owner),
+                project,
+            ) {
                 Ok(t) => {
                     added.push(t.slug.clone());
                     t.slug
@@ -267,7 +313,11 @@ fn todowrite(input: Option<&Value>, state_dir: &Path, project: &str) -> String {
 /// `open_sessions_for_project`: an unreadable store must deny with the real
 /// error, not be misread as "no sessions open" and auto-start a second session
 /// on top of an existing-but-unreadable one (#1112).
-fn ensure_session(state_dir: &Path, project: &str) -> Result<(), String> {
+fn ensure_session(
+    state_dir: &Path,
+    project: &str,
+    owner: &session::EngineIdentity,
+) -> Result<(), String> {
     let open_sessions = match session::try_open_sessions_for_project(state_dir, project) {
         Ok(sessions) => sessions,
         Err(e) => {
@@ -279,8 +329,16 @@ fn ensure_session(state_dir: &Path, project: &str) -> Result<(), String> {
         }
     };
     if open_sessions.is_empty()
-        && let Err(e) =
-            session::start_session(state_dir, None, None, project, session::StartDecision::Auto)
+        && let Err(e) = session::start_session_as(
+            state_dir,
+            &session::StartRequest {
+                name: None,
+                description: None,
+                project,
+                owner,
+            },
+            session::StartDecision::Auto,
+        )
     {
         tracing::error!(error = %e, "task redirect: couldn't auto-start a session");
         return Err(deny(&format!(
@@ -622,6 +680,43 @@ mod tests {
             PROJECT,
         );
         assert!(out.contains("no `content`"), "{out}");
+    }
+
+    #[test]
+    fn task_create_with_two_open_sessions_joins_the_payload_conversations_session() {
+        let dir = tmp();
+        let start = |name: &str, conv: &str| {
+            let owner = session::EngineIdentity::from_session_id(Some(conv));
+            let request = session::StartRequest {
+                name: Some(name),
+                description: None,
+                project: PROJECT,
+                owner: &owner,
+            };
+            match session::start_session_as(dir.path(), &request, session::StartDecision::New)
+                .unwrap()
+            {
+                session::StartOutcome::Created(s) => s,
+                other => panic!("expected Created, got {other:?}"),
+            }
+        };
+        start("theirs", "conv-other");
+        let mine = start("mine", "conv-me");
+
+        let owner = session::EngineIdentity::from_session_id(Some("conv-me"));
+        let out = handle_inner_as(
+            "TaskCreate",
+            Some(&json!({ "subject": "my step" })),
+            dir.path(),
+            PROJECT,
+            &owner,
+        );
+        assert!(out.contains("Tracked"), "{out}");
+        let task = task::list_tasks(dir.path())
+            .into_iter()
+            .find(|t| t.title == "my step")
+            .expect("task created");
+        assert_eq!(task.session.as_deref(), Some(mine.id.as_str()));
     }
 
     #[test]

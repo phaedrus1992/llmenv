@@ -436,24 +436,34 @@ pub enum ParentSpec<'a> {
     Detached,
 }
 
+/// Which session a new task joins.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SessionChoice<'a> {
+    /// `--session <id>` given explicitly.
+    Named(&'a str),
+    /// No `--session`: the project's only open session, else the one the
+    /// caller owns ([`session::pick_open_session`], #2365).
+    Resolve(&'a session::EngineIdentity),
+}
+
 /// Create a new task in `open` state and persist it, tagged to a resolved
 /// session (mandatory-sessions design).
 ///
 /// # Errors
 /// Errors if `parent` is [`ParentSpec::Explicit`] and doesn't resolve to an
-/// existing task. Errors on session resolution: `session_id` explicit but
-/// unknown/closed → error; omitted with zero or 2+ open sessions for
-/// `project` → error telling the agent to run `llmenv task session start`
-/// or pass `--session`; omitted with exactly one open session for `project`
-/// → auto-resolved.
+/// existing task. Errors on session resolution: [`SessionChoice::Named`]
+/// unknown/closed → error; [`SessionChoice::Resolve`] with no open session
+/// for `project`, or with 2+ open and not exactly one owned by the caller →
+/// error telling the agent to run `llmenv task session start` or pass
+/// `--session`; otherwise auto-resolved.
 pub(crate) fn add_task(
     state_dir: &Path,
     title: &str,
     parent: ParentSpec<'_>,
-    session_id: Option<&str>,
+    session: SessionChoice<'_>,
     project: &str,
 ) -> anyhow::Result<Task> {
-    let resolved_session = resolve_session_for_add(state_dir, session_id, project)?;
+    let resolved_session = resolve_session_for_add(state_dir, session, project)?;
     let task = add_task_for_session(state_dir, title, parent, &resolved_session)?;
     touch_task_session(state_dir, &task);
     Ok(task)
@@ -510,39 +520,42 @@ pub(crate) fn add_task_for_session(
 }
 
 /// Resolve which session a `task add` belongs to, per the mandatory-sessions
-/// rules. An explicit `session_id` is honored as long as it names an
-/// existing, open session (any project — an explicit id is a deliberate
-/// choice). Omitted, it auto-resolves to the current project's single open
-/// session, or errors on zero/2+.
+/// rules. An explicit id is honored as long as it names an existing, open
+/// session (any project — an explicit id is a deliberate choice). Otherwise
+/// it resolves through [`session::pick_open_session`].
 fn resolve_session_for_add(
     state_dir: &Path,
-    session_id: Option<&str>,
+    session: SessionChoice<'_>,
     project: &str,
 ) -> anyhow::Result<String> {
-    if let Some(id) = session_id {
-        // Fallible `try_list_sessions` rather than the tolerant `list_sessions`:
-        // an unreadable store must error out here rather than be misread as "no
-        // such session" (#1112) — this is the same resolution step `TaskCreate`
-        // (via `add_task`) runs through, so the hook redirect's own unreadable-
-        // store guard in `task_tools::create` would otherwise be undone here.
-        let exists_open = session::try_list_sessions(state_dir)?
-            .into_iter()
-            .any(|s| s.id == id && s.is_open());
-        if !exists_open {
-            anyhow::bail!("session '{id}' does not exist or is not open");
+    let owner = match session {
+        SessionChoice::Named(id) => {
+            // Fallible `try_list_sessions` rather than the tolerant `list_sessions`:
+            // an unreadable store must error out here rather than be misread as "no
+            // such session" (#1112) — this is the same resolution step `TaskCreate`
+            // (via `add_task`) runs through, so the hook redirect's own unreadable-
+            // store guard in `task_tools::create` would otherwise be undone here.
+            let exists_open = session::try_list_sessions(state_dir)?
+                .into_iter()
+                .any(|s| s.id == id && s.is_open());
+            if !exists_open {
+                anyhow::bail!("session '{id}' does not exist or is not open");
+            }
+            return Ok(id.to_string());
         }
-        return Ok(id.to_string());
-    }
+        SessionChoice::Resolve(owner) => owner,
+    };
     let open = session::try_open_sessions_for_project(state_dir, project)?;
-    match open.len() {
-        0 => anyhow::bail!(
+    match session::pick_open_session(open, owner) {
+        Ok(session) => Ok(session.id),
+        Err(session::PickError::NoneOpen) => anyhow::bail!(
             "no open session for this project — run `llmenv task session start` first, \
              or pass --session <id>"
         ),
-        1 => Ok(open[0].id.clone()),
-        n => anyhow::bail!(
-            "{n} open sessions for this project — pass --session <id>, or see \
-             `llmenv task session ls`"
+        Err(session::PickError::Ambiguous(n)) => anyhow::bail!(
+            "{n} open sessions for this project, and none of them is owned by this \
+             conversation — pass --session <id>, resume yours with `llmenv task session \
+             start --resume <id>`, or see `llmenv task session ls`"
         ),
     }
 }
@@ -1411,6 +1424,13 @@ mod tests {
     use tempfile::TempDir;
 
     const PROJECT: &str = "test-project-0000000000";
+
+    /// A caller with no engine identity, as from a plain terminal.
+    static NO_OWNER: session::EngineIdentity = session::EngineIdentity {
+        session_id: None,
+        pid: None,
+    };
+    const ANYONE: SessionChoice<'static> = SessionChoice::Resolve(&NO_OWNER);
 
     /// Create a task tagged to a fixed test session id, exercising the same
     /// creation logic (`add_task_for_session`) the mandatory-session path
@@ -2994,7 +3014,7 @@ mod tests {
             dir.path(),
             "Do thing",
             ParentSpec::Detached,
-            Some(&session.id),
+            SessionChoice::Named(&session.id),
             PROJECT,
         )
         .expect("test");
@@ -3009,7 +3029,7 @@ mod tests {
                 dir.path(),
                 "Do thing",
                 ParentSpec::Detached,
-                Some("no-such-session"),
+                SessionChoice::Named("no-such-session"),
                 PROJECT
             )
             .is_err()
@@ -3022,16 +3042,28 @@ mod tests {
         let session = created(
             start_session(dir.path(), Some("s"), None, PROJECT, StartDecision::Auto).expect("test"),
         );
-        let task =
-            add_task(dir.path(), "Do thing", ParentSpec::Detached, None, PROJECT).expect("test");
+        let task = add_task(
+            dir.path(),
+            "Do thing",
+            ParentSpec::Detached,
+            ANYONE,
+            PROJECT,
+        )
+        .expect("test");
         assert_eq!(task.session, Some(session.id));
     }
 
     #[test]
     fn add_task_errors_with_zero_open_sessions_for_project() {
         let dir = TempDir::new().expect("test");
-        let err =
-            add_task(dir.path(), "Do thing", ParentSpec::Detached, None, PROJECT).unwrap_err();
+        let err = add_task(
+            dir.path(),
+            "Do thing",
+            ParentSpec::Detached,
+            ANYONE,
+            PROJECT,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("session start"));
     }
 
@@ -3054,8 +3086,14 @@ mod tests {
             StartDecision::New,
         )
         .expect("test");
-        let err =
-            add_task(dir.path(), "Do thing", ParentSpec::Detached, None, PROJECT).unwrap_err();
+        let err = add_task(
+            dir.path(),
+            "Do thing",
+            ParentSpec::Detached,
+            ANYONE,
+            PROJECT,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("--session"));
     }
 
@@ -3070,7 +3108,16 @@ mod tests {
             StartDecision::Auto,
         )
         .expect("test");
-        assert!(add_task(dir.path(), "Do thing", ParentSpec::Detached, None, PROJECT).is_err());
+        assert!(
+            add_task(
+                dir.path(),
+                "Do thing",
+                ParentSpec::Detached,
+                ANYONE,
+                PROJECT
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -3084,7 +3131,7 @@ mod tests {
             dir.path(),
             "Do thing",
             ParentSpec::Detached,
-            Some(&session.id),
+            SessionChoice::Named(&session.id),
             PROJECT,
         )
         .expect("test");
