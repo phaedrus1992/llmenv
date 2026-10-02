@@ -1,0 +1,118 @@
+name: CodeQL
+
+on:
+  push:
+    branches:
+      - main
+      - release/**
+  pull_request:
+    branches:
+      - main
+      - release/**
+  schedule:
+    - cron: 0 5 * * 1
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      python: ${{ steps.filter.outputs.python }}
+      javascript: ${{ steps.filter.outputs.javascript }}
+      rust: ${{ steps.filter.outputs.rust }}
+      actions: ${{ steps.filter.outputs.actions }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
+        id: filter
+        with:
+          filters: |
+            python:
+              - '**/*.py'
+              - 'pyproject.toml'
+              - 'requirements*.txt'
+            javascript:
+              - '**/*.js'
+              - '**/*.ts'
+              - '**/*.tsx'
+              - '**/*.jsx'
+              - 'package.json'
+              - 'package-lock.json'
+            rust:
+              - 'src/**'
+              - 'crates/**'
+              - 'benches/**'
+              - 'build.rs'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.cargo/**'
+            actions:
+              - '.github/**'
+
+  analyze:
+    needs: changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language:
+          - python
+          - javascript-typescript
+          - rust
+          - actions
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check CodeQL config exists
+        run: |
+          if [ ! -f .github/codeql/codeql-config.yml ]; then
+            echo "ERROR: CodeQL config not found at .github/codeql/codeql-config.yml"
+            exit 1
+          fi
+
+      - name: Initialize CodeQL
+        if: |
+          (matrix.language == 'python' && needs.changes.outputs.python == 'true') ||
+          (matrix.language == 'javascript-typescript' && needs.changes.outputs.javascript == 'true') ||
+          (matrix.language == 'rust' && needs.changes.outputs.rust == 'true') ||
+          (matrix.language == 'actions' && needs.changes.outputs.actions == 'true')
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
+        with:
+          languages: ${{ matrix.language }}
+          config-file: .github/codeql/codeql-config.yml
+
+      - name: Autobuild
+        if: |
+          (matrix.language == 'python' && needs.changes.outputs.python == 'true') ||
+          (matrix.language == 'javascript-typescript' && needs.changes.outputs.javascript == 'true') ||
+          (matrix.language == 'rust' && needs.changes.outputs.rust == 'true') ||
+          (matrix.language == 'actions' && needs.changes.outputs.actions == 'true')
+        uses: github/codeql-action/autobuild@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
+
+      - name: Perform CodeQL Analysis
+        if: |
+          (matrix.language == 'python' && needs.changes.outputs.python == 'true') ||
+          (matrix.language == 'javascript-typescript' && needs.changes.outputs.javascript == 'true') ||
+          (matrix.language == 'rust' && needs.changes.outputs.rust == 'true') ||
+          (matrix.language == 'actions' && needs.changes.outputs.actions == 'true')
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
+        with:
+          category: /language:${{ matrix.language }}
