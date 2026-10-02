@@ -64,17 +64,22 @@ pub(crate) fn context_was_lost(source: Option<&str>) -> bool {
     matches!(source, Some("startup" | "clear" | "compact"))
 }
 
-/// Delete the read-once cache and the read-before-edit record of one session.
+/// Delete the read-once cache, the read-before-edit record, and the repeat-call
+/// counter of one session.
 /// After a compaction the model holds none of the file contents it read, so a
 /// stale record would deny a re-read or excuse an edit of an unseen file.
+/// The model also cannot remember the earlier calls, so a stale repeat counter
+/// would warn about a call that is new to it.
 /// Fail-soft: a file that cannot be removed is logged and the hook goes on.
 pub(crate) fn reset_read_state(state_dir: &Path, session_id: &str) {
     if !crate::paths::is_valid_short_name(session_id) {
+        tracing::debug!("reset_read_state: session id is not a valid state file name, skipped");
         return;
     }
     for path in [
         super::read_once::session_cache_path(state_dir, session_id),
         super::slippage::stats_path(state_dir, session_id),
+        super::repeat_detect::session_state_path(state_dir, session_id),
     ] {
         match std::fs::remove_file(&path) {
             Ok(()) => {}
@@ -132,6 +137,7 @@ mod tests {
         let own = [
             super::super::read_once::session_cache_path(dir.path(), "s1"),
             super::super::slippage::stats_path(dir.path(), "s1"),
+            super::super::repeat_detect::session_state_path(dir.path(), "s1"),
         ];
         let other = super::super::read_once::session_cache_path(dir.path(), "s2");
         for p in own.iter().chain([&other]) {

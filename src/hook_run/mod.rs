@@ -1113,9 +1113,12 @@ fn run_inner(
     // must go before the first Read or Edit of the new context.
     if event == HookEvent::SessionStart
         && session_state::context_was_lost(stdin_payload["source"].as_str())
-        && let (Some(session_id), Ok(state_dir)) = (claude_session_id, crate::paths::state_dir())
+        && let Some(session_id) = claude_session_id
     {
-        session_state::reset_read_state(&state_dir, session_id);
+        match crate::paths::state_dir() {
+            Ok(state_dir) => session_state::reset_read_state(&state_dir, session_id),
+            Err(e) => tracing::error!("no state dir, read state not reset after compaction: {e}"),
+        }
     }
 
     let pre_tool_text = if event == HookEvent::PreToolUse {

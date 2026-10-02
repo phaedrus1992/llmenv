@@ -2823,12 +2823,13 @@ mod tests {
         CLAUDE_JSON_OWNED_SERVERS_FILE, CONFIG_CONTEXT_COMMAND, CONFIG_GUARD_COMMAND,
         CTX_DESTRUCTIVE, CTX_MUTATION, CTX_READ_ONLY, ClaudeCodeAdapter, HOOK_RUN_COMMAND,
         ICM_DESTRUCTIVE, ICM_MUTATION, ICM_READ_ONLY, LLMENV_OWNED_SETTINGS_KEYS,
-        MODELED_SETTINGS_KEYS, classify_claude_path, dedup_hooks_doc,
-        generate_installed_plugins_json, generate_settings_json, is_hook_json,
-        merge_mcp_into_claude_json, normalize_deprecated_tool, overlay_native, permission_mode_str,
-        plugin_install_paths_json, purge_hooks_from_disabled_plugins, read_owned_servers,
-        reconcile_settings, reject_modeled_keys_in_catch_all, render_marketplace_source,
-        render_permission_rule, seed_install_method, seed_status_line, starting_permission_mode,
+        MODELED_SETTINGS_KEYS, RENDERED_ENTRY_KEYS, build_mcp_servers, carry_runtime_keys,
+        classify_claude_path, dedup_hooks_doc, generate_installed_plugins_json,
+        generate_settings_json, is_hook_json, merge_mcp_into_claude_json,
+        normalize_deprecated_tool, overlay_native, permission_mode_str, plugin_install_paths_json,
+        purge_hooks_from_disabled_plugins, read_owned_servers, reconcile_settings,
+        reject_modeled_keys_in_catch_all, render_marketplace_source, render_permission_rule,
+        seed_install_method, seed_status_line, starting_permission_mode,
     };
     use crate::adapter::skills::{
         arb_distinct_resolved_mcps, arb_yaml_value, reject_hardcoded_config_path, validate_skills,
@@ -5799,6 +5800,56 @@ mod tests {
             !owned_path.exists(),
             "companion file removed when no owned servers"
         );
+    }
+
+    #[test]
+    fn rendered_entry_keys_cover_every_key_build_mcp_servers_writes() {
+        // A key the builder writes but RENDERED_ENTRY_KEYS lacks would survive a
+        // re-render from the old on-disk entry (#2376).
+        let mut stdio = stdio_mcp("a", "bin");
+        if let ResolvedKind::Stdio { args, env, .. } = &mut stdio.kind {
+            args.push("--x".into());
+            env.insert("K".into(), "V".into());
+        }
+        let mut remote = remote_mcp("b", "https://x.example", crate::config::McpTransport::Http);
+        remote.headers.insert("H".into(), "V".into());
+        remote.timeout = Some(5);
+        let servers = build_mcp_servers(&[stdio, remote]).unwrap();
+        for (name, entry) in &servers {
+            for key in entry.as_object().unwrap().keys() {
+                assert!(RENDERED_ENTRY_KEYS.contains(&key.as_str()), "{name}: {key}");
+            }
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn carry_runtime_keys_copies_only_unrendered_unnulled_keys(
+            existing in proptest::collection::btree_map("[a-z]{1,6}", 0u8..9, 0..8),
+            fresh in proptest::collection::btree_map("[a-z]{1,6}", 0u8..9, 0..4),
+            nulled in proptest::collection::btree_set("[a-z]{1,6}", 0..3),
+        ) {
+            let to_map = |m: &std::collections::BTreeMap<String, u8>| -> serde_json::Map<_, _> {
+                m.iter().map(|(k, v)| (k.clone(), serde_json::json!(v))).collect()
+            };
+            let existing_map = to_map(&existing);
+            let mut out = to_map(&fresh);
+            let nulled: std::collections::HashSet<String> = nulled.into_iter().collect();
+            carry_runtime_keys(&existing_map, &mut out, Some(&nulled));
+            for (k, v) in &existing_map {
+                let carried = !fresh.contains_key(k)
+                    && !nulled.contains(k)
+                    && !RENDERED_ENTRY_KEYS.contains(&k.as_str());
+                if carried {
+                    prop_assert_eq!(out.get(k), Some(v));
+                } else if !fresh.contains_key(k) {
+                    prop_assert!(!out.contains_key(k), "{k} must not be carried");
+                }
+            }
+            for (k, v) in &fresh {
+                prop_assert_eq!(out.get(k), Some(&serde_json::json!(v)), "fresh value must win");
+            }
+        }
     }
 
     #[test]
