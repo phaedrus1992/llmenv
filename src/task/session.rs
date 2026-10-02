@@ -1844,6 +1844,7 @@ mod tests {
                     parent: None,
                     blocked_on: Vec::new(),
                     notes: Vec::new(),
+                    detail: None,
                     session,
                     created_at: now_rfc3339(),
                     updated_at: now_rfc3339(),

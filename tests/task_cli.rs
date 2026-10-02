@@ -2667,3 +2667,118 @@ fn session_start_with_context_prints_no_nudge() {
         .success()
         .stdout(predicates::str::contains("No resume context").not());
 }
+
+// -- task detail (#2339) --
+
+fn task_json(dir: &std::path::Path, cwd: &std::path::Path, slug: &str) -> serde_json::Value {
+    let out = stdout_of(llmenv(dir).current_dir(cwd).args(["task", "show", slug]));
+    serde_json::from_str(&out).unwrap()
+}
+
+#[test]
+fn task_add_detail_is_stored_and_shown() {
+    let (dir, cwd) = (TempDir::new().unwrap(), plain_cwd());
+    start_session_in(dir.path(), cwd.path(), "s");
+    llmenv(dir.path())
+        .current_dir(cwd.path())
+        .args([
+            "task",
+            "add",
+            "Fix parser",
+            "--detail",
+            "files: src/parse.rs\ncriteria: no panic",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Added task"));
+    let task = task_json(dir.path(), cwd.path(), "fix-parser");
+    assert_eq!(task["detail"], "files: src/parse.rs\ncriteria: no panic");
+}
+
+#[test]
+fn task_add_without_detail_has_no_detail_field() {
+    let (dir, cwd) = (TempDir::new().unwrap(), plain_cwd());
+    start_session_in(dir.path(), cwd.path(), "s");
+    llmenv(dir.path())
+        .current_dir(cwd.path())
+        .args(["task", "add", "Plain"])
+        .assert()
+        .success();
+    assert!(
+        task_json(dir.path(), cwd.path(), "plain")
+            .get("detail")
+            .is_none()
+    );
+}
+
+#[test]
+fn task_add_reads_detail_from_a_file() {
+    let (dir, cwd) = (TempDir::new().unwrap(), plain_cwd());
+    start_session_in(dir.path(), cwd.path(), "s");
+    let file = cwd.path().join("detail.md");
+    std::fs::write(&file, "from a file\n").unwrap();
+    llmenv(dir.path())
+        .current_dir(cwd.path())
+        .args(["task", "add", "From file", "--detail-file"])
+        .arg(&file)
+        .assert()
+        .success();
+    assert_eq!(
+        task_json(dir.path(), cwd.path(), "from-file")["detail"],
+        "from a file"
+    );
+}
+
+#[test]
+fn task_add_with_a_missing_detail_file_fails_and_adds_nothing() {
+    let (dir, cwd) = (TempDir::new().unwrap(), plain_cwd());
+    start_session_in(dir.path(), cwd.path(), "s");
+    llmenv(dir.path())
+        .current_dir(cwd.path())
+        .args([
+            "task",
+            "add",
+            "Ghost",
+            "--detail-file",
+            "/no/such/detail.md",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("/no/such/detail.md"));
+    let listed = stdout_of(
+        llmenv(dir.path())
+            .current_dir(cwd.path())
+            .args(["task", "ls", "--all"]),
+    );
+    assert!(!listed.contains("ghost"), "{listed}");
+}
+
+#[test]
+fn task_edit_detail_replaces_and_an_empty_value_clears() {
+    let (dir, cwd) = (TempDir::new().unwrap(), plain_cwd());
+    start_session_in(dir.path(), cwd.path(), "s");
+    llmenv(dir.path())
+        .current_dir(cwd.path())
+        .args(["task", "add", "Edit me", "--detail", "old"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .current_dir(cwd.path())
+        .args(["task", "edit", "edit-me", "--detail", "new"])
+        .assert()
+        .success();
+    assert_eq!(
+        task_json(dir.path(), cwd.path(), "edit-me")["detail"],
+        "new"
+    );
+    llmenv(dir.path())
+        .current_dir(cwd.path())
+        .args(["task", "edit", "edit-me", "--detail", ""])
+        .assert()
+        .success();
+    assert!(
+        task_json(dir.path(), cwd.path(), "edit-me")
+            .get("detail")
+            .is_none()
+    );
+}

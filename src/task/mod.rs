@@ -74,6 +74,9 @@ pub struct Task {
     pub(crate) blocked_on: Vec<String>,
     #[serde(default)]
     notes: Vec<TaskNote>,
+    /// What a cold reader needs to do the task: files, acceptance criteria, gotchas (#2339).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) detail: Option<String>,
     /// Id of the session active when this task was created (`None` for a
     /// task added outside any session, or created before sessions existed —
     /// `#[serde(default)]` keeps old task files loadable). Set once at
@@ -511,6 +514,7 @@ pub(crate) fn add_task_for_session(
             parent: parent_slug,
             blocked_on: Vec::new(),
             notes: Vec::new(),
+            detail: None,
             session: Some(session_id.to_string()),
             created_at: now.clone(),
             updated_at: now,
@@ -881,6 +885,8 @@ pub struct TaskEdit<'a> {
     /// Remove a note, identified by its 0-based index or its exact RFC3339
     /// `at` timestamp.
     pub(crate) delete_note: Option<&'a str>,
+    /// Replace the detail. An empty string clears it.
+    pub(crate) detail: Option<&'a str>,
 }
 
 /// Mutate an existing task's title, parent, `blocked_on` set, and notes in a
@@ -942,6 +948,10 @@ pub(crate) fn edit_task(
         if let Some(id) = edit.delete_note {
             let idx = resolve_note_index(&task.notes, id)?;
             task.notes.remove(idx);
+        }
+
+        if let Some(detail) = edit.detail {
+            task.detail = (!detail.is_empty()).then(|| detail.to_string());
         }
 
         task.updated_at = now_rfc3339();
@@ -2120,6 +2130,59 @@ mod tests {
     }
 
     #[test]
+    fn edit_task_sets_replaces_and_clears_the_detail() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Has detail", None).expect("test");
+        assert_eq!(task.detail, None);
+        let set = |text| TaskEdit {
+            detail: Some(text),
+            ..Default::default()
+        };
+        let first = edit_task(dir.path(), &task.slug, &set("files: a.rs")).expect("test");
+        assert_eq!(first.detail.as_deref(), Some("files: a.rs"));
+        let second = edit_task(dir.path(), &task.slug, &set("files: b.rs")).expect("test");
+        assert_eq!(second.detail.as_deref(), Some("files: b.rs"));
+        let cleared = edit_task(dir.path(), &task.slug, &set("")).expect("test");
+        assert_eq!(cleared.detail, None);
+    }
+
+    #[test]
+    fn an_edit_without_detail_keeps_the_detail() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Keeps detail", None).expect("test");
+        let set = TaskEdit {
+            detail: Some("keep me"),
+            ..Default::default()
+        };
+        edit_task(dir.path(), &task.slug, &set).expect("test");
+        let retitle = TaskEdit {
+            title: Some("Retitled"),
+            ..Default::default()
+        };
+        let after = edit_task(dir.path(), &task.slug, &retitle).expect("test");
+        assert_eq!(after.detail.as_deref(), Some("keep me"));
+    }
+
+    #[test]
+    fn a_task_file_written_before_detail_existed_still_loads() {
+        let old = r#"{"slug":"old","title":"Old","created_at":"2026-01-01T00:00:00Z",
+            "updated_at":"2026-01-01T00:00:00Z"}"#;
+        let task: Task = serde_json::from_str(old).expect("old file loads");
+        assert_eq!(task.detail, None);
+    }
+
+    #[test]
+    fn a_task_without_detail_does_not_write_the_field() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Plain", None).expect("test");
+        assert!(
+            !serde_json::to_string(&task)
+                .expect("test")
+                .contains("detail")
+        );
+    }
+
+    #[test]
     fn edit_task_sets_and_clears_parent() {
         let dir = TempDir::new().expect("test");
         let parent = mk(dir.path(), "Parent", None).expect("test");
@@ -2802,6 +2865,7 @@ mod tests {
             parent: parent.map(str::to_string),
             blocked_on: Vec::new(),
             notes: Vec::new(),
+            detail: None,
             session: session.map(str::to_string),
             // Identical timestamps on purpose: exercises the slug tiebreak.
             created_at: "2026-01-01T00:00:00Z".to_string(),
@@ -3254,6 +3318,7 @@ mod tests {
                             parent,
                             blocked_on,
                             notes,
+                            detail: None,
                             session,
                             created_at,
                             updated_at,
@@ -3295,6 +3360,7 @@ mod tests {
                                 parent,
                                 blocked_on: Vec::new(),
                                 notes: Vec::new(),
+                                detail: None,
                                 session: Some("s".to_string()),
                                 created_at: format!("2026-01-01T00:00:{:02}Z", i.min(59)),
                                 updated_at: "2026-01-01T00:00:00Z".to_string(),
@@ -3353,6 +3419,7 @@ mod tests {
                             parent,
                             blocked_on,
                             notes: Vec::new(),
+                            detail: None,
                             session: Some("s".to_string()),
                             created_at: format!("2026-01-01T00:00:{:02}Z", i.min(59)),
                             updated_at: "2026-01-01T00:00:00Z".to_string(),
@@ -3568,6 +3635,7 @@ mod tests {
                             parent: None,
                             blocked_on: Vec::new(),
                             notes: Vec::new(),
+                            detail: None,
                             session,
                             created_at: "2026-01-01T00:00:00Z".to_string(),
                             updated_at: "2026-01-01T00:00:00Z".to_string(),
@@ -3717,6 +3785,7 @@ mod tests {
                     parent: None,
                     blocked_on: Vec::new(),
                     notes: Vec::new(),
+                    detail: None,
                     session: Some("s".to_string()),
                     created_at: "2026-01-01T00:00:00Z".to_string(),
                     updated_at: "2026-01-01T00:00:00Z".to_string(),

@@ -396,6 +396,8 @@ enum TaskCommand {
         /// exactly one session is open for the current project.
         #[arg(long)]
         session: Option<String>,
+        #[command(flatten)]
+        detail: DetailArgs,
     },
     /// Claim a task, transitioning it to `wip`. An undone `parent` only
     /// warns (soft-block, starts anyway); an undone `blocked_on` reference
@@ -490,6 +492,8 @@ enum TaskCommand {
         /// Delete a note by its 0-based index or exact RFC3339 timestamp.
         #[arg(long = "delete-note")]
         delete_note: Option<String>,
+        #[command(flatten)]
+        detail: DetailArgs,
     },
     /// Delete task(s) outright — for a batch of work that's being
     /// deliberately abandoned, not just reshuffled. Provide explicit ids, or
@@ -564,6 +568,33 @@ enum TaskSessionCommand {
     },
     /// List every currently open session, current-project matches first.
     Ls,
+}
+
+/// The task detail flags shared by `task add` and `task edit` (#2339).
+#[derive(clap::Args, Default)]
+struct DetailArgs {
+    /// What a cold reader needs to do the task: files, acceptance criteria, gotchas.
+    /// On `task edit`, an empty string clears it.
+    #[arg(long, conflicts_with = "detail_file")]
+    detail: Option<String>,
+    /// Read the detail from a file.
+    #[arg(long, value_name = "PATH")]
+    detail_file: Option<std::path::PathBuf>,
+}
+
+impl DetailArgs {
+    fn resolve(self) -> anyhow::Result<Option<String>> {
+        use anyhow::Context as _;
+        match (self.detail, self.detail_file) {
+            (_, Some(path)) => Ok(Some(
+                std::fs::read_to_string(&path)
+                    .with_context(|| format!("cannot read --detail-file {}", path.display()))?
+                    .trim_end()
+                    .to_string(),
+            )),
+            (text, None) => Ok(text),
+        }
+    }
 }
 
 /// The resume-context flags shared by `session start` and `session edit` (#2339).
@@ -3370,7 +3401,9 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             parent,
             no_parent,
             session,
+            detail,
         } => {
+            let detail = detail.resolve()?;
             // New-project guard: warn before starting a deliberately
             // top-level task while another is still in progress. Only fires
             // on `--no-parent` now (#929) — omitting `--parent` no longer
@@ -3410,7 +3443,21 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 Some(id) => crate::task::SessionChoice::Named(id),
                 None => crate::task::SessionChoice::Resolve(&owner),
             };
-            let task = crate::task::add_task(&state_dir, &title, parent_spec, choice, &project)?;
+            let mut task =
+                crate::task::add_task(&state_dir, &title, parent_spec, choice, &project)?;
+            if let Some(text) = detail.as_deref().filter(|t| !t.is_empty()) {
+                let edit = crate::task::TaskEdit {
+                    detail: Some(text),
+                    ..Default::default()
+                };
+                task = crate::task::edit_task(&state_dir, &task.slug, &edit).map_err(|e| {
+                    e.context(format!(
+                        "task '{}' was added, but its detail was not saved; \
+                         run `llmenv task edit {} --detail ...`",
+                        task.slug, task.slug
+                    ))
+                })?;
+            }
             println!("Added task '{}' ({})", task.slug, task.title);
         }
         TaskCommand::Start { id, force, reopen } => {
@@ -3551,7 +3598,9 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             unblock,
             add_note,
             delete_note,
+            detail,
         } => {
+            let detail = detail.resolve()?;
             let add_note = match add_note.as_deref() {
                 Some("") => {
                     use std::io::Read;
@@ -3570,6 +3619,7 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 unblock: &unblock,
                 add_note: add_note.as_deref(),
                 delete_note: delete_note.as_deref(),
+                detail: detail.as_deref(),
             };
             let task = crate::task::edit_task(&state_dir, &id, &edit)?;
             println!("Updated '{}'", task.slug);
