@@ -49,13 +49,15 @@
   // quinn-proto pulled in by quinn). A periodic full lockfile regen bumps
   // those transitive versions to the latest one already permitted by their
   // parents' existing semver ranges, which is where most of these fixes live.
-  // Default schedule is "before 4am on monday" — every other update in this
-  // repo runs on Renovate's normal cadence with no schedule restriction, so
-  // an unset schedule here would leave transitive security fixes waiting up
-  // to a week behind everything else. Empty schedule matches that cadence.
+  // The default schedule ("before 4am on monday") holds transitive fixes for
+  // up to a week. An empty schedule opens a new lock PR on every Renovate run,
+  // and each one makes every open PR that touches Cargo.lock or
+  // package-lock.json stale, so Renovate rebases and CI runs again (#2364).
+  // Daily keeps the delay to about 24h. vulnerabilityAlerts (below) still
+  // opens direct-dependency security PRs at once.
   "lockFileMaintenance": {
     "enabled": true,
-    "schedule": [],
+    "schedule": ["before 6am"],
   },
 
   // The pre-commit manager is disabled by default; .pre-commit-config.yaml
@@ -129,6 +131,16 @@
       "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
       "groupName": "non-major GitHub Actions",
       "groupSlug": "github-actions-non-major",
+    },
+    {
+      // A uses-with dep is a version string in a `with:` input, such as
+      // sccache-action's `version` or cosign-installer's `cosign-release`.
+      // It has no digest, so `github-actions.pinDigests` fails the whole
+      // pin branch with "update failure" (#2364).
+      "description": "Do not pin digests on version inputs of actions",
+      "matchManagers": ["github-actions"],
+      "matchDepTypes": ["uses-with"],
+      "pinDigests": false,
     },
     {
       "description": "Group Docusaurus package updates together (co-versioned; must move as a unit)",
