@@ -1120,7 +1120,7 @@ fn idle_session_reminders(state_dir: &Path) -> String {
     let project = match project::current_tag() {
         Ok(project) => project,
         Err(e) => {
-            tracing::debug!("project::current_tag failed (non-fatal): {e}");
+            tracing::error!("project::current_tag failed, so the task reminder is skipped: {e:#}");
             return String::new();
         }
     };
@@ -1155,7 +1155,7 @@ fn tasks_for_current_project(state_dir: &Path, tasks: Vec<Task>) -> Vec<Task> {
     let project = match project::current_tag() {
         Ok(project) => project,
         Err(e) => {
-            tracing::debug!("project::current_tag failed (non-fatal): {e}");
+            tracing::error!("project::current_tag failed, so the task reminder is skipped: {e:#}");
             return Vec::new();
         }
     };
@@ -1317,7 +1317,7 @@ fn session_finish_reminders(state_dir: &Path) -> String {
     let project = match project::current_tag() {
         Ok(project) => project,
         Err(e) => {
-            tracing::debug!("project::current_tag failed (non-fatal): {e}");
+            tracing::error!("project::current_tag failed, so the task reminder is skipped: {e:#}");
             return String::new();
         }
     };
