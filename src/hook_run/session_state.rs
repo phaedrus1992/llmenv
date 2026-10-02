@@ -81,11 +81,17 @@ pub(crate) fn reset_read_state(state_dir: &Path, session_id: &str) {
         super::slippage::stats_path(state_dir, session_id),
         super::repeat_detect::session_state_path(state_dir, session_id),
     ] {
-        match std::fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => tracing::warn!("reset_read_state: cannot remove {}: {e}", path.display()),
+        if let Err(e) = remove_if_present(&path) {
+            tracing::warn!("reset_read_state: cannot remove {}: {e}", path.display());
         }
+    }
+}
+
+/// Remove `path`; a file that is already gone counts as removed.
+fn remove_if_present(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
     }
 }
 
@@ -151,6 +157,20 @@ mod tests {
         assert!(other.exists(), "another session's state must stay");
         reset_read_state(dir.path(), "s1");
         reset_read_state(dir.path(), "../escape");
+    }
+
+    #[test]
+    fn remove_if_present_accepts_a_missing_file_and_reports_a_real_error() {
+        let dir = TempDir::new().expect("test");
+        let file = dir.path().join("f.json");
+        remove_if_present(&file).unwrap();
+        std::fs::write(&file, "{}").expect("test");
+        remove_if_present(&file).unwrap();
+        assert!(!file.exists());
+        // `remove_file` fails on a directory, which is not a NotFound error.
+        let sub = dir.path().join("d");
+        std::fs::create_dir(&sub).expect("test");
+        assert!(remove_if_present(&sub).is_err());
     }
 
     #[test]

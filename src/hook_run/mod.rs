@@ -602,6 +602,12 @@ fn should_check_stale(event: HookEvent, engine: &str) -> bool {
     event == HookEvent::SessionStart && engine == "claude-code"
 }
 
+/// Whether this event empties the model's context, so the per-session "already
+/// seen" state must reset (#2381).
+fn resets_read_state(event: HookEvent, payload: &serde_json::Value) -> bool {
+    event == HookEvent::SessionStart && session_state::context_was_lost(payload["source"].as_str())
+}
+
 /// Whether the caller should exit 0 or signal a blocked tool call.
 ///
 /// Exit code 2 is what both supported engines read as "don't run this tool":
@@ -1111,8 +1117,7 @@ fn run_inner(
 
     // #2381: a compaction empties the model's context, so the per-session "already read" state
     // must go before the first Read or Edit of the new context.
-    if event == HookEvent::SessionStart
-        && session_state::context_was_lost(stdin_payload["source"].as_str())
+    if resets_read_state(event, stdin_payload)
         && let Some(session_id) = claude_session_id
     {
         match crate::paths::state_dir() {
@@ -2822,6 +2827,20 @@ mod tests {
         assert_eq!(cmd.get_program(), "/bin/llmenv");
         let args: Vec<_> = cmd.get_args().collect();
         assert_eq!(args, ["consolidation-run"]);
+    }
+
+    #[test]
+    fn only_a_context_losing_session_start_resets_read_state() {
+        let with = |source: &str| serde_json::json!({ "source": source });
+        assert!(resets_read_state(HookEvent::SessionStart, &with("compact")));
+        assert!(resets_read_state(HookEvent::SessionStart, &with("clear")));
+        assert!(!resets_read_state(HookEvent::SessionStart, &with("resume")));
+        assert!(!resets_read_state(
+            HookEvent::SessionStart,
+            &serde_json::Value::Null
+        ));
+        assert!(!resets_read_state(HookEvent::PostToolUse, &with("compact")));
+        assert!(!resets_read_state(HookEvent::PreToolUse, &with("clear")));
     }
 
     #[test]
