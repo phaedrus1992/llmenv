@@ -1283,12 +1283,6 @@ fn run_inner(
         let mut chunk = crate::icm::generate_context_chunk(&active, &bundles);
         let mut storage_chunk = crate::icm::generate_minimal_chunk(&active, &bundles);
 
-        // Apply default type/importance markers from config (R1, R3) when no explicit
-        // marker is present in the generated chunk.
-        chunk = apply_memory_config_defaults(chunk, &config, &active);
-        // Apply markers to storage chunk too (not just injection chunk).
-        storage_chunk = apply_memory_config_defaults(storage_chunk, &config, &active);
-
         // #317: folded into the chunk the SessionEnd store already sends,
         // rather than issuing a second `icm_memory_store` — one store per
         // session end keeps the memory readable and halves the round trips.
@@ -1316,6 +1310,10 @@ fn run_inner(
         let resolved_client =
             resolve_memory_client(&config, config_dir, &active, event, &MCP_CLIENT_CACHE);
         let settings = resolved_client.as_ref().map(|r| r.settings);
+        // Default type/importance markers (R1, R3) from the resolved entry, which
+        // can be top-level or bundle-declared, when the chunk has none of its own.
+        chunk = apply_memory_config_defaults(chunk, settings.as_ref());
+        storage_chunk = apply_memory_config_defaults(storage_chunk, settings.as_ref());
         let wake = wake_args(event, settings, stdin_payload, &env.cwd);
         let client = resolved_client.map(|r| r.client);
         let state_path = Some(state::state_path());
@@ -1961,6 +1959,8 @@ impl MemoryEndpoint {
 const DEFAULT_MEMORY_HOOK: MemoryHookSettings = MemoryHookSettings {
     wakeup_max_tokens: None,
     adaptive_recall: true,
+    default_type: None,
+    default_importance: None,
 };
 
 /// A resolved memory-backend client plus the active `features.memory`
@@ -2333,36 +2333,33 @@ fn resolve_bundle_memory_host(
     Ok((mem, merged.capabilities.host))
 }
 
-/// Apply default memory type/importance markers from the active memory config (R1, R3).
+/// Apply default memory type/importance markers from the resolved memory
+/// entry's `settings` (R1, R3). `None` (no backend resolved) leaves the chunk
+/// unchanged.
 ///
 /// If the chunk already contains an `<!-- llmenv-type: -->` or
 /// `<!-- llmenv-importance: -->` marker, the inline value takes precedence and
-/// no default is appended. Otherwise the config's `default_type` /
+/// no default is appended. Otherwise the entry's `default_type` /
 /// `default_importance` are appended as markers at the end of the chunk.
 ///
 /// ponytail: `type_importance` per-type overrides are not yet applied here —
 /// they will be resolved when the Store action runs against the ICM backend.
 fn apply_memory_config_defaults(
     mut chunk: String,
-    config: &crate::config::Config,
-    active: &crate::scope::ActiveScopes,
+    settings: Option<&MemoryHookSettings>,
 ) -> String {
-    let Some(mem) = config.features.as_ref().and_then(|f| {
-        f.memory
-            .iter()
-            .find(|m| m.when.iter().any(|t| active.tags.contains(t)))
-    }) else {
+    let Some(settings) = settings else {
         return chunk;
     };
 
     if !chunk.contains("<!-- llmenv-type:")
-        && let Some(ty) = &mem.default_type
+        && let Some(ty) = &settings.default_type
     {
         chunk.push_str(&format!("\n<!-- llmenv-type: {} -->", ty.as_marker_str()));
     }
 
     if !chunk.contains("<!-- llmenv-importance:")
-        && let Some(imp) = &mem.default_importance
+        && let Some(imp) = &settings.default_importance
     {
         chunk.push_str(&format!(
             "\n<!-- llmenv-importance: {} -->",
@@ -2757,10 +2754,14 @@ mod tests {
         let on = Some(MemoryHookSettings {
             wakeup_max_tokens: None,
             adaptive_recall: true,
+            default_type: None,
+            default_importance: None,
         });
         let off = Some(MemoryHookSettings {
             wakeup_max_tokens: None,
             adaptive_recall: false,
+            default_type: None,
+            default_importance: None,
         });
         for event in [
             HookEvent::SessionStart,
@@ -5410,56 +5411,29 @@ mod tests {
 
     // ===== #592: apply_memory_config_defaults idempotence =====
 
-    fn memory_config(default_type: Option<llmenv_config::MemoryType>) -> crate::config::Config {
-        let mut config = crate::config::Config::default();
-        config.features = Some(crate::config::Features {
-            memory: vec![llmenv_config::Memory {
-                server_host: "test-host".into(),
-                port: 0,
-                listen_host: "127.0.0.1".into(),
-                when: vec!["test".into()],
-                default_topics: vec![],
-                default_type,
-                default_importance: None,
-                type_importance: Default::default(),
-                retention: None,
-                auto_prune: false,
-                consolidation: None,
-                mcp_permissions: None,
-                wakeup_max_tokens: None,
-                adaptive_recall: true,
-            }],
-            ..Default::default()
-        });
-        config
-    }
-
-    fn active_with_tag(tag: &str) -> crate::scope::ActiveScopes {
-        let mut tags = std::collections::BTreeSet::new();
-        tags.insert(tag.to_string());
-        crate::scope::ActiveScopes {
-            tags,
-            scopes: vec![],
-            ..Default::default()
+    fn memory_settings(default_type: Option<llmenv_config::MemoryType>) -> MemoryHookSettings {
+        MemoryHookSettings {
+            wakeup_max_tokens: None,
+            adaptive_recall: true,
+            default_type,
+            default_importance: None,
         }
     }
 
     #[test]
     fn apply_memory_defaults_idempotent_no_type() {
-        let config = memory_config(None);
-        let active = active_with_tag("test");
+        let settings = memory_settings(None);
         let input = "## context\nno markers".to_string();
-        let once = apply_memory_config_defaults(input, &config, &active);
-        let twice = apply_memory_config_defaults(once.clone(), &config, &active);
+        let once = apply_memory_config_defaults(input, Some(&settings));
+        let twice = apply_memory_config_defaults(once.clone(), Some(&settings));
         assert_eq!(once, twice, "applying defaults twice must be idempotent");
     }
 
     #[test]
     fn apply_memory_defaults_adds_type_marker_when_present() {
-        let config = memory_config(Some(llmenv_config::MemoryType::Semantic));
-        let active = active_with_tag("test");
+        let settings = memory_settings(Some(llmenv_config::MemoryType::Semantic));
         let input = "## context".to_string();
-        let out = apply_memory_config_defaults(input, &config, &active);
+        let out = apply_memory_config_defaults(input, Some(&settings));
         assert!(
             out.contains("<!-- llmenv-type: semantic -->"),
             "should add semantic type marker: {out}"
@@ -5468,10 +5442,9 @@ mod tests {
 
     #[test]
     fn apply_memory_defaults_skips_existing_marker() {
-        let config = memory_config(Some(llmenv_config::MemoryType::Semantic));
-        let active = active_with_tag("test");
+        let settings = memory_settings(Some(llmenv_config::MemoryType::Semantic));
         let input = "## context\n<!-- llmenv-type: episodic -->".to_string();
-        let out = apply_memory_config_defaults(input, &config, &active);
+        let out = apply_memory_config_defaults(input, Some(&settings));
         assert!(
             !out.contains("semantic"),
             "must not override existing episodic marker"
@@ -6035,6 +6008,8 @@ mod adaptive_routing_tests {
             settings: Some(MemoryHookSettings {
                 wakeup_max_tokens: None,
                 adaptive_recall,
+                default_type: None,
+                default_importance: None,
             }),
             session_id: Some("s1"),
             state_dir: Some(state_dir.path().to_path_buf()),
@@ -6110,6 +6085,8 @@ mod adaptive_routing_tests {
         let adaptive = Some(MemoryHookSettings {
             wakeup_max_tokens: None,
             adaptive_recall: true,
+            default_type: None,
+            default_importance: None,
         });
         let start = wake_args(HookEvent::SessionStart, adaptive, &payload, "/");
         assert_eq!(start.project.as_deref(), Some("wake-repo"));

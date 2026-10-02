@@ -712,6 +712,9 @@ pub(crate) fn delete_task(state_dir: &Path, input: &str) -> anyhow::Result<Task>
 }
 
 /// Mark a task done. Idempotent from any prior state (fast-path completion).
+/// Production callers use [`complete_task`], which also reports the prior
+/// state; tests use this shorter form.
+#[cfg(test)]
 pub(crate) fn done_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
     complete_task(state_dir, input).map(|c| c.task)
 }
