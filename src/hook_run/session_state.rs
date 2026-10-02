@@ -58,6 +58,43 @@ pub(crate) fn prune_stale_json_files(dir: &Path, max_age_days: u64) {
     }
 }
 
+/// Whether a `SessionStart` `source` means the model's context was emptied, so
+/// state that records what the model has seen no longer holds (#2381).
+pub(crate) fn context_was_lost(source: Option<&str>) -> bool {
+    matches!(source, Some("startup" | "clear" | "compact"))
+}
+
+/// Delete the read-once cache, the read-before-edit record, and the repeat-call
+/// counter of one session.
+/// After a compaction the model holds none of the file contents it read, so a
+/// stale record would deny a re-read or excuse an edit of an unseen file.
+/// The model also cannot remember the earlier calls, so a stale repeat counter
+/// would warn about a call that is new to it.
+/// Fail-soft: a file that cannot be removed is logged and the hook goes on.
+pub(crate) fn reset_read_state(state_dir: &Path, session_id: &str) {
+    if !crate::paths::is_valid_short_name(session_id) {
+        tracing::debug!("reset_read_state: session id is not a valid state file name, skipped");
+        return;
+    }
+    for path in [
+        super::read_once::session_cache_path(state_dir, session_id),
+        super::slippage::stats_path(state_dir, session_id),
+        super::repeat_detect::session_state_path(state_dir, session_id),
+    ] {
+        if let Err(e) = remove_if_present(&path) {
+            tracing::warn!("reset_read_state: cannot remove {}: {e}", path.display());
+        }
+    }
+}
+
+/// Remove `path`; a file that is already gone counts as removed.
+fn remove_if_present(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
 /// Seconds since the Unix epoch; 0 for a clock set before 1970.
 pub(crate) fn unix_now() -> i64 {
     std::time::SystemTime::now()
@@ -98,6 +135,52 @@ mod tests {
     fn missing_dir_is_a_noop() {
         let dir = TempDir::new().expect("test");
         prune_stale_json_files(&dir.path().join("does-not-exist"), 7);
+    }
+
+    #[test]
+    fn reset_read_state_removes_both_files_of_one_session_only() {
+        let dir = TempDir::new().expect("test");
+        let own = [
+            super::super::read_once::session_cache_path(dir.path(), "s1"),
+            super::super::slippage::stats_path(dir.path(), "s1"),
+            super::super::repeat_detect::session_state_path(dir.path(), "s1"),
+        ];
+        let other = super::super::read_once::session_cache_path(dir.path(), "s2");
+        for p in own.iter().chain([&other]) {
+            std::fs::create_dir_all(p.parent().expect("test")).expect("test");
+            std::fs::write(p, "{}").expect("test");
+        }
+
+        reset_read_state(dir.path(), "s1");
+
+        assert!(own.iter().all(|p| !p.exists()), "own state must go");
+        assert!(other.exists(), "another session's state must stay");
+        reset_read_state(dir.path(), "s1");
+        reset_read_state(dir.path(), "../escape");
+    }
+
+    #[test]
+    fn remove_if_present_accepts_a_missing_file_and_reports_a_real_error() {
+        let dir = TempDir::new().expect("test");
+        let file = dir.path().join("f.json");
+        remove_if_present(&file).unwrap();
+        std::fs::write(&file, "{}").expect("test");
+        remove_if_present(&file).unwrap();
+        assert!(!file.exists());
+        // `remove_file` fails on a directory, which is not a NotFound error.
+        let sub = dir.path().join("d");
+        std::fs::create_dir(&sub).expect("test");
+        assert!(remove_if_present(&sub).is_err());
+    }
+
+    #[test]
+    fn only_context_losing_sources_reset() {
+        let got: Vec<bool> = ["startup", "clear", "compact", "resume", "fork"]
+            .iter()
+            .map(|s| context_was_lost(Some(s)))
+            .collect();
+        assert_eq!(got, [true, true, true, false, false]);
+        assert!(!context_was_lost(None));
     }
 
     #[test]

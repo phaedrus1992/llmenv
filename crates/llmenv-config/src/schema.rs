@@ -1500,8 +1500,10 @@ pub struct Memory {
     #[serde(default)]
     pub consolidation: Option<ConsolidationConfig>,
     /// Per-type retention policy for memory pruning (R4). When `None`,
-    /// pruning is fully disabled. When `Some(Config)`, the per-type
-    /// duration strings drive `llmenv memory prune`.
+    /// `llmenv memory prune` uses its importance-based prune. When
+    /// `Some(Config)`, `llmenv memory prune` refuses to run, because ICM's
+    /// recall output has no record age or type to apply the durations to
+    /// (#2386).
     #[serde(default)]
     pub retention: Option<RetentionConfig>,
     /// Whether to automatically run `llmenv memory prune` during
