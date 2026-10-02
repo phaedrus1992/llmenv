@@ -706,6 +706,32 @@ mod tests {
         .expect("valid Memory fixture YAML")
     }
 
+    proptest! {
+        // Oracle check: the first tag-active entry decides, and only when its
+        // consolidation is enabled; a later enabled entry never wins.
+        #[test]
+        fn active_consolidation_matches_oracle(
+            entries in proptest::collection::vec(
+                (0u8..3, proptest::option::of(any::<bool>())),
+                0..5,
+            ),
+            active in proptest::collection::btree_set(0u8..3, 0..3),
+        ) {
+            let memory: Vec<crate::config::Memory> = entries
+                .iter()
+                .map(|(tag, enabled)| memory_entry(&format!("t{tag}"), *enabled))
+                .collect();
+            let tags: std::collections::BTreeSet<String> =
+                active.iter().map(|t| format!("t{t}")).collect();
+            let expected = entries
+                .iter()
+                .find(|(tag, _)| active.contains(tag))
+                .and_then(|(_, enabled)| *enabled)
+                .unwrap_or(false);
+            prop_assert_eq!(active_consolidation(&memory, &tags).is_some(), expected);
+        }
+    }
+
     #[test]
     fn active_consolidation_uses_the_tag_active_entry() {
         let tags = std::collections::BTreeSet::from(["on".to_string()]);

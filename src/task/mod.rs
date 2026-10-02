@@ -2495,6 +2495,60 @@ mod tests {
         assert_eq!(idle[0].open_count, 2);
     }
 
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(32))]
+
+        // For any mix of task states per session: a session is idle exactly
+        // when it has an open task and no wip or waiting task, and its next
+        // task is open (#2338).
+        #[test]
+        fn idle_sessions_invariants(
+            plan in proptest::collection::vec(
+                proptest::collection::vec(0u8..4, 0..5),
+                1..4,
+            ),
+        ) {
+            let dir = TempDir::new().unwrap();
+            let mut expected = std::collections::BTreeMap::new();
+            for states in &plan {
+                let sid = session_for_project(dir.path(), PROJECT);
+                for (i, state) in states.iter().enumerate() {
+                    let t = add_task_for_session(
+                        dir.path(),
+                        &format!("t{i}"),
+                        ParentSpec::Detached,
+                        &sid,
+                    )
+                    .unwrap();
+                    match state {
+                        1 => drop(start_task(dir.path(), &t.slug, true).unwrap()),
+                        2 => {
+                            start_task(dir.path(), &t.slug, true).unwrap();
+                            wait_task(dir.path(), &t.slug, "r").unwrap();
+                        }
+                        3 => drop(done_task(dir.path(), &t.slug).unwrap()),
+                        _ => {}
+                    }
+                }
+                let open = states.iter().filter(|s| **s == 0).count();
+                let busy = states.iter().any(|s| matches!(s, 1 | 2));
+                if open > 0 && !busy {
+                    expected.insert(sid, open);
+                }
+            }
+            let idle = idle_sessions(dir.path(), PROJECT);
+            let got: std::collections::BTreeMap<String, usize> = idle
+                .iter()
+                .map(|i| (i.session.id.clone(), i.open_count))
+                .collect();
+            proptest::prop_assert_eq!(got, expected);
+            for i in &idle {
+                proptest::prop_assert_eq!(i.next.state, TaskState::Open);
+                proptest::prop_assert_eq!(i.next.session.as_deref(), Some(i.session.id.as_str()));
+            }
+        }
+    }
+
     // --- done without start, reopen (#2338) ---
 
     #[test]

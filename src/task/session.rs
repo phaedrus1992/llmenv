@@ -805,6 +805,74 @@ mod tests {
         }
     }
 
+    /// A session built in memory, for the properties that need no store.
+    fn bare_session(id: usize, owner_session: Option<String>, owner_pid: Option<u32>) -> Session {
+        Session {
+            id: format!("s{id}"),
+            name: None,
+            project: PROJECT_A.to_string(),
+            description: None,
+            started_at: "2026-10-02T00:00:00Z".to_string(),
+            last_activity: "2026-10-02T00:00:00Z".to_string(),
+            finished_at: None,
+            abandoned_at: None,
+            owner_session,
+            owner_pid,
+        }
+    }
+
+    proptest! {
+        // The owner fields are optional and skipped when absent; any mix must
+        // survive a save and a load unchanged (#2365).
+        #[test]
+        fn session_serde_round_trips_any_owner(
+            owner_session in proptest::option::of("[a-z0-9-]{1,12}"),
+            owner_pid in proptest::option::of(any::<u32>()),
+            finished in any::<bool>(),
+        ) {
+            let mut session = bare_session(0, owner_session, owner_pid);
+            if finished {
+                session.finished_at = Some("2026-10-02T01:00:00Z".to_string());
+            }
+            let json = serde_json::to_string(&session).unwrap();
+            let back: Session = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(back, session);
+        }
+
+        // Oracle check: the only open session wins; else the only one the
+        // caller's conversation owns; else an error that counts both.
+        #[test]
+        fn pick_open_session_matches_oracle(
+            owners in proptest::collection::vec(proptest::option::of(0u8..3), 0..6),
+            caller in proptest::option::of(0u8..3),
+        ) {
+            let sessions: Vec<Session> = owners
+                .iter()
+                .enumerate()
+                .map(|(i, o)| bare_session(i, o.map(|c| format!("conv-{c}")), None))
+                .collect();
+            let identity = EngineIdentity {
+                session_id: caller.map(|c| format!("conv-{c}")),
+                pid: None,
+            };
+            let owned: Vec<&Session> = sessions
+                .iter()
+                .filter(|s| caller.is_some() && s.owner_session == identity.session_id)
+                .collect();
+            let expected = match sessions.len() {
+                0 => Err(PickError::NoneOpen),
+                1 => Ok(sessions[0].clone()),
+                _ if owned.len() == 1 => Ok(owned[0].clone()),
+                n => Err(PickError::Ambiguous {
+                    open: n,
+                    owned: owned.len(),
+                    identified: caller.is_some(),
+                }),
+            };
+            prop_assert_eq!(pick_open_session(sessions.clone(), &identity), expected);
+        }
+    }
+
     #[test]
     fn start_session_as_records_owner() {
         let dir = TempDir::new().expect("test");
