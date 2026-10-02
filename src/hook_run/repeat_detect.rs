@@ -115,7 +115,7 @@ fn repeat_detect_state_dir(state_dir: &Path) -> PathBuf {
     state_dir.join("repeat_detect")
 }
 
-fn session_state_path(state_dir: &Path, session_id: &str) -> PathBuf {
+pub(super) fn session_state_path(state_dir: &Path, session_id: &str) -> PathBuf {
     repeat_detect_state_dir(state_dir).join(format!("{session_id}.json"))
 }
 

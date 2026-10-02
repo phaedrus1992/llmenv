@@ -161,7 +161,7 @@ async fn waves(
 }
 
 fn resets_ledger(source: Option<&str>) -> bool {
-    matches!(source, Some("startup" | "clear" | "compact"))
+    super::session_state::context_was_lost(source)
 }
 
 /// Run the scope recalls into `budget`, one after another, until it is full.

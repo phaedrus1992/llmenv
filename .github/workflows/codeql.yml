@@ -1,0 +1,143 @@
+name: CodeQL
+
+on:
+  push:
+    branches:
+      - main
+      - release/**
+  pull_request:
+    branches:
+      - main
+      - release/**
+  schedule:
+    - cron: 0 5 * * 1
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      python: ${{ steps.filter.outputs.python }}
+      javascript: ${{ steps.filter.outputs.javascript }}
+      rust: ${{ steps.filter.outputs.rust }}
+      actions: ${{ steps.filter.outputs.actions }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
+        id: filter
+        with:
+          filters: |
+            python:
+              - '**/*.py'
+              - 'pyproject.toml'
+              - 'requirements*.txt'
+            javascript:
+              - '**/*.js'
+              - '**/*.ts'
+              - '**/*.tsx'
+              - '**/*.jsx'
+              - 'package.json'
+              - 'package-lock.json'
+            rust:
+              - 'src/**'
+              - 'crates/**'
+              - 'benches/**'
+              - 'build.rs'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.cargo/**'
+            actions:
+              - '.github/**'
+
+  analyze:
+    needs: changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language:
+          - python
+          - javascript-typescript
+          - rust
+          - actions
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check CodeQL config exists
+        run: |
+          if [ ! -f .github/codeql/codeql-config.yml ]; then
+            echo "ERROR: CodeQL config not found at .github/codeql/codeql-config.yml"
+            exit 1
+          fi
+
+      - name: Decide whether this language changed
+        id: gate
+        env:
+          LANGUAGE: ${{ matrix.language }}
+          PYTHON: ${{ needs.changes.outputs.python }}
+          JAVASCRIPT: ${{ needs.changes.outputs.javascript }}
+          RUST: ${{ needs.changes.outputs.rust }}
+          ACTIONS: ${{ needs.changes.outputs.actions }}
+        run: |
+          case "$LANGUAGE" in
+            python) changed="$PYTHON" ;;
+            javascript-typescript) changed="$JAVASCRIPT" ;;
+            rust) changed="$RUST" ;;
+            actions) changed="$ACTIONS" ;;
+            *) echo "ERROR: unknown CodeQL language '$LANGUAGE'" >&2; exit 1 ;;
+          esac
+          echo "run=$changed" >> "$GITHUB_OUTPUT"
+
+      - name: Initialize CodeQL
+        if: steps.gate.outputs.run == 'true'
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
+        with:
+          languages: ${{ matrix.language }}
+          config-file: .github/codeql/codeql-config.yml
+
+      - name: Autobuild
+        if: steps.gate.outputs.run == 'true'
+        uses: github/codeql-action/autobuild@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
+
+      - name: Perform CodeQL Analysis
+        if: steps.gate.outputs.run == 'true'
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
+        with:
+          category: /language:${{ matrix.language }}
+
+      # The required code-scanning rule fails a PR when a category present on the
+      # base branch has no result on the PR, so a skipped language reports an empty one (#2411).
+      - name: Report empty results for an unchanged language
+        if: steps.gate.outputs.run != 'true'
+        env:
+          LANGUAGE: ${{ matrix.language }}
+        run: |
+          printf '%s' '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"CodeQL"}},"results":[]}]}' \
+            > "$RUNNER_TEMP/empty.sarif"
+          echo "category=/language:$LANGUAGE" >> "$GITHUB_OUTPUT"
+        id: empty
+
+      - name: Upload empty results
+        if: steps.gate.outputs.run != 'true'
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
+        with:
+          sarif_file: ${{ runner.temp }}/empty.sarif
+          category: ${{ steps.empty.outputs.category }}
