@@ -602,6 +602,7 @@ features:
 | `mcp_permissions` | no | Per-tier permission override for the ICM MCP's tools — see [`mcp_permissions`](#featuresmcp_permissions) below |
 | `wakeup_max_tokens` | no | Token budget for the `SessionStart` wake-up call, `20`-`4000` (added in v3.8.0) |
 | `adaptive_recall` | no | Per-session adaptive recall, `true` or `false`, default `true` (added in v3.12.0) |
+| `retention` | no | Per-type retention durations for `llmenv memory prune`. While set, prune refuses to run — see [`llmenv memory prune`](commands.md#memory) (changed in v3.12.0) |
 | `consolidation` | no | Post-session memory consolidation — see [Post-session consolidation](#post-session-consolidation) below (added in v3.3.0) |
 
 `wakeup_max_tokens` (added in v3.8.0) controls the size of the wake-up pack
@@ -625,7 +626,11 @@ Set `adaptive_recall: false` to go back to the stateless recall, which sends the
 (added in v3.3.0; model default changed in v3.11.2; runs on Claude Code `SessionEnd` since v3.12.0)
 
 After a session ends, llmenv can ask an LLM to distill that session's episodic memories into a few
-semantic rules and store them back in ICM. It is off by default and skips a session with fewer than
+semantic rules and store them back in ICM.
+(changed in v3.12.0) It reads only the memories of the current project, which it names the same way the session start does.
+It stores each rule under the topic `llmenv-consolidation-<project>`, so the rule comes back in that project's recall.
+Rules stored before v3.12.0 stay under the topic `llmenv-consolidation`.
+Before it stores a rule, it recalls the five closest rules in that topic and skips the new rule when one shares at least 80% of its words. It is off by default and skips a session with fewer than
 three memories.
 
 (changed in v3.12.0) The trigger is the `session_end` hook (Claude Code's `SessionEnd`).
@@ -988,6 +993,9 @@ unaffected. A `Read` call with an `offset` or `limit` (a partial read) always
 bypasses the cache — only whole-file reads are tracked and deduplicated.
 Fail-soft — any cache/IO error passes the read through silently rather than
 blocking.
+
+(changed in v3.12.0) The cache of a session resets on `/clear` and after a compaction, because the model no longer holds the file contents.
+The same reset applies to the `read_before_edit` record of `features.slippage`.
 
 ```yaml
 features:
