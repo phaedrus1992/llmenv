@@ -59,24 +59,24 @@ pub struct Session {
     /// Free-text resume context: git branch, issue numbers, plan docs, memory topics.
     /// Set via `session start --context` or `session edit --context`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) context: Option<String>,
+    context: Option<String>,
     /// GitHub issue numbers relevant to this session (e.g., [2358, 2339]).
     /// Auto-detected from branch name (feat/<N>-...) or set via `--issue` (repeatable).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) issues: Vec<u32>,
+    issues: Vec<u32>,
     /// Git branch this session is working on (auto-detected at `session start`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) branch: Option<String>,
+    branch: Option<String>,
     /// Base branch (e.g., main, release/3.x) for the work. Auto-detected from branch/milestone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) base: Option<String>,
+    base: Option<String>,
     /// ICM memory topics to recall (e.g., ["decisions-llmenv", "context-servarr"]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) memory_topics: Vec<String>,
+    memory_topics: Vec<String>,
     /// Plan/spec docs relevant to this session (e.g., ["docs/design/plan.md"]).
     /// Paths should be relative to repo root.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) docs: Vec<String>,
+    docs: Vec<String>,
 }
 
 /// Who is calling: the engine conversation and process, when the engine
