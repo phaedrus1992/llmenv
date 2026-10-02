@@ -326,8 +326,7 @@ mod tests {
     use super::*;
 
     fn config_with(memory_yaml: &str) -> crate::config::Config {
-        serde_yaml::from_str(&format!("features:\n  memory:\n    - {memory_yaml}\n"))
-            .expect("valid Config fixture YAML")
+        serde_yaml::from_str(&format!("features:\n  memory:\n    - {memory_yaml}\n")).unwrap()
     }
 
     #[test]
