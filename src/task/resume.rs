@@ -207,6 +207,35 @@ fn extend_unique<T: PartialEq + Clone>(into: &mut Vec<T>, from: &[T]) {
     }
 }
 
+/// Property-test generators shared with the session tests.
+#[cfg(test)]
+pub(crate) mod strategies {
+    use super::ResumeContext;
+    use proptest::prelude::*;
+
+    /// Any `ResumeContext`, including empty fields and text with odd characters.
+    pub(crate) fn arb_resume_context() -> impl Strategy<Value = ResumeContext> {
+        (
+            proptest::option::of(".{0,60}"),
+            proptest::collection::vec(any::<u32>(), 0..4),
+            proptest::option::of(".{1,30}"),
+            proptest::option::of(".{1,30}"),
+            proptest::collection::vec(".{1,20}", 0..4),
+            proptest::collection::vec(".{1,30}", 0..4),
+        )
+            .prop_map(|(context, issues, branch, base, memory_topics, docs)| {
+                ResumeContext {
+                    context,
+                    issues,
+                    branch,
+                    base,
+                    memory_topics,
+                    docs,
+                }
+            })
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -459,6 +488,7 @@ mod tests {
     }
 
     mod props {
+        use super::super::strategies::arb_resume_context;
         use super::super::*;
         use proptest::prelude::*;
 
@@ -466,6 +496,26 @@ mod tests {
             #[test]
             fn detect_issue_finds_any_valid_number(n in 1u32..=9_999_999, slug in "[a-z][a-z0-9-]{0,20}") {
                 prop_assert_eq!(detect_issue(&format!("feat/{n}-{slug}")), Some(n));
+            }
+
+            #[test]
+            fn serde_round_trips_any_context(context in arb_resume_context()) {
+                let json = serde_json::to_string(&context).unwrap();
+                let back: ResumeContext = serde_json::from_str(&json).unwrap();
+                prop_assert_eq!(back, context);
+            }
+
+            #[test]
+            fn a_field_is_written_only_when_it_holds_something(context in arb_resume_context()) {
+                let json = serde_json::to_string(&context).unwrap();
+                let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+                let present = |key: &str| value.get(key).is_some();
+                prop_assert_eq!(present("context"), context.context.is_some());
+                prop_assert_eq!(present("issues"), !context.issues.is_empty());
+                prop_assert_eq!(present("branch"), context.branch.is_some());
+                prop_assert_eq!(present("base"), context.base.is_some());
+                prop_assert_eq!(present("memory_topics"), !context.memory_topics.is_empty());
+                prop_assert_eq!(present("docs"), !context.docs.is_empty());
             }
 
             #[test]

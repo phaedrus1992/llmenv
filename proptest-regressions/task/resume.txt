@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 4319a3e1808b4b6eab988ceb53c37d69c513b9e083ba5dd8cb4735e0bff69f0b # shrinks to n = 1, slug = "a"
+cc f91a2e6beb02095db638fb048d1aa411dc469f1bf86f4eb0c7d41054de261f5b # shrinks to context = ResumeContext { context: None, issues: [], branch: None, base: None, memory_topics: [], docs: [] }

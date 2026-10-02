@@ -1144,8 +1144,10 @@ mod tests {
             owner_session in proptest::option::of("[a-z0-9-]{1,12}"),
             owner_pid in proptest::option::of(any::<u32>()),
             finished in any::<bool>(),
+            resume in crate::task::resume::strategies::arb_resume_context(),
         ) {
             let mut session = bare_session(0, owner_session, owner_pid);
+            session.resume = resume;
             if finished {
                 session.finished_at = Some("2026-10-02T01:00:00Z".to_string());
             }
