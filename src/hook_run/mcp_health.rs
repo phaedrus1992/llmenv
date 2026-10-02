@@ -2,6 +2,10 @@ use anyhow::Result;
 use tracing::warn;
 
 /// Health check for managed MCP servers at session start.
+#[expect(
+    dead_code,
+    reason = "called from SessionStart hook in future integration"
+)]
 pub async fn check_mcp_servers() {
     // Check icm server availability
     if let Err(e) = check_icm().await {
