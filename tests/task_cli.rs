@@ -2864,3 +2864,61 @@ fn task_show_current_prints_resume_context_on_stderr_and_keeps_stdout_json() {
         "{stderr}"
     );
 }
+
+// -- file flags are bounded (#2339 review) --
+
+const FILE_FLAG_LIMIT: usize = 64 * 1024;
+
+#[test]
+fn context_file_refuses_a_device_instead_of_reading_it_forever() {
+    let (dir, cwd) = (TempDir::new().unwrap(), plain_cwd());
+    llmenv(dir.path())
+        .current_dir(cwd.path())
+        .timeout(std::time::Duration::from_secs(10))
+        .args([
+            "task",
+            "session",
+            "start",
+            "s",
+            "--context-file",
+            "/dev/zero",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not a regular file"));
+}
+
+#[test]
+fn detail_file_refuses_a_device_instead_of_reading_it_forever() {
+    let (dir, cwd) = (TempDir::new().unwrap(), plain_cwd());
+    start_session_in(dir.path(), cwd.path(), "s");
+    llmenv(dir.path())
+        .current_dir(cwd.path())
+        .timeout(std::time::Duration::from_secs(10))
+        .args(["task", "add", "T", "--detail-file", "/dev/zero"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not a regular file"));
+}
+
+#[test]
+fn file_flags_accept_a_file_at_the_limit_and_refuse_one_byte_over() {
+    let (dir, cwd) = (TempDir::new().unwrap(), plain_cwd());
+    let at_limit = cwd.path().join("at.md");
+    let over = cwd.path().join("over.md");
+    std::fs::write(&at_limit, "a".repeat(FILE_FLAG_LIMIT)).unwrap();
+    std::fs::write(&over, "a".repeat(FILE_FLAG_LIMIT + 1)).unwrap();
+    llmenv(dir.path())
+        .current_dir(cwd.path())
+        .args(["task", "session", "start", "s", "--context-file"])
+        .arg(&at_limit)
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .current_dir(cwd.path())
+        .args(["task", "session", "edit", "--context-file"])
+        .arg(&over)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("larger than").and(predicates::str::contains("65536")));
+}

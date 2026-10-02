@@ -584,17 +584,46 @@ struct DetailArgs {
 
 impl DetailArgs {
     fn resolve(self) -> anyhow::Result<Option<String>> {
-        use anyhow::Context as _;
         match (self.detail, self.detail_file) {
-            (_, Some(path)) => Ok(Some(
-                std::fs::read_to_string(&path)
-                    .with_context(|| format!("cannot read --detail-file {}", path.display()))?
-                    .trim_end()
-                    .to_string(),
-            )),
+            (_, Some(path)) => Ok(Some(read_text_file(&path, "--detail-file")?)),
             (text, None) => Ok(text),
         }
     }
+}
+
+/// The most a `--context-file` or `--detail-file` may hold. The text goes into every later
+/// SessionStart for the project, so a large file would flood the context window.
+const MAX_TEXT_FILE_BYTES: u64 = 64 * 1024;
+
+/// Read a text file named by `flag`. It refuses anything but a regular file, because a device
+/// such as `/dev/zero` never ends and a FIFO blocks on open. It refuses a file over
+/// [`MAX_TEXT_FILE_BYTES`].
+fn read_text_file(path: &std::path::Path, flag: &str) -> anyhow::Result<String> {
+    use anyhow::Context as _;
+    use std::io::Read as _;
+    let describe = || format!("cannot read {flag} {}", path.display());
+    let not_regular = || anyhow::anyhow!("{flag} {} is not a regular file", path.display());
+    // Check before `open`: opening a FIFO with no writer blocks.
+    anyhow::ensure!(
+        std::fs::metadata(path).with_context(describe)?.is_file(),
+        not_regular()
+    );
+    let file = std::fs::File::open(path).with_context(describe)?;
+    // Check again on the open handle, in case the path changed after the first check.
+    anyhow::ensure!(
+        file.metadata().with_context(describe)?.is_file(),
+        not_regular()
+    );
+    let mut text = String::new();
+    file.take(MAX_TEXT_FILE_BYTES + 1)
+        .read_to_string(&mut text)
+        .with_context(describe)?;
+    anyhow::ensure!(
+        text.len() as u64 <= MAX_TEXT_FILE_BYTES,
+        "{flag} {} is larger than {MAX_TEXT_FILE_BYTES} bytes",
+        path.display()
+    );
+    Ok(text.trim_end().to_string())
 }
 
 /// The resume-context flags shared by `session start` and `session edit` (#2339).
@@ -625,14 +654,8 @@ struct ResumeArgs {
 
 impl ResumeArgs {
     fn into_context(self) -> anyhow::Result<crate::task::resume::ResumeContext> {
-        use anyhow::Context as _;
         let context = match (self.context, self.context_file) {
-            (_, Some(path)) => Some(
-                std::fs::read_to_string(&path)
-                    .with_context(|| format!("cannot read --context-file {}", path.display()))?
-                    .trim_end()
-                    .to_string(),
-            ),
+            (_, Some(path)) => Some(read_text_file(&path, "--context-file")?),
             (text, None) => text,
         };
         Ok(crate::task::resume::ResumeContext {
