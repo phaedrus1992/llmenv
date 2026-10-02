@@ -91,8 +91,10 @@ pub(crate) struct Retired {
     pub no_effect: bool,
     /// Claude Code version, or `None` when the docs give none.
     pub since: Option<&'static str>,
-    /// Replacement, or `None`.
+    /// The setting or value to use instead, or `None`.
     pub replacement: Option<&'static str>,
+    /// Extra advice for a row with no replacement, such as "word-editing keys always follow readline".
+    pub note: Option<&'static str>,
 }
 
 pub(crate) const RETIRED: &[Retired] = &[ /* rows from the tables above */ ];
@@ -117,7 +119,12 @@ pub(crate) fn scan(settings: &serde_json::Value, claude_json: &serde_json::Value
 - Permission tools: each string in `settings["permissions"]["allow"|"ask"|"deny"]`.
 - MCP types: each value in `claude_json["mcpServers"]` whose `type` is the string `sdk`.
 - Non-object or missing parts are skipped, never an error.
-- Output order: settings keys, env, permissions, MCP; within each, the file order.
+- Output order: settings keys, env, permissions, MCP.
+  Within a JSON object the order is `serde_json`'s map order (sorted), because the crate is built without `preserve_order`, so file order is not available.
+  Permission rules keep their array order.
+- An MCP hit names the server by its key (`.claude.json mcpServers.<name>`), not by an index.
+- The scan also reads per-project servers under `projects.<path>.mcpServers`, where Claude Code keeps project-scoped MCP entries.
+- Server names and project paths come from user and third-party config, so control characters in them are escaped before doctor prints them.
 
 `scan` is pure and has no file I/O.
 
@@ -125,11 +132,14 @@ pub(crate) fn scan(settings: &serde_json::Value, claude_json: &serde_json::Value
 
 In `src/cli/doctor.rs`, after the lifecycle-hook section, when the Claude Code adapter is installed:
 
-1. Read `settings.json` and `.claude.json` from the same `adapter_root` doctor already computes for the credentials check (near line 753).
-2. A missing file counts as `{}`. A file that is not valid JSON prints one `{warn}` line naming the file and the parse error, and the scan continues with `{}` for it.
+1. Read `settings.json` and `.claude.json` from the folder in `CLAUDE_CONFIG_DIR`, but only when that folder is under the Claude Code adapter root.
+   The rendered files live in `<adapter_root>/<version>/<folder>/`, not in `adapter_root` itself; only the credentials cache lives there.
+   The folder name depends on the hashing mode, and strict mode hashes the filtered manifest, so doctor uses the folder the shell hook exported, as `check-stale` does.
+   When `CLAUDE_CONFIG_DIR` is unset or outside the adapter root, print one `{info}` line and skip the check.
+2. A missing file prints one `{info}` line that names it and `llmenv export`, and counts as `{}`. A file that cannot be read or is not valid JSON prints one `{warn}` line naming the file and the error, and the scan continues with `{}` for it.
 3. Print a heading `Retired Claude Code settings:` only when there is at least one hit.
 4. One line per hit, format:
-   - no effect: `{warn} <location>: <name> has no effect since Claude Code <since>. <replacement text or "Remove it.">`
+   - no effect: `{warn} <location>: <name> has no effect since Claude Code <since>. <advice>`, where the advice is `Use <replacement> instead.`, `Remove it; <note>.`, or `Remove it.`
    - deprecated: `{warn} <location>: <name> is deprecated. Use <replacement>.`
    - when `since` is `None`, omit `since Claude Code <since>`.
 5. When there are no hits, print nothing.
@@ -138,7 +148,7 @@ In `src/cli/doctor.rs`, after the lifecycle-hook section, when the Claude Code a
 
 1. `BASH_MAX_OUTPUT_LENGTH`: if `native.claude_code.bashOutputMaxChars` is set, print `{pass} bashOutputMaxChars=<n> (BASH_MAX_OUTPUT_LENGTH is ignored while it is set)` and skip the variable check.
    Otherwise keep today's check.
-2. `ENABLE_PROMPT_CACHING_1H`: pass if it is `1` or `true`, or if `CLAUDE_CODE_PROMPT_CACHE_TTL` is `1h` (process env or `native.claude_code.env`).
+2. `ENABLE_PROMPT_CACHING_1H`: `CLAUDE_CODE_PROMPT_CACHE_TTL` takes precedence (process env or `native.claude_code.env`). Pass when it is `1h`, warn when it is set to another value, and check `ENABLE_PROMPT_CACHING_1H` (`1` or `true` passes) only when it is unset.
    When none is set, change the text from a warning to `{info} prompt cache TTL not set: subscription plans get 1h on the main conversation automatically; API-key and cloud-provider users can set CLAUDE_CODE_PROMPT_CACHE_TTL=1h`.
 
 Use the existing `effective_token_efficiency_var` helper for every lookup.

@@ -5550,7 +5550,7 @@ mod tests {
 
     /// Build a minimal Config with a memory backend whose server_host is "srv".
     /// The caller controls `listen_host` and `port`.
-    fn memory_config(listen_host: &str, port: u16) -> Config {
+    pub(crate) fn memory_config(listen_host: &str, port: u16) -> Config {
         use crate::config::{Features, HostEntry, Memory};
         use std::collections::BTreeMap;
         let mut host = BTreeMap::new();
@@ -5596,7 +5596,7 @@ mod tests {
     }
 
     /// Build an ActiveScopes with the host-scope "srv" matched and tag "mem" active.
-    fn active_as_server() -> ActiveScopes {
+    pub(crate) fn active_as_server() -> ActiveScopes {
         use crate::scope::ActiveScope;
         ActiveScopes {
             scopes: vec![ActiveScope {
@@ -5621,7 +5621,7 @@ mod tests {
 
     /// Active scopes with no matched host scope — this host is a client, not
     /// the server.
-    fn active_as_client() -> ActiveScopes {
+    pub(crate) fn active_as_client() -> ActiveScopes {
         use crate::scope::ActiveScope;
         ActiveScopes {
             scopes: vec![ActiveScope {

@@ -77,12 +77,53 @@ llmenv prune --all                # nuke everything (re-materializes on next exp
 llmenv doctor --gc                # diagnostics + GC in one pass
 ```
 
+## Doctor warns about retired Claude Code settings
+
+(added in v3.12.0)
+
+Claude Code retires settings keys, environment variables, and tools over time.
+A retired entry in your config does nothing, and Claude Code does not tell you.
+`llmenv doctor` reads the rendered `settings.json` and `.claude.json` in the folder that `CLAUDE_CONFIG_DIR`
+points to, and prints a `Retired Claude Code settings:` section when it finds one.
+Run doctor in a shell that has the llmenv hook; without `CLAUDE_CONFIG_DIR`, doctor skips the check and says so.
+Each line names where the entry is, the Claude Code version that dropped it, and what to use
+instead:
+
+```text
+⚠ settings.json env: CLAUDE_CODE_CONNECT_TIMEOUT_MS has no effect since Claude Code 2.1.186.
+  Use API_TIMEOUT_MS instead.
+⚠ settings.json: voiceEnabled is deprecated. Use voice.enabled.
+```
+
+The list follows Claude Code's own settings reference, environment-variable reference, and
+changelog.
+The rendered files collect entries from `native.claude_code`, `capabilities.env`, permission
+rules, MCP entries, and keys that Claude Code writes itself, so remove the entry from whichever
+of those holds it.
+The check only warns: it never changes the exit status, and `llmenv validate` does not report it.
+If a rendered file is not valid JSON, doctor names the file and skips it.
+
+Two token-efficiency recommendations also changed in v3.12.0:
+
+- When `native.claude_code.bashOutputMaxChars` is set, doctor reports it and skips
+  `BASH_MAX_OUTPUT_LENGTH`, because Claude Code ignores the variable while the setting is set.
+- `CLAUDE_CODE_PROMPT_CACHE_TTL` takes precedence over `ENABLE_PROMPT_CACHING_1H`. The prompt-cache check
+  passes when the TTL is `1h`, and warns when it is set to another value. When the TTL is unset, it checks
+  `ENABLE_PROMPT_CACHING_1H`. When neither is set, it prints an info line instead of a warning:
+  subscription plans get the 1-hour TTL on the main conversation without any variable.
+
 ## Memory backend issues
 
 - **Server not activating** — it renders only when one of `memory.tags` is
   active. Check `llmenv tag-ls`.
 - **Client can't reach the server** — confirm the `host:` address resolves and
   the port is open: `nc -vz <addr> <port>`.
+- **Old ICM server** (added in v3.12.0) — on the host that serves memory, `llmenv doctor`
+  reports the `icm` version under `ICM server:`. It warns below 0.10.60, where recall filters by
+  keyword and topic after the limit, so adaptive recall returns little or nothing. It warns again
+  below 0.10.64, where recall ranking is weaker. Run `icm upgrade --apply` on that host. On a
+  memory client, doctor cannot read the server version, because `mcp-proxy` does not forward it;
+  run `icm --version` on the server host.
 - **`mcp-proxy` missing** — the server host needs `mcp-proxy` or `uvx` on
   `PATH`. `llmenv export` errors with an install hint if neither is present.
 - **`mcp-proxy` won't start** (added in v3.8.0) — the warning quotes the tail of
