@@ -1678,6 +1678,28 @@ fn translate_command_md(source: &str, _name: &str) -> anyhow::Result<String> {
     }
 }
 
+/// Frontmatter keys that produce no drop warning: the keys `translate_agent_md` copies, plus
+/// `name`, because opencode takes the agent name from the file name.
+const OPENCODE_AGENT_KEYS: &[&str] = &["description", "model", "tools", "allowed_tools", "name"];
+
+/// Source frontmatter keys that opencode has no field for (#2150), in source order. A key that
+/// is not a string (`1: x`) is rendered as YAML, so it is reported instead of dropped silently.
+fn dropped_agent_keys(map: &serde_yaml::Mapping) -> Vec<String> {
+    map.keys()
+        .filter(|key| {
+            key.as_str()
+                .is_none_or(|k| !OPENCODE_AGENT_KEYS.contains(&k))
+        })
+        .map(|key| match key.as_str() {
+            Some(k) => k.to_owned(),
+            None => serde_yaml::to_string(key)
+                .unwrap_or_default()
+                .trim()
+                .to_owned(),
+        })
+        .collect()
+}
+
 /// Translate an agent markdown file from Claude frontmatter to opencode format.
 ///
 /// Keeps `description`, `model`, `tools` / `allowed_tools`, and adds
@@ -1697,6 +1719,15 @@ fn translate_agent_md(source: &str, _name: &str) -> anyhow::Result<String> {
             if let Some(val) = map.get(serde_yaml::Value::String((*tool_key).into())) {
                 new_fm.insert((*tool_key).into(), val.clone());
             }
+        }
+
+        for key in dropped_agent_keys(map) {
+            // Agent files come from third-party plugins, so a key can hold terminal escapes.
+            let key = crate::util::escape_control(&key);
+            eprintln!(
+                "warning: opencode adapter does not support '{key}' in \
+                 agent frontmatter — dropping this field"
+            );
         }
     }
 
@@ -3607,6 +3638,74 @@ mod tests {
         let result = translate_agent_md(src, "test").unwrap();
         assert!(result.contains("allowed_tools:"));
         assert!(result.contains("mode: subagent"));
+    }
+
+    #[test]
+    fn translate_agent_md_drops_unsupported_keys() {
+        let src = "---\ndescription: My agent\nmodel: claude-sonnet-4-20250514\nomitClaudeMd: true\neffort: high\nmaxTurns: 5\n---\n\nBody.";
+        let result = translate_agent_md(src, "test").unwrap();
+        // Supported keys should be present
+        assert!(result.contains("description: My agent"));
+        assert!(result.contains("model: claude-sonnet-4-20250514"));
+        assert!(result.contains("mode: subagent"));
+        // Dropped keys should not be present
+        assert!(!result.contains("omitClaudeMd"));
+        assert!(!result.contains("effort"));
+        assert!(!result.contains("maxTurns"));
+    }
+
+    #[test]
+    fn dropped_agent_keys_lists_unsupported_keys_in_source_order() {
+        let map: serde_yaml::Mapping = serde_yaml::from_str(
+            "name: a\ndescription: d\nomitClaudeMd: true\nmodel: m\neffort: high\n\
+             tools: [Bash]\npermissionMode: plan\n",
+        )
+        .unwrap();
+        assert_eq!(
+            dropped_agent_keys(&map),
+            ["omitClaudeMd", "effort", "permissionMode"]
+        );
+    }
+
+    #[test]
+    fn dropped_agent_keys_reports_non_string_keys() {
+        let map: serde_yaml::Mapping =
+            serde_yaml::from_str("description: d\n1: x\ntrue: y\n").unwrap();
+        assert_eq!(dropped_agent_keys(&map), ["1", "true"]);
+    }
+
+    proptest::proptest! {
+        /// The output is exactly the source keys outside the allowlist, in source order.
+        #[test]
+        fn dropped_agent_keys_is_the_ordered_complement_of_the_allowlist(
+            keys in proptest::collection::vec(
+                proptest::prop_oneof![
+                    proptest::sample::select(OPENCODE_AGENT_KEYS.to_vec()).prop_map(String::from),
+                    "[a-zA-Z]{1,10}",
+                ],
+                0..10,
+            ),
+        ) {
+            use proptest::prelude::*;
+            let mut map = serde_yaml::Mapping::new();
+            for k in &keys {
+                map.insert(serde_yaml::Value::from(k.as_str()), serde_yaml::Value::from(1));
+            }
+            let expected: Vec<String> = map
+                .keys()
+                .filter_map(serde_yaml::Value::as_str)
+                .filter(|k| !OPENCODE_AGENT_KEYS.contains(k))
+                .map(String::from)
+                .collect();
+            prop_assert_eq!(dropped_agent_keys(&map), expected);
+        }
+    }
+
+    #[test]
+    fn dropped_agent_keys_is_empty_for_supported_keys_only() {
+        let map: serde_yaml::Mapping =
+            serde_yaml::from_str("name: a\ndescription: d\nallowed_tools: [Read]\n").unwrap();
+        assert!(dropped_agent_keys(&map).is_empty());
     }
 
     #[test]
