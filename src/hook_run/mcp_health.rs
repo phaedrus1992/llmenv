@@ -69,11 +69,21 @@ async fn probe_stdio(
     })
 }
 
-/// Send `initialize` and wait for the reply with id 0. Lines that are not that reply are
-/// skipped, so a banner or a notification on stdout is not mistaken for a failure.
+/// Send `initialize` to the child and wait for the reply.
 async fn handshake(child: &mut Child, command: &str) -> anyhow::Result<()> {
-    let mut stdin = child.stdin.take().context("child stdin is not piped")?;
+    let stdin = child.stdin.take().context("child stdin is not piped")?;
     let stdout = child.stdout.take().context("child stdout is not piped")?;
+    handshake_io(stdin, stdout, command).await
+}
+
+/// Send `initialize` on `writer` and wait for the reply with id 0 on `reader`. Lines that are
+/// not that reply are skipped, so a banner or a notification is not mistaken for a failure.
+/// The writer stays open until the reply arrives, because some servers stop at end of input.
+async fn handshake_io<W, R>(mut writer: W, reader: R, command: &str) -> anyhow::Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+    R: tokio::io::AsyncRead + Unpin,
+{
     let request = json!({
         "jsonrpc": "2.0",
         "id": 0,
@@ -84,13 +94,19 @@ async fn handshake(child: &mut Child, command: &str) -> anyhow::Result<()> {
             "clientInfo": { "name": "llmenv-health", "version": env!("CARGO_PKG_VERSION") }
         }
     });
-    // A server that already exited fails this write. The read below then reports the exit.
-    let write = async {
-        stdin.write_all(format!("{request}\n").as_bytes()).await?;
-        stdin.flush().await
+    let sent = async {
+        writer.write_all(format!("{request}\n").as_bytes()).await?;
+        writer.flush().await
     }
     .await;
-    let mut lines = BufReader::new(stdout).lines();
+    // A closed pipe means the server is gone. Waiting on its output would only hide that
+    // behind the timeout message.
+    if let Err(e) = sent {
+        return Err(anyhow!(
+            "`{command}` exited before answering MCP initialize (write failed: {e})"
+        ));
+    }
+    let mut lines = BufReader::new(reader).lines();
     while let Some(line) = lines
         .next_line()
         .await
@@ -100,12 +116,8 @@ async fn handshake(child: &mut Child, command: &str) -> anyhow::Result<()> {
             return reply;
         }
     }
-    let note = write
-        .err()
-        .map(|e| format!(" (write failed: {e})"))
-        .unwrap_or_default();
     Err(anyhow!(
-        "`{command}` exited before answering MCP initialize{note}"
+        "`{command}` exited before answering MCP initialize"
     ))
 }
 
@@ -385,6 +397,46 @@ mod tests {
         let names: Vec<&str> = down.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(names, ["stdio-test", "gone"]);
         assert!(down.iter().all(|d| !d.reason.is_empty()));
+    }
+
+    /// A writer whose pipe is already closed.
+    struct ClosedPipe;
+
+    impl tokio::io::AsyncWrite for ClosedPipe {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            _: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_write_is_reported_at_once_not_after_the_timeout() {
+        // The reader never ends and never answers, like a wedged server with stdin closed.
+        let (_keep_open, reader) = tokio::io::duplex(64);
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(2),
+            handshake_io(ClosedPipe, reader, "srv"),
+        )
+        .await
+        .expect("the handshake must not wait for the reader after a failed write");
+        let err = outcome.expect_err("failed write");
+        assert!(err.to_string().contains("exited"), "{err}");
+        assert!(err.to_string().contains("write failed"), "{err}");
     }
 
     #[tokio::test]
