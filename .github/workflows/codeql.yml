@@ -9,6 +9,8 @@ on:
     branches:
       - main
       - release/**
+  schedule:
+    - cron: 0 5 * * 1
 
 concurrency:
   group: codeql-${{ github.ref }}
@@ -16,11 +18,13 @@ concurrency:
 
 permissions:
   contents: read
-  security-events: write
 
 jobs:
   changes:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       python: ${{ steps.filter.outputs.python }}
       javascript: ${{ steps.filter.outputs.javascript }}
@@ -49,14 +53,21 @@ jobs:
               - 'src/**'
               - 'crates/**'
               - 'benches/**'
+              - 'build.rs'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.cargo/**'
             actions:
               - '.github/**'
 
   analyze:
     needs: changes
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -70,24 +81,12 @@ jobs:
         with:
           persist-credentials: false
 
-      # Language matrix gates: skip if no files changed for this language.
-      # Rust paths are restricted in codeql-config.yml, so a config-only PR
-      # that touches .github/ but no src/crates/benches/ still skips Rust.
-      - name: Skip if no changes (Python)
-        if: matrix.language == 'python' && needs.changes.outputs.python != 'true'
-        run: echo "Skipping Python CodeQL — no Python files changed"
-
-      - name: Skip if no changes (JavaScript)
-        if: matrix.language == 'javascript-typescript' && needs.changes.outputs.javascript != 'true'
-        run: echo "Skipping JavaScript CodeQL — no JavaScript files changed"
-
-      - name: Skip if no changes (Rust)
-        if: matrix.language == 'rust' && needs.changes.outputs.rust != 'true'
-        run: echo "Skipping Rust CodeQL — no Rust files changed"
-
-      - name: Skip if no changes (GitHub Actions)
-        if: matrix.language == 'actions' && needs.changes.outputs.actions != 'true'
-        run: echo "Skipping GitHub Actions CodeQL — no workflow files changed"
+      - name: Check CodeQL config exists
+        run: |
+          if [ ! -f .github/codeql/codeql-config.yml ]; then
+            echo "ERROR: CodeQL config not found at .github/codeql/codeql-config.yml"
+            exit 1
+          fi
 
       - name: Initialize CodeQL
         if: |
@@ -95,7 +94,7 @@ jobs:
           (matrix.language == 'javascript-typescript' && needs.changes.outputs.javascript == 'true') ||
           (matrix.language == 'rust' && needs.changes.outputs.rust == 'true') ||
           (matrix.language == 'actions' && needs.changes.outputs.actions == 'true')
-        uses: github/codeql-action/init@662472033e021a8251b1f89b3c3764d5dfb147f1  # v3.27.7
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
         with:
           languages: ${{ matrix.language }}
           config-file: .github/codeql/codeql-config.yml
@@ -106,7 +105,7 @@ jobs:
           (matrix.language == 'javascript-typescript' && needs.changes.outputs.javascript == 'true') ||
           (matrix.language == 'rust' && needs.changes.outputs.rust == 'true') ||
           (matrix.language == 'actions' && needs.changes.outputs.actions == 'true')
-        uses: github/codeql-action/autobuild@662472033e021a8251b1f89b3c3764d5dfb147f1  # v3.27.7
+        uses: github/codeql-action/autobuild@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
 
       - name: Perform CodeQL Analysis
         if: |
@@ -114,6 +113,6 @@ jobs:
           (matrix.language == 'javascript-typescript' && needs.changes.outputs.javascript == 'true') ||
           (matrix.language == 'rust' && needs.changes.outputs.rust == 'true') ||
           (matrix.language == 'actions' && needs.changes.outputs.actions == 'true')
-        uses: github/codeql-action/analyze@662472033e021a8251b1f89b3c3764d5dfb147f1  # v3.27.7
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
         with:
           category: /language:${{ matrix.language }}

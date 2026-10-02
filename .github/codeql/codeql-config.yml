@@ -2,11 +2,9 @@ name: CodeQL configuration
 queries:
   - uses: security-and-quality
 
-paths:
-  include:
-    - src
-    - crates
-    - benches
 paths-ignore:
   - tests
   - website
+
+# Rust-specific: additional path restrictions (via separate config if needed)
+# For now, keep global scan scope and rely on changes job for per-language gating
