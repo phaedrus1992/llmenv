@@ -105,7 +105,7 @@ pub fn read_once_state_dir(state_dir: &Path) -> PathBuf {
 }
 
 /// Build the full path to a session's cache file.
-fn session_cache_path(state_dir: &Path, session_id: &str) -> PathBuf {
+pub(super) fn session_cache_path(state_dir: &Path, session_id: &str) -> PathBuf {
     read_once_state_dir(state_dir).join(format!("{session_id}.json"))
 }
 
