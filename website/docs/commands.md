@@ -354,7 +354,7 @@ re-ingestion on the next turn.
 
 ```text
 llmenv task add <title> [--parent SLUG | --no-parent] [--session <id>]
-llmenv task start <id> [--force]
+llmenv task start <id> [--force] [--reopen]
 llmenv task done <id>
 llmenv task wait <id> [reason]
 llmenv task ls [--format json] (--session <id> | --all) [--current-project]
@@ -386,8 +386,10 @@ unambiguous prefix of one.
   crosses sessions — a new session's first task always starts with no
   parent, regardless of what was last added in a different session. **A
   task must belong to a session** (see below): with exactly one session open
-  for the current project it auto-resolves; pass `--session <id>` when two
-  or more are open; errors with actionable guidance when none is open.
+  for the current project it auto-resolves; with two or more open it picks
+  the one this conversation started or resumed (changed in v3.12.0; see
+  "Session ownership" below), else asks for `--session <id>`; errors with
+  actionable guidance when none is open.
 - `task start <id> [--force]` — claim a task, moving it to `wip`. Also the
   resume action for a `waiting` task — it accepts any non-`done` state as its
   starting point. `parent` and `blocked_on` (added in v3.8.0) are enforced
@@ -398,8 +400,12 @@ unambiguous prefix of one.
   dependency the user configured on purpose; pass `--force` to override. A
   `blocked_on` reference resolves as done only once the target task *and
   every one of its descendants* are done, so blocking on a parent task alone
-  covers its whole child set (see `task block`, below).
-- `task done <id>` — mark a task complete.
+  covers its whole child set (see `task block`, below). `--reopen` (added
+  in v3.12.0) moves a `done` task back to `open` with a note, then starts
+  it; without it, `start` refuses a `done` task.
+- `task done <id>` — mark a task complete. (changed in v3.12.0) Prints a
+  note when the task was never started (`open` straight to `done`), because
+  that jump often means a step was closed before its work was finished.
 - `task wait <id> [reason]` — mark a task `waiting` on something outside the
   agent's control (a human review, a decision, external system access)
   instead of `wip`. `reason` is recorded as a note; reads from stdin if
@@ -502,8 +508,21 @@ project's hook.
 
   Tasks created with `task add` while a session is open are tagged with it
   permanently, so a task's session membership reflects when it was created.
+
+  **Session ownership** (added in v3.12.0): `session start` records the
+  engine conversation (`CLAUDE_CODE_SESSION_ID`) and engine process
+  (`CLAUDE_PID`) that started the session; `--resume` moves it to the
+  resuming conversation. When two or more sessions are open, `task add`,
+  `session finish`, `session show`, and `session summary` without an id pick
+  the one this conversation owns. The checkpoint error marks a session as
+  yours when this conversation started it, or when this same engine process
+  started it under an earlier conversation id — the state after a `/clear`
+  or a compaction — so `--resume` is the safe choice instead of `--new`.
+  Outside an engine (no such variables) nothing is recorded, and resolution
+  works as before.
 - `task session finish [<id>]` — close out a session; auto-resolves when
-  exactly one is open for the current project, otherwise pass an id. Never
+  exactly one is open for the current project, or to the one this
+  conversation owns, otherwise pass an id. Never
   touches its tasks' session tag — a finished session (even with incomplete
   tasks) is a legitimate historical record.
 - `task session show [<id>]` — print a session's progress; auto-resolves
@@ -534,7 +553,10 @@ terminals in the same project is a normal pattern), the reminder never
 presumes ownership — it conditions resuming/finishing a task on the agent
 recognizing it as its own earlier work. Separately, once every task in an
 open session is done, the reminder nudges to close out that session or add
-more work to it (see above), likewise conditioned on recognizing it:
+more work to it (see above), likewise conditioned on recognizing it. (added
+in v3.12.0) On Stop, an open session that holds `open` tasks but no `wip` or
+`waiting` task gets one line naming its next task to `task start` — an agent
+that adds steps and never starts them otherwise gets no reminder at all:
 
 ```yaml
 features:

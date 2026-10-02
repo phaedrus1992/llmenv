@@ -404,8 +404,11 @@ enum TaskCommand {
         id: String,
         #[arg(long)]
         force: bool,
+        /// Move a `done` task back to `open` first, then start it.
+        #[arg(long)]
+        reopen: bool,
     },
-    /// Mark a task done.
+    /// Mark a task done. Warns when the task was never started.
     Done { id: String },
     /// List tasks. Requires `--session <id>` or `--all` (#1124) — no silent
     /// default to every session's tasks. `--state`/`--hide-done` filter by
@@ -732,7 +735,7 @@ pub fn run() -> anyhow::Result<()> {
             crate::hook_run::detached_store::run_icm_store(&payload_json)?;
         }
         Some(Command::ConsolidationRun) => {
-            crate::hook_run::detached_consolidation::run_consolidation()?;
+            crate::hook_run::detached_consolidation::run_consolidation(&paths::config_path()?)?;
         }
         Some(Command::Login { global }) => {
             run_login(global)?;
@@ -1036,15 +1039,8 @@ fn run_export(
     // local `mcp-proxy` is alive before agents try to reach it. Failures here
     // are logged but non-fatal — the export must still emit env vars so the
     // shell hook stays usable.
-    // NOTE: only top-level config.features.memory is used here; bundle-contributed
-    // memory entries are merged later in build_manifest and affect resolve_mcps but
-    // not the proxy startup check (#335).
-    let top_memory: &[_] = config
-        .features
-        .as_ref()
-        .map(|f| f.memory.as_slice())
-        .unwrap_or_default();
-    if let Some(mem) = find_local_memory_entry(top_memory, &active) {
+    if let Some(mem) = export_local_memory_entry(&config, &config_dir, &active) {
+        let mem = &mem;
         let bind = memory_bind_address(mem);
         match crate::mcp::proxy::default_pid_path() {
             Ok(pid_path) => {
@@ -3330,17 +3326,27 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 (None, false) => crate::task::ParentSpec::Auto,
             };
             let project = current_project_tag()?;
-            let task = crate::task::add_task(
-                &state_dir,
-                &title,
-                parent_spec,
-                session.as_deref(),
-                &project,
-            )?;
+            let owner = crate::task::session::EngineIdentity::from_env();
+            let choice = match session.as_deref() {
+                Some(id) => crate::task::SessionChoice::Named(id),
+                None => crate::task::SessionChoice::Resolve(&owner),
+            };
+            let task = crate::task::add_task(&state_dir, &title, parent_spec, choice, &project)?;
             println!("Added task '{}' ({})", task.slug, task.title);
         }
-        TaskCommand::Start { id, force } => {
-            let task = crate::task::start_task(&state_dir, &id, force)?;
+        TaskCommand::Start { id, force, reopen } => {
+            if reopen {
+                crate::task::reopen_task(&state_dir, &id)?;
+            }
+            let task = crate::task::start_task(&state_dir, &id, force).map_err(|e| {
+                if reopen {
+                    e.context(format!(
+                        "task '{id}' is now reopened (open), but it did not start"
+                    ))
+                } else {
+                    e
+                }
+            })?;
             // Parent is a soft-block (#1164): unlike an unmet blocked_on
             // (hard-blocked inside start_task itself), an undone parent
             // only warns here, mirroring Add's own wip-in-progress warning
@@ -3351,8 +3357,11 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             println!("Started '{}' — now {:?}", task.slug, task.state);
         }
         TaskCommand::Done { id } => {
-            let task = crate::task::done_task(&state_dir, &id)?;
-            println!("Completed '{}'", task.slug);
+            let completed = crate::task::complete_task(&state_dir, &id)?;
+            println!("Completed '{}'", completed.task.slug);
+            if let Some(warning) = completed.never_started_warning() {
+                println!("{warning}");
+            }
         }
         TaskCommand::Ls {
             format,
@@ -3603,13 +3612,14 @@ fn run_task_session_command(
                 (None, false, false) => StartDecision::Auto,
                 _ => unreachable!("clap's conflicts_with_all enforces at most one"),
             };
-            let outcome = session::start_session(
-                state_dir,
-                name.as_deref(),
-                description.as_deref(),
-                &project,
-                decision,
-            )?;
+            let owner = session::EngineIdentity::from_env();
+            let request = session::StartRequest {
+                name: name.as_deref(),
+                description: description.as_deref(),
+                project: &project,
+                owner: &owner,
+            };
+            let outcome = session::start_session_as(state_dir, &request, decision)?;
             match outcome {
                 StartOutcome::Created(s) => println!(
                     "Started session '{}'{}",
@@ -3702,21 +3712,29 @@ fn run_task_session_command(
 }
 
 /// Resolve an explicit-or-omitted session id the same way `add_task` does:
-/// omitted + exactly one open session for `project` auto-resolves, omitted +
-/// zero/2+ errors.
+/// omitted resolves through [`crate::task::session::pick_open_session`], so
+/// with two or more open the caller's own session wins (#2365).
 fn resolve_session_id(
     state_dir: &std::path::Path,
     project: &str,
     id: Option<String>,
 ) -> anyhow::Result<String> {
+    use crate::task::session::{self, EngineIdentity, PickError};
     if let Some(id) = id {
         return Ok(id);
     }
-    let open = crate::task::session::open_sessions_for_project(state_dir, project);
-    match open.len() {
-        0 => anyhow::bail!("no open session for this project — pass an id explicitly"),
-        1 => Ok(open[0].id.clone()),
-        n => anyhow::bail!("{n} open sessions for this project — pass an id explicitly"),
+    // Fallible read: an unreadable store must not read as "no open session" (#1112).
+    let open = session::try_open_sessions_for_project(state_dir, project)?;
+    match session::pick_open_session(open, &EngineIdentity::from_env()) {
+        Ok(session) => Ok(session.id),
+        Err(PickError::NoneOpen) => {
+            anyhow::bail!("no open session for this project — pass an id explicitly")
+        }
+        Err(e) => anyhow::bail!(
+            "{}",
+            e.ambiguity_message("pass an id explicitly")
+                .unwrap_or_default()
+        ),
     }
 }
 
@@ -4173,8 +4191,39 @@ fn find_local_memory_entry<'a>(
 ) -> Option<&'a crate::config::Memory> {
     let host_ids = active_host_ids(active);
     memory.iter().find(|m| {
-        m.when.iter().any(|t| active.tags.contains(t)) && host_ids.contains(&m.server_host)
+        crate::mcp::resolve::memory_is_tag_active(m, &active.tags)
+            && host_ids.contains(&m.server_host)
     })
+}
+
+/// The memory entry that `export` starts a local `mcp-proxy` for. It reads the
+/// same top-level plus bundle-contributed list as `hook_run::memory_url`, so a
+/// server that a firing bundle declares for this host starts too (#2344). The
+/// bundle merge uses the on-disk merge cache when it is current.
+///
+/// A merge failure falls back to the top-level entries with a warning, because
+/// `export` must still emit its env vars for the shell hook.
+fn export_local_memory_entry(
+    config: &Config,
+    config_dir: &Path,
+    active: &ActiveScopes,
+) -> Option<crate::config::Memory> {
+    let memory = match crate::hook_run::merged_memory(config, config_dir, active) {
+        Ok(merged) => merged.memory,
+        Err(e) => {
+            eprintln!(
+                "warning: cannot read bundle memory entries, so only config.yaml memory \
+                 entries can start the local mcp-proxy: {e:#}. Fix or remove the failing \
+                 bundle.yaml, then run `llmenv doctor`."
+            );
+            config
+                .features
+                .as_ref()
+                .map(|f| f.memory.clone())
+                .unwrap_or_default()
+        }
+    };
+    find_local_memory_entry(&memory, active).cloned()
 }
 
 /// The `listen_host:port` address a local memory server binds to.
@@ -6205,6 +6254,65 @@ mod tests {
         active: &ActiveScopes,
     ) -> Option<String> {
         find_local_memory_entry(memory, active).map(memory_bind_address)
+    }
+
+    /// A config root whose bundle `b` (tag `mem`) declares the memory server
+    /// for host `srv`, with no top-level memory entry (#2344).
+    fn bundle_memory_server_fixture(bundle_yaml: Option<&str>) -> (tempfile::TempDir, Config) {
+        let root = tempfile::tempdir().unwrap();
+        let bundle_dir = root.path().join("bundles").join("b");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        if let Some(yaml) = bundle_yaml {
+            std::fs::write(bundle_dir.join("bundle.yaml"), yaml).unwrap();
+        }
+        let cache = root.path().join("cache");
+        let config = Config {
+            bundle: vec![Bundle {
+                name: "b".into(),
+                when: vec!["mem".into()],
+            }],
+            cache: crate::config::Cache {
+                cache_dir: cache.to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        (root, config)
+    }
+
+    const BUNDLE_MEMORY_SERVER: &str = concat!(
+        "features:\n",
+        "  memory:\n",
+        "    - server_host: srv\n",
+        "      port: 7979\n",
+        "      when: [mem]\n",
+        "host:\n",
+        "  srv:\n",
+        "    addr: srv.local\n",
+    );
+
+    #[test]
+    fn export_starts_proxy_for_bundle_declared_memory_server() {
+        let (root, config) = bundle_memory_server_fixture(Some(BUNDLE_MEMORY_SERVER));
+        assert!(config_memory(&config).is_empty(), "no top-level entry");
+        let mem = export_local_memory_entry(&config, root.path(), &active_as_server())
+            .expect("bundle-declared server on this host must start");
+        assert_eq!(mem.port, 7979);
+    }
+
+    #[test]
+    fn export_skips_bundle_declared_memory_server_on_a_client_host() {
+        let (root, config) = bundle_memory_server_fixture(Some(BUNDLE_MEMORY_SERVER));
+        assert!(export_local_memory_entry(&config, root.path(), &active_as_client()).is_none());
+    }
+
+    #[test]
+    fn export_still_uses_top_level_memory_entry() {
+        let config = memory_config("127.0.0.1", 7878);
+        let root = tempfile::tempdir().unwrap();
+        let mem = export_local_memory_entry(&config, root.path(), &active_as_server())
+            .expect("top-level entry still starts");
+        assert_eq!(mem.port, 7878);
     }
 
     #[test]

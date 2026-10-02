@@ -2343,3 +2343,96 @@ fn show_current_shows_a_separate_block_per_open_session_for_the_project() {
         "expected a separator between session blocks:\n{out}"
     );
 }
+
+// --- #2365: id-less commands resolve to the caller's own session ---
+
+#[test]
+fn task_add_after_session_start_new_joins_the_callers_session() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .env("CLAUDE_CODE_SESSION_ID", "conv-old")
+        .args(["task", "session", "start", "first"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .env("CLAUDE_CODE_SESSION_ID", "conv-new")
+        .args(["task", "session", "start", "second", "--new"])
+        .assert()
+        .success();
+
+    llmenv(dir.path())
+        .env("CLAUDE_CODE_SESSION_ID", "conv-new")
+        .args(["task", "add", "x"])
+        .assert()
+        .success();
+    let ls = llmenv(dir.path())
+        .args(["task", "ls", "--format", "json", "--all"])
+        .output()
+        .unwrap();
+    let tasks: serde_json::Value = serde_json::from_slice(&ls.stdout).unwrap();
+    assert_eq!(tasks[0]["session"], "second", "{tasks}");
+
+    // A third conversation owns neither session, so it still has to choose.
+    llmenv(dir.path())
+        .env("CLAUDE_CODE_SESSION_ID", "conv-other")
+        .args(["task", "add", "y"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "none of them is owned by this conversation",
+        ));
+}
+
+// --- #2338: done without start, and reopen ---
+
+#[test]
+fn done_without_start_warns_and_reopen_restarts_it() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Step one"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "done", "step-one"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("never started"));
+    llmenv(dir.path())
+        .args(["task", "start", "step-one"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--reopen"));
+    llmenv(dir.path())
+        .args(["task", "start", "step-one", "--reopen"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Wip"));
+}
+
+#[test]
+fn reopen_that_cannot_start_says_the_task_is_reopened() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    for title in ["Blocker", "Blocked"] {
+        llmenv(dir.path())
+            .args(["task", "add", title, "--no-parent"])
+            .assert()
+            .success();
+    }
+    llmenv(dir.path())
+        .args(["task", "block", "blocked", "--on", "blocker"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "done", "blocked"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "start", "blocked", "--reopen"])
+        .assert()
+        .failure()
+        .stderr(
+            predicates::str::contains("now reopened").and(predicates::str::contains("blocked on")),
+        );
+}
