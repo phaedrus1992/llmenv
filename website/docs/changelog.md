@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.12.0-alpha.1] - 2026-10-02
+
 ### Added
 
 - `llmenv doctor` warns about retired Claude Code settings, environment variables, permission tools, and MCP server types in the rendered config, and names what to use instead. See [Troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#doctor-warns-about-retired-claude-code-settings) (#2145)

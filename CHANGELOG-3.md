@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.12.0-alpha.1] - 2026-10-02
+
 ### Added
 
 - `llmenv doctor` warns about retired Claude Code settings, environment variables, permission tools, and MCP server types in the rendered config, and names what to use instead. See [Troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#doctor-warns-about-retired-claude-code-settings) (#2145)
@@ -940,7 +942,8 @@ the rc.1 and rc.2 sections below.
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.11.2...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.12.0-alpha.1...HEAD
+[3.12.0-alpha.1]: https://github.com/phaedrus1992/llmenv/compare/v3.11.2...v3.12.0-alpha.1
 [3.11.2]: https://github.com/phaedrus1992/llmenv/compare/v3.11.1...v3.11.2
 [3.11.1]: https://github.com/phaedrus1992/llmenv/compare/v3.11.0...v3.11.1
 [3.11.0]: https://github.com/phaedrus1992/llmenv/compare/v3.10.0...v3.11.0
