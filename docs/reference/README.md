@@ -15,3 +15,8 @@ future design docs and err on the side of too much detail.
   coding agent and pi-durable against llmenv + Claude Code: hooks, determinism,
   token efficiency, multi-project scopes, multi-channel access, model routing,
   and a recommendation (#2372).
+- [context-management-evaluation.md](./context-management-evaluation.md) — evaluation of
+  context-management research (Context Language Models, pi-clm, connectome, open-strix,
+  compaction and forgetting posts, salience and subliminal-learning papers) against
+  llmenv: technique inventory, gaps found, fit per goal, and an ordered recommendation
+  (#2377).
