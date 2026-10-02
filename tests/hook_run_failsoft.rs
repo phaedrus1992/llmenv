@@ -766,6 +766,32 @@ fn session_end_dedup_skip_still_writes_session_log() {
     );
 }
 
+/// #2355: the `claude -p` child that consolidation starts carries
+/// `LLMENV_CONSOLIDATION_CHILD`. A `hook-run` under it must do nothing, or the
+/// child's own SessionEnd would start consolidation again.
+#[test]
+fn hook_run_under_consolidation_guard_is_a_no_op() {
+    let (dir, config_path) = setup_config(&config_with_file_session_log());
+    let payload = serde_json::json!({
+        "hook_event_name": "SessionEnd",
+        "session_id": "test-consolidation-guard",
+    })
+    .to_string();
+
+    hook_cmd(dir.path(), &config_path, "session_end")
+        .env("LLMENV_CONSOLIDATION_CHILD", "1")
+        .write_stdin(payload.as_str())
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+
+    assert!(
+        !dir.path().join("session-log.jsonl").exists(),
+        "a guarded hook-run must not write the session log"
+    );
+}
+
 fn config_with_codebase_memory() -> String {
     format!(
         r#"

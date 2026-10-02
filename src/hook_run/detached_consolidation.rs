@@ -35,6 +35,12 @@ fn run_consolidation_inner() -> anyhow::Result<()> {
     let config_dir = config_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
+    // The merged list, so a bundle-declared memory entry's consolidation
+    // settings count (#2355), the same as its endpoint does.
+    let merged = crate::hook_run::merged_memory(&config, config_dir, &active)?;
+    let Some(cc) = consolidation::active_consolidation(&merged.memory, &active.tags) else {
+        return Ok(());
+    };
     let url = crate::hook_run::memory_url(&config, config_dir, &active)?.into_url()?;
     let client = McpHttpClient::new(url, CONSOLIDATION_TIMEOUT)
         .map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))?;
@@ -42,7 +48,7 @@ fn run_consolidation_inner() -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    let _result = rt.block_on(consolidation::run(&config, &client))?;
+    let _result = rt.block_on(consolidation::run(cc, &client))?;
     Ok(())
 }
 

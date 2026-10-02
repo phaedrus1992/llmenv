@@ -622,11 +622,18 @@ Set `adaptive_recall: false` to go back to the stateless recall, which sends the
 
 #### Post-session consolidation
 
-(added in v3.3.0; model default changed in v3.11.2)
+(added in v3.3.0; model default changed in v3.11.2; runs on Claude Code `SessionEnd` since v3.12.0)
 
 After a session ends, llmenv can ask an LLM to distill that session's episodic memories into a few
 semantic rules and store them back in ICM. It is off by default and skips a session with fewer than
 three memories.
+
+(changed in v3.12.0) The trigger is the `session_end` hook (Claude Code's `SessionEnd`).
+Before v3.12.0 consolidation waited for a `post_session` event that no adapter sent, so it never ran.
+The settings come from the active `memory:` entry, which can be in `config.yaml` or in a firing bundle's `bundle.yaml`.
+The `claude-cli` backend runs `claude -p --setting-sources "" --strict-mcp-config --tools "" --no-session-persistence`.
+That child loads no hooks, no plugins, and no MCP servers, and it keeps its Claude subscription login.
+llmenv also sets `LLMENV_CONSOLIDATION_CHILD=1` on the child, and `llmenv hook-run` does nothing under that variable, so the child cannot start consolidation again.
 
 ```yaml
 features:

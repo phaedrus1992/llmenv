@@ -638,6 +638,9 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
         .ok()
         .unwrap_or_default();
 
+    if is_consolidation_child(std::env::var_os(crate::consolidation::CHILD_GUARD_ENV).as_deref()) {
+        return Ok(HookExit::Success);
+    }
     let parsed = match HookEvent::from_str(event) {
         Ok(e) => e,
         Err(e) => {
@@ -1352,6 +1355,10 @@ fn run_inner(
             if is_unchanged {
                 debug!("chunk unchanged since last store, skipping");
                 if !log_cfg.any_sink_enabled() {
+                    // An unchanged chunk skips the store, not the consolidation.
+                    if client.is_some() {
+                        maybe_start_consolidation(event, &config, config_dir, &active);
+                    }
                     emit_trace_timing(t0, t_config, Some(t_scope), None, None);
                     return Ok(String::new());
                 }
@@ -1418,14 +1425,6 @@ fn run_inner(
                 })
                 .await?;
 
-                // PostSession: run reflective consolidation (R5) in a detached
-                // child process so the hook returns immediately instead of
-                // blocking on MCP. The result is fire-and-forget — PostSession is
-                // the final event, so no caller needs its output.
-                if event == HookEvent::PostSession {
-                    post_session_consolidation();
-                }
-
                 // PostToolUse WebFetch/WebSearch: auto-store fetched content in ICM
                 // with fast-falloff memory (topic: web-fetch, importance: low) so it
                 // survives session compactions but decays quickly. (#579)
@@ -1482,6 +1481,10 @@ fn run_inner(
 
             Ok::<String, anyhow::Error>(out)
         })?;
+        // After the store, so the child's recall can see this session's chunk.
+        if client.is_some() {
+            maybe_start_consolidation(event, &config, config_dir, &active);
+        }
         let t_end = std::time::Instant::now();
         emit_trace_timing(t0, t_config, Some(t_scope), Some(t_chunk), Some(t_end));
         Ok(out)
@@ -2642,6 +2645,44 @@ fn trigger_codebase_memory_index(
     }
 }
 
+/// True for the event that ends a session and so starts consolidation.
+/// Claude Code's `SessionEnd` arrives as `session_end`, and no adapter emits
+/// `post_session`, so consolidation keyed on `PostSession` alone never ran
+/// (#2355). One event per session end means one child per session end.
+fn starts_consolidation(event: HookEvent) -> bool {
+    matches!(event, HookEvent::SessionEnd | HookEvent::PostSession)
+}
+
+/// Start the detached consolidation child when `event` ends the session and
+/// the active memory entry enables consolidation. The check reads the same
+/// merged memory list as endpoint resolution, so a bundle-declared entry
+/// counts. Fail-soft: a merge error is logged and skips consolidation.
+fn maybe_start_consolidation(
+    event: HookEvent,
+    config: &crate::config::Config,
+    config_dir: &std::path::Path,
+    active: &crate::scope::ActiveScopes,
+) {
+    if !starts_consolidation(event) {
+        return;
+    }
+    match merged_memory(config, config_dir, active) {
+        Ok(merged) => {
+            if crate::consolidation::active_consolidation(&merged.memory, &active.tags).is_some() {
+                post_session_consolidation();
+            }
+        }
+        Err(e) => tracing::error!("consolidation: cannot read merged memory entries: {e:#}"),
+    }
+}
+
+/// True when this `hook-run` runs inside the `claude -p` child that
+/// consolidation starts. Such a run does nothing, so an older Claude Code that
+/// ignores the child's isolation flags still cannot loop (#2355).
+fn is_consolidation_child(guard: Option<&std::ffi::OsStr>) -> bool {
+    guard.is_some_and(|v| !v.is_empty())
+}
+
 /// Spawn a detached child to run post-session consolidation. Best-effort
 /// fire-and-forget — spawn failures are logged at debug level and the caller
 /// never waits on the child. The child's stderr goes to the shared bounded log
@@ -2687,6 +2728,25 @@ mod tests {
         "subagent_start",
         "subagent_task",
     ];
+
+    #[test]
+    fn only_session_end_and_post_session_start_consolidation() {
+        let starting: Vec<&str> = ALL_HOOK_EVENTS
+            .iter()
+            .copied()
+            .filter(|e| starts_consolidation(HookEvent::from_str(e).unwrap()))
+            .collect();
+        // Claude Code registers `session_end` once and never `post_session`,
+        // so one session end starts one child (#2355).
+        assert_eq!(starting, ["session_end", "post_session"]);
+    }
+
+    #[test]
+    fn consolidation_guard_needs_a_non_empty_value() {
+        assert!(!is_consolidation_child(None));
+        assert!(!is_consolidation_child(Some(std::ffi::OsStr::new(""))));
+        assert!(is_consolidation_child(Some(std::ffi::OsStr::new("1"))));
+    }
 
     #[test]
     fn adaptive_applies_only_to_its_events_with_a_valid_session() {

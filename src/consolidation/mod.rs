@@ -99,13 +99,7 @@ fn parse_recall_output(text: &str) -> Vec<MemoryRecord> {
 }
 
 /// Build the prompt body for the Anthropic API call.
-fn build_prompt(config: &crate::config::Config, summaries: &[String]) -> String {
-    let max_rules = config
-        .features
-        .as_ref()
-        .and_then(|f| f.memory.iter().find_map(|m| m.consolidation.as_ref()))
-        .map_or(10, |c| c.max_rules_per_session);
-
+fn build_prompt(max_rules: u32, summaries: &[String]) -> String {
     let summaries_text = summaries.join("\n---\n");
     CONSOLIDATION_PROMPT
         .replace("{max_rules}", &max_rules.to_string())
@@ -120,9 +114,7 @@ fn build_prompt(config: &crate::config::Config, summaries: &[String]) -> String 
 /// Returns `anyhow::Error` if the process fails to start, times out, or exits
 /// with a non-zero status.
 async fn call_claude(prompt: &str) -> anyhow::Result<String> {
-    let mut cmd = tokio::process::Command::new("claude");
-    cmd.arg("-p");
-    let mut child = spawn_with_kill_on_drop(cmd)?;
+    let mut child = spawn_with_kill_on_drop(claude_command())?;
 
     // Write prompt to stdin and close it
     if let Some(mut stdin) = child.stdin.take() {
@@ -142,6 +134,48 @@ async fn call_claude(prompt: &str) -> anyhow::Result<String> {
 
     let stdout = String::from_utf8(output.stdout)?;
     Ok(stdout.trim().to_string())
+}
+
+/// Env var set on the `claude -p` child. `hook-run` exits at once when it
+/// sees it, so the child can never start consolidation again (#2355).
+pub(crate) const CHILD_GUARD_ENV: &str = "LLMENV_CONSOLIDATION_CHILD";
+
+/// The isolated `claude -p` call. The child inherits `CLAUDE_CONFIG_DIR`, so
+/// without these flags it loads every llmenv hook and MCP server, and its own
+/// `SessionEnd` hook starts consolidation again (#2355). `--bare` would
+/// isolate it too, but `--bare` reads only `ANTHROPIC_API_KEY`, and this
+/// backend exists for subscription (OAuth) users.
+fn claude_command() -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new("claude");
+    cmd.args([
+        "-p",
+        // No user/project/local settings: no hooks, no plugins.
+        "--setting-sources",
+        "",
+        // No --mcp-config is given, so no MCP server starts.
+        "--strict-mcp-config",
+        "--tools",
+        "",
+        "--no-session-persistence",
+    ])
+    .env(CHILD_GUARD_ENV, "1");
+    cmd
+}
+
+/// The consolidation settings of the active memory entry: the first entry in
+/// `memory` (top-level plus bundle-contributed) whose `when` has an active
+/// tag, when its consolidation is enabled. `resolve_mcps` rejects two active
+/// entries, so the first one is the only one.
+#[must_use]
+pub(crate) fn active_consolidation<'a>(
+    memory: &'a [crate::config::Memory],
+    active_tags: &std::collections::BTreeSet<String>,
+) -> Option<&'a crate::config::ConsolidationConfig> {
+    memory
+        .iter()
+        .find(|m| m.when.iter().any(|t| active_tags.contains(t)))
+        .and_then(|m| m.consolidation.as_ref())
+        .filter(|c| c.enabled)
 }
 
 /// Spawn `cmd` with piped stdio and `kill_on_drop` set. Without it, a child
@@ -352,7 +386,8 @@ async fn store_rule(client: &McpHttpClient, rule: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Run post-session consolidation if enabled.
+/// Run post-session consolidation with the active memory entry's settings
+/// (see [`active_consolidation`]).
 ///
 /// Recalls recent memories from the ICM backend, preconditions ≥3 records,
 /// calls the Anthropic Messages API for distillation, and stores the
@@ -362,18 +397,9 @@ async fn store_rule(client: &McpHttpClient, rule: &str) -> anyhow::Result<()> {
 /// All errors are caught and logged via `tracing::warn!` — this function
 /// always returns `Ok(summary)` to match the fail-soft contract.
 pub(crate) async fn run(
-    config: &crate::config::Config,
+    cc: &crate::config::ConsolidationConfig,
     client: &McpHttpClient,
 ) -> anyhow::Result<String> {
-    let Some(cc) = config
-        .features
-        .as_ref()
-        .and_then(|f| f.memory.iter().find_map(|m| m.consolidation.as_ref()))
-        .filter(|c| c.enabled)
-    else {
-        return Ok(String::new());
-    };
-
     tracing::info!(
         max_rules = cc.max_rules_per_session,
         backend = ?cc.backend,
@@ -426,7 +452,7 @@ pub(crate) async fn run(
     let summaries: Vec<String> = records.iter().map(|r| r.summary.clone()).collect();
 
     // Step 3: Build the prompt
-    let prompt = build_prompt(config, &summaries);
+    let prompt = build_prompt(cc.max_rules_per_session, &summaries);
 
     // Step 4: Call the configured LLM backend
     let llm_result = tracing::debug_span!("consolidation_llm_call")
@@ -626,14 +652,58 @@ mod tests {
         assert!(records[0].summary.is_empty());
     }
 
-    /// Builds a minimal `Config` carrying only `max_rules_per_session`, the
-    /// one field `build_prompt` reads.
-    fn config_with_max_rules(max_rules_per_session: u32) -> crate::config::Config {
-        let yaml = format!(
-            "features:\n  memory:\n    - server_host: h\n      port: 1\n      \
-             consolidation:\n        max_rules_per_session: {max_rules_per_session}\n"
-        );
-        serde_yaml::from_str(&yaml).expect("valid Config fixture YAML")
+    // -- isolated claude -p child (#2355) --
+
+    #[test]
+    fn claude_command_isolates_the_child_and_sets_the_guard() {
+        let cmd = claude_command();
+        let std_cmd = cmd.as_std();
+        let args: Vec<&std::ffi::OsStr> = std_cmd.get_args().collect();
+        let has_pair = |flag: &str, value: &str| {
+            args.windows(2)
+                .any(|w| w[0] == std::ffi::OsStr::new(flag) && w[1] == std::ffi::OsStr::new(value))
+        };
+        assert!(has_pair("--setting-sources", ""), "{args:?}");
+        assert!(has_pair("--tools", ""), "{args:?}");
+        assert!(args.contains(&std::ffi::OsStr::new("--strict-mcp-config")));
+        assert!(args.contains(&std::ffi::OsStr::new("-p")));
+        // `--bare` would drop OAuth auth, which this backend exists for.
+        assert!(!args.contains(&std::ffi::OsStr::new("--bare")));
+        let guard = std_cmd
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new(CHILD_GUARD_ENV))
+            .and_then(|(_, v)| v);
+        assert_eq!(guard, Some(std::ffi::OsStr::new("1")));
+    }
+
+    fn memory_entry(when: &str, enabled: Option<bool>) -> crate::config::Memory {
+        let consolidation = enabled.map_or(String::new(), |e| {
+            format!("consolidation:\n  enabled: {e}\n  max_rules_per_session: 4\n")
+        });
+        serde_yaml::from_str(&format!(
+            "server_host: h\nport: 1\nwhen: [{when}]\n{consolidation}"
+        ))
+        .expect("valid Memory fixture YAML")
+    }
+
+    #[test]
+    fn active_consolidation_uses_the_tag_active_entry() {
+        let tags = std::collections::BTreeSet::from(["on".to_string()]);
+        let memory = vec![
+            memory_entry("off", Some(true)),
+            memory_entry("on", Some(true)),
+        ];
+        let cc = active_consolidation(&memory, &tags).expect("active entry consolidates");
+        assert_eq!(cc.max_rules_per_session, 4);
+    }
+
+    #[test]
+    fn active_consolidation_none_when_disabled_absent_or_inactive() {
+        let tags = std::collections::BTreeSet::from(["on".to_string()]);
+        assert!(active_consolidation(&[memory_entry("on", Some(false))], &tags).is_none());
+        assert!(active_consolidation(&[memory_entry("on", None)], &tags).is_none());
+        assert!(active_consolidation(&[memory_entry("off", Some(true))], &tags).is_none());
+        assert!(active_consolidation(&[], &tags).is_none());
     }
 
     // -- child-process timeout lifecycle (#1093) --
@@ -754,8 +824,7 @@ mod tests {
             max_rules_per_session in 0u32..1000,
             summaries in proptest::collection::vec(".{0,50}", 0..5),
         ) {
-            let config = config_with_max_rules(max_rules_per_session);
-            let _ = build_prompt(&config, &summaries);
+            let _ = build_prompt(max_rules_per_session, &summaries);
         }
 
         /// Every placeholder the prompt template declares (`{max_rules}`,
@@ -766,8 +835,7 @@ mod tests {
             max_rules_per_session in 0u32..1000,
             junk in "[^{}]{0,10}",
         ) {
-            let config = config_with_max_rules(max_rules_per_session);
-            let out = build_prompt(&config, &[junk]);
+            let out = build_prompt(max_rules_per_session, &[junk]);
             for token in ["{max_rules}", "{summaries}"] {
                 prop_assert!(!out.contains(token), "placeholder {token} left unconsumed in {out:?}");
             }
@@ -783,8 +851,7 @@ mod tests {
             max_rules_per_session in 0u32..1000,
             summaries in proptest::collection::vec(".{0,50}", 0..5),
         ) {
-            let config = config_with_max_rules(max_rules_per_session);
-            let out = build_prompt(&config, &summaries);
+            let out = build_prompt(max_rules_per_session, &summaries);
             prop_assert!(
                 out.contains(&max_rules_per_session.to_string()),
                 "max_rules value {max_rules_per_session} missing from {out:?}"
