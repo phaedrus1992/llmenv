@@ -88,31 +88,56 @@ jobs:
             exit 1
           fi
 
+      - name: Decide whether this language changed
+        id: gate
+        env:
+          LANGUAGE: ${{ matrix.language }}
+          PYTHON: ${{ needs.changes.outputs.python }}
+          JAVASCRIPT: ${{ needs.changes.outputs.javascript }}
+          RUST: ${{ needs.changes.outputs.rust }}
+          ACTIONS: ${{ needs.changes.outputs.actions }}
+        run: |
+          case "$LANGUAGE" in
+            python) changed="$PYTHON" ;;
+            javascript-typescript) changed="$JAVASCRIPT" ;;
+            rust) changed="$RUST" ;;
+            actions) changed="$ACTIONS" ;;
+            *) echo "ERROR: unknown CodeQL language '$LANGUAGE'" >&2; exit 1 ;;
+          esac
+          echo "run=$changed" >> "$GITHUB_OUTPUT"
+
       - name: Initialize CodeQL
-        if: |
-          (matrix.language == 'python' && needs.changes.outputs.python == 'true') ||
-          (matrix.language == 'javascript-typescript' && needs.changes.outputs.javascript == 'true') ||
-          (matrix.language == 'rust' && needs.changes.outputs.rust == 'true') ||
-          (matrix.language == 'actions' && needs.changes.outputs.actions == 'true')
+        if: steps.gate.outputs.run == 'true'
         uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
         with:
           languages: ${{ matrix.language }}
           config-file: .github/codeql/codeql-config.yml
 
       - name: Autobuild
-        if: |
-          (matrix.language == 'python' && needs.changes.outputs.python == 'true') ||
-          (matrix.language == 'javascript-typescript' && needs.changes.outputs.javascript == 'true') ||
-          (matrix.language == 'rust' && needs.changes.outputs.rust == 'true') ||
-          (matrix.language == 'actions' && needs.changes.outputs.actions == 'true')
+        if: steps.gate.outputs.run == 'true'
         uses: github/codeql-action/autobuild@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
 
       - name: Perform CodeQL Analysis
-        if: |
-          (matrix.language == 'python' && needs.changes.outputs.python == 'true') ||
-          (matrix.language == 'javascript-typescript' && needs.changes.outputs.javascript == 'true') ||
-          (matrix.language == 'rust' && needs.changes.outputs.rust == 'true') ||
-          (matrix.language == 'actions' && needs.changes.outputs.actions == 'true')
+        if: steps.gate.outputs.run == 'true'
         uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
         with:
           category: /language:${{ matrix.language }}
+
+      # The required code-scanning rule fails a PR when a category present on the
+      # base branch has no result on the PR, so a skipped language reports an empty one (#2411).
+      - name: Report empty results for an unchanged language
+        if: steps.gate.outputs.run != 'true'
+        env:
+          LANGUAGE: ${{ matrix.language }}
+        run: |
+          printf '%s' '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"CodeQL"}},"results":[]}]}' \
+            > "$RUNNER_TEMP/empty.sarif"
+          echo "category=/language:$LANGUAGE" >> "$GITHUB_OUTPUT"
+        id: empty
+
+      - name: Upload empty results
+        if: steps.gate.outputs.run != 'true'
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
+        with:
+          sarif_file: ${{ runner.temp }}/empty.sarif
+          category: ${{ steps.empty.outputs.category }}

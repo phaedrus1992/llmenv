@@ -318,7 +318,10 @@ Inspect ICM memory state for the active scope.
 - `memory stats` — record counts by tag/bundle/type, last-written.
 - `memory list` — list stored memories for the active scope.
 - `memory diff` — show what changed since the last session.
-- `memory prune [--dry-run]` — preview or apply TTL-based forgetting.
+- `memory prune [--dry-run]` — preview or apply forgetting by memory importance.
+  (changed in v3.12.0) The command refuses to run, and forgets nothing, while `memory.retention` is set.
+  ICM's recall output has no record age or type, so llmenv cannot apply the per-type durations.
+  Remove `retention` from the config to use the importance-based prune.
 
 ## `prune`
 

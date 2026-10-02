@@ -17,8 +17,11 @@
 //! important data → kept, old noise → removed) without needing absolute
 //! dates.
 //!
-//!   ponytail: importance-proxy TTL. Add true age-based pruning when ICM's
-//!   MCP output includes `created_at` timestamps (icm upstream issue #?).
+//! The same output also omits the memory type, so the per-type durations of
+//! `memory.retention` cannot be applied either. When `retention` is set, prune
+//! refuses to run and forgets nothing (#2386). It never falls back to the
+//! importance proxy for a user who configured durations. Add age-based pruning
+//! when ICM's MCP output includes `created_at` and the type.
 
 use std::time::Duration;
 
@@ -77,15 +80,40 @@ pub struct PruneResult {
     dry_run: bool,
 }
 
-fn connect() -> anyhow::Result<McpHttpClient> {
+fn load_config() -> anyhow::Result<(std::path::PathBuf, crate::config::Config)> {
     let config_path = crate::paths::config_path()?;
     let config = crate::config::Config::load(&config_path)?;
+    Ok((config_path, config))
+}
+
+/// Refuse to prune when `memory.retention` is set: its per-type durations need
+/// each record's age and type, which the ICM recall output does not carry.
+fn ensure_retention_unset(config: &crate::config::Config) -> anyhow::Result<()> {
+    let configured = config
+        .features
+        .as_ref()
+        .is_some_and(|f| f.memory.iter().any(|m| m.retention.is_some()));
+    if configured {
+        anyhow::bail!(
+            "memory prune cannot apply `memory.retention`: ICM's recall output has no \
+             created_at or memory type, so no record can be aged. Nothing was forgotten. \
+             Remove `retention` from the config to use the importance-based prune, or \
+             wait for ICM to expose timestamps."
+        );
+    }
+    Ok(())
+}
+
+fn connect(
+    config_path: &std::path::Path,
+    config: &crate::config::Config,
+) -> anyhow::Result<McpHttpClient> {
     let config_dir = config_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
     let env = crate::scope::matcher::Env::detect();
-    let active = crate::scope::evaluate(&config, &env);
-    let url = crate::hook_run::memory_url(&config, config_dir, &active)?.into_url()?;
+    let active = crate::scope::evaluate(config, &env);
+    let url = crate::hook_run::memory_url(config, config_dir, &active)?.into_url()?;
     McpHttpClient::new(url, CLI_TIMEOUT)
         .map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))
 }
@@ -164,9 +192,11 @@ fn parse_recall_output(text: &str) -> Vec<MemoryRecord> {
 /// `dry_run` when true prints what would be pruned without making forget
 /// calls. Returns a [`PruneResult`] with counts.
 pub(crate) fn run(dry_run: bool) -> anyhow::Result<PruneResult> {
-    let client = connect()?;
+    let (config_path, config) = load_config()?;
+    ensure_retention_unset(&config)?;
+    let client = connect(&config_path, &config)?;
     let output = call_tool_blocking(
-        client,
+        client.clone(),
         "icm_memory_recall",
         serde_json::json!({ "query": "", "limit": 100 }),
     )?;
@@ -227,7 +257,7 @@ pub(crate) fn run(dry_run: bool) -> anyhow::Result<PruneResult> {
             println!("  ICM exposes timestamps through the MCP interface.");
         }
     } else {
-        let forget_client = connect()?;
+        let forget_client = client;
         let mut forgotten = 0;
         for candidate in &candidates {
             match call_tool_blocking(
@@ -294,6 +324,24 @@ pub(crate) fn auto_prune_if_enabled(config: &crate::config::Config) {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    fn config_with(memory_yaml: &str) -> crate::config::Config {
+        serde_yaml::from_str(&format!("features:\n  memory:\n    - {memory_yaml}\n")).unwrap()
+    }
+
+    #[test]
+    fn configured_retention_blocks_prune() {
+        let config = config_with("{server_host: h, port: 1, retention: {episodic: 1d}}");
+        let err = ensure_retention_unset(&config).unwrap_err().to_string();
+        assert!(err.contains("Nothing was forgotten"), "{err}");
+    }
+
+    #[test]
+    fn absent_retention_allows_prune() {
+        let config = config_with("{server_host: h, port: 1}");
+        ensure_retention_unset(&config).unwrap();
+        ensure_retention_unset(&crate::config::Config::default()).unwrap();
+    }
 
     #[test]
     fn parse_recall_output_empty() {
