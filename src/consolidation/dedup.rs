@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::hook_run::mcp_client::McpHttpClient;
+use llmenv_mcp::mcp_client::McpHttpClient;
 
 /// Word-overlap ratio at which two rules count as one rule. The model words the
 /// same rule a little differently each session, so an exact match finds almost
