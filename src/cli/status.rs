@@ -340,7 +340,8 @@ fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
     }
 
     for mem in &all_memory_ls {
-        let is_active = mem.when.is_empty() || mem.when.iter().any(|t| active.tags.contains(t));
+        // The selection rule itself: an entry with no `when` never resolves.
+        let is_active = crate::mcp::resolve::memory_is_tag_active(mem, &active.tags);
         let is_orphan = !mem.when.is_empty() && !mem.when.iter().any(|t| emitted.contains(t));
         let detail = mcp_kind_detail(MEMORY_MCP_NAME, "memory", &all_resolved);
         let name = format!("{} ({})", MEMORY_MCP_NAME, mem.server_host);

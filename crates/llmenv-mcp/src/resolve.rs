@@ -54,6 +54,11 @@ pub struct MemoryHookSettings {
     pub wakeup_max_tokens: Option<u32>,
     /// Whether adaptive recall is on (#2249).
     pub adaptive_recall: bool,
+    /// Type marker for stored chunks without their own marker (R1). Carried
+    /// here so a bundle-declared entry's default applies too.
+    pub default_type: Option<llmenv_config::MemoryType>,
+    /// Importance marker for stored chunks without their own marker (R3).
+    pub default_importance: Option<llmenv_config::ImportanceLevel>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -267,6 +272,8 @@ fn resolve_memory(
         memory_hook: Some(MemoryHookSettings {
             wakeup_max_tokens: mem.wakeup_max_tokens,
             adaptive_recall: mem.adaptive_recall,
+            default_type: mem.default_type,
+            default_importance: mem.default_importance,
         }),
     })
 }
@@ -550,12 +557,16 @@ mod tests {
         let mut mem = memory();
         mem.wakeup_max_tokens = Some(750);
         mem.adaptive_recall = false;
+        mem.default_type = Some(llmenv_config::MemoryType::Semantic);
+        mem.default_importance = Some(llmenv_config::ImportanceLevel::High);
         let resolved = resolve_mcps(&[], &[mem], &base_host(), &tags(&["network-home"])).unwrap();
         assert_eq!(
             resolved[0].memory_hook,
             Some(MemoryHookSettings {
                 wakeup_max_tokens: Some(750),
                 adaptive_recall: false,
+                default_type: Some(llmenv_config::MemoryType::Semantic),
+                default_importance: Some(llmenv_config::ImportanceLevel::High),
             })
         );
     }
@@ -569,6 +580,8 @@ mod tests {
             Some(MemoryHookSettings {
                 wakeup_max_tokens: None,
                 adaptive_recall: true,
+                default_type: None,
+                default_importance: None,
             })
         );
     }
