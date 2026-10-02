@@ -2782,3 +2782,85 @@ fn task_edit_detail_replaces_and_an_empty_value_clears() {
             .is_none()
     );
 }
+
+// -- resume context surfaced where a fresh agent looks (#2339) --
+
+fn start_with_context(dir: &std::path::Path, cwd: &std::path::Path) {
+    llmenv(dir)
+        .current_dir(cwd)
+        .args([
+            "task",
+            "session",
+            "start",
+            "s",
+            "--context",
+            "pick up at step 4",
+            "--issue",
+            "2337",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn session_summary_json_carries_resume_context_and_task_detail() {
+    let (dir, cwd) = (TempDir::new().unwrap(), plain_cwd());
+    start_with_context(dir.path(), cwd.path());
+    llmenv(dir.path())
+        .current_dir(cwd.path())
+        .args(["task", "add", "Do it", "--detail", "files: a.rs"])
+        .assert()
+        .success();
+    let out = stdout_of(
+        llmenv(dir.path())
+            .current_dir(cwd.path())
+            .args(["task", "session", "summary", "--format", "json"]),
+    );
+    let summary: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(summary["resume"]["context"], "pick up at step 4");
+    assert_eq!(summary["resume"]["issues"][0], 2337);
+    assert_eq!(summary["tasks"][0]["detail"], "files: a.rs");
+}
+
+#[test]
+fn session_summary_human_prints_resume_context_and_task_detail() {
+    let (dir, cwd) = (TempDir::new().unwrap(), plain_cwd());
+    start_with_context(dir.path(), cwd.path());
+    llmenv(dir.path())
+        .current_dir(cwd.path())
+        .args(["task", "add", "Do it", "--detail", "files: a.rs"])
+        .assert()
+        .success();
+    let out = stdout_of(
+        llmenv(dir.path())
+            .current_dir(cwd.path())
+            .args(["task", "session", "summary"]),
+    );
+    for needle in ["pick up at step 4", "gh issue view 2337", "files: a.rs"] {
+        assert!(out.contains(needle), "missing {needle:?} in:\n{out}");
+    }
+}
+
+#[test]
+fn task_show_current_prints_resume_context_on_stderr_and_keeps_stdout_json() {
+    let (dir, cwd) = (TempDir::new().unwrap(), plain_cwd());
+    start_with_context(dir.path(), cwd.path());
+    llmenv(dir.path())
+        .current_dir(cwd.path())
+        .args(["task", "add", "Do it"])
+        .assert()
+        .success();
+    let output = llmenv(dir.path())
+        .current_dir(cwd.path())
+        .args(["task", "show", "--current"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["slug"], "do-it");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("pick up at step 4") && stderr.contains("gh issue view 2337"),
+        "{stderr}"
+    );
+}

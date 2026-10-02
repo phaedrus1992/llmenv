@@ -699,6 +699,9 @@ pub struct SessionSummaryTask {
     parent: Option<String>,
     blocked_on: Vec<String>,
     pub(crate) notes: Vec<TaskNote>,
+    /// What a cold reader needs to do the task (#2339).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) detail: Option<String>,
 }
 
 /// Session metadata plus every task tagged to it, in the same
@@ -712,6 +715,9 @@ pub struct SessionSummary {
     pub(crate) done: u64,
     pub(crate) total: u64,
     pub(crate) tasks: Vec<SessionSummaryTask>,
+    /// Resume context, so a fresh agent reading the rollup knows what the work is (#2339).
+    #[serde(default, skip_serializing_if = "ResumeContext::is_empty")]
+    pub(crate) resume: ResumeContext,
 }
 
 /// Build a [`SessionSummary`] for `session_id`.
@@ -745,6 +751,7 @@ pub(crate) fn session_summary(
             parent: row.task.parent,
             blocked_on: row.task.blocked_on,
             notes: row.task.notes,
+            detail: row.task.detail,
         })
         .collect();
 
@@ -755,7 +762,28 @@ pub(crate) fn session_summary(
         done,
         total,
         tasks,
+        resume: session.resume,
     })
+}
+
+/// SessionStart text for each open session in `project` that has resume context (#2339).
+/// Like the other reminders it does not presume the session is the reader's own (#1028).
+#[must_use]
+pub(crate) fn resume_reminders(state_dir: &Path, project: &str) -> String {
+    open_sessions_for_project(state_dir, project)
+        .iter()
+        .filter(|session| !session.resume.is_empty())
+        .map(|session| {
+            format!(
+                "Session '{label}' ({id}) has resume context. Use it only if you recognize the \
+                 session as your own:\n{context}",
+                label = session.name.as_deref().unwrap_or(session.id.as_str()),
+                id = session.id,
+                context = session.resume.render(),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// Delete every task tagged with `session_id` outright. Returns the deleted
@@ -929,6 +957,64 @@ mod tests {
         finish_session(dir.path(), &created.id).expect("finish");
         let err = update_resume(dir.path(), &created.id, |_| {}).expect_err("closed");
         assert!(err.to_string().contains("closed"), "{err}");
+    }
+
+    #[test]
+    fn resume_reminders_list_context_and_refs_for_open_sessions_of_the_project() {
+        let dir = TempDir::new().expect("tempdir");
+        start_with_resume(dir.path(), &full_resume_context(), StartDecision::Auto);
+        let text = resume_reminders(dir.path(), PROJECT_A);
+        for needle in [
+            "line one",
+            "gh issue view 2337",
+            "decisions-llmenv",
+            "docs/design/x.md",
+        ] {
+            assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
+        }
+        assert!(
+            text.contains("recognize"),
+            "must not presume ownership:\n{text}"
+        );
+    }
+
+    #[test]
+    fn resume_reminders_skip_other_projects_closed_sessions_and_empty_context() {
+        let dir = TempDir::new().expect("tempdir");
+        start_with_resume(dir.path(), &full_resume_context(), StartDecision::Auto);
+        assert_eq!(resume_reminders(dir.path(), "other-project"), "");
+        let empty_dir = TempDir::new().expect("tempdir");
+        start_with_resume(
+            empty_dir.path(),
+            &ResumeContext::default(),
+            StartDecision::Auto,
+        );
+        assert_eq!(resume_reminders(empty_dir.path(), PROJECT_A), "");
+        let closed = start_with_resume(dir.path(), &full_resume_context(), StartDecision::New);
+        finish_session(dir.path(), &closed.id).expect("finish");
+        let both = resume_reminders(dir.path(), PROJECT_A);
+        assert_eq!(both.matches("has resume context").count(), 1, "{both}");
+    }
+
+    #[test]
+    fn session_summary_carries_resume_context_and_task_detail() {
+        let dir = TempDir::new().expect("tempdir");
+        let created = start_with_resume(dir.path(), &full_resume_context(), StartDecision::Auto);
+        let task = crate::task::add_task_for_session(
+            dir.path(),
+            "Do it",
+            crate::task::ParentSpec::Detached,
+            &created.id,
+        )
+        .expect("add");
+        let edit = crate::task::TaskEdit {
+            detail: Some("files: a.rs"),
+            ..Default::default()
+        };
+        crate::task::edit_task(dir.path(), &task.slug, &edit).expect("edit");
+        let summary = session_summary(dir.path(), &created.id).expect("summary");
+        assert_eq!(summary.resume, full_resume_context());
+        assert_eq!(summary.tasks[0].detail.as_deref(), Some("files: a.rs"));
     }
 
     #[test]

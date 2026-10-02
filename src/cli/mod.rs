@@ -2580,11 +2580,9 @@ fn run_config_context() {
         bundles = bundles_dir.display(),
     );
 
-    // #231: append the task-tracker SessionStart reminder, if enabled. This
-    // is the only SessionStart hook whose additionalContext Claude Code
-    // actually surfaces (see emit_hook_context's #558 comment — hook-run's
-    // own SessionStart output is suppressed), so cross-session task pickup
-    // rides this existing channel rather than hook-run.
+    // #231: append the task-tracker SessionStart reminder, if enabled. Cross-session task
+    // pickup rides this channel, which predates hook-run's SessionStart output (accepted
+    // since #2251).
     match Config::load(&config_path) {
         Ok(config) => {
             let task_tracker_enabled = config
@@ -3371,6 +3369,11 @@ fn render_task_session_summary_human(
         out.push_str(&style::sanitize_for_terminal(desc));
     }
     out.push_str(&format!(" ({}/{} done)\n", summary.done, summary.total));
+    let resume = summary.resume.render();
+    if !resume.is_empty() {
+        out.push_str(&resume);
+        out.push('\n');
+    }
     if summary.tasks.is_empty() {
         out.push_str("No tasks.\n");
         return out;
@@ -3380,6 +3383,11 @@ fn render_task_session_summary_human(
         let label = format!("{:<7}", style::task_state_label(task.state));
         let title = style::sanitize_for_terminal(&task.title);
         out.push_str(&format!("{glyph} {label} {}  {title}\n", task.slug));
+        if let Some(detail) = &task.detail {
+            for line in detail.lines() {
+                out.push_str(&format!("    | {}\n", style::sanitize_for_terminal(line)));
+            }
+        }
         for note in &task.notes {
             out.push_str(&format!(
                 "    {} {}\n",
@@ -3712,6 +3720,11 @@ fn run_task_show_current_or_next(state_dir: &Path, target: ShowTarget) -> anyhow
         match resolved {
             Some(task) => println!("{}", serde_json::to_string_pretty(&task)?),
             None => println!("No {} task.", target.label()),
+        }
+        // On stderr so the JSON on stdout stays machine-readable (#2339).
+        let resume = session.resume.render();
+        if matches!(target, ShowTarget::Current) && !resume.is_empty() {
+            eprintln!("{resume}");
         }
     }
     Ok(())

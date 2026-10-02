@@ -109,9 +109,13 @@ impl ResumeContext {
         }
         let mut lines = vec!["Resume context:".to_string()];
         if let Some(context) = &self.context {
-            lines.extend(context.lines().map(|line| format!("  {line}")));
+            lines.extend(context.lines().map(|line| format!("  {}", clean(line))));
         }
-        match (&self.branch, &self.base) {
+        let (branch, base) = (
+            self.branch.as_deref().map(clean),
+            self.base.as_deref().map(clean),
+        );
+        match (&branch, &base) {
             (Some(branch), Some(base)) => lines.push(format!("  Branch: {branch} (base: {base})")),
             (Some(branch), None) => lines.push(format!("  Branch: {branch}")),
             (None, Some(base)) => lines.push(format!("  Base: {base}")),
@@ -123,9 +127,10 @@ impl ResumeContext {
                 .map(|n| format!("  Issue #{n}: gh issue view {n}")),
         );
         lines.extend(self.memory_topics.iter().map(|topic| {
+            let topic = clean(topic);
             format!("  Memory topic {topic}: icm_memory_recall with topic \"{topic}\"")
         }));
-        lines.extend(self.docs.iter().map(|doc| format!("  Doc: {doc}")));
+        lines.extend(self.docs.iter().map(|doc| format!("  Doc: {}", clean(doc))));
         lines.join("\n")
     }
 }
@@ -161,6 +166,11 @@ pub(crate) fn git_branch(cwd: &Path) -> Option<String> {
     }
     let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (!name.is_empty()).then_some(name)
+}
+
+/// Drop control characters, so agent-written text cannot spoof terminal output.
+fn clean(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).collect()
 }
 
 fn extend_unique<T: PartialEq + Clone>(into: &mut Vec<T>, from: &[T]) {
@@ -367,6 +377,22 @@ mod tests {
     #[test]
     fn git_branch_is_none_for_a_missing_directory() {
         assert_eq!(git_branch(Path::new("/no/such/dir/for/llmenv")), None);
+    }
+
+    #[test]
+    fn render_strips_terminal_control_sequences_from_every_field() {
+        let text = ResumeContext {
+            context: Some("ok\u{1b}]0;pwned\u{7}\nsecond".to_string()),
+            branch: Some("feat/\u{1b}[31mred".to_string()),
+            docs: vec!["a\u{0}.md".to_string()],
+            ..ResumeContext::default()
+        }
+        .render();
+        assert!(
+            !text.chars().any(|c| c.is_control() && c != '\n'),
+            "{text:?}"
+        );
+        assert!(text.contains("second"), "{text}");
     }
 
     #[test]

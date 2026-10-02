@@ -1021,6 +1021,7 @@ fn reject_cycle(state_dir: &Path, slug: &str, new_parent: &str) -> anyhow::Resul
 pub(crate) fn session_start_reminder(state_dir: &Path) -> String {
     let tasks = tasks_for_current_project(state_dir, list_tasks(state_dir));
     combine_reminders([
+        session_resume_reminders(state_dir),
         wip_reminder(
             &tasks,
             "In-progress task(s) in this project",
@@ -1351,6 +1352,19 @@ fn session_finish_reminders(state_dir: &Path) -> String {
         ));
     }
     lines.join("\n\n")
+}
+
+/// The resume context of each open session in the current project (#2339).
+fn session_resume_reminders(state_dir: &Path) -> String {
+    match project::current_tag() {
+        Ok(project) => session::resume_reminders(state_dir, &project),
+        Err(e) => {
+            tracing::error!(
+                "project::current_tag failed, so the resume reminder is skipped: {e:#}"
+            );
+            String::new()
+        }
+    }
 }
 
 /// Join non-empty reminder strings with a blank line between them; empty
@@ -2457,6 +2471,30 @@ mod tests {
         let reminder = session_start_reminder(dir.path());
         assert!(reminder.contains("In progress task"));
         assert!(reminder.contains(&task.slug));
+    }
+
+    #[test]
+    fn session_start_reminder_includes_resume_context_for_an_open_session() {
+        let dir = TempDir::new().expect("test");
+        let project = project::current_tag().expect("project tag");
+        let owner = session::EngineIdentity::default();
+        let resume = resume::ResumeContext {
+            context: Some("pick up at step 4".to_string()),
+            issues: vec![2339],
+            ..Default::default()
+        };
+        let request = session::StartRequest {
+            name: Some("s"),
+            description: None,
+            project: &project,
+            owner: &owner,
+            resume: &resume,
+        };
+        session::start_session_as(dir.path(), &request, session::StartDecision::Auto)
+            .expect("start");
+        let reminder = session_start_reminder(dir.path());
+        assert!(reminder.contains("pick up at step 4"), "{reminder}");
+        assert!(reminder.contains("gh issue view 2339"), "{reminder}");
     }
 
     #[test]
