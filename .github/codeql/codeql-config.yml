@@ -1,0 +1,12 @@
+name: CodeQL configuration
+queries:
+  - uses: security-and-quality
+
+paths:
+  include:
+    - src
+    - crates
+    - benches
+paths-ignore:
+  - tests
+  - website

@@ -1,0 +1,119 @@
+name: CodeQL
+
+on:
+  push:
+    branches:
+      - main
+      - release/**
+  pull_request:
+    branches:
+      - main
+      - release/**
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      python: ${{ steps.filter.outputs.python }}
+      javascript: ${{ steps.filter.outputs.javascript }}
+      rust: ${{ steps.filter.outputs.rust }}
+      actions: ${{ steps.filter.outputs.actions }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
+        id: filter
+        with:
+          filters: |
+            python:
+              - '**/*.py'
+              - 'pyproject.toml'
+              - 'requirements*.txt'
+            javascript:
+              - '**/*.js'
+              - '**/*.ts'
+              - '**/*.tsx'
+              - '**/*.jsx'
+              - 'package.json'
+              - 'package-lock.json'
+            rust:
+              - 'src/**'
+              - 'crates/**'
+              - 'benches/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+            actions:
+              - '.github/**'
+
+  analyze:
+    needs: changes
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language:
+          - python
+          - javascript-typescript
+          - rust
+          - actions
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Language matrix gates: skip if no files changed for this language.
+      # Rust paths are restricted in codeql-config.yml, so a config-only PR
+      # that touches .github/ but no src/crates/benches/ still skips Rust.
+      - name: Skip if no changes (Python)
+        if: matrix.language == 'python' && needs.changes.outputs.python != 'true'
+        run: echo "Skipping Python CodeQL — no Python files changed"
+
+      - name: Skip if no changes (JavaScript)
+        if: matrix.language == 'javascript-typescript' && needs.changes.outputs.javascript != 'true'
+        run: echo "Skipping JavaScript CodeQL — no JavaScript files changed"
+
+      - name: Skip if no changes (Rust)
+        if: matrix.language == 'rust' && needs.changes.outputs.rust != 'true'
+        run: echo "Skipping Rust CodeQL — no Rust files changed"
+
+      - name: Skip if no changes (GitHub Actions)
+        if: matrix.language == 'actions' && needs.changes.outputs.actions != 'true'
+        run: echo "Skipping GitHub Actions CodeQL — no workflow files changed"
+
+      - name: Initialize CodeQL
+        if: |
+          (matrix.language == 'python' && needs.changes.outputs.python == 'true') ||
+          (matrix.language == 'javascript-typescript' && needs.changes.outputs.javascript == 'true') ||
+          (matrix.language == 'rust' && needs.changes.outputs.rust == 'true') ||
+          (matrix.language == 'actions' && needs.changes.outputs.actions == 'true')
+        uses: github/codeql-action/init@662472033e021a8251b1f89b3c3764d5dfb147f1  # v3.27.7
+        with:
+          languages: ${{ matrix.language }}
+          config-file: .github/codeql/codeql-config.yml
+
+      - name: Autobuild
+        if: |
+          (matrix.language == 'python' && needs.changes.outputs.python == 'true') ||
+          (matrix.language == 'javascript-typescript' && needs.changes.outputs.javascript == 'true') ||
+          (matrix.language == 'rust' && needs.changes.outputs.rust == 'true') ||
+          (matrix.language == 'actions' && needs.changes.outputs.actions == 'true')
+        uses: github/codeql-action/autobuild@662472033e021a8251b1f89b3c3764d5dfb147f1  # v3.27.7
+
+      - name: Perform CodeQL Analysis
+        if: |
+          (matrix.language == 'python' && needs.changes.outputs.python == 'true') ||
+          (matrix.language == 'javascript-typescript' && needs.changes.outputs.javascript == 'true') ||
+          (matrix.language == 'rust' && needs.changes.outputs.rust == 'true') ||
+          (matrix.language == 'actions' && needs.changes.outputs.actions == 'true')
+        uses: github/codeql-action/analyze@662472033e021a8251b1f89b3c3764d5dfb147f1  # v3.27.7
+        with:
+          category: /language:${{ matrix.language }}
