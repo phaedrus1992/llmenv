@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
+use crate::cli::ProxyStart;
 use crate::hook_run::mcp_client::McpHttpClient;
 use crate::mcp::resolve::{
     CODEBASE_MEMORY_MCP_NAME, MEMORY_MCP_NAME, ResolvedKind, ResolvedMcp, codebase_memory_paths,
@@ -225,18 +226,58 @@ pub(super) fn session_start_notice(
         return None;
     }
     let mut down = rt.block_on(find_down(&servers, DEFAULT_PROBE_TIMEOUT));
-    if down.iter().any(|d| d.name == MEMORY_MCP_NAME)
-        && crate::cli::ensure_local_memory_proxy(config, config_dir, active)
-    {
-        // This call started the proxy that was down, so ask it again before reporting.
-        let memory: Vec<ResolvedMcp> = servers
-            .into_iter()
-            .filter(|s| s.name == MEMORY_MCP_NAME)
-            .collect();
-        down.retain(|d| d.name != MEMORY_MCP_NAME);
-        down.extend(rt.block_on(find_down(&memory, DEFAULT_PROBE_TIMEOUT)));
+    if down.iter().any(|d| d.name == MEMORY_MCP_NAME) {
+        let outcome = crate::cli::ensure_local_memory_proxy(config, config_dir, active);
+        if outcome == ProxyStart::Started {
+            // This call started the proxy that was down, so ask it again before reporting.
+            let memory: Vec<ResolvedMcp> = servers
+                .iter()
+                .filter(|s| s.name == MEMORY_MCP_NAME)
+                .cloned()
+                .collect();
+            let after = rt.block_on(find_down(&memory, DEFAULT_PROBE_TIMEOUT));
+            down = merge_in_order(&servers, down, after);
+        } else if let Some(note) = restart_note(&outcome) {
+            for d in down.iter_mut().filter(|d| d.name == MEMORY_MCP_NAME) {
+                d.reason = format!("{}; {note}", d.reason);
+            }
+        }
     }
     down_notice(&down)
+}
+
+/// Replace the memory server's entry in `down` with its result after a restart, and keep the
+/// servers in the order of `servers`.
+fn merge_in_order(
+    servers: &[ResolvedMcp],
+    down: Vec<DownServer>,
+    memory_after: Vec<DownServer>,
+) -> Vec<DownServer> {
+    servers
+        .iter()
+        .filter_map(|server| {
+            let source = if server.name == MEMORY_MCP_NAME {
+                &memory_after
+            } else {
+                &down
+            };
+            source.iter().find(|d| d.name == server.name).cloned()
+        })
+        .collect()
+}
+
+/// Why llmenv did not restart the memory proxy, when the reader needs to know.
+fn restart_note(outcome: &ProxyStart) -> Option<String> {
+    match outcome {
+        ProxyStart::Started => None,
+        ProxyStart::Failed(cause) => Some(format!("llmenv could not start the proxy: {cause}")),
+        ProxyStart::AlreadyRunning => Some(
+            "the proxy process runs but does not answer, so llmenv did not restart it".to_string(),
+        ),
+        ProxyStart::NotLocal => {
+            Some("this host does not serve memory, so llmenv did not try to restart it".to_string())
+        }
+    }
 }
 
 /// The notice for a config that stops the managed servers from resolving. Without it the check
@@ -487,6 +528,51 @@ mod tests {
             args: Vec::new(),
             env: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn restart_note_explains_each_outcome_that_leaves_memory_down() {
+        let failed = restart_note(&ProxyStart::Failed("no mcp-proxy on PATH".to_string()));
+        assert!(
+            failed
+                .as_deref()
+                .is_some_and(|n| n.contains("no mcp-proxy on PATH"))
+        );
+        assert!(failed.is_some_and(|n| n.contains("could not start")));
+        let running = restart_note(&ProxyStart::AlreadyRunning).expect("note");
+        assert!(running.contains("does not answer"), "{running}");
+        let remote = restart_note(&ProxyStart::NotLocal).expect("note");
+        assert!(remote.contains("does not serve memory"), "{remote}");
+        assert_eq!(restart_note(&ProxyStart::Started), None);
+    }
+
+    fn down_named(name: &str, reason: &str) -> DownServer {
+        DownServer {
+            name: name.to_string(),
+            reason: reason.to_string(),
+        }
+    }
+
+    #[test]
+    fn merge_in_order_puts_the_memory_result_back_in_its_place() {
+        let servers = [
+            server(MEMORY_MCP_NAME, stdio_kind("true")),
+            server(CODEBASE_MEMORY_MCP_NAME, stdio_kind("true")),
+        ];
+        let before = vec![
+            down_named(MEMORY_MCP_NAME, "refused"),
+            down_named(CODEBASE_MEMORY_MCP_NAME, "stuck"),
+        ];
+        let still_down = merge_in_order(
+            &servers,
+            before.clone(),
+            vec![down_named(MEMORY_MCP_NAME, "wedged")],
+        );
+        let names: Vec<&str> = still_down.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, [MEMORY_MCP_NAME, CODEBASE_MEMORY_MCP_NAME]);
+        assert_eq!(still_down[0].reason, "wedged");
+        let recovered = merge_in_order(&servers, before, Vec::new());
+        assert_eq!(recovered, [down_named(CODEBASE_MEMORY_MCP_NAME, "stuck")]);
     }
 
     #[test]

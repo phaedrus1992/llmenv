@@ -1153,7 +1153,8 @@ fn session_start_names_a_dead_backend_on_stdout_with_the_fix() {
         .assert()
         .success()
         .stdout(predicate::str::contains("icm"))
-        .stdout(predicate::str::contains("llmenv export"));
+        .stdout(predicate::str::contains("llmenv export"))
+        .stdout(predicate::str::contains("does not serve memory"));
 }
 
 // #2358 review: a config that stops the managed servers from resolving must not turn the

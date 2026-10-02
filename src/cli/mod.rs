@@ -1141,18 +1141,30 @@ fn installed_adapters(config: &Config) -> impl Iterator<Item = Box<dyn AgentAdap
         })
 }
 
+/// What [`ensure_local_memory_proxy`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProxyStart {
+    /// This host does not serve memory, so there is no local proxy to start.
+    NotLocal,
+    /// A proxy already holds the address.
+    AlreadyRunning,
+    /// This call started a new proxy.
+    Started,
+    /// llmenv could not start the proxy. Carries the cause.
+    Failed(String),
+}
+
 /// Start the local `mcp-proxy` when this host is the memory server and nothing serves its
 /// address. A failure prints a warning and is not fatal: the caller goes on without a proxy.
-/// Returns `true` when this call started a new proxy.
 pub(crate) fn ensure_local_memory_proxy(
     config: &Config,
     config_dir: &Path,
     active: &ActiveScopes,
-) -> bool {
+) -> ProxyStart {
     let Some(mem) = export_local_memory_entry(config, config_dir, active) else {
-        return false;
+        return ProxyStart::NotLocal;
     };
-    let mut spawned = false;
+    let mut start = ProxyStart::AlreadyRunning;
     let mem = &mem;
     let bind = memory_bind_address(mem);
     match crate::mcp::proxy::default_pid_path() {
@@ -1161,7 +1173,10 @@ pub(crate) fn ensure_local_memory_proxy(
                 crate::mcp::proxy::spawn_mcp_proxy(bind, &pid_path)
             }) {
                 Ok(outcome) => {
-                    spawned = outcome == crate::mcp::proxy::EnsureOutcome::Spawned;
+                    let spawned = outcome == crate::mcp::proxy::EnsureOutcome::Spawned;
+                    if spawned {
+                        start = ProxyStart::Started;
+                    }
                     // Warn when binding to all interfaces only on startup — the ICM
                     // daemon is unauthenticated.
                     if spawned
@@ -1181,14 +1196,16 @@ pub(crate) fn ensure_local_memory_proxy(
                     // label like "waiting on mcp-proxy child" and the io::Error
                     // underneath it is the actual diagnosis.
                     eprintln!("warning: failed to ensure mcp-proxy running: {e:#}");
+                    start = ProxyStart::Failed(format!("{e:#}"));
                 }
             }
         }
         Err(e) => {
             eprintln!("warning: cannot locate mcp-proxy pidfile: {e:#}");
+            start = ProxyStart::Failed(format!("cannot locate the mcp-proxy pidfile: {e:#}"));
         }
     }
-    spawned
+    start
 }
 
 fn run_export(
@@ -6397,6 +6414,14 @@ mod tests {
             host,
             ..Config::default()
         }
+    }
+
+    #[test]
+    fn ensure_local_memory_proxy_is_not_local_without_a_memory_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outcome =
+            ensure_local_memory_proxy(&Config::default(), dir.path(), &active_as_server());
+        assert_eq!(outcome, ProxyStart::NotLocal);
     }
 
     /// Build an ActiveScopes with the host-scope "srv" matched and tag "mem" active.
