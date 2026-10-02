@@ -282,6 +282,9 @@ mod tests {
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    /// For a server that must answer: long enough that CPU load cannot fail the test.
+    const GENEROUS: Duration = Duration::from_secs(10);
+    /// For a server that never answers: the test waits this long, so keep it short.
     const SHORT: Duration = Duration::from_millis(300);
     const INIT_REPLY: &str = r#"{"jsonrpc":"2.0","id":0,"result":{}}"#;
 
@@ -318,7 +321,9 @@ mod tests {
 
     #[tokio::test]
     async fn stdio_probe_passes_when_server_answers_initialize() {
-        probe(&answers(INIT_REPLY), SHORT).await.expect("probe ok");
+        probe(&answers(INIT_REPLY), GENEROUS)
+            .await
+            .expect("probe ok");
     }
 
     #[tokio::test]
@@ -329,7 +334,7 @@ mod tests {
 
     #[tokio::test]
     async fn stdio_probe_fails_when_process_exits_without_answering() {
-        let err = probe(&sh("exit 3"), SHORT).await.expect_err("exited");
+        let err = probe(&sh("exit 3"), GENEROUS).await.expect_err("exited");
         assert!(err.to_string().contains("exited"), "got: {err}");
     }
 
@@ -340,14 +345,16 @@ mod tests {
             args: Vec::new(),
             env: BTreeMap::new(),
         };
-        let err = probe(&server("x", kind), SHORT).await.expect_err("missing");
+        let err = probe(&server("x", kind), GENEROUS)
+            .await
+            .expect_err("missing");
         assert!(err.to_string().contains("cannot start"), "got: {err}");
     }
 
     #[tokio::test]
     async fn stdio_probe_reports_a_jsonrpc_error_reply() {
         let reply = r#"{"jsonrpc":"2.0","id":0,"error":{"code":-32600,"message":"nope"}}"#;
-        let err = probe(&answers(reply), SHORT)
+        let err = probe(&answers(reply), GENEROUS)
             .await
             .expect_err("error reply");
         assert!(err.to_string().contains("nope"), "got: {err}");
@@ -358,7 +365,7 @@ mod tests {
         let script =
             format!("read line; [ \"$LLMENV_PROBE_X\" = 1 ] && printf '%s\\n' '{INIT_REPLY}'");
         let env = BTreeMap::from([("LLMENV_PROBE_X".to_string(), "1".to_string())]);
-        probe(&sh_env(&script, env), SHORT)
+        probe(&sh_env(&script, env), GENEROUS)
             .await
             .expect("env reached the server");
     }
@@ -382,7 +389,7 @@ mod tests {
     #[tokio::test]
     async fn find_down_returns_only_failures_in_input_order() {
         let servers = [
-            sh("exec sleep 5"),
+            sh("exit 3"),
             answers(INIT_REPLY),
             server(
                 "gone",
@@ -393,9 +400,9 @@ mod tests {
                 },
             ),
         ];
-        let down = find_down(&servers, SHORT).await;
+        let down = find_down(&servers, GENEROUS).await;
         let names: Vec<&str> = down.iter().map(|d| d.name.as_str()).collect();
-        assert_eq!(names, ["stdio-test", "gone"]);
+        assert_eq!(names, ["stdio-test", "gone"], "{down:?}");
         assert!(down.iter().all(|d| !d.reason.is_empty()));
     }
 
