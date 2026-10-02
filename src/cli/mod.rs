@@ -4213,7 +4213,8 @@ fn export_local_memory_entry(
         Err(e) => {
             eprintln!(
                 "warning: cannot read bundle memory entries, so only config.yaml memory \
-                 entries can start the local mcp-proxy: {e:#}"
+                 entries can start the local mcp-proxy: {e:#}. Fix or remove the failing \
+                 bundle.yaml, then run `llmenv doctor`."
             );
             config
                 .features
