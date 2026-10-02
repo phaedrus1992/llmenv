@@ -15,12 +15,13 @@
 //! record — it does **not** perform LLM summarization, so we handle that here.
 //!
 //! The pipeline:
-//! 1. Recall recent memories from ICM (no type filter — broadest recall).
+//! 1. Recall recent memories of the current project from ICM (no type filter).
 //! 2. Precondition: ≥3 records, otherwise skip with a diagnostic.
 //! 3. Build ExpeL-inspired prompt from memory summaries.
 //! 4. Call the configured LLM backend (120s timeout).
 //! 5. Parse bullet-point rules from the response.
-//! 6. Store each rule as `type: semantic`, `importance: high`.
+//! 6. Store each rule as `type: semantic`, `importance: high`, in the project's
+//!    rule topic, unless a matching rule is already stored there (#2387).
 //!
 //! All failures are fail-soft: `tracing::error!`, return `Ok(summary)`. The
 //! detached child's log filter is ERROR-only by default, so a `warn!` here
@@ -30,6 +31,8 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use crate::hook_run::mcp_client::McpHttpClient;
+
+mod dedup;
 
 /// Hard timeout for the LLM backend call.
 const LLM_TIMEOUT: Duration = Duration::from_secs(120);
@@ -383,15 +386,44 @@ fn parse_bullets(text: &str) -> Vec<String> {
 }
 
 /// Store a single consolidation rule via `icm_memory_store`.
-async fn store_rule(client: &McpHttpClient, rule: &str) -> anyhow::Result<()> {
+async fn store_rule(client: &McpHttpClient, project: &str, rule: &str) -> anyhow::Result<()> {
     let args = serde_json::json!({
         "content": rule,
-        "topic": "llmenv-consolidation",
+        "topic": dedup::rule_topic(project),
         "type": "semantic",
         "importance": "high",
     });
     client.call_tool("icm_memory_store", args).await?;
     Ok(())
+}
+
+/// Store each rule that no stored rule or earlier rule in `rules` matches.
+/// Returns the number stored and the number skipped as duplicates.
+async fn store_new_rules(client: &McpHttpClient, project: &str, rules: &[&str]) -> (usize, usize) {
+    let mut stored = 0usize;
+    let mut duplicates = 0usize;
+    let mut batch: Vec<&str> = Vec::new();
+    for rule in rules.iter().copied() {
+        match dedup::is_stored(client, project, rule).await {
+            Ok(false) if !dedup::matches_any(rule, batch.iter().copied()) => {}
+            Ok(_) => {
+                duplicates += 1;
+                continue;
+            }
+            Err(e) => {
+                tracing::error!("consolidation: duplicate check failed, rule skipped: {e:#}");
+                continue;
+            }
+        }
+        batch.push(rule);
+        match store_rule(client, project, rule).await {
+            Ok(()) => stored += 1,
+            Err(e) => {
+                tracing::error!("consolidation: failed to store rule (fail-soft): {e:#}");
+            }
+        }
+    }
+    (stored, duplicates)
 }
 
 /// Run post-session consolidation with the active memory entry's settings
@@ -407,6 +439,7 @@ async fn store_rule(client: &McpHttpClient, rule: &str) -> anyhow::Result<()> {
 pub(crate) async fn run(
     cc: &crate::config::ConsolidationConfig,
     client: &McpHttpClient,
+    project: &str,
 ) -> anyhow::Result<String> {
     tracing::info!(
         max_rules = cc.max_rules_per_session,
@@ -422,6 +455,7 @@ pub(crate) async fn run(
                     "icm_memory_recall",
                     serde_json::json!({
                         "query": "",
+                        "project": project,
                         "limit": 50,
                     }),
                 )
@@ -500,24 +534,16 @@ pub(crate) async fn run(
     let rules: Vec<&str> = rules.iter().map(|s| s.as_str()).take(max_rules).collect();
 
     // Step 6: Store each rule
-    let mut stored = 0usize;
-    for rule in &rules {
-        match store_rule(client, rule).await {
-            Ok(()) => stored += 1,
-            Err(e) => {
-                tracing::error!("consolidation: failed to store rule (fail-soft): {e:#}");
-            }
-        }
-    }
+    let (stored, duplicates) = store_new_rules(client, project, &rules).await;
 
     let msg = format!(
         "consolidation: distilled {} memory records into {} semantic rule(s) \
-         (backend: {:?}, rules stored: {stored})",
+         (backend: {:?}, rules stored: {stored}, duplicates skipped: {duplicates})",
         records.len(),
         rules.len(),
         cc.backend,
     );
-    if stored < rules.len() {
+    if stored + duplicates < rules.len() {
         tracing::error!("{msg}");
     } else {
         tracing::info!("{msg}");
