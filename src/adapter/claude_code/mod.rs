@@ -714,6 +714,29 @@ fn build_mcp_servers(
     Ok(servers)
 }
 
+/// Entry keys that `build_mcp_servers` renders from llmenv config. The new
+/// render owns them: an absent key means "unset", so the on-disk value must not
+/// come back (#2376).
+const RENDERED_ENTRY_KEYS: &[&str] = &[
+    "type", "command", "args", "env", "url", "headers", "timeout",
+];
+
+/// Copy the runtime-added keys of an existing server entry (for example the
+/// `auth` block Claude Code writes, #814) into the freshly rendered `new_obj`.
+/// Skip keys llmenv renders itself, and keys the native overlay nulled (#1270).
+fn carry_runtime_keys(
+    existing: &serde_json::Map<String, serde_json::Value>,
+    new_obj: &mut serde_json::Map<String, serde_json::Value>,
+    nulled: Option<&std::collections::HashSet<String>>,
+) {
+    for (k, v) in existing {
+        let deleted = nulled.is_some_and(|n| n.contains(k));
+        if !new_obj.contains_key(k) && !deleted && !RENDERED_ENTRY_KEYS.contains(&k.as_str()) {
+            new_obj.insert(k.clone(), v.clone());
+        }
+    }
+}
+
 /// Merge llmenv's resolved MCP servers into the top-level `mcpServers` of
 /// `$CLAUDE_CONFIG_DIR/.claude.json` (#244) — the only surface Claude Code reads
 /// for user-scoped servers.
@@ -821,20 +844,10 @@ fn merge_mcp_into_claude_json(
             }
             // Upsert current servers, preserving runtime-added sub-keys.
             for (name, mut entry) in llmenv_servers {
-                // Preserve runtime-added sub-keys (e.g., auth tokens) from the
-                // previous session's .claude.json so they survive re-materialization
-                // in Loose/Normal mode where the same file is reused.
                 if let Some(existing) = servers_obj.get(&name).and_then(|v| v.as_object())
-                    && let Some(ref mut new_obj) = entry.as_object_mut()
+                    && let Some(new_obj) = entry.as_object_mut()
                 {
-                    let explicitly_nulled = nulled_keys.get(&name);
-                    for (k, v) in existing.iter() {
-                        let was_explicitly_deleted =
-                            explicitly_nulled.is_some_and(|nulled| nulled.contains(k));
-                        if !new_obj.contains_key(k) && !was_explicitly_deleted {
-                            new_obj.insert(k.clone(), v.clone());
-                        }
-                    }
+                    carry_runtime_keys(existing, new_obj, nulled_keys.get(&name));
                 }
                 servers_obj.insert(name, entry);
             }
@@ -5785,6 +5798,62 @@ mod tests {
         assert!(
             !owned_path.exists(),
             "companion file removed when no owned servers"
+        );
+    }
+
+    #[test]
+    fn merge_mcp_drops_stale_config_keys_but_keeps_runtime_keys() {
+        // #2376: a re-render that no longer writes `env` (or `headers`, `args`,
+        // `timeout`) must not keep the old on-disk value, or a removed
+        // `CBM_ALLOWED_ROOT` pin survives every re-materialization.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(CLAUDE_JSON_FILE);
+        write_json(
+            &path,
+            &serde_json::json!({
+                "mcpServers": {
+                    "cbm": {
+                        "command": "cbm-old",
+                        "args": ["--old"],
+                        "env": { "CBM_ALLOWED_ROOT": "/old", "CBM_CACHE_DIR": "/old/cache" },
+                        "auth": { "token": "abc123" }
+                    },
+                    "remote": {
+                        "type": "http",
+                        "url": "https://old.example",
+                        "headers": { "X-Stale": "1" },
+                        "timeout": 5
+                    }
+                }
+            }),
+        );
+        let mut cbm = stdio_mcp("cbm", "cbm-bin");
+        if let ResolvedKind::Stdio { args, .. } = &mut cbm.kind {
+            args.clear();
+        }
+        let remote = remote_mcp(
+            "remote",
+            "https://new.example",
+            crate::config::McpTransport::Http,
+        );
+        merge_mcp_into_claude_json(tmp.path(), &[cbm, remote], None).unwrap();
+
+        let doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(doc["mcpServers"]["cbm"]["command"], "cbm-bin");
+        assert!(
+            doc["mcpServers"]["cbm"].get("env").is_none(),
+            "stale env: {doc}"
+        );
+        assert_eq!(doc["mcpServers"]["cbm"]["args"], serde_json::json!([]));
+        assert_eq!(doc["mcpServers"]["cbm"]["auth"]["token"], "abc123");
+        assert!(
+            doc["mcpServers"]["remote"].get("headers").is_none(),
+            "stale headers: {doc}"
+        );
+        assert!(
+            doc["mcpServers"]["remote"].get("timeout").is_none(),
+            "stale timeout: {doc}"
         );
     }
 
