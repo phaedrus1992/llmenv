@@ -2684,12 +2684,12 @@ fn is_consolidation_child(guard: Option<&std::ffi::OsStr>) -> bool {
 }
 
 /// Spawn a detached child to run post-session consolidation. Best-effort
-/// fire-and-forget — spawn failures are logged at debug level and the caller
+/// fire-and-forget — spawn failures are logged at error level and the caller
 /// never waits on the child. The child's stderr goes to the shared bounded log
 /// rather than `/dev/null` so its own failures are diagnosable (#1133).
 fn post_session_consolidation() {
     let Ok(exe) = std::env::current_exe() else {
-        tracing::debug!("consolidation-run: cannot resolve current_exe");
+        tracing::error!("consolidation-run: cannot resolve current_exe; consolidation skipped");
         return;
     };
     let mut cmd = std::process::Command::new(exe);
@@ -2699,7 +2699,9 @@ fn post_session_consolidation() {
     redirect_stderr_to_detached_log(&mut cmd);
     crate::mcp::proxy::detach_process_group(&mut cmd);
     if let Err(e) = cmd.spawn() {
-        tracing::debug!("consolidation-run: failed to spawn detached child: {e}");
+        tracing::error!(
+            "consolidation-run: cannot spawn the detached child: {e}; consolidation skipped"
+        );
     }
     // Not waited on: the child is process-group-detached and outlives us.
 }

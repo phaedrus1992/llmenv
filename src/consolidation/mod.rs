@@ -22,7 +22,9 @@
 //! 5. Parse bullet-point rules from the response.
 //! 6. Store each rule as `type: semantic`, `importance: high`.
 //!
-//! All failures are fail-soft: `tracing::warn!`, return `Ok(summary)`.
+//! All failures are fail-soft: `tracing::error!`, return `Ok(summary)`. The
+//! detached child's log filter is ERROR-only by default, so a `warn!` here
+//! would leave no trace (#2355).
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -169,7 +171,8 @@ fn claude_command() -> tokio::process::Command {
 
 /// The consolidation settings of the active memory entry: the first entry in
 /// `memory` (top-level plus bundle-contributed) whose `when` has an active
-/// tag, when its consolidation is enabled. `resolve_mcps` rejects two active
+/// tag ([`crate::mcp::resolve::memory_is_tag_active`], the selection rule),
+/// when its consolidation is enabled. `resolve_mcps` rejects two active
 /// entries, so the first one is the only one.
 #[must_use]
 pub(crate) fn active_consolidation<'a>(
@@ -178,7 +181,7 @@ pub(crate) fn active_consolidation<'a>(
 ) -> Option<&'a crate::config::ConsolidationConfig> {
     memory
         .iter()
-        .find(|m| m.when.iter().any(|t| active_tags.contains(t)))
+        .find(|m| crate::mcp::resolve::memory_is_tag_active(m, active_tags))
         .and_then(|m| m.consolidation.as_ref())
         .filter(|c| c.enabled)
 }
@@ -310,7 +313,7 @@ async fn call_anthropic_api(prompt: &str) -> anyhow::Result<String> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")?;
     let (model, warning) = resolve_api_model(std::env::var("ANTHROPIC_MODEL").ok().as_deref());
     if let Some(warning) = warning {
-        tracing::warn!("{warning}");
+        tracing::error!("{warning}");
     }
 
     let client = reqwest::Client::builder().timeout(LLM_TIMEOUT).build()?;
@@ -339,7 +342,7 @@ async fn call_anthropic_api(prompt: &str) -> anyhow::Result<String> {
             .text()
             .await
             .inspect_err(
-                |e| tracing::warn!(error = %e, url = "https://api.anthropic.com/v1/messages", "failed to read consolidation error response body"),
+                |e| tracing::error!(error = %e, url = "https://api.anthropic.com/v1/messages", "failed to read consolidation error response body"),
             )
             .unwrap_or_else(|_| "(no body)".into());
         anyhow::bail!("Anthropic API returned {status}: {text}");
@@ -399,7 +402,7 @@ async fn store_rule(client: &McpHttpClient, rule: &str) -> anyhow::Result<()> {
 /// resulting rules as semantic/high memories.
 ///
 /// # Errors
-/// All errors are caught and logged via `tracing::warn!` — this function
+/// All errors are caught and logged via `tracing::error!` — this function
 /// always returns `Ok(summary)` to match the fail-soft contract.
 pub(crate) async fn run(
     cc: &crate::config::ConsolidationConfig,
@@ -430,7 +433,7 @@ pub(crate) async fn run(
         Ok(out) => out,
         Err(e) => {
             let msg = format!("consolidation: recall failed (fail-soft): {e}");
-            tracing::warn!("{msg}");
+            tracing::error!("{msg}");
             return Ok(msg);
         }
     };
@@ -474,7 +477,7 @@ pub(crate) async fn run(
         Ok(out) => out,
         Err(e) => {
             let msg = format!("consolidation: LLM call failed (fail-soft): {e}");
-            tracing::warn!("{msg}");
+            tracing::error!("{msg}");
             return Ok(msg);
         }
     };
@@ -502,7 +505,7 @@ pub(crate) async fn run(
         match store_rule(client, rule).await {
             Ok(()) => stored += 1,
             Err(e) => {
-                tracing::warn!("consolidation: failed to store rule (fail-soft): {e}");
+                tracing::error!("consolidation: failed to store rule (fail-soft): {e:#}");
             }
         }
     }
@@ -514,7 +517,11 @@ pub(crate) async fn run(
         rules.len(),
         cc.backend,
     );
-    tracing::info!("{msg}");
+    if stored < rules.len() {
+        tracing::error!("{msg}");
+    } else {
+        tracing::info!("{msg}");
+    }
     Ok(msg)
 }
 

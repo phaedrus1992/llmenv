@@ -23,7 +23,7 @@ const CONSOLIDATION_TIMEOUT: Duration = Duration::from_secs(30);
 /// or an MCP call failure.
 pub fn run_consolidation() -> anyhow::Result<()> {
     run_consolidation_inner().inspect_err(|e| {
-        tracing::error!("consolidation-run: detached consolidation failed: {e}");
+        tracing::error!("consolidation-run: detached consolidation failed: {e:#}");
     })
 }
 
