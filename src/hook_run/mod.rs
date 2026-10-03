@@ -2696,7 +2696,7 @@ fn build_index_repository_command(
 
 /// [`build_index_repository_command`] from the two values the command needs, so the checkpointed
 /// wrapper (`detached_cbm`) can rebuild it from a checkpoint file (#2396).
-pub(crate) fn index_command(
+fn index_command(
     project_root: &std::path::Path,
     index_path: Option<&str>,
 ) -> std::process::Command {

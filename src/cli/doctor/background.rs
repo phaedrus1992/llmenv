@@ -9,11 +9,7 @@ use crate::hook_run::checkpoint::{self, Entry};
 /// One doctor line per checkpoint, or a single pass line when there is none. A checkpoint that is
 /// not stale is `info`, because its child may still be running. A stale one is `warn`, and so is
 /// a file that cannot be read.
-pub(super) fn checkpoint_lines(
-    entries: &[Entry],
-    now: u64,
-    log: &Path,
-) -> Vec<(CheckLevel, String)> {
+fn checkpoint_lines(entries: &[Entry], now: u64, log: &Path) -> Vec<(CheckLevel, String)> {
     if entries.is_empty() {
         return vec![(
             CheckLevel::Pass,

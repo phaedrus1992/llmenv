@@ -15,11 +15,11 @@ use super::session_ledger::hash_prefix;
 use super::session_state::{prune_stale_json_files, unix_now};
 
 /// Runs of one job before it stays for doctor. The first run counts as attempt 1.
-pub(crate) const MAX_ATTEMPTS: u32 = 3;
+const MAX_ATTEMPTS: u32 = 3;
 /// Checkpoints older than this are deleted, finished or not.
 const PRUNE_DAYS: u64 = 7;
 /// Above this, a payload is not checkpointed. The job still runs, as before.
-pub(crate) const MAX_INPUT_BYTES: usize = 64 * 1024;
+const MAX_INPUT_BYTES: usize = 64 * 1024;
 /// Seconds added to a job's longest timeout before its checkpoint counts as stale.
 const DEADLINE_MARGIN_SECS: u64 = 60;
 
@@ -34,7 +34,7 @@ pub(crate) enum JobKind {
 }
 
 impl JobKind {
-    pub(crate) fn as_str(self) -> &'static str {
+    fn as_str(self) -> &'static str {
         match self {
             Self::Consolidation => "consolidation",
             Self::IcmStore => "icm-store",
@@ -46,7 +46,7 @@ impl JobKind {
     /// Seconds a healthy job can run: its longest timeout plus a margin. The cbm indexer has no
     /// timeout, so it gets half an hour; the upstream benchmark for a very large repository is
     /// about three minutes.
-    pub(crate) fn deadline_secs(self) -> u64 {
+    fn deadline_secs(self) -> u64 {
         let longest = match self {
             // The LLM call allows 120 s and each ICM call 30 s.
             Self::Consolidation => 120 + 30,
@@ -61,14 +61,14 @@ impl JobKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Checkpoint {
     pub(crate) kind: JobKind,
-    pub(crate) key: String,
+    key: String,
     /// Where the job stopped. Consolidation uses `started`, `recalled`, `summarized`; the other
     /// jobs are one call each and stay at `started`.
     pub(crate) phase: String,
     pub(crate) inputs: serde_json::Value,
     pub(crate) started_at: u64,
     pub(crate) attempts: u32,
-    pub(crate) session_id: Option<String>,
+    session_id: Option<String>,
 }
 
 impl Checkpoint {
@@ -104,7 +104,7 @@ pub(crate) enum Entry {
     Unreadable(PathBuf, String),
 }
 
-pub(crate) fn dir(state_dir: &Path) -> PathBuf {
+fn dir(state_dir: &Path) -> PathBuf {
     state_dir.join("checkpoints")
 }
 
@@ -114,7 +114,7 @@ pub(crate) fn now_secs() -> u64 {
 
 /// The first 16 hex characters of the SHA-256 over the kind and the inputs.
 #[must_use]
-pub(crate) fn key_for(kind: JobKind, inputs: &serde_json::Value) -> String {
+fn key_for(kind: JobKind, inputs: &serde_json::Value) -> String {
     hash_prefix(format!("{}\n{inputs}", kind.as_str()).as_bytes())
 }
 

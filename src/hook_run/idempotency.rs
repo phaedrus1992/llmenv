@@ -36,7 +36,7 @@ pub(crate) struct SeenStore {
 }
 
 impl SeenStore {
-    pub(crate) fn new(state_dir: &Path) -> Self {
+    fn new(state_dir: &Path) -> Self {
         Self {
             dir: state_dir.join("idempotency"),
         }
@@ -44,7 +44,7 @@ impl SeenStore {
 
     /// Whether `id` was recorded under `key`. A busy lock, an unsafe `key`, or an unreadable
     /// file reads as "not seen": the call then runs, which is the safe side for a lost record.
-    pub(crate) fn contains(&self, key: &str, id: &str) -> bool {
+    fn contains(&self, key: &str, id: &str) -> bool {
         let Some(_lock) = lock_state_file(&self.dir, key, LABEL) else {
             return false;
         };
@@ -54,7 +54,7 @@ impl SeenStore {
 
     /// Record `id` under `key`, dropping the oldest id past [`MAX_IDS`]. Fail-soft: the call that
     /// the id guards has already succeeded, so a failed write is logged and dropped.
-    pub(crate) fn record(&self, key: &str, id: &str) {
+    fn record(&self, key: &str, id: &str) {
         let Some(_lock) = lock_state_file(&self.dir, key, LABEL) else {
             return;
         };
@@ -104,7 +104,7 @@ impl SeenStore {
 /// A key that is always safe as a file name: `raw` itself when it is a valid short name, else a
 /// hash of it. A transcript id from ICM has no promised character set.
 #[must_use]
-pub(crate) fn state_key(raw: &str) -> String {
+fn state_key(raw: &str) -> String {
     if crate::paths::is_valid_short_name(raw) {
         raw.to_string()
     } else {
