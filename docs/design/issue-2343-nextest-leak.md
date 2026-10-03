@@ -30,11 +30,15 @@ That is not confirmed.
    Run the full suite three times with `--leak-timeout 500ms`.
    If `LEAK` disappears, the cause is the timing heuristic.
    If it stays, find the handle: run the single test under `lsof -p` (or `fuser`) at exit, and check whether the test opens a file it does not drop before returning (an unflushed `File` in a `tempfile::TempDir` still counts as a child-held handle only if a child exists; so also check for an inherited stdout or stderr pipe from a `Command` elsewhere in the same binary).
-2. **If timing, set a project-wide `leak-timeout` with the reason**, in `.config/nextest.toml` under `[profile.default]`: `leak-timeout = "500ms"`, with a comment that names this issue, the machine load, and that the value is five times the default.
+2. **If timing, set a project-wide `leak-timeout` with the reason**, in `.config/nextest.toml` under `[profile.default]`: `leak-timeout = "2s"`, with a comment that names this issue and the machine load.
+   Result of step 1: nextest has no `--leak-timeout` flag, so the check ran through the config.
+   Two full suites at once flagged `readme_links::cargo_toml_has_documentation_field` (a file-read test) at the 100 ms default, and flagged tests at 0.52 s and 2 s with a 500 ms value, so the value is 2 s.
+   A leaked handle never closes, so a longer window delays the verdict only for a test that really leaks.
 3. **Make a real leak fail in CI.**
-   Add `leak-timeout-result = "fail"` under a `[profile.ci]` that inherits default, and switch the CI command to `--profile ci`.
+   Add `leak-timeout = { period = "2s", result = "fail" }` under a `[profile.ci]` that inherits default, and switch the CI command to `--profile ci`.
+   The result is part of the `leak-timeout` table; a separate `leak-timeout-result` key does not exist.
+   The table form needs nextest 0.9.95 or later; CI installs the latest release.
    Do this only after three clean full runs locally with the new timeout, so CI does not turn red on day one.
-   Check the pinned nextest version in CI supports the key; bump if needed and note it.
 4. **If a real handle is found, fix the test (or the code) and leave the timeout alone.**
    The doc then records which handle it was.
 
@@ -45,12 +49,13 @@ That is not confirmed.
 ```toml
 [profile.default]
 # nextest's 100 ms leak window flags a pure file-I/O test under full parallel
-# load (#2343); 500 ms keeps the detector for real leaks without the false flag.
-leak-timeout = "500ms"
+# load (#2343); 2 s keeps the detector for real leaks without the false flag.
+leak-timeout = "2s"
 
 [profile.ci]
+inherits = "default"
 # A real leaked handle is a bug; CI must not pass it silently.
-leak-timeout-result = "fail"
+leak-timeout = { period = "2s", result = "fail" }
 ```
 
 ### `.github/workflows/ci.yml`
@@ -63,7 +68,7 @@ leak-timeout-result = "fail"
 
 ## Tests
 
-1. Three full `cargo nextest run --workspace --all-features` runs with the new config: zero `LEAK` lines.
+1. Three full `cargo nextest run --workspace --all-features --profile ci` runs with the new config: zero `LEAK` lines. Recorded: three clean runs of 3,308 tests.
 2. A deliberate leak (a temporary test that spawns `sleep 5` without waiting) fails under `--profile ci` and passes under the default profile; remove the test before merging and record the result in the PR.
 3. CI green on the PR.
 

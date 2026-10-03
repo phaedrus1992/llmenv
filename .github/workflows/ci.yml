@@ -97,7 +97,7 @@ jobs:
         run: echo "CARGO_BUILD_JOBS=$(scripts/core_count.sh)" >> "$GITHUB_ENV"
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo nextest run --workspace --test-threads "$CARGO_BUILD_JOBS"
+      - run: cargo nextest run --workspace --profile ci --test-threads "$CARGO_BUILD_JOBS"
   deny:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
@@ -150,6 +150,8 @@ jobs:
           tool: cargo-hawk
       # -D since #1314 cleared the 330-finding backlog from #923. The published
       # `crates/*` libs are excluded as external boundaries by the script.
+      # The script builds into target/hawk (#2312). This job has no Rust build
+      # cache step, so that directory is not cached.
       - run: bash scripts/hawk-check.sh -D warnings
         env:
           RUSTUP_TOOLCHAIN: ${{ steps.toolchain.outputs.name }}
