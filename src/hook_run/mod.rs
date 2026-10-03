@@ -3759,6 +3759,67 @@ mod tests {
         );
     }
 
+    // #2456: a turn that ends with a question adds the waiting reminder after the tracker text,
+    // and adds it alone when the tracker said nothing.
+    #[test]
+    fn stop_reminder_appends_the_waiting_reminder_after_a_question() {
+        let state_dir = tempfile::tempdir().expect("test");
+        let project = crate::task::project::current_tag().expect("test");
+        let config = crate::config::Config {
+            features: Some(crate::config::Features {
+                task_tracker: Some(crate::config::TaskTracker {
+                    enabled: true,
+                    ..Default::default()
+                }),
+                repeat_detect: Some(crate::config::RepeatDetect {
+                    enabled: false,
+                    threshold: 1,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let question = serde_json::json!({ "last_assistant_message": "Which one?" });
+        // No task: nothing to say, and no stray separator.
+        let empty = resolve_stop_reminder(state_dir.path(), Some("s1"), &config, &question);
+        assert_eq!(empty, "");
+        crate::task::session::start_session(
+            state_dir.path(),
+            None,
+            None,
+            &project,
+            crate::task::session::StartDecision::Auto,
+        )
+        .expect("test");
+        let task = crate::task::add_task(
+            state_dir.path(),
+            "finish the parser",
+            crate::task::ParentSpec::Detached,
+            crate::task::SessionChoice::Resolve(&crate::task::session::EngineIdentity::default()),
+            &project,
+        )
+        .expect("test");
+        crate::task::start_task(state_dir.path(), &task.slug, false).expect("test");
+        let text = resolve_stop_reminder(state_dir.path(), Some("s1"), &config, &question);
+        let tracker_only = crate::task::stop_hook_reminder(state_dir.path());
+        assert!(
+            !tracker_only.is_empty(),
+            "the fixture must produce tracker text"
+        );
+        let expected_tail = format!(
+            "\n\nllmenv task tracker: you asked the user a question while '{}'",
+            task.slug
+        );
+        assert!(text.starts_with(tracker_only.as_str()), "{text:?}");
+        assert!(
+            text[tracker_only.len()..].starts_with(&expected_tail),
+            "{text:?}"
+        );
+        let statement = serde_json::json!({ "last_assistant_message": "Done." });
+        let quiet = resolve_stop_reminder(state_dir.path(), Some("s1"), &config, &statement);
+        assert_eq!(quiet, tracker_only);
+    }
+
     #[test]
     fn only_opencode_needs_the_exit_code_block_signal() {
         let mut by_exit_code = Vec::new();

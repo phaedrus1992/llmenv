@@ -60,21 +60,24 @@ fn state_path(state_dir: &Path, session_id: &str) -> Option<PathBuf> {
     })
 }
 
-fn load(path: &Path) -> NudgeState {
-    match std::fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-            tracing::error!(
-                "task nudge state {} is unreadable, reset: {e}",
-                path.display()
-            );
-            NudgeState::default()
-        }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => NudgeState::default(),
+/// The state of a session. A missing file is a new session. `None` means the file exists but
+/// cannot be read, and the caller skips the nudge. A corrupt file is reset.
+fn load(path: &Path) -> Option<NudgeState> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(NudgeState::default()),
         Err(e) => {
             tracing::error!("task nudge state {} cannot be read: {e}", path.display());
-            NudgeState::default()
+            return None;
         }
-    }
+    };
+    Some(serde_json::from_str(&text).unwrap_or_else(|e| {
+        tracing::error!(
+            "task nudge state {} is unreadable, reset: {e}",
+            path.display()
+        );
+        NudgeState::default()
+    }))
 }
 
 /// Whether the state was saved. A caller that depends on the state, such as the deny marker,
@@ -143,7 +146,9 @@ pub(crate) fn handle_post_tool_use(
     let Some(path) = session_id.and_then(|id| state_path(state_dir, id)) else {
         return String::new();
     };
-    let mut state = load(&path);
+    let Some(mut state) = load(&path) else {
+        return String::new();
+    };
     let before = (
         state.calls,
         state.last_nudge,
@@ -397,7 +402,9 @@ pub(crate) fn handle_pre_tool_use(
         return String::new();
     };
     let tracking = crate::task::tracking(state_dir);
-    let mut state = load(&path);
+    let Some(mut state) = load(&path) else {
+        return String::new();
+    };
     match tracking {
         Tracking::Unknown => String::new(),
         Tracking::Tracked { wip: Some(_), .. } => {
@@ -498,6 +505,9 @@ mod tests {
             ("echo 'a && gh pr create'", false),
             ("git commit -m \"fix: a; b\"", true),
             ("git status 2>&1", false),
+            ("gh --no-pager pr create", true),
+            ("git --no-pager commit -m x", true),
+            ("gh --no-pager pr view 1", false),
             ("bash script.sh", false),
         ] {
             assert_eq!(runs_commit_or_pr(command), expected, "{command:?}");
@@ -583,7 +593,7 @@ mod tests {
         for _ in 0..5 {
             assert_eq!(post("Edit"), "");
         }
-        let state = load(&state_path(dir.path(), "s1").unwrap());
+        let state = load(&state_path(dir.path(), "s1").unwrap()).unwrap();
         assert_eq!(state.calls, 0, "tracked work resets the count");
     }
 
@@ -669,7 +679,11 @@ mod tests {
             handle_pre_tool_use(&tracker, &bash("git commit"), Some("s1"), dir.path()),
             ""
         );
-        assert!(!load(&state_path(dir.path(), "s1").unwrap()).commit_denied);
+        assert!(
+            !load(&state_path(dir.path(), "s1").unwrap())
+                .unwrap()
+                .commit_denied
+        );
     }
 
     #[test]
@@ -728,6 +742,61 @@ mod tests {
         let stop = serde_json::json!({ "last_assistant_message": "Ready?" });
         let text = handle_stop(&TaskTracker::default(), &stop, dir.path());
         assert!(text.contains("waiting on the user: step-one"), "{text}");
+    }
+
+    #[test]
+    fn a_state_file_that_cannot_be_read_skips_the_nudge_and_a_corrupt_one_resets() {
+        let dir = TempDir::new().unwrap();
+        let tracker = TaskTracker {
+            nudge_after: Some(1),
+            ..TaskTracker::default()
+        };
+        let path = state_path(dir.path(), "s1").unwrap();
+        // A directory in place of the file: reading fails with an error that is not NotFound.
+        std::fs::create_dir_all(&path).unwrap();
+        let edit = serde_json::json!({ "tool_name": "Edit" });
+        assert_eq!(
+            handle_post_tool_use(&tracker, &edit, Some("s1"), dir.path()),
+            ""
+        );
+        assert_eq!(
+            handle_pre_tool_use(&tracker, &bash("git commit"), Some("s1"), dir.path()),
+            ""
+        );
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, "not json").unwrap();
+        let text = handle_post_tool_use(&tracker, &edit, Some("s1"), dir.path());
+        assert!(text.contains("1 tool calls"), "{text}");
+    }
+
+    #[test]
+    fn an_unreadable_task_store_never_denies_or_nudges() {
+        let dir = TempDir::new().unwrap();
+        // A file where the task store directory belongs: the store cannot be read.
+        std::fs::write(dir.path().join("tasks"), "x").unwrap();
+        assert_eq!(crate::task::tracking(dir.path()), Tracking::Unknown);
+        let tracker = TaskTracker {
+            nudge_after: Some(1),
+            ..TaskTracker::default()
+        };
+        assert_eq!(
+            handle_pre_tool_use(&tracker, &bash("git commit"), Some("s1"), dir.path()),
+            ""
+        );
+        let edit = serde_json::json!({ "tool_name": "Edit" });
+        assert_eq!(
+            handle_post_tool_use(&tracker, &edit, Some("s1"), dir.path()),
+            ""
+        );
+    }
+
+    #[test]
+    fn a_question_with_only_unstarted_tasks_says_nothing() {
+        let dir = TempDir::new().unwrap();
+        let session = open_session(dir.path());
+        add(dir.path(), &session, "Step one");
+        let stop = serde_json::json!({ "last_assistant_message": "Ready?" });
+        assert_eq!(handle_stop(&TaskTracker::default(), &stop, dir.path()), "");
     }
 
     proptest! {

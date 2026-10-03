@@ -653,10 +653,10 @@ mod tests {
             );
         }
         let summary = session_metrics_summary(Some(&cfg), Some("s1"), state.path()).unwrap();
-        assert!(summary.contains("6 calls"), "{summary}");
-        assert!(summary.contains("4 reads"), "{summary}");
-        assert!(summary.contains("2 edits"), "{summary}");
-        assert!(summary.contains("2.0 reads per edit"), "{summary}");
+        assert!(summary.contains("6 calls"));
+        assert!(summary.contains("4 reads"));
+        assert!(summary.contains("2 edits"));
+        assert!(summary.contains("2.0 reads per edit"));
     }
 
     #[test]
