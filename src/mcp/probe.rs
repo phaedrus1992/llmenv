@@ -211,6 +211,13 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+    /// A broken exchange waits for a reply forever, so bound it: the test then fails at once.
+    async fn quickly<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::time::timeout(Duration::from_secs(3), future)
+            .await
+            .unwrap()
+    }
+
     fn tool(name: &str, description: Option<&str>) -> ToolSummary {
         ToolSummary {
             name: name.into(),
@@ -292,7 +299,7 @@ mod tests {
         let (client_w, server_r) = tokio::io::duplex(4096);
         let (server_w, client_r) = tokio::io::duplex(4096);
         tokio::spawn(stub_server(server_r, server_w, pages));
-        stdio_exchange(StdioRpc::new(client_w, client_r)).await
+        quickly(stdio_exchange(StdioRpc::new(client_w, client_r))).await
     }
 
     #[tokio::test]
@@ -314,7 +321,7 @@ mod tests {
         let (client_w, _server_r) = tokio::io::duplex(4096);
         let (server_w, client_r) = tokio::io::duplex(4096);
         drop(server_w);
-        let err = stdio_exchange(StdioRpc::new(client_w, client_r))
+        let err = quickly(stdio_exchange(StdioRpc::new(client_w, client_r)))
             .await
             .unwrap_err()
             .to_string();
@@ -338,7 +345,7 @@ mod tests {
                 .unwrap();
             std::future::pending::<()>().await;
         });
-        let err = stdio_exchange(StdioRpc::new(client_w, client_r))
+        let err = quickly(stdio_exchange(StdioRpc::new(client_w, client_r)))
             .await
             .unwrap_err()
             .to_string();

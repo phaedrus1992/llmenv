@@ -832,6 +832,55 @@ mod tests {
         }
     }
 
+    /// A broken exchange waits for a reply forever, so bound it: the test then fails at once.
+    async fn quickly<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::time::timeout(Duration::from_secs(3), future)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn stdio_rpc_matches_the_reply_by_id_and_returns_its_result() {
+        let (client_w, server_r) = tokio::io::duplex(4096);
+        let (mut server_w, client_r) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(server_r).lines();
+            let line = lines.next_line().await.unwrap().unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["method"], "tools/list");
+            assert_eq!(request["params"], json!({"a": 1}));
+            server_w
+                .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"wrong\":true}}\n")
+                .await
+                .unwrap();
+            server_w
+                .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"right\":true}}\n")
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        });
+        let mut rpc = StdioRpc::new(client_w, client_r);
+        let result = quickly(rpc.request("tools/list", json!({"a": 1})))
+            .await
+            .unwrap();
+        assert_eq!(result, json!({"right": true}));
+    }
+
+    #[tokio::test]
+    async fn stdio_rpc_sends_a_notification_without_an_id() {
+        let (client_w, server_r) = tokio::io::duplex(4096);
+        let (_server_w, client_r) = tokio::io::duplex(4096);
+        let mut rpc = StdioRpc::new(client_w, client_r);
+        quickly(rpc.notify("notifications/initialized"))
+            .await
+            .unwrap();
+        let mut lines = BufReader::new(server_r).lines();
+        let line = quickly(lines.next_line()).await.unwrap().unwrap();
+        let sent: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(sent["method"], "notifications/initialized");
+        assert!(sent.get("id").is_none());
+    }
+
     #[tokio::test]
     async fn stdio_rpc_skips_server_requests_and_counts_non_json_lines() {
         let (client_w, _server_r) = tokio::io::duplex(4096);
