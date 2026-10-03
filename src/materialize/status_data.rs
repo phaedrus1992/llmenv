@@ -1078,7 +1078,7 @@ mod tests {
             &session.id,
         )
         .unwrap();
-        crate::task::complete_task(dir.path(), &t1.slug).unwrap();
+        crate::task::complete_task(dir.path(), &t1.slug, true).unwrap();
 
         let data = collect_tasks_from_state_dir(dir.path(), PROJECT);
         assert_eq!(data.session, Some(SessionProgress { done: 1, total: 2 }));
@@ -1123,7 +1123,7 @@ mod tests {
             &s1.id,
         )
         .unwrap();
-        crate::task::complete_task(dir.path(), &t1.slug).unwrap();
+        crate::task::complete_task(dir.path(), &t1.slug, true).unwrap();
         crate::task::add_task_for_session(
             dir.path(),
             "b",

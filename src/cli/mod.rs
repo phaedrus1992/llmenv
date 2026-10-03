@@ -408,8 +408,13 @@ enum TaskCommand {
         #[arg(long)]
         reopen: bool,
     },
-    /// Mark a task done. Warns when the task was never started.
-    Done { id: String },
+    /// Mark a task done. Refuses a task that was never started (#2416);
+    /// `--force` completes it anyway.
+    Done {
+        id: String,
+        #[arg(long)]
+        force: bool,
+    },
     /// List tasks. Requires `--session <id>` or `--all` (#1124) — no silent
     /// default to every session's tasks. `--state`/`--hide-done` filter by
     /// lifecycle state; `--current-project` further narrows to the current
@@ -552,8 +557,13 @@ enum TaskSessionCommand {
         id: Option<String>,
     },
     /// Finish a session by id. Auto-resolves when exactly one session is
-    /// open for the current project.
-    Finish { id: Option<String> },
+    /// open for the current project. Refuses while a task is `open`, `wip`,
+    /// or `waiting` (#2416); `--abandon-open` untags those tasks and finishes.
+    Finish {
+        id: Option<String>,
+        #[arg(long)]
+        abandon_open: bool,
+    },
     /// Show one session's progress. Auto-resolves like `finish`.
     Show { id: Option<String> },
     /// Roll up a session's tasks, notes, and states into one artifact —
@@ -3327,11 +3337,11 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             }
             println!("Started '{}' — now {:?}", task.slug, task.state);
         }
-        TaskCommand::Done { id } => {
-            let completed = crate::task::complete_task(&state_dir, &id)?;
+        TaskCommand::Done { id, force } => {
+            let completed = crate::task::complete_task(&state_dir, &id, force)?;
             println!("Completed '{}'", completed.task.slug);
-            if let Some(warning) = completed.never_started_warning() {
-                println!("{warning}");
+            if let Some(note) = completed.skipped_start_note() {
+                println!("{note}");
             }
         }
         TaskCommand::Ls {
@@ -3653,11 +3663,25 @@ fn run_task_session_command(
             let session = session::update_resume(state_dir, &id, |r| r.append_note(text))?;
             println!("Noted session '{}'", session.id);
         }
-        TaskSessionCommand::Finish { id } => {
+        TaskSessionCommand::Finish { id, abandon_open } => {
             let id = resolve_session_id(state_dir, &project, id)?;
-            let session = session::finish_session(state_dir, &id)?;
-            let (done, total) = session::session_progress(state_dir, &session.id);
-            println!("Finished session '{}' ({done}/{total} done)", session.id);
+            let outcome = session::finish_session(state_dir, &id, abandon_open)?;
+            let (done, total) = (outcome.done, outcome.total);
+            let id = &outcome.session.id;
+            if outcome.abandoned.is_empty() {
+                println!("Finished session '{id}' ({done}/{total} done)");
+            } else {
+                let n = outcome.abandoned.len();
+                println!("Finished session '{id}' ({done}/{total} done, {n} abandoned)");
+                for task in &outcome.abandoned {
+                    println!(
+                        "  abandoned {} {} {}",
+                        task.state.as_str(),
+                        task.slug,
+                        task.title
+                    );
+                }
+            }
         }
         TaskSessionCommand::Show { id } => {
             let id = resolve_session_id(state_dir, &project, id)?;

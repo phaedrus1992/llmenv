@@ -147,6 +147,7 @@ pub fn merge(
         merged_caps.effort_level = s.effort_level.clone();
     }
     llmenv_config::validate_effort("merged capabilities", &merged_caps)?;
+    llmenv_config::validate_advisor("merged capabilities", &merged_caps)?;
 
     // Merge bundle native: blocks (lower precedence) with the top-level native:
     // block (highest precedence). Start with bundle contributions, then overlay
@@ -251,6 +252,8 @@ const BUNDLE_YAML_KNOWN_KEYS: &[&str] = &[
     "auto_memory_enabled",
     "effort_level",
     "model_effort",
+    "advisor_model",
+    // Parsed so validation can name the replacement (#2409); never merged.
     "advisor_size",
     "native_permissions",
     "native_hooks",
@@ -324,6 +327,7 @@ pub(crate) fn read_bundle_yaml(
         crate::config::validate_capabilities_env_key(&context, key)?;
     }
     llmenv_config::validate_effort(&context, &caps)?;
+    llmenv_config::validate_advisor(&context, &caps)?;
     let permission_rules = caps
         .permissions
         .allow
@@ -881,6 +885,28 @@ mod tests {
             .expect("should be ValidateError");
         assert!(
             matches!(ve, crate::config::ValidateError::ModelEffortKey { model, .. } if model == "opus"),
+            "unexpected variant: {ve}"
+        );
+    }
+
+    // #2409: a bundle that still sets the removed advisor_size fails with the replacement named.
+    #[test]
+    fn bundle_advisor_size_is_rejected_with_the_fix() {
+        let tmp = tempdir().unwrap();
+        let bundle_dir = tmp.path().join("b");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(bundle_dir.join("bundle.yaml"), "advisor_size: medium\n").unwrap();
+        let bundle = BundleRef {
+            name: "b".into(),
+            path: bundle_dir,
+            precedence: 1,
+        };
+        let err = merge(&Capabilities::default(), &BTreeMap::new(), &[bundle]).unwrap_err();
+        let ve = err
+            .downcast_ref::<crate::config::ValidateError>()
+            .expect("should be ValidateError");
+        assert!(
+            matches!(ve, crate::config::ValidateError::AdvisorSizeRemoved { .. }),
             "unexpected variant: {ve}"
         );
     }

@@ -17,6 +17,7 @@ use super::resume::ResumeContext;
 use super::{
     Task, TaskNote, TaskState, list_tasks, now_rfc3339, slugify, task_path, tasks_dir, unique_slug,
 };
+use anyhow::Context;
 
 /// A task session: a named (or anonymous) span of work, tagged with the
 /// project it was started in, whose tasks are tracked as a group.
@@ -609,6 +610,16 @@ pub(super) fn tasks_in_session(state_dir: &Path, session_id: &str) -> Vec<Task> 
         .collect()
 }
 
+/// [`tasks_in_session`], but a read error on the tasks directory is an error instead of an empty
+/// list. Finishing or abandoning a session on a store it cannot read would skip the unfinished
+/// check (#2416).
+fn try_tasks_in_session(state_dir: &Path, session_id: &str) -> anyhow::Result<Vec<Task>> {
+    Ok(super::try_list_tasks(state_dir)?
+        .into_iter()
+        .filter(|t| t.session.as_deref() == Some(session_id))
+        .collect())
+}
+
 /// Abandon `session`: stamps `abandoned_at`, and for every one of its tasks
 /// that isn't already `done`, clears the `session` tag and appends an
 /// orphaning note. Already-`done` tasks keep their tag — a legitimate
@@ -620,38 +631,120 @@ fn abandon_session(state_dir: &Path, mut session: Session) -> anyhow::Result<Ses
     save_session(state_dir, &session)?;
 
     let label = session.name.clone().unwrap_or_else(|| session.id.clone());
-    for mut task in tasks_in_session(state_dir, &session.id)
+    let note = format!(
+        "Orphaned: session '{label}' was abandoned (`session start --replace`) \
+         before this task was finished."
+    );
+    untag_unfinished(state_dir, &session.id, &now, &note)?;
+    Ok(session)
+}
+
+/// Clear the `session` tag from every task in `session_id` that is not `done`
+/// and append `note` to it. Caller must already hold the store lock. Returns
+/// the untagged tasks. Already-`done` tasks keep their tag as history.
+fn untag_unfinished(
+    state_dir: &Path,
+    session_id: &str,
+    now: &str,
+    note: &str,
+) -> anyhow::Result<Vec<Task>> {
+    let mut untagged = Vec::new();
+    for mut task in try_tasks_in_session(state_dir, session_id)?
         .into_iter()
         .filter(|t| t.state != TaskState::Done)
     {
         task.notes.push(TaskNote {
-            at: now.clone(),
-            text: format!(
-                "Orphaned: session '{label}' was abandoned (`session start --replace`) \
-                 before this task was finished."
-            ),
+            at: now.to_string(),
+            text: note.to_string(),
         });
         task.session = None;
-        task.updated_at = now.clone();
-        super::save_task(state_dir, &task)?;
+        task.updated_at = now.to_string();
+        super::save_task(state_dir, &task).with_context(|| {
+            format!(
+                "untagging task '{}' from session '{session_id}'; {} earlier task(s) are already untagged",
+                task.slug,
+                untagged.len()
+            )
+        })?;
+        untagged.push(task);
     }
-    Ok(session)
+    Ok(untagged)
 }
 
-/// Finish an open session by id: stamps `finished_at`.
+/// The tasks that keep a session from finishing: every `open`, `wip`, or
+/// `waiting` task (#2416).
+#[must_use]
+fn unfinished_tasks(tasks: &[Task]) -> Vec<&Task> {
+    tasks
+        .iter()
+        .filter(|t| t.state != TaskState::Done)
+        .collect()
+}
+
+/// What [`finish_session`] did.
+#[derive(Debug, Clone)]
+pub struct FinishOutcome {
+    pub session: Session,
+    /// Tasks that were `done` when the session closed.
+    pub done: u64,
+    /// Tasks tagged to the session before it closed, abandoned ones included.
+    pub total: u64,
+    /// Tasks untagged because `abandon_open` was set.
+    pub abandoned: Vec<Task>,
+}
+
+fn unfinished_error(id: &str, unfinished: &[&Task]) -> anyhow::Error {
+    let list: String = unfinished
+        .iter()
+        .map(|t| format!("\n  {} {} {}", t.state.as_str(), t.slug, t.title))
+        .collect();
+    anyhow::anyhow!(
+        "session '{session}' has {n} unfinished task(s):{list}\nFinish them with `llmenv task done \
+         <slug>`, drop one with `llmenv task clear <slug>`, or pass --abandon-open to untag \
+         them and finish the session anyway.",
+        session = id,
+        n = unfinished.len()
+    )
+}
+
+/// Finish an open session by id: stamps `finished_at`. A session with an
+/// `open`, `wip`, or `waiting` task is not finished (#2416), so it is refused
+/// unless `abandon_open` untags those tasks first.
 ///
 /// # Errors
-/// Errors if `id` doesn't resolve to an existing, currently-open session.
-pub fn finish_session(state_dir: &Path, id: &str) -> anyhow::Result<Session> {
+/// Errors if `id` doesn't resolve to an existing, currently-open session, or if
+/// the session has unfinished tasks and `abandon_open` is false.
+pub fn finish_session(
+    state_dir: &Path,
+    id: &str,
+    abandon_open: bool,
+) -> anyhow::Result<FinishOutcome> {
     super::with_store_lock(state_dir, || {
         let mut session = load_session(state_dir, id)
             .map_err(|e| anyhow::anyhow!("no session '{id}' found: {e}"))?;
         if !session.is_open() {
             anyhow::bail!("session '{id}' is already closed");
         }
-        session.finished_at = Some(now_rfc3339());
+        let tasks = try_tasks_in_session(state_dir, &session.id)?;
+        let unfinished = unfinished_tasks(&tasks);
+        if !unfinished.is_empty() && !abandon_open {
+            return Err(unfinished_error(id, &unfinished));
+        }
+        let now = now_rfc3339();
+        let note = format!(
+            "Dropped: session '{}' finished (`session finish --abandon-open`) before this task \
+             was finished.",
+            session.id
+        );
+        let abandoned = untag_unfinished(state_dir, &session.id, &now, &note)?;
+        session.finished_at = Some(now);
         save_session(state_dir, &session)?;
-        Ok(session)
+        Ok(FinishOutcome {
+            session,
+            done: (tasks.len() - unfinished.len()) as u64,
+            total: tasks.len() as u64,
+            abandoned,
+        })
     })
 }
 
@@ -989,7 +1082,7 @@ mod tests {
     fn update_resume_rejects_a_closed_session() {
         let dir = TempDir::new().expect("tempdir");
         let created = start_with_resume(dir.path(), &ResumeContext::default(), StartDecision::Auto);
-        finish_session(dir.path(), &created.id).expect("finish");
+        finish_session(dir.path(), &created.id, false).expect("finish");
         let err = update_resume(dir.path(), &created.id, |_| {}).expect_err("closed");
         assert!(err.to_string().contains("closed"), "{err}");
     }
@@ -1079,7 +1172,7 @@ mod tests {
         );
         assert_eq!(resume_reminders(empty_dir.path(), PROJECT_A), "");
         let closed = start_with_resume(dir.path(), &full_resume_context(), StartDecision::New);
-        finish_session(dir.path(), &closed.id).expect("finish");
+        finish_session(dir.path(), &closed.id, false).expect("finish");
         let both = resume_reminders(dir.path(), PROJECT_A);
         assert_eq!(both.matches("has resume context").count(), 1, "{both}");
     }
@@ -1739,7 +1832,7 @@ mod tests {
         else {
             panic!("expected Created");
         };
-        finish_session(dir.path(), &session.id).expect("test");
+        finish_session(dir.path(), &session.id, false).expect("test");
         touch_last_activity(dir.path(), &session.id).expect("test");
         // Still closed — the touch is a no-op on a non-open session.
         assert!(open_sessions_for_project(dir.path(), PROJECT_A).is_empty());
@@ -1785,15 +1878,15 @@ mod tests {
         .expect("test") else {
             panic!("expected Created");
         };
-        let finished = finish_session(dir.path(), &session.id).expect("test");
-        assert!(finished.finished_at.is_some());
+        let finished = finish_session(dir.path(), &session.id, false).expect("test");
+        assert!(finished.session.finished_at.is_some());
         assert!(open_sessions_for_project(dir.path(), PROJECT_A).is_empty());
     }
 
     #[test]
     fn finish_session_unknown_id_errors() {
         let dir = TempDir::new().expect("test");
-        assert!(finish_session(dir.path(), "no-such-session").is_err());
+        assert!(finish_session(dir.path(), "no-such-session", false).is_err());
     }
 
     #[test]
@@ -1809,8 +1902,153 @@ mod tests {
         .expect("test") else {
             panic!("expected Created");
         };
-        finish_session(dir.path(), &session.id).expect("test");
-        assert!(finish_session(dir.path(), &session.id).is_err());
+        finish_session(dir.path(), &session.id, false).expect("test");
+        assert!(finish_session(dir.path(), &session.id, false).is_err());
+    }
+
+    /// A fresh session in `PROJECT_A` with one task per entry of `states`, each driven through
+    /// the real `start`/`wait`/`done` path.
+    fn session_with_states(dir: &Path, states: &[TaskState]) -> Session {
+        let StartOutcome::Created(session) =
+            start_session(dir, Some("s"), None, PROJECT_A, StartDecision::Auto).expect("test")
+        else {
+            panic!("expected Created");
+        };
+        for (i, state) in states.iter().enumerate() {
+            let task = add_task_for_session(
+                dir,
+                &format!("Task {i}"),
+                crate::ParentSpec::Detached,
+                &session.id,
+            )
+            .expect("test");
+            match state {
+                TaskState::Open => {}
+                TaskState::Wip => {
+                    crate::start_task(dir, &task.slug, false).expect("test");
+                }
+                TaskState::Waiting => {
+                    crate::start_task(dir, &task.slug, false).expect("test");
+                    crate::wait_task(dir, &task.slug, "review").expect("test");
+                }
+                TaskState::Done => {
+                    crate::start_task(dir, &task.slug, false).expect("test");
+                    crate::complete_task(dir, &task.slug, false).expect("test");
+                }
+            }
+        }
+        session
+    }
+
+    #[test]
+    fn finish_session_refuses_each_unfinished_state_and_lists_it() {
+        for state in [TaskState::Open, TaskState::Wip, TaskState::Waiting] {
+            let dir = TempDir::new().expect("test");
+            let session = session_with_states(dir.path(), &[TaskState::Done, state]);
+            let err = finish_session(dir.path(), &session.id, false).expect_err("must refuse");
+            let text = err.to_string();
+            assert!(
+                text.contains(&format!("{} task-1 Task 1", state.as_str())),
+                "{text}"
+            );
+            assert!(
+                !text.contains("task-0"),
+                "done tasks are not listed: {text}"
+            );
+            assert!(
+                text.contains("--abandon-open") && text.contains("task clear"),
+                "{text}"
+            );
+            assert!(
+                load_session(dir.path(), &session.id)
+                    .expect("test")
+                    .is_open(),
+                "a refused finish must leave the session open"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finish_session_on_an_unreadable_task_store_errors_and_stays_open() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().expect("test");
+        let session = session_with_states(dir.path(), &[TaskState::Open]);
+        let tasks = crate::tasks_dir(dir.path());
+        std::fs::set_permissions(&tasks, std::fs::Permissions::from_mode(0o000)).expect("test");
+        let readable_anyway = std::fs::read_dir(&tasks).is_ok();
+        let result = finish_session(dir.path(), &session.id, false);
+        std::fs::set_permissions(&tasks, std::fs::Permissions::from_mode(0o700)).expect("test");
+        if readable_anyway {
+            return; // running as root: the FS ignores permissions
+        }
+        assert!(
+            result.is_err(),
+            "an unreadable store must not finish the session"
+        );
+        assert!(
+            load_session(dir.path(), &session.id)
+                .expect("test")
+                .is_open()
+        );
+    }
+
+    #[test]
+    fn finish_session_all_done_finishes_with_counts() {
+        let dir = TempDir::new().expect("test");
+        let session = session_with_states(dir.path(), &[TaskState::Done, TaskState::Done]);
+        let outcome = finish_session(dir.path(), &session.id, false).expect("test");
+        assert_eq!((outcome.done, outcome.total), (2, 2));
+        assert!(outcome.abandoned.is_empty());
+        assert!(outcome.session.finished_at.is_some());
+    }
+
+    #[test]
+    fn finish_session_abandon_open_untags_notes_and_reports() {
+        let dir = TempDir::new().expect("test");
+        let states = [
+            TaskState::Done,
+            TaskState::Open,
+            TaskState::Wip,
+            TaskState::Waiting,
+        ];
+        let session = session_with_states(dir.path(), &states);
+        let outcome = finish_session(dir.path(), &session.id, true).expect("test");
+        assert_eq!((outcome.done, outcome.total), (1, 4));
+        assert_eq!(outcome.abandoned.len(), 3);
+        for dropped in &outcome.abandoned {
+            let stored = crate::load_task(dir.path(), &dropped.slug).expect("test");
+            assert!(stored.session.is_none());
+            let note = &stored.notes.last().expect("note added").text;
+            assert!(
+                note.contains(&session.id) && note.contains("finished"),
+                "{note}"
+            );
+        }
+        let kept = crate::load_task(dir.path(), "task-0").expect("test");
+        assert_eq!(
+            kept.session.as_deref(),
+            Some(session.id.as_str()),
+            "done keeps its tag"
+        );
+    }
+
+    proptest::proptest! {
+        /// A session finishes without `abandon_open` if and only if every task is done.
+        #[test]
+        fn finish_succeeds_iff_every_task_is_done(
+            picks in proptest::collection::vec(0u8..4, 0..8),
+        ) {
+            let states: Vec<TaskState> = picks
+                .iter()
+                .map(|p| [TaskState::Open, TaskState::Wip, TaskState::Waiting, TaskState::Done][*p as usize])
+                .collect();
+            let dir = TempDir::new().expect("test");
+            let session = session_with_states(dir.path(), &states);
+            let finished = finish_session(dir.path(), &session.id, false).is_ok();
+            proptest::prop_assert_eq!(finished, states.iter().all(|s| *s == TaskState::Done));
+        }
     }
 
     #[test]
@@ -1823,7 +2061,7 @@ mod tests {
             panic!("expected Created");
         };
         start_session(dir.path(), Some("b"), None, PROJECT_B, StartDecision::Auto).expect("test");
-        finish_session(dir.path(), &a.id).expect("test");
+        finish_session(dir.path(), &a.id, false).expect("test");
         start_session(dir.path(), Some("c"), None, PROJECT_A, StartDecision::Auto).expect("test");
 
         let open = open_sessions_for_project(dir.path(), PROJECT_A);
@@ -1840,7 +2078,7 @@ mod tests {
         else {
             panic!("expected Created");
         };
-        finish_session(dir.path(), &a.id).expect("test");
+        finish_session(dir.path(), &a.id, false).expect("test");
         start_session(dir.path(), Some("b"), None, PROJECT_A, StartDecision::New).expect("test");
         start_session(dir.path(), Some("c"), None, PROJECT_B, StartDecision::Auto).expect("test");
 

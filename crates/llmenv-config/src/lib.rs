@@ -1,3 +1,4 @@
+mod advisor;
 mod effort;
 mod proxy_path;
 mod schema;
@@ -25,6 +26,7 @@ pub const CONTEXT_MODE_DATA_ENV: &str = "CONTEXT_MODE_DATA_DIR";
 /// Durable-state subdir name for context-mode's store.
 pub const CONTEXT_MODE_STATE_SUBDIR: &str = "context-mode";
 
+pub use advisor::validate_advisor;
 pub use effort::validate_effort;
 pub use proxy_path::{PathParseError, PathSegment, get_path, parse_path, remove_path, set_path};
 pub use schema::{
