@@ -2796,7 +2796,7 @@ fn direct_index_stdout(
 
 /// Create the result file at `path`, owner-only and new. An existing file or symlink at `path` is
 /// removed first, so the open can neither follow a link nor reuse a file that another user made.
-pub(crate) fn create_result_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+fn create_result_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     match std::fs::remove_file(path) {
         Ok(()) => {}
