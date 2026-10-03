@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::HookEvent;
 use crate::session_log::scope_header::ScopeContext;
 
 const DIR: &str = "agent_config";
@@ -132,9 +133,13 @@ impl AgentConfig {
 }
 
 /// The content hash of the booted config folder, when the engine sets one.
-pub(crate) fn booted_config_hash() -> Option<String> {
-    let dir = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty())?;
-    match crate::materialize::manifest::CacheManifest::read(Path::new(&dir)) {
+fn booted_config_hash() -> Option<String> {
+    booted_hash_in(std::env::var_os("CLAUDE_CONFIG_DIR").as_deref())
+}
+
+fn booted_hash_in(config_dir: Option<&std::ffi::OsStr>) -> Option<String> {
+    let dir = config_dir.filter(|d| !d.is_empty())?;
+    match crate::materialize::manifest::CacheManifest::read(Path::new(dir)) {
         Ok(manifest) => manifest.map(|m| m.content_hash),
         Err(e) => {
             tracing::warn!("cannot read the booted config manifest, config hash unknown: {e}");
@@ -144,7 +149,7 @@ pub(crate) fn booted_config_hash() -> Option<String> {
 }
 
 /// Write the document for a `SessionStart`. A `resume` or `compact` also returns the resume line.
-pub(crate) fn on_session_start(
+fn on_session_start(
     state_dir: &Path,
     session_id: &str,
     ctx: &ScopeContext,
@@ -154,6 +159,36 @@ pub(crate) fn on_session_start(
     let line = matches!(facts.source, "resume" | "compact").then(|| doc.resume_line());
     write_session_start(state_dir, session_id, doc);
     line
+}
+
+/// Write the document for a `SessionStart` hook (#2398). Any other event writes nothing. Returns
+/// the resume line for a `resume` or `compact`.
+pub(crate) fn record_for_event(
+    event: HookEvent,
+    session_id: Option<&str>,
+    payload: &serde_json::Value,
+    adapter_name: &str,
+    ctx: &ScopeContext,
+    state_dir: anyhow::Result<PathBuf>,
+) -> Option<String> {
+    if event != HookEvent::SessionStart {
+        return None;
+    }
+    let Some(session_id) = session_id else {
+        tracing::debug!("agent config skipped: the hook has no session id");
+        return None;
+    };
+    let state_dir = state_dir
+        .inspect_err(|e| tracing::error!("no state dir, agent config not written: {e}"))
+        .ok()?;
+    let hash = booted_config_hash();
+    let facts = StartFacts::from_payload(
+        payload,
+        adapter_name,
+        hash.as_deref(),
+        super::session_state::unix_now(),
+    );
+    on_session_start(&state_dir, session_id, ctx, &facts)
 }
 
 /// Handle a `PostModelSwitch` payload. A payload without `to_model` changes nothing.
@@ -203,24 +238,44 @@ fn path(state_dir: &Path, session_id: &str) -> Option<PathBuf> {
         .then(|| state_dir.join(DIR).join(format!("{session_id}.json")))
 }
 
-/// Read the document. A missing file gives `None` quietly. A corrupt or unreadable file gives
-/// `None` and a warning, because the next write then replaces it.
-pub(crate) fn load(state_dir: &Path, session_id: &str) -> Option<AgentConfig> {
+/// What the file for a session holds.
+#[derive(Debug, PartialEq, Eq)]
+enum Stored {
+    Missing,
+    /// The file exists and cannot be used.
+    Unreadable,
+    Doc(AgentConfig),
+}
+
+fn read(state_dir: &Path, session_id: &str) -> Stored {
     let Some(path) = path(state_dir, session_id) else {
         tracing::debug!("agent config skipped: the session id is not safe in a path");
-        return None;
+        return Stored::Missing;
     };
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Stored::Missing,
         Err(e) => {
             tracing::warn!("cannot read agent config {}: {e}", path.display());
-            return None;
+            return Stored::Unreadable;
         }
     };
-    serde_json::from_str(&text)
-        .inspect_err(|e| tracing::warn!("corrupt agent config {}: {e}", path.display()))
-        .ok()
+    serde_json::from_str(&text).map_or_else(
+        |e| {
+            tracing::warn!("corrupt agent config {}: {e}", path.display());
+            Stored::Unreadable
+        },
+        Stored::Doc,
+    )
+}
+
+/// Read the document. A missing, corrupt, or unreadable file gives `None`. The last two warn,
+/// because the next write replaces the file.
+pub(crate) fn load(state_dir: &Path, session_id: &str) -> Option<AgentConfig> {
+    match read(state_dir, session_id) {
+        Stored::Doc(doc) => Some(doc),
+        Stored::Missing | Stored::Unreadable => None,
+    }
 }
 
 /// Replace the document for a `SessionStart`. A restart keeps `created_at` and the model history.
@@ -600,6 +655,70 @@ mod tests {
             load(dir.path(), "s").unwrap().effort.as_deref(),
             Some("low")
         );
+    }
+
+    #[test]
+    fn read_tells_a_missing_file_from_an_unusable_one() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read(dir.path(), "s"), Stored::Missing);
+        assert_eq!(read(dir.path(), "../x"), Stored::Missing);
+        write_session_start(dir.path(), "s", doc());
+        assert_eq!(read(dir.path(), "s"), Stored::Doc(doc()));
+        std::fs::write(path(dir.path(), "s").unwrap(), "{not json").unwrap();
+        assert_eq!(read(dir.path(), "s"), Stored::Unreadable);
+        let blocked = path(dir.path(), "d").unwrap();
+        std::fs::create_dir_all(&blocked).unwrap();
+        assert_eq!(read(dir.path(), "d"), Stored::Unreadable);
+    }
+
+    #[test]
+    fn the_booted_hash_comes_from_the_manifest_in_the_config_dir() {
+        use crate::materialize::manifest::CacheManifest;
+        use std::ffi::OsStr;
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(booted_hash_in(None), None);
+        assert_eq!(booted_hash_in(Some(OsStr::new(""))), None);
+        assert_eq!(booted_hash_in(Some(dir.path().as_os_str())), None);
+        CacheManifest::new("abc123", Vec::<std::path::PathBuf>::new())
+            .write(dir.path())
+            .unwrap();
+        assert_eq!(
+            booted_hash_in(Some(dir.path().as_os_str())).as_deref(),
+            Some("abc123")
+        );
+    }
+
+    #[test]
+    fn a_session_start_without_a_session_id_or_state_dir_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = serde_json::json!({ "source": "resume", "model": "m" });
+        let ctx = ctx();
+        let run = |event, id, state: anyhow::Result<std::path::PathBuf>| {
+            record_for_event(event, id, &payload, "claude-code", &ctx, state)
+        };
+        assert_eq!(
+            run(HookEvent::SessionStart, None, Ok(dir.path().into())),
+            None
+        );
+        assert_eq!(
+            run(
+                HookEvent::SessionStart,
+                Some("s"),
+                Err(anyhow::anyhow!("x"))
+            ),
+            None
+        );
+        assert_eq!(
+            run(HookEvent::TurnStart, Some("s"), Ok(dir.path().into())),
+            None
+        );
+        assert!(load(dir.path(), "s").is_none());
+        let line = run(HookEvent::SessionStart, Some("s"), Ok(dir.path().into())).unwrap();
+        assert!(
+            line.starts_with("[llmenv session] engine claude_code, model m"),
+            "{line}"
+        );
+        assert_eq!(load(dir.path(), "s").unwrap().source, "resume");
     }
 
     proptest! {

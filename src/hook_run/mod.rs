@@ -1075,31 +1075,6 @@ fn emit_trace_timing(
     }
 }
 
-/// Write the agent-config document for a `SessionStart` (#2398). Returns the resume line for a
-/// `resume` or `compact`.
-fn record_agent_config(
-    session_id: Option<&str>,
-    payload: &serde_json::Value,
-    adapter_name: &str,
-    ctx: &crate::session_log::scope_header::ScopeContext,
-) -> Option<String> {
-    let Some(session_id) = session_id else {
-        tracing::debug!("agent config skipped: the hook has no session id");
-        return None;
-    };
-    let state_dir = crate::paths::state_dir()
-        .inspect_err(|e| tracing::error!("no state dir, agent config not written: {e}"))
-        .ok()?;
-    let hash = agent_config::booted_config_hash();
-    let facts = agent_config::StartFacts::from_payload(
-        payload,
-        adapter_name,
-        hash.as_deref(),
-        session_state::unix_now(),
-    );
-    agent_config::on_session_start(&state_dir, session_id, ctx, &facts)
-}
-
 fn run_inner(
     event: HookEvent,
     claude_session_id: Option<&str>,
@@ -1464,11 +1439,14 @@ fn run_inner(
             ctx: &ctx,
             state_path: state_path.as_deref(),
         };
-        let agent_line = if event == HookEvent::SessionStart {
-            record_agent_config(claude_session_id, stdin_payload, adapter_name, &ctx)
-        } else {
-            None
-        };
+        let agent_line = agent_config::record_for_event(
+            event,
+            claude_session_id,
+            stdin_payload,
+            adapter_name,
+            &ctx,
+            crate::paths::state_dir(),
+        );
         let health_notice = if event == HookEvent::SessionStart {
             mcp_health::session_start_notice(rt, &config, config_dir, &active)
         } else {
