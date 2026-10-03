@@ -77,19 +77,23 @@ fn check_level(
     })
 }
 
-/// Claude Code matches an alias (`opus`), a `[1m]` suffix, or a provider ID to
-/// the canonical model ID entry itself, so only the canonical ID is a valid key.
-/// A canonical ID is `claude-` and then lowercase ASCII words joined by `-`.
-fn check_model_id(context: &str, model: &str) -> Result<(), ValidateError> {
-    let canonical = model.strip_prefix("claude-").is_some_and(|rest| {
+/// True for a canonical Claude model ID: `claude-` and then lowercase ASCII words joined by `-`.
+pub(crate) fn is_canonical_model_id(model: &str) -> bool {
+    model.strip_prefix("claude-").is_some_and(|rest| {
         rest.split('-').all(|word| {
             !word.is_empty()
                 && word
                     .bytes()
                     .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
         })
-    });
-    if canonical {
+    })
+}
+
+/// Claude Code matches an alias (`opus`), a `[1m]` suffix, or a provider ID to
+/// the canonical model ID entry itself, so only the canonical ID is a valid key.
+/// A canonical ID is `claude-` and then lowercase ASCII words joined by `-`.
+fn check_model_id(context: &str, model: &str) -> Result<(), ValidateError> {
+    if is_canonical_model_id(model) {
         return Ok(());
     }
     Err(ValidateError::ModelEffortKey {

@@ -283,14 +283,15 @@ fn todowrite(
                 }
             }
             "completed" if !existing.is_some_and(|t| t.state == task::TaskState::Done) => {
-                match task::complete_task(state_dir, &slug) {
-                    // A todo added and completed in this same call is not a
-                    // skipped start; one that sat `open` before is (#2338).
-                    Ok(c) if existing.is_some() && c.never_started_warning().is_some() => {
-                        finished.push(format!("{slug} (never started)"));
-                    }
+                // A todo added and completed in this same call is not a skipped
+                // start, so only that one is forced; a task that sat `open`
+                // before is refused (#2416).
+                match task::complete_task(state_dir, &slug, existing.is_none()) {
                     Ok(_) => finished.push(slug.clone()),
-                    Err(e) => failures.push(format!("'{title}' couldn't be completed ({e})")),
+                    Err(e) => {
+                        tracing::warn!(error = %e, slug = %slug, "task redirect: completion refused");
+                        failures.push(format!("'{title}' couldn't be completed ({e})"));
+                    }
                 }
             }
             _ => {}
@@ -474,10 +475,9 @@ fn update(input: Option<&Value>, state_dir: &Path) -> String {
             })
         }
         Some("completed") => {
-            task::complete_task(state_dir, &slug).map(|c| match c.never_started_warning() {
-                Some(warning) => format!("completed '{slug}'. {warning}"),
-                None => format!("completed '{slug}'"),
-            })
+            // force=false: the redirect must not let an agent skip the start
+            // check that `llmenv task done` enforces (#2416).
+            task::complete_task(state_dir, &slug, false).map(|_| format!("completed '{slug}'"))
         }
         Some("deleted") => task::delete_task(state_dir, &slug).map(|_| format!("deleted '{slug}'")),
         // Name the unrecognized value rather than silently reporting "unchanged"
@@ -598,10 +598,10 @@ mod tests {
         );
     }
 
-    // #2338: a todo that sat `pending` and then arrives `completed` skipped
-    // its start; one added and completed in the same call did not sit open.
+    // #2416: a todo that sat `pending` and then arrives `completed` skipped its start and is
+    // refused; one added and completed in the same call did not sit open and is accepted.
     #[test]
-    fn todowrite_flags_pending_to_completed_but_not_added_completed() {
+    fn todowrite_refuses_pending_to_completed_but_not_added_completed() {
         let dir = tmp();
         handle_inner(
             "todowrite",
@@ -624,10 +624,19 @@ mod tests {
             .find(|t| t.title == "waited")
             .expect("test");
         assert!(
-            out.contains(&format!("{} (never started)", waited.slug)),
+            out.contains("couldn't be completed") && out.contains("never started"),
             "{out}"
         );
-        assert_eq!(out.matches("(never started)").count(), 1, "{out}");
+        assert_eq!(
+            waited.state,
+            task::TaskState::Open,
+            "a refused todo stays open"
+        );
+        let instant = task::list_tasks(dir.path())
+            .into_iter()
+            .find(|t| t.title == "instant")
+            .expect("test");
+        assert_eq!(instant.state, task::TaskState::Done);
     }
 
     // Re-sending an unchanged list is opencode's normal behaviour — every edit
@@ -905,7 +914,7 @@ mod tests {
     }
 
     #[test]
-    fn update_maps_status_to_done() {
+    fn update_refuses_done_on_an_open_task() {
         let dir = tmp();
         // Seed a task via the same create path.
         handle_inner(
@@ -924,14 +933,14 @@ mod tests {
         );
         assert!(out.starts_with("__DENY__:"), "{out}");
         assert!(
-            out.contains("never started"),
-            "open -> done must warn (#2338): {out}"
+            out.contains("never started") && out.contains("llmenv task start"),
+            "open -> done must be refused with the fix (#2416): {out}"
         );
         let t = &task::list_tasks(dir.path())[0];
         assert_eq!(
             t.state,
-            task::TaskState::Done,
-            "state should be Done: {t:?}"
+            task::TaskState::Open,
+            "a refused done leaves the task open: {t:?}"
         );
     }
 

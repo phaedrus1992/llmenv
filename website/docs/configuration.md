@@ -341,6 +341,23 @@ A `native.claude_code.modelSettings` block goes on top of all of this.
 The list of models that ignore the top-level key is `PER_MODEL_EFFORT_MODELS` in `src/adapter/model_settings.rs`.
 Each new Claude model that ignores the top-level key must be added to that list when it ships.
 
+### `advisor_model` (Claude Code)
+
+(added in v3.12.0; replaces `advisor_size`)
+
+`capabilities.advisor_model` sets the advisor model that Claude Code uses, and llmenv renders it to the `advisorModel` key in `settings.json`.
+Use `fable`, `opus`, `sonnet`, or a canonical model ID such as `claude-opus-5-5`.
+An alias means the current default model of that family.
+Any other value fails validation.
+llmenv checks the shape of the value only.
+Claude Code and the API check that the advisor ranks at or above the main model.
+Leave it unset to keep the advisor off.
+`--advisor <model>` and `/advisor <model>` override the setting for a session.
+See the [Claude Code advisor page](https://code.claude.com/docs/en/advisor).
+
+`capabilities.advisor_size` was removed in v3.12.0, because Claude Code never read the `advisorSize` key that it rendered.
+A config that still sets it fails validation and names `advisor_model`.
+
 ### `model_providers` / `default_models`
 
 (added in v3.3.0; Crush rendering added in v3.6.1, opencode rendering added in
