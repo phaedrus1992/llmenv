@@ -2884,8 +2884,9 @@ fn sync_plugin_payloads(
             };
             let Some(entry) = entries.iter().find(|e| e.name == p.plugin) else {
                 tracing::warn!(
-                    "plugin '{}' not found in marketplace '{}' manifest — \
-                     verify plugin name or run `llmenv plugin-sync` to refresh the clone",
+                    "plugin '{}' not found in marketplace '{}' manifest — verify plugin name, \
+                     look for an earlier warning that skipped its entry, or run \
+                     `llmenv plugin-sync` to refresh the clone",
                     p.plugin,
                     p.marketplace
                 );
@@ -2894,13 +2895,8 @@ fn sync_plugin_payloads(
             if !crate::plugins::cache::is_external_plugin_source(&entry.source) {
                 return p;
             }
-            match crate::plugins::cache::sync_external_plugin(
-                cache_root,
-                &p.marketplace,
-                &p.plugin,
-                &entry.source,
-                false,
-            ) {
+            match crate::plugins::cache::sync_plugin_entry(cache_root, &p.marketplace, entry, false)
+            {
                 Ok(state) => {
                     p.install_path = Some(state.install_location.to_string_lossy().into_owned());
                     p.git_commit_sha = state.head;
@@ -2914,7 +2910,7 @@ fn sync_plugin_payloads(
                 }
                 Err(e) => {
                     eprintln!(
-                        "warning: external plugin '{}@{}' payload lookup failed: {e}",
+                        "warning: external plugin '{}@{}' payload lookup failed: {e:#}",
                         p.plugin, p.marketplace
                     );
                 }
@@ -4616,7 +4612,8 @@ fn run_plugin_sync() -> anyhow::Result<()> {
         let Some(entry) = plugins.iter().find(|p| p.name == *plugin_name) else {
             eprintln!(
                 "✗ {plugin_name}@{mkt_name}: not found in marketplace manifest after sync — \
-                 check that the plugin name matches an entry in {mkt_name}"
+                 check that the plugin name matches an entry in {mkt_name}, and look for an \
+                 earlier warning that skipped the entry"
             );
             missing_plugins.push(format!("{plugin_name}@{mkt_name}"));
             continue;
@@ -4624,14 +4621,8 @@ fn run_plugin_sync() -> anyhow::Result<()> {
         if !crate::plugins::cache::is_external_plugin_source(&entry.source) {
             continue;
         }
-        let state = crate::plugins::cache::sync_external_plugin(
-            &cache_root,
-            mkt_name,
-            plugin_name,
-            &entry.source,
-            true,
-        )
-        .with_context(|| format!("syncing external plugin '{plugin_name}@{mkt_name}'"))?;
+        let state = crate::plugins::cache::sync_plugin_entry(&cache_root, mkt_name, entry, true)
+            .with_context(|| format!("syncing external plugin '{plugin_name}@{mkt_name}'"))?;
         let head = state.head.as_deref().unwrap_or("(unknown)");
         println!(
             "✓ {}@{} (external) → {} [{}]",

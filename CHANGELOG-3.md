@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Claude Code sessions write an agent-config document (engine, model, effort, project, tags, config hash) to the state dir, and a `PostModelSwitch` hook keeps the model current. A resumed or compacted session starts with a one-line `[llmenv session]` summary of it, and `llmenv task session summary` shows a `running as` line. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#agent-config) (#2398)
 - `llmenv doctor` reports the size of the always-loaded instruction text (`CLAUDE.md` and rules without a `paths:` filter), names the largest bundles, and warns over Claude Code's large-file limit. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#doctor) (#2357)
 - `llmenv doctor` measures the instructions and tool descriptions of each MCP server and warns when Claude Code would cut them at its 2,048-character limit. `llmenv doctor --probe-mcp` also measures stdio servers. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#doctor) (#2148)
+- Marketplace plugin entries with a `git-subdir` source install the plugin from the named folder of the repo, and a `sha` pins the exact commit for `github`, `url`, and `git-subdir` sources. `archive` and `command` sources are skipped with a warning that names the kind. See [Plugins](https://phaedrus1992.github.io/llmenv/docs/plugins#plugin-sources-in-a-marketplace-manifest) (#2441)
 
 ### Changed
 
@@ -24,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `llmenv task done` refuses a task that was never started, and `llmenv task session finish` refuses while a task is `open`, `wip`, or `waiting`. Both exit non-zero with the fix. `task done --force` and `task session finish --abandon-open` override them, and the native-tool redirect never forces. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#task) (#2416)
 - `capabilities.advisor_size` is now `capabilities.advisor_model` and renders Claude Code's `advisorModel`. Use `fable`, `opus`, `sonnet`, or a model ID. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#advisor_model-claude-code) (#2409)
 - The consolidation `claude -p` call no longer waits for MCP servers to connect (`CLAUDE_CODE_MCP_STARTUP_WAIT_MS=0`), so it starts faster (#2148)
+- Plugin and marketplace sources that use `git://` or a `<helper>::` remote helper are rejected, like `ext::` and `http://` before. A pin (`sha` or `ref`) that is not a string is an error, not an unpinned clone (#2441)
 
 ### Removed
 
@@ -31,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- `llmenv plugin-sync` re-clones a pinned plugin payload, so a changed `ref` in the marketplace manifest takes effect. Before, it kept the old checkout and reported success (#2442)
+- A `ref` on a `url` plugin source is honored. Before, it was ignored (#2441)
 - A marketplace plugin whose `source` is `{"source": "github", "repo": "owner/name"}` with no `url` now syncs, and its `ref` selects the branch or tag. Before, llmenv skipped it as "not found in marketplace manifest". See [Plugins](https://phaedrus1992.github.io/llmenv/docs/plugins#plugin-sources-in-a-marketplace-manifest) (#2440)
 - Background work is no longer lost when a child dies or ICM is down. Consolidation, the memory store of a web fetch, the transcript records, and the codebase-memory index write a checkpoint, and the next session start runs unfinished jobs again. `llmenv doctor` lists what is left. A request id keeps a resumed or retried store from writing the same memory twice. See [Troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#background-work-that-did-not-finish) (#2396, #2397)
 - `llmenv doctor` no longer recommends `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` when `autoCompactEnabled` is `false`, and it names the `autoCompactWindow` that the percentage applies to (#2345)

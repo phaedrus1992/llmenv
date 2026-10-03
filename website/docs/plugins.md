@@ -42,15 +42,27 @@ llmenv reads these forms:
 | `source` | Result |
 | --- | --- |
 | `"./path"` | A plugin inside the marketplace clone. |
-| `"https://host/repo.git"` or `{"source": "url", "url": ...}` | A separate clone under `plugin-payloads/`. |
-| `{"source": "github", "repo": "owner/name", "ref": "plugin"}` | A clone of `https://github.com/owner/name.git`. |
+| `"https://host/repo.git"` | A separate clone under `plugin-payloads/`. |
+| `{"source": "url", "url": ...}` | The same as a plain URL. |
+| `{"source": "github", "repo": "owner/name"}` | A clone of `https://github.com/owner/name.git`. |
+| `{"source": "git-subdir", "url": ..., "path": ...}` | A clone of the repo. The plugin is the folder `path`. |
 | `{"source": "npm", "package": ..., "version": ...}` | Left to the engine, which installs it from npm. |
 
-For a `github` source, `ref` selects the branch or tag, and no `ref` uses the default branch.
+`url`, `github`, and `git-subdir` sources accept a `ref` and a `sha`.
+A `git-subdir` `url` is a clone URL or `owner/name`.
+A `sha` must be a full commit id (40 hex digits).
+llmenv fetches that one commit, so the plugin does not move when the branch does.
+When an object has a `sha` and a `ref`, the `sha` wins.
+A `ref` selects a branch or tag, and no pin uses the default branch.
 When an object has both `url` and `repo`, `url` wins.
-A `repo` that is not `owner/name` skips that entry, and the warning names the entry, the value, and the fix.
+`plugin-sync` re-clones a pinned plugin, so a changed `ref` or `sha` takes effect on the next sync.
+An unpinned plugin is pulled.
+
+A malformed entry is skipped with a warning that names the entry, the value, and the fix.
+This covers a `repo` that is not `owner/name`, a `sha` that is not a full commit id,
+a `ref` that is empty or unsafe, and a `path` that is not a relative folder inside the repo.
+The `archive` and `command` kinds are skipped with a warning that names the kind, because llmenv does not fetch them.
 An object with neither `url` nor a github `repo` is skipped with a warning.
-The `git-subdir`, `archive`, and `command` kinds and `sha` pins are not supported yet (#2441).
 
 ## Plugin collections
 
