@@ -122,7 +122,7 @@ pub(super) fn undone_children_message(slug: &str, undone: &[&Task]) -> String {
 
 /// How far the sub-tasks of a parent have come.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct ChildProgress {
+struct ChildProgress {
     pub done: usize,
     pub wip: usize,
     pub waiting: usize,
@@ -140,11 +140,11 @@ impl ChildProgress {
     }
 
     /// Sub-tasks remain, and none is running or parked.
-    pub(super) fn stalled(self) -> bool {
+    fn stalled(self) -> bool {
         self.open > 0 && self.wip == 0 && self.waiting == 0
     }
 
-    pub(super) fn line(self) -> String {
+    fn line(self) -> String {
         format!(
             "{} of {} sub-tasks done, {} in progress, {} waiting, {} not started",
             self.done,
@@ -157,7 +157,7 @@ impl ChildProgress {
 }
 
 /// The progress of the direct sub-tasks of `parent`, or `None` when it has none.
-pub(super) fn child_progress(parent: &str, all: &[Task]) -> Option<ChildProgress> {
+fn child_progress(parent: &str, all: &[Task]) -> Option<ChildProgress> {
     let kids = children(parent, all);
     if kids.is_empty() {
         return None;
@@ -172,7 +172,7 @@ pub(super) fn child_progress(parent: &str, all: &[Task]) -> Option<ChildProgress
 }
 
 /// The first `open` sub-task of `parent`, in creation order.
-pub(super) fn first_open_child<'a>(parent: &str, all: &'a [Task]) -> Option<&'a Task> {
+fn first_open_child<'a>(parent: &str, all: &'a [Task]) -> Option<&'a Task> {
     children(parent, all)
         .into_iter()
         .filter(|t| t.state == TaskState::Open)
