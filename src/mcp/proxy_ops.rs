@@ -303,10 +303,17 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("mcp-proxy");
-        std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
+        std::fs::write(
+            &script,
+            "#!/bin/sh\ntrap 'kill $pid; exit 143' TERM\nsleep 30 &\npid=$!\nwait $pid\n",
+        )
+        .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut child = std::process::Command::new(&script)
             .args(["--host", "127.0.0.1", "--port", "1", "--", "icm", "serve"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
         let pid = child.id();
