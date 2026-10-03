@@ -54,7 +54,9 @@
   // and each one makes every open PR that touches Cargo.lock or
   // package-lock.json stale, so Renovate rebases and CI runs again (#2364).
   // Daily keeps the delay to about 24h. vulnerabilityAlerts (below) still
-  // opens direct-dependency security PRs at once.
+  // opens direct-dependency security PRs at once. The maintenance lines
+  // release/1.x and release/2.x are covered too, through a packageRules entry
+  // below (#2367).
   "lockFileMaintenance": {
     "enabled": true,
     "schedule": ["before 6am"],
@@ -102,10 +104,20 @@
       // release/1.x and release/2.x are maintenance lines: no routine dependency
       // churn, only security fixes. Disabling normal updates here still leaves
       // vulnerabilityAlerts (a separate remediation path) free to open security
-      // PRs against these branches. main and release/3.x keep full updates.
-      "description": "Maintenance release lines get security fixes only",
+      // PRs against these branches. The next rule turns lock maintenance back
+      // on for them, because a transitive CVE fix is a lockfile-only change
+      // (#2367). main and release/3.x keep full updates.
+      "description": "Maintenance release lines: version bumps are off; lock maintenance stays on for transitive fixes",
       "matchBaseBranches": ["release/1.x", "release/2.x"],
       "enabled": false,
+    },
+    {
+      // Later rules override earlier ones for the keys they set, so this one wins
+      // over the disable rule above for lock maintenance only.
+      "description": "Maintenance lines still get transitive security fixes through lock maintenance",
+      "matchBaseBranches": ["release/1.x", "release/2.x"],
+      "matchUpdateTypes": ["lockFileMaintenance"],
+      "enabled": true,
     },
     {
       "description": "Automerge every non-major update once its branch is green",
