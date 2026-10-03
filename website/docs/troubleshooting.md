@@ -120,6 +120,24 @@ Three token-efficiency recommendations also changed in v3.12.0:
   `ENABLE_PROMPT_CACHING_1H`. When neither is set, it prints an info line instead of a warning:
   subscription plans get the 1-hour TTL on the main conversation without any variable.
 
+## Background work that did not finish
+
+(added in v3.12.0)
+
+llmenv runs four jobs in a detached child: post-session consolidation, the ICM store of a web fetch,
+the transcript record of a session event, and the `codebase-memory-mcp` index.
+Each job writes a checkpoint file to `<state dir>/checkpoints/` first, and deletes it when the job succeeds.
+A file that stays means the job did not finish, for example because the memory proxy was down.
+
+`llmenv doctor` prints a `Background work:` section with one line for each checkpoint:
+the job, its age, the attempts so far out of 3, its phase, and the log to read (`<state dir>/detached-hook.log`).
+A checkpoint that is not yet old enough to be stale shows as info, because its child may still be running.
+
+At each new session start, llmenv runs a stale job again, up to 3 attempts.
+After the third attempt the file stays, so doctor keeps showing it.
+To abandon a job, delete its file under `checkpoints/`.
+llmenv deletes checkpoints that are older than 7 days.
+
 ## Memory backend issues
 
 - **Server not activating** — it renders only when one of `memory.tags` is

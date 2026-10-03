@@ -7,6 +7,7 @@
 use std::path::Path;
 use std::time::Duration;
 
+use crate::hook_run::checkpoint;
 use crate::hook_run::idempotency::Guard;
 use crate::hook_run::mcp_client::McpHttpClient;
 
@@ -29,15 +30,33 @@ const STORE_TIMEOUT: Duration = Duration::from_secs(5);
 /// # Errors
 /// Malformed payload, no active memory backend, an invalid backend URL, or
 /// the MCP call itself failing.
-pub fn run_icm_store(payload_json: &str) -> anyhow::Result<()> {
-    run_icm_store_inner(payload_json).inspect_err(|e| {
-        tracing::error!("icm-store: detached store failed: {e}");
-    })
+pub fn run_icm_store(payload_json: &str, checkpoint: Option<&Path>) -> anyhow::Result<()> {
+    run_icm_store_with(payload_json, checkpoint, run_icm_store_inner)
 }
 
-fn run_icm_store_inner(payload_json: &str) -> anyhow::Result<()> {
-    let args: serde_json::Value = serde_json::from_str(payload_json)?;
+/// [`run_icm_store`] with the store call injected, so a test needs no memory backend.
+fn run_icm_store_with(
+    payload_json: &str,
+    checkpoint: Option<&Path>,
+    store: impl FnOnce(serde_json::Value) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let result = serde_json::from_str(payload_json)
+        .map_err(anyhow::Error::from)
+        .and_then(store);
+    match &result {
+        // A payload that does not parse cannot succeed on a retry, so its checkpoint goes too.
+        Ok(()) => checkpoint::finish(checkpoint),
+        Err(e) => {
+            tracing::error!("icm-store: detached store failed: {e}");
+            if serde_json::from_str::<serde_json::Value>(payload_json).is_err() {
+                checkpoint::finish(checkpoint);
+            }
+        }
+    }
+    result
+}
 
+fn run_icm_store_inner(args: serde_json::Value) -> anyhow::Result<()> {
     let config_path = crate::paths::config_path()?;
     let config = crate::config::Config::load(&config_path)?;
     let env = crate::scope::matcher::Env::detect_for_config(&config);
@@ -114,6 +133,31 @@ mod tests {
             .filter_map(|r| serde_json::from_slice(&r.body).ok())
             .filter(|b: &serde_json::Value| b["method"] == "tools/call")
             .collect()
+    }
+
+    #[test]
+    fn a_payload_that_does_not_parse_deletes_its_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let cp =
+            checkpoint::Checkpoint::new(checkpoint::JobKind::IcmStore, serde_json::json!({}), None);
+        let file = checkpoint::write(dir.path(), &cp).unwrap().unwrap();
+        run_icm_store("not json", Some(&file)).unwrap_err();
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn a_failed_store_keeps_its_checkpoint_and_a_successful_one_deletes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let cp =
+            checkpoint::Checkpoint::new(checkpoint::JobKind::IcmStore, serde_json::json!({}), None);
+        let file = checkpoint::write(dir.path(), &cp).unwrap().unwrap();
+        run_icm_store_with("{}", Some(&file), |_| anyhow::bail!("backend down")).unwrap_err();
+        assert!(
+            file.exists(),
+            "a failure a later run may fix keeps the file"
+        );
+        run_icm_store_with("{}", Some(&file), |_| Ok(())).unwrap();
+        assert!(!file.exists(), "success deletes the file");
     }
 
     #[tokio::test]
@@ -208,7 +252,7 @@ mod tests {
         let err = crate::session_log::tracing_layer::capture_file_logs_at(
             &log,
             tracing_subscriber::filter::LevelFilter::ERROR,
-            || run_icm_store("not json").unwrap_err(),
+            || run_icm_store("not json", None).unwrap_err(),
         );
 
         assert!(err.to_string().to_lowercase().contains("expected"));

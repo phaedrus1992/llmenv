@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::hook_run::checkpoint::{self, JobKind};
 use crate::hook_run::idempotency::{self, Guard};
 use crate::hook_run::mcp_client::McpHttpClient;
 use crate::session_log::dispatch;
@@ -67,6 +68,15 @@ fn with_request_id(ev: &SessionLogEvent, id: &str) -> SessionLogEvent {
 /// previous behavior, since the child is process-group-detached and outlives
 /// this process regardless.
 pub(crate) fn spawn_record(session_id: &str, ev: &SessionLogEvent) -> Option<Child> {
+    spawn_record_in(checkpoint::spawner_state_dir().as_deref(), session_id, ev)
+}
+
+/// [`spawn_record`] with the state dir for the checkpoint given (#2396).
+fn spawn_record_in(
+    state_dir: Option<&std::path::Path>,
+    session_id: &str,
+    ev: &SessionLogEvent,
+) -> Option<Child> {
     let Ok(exe) = std::env::current_exe() else {
         tracing::debug!("session_log: cannot resolve current_exe for detached record");
         return None;
@@ -80,10 +90,13 @@ pub(crate) fn spawn_record(session_id: &str, ev: &SessionLogEvent) -> Option<Chi
         tracing::debug!("session_log: cannot serialize event for detached record");
         return None;
     };
-    let mut cmd = Command::new(exe);
-    cmd.arg("session-log-record")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null());
+    let checkpoint = checkpoint::begin(
+        state_dir,
+        JobKind::SessionLogRecord,
+        serde_json::to_value(&payload).unwrap_or_default(),
+        Some(session_id),
+    );
+    let mut cmd = record_command(exe, checkpoint.as_deref());
     crate::hook_run::redirect_stderr_to_detached_log(&mut cmd);
     crate::mcp::proxy::detach_process_group(&mut cmd);
     let Ok(mut child) = cmd.spawn() else {
@@ -102,6 +115,21 @@ pub(crate) fn spawn_record(session_id: &str, ev: &SessionLogEvent) -> Option<Chi
     Some(child)
 }
 
+/// The `llmenv session-log-record` child, before its stderr log and process group are set.
+pub(crate) fn record_command(
+    exe: std::path::PathBuf,
+    checkpoint: Option<&std::path::Path>,
+) -> Command {
+    let mut cmd = Command::new(exe);
+    cmd.arg("session-log-record")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null());
+    if let Some(path) = checkpoint {
+        cmd.arg("--checkpoint").arg(path);
+    }
+    cmd
+}
+
 /// Child entrypoint: parse the `{session_id, event}` stdin payload, resolve
 /// the active memory backend the same way a hook process would, and record
 /// the event. There's no terminal to write to, so on error this logs via
@@ -115,15 +143,36 @@ pub(crate) fn spawn_record(session_id: &str, ev: &SessionLogEvent) -> Option<Chi
 /// # Errors
 /// Malformed payload, no active memory backend, an invalid backend URL, or
 /// the MCP call itself failing.
-pub(crate) fn run_record(payload_json: &str) -> anyhow::Result<()> {
-    run_record_inner(payload_json).inspect_err(|e| {
-        tracing::error!("session_log: detached record failed: {e}");
-    })
+pub(crate) fn run_record(
+    payload_json: &str,
+    checkpoint: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    run_record_with(payload_json, checkpoint, run_record_inner)
 }
 
-fn run_record_inner(payload_json: &str) -> anyhow::Result<()> {
-    let payload: RecordPayload = serde_json::from_str(payload_json)?;
+/// [`run_record`] with the record call injected, so a test needs no memory backend. A payload that
+/// does not parse cannot succeed on a retry, so its checkpoint is deleted with a successful one's.
+fn run_record_with(
+    payload_json: &str,
+    checkpoint: Option<&std::path::Path>,
+    record: impl FnOnce(RecordPayload) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let parsed = serde_json::from_str::<RecordPayload>(payload_json).map_err(anyhow::Error::from);
+    let unparseable = parsed.is_err();
+    let result = parsed.and_then(record);
+    match &result {
+        Ok(()) => checkpoint::finish(checkpoint),
+        Err(e) => {
+            tracing::error!("session_log: detached record failed: {e}");
+            if unparseable {
+                checkpoint::finish(checkpoint);
+            }
+        }
+    }
+    result
+}
 
+fn run_record_inner(payload: RecordPayload) -> anyhow::Result<()> {
     let config_path = crate::paths::config_path()?;
     let config = crate::config::Config::load(&config_path)?;
     let env = crate::scope::matcher::Env::detect_for_config(&config);
@@ -162,7 +211,7 @@ async fn record_once(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::session_log::event::{EventKind, EventScope};
@@ -180,6 +229,44 @@ mod tests {
             fields: serde_json::json!({}),
             trace_fields: None,
         }
+    }
+
+    #[test]
+    fn spawn_record_writes_a_checkpoint_and_passes_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let child = spawn_record_in(Some(dir.path()), "sess-1", &ev());
+        let listed = checkpoint::list(dir.path());
+        let [checkpoint::Entry::Ready(path, cp)] = &listed[..] else {
+            panic!("expected one checkpoint: {listed:?}");
+        };
+        assert_eq!(cp.kind, JobKind::SessionLogRecord);
+        assert_eq!(cp.inputs["session_id"], "sess-1");
+        assert!(!cp.inputs["request_id"].as_str().unwrap().is_empty());
+        let cmd = record_command("llmenv".into(), Some(path));
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args[..2], ["session-log-record", "--checkpoint"]);
+        if let Some(mut child) = child {
+            reap(&mut child, std::time::Duration::from_secs(5));
+        }
+    }
+
+    #[test]
+    fn a_failed_record_keeps_its_checkpoint_and_a_successful_one_deletes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let cp =
+            checkpoint::Checkpoint::new(JobKind::SessionLogRecord, serde_json::json!({}), None);
+        let file = checkpoint::write(dir.path(), &cp).unwrap().unwrap();
+        let json = serde_json::to_string(&payload_with_id("abc")).unwrap();
+        run_record_with(&json, Some(&file), |_| anyhow::bail!("down")).unwrap_err();
+        assert!(file.exists());
+        run_record_with(&json, Some(&file), |_| Ok(())).unwrap();
+        assert!(!file.exists());
+        let file = checkpoint::write(dir.path(), &cp).unwrap().unwrap();
+        run_record_with("not json", Some(&file), |_| Ok(())).unwrap_err();
+        assert!(!file.exists(), "an unparseable payload cannot be retried");
     }
 
     #[test]
@@ -241,7 +328,7 @@ mod tests {
         let err = crate::session_log::tracing_layer::capture_file_logs_at(
             &log,
             tracing_subscriber::filter::LevelFilter::ERROR,
-            || run_record("not json").unwrap_err(),
+            || run_record("not json", None).unwrap_err(),
         );
 
         assert!(err.to_string().to_lowercase().contains("expected"));

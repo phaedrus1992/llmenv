@@ -10,6 +10,8 @@ pub(crate) mod action;
 mod adaptive;
 pub(crate) mod cbm_index_guard;
 pub(crate) mod cd_guard;
+pub(crate) mod checkpoint;
+pub(crate) mod detached_cbm;
 pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
 pub(crate) mod idempotency;
@@ -1415,6 +1417,15 @@ fn run_inner(
         } else {
             None
         };
+        if event == HookEvent::SessionStart
+            && !continues_session(stdin_payload)
+            && !is_consolidation_child(
+                std::env::var_os(crate::consolidation::CHILD_GUARD_ENV).as_deref(),
+            )
+        {
+            // After the notice, so the proxy it may restart is up (#2396).
+            resume_checkpoints(checkpoint::spawner_state_dir().as_deref());
+        }
         let t_chunk = std::time::Instant::now();
         let out = rt.block_on(async {
             let mut out = String::new();
@@ -2526,6 +2537,29 @@ fn web_fetch_store_args(payload: &serde_json::Value) -> Option<serde_json::Value
 /// identical to the previous behavior, since the child is
 /// process-group-detached and outlives this process regardless.
 fn handle_web_fetch_post_tool_use(payload: &serde_json::Value) -> Option<std::process::Child> {
+    handle_web_fetch_in(checkpoint::spawner_state_dir().as_deref(), payload)
+}
+
+/// The `llmenv icm-store` child, before its stderr log and process group are set.
+fn icm_store_command(
+    exe: std::path::PathBuf,
+    checkpoint: Option<&std::path::Path>,
+) -> std::process::Command {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("icm-store")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null());
+    if let Some(path) = checkpoint {
+        cmd.arg("--checkpoint").arg(path);
+    }
+    cmd
+}
+
+/// [`handle_web_fetch_post_tool_use`] with the state dir for the checkpoint given (#2396).
+fn handle_web_fetch_in(
+    state_dir: Option<&std::path::Path>,
+    payload: &serde_json::Value,
+) -> Option<std::process::Child> {
     let args = web_fetch_store_args(payload)?;
     let Ok(payload_json) = serde_json::to_string(&args) else {
         tracing::debug!("icm-store: failed to serialize store args");
@@ -2535,10 +2569,13 @@ fn handle_web_fetch_post_tool_use(payload: &serde_json::Value) -> Option<std::pr
         tracing::debug!("icm-store: cannot resolve current_exe for detached store");
         return None;
     };
-    let mut cmd = std::process::Command::new(exe);
-    cmd.arg("icm-store")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null());
+    let checkpoint = checkpoint::begin(
+        state_dir,
+        checkpoint::JobKind::IcmStore,
+        args,
+        payload["session_id"].as_str(),
+    );
+    let mut cmd = icm_store_command(exe, checkpoint.as_deref());
     redirect_stderr_to_detached_log(&mut cmd);
     crate::mcp::proxy::detach_process_group(&mut cmd);
     let Ok(mut child) = cmd.spawn() else {
@@ -2654,6 +2691,15 @@ fn build_index_repository_command(
     project_root: &std::path::Path,
     cm: &crate::config::CodebaseMemory,
 ) -> std::process::Command {
+    index_command(project_root, cm.index_path.as_deref())
+}
+
+/// [`build_index_repository_command`] from the two values the command needs, so the checkpointed
+/// wrapper (`detached_cbm`) can rebuild it from a checkpoint file (#2396).
+pub(crate) fn index_command(
+    project_root: &std::path::Path,
+    index_path: Option<&str>,
+) -> std::process::Command {
     // repo_path must become JSON text regardless (the CLI arg is a JSON
     // string), so this lossy step is unavoidable here — unlike the env var
     // below, which can carry the raw OsStr straight through.
@@ -2664,7 +2710,7 @@ fn build_index_repository_command(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    if let Some(index_path) = &cm.index_path {
+    if let Some(index_path) = index_path {
         cmd.env("CBM_CACHE_DIR", index_path);
     }
     cmd
@@ -2689,7 +2735,30 @@ fn trigger_codebase_memory_index(
     cm: &crate::config::CodebaseMemory,
     state_dir: &std::path::Path,
 ) {
-    let mut cmd = build_index_repository_command(project_root, cm);
+    // A checkpointed run goes through `llmenv cbm-index-run`, which observes the indexer's exit
+    // status. Without a checkpoint the indexer starts directly, as before (#2396).
+    let inputs = detached_cbm::IndexInputs {
+        project_root: project_root.display().to_string(),
+        index_path: cm.index_path.clone(),
+    };
+    let checkpoint = checkpoint::begin(
+        Some(state_dir),
+        checkpoint::JobKind::CbmIndex,
+        serde_json::to_value(&inputs).unwrap_or_default(),
+        None,
+    );
+    let mut cmd = match (&checkpoint, std::env::current_exe()) {
+        (Some(path), Ok(exe)) => {
+            let mut cmd = std::process::Command::new(exe);
+            cmd.arg("cbm-index-run")
+                .arg("--checkpoint")
+                .arg(path)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null());
+            cmd
+        }
+        _ => build_index_repository_command(project_root, cm),
+    };
     let cache_dir = codebase_memory_cache_dir(cm, state_dir);
     let log_path = cache_dir.join("index.log");
     // Only the default cache dir (under llmenv's own state tree) gets
@@ -2708,6 +2777,63 @@ fn trigger_codebase_memory_index(
     if let Err(e) = cmd.spawn() {
         tracing::debug!("codebase-memory-mcp index_repository: failed to spawn: {e}");
     }
+}
+
+/// Start the detached jobs whose checkpoints are stale: work that an earlier session started and
+/// never finished (#2396). Fail-soft: a failure is logged at debug level and the session goes on.
+fn resume_checkpoints(state_dir: Option<&std::path::Path>) {
+    let Some(state_dir) = state_dir else {
+        return;
+    };
+    let now = checkpoint::now_secs();
+    let resumed = checkpoint::resume_pending(state_dir, now, respawn_job);
+    if resumed > 0 {
+        tracing::info!("resumed {resumed} unfinished background job(s)");
+    }
+}
+
+/// Start the child for one stale checkpoint, with the inputs the first run had.
+fn respawn_job(cp: &checkpoint::Checkpoint, path: &std::path::Path) -> anyhow::Result<()> {
+    use checkpoint::JobKind;
+    let exe = std::env::current_exe()?;
+    match cp.kind {
+        JobKind::IcmStore => spawn_detached(
+            icm_store_command(exe, Some(path)),
+            Some(&cp.inputs.to_string()),
+            None,
+        ),
+        JobKind::SessionLogRecord => spawn_detached(
+            crate::session_log::detached::record_command(exe, Some(path)),
+            Some(&cp.inputs.to_string()),
+            None,
+        ),
+        JobKind::Consolidation => spawn_detached(
+            consolidation_run_command(exe, Some(path)),
+            None,
+            cp.inputs["cwd"].as_str().map(std::path::Path::new),
+        ),
+        // `SessionStart` starts the indexer itself, and that run rewrites this checkpoint.
+        JobKind::CbmIndex => Ok(()),
+    }
+}
+
+/// Spawn `cmd` as a detached child with the shared bounded stderr log, optionally in `cwd`, and
+/// write `stdin` to it. Not waited on.
+fn spawn_detached(
+    mut cmd: std::process::Command,
+    stdin: Option<&str>,
+    cwd: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    if let Some(cwd) = cwd.filter(|c| c.is_dir()) {
+        cmd.current_dir(cwd);
+    }
+    redirect_stderr_to_detached_log(&mut cmd);
+    crate::mcp::proxy::detach_process_group(&mut cmd);
+    let mut child = cmd.spawn()?;
+    if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
+        pipe.write_all(text.as_bytes())?;
+    }
+    Ok(())
 }
 
 /// True for the event that ends a session and so starts consolidation.
@@ -2757,11 +2883,17 @@ fn is_consolidation_child(guard: Option<&std::ffi::OsStr>) -> bool {
 
 /// The `llmenv consolidation-run` child, before its stderr log and process
 /// group are set.
-fn consolidation_run_command(exe: std::path::PathBuf) -> std::process::Command {
+fn consolidation_run_command(
+    exe: std::path::PathBuf,
+    checkpoint: Option<&std::path::Path>,
+) -> std::process::Command {
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("consolidation-run")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null());
+    if let Some(path) = checkpoint {
+        cmd.arg("--checkpoint").arg(path);
+    }
     cmd
 }
 
@@ -2770,11 +2902,27 @@ fn consolidation_run_command(exe: std::path::PathBuf) -> std::process::Command {
 /// never waits on the child. The child's stderr goes to the shared bounded log
 /// rather than `/dev/null` so its own failures are diagnosable (#1133).
 fn post_session_consolidation() {
+    post_session_consolidation_in(checkpoint::spawner_state_dir().as_deref());
+}
+
+/// [`post_session_consolidation`] with the state dir for the checkpoint given (#2396). The
+/// checkpoint holds the working directory, because the child derives the project from it and a
+/// resumed run must start in the same place.
+fn post_session_consolidation_in(state_dir: Option<&std::path::Path>) {
     let Ok(exe) = std::env::current_exe() else {
         tracing::error!("consolidation-run: cannot resolve current_exe; consolidation skipped");
         return;
     };
-    let mut cmd = consolidation_run_command(exe);
+    let cwd = std::env::current_dir()
+        .map(|d| d.display().to_string())
+        .unwrap_or_default();
+    let checkpoint = checkpoint::begin(
+        state_dir,
+        checkpoint::JobKind::Consolidation,
+        serde_json::json!({ "cwd": cwd }),
+        None,
+    );
+    let mut cmd = consolidation_run_command(exe, checkpoint.as_deref());
     redirect_stderr_to_detached_log(&mut cmd);
     crate::mcp::proxy::detach_process_group(&mut cmd);
     if let Err(e) = cmd.spawn() {
@@ -2863,10 +3011,87 @@ mod tests {
 
     #[test]
     fn consolidation_run_command_runs_the_consolidation_subcommand() {
-        let cmd = consolidation_run_command("/bin/llmenv".into());
+        let cmd = consolidation_run_command("/bin/llmenv".into(), None);
         assert_eq!(cmd.get_program(), "/bin/llmenv");
         let args: Vec<_> = cmd.get_args().collect();
         assert_eq!(args, ["consolidation-run"]);
+    }
+
+    #[test]
+    fn each_detached_command_carries_its_checkpoint_path() {
+        let path = std::path::Path::new("/s/checkpoints/x.json");
+        let args = |cmd: std::process::Command| -> Vec<String> {
+            cmd.get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(
+            args(consolidation_run_command("/bin/llmenv".into(), Some(path))),
+            ["consolidation-run", "--checkpoint", "/s/checkpoints/x.json"]
+        );
+        assert_eq!(
+            args(icm_store_command("/bin/llmenv".into(), Some(path))),
+            ["icm-store", "--checkpoint", "/s/checkpoints/x.json"]
+        );
+        assert_eq!(
+            args(icm_store_command("/bin/llmenv".into(), None)),
+            ["icm-store"]
+        );
+    }
+
+    #[test]
+    fn a_web_fetch_writes_a_checkpoint_with_the_store_args() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = json!({
+            "session_id": "sess-1", "tool_use_id": "tu1", "tool_name": "WebFetch",
+            "tool_input": {"url": "https://example.com"}, "tool_response": "body",
+        });
+        let child = handle_web_fetch_in(Some(dir.path()), &payload);
+        let listed = checkpoint::checkpoint_entries_for_test(dir.path());
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        let (kind, inputs, session) = &listed[0];
+        assert_eq!(*kind, checkpoint::JobKind::IcmStore);
+        assert_eq!(inputs["topic"], "web-fetch");
+        assert!(
+            !inputs[detached_store::REQUEST_ID_FIELD]
+                .as_str()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(session.as_deref(), Some("sess-1"));
+        if let Some(mut child) = child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    #[test]
+    fn consolidation_spawn_writes_a_checkpoint_with_the_working_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        post_session_consolidation_in(Some(dir.path()));
+        let listed = checkpoint::checkpoint_entries_for_test(dir.path());
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        assert_eq!(listed[0].0, checkpoint::JobKind::Consolidation);
+        let cwd = std::env::current_dir().unwrap().display().to_string();
+        assert_eq!(listed[0].1["cwd"], cwd.as_str());
+    }
+
+    #[test]
+    fn the_resume_step_starts_a_stale_job_once_and_leaves_a_fresh_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut stale = checkpoint::Checkpoint::new(
+            checkpoint::JobKind::CbmIndex,
+            json!({"project_root": "/r", "index_path": null}),
+            None,
+        );
+        stale.started_at = 1;
+        let path = checkpoint::write(dir.path(), &stale).unwrap().unwrap();
+        let fresh =
+            checkpoint::Checkpoint::new(checkpoint::JobKind::CbmIndex, json!({"n": 2}), None);
+        let fresh_path = checkpoint::write(dir.path(), &fresh).unwrap().unwrap();
+        resume_checkpoints(Some(dir.path()));
+        assert_eq!(checkpoint::load(&path).unwrap().attempts, 2);
+        assert_eq!(checkpoint::load(&fresh_path).unwrap().attempts, 1);
     }
 
     #[test]

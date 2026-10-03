@@ -30,6 +30,7 @@
 use std::process::Stdio;
 use std::time::Duration;
 
+use crate::hook_run::checkpoint;
 use crate::hook_run::idempotency;
 use crate::hook_run::mcp_client::McpHttpClient;
 
@@ -453,28 +454,24 @@ async fn store_new_rules(
     (stored, duplicates)
 }
 
-/// Run post-session consolidation with the active memory entry's settings
-/// (see [`active_consolidation`]).
-///
-/// Recalls recent memories from the ICM backend, preconditions ≥3 records,
-/// calls the Anthropic Messages API for distillation, and stores the
-/// resulting rules as semantic/high memories.
-///
-/// # Errors
-/// All errors are caught and logged via `tracing::error!` — this function
-/// always returns `Ok(summary)` to match the fail-soft contract.
-pub(crate) async fn run(
+/// How far the first half of a consolidation run got.
+enum Distilled {
+    /// The model returned a summary; `records` is the number of memories it read, 0 on a resume.
+    Summary { text: String, records: usize },
+    /// The run ends here. `settled` is true when nothing is left to retry (too few records, or no
+    /// rules), and false for a failure that a later run may fix.
+    Stop { msg: String, settled: bool },
+}
+
+/// Steps 1-4: recall recent memories, check the precondition, and ask the model for rules. On a
+/// model success the summary goes into the checkpoint, so a resume after a failed store never
+/// pays for the model again (#2396).
+async fn distill(
     cc: &crate::config::ConsolidationConfig,
     client: &McpHttpClient,
     project: &str,
-) -> anyhow::Result<String> {
-    tracing::info!(
-        max_rules = cc.max_rules_per_session,
-        backend = ?cc.backend,
-        "running post-session consolidation"
-    );
-
-    // Step 1: Recall recent memories
+    checkpoint: Option<&std::path::Path>,
+) -> Distilled {
     let recall_result = tracing::debug_span!("consolidation_recall")
         .in_scope(|| async {
             client
@@ -495,35 +492,30 @@ pub(crate) async fn run(
         Err(e) => {
             let msg = format!("consolidation: recall failed (fail-soft): {e}");
             tracing::error!("{msg}");
-            return Ok(msg);
+            return Distilled::Stop {
+                msg,
+                settled: false,
+            };
         }
     };
 
     let records = parse_recall_output(&output);
-
-    // Step 2: Precondition check
     if records.len() < MIN_RECORDS {
         let msg = format!(
             "consolidation: skipping — only {} record(s) found, need at least {MIN_RECORDS}",
             records.len(),
         );
         tracing::debug!("{msg}");
-        return Ok(msg);
+        return Distilled::Stop { msg, settled: true };
     }
-
     tracing::info!(
         count = records.len(),
         "consolidation: recalling {} memory records",
         records.len(),
     );
 
-    // Collect summaries for the prompt
     let summaries: Vec<String> = records.iter().map(|r| r.summary.clone()).collect();
-
-    // Step 3: Build the prompt
     let prompt = build_prompt(cc.max_rules_per_session, &summaries);
-
-    // Step 4: Call the configured LLM backend
     let llm_result = tracing::debug_span!("consolidation_llm_call")
         .in_scope(|| async {
             use crate::config::ConsolidationBackend;
@@ -534,25 +526,105 @@ pub(crate) async fn run(
         })
         .await;
 
-    let llm_output = match llm_result {
-        Ok(out) => out,
+    match llm_result {
+        Ok(text) => {
+            note_phase(checkpoint, "summarized", Some(&text));
+            Distilled::Summary {
+                text,
+                records: records.len(),
+            }
+        }
         Err(e) => {
             let msg = format!("consolidation: LLM call failed (fail-soft): {e}");
             tracing::error!("{msg}");
-            return Ok(msg);
+            Distilled::Stop {
+                msg,
+                settled: false,
+            }
         }
+    }
+}
+
+/// Record the phase (and the model summary, once there is one) in the checkpoint. Fail-soft.
+fn note_phase(checkpoint: Option<&std::path::Path>, phase: &str, summary: Option<&str>) {
+    let Some(path) = checkpoint else {
+        return;
+    };
+    let result = checkpoint::update(path, |c| {
+        c.phase = phase.to_string();
+        if let Some(summary) = summary {
+            c.inputs["summary"] = serde_json::json!(summary);
+        }
+    });
+    if let Err(e) = result {
+        tracing::error!("consolidation: cannot update the checkpoint: {e:#}");
+    }
+}
+
+/// The model summary a previous run saved, when this run resumes after the model step.
+fn saved_summary(checkpoint: Option<&std::path::Path>) -> Option<String> {
+    let loaded = checkpoint::load(checkpoint?).ok()?;
+    if loaded.phase != "summarized" {
+        return None;
+    }
+    loaded.inputs["summary"].as_str().map(str::to_string)
+}
+
+/// Delete the checkpoint of a run with nothing left to retry. Fail-soft.
+fn settle(checkpoint: Option<&std::path::Path>) {
+    if let Some(path) = checkpoint
+        && let Err(e) = checkpoint::complete(path)
+    {
+        tracing::error!("consolidation: {e:#}");
+    }
+}
+
+/// Run post-session consolidation with the active memory entry's settings
+/// (see [`active_consolidation`]).
+///
+/// Recalls recent memories from the ICM backend, preconditions ≥3 records,
+/// calls the Anthropic Messages API for distillation, and stores the
+/// resulting rules as semantic/high memories. With a `checkpoint`, the run
+/// records its phase, keeps the model summary, and deletes the file only
+/// when no work is left to retry (#2396). `state_dir` holds the seen-set that keeps a resumed run
+/// from storing a rule twice (#2397).
+///
+/// # Errors
+/// All errors are caught and logged via `tracing::error!` — this function
+/// always returns `Ok(summary)` to match the fail-soft contract.
+pub(crate) async fn run(
+    cc: &crate::config::ConsolidationConfig,
+    client: &McpHttpClient,
+    project: &str,
+    state_dir: Option<&std::path::Path>,
+    checkpoint: Option<&std::path::Path>,
+) -> anyhow::Result<String> {
+    tracing::info!(
+        max_rules = cc.max_rules_per_session,
+        backend = ?cc.backend,
+        "running post-session consolidation"
+    );
+
+    let (llm_output, records) = match saved_summary(checkpoint) {
+        Some(text) => (text, 0),
+        None => match distill(cc, client, project, checkpoint).await {
+            Distilled::Summary { text, records } => (text, records),
+            Distilled::Stop { msg, settled } => {
+                if settled {
+                    settle(checkpoint);
+                }
+                return Ok(msg);
+            }
+        },
     };
 
     // Step 5: Parse bullet points
     let rules = parse_bullets(&llm_output);
 
     if rules.is_empty() {
-        let msg = format!(
-            "consolidation: LLM returned no rules (parsed {} records, {:.0} tokens)",
-            records.len(),
-            prompt.len() as f64 / 4.0,
-        );
+        let msg = format!("consolidation: LLM returned no rules (parsed {records} records)");
         tracing::debug!("{msg}");
+        settle(checkpoint);
         return Ok(msg);
     }
 
@@ -561,13 +633,11 @@ pub(crate) async fn run(
     let rules: Vec<&str> = rules.iter().map(|s| s.as_str()).take(max_rules).collect();
 
     // Step 6: Store each rule
-    let state_dir = crate::paths::state_dir().ok();
-    let (stored, duplicates) = store_new_rules(client, state_dir.as_deref(), project, &rules).await;
+    let (stored, duplicates) = store_new_rules(client, state_dir, project, &rules).await;
 
     let msg = format!(
-        "consolidation: distilled {} memory records into {} semantic rule(s) \
+        "consolidation: distilled {records} memory records into {} semantic rule(s) \
          (backend: {:?}, rules stored: {stored}, duplicates skipped: {duplicates})",
-        records.len(),
         rules.len(),
         cc.backend,
     );
@@ -575,6 +645,7 @@ pub(crate) async fn run(
         tracing::error!("{msg}");
     } else {
         tracing::info!("{msg}");
+        settle(checkpoint);
     }
     Ok(msg)
 }
@@ -870,6 +941,102 @@ mod tests {
         assert!(
             keyword.as_str().expect("keyword").starts_with("request:"),
             "{keyword}"
+        );
+    }
+
+    // -- checkpoint phases (#2396) --
+
+    fn cc() -> crate::config::ConsolidationConfig {
+        crate::config::ConsolidationConfig {
+            enabled: true,
+            backend: crate::config::ConsolidationBackend::default(),
+            max_rules_per_session: 5,
+        }
+    }
+
+    fn summarized_checkpoint(dir: &std::path::Path) -> std::path::PathBuf {
+        use crate::hook_run::checkpoint::{Checkpoint, JobKind, write};
+        let mut cp = Checkpoint::new(
+            JobKind::Consolidation,
+            serde_json::json!({ "cwd": "/p" }),
+            None,
+        );
+        cp.phase = "summarized".into();
+        cp.inputs["summary"] = serde_json::json!("- Run the formatter before every commit");
+        write(dir, &cp).expect("write").expect("path")
+    }
+
+    async fn mount_icm(server: &wiremock::MockServer, store_ok: bool) {
+        use wiremock::matchers::{body_string_contains, method};
+        use wiremock::{Mock, ResponseTemplate};
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body("")))
+            .mount(server)
+            .await;
+        if !store_ok {
+            Mock::given(method("POST"))
+                .and(body_string_contains("icm_memory_store"))
+                .respond_with(ResponseTemplate::new(500))
+                .with_priority(1)
+                .mount(server)
+                .await;
+        }
+    }
+
+    async fn recalls_of_fifty(server: &wiremock::MockServer) -> usize {
+        server
+            .received_requests()
+            .await
+            .expect("recorded")
+            .iter()
+            .filter_map(|r| serde_json::from_slice::<serde_json::Value>(&r.body).ok())
+            .filter(|b| {
+                b["params"]["name"] == "icm_memory_recall"
+                    && b["params"]["arguments"]["limit"] == 50
+            })
+            .count()
+    }
+
+    #[tokio::test]
+    async fn a_resume_after_the_model_step_skips_recall_and_the_model_and_settles() {
+        let server = wiremock::MockServer::start().await;
+        mount_icm(&server, true).await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("client");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = summarized_checkpoint(dir.path());
+        let msg = run(&cc(), &client, "proj", Some(dir.path()), Some(&file))
+            .await
+            .expect("run");
+        assert!(msg.contains("1 semantic rule"), "{msg}");
+        assert_eq!(
+            recalls_of_fifty(&server).await,
+            0,
+            "a resume must not recall again"
+        );
+        assert_eq!(store_calls(&server).await.len(), 1);
+        assert!(
+            !file.exists(),
+            "every rule is handled, so the checkpoint goes"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_store_keeps_the_checkpoint_at_summarized_with_its_summary() {
+        let server = wiremock::MockServer::start().await;
+        mount_icm(&server, false).await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("client");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = summarized_checkpoint(dir.path());
+        run(&cc(), &client, "proj", Some(dir.path()), Some(&file))
+            .await
+            .expect("run");
+        let kept = crate::hook_run::checkpoint::load(&file).expect("kept");
+        assert_eq!(kept.phase, "summarized");
+        assert!(
+            kept.inputs["summary"]
+                .as_str()
+                .expect("summary")
+                .contains("formatter")
         );
     }
 
