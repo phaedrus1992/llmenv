@@ -27,13 +27,15 @@ The full-sweep job has the same problem, and when it is skipped its name shows t
 
 ## Decisions
 
-1. **The plan script emits objects, not integers.**
-   `matrix=[{"shard":0,"label":"1/3"},{"shard":1,"label":"2/3"},{"shard":2,"label":"3/3"}]`.
+1. **The plan script emits one-based label strings.**
+   `matrix=["1/3","2/3","3/3"]`.
    GitHub expressions have no arithmetic, so the one-based label must come from the script.
-   The label includes the total so `name:` needs only `${{ matrix.label }}`.
-2. **Both jobs read `matrix.shard` for `--shard` and `matrix.label` for `name:`.**
-   The sweep job gets the same object list inline, written out by hand with a comment that says the labels are one-based display and the shards are zero-based input.
-3. **The artifact names keep the zero-based shard**, since downstream steps may read them; only `name:` changes.
+2. **The job name is static, and the matrix holds only the label.**
+   GitHub appends the matrix values to a static name, so a running job reads `mutants (changed lines) (1/3)`.
+   A skipped job shows no matrix text, where a `${{ matrix.label }}` in the name showed the literal expression.
+   Both jobs take the zero-based shard for `--shard` from `strategy.job-index`.
+   The sweep job lists its eight labels inline, with a comment.
+3. **The artifact names use `strategy.job-index`** (zero-based, no slash), since a label such as `1/3` is not a valid artifact name.
 4. **The plan script gets a test** in `.github/workflows/__tests__/mutants-plan.sh`, run the same way the existing guard test is run (check how `forward-merge-release-guards.sh` is invoked, in CI or by hand, and follow it).
 5. **`shards=0` still gives `matrix=[]`**, and the PR job's `if:` on `shards != '0'` is unchanged.
 
@@ -41,19 +43,19 @@ The full-sweep job has the same problem, and when it is skipped its name shows t
 
 ### `scripts/mutants-plan.sh`
 
-- Build the matrix with a loop (or `jq -n` if `jq` is already required by the script; do not add a dependency for this) producing `{"shard":k,"label":"k+1/N"}` for `k` in `0..N-1`.
+- Build the matrix with a loop producing `"k+1/N"` for `k` in `0..N-1`.
 - Keep `shards=<N>` as the first output line and `matrix=…` as the second.
 - Update the usage comment at the top of the file.
 
 ### `.github/workflows/mutants.yml`
 
-- PR job: `name: mutants (changed lines, shard ${{ matrix.label }})`; `SHARD: ${{ matrix.shard }}` stays; the matrix key stays `shard` but each entry is an object, so GitHub exposes `matrix.shard` and `matrix.label` (verify this form against the GitHub matrix docs: an array of objects under `matrix.include` is the documented way; if a bare array of objects is not supported, use `include: ${{ fromJSON(...) }}`).
-- Sweep job: `include:` with eight objects and `name: mutants (full sweep, shard ${{ matrix.label }})`.
+- PR job: `name: mutants (changed lines)`; the matrix key is `label`, fed from `fromJSON(needs.plan.outputs.matrix)`; `SHARD: ${{ strategy.job-index }}`.
+- Sweep job: a `label` list of eight strings and `name: mutants (full sweep)`.
 - Update the two comments about zero indexing to mention the label.
 
 ## Tests
 
-1. `__tests__/mutants-plan.sh`: with a fake diff of 13 mutants and `--per-shard 6`, the script prints `shards=3` and the three-object matrix with labels `1/3`, `2/3`, `3/3`; with zero mutants, `shards=0` and `matrix=[]`; with `--max-shards 2` the labels read `1/2`, `2/2`.
+1. `__tests__/mutants-plan.sh`: with a fake diff of 13 mutants and `--per-shard 6`, the script prints `shards=3` and the matrix `["1/3","2/3","3/3"]`; with zero mutants, `shards=0` and `matrix=[]`; with `--max-shards 2` the labels read `1/2`, `2/2`.
    Stub `cargo mutants --list` the way the script's own usage allows (an env var or a `PATH` shim), so the test needs no real mutants run.
 2. `actionlint` and `zizmor` pass on the workflow.
 3. A PR run shows job names `shard 1/N … N/N`.

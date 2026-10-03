@@ -53,8 +53,8 @@ check() {
 
 out="$(FAKE_MUTANTS=13 bash "$PLAN" main --per-shard 6 2>/dev/null)"
 check "13 mutants, 6 per shard: three shards" "shards=3" "$(sed -n 1p <<<"$out")"
-check "labels are one-based, shards zero-based" \
-  'matrix=[{"shard":0,"label":"1/3"},{"shard":1,"label":"2/3"},{"shard":2,"label":"3/3"}]' \
+check "labels are one-based" \
+  'matrix=["1/3","2/3","3/3"]' \
   "$(sed -n 2p <<<"$out")"
 
 out="$(FAKE_MUTANTS=0 bash "$PLAN" main 2>/dev/null)"
@@ -63,7 +63,7 @@ check "zero mutants: empty matrix" "matrix=[]" "$(sed -n 2p <<<"$out")"
 
 out="$(FAKE_MUTANTS=100 bash "$PLAN" main --per-shard 6 --max-shards 2 2>/dev/null)"
 check "max-shards caps the label total" \
-  'matrix=[{"shard":0,"label":"1/2"},{"shard":1,"label":"2/2"}]' \
+  'matrix=["1/2","2/2"]' \
   "$(sed -n 2p <<<"$out")"
 
 echo "$PASS passed, $FAIL failed"

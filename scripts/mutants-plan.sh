@@ -5,10 +5,10 @@
 # stdout, ready to append to $GITHUB_OUTPUT:
 #
 #   shards=<N>          number of shards; 0 when the diff has no mutants
-#   matrix=[{"shard":0,"label":"1/N"},...]
-#                       one object per shard for a workflow matrix: `shard` is
-#                       the zero-based index that `cargo mutants --shard k/N`
-#                       needs, `label` is the one-based text for a job name
+#   matrix=["1/N",...]  one one-based label per shard for a workflow matrix.
+#                       The job name shows the label. The workflow takes the
+#                       zero-based index that `cargo mutants --shard k/N`
+#                       needs from `strategy.job-index`.
 #
 # The shard count follows the mutant count, so a large diff does not run into
 # the job timeout and a small one does not pay for idle runners. Every shard
@@ -89,7 +89,7 @@ matrix="[]"
 if ((shards > 0)); then
     entries=()
     for ((k = 0; k < shards; k++)); do
-        entries+=("{\"shard\":${k},\"label\":\"$((k + 1))/${shards}\"}")
+        entries+=("\"$((k + 1))/${shards}\"")
     done
     matrix="[$(
         IFS=,
