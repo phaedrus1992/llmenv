@@ -812,6 +812,16 @@ active context (active bundles, active MCP servers, etc.). Checks:
   `turn_start`'s gate is read straight from the generator; the others are
   derived separately and held in step by a test that renders `settings.json`
   for each combination and fails if the report disagrees.
+- instruction size (added in v3.12.0) — measures the text Claude Code loads into
+  every session: `CLAUDE.md` plus every rule file without a `paths:` filter.
+  Doctor prints the total, the `CLAUDE.md` size, and the five largest
+  contributors by bundle. It warns when one file is over 40,000 characters or
+  the total is over 80,000. The 40,000 figure is the floor of Claude Code's
+  per-file notice. Claude Code does not document the combined limit, so 80,000
+  is an estimate and the warning says so. Rules with a `paths:` list load only
+  on matching files and are counted by number, not size. Doctor measures the
+  merged config, which is what the next `llmenv regenerate` writes. Fix a large
+  file in its source bundle, not in the generated copy.
 - dependent-tool versions (added in v3.11.0) — reports the installed version of
   the external tools llmenv wires in but doesn't ship (`icm`,
   `codebase-memory-mcp`) and how to update each. `icm upgrade --apply` installs

@@ -77,6 +77,17 @@ llmenv prune --all                # nuke everything (re-materializes on next exp
 llmenv doctor --gc                # diagnostics + GC in one pass
 ```
 
+## Claude Code says CLAUDE.md is large
+
+(added in v3.12.0)
+
+Claude Code warns at startup when the instruction files it loads are large, and the warning names files under `~/.cache/llmenv/`.
+Do not edit those files, because `llmenv regenerate` overwrites them.
+Run `llmenv doctor` and read the `Instruction size (Claude Code):` section.
+It prints the total and the largest contributors with their bundle names.
+Trim the named bundle's `CLAUDE.md` text or rule, or add a `paths:` list to a rule that only matters for some files.
+Then run `llmenv regenerate`.
+
 ## Doctor warns about retired Claude Code settings
 
 (added in v3.12.0)

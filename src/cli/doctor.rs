@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 mod autocompact;
 mod background;
+mod instruction_size;
 
 /// Effective value of a token-efficiency env var: the process environment
 /// wins if set (matches what Claude Code will actually see if it inherited
@@ -1364,6 +1365,13 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
                 eprintln!("{info} {event} not registered — {why}");
             }
         }
+    }
+
+    // #2357: the always-loaded instruction text is what Claude Code's large-file notice counts.
+    if let Some((manifest, _)) = &doctor_manifest
+        && claude_installed
+    {
+        instruction_size::run_doctor_instruction_size(use_color, manifest);
     }
 
     if let Some((manifest, _)) = &doctor_manifest {
