@@ -497,12 +497,11 @@ fails at import time. Pinning the install sidesteps it:
 uv tool install mcp-proxy --with "mcp<2"
 ```
 
-To reproduce a cold start deliberately, stop the proxy and let the next export
-bring it back:
+To reproduce a cold start deliberately, restart the proxy through llmenv
+(added in v3.12.0):
 
 ```bash
-pkill -f 'mcp-proxy --host'
-llmenv export >/dev/null
+llmenv doctor --restart-memory-proxy
 ```
 
 ## Tag-scoped memory and the env var contract
