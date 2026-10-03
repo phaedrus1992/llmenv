@@ -17,6 +17,7 @@ use super::resume::ResumeContext;
 use super::{
     Task, TaskNote, TaskState, list_tasks, now_rfc3339, slugify, task_path, tasks_dir, unique_slug,
 };
+use anyhow::Context;
 
 /// A task session: a named (or anonymous) span of work, tagged with the
 /// project it was started in, whose tasks are tracked as a group.
@@ -610,6 +611,16 @@ pub(super) fn tasks_in_session(state_dir: &Path, session_id: &str) -> Vec<Task> 
         .collect()
 }
 
+/// [`tasks_in_session`], but a read error on the tasks directory is an error instead of an empty
+/// list. Finishing or abandoning a session on a store it cannot read would skip the unfinished
+/// check (#2416).
+fn try_tasks_in_session(state_dir: &Path, session_id: &str) -> anyhow::Result<Vec<Task>> {
+    Ok(super::try_list_tasks(state_dir)?
+        .into_iter()
+        .filter(|t| t.session.as_deref() == Some(session_id))
+        .collect())
+}
+
 /// Abandon `session`: stamps `abandoned_at`, and for every one of its tasks
 /// that isn't already `done`, clears the `session` tag and appends an
 /// orphaning note. Already-`done` tasks keep their tag — a legitimate
@@ -639,7 +650,7 @@ fn untag_unfinished(
     note: &str,
 ) -> anyhow::Result<Vec<Task>> {
     let mut untagged = Vec::new();
-    for mut task in tasks_in_session(state_dir, session_id)
+    for mut task in try_tasks_in_session(state_dir, session_id)?
         .into_iter()
         .filter(|t| t.state != TaskState::Done)
     {
@@ -649,7 +660,13 @@ fn untag_unfinished(
         });
         task.session = None;
         task.updated_at = now.to_string();
-        super::save_task(state_dir, &task)?;
+        super::save_task(state_dir, &task).with_context(|| {
+            format!(
+                "untagging task '{}' from session '{session_id}'; {} earlier task(s) are already untagged",
+                task.slug,
+                untagged.len()
+            )
+        })?;
         untagged.push(task);
     }
     Ok(untagged)
@@ -708,7 +725,7 @@ pub(crate) fn finish_session(
         if !session.is_open() {
             anyhow::bail!("session '{id}' is already closed");
         }
-        let tasks = tasks_in_session(state_dir, &session.id);
+        let tasks = try_tasks_in_session(state_dir, &session.id)?;
         let unfinished = unfinished_tasks(&tasks);
         if !unfinished.is_empty() && !abandon_open {
             return Err(unfinished_error(id, &unfinished));
@@ -1955,6 +1972,32 @@ mod tests {
                 "a refused finish must leave the session open"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finish_session_on_an_unreadable_task_store_errors_and_stays_open() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().expect("test");
+        let session = session_with_states(dir.path(), &[TaskState::Open]);
+        let tasks = crate::task::tasks_dir(dir.path());
+        std::fs::set_permissions(&tasks, std::fs::Permissions::from_mode(0o000)).expect("test");
+        let readable_anyway = std::fs::read_dir(&tasks).is_ok();
+        let result = finish_session(dir.path(), &session.id, false);
+        std::fs::set_permissions(&tasks, std::fs::Permissions::from_mode(0o700)).expect("test");
+        if readable_anyway {
+            return; // running as root: the FS ignores permissions
+        }
+        assert!(
+            result.is_err(),
+            "an unreadable store must not finish the session"
+        );
+        assert!(
+            load_session(dir.path(), &session.id)
+                .expect("test")
+                .is_open()
+        );
     }
 
     #[test]

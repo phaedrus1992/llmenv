@@ -288,7 +288,10 @@ fn todowrite(
                 // before is refused (#2416).
                 match task::complete_task(state_dir, &slug, existing.is_none()) {
                     Ok(_) => finished.push(slug.clone()),
-                    Err(e) => failures.push(format!("'{title}' couldn't be completed ({e})")),
+                    Err(e) => {
+                        tracing::warn!(error = %e, slug = %slug, "task redirect: completion refused");
+                        failures.push(format!("'{title}' couldn't be completed ({e})"));
+                    }
                 }
             }
             _ => {}

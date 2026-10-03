@@ -34,14 +34,47 @@ fn autocompact_window(settings: Option<&Value>) -> Option<String> {
         .or_else(|| window.as_u64().map(|n| n.to_string()))
 }
 
+/// The first `autoCompactWindow` (top-level, then per model) that is neither a number nor a
+/// string, rendered for the message. Claude Code owns the value range, so only the type is checked.
+fn invalid_window(settings: Option<&Value>) -> Option<String> {
+    let settings = settings?;
+    let per_model = settings
+        .get("modelSettings")
+        .and_then(Value::as_mapping)
+        .into_iter()
+        .flat_map(|models| models.values())
+        .filter_map(|model| model.get("autoCompactWindow"));
+    std::iter::once(settings.get("autoCompactWindow"))
+        .flatten()
+        .chain(per_model)
+        .find(|w| !w.is_string() && w.as_u64().is_none())
+        .map(render)
+}
+
+fn render(value: &Value) -> String {
+    serde_yaml::to_string(value)
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
 pub(super) fn autocompact_check(
     settings: Option<&Value>,
     override_value: Option<String>,
 ) -> (CheckLevel, String) {
-    let enabled = settings
-        .and_then(|s| s.get("autoCompactEnabled"))
-        .and_then(Value::as_bool);
-    if enabled == Some(false) {
+    let enabled_value = settings.and_then(|s| s.get("autoCompactEnabled"));
+    if let Some(value) = enabled_value
+        && value.as_bool().is_none()
+    {
+        return (
+            CheckLevel::Warn,
+            format!(
+                "autoCompactEnabled must be true or false, got {}",
+                render(value)
+            ),
+        );
+    }
+    if enabled_value.and_then(Value::as_bool) == Some(false) {
         let tail = if override_value.is_some() {
             "; the override can be removed"
         } else {
@@ -55,12 +88,22 @@ pub(super) fn autocompact_check(
             ),
         );
     }
+    if let Some(bad) = invalid_window(settings) {
+        return (
+            CheckLevel::Warn,
+            format!("autoCompactWindow must be a number of tokens or \"auto\", got {bad}"),
+        );
+    }
     let window = autocompact_window(settings);
     let of_window = window
         .as_deref()
         .map(|w| format!(" of autoCompactWindow {w}"))
         .unwrap_or_default();
     match override_value.map(|v| v.parse::<u32>().map_err(|_| v)) {
+        Some(Ok(0)) => (
+            CheckLevel::Warn,
+            format!("{OVERRIDE_VAR}=0 is outside the 1-100 range Claude Code accepts"),
+        ),
         Some(Ok(pct)) if pct <= PCT_MAX_RECOMMENDED => {
             (CheckLevel::Pass, format!("{OVERRIDE_VAR}={pct}{of_window}"))
         }
@@ -186,6 +229,37 @@ mod tests {
         let yaml = "autoCompactWindow: 300000\nmodelSettings:\n  m:\n    autoCompactWindow: 400000";
         let (_, text) = check(Some(yaml), Some("50"));
         assert!(text.contains("autoCompactWindow 300000"), "{text}");
+    }
+
+    #[test]
+    fn zero_override_warns() {
+        let (level, text) = check(Some("{}"), Some("0"));
+        assert_eq!(level, CheckLevel::Warn);
+        assert!(text.contains("1-100"), "{text}");
+    }
+
+    #[test]
+    fn non_boolean_enabled_warns_with_the_value() {
+        let (level, text) = check(Some("autoCompactEnabled: \"false\""), Some("50"));
+        assert_eq!(level, CheckLevel::Warn);
+        assert!(
+            text.contains("autoCompactEnabled") && text.contains("false"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn malformed_window_warns_instead_of_reading_as_unset() {
+        for yaml in [
+            "autoCompactWindow: true",
+            "autoCompactWindow: -5",
+            "autoCompactWindow: 1.5",
+            "modelSettings:\n  m:\n    autoCompactWindow: [1]",
+        ] {
+            let (level, text) = check(Some(yaml), Some("50"));
+            assert_eq!(level, CheckLevel::Warn, "{yaml}");
+            assert!(text.contains("autoCompactWindow must be"), "{yaml}: {text}");
+        }
     }
 
     #[test]

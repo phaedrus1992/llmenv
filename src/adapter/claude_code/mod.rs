@@ -2414,7 +2414,9 @@ fn reconcile_settings(
     // Before v3.12.0 llmenv rendered `advisorSize`, which Claude Code never read (#2409). The key
     // is no longer owned, so clear the stale copy here; the passthrough loop below restores it
     // if `native.claude_code` sets it on purpose.
-    merged_obj.remove("advisorSize");
+    if merged_obj.remove("advisorSize").is_some() {
+        tracing::info!("removed stale advisorSize from settings.json; llmenv renders advisorModel");
+    }
 
     // Native passthrough keys: any key llmenv computed into `fresh` (e.g. via
     // overlay_native) that is not a modeled-feature key gets written through on
