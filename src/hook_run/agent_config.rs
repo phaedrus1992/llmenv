@@ -132,11 +132,7 @@ impl AgentConfig {
     }
 }
 
-/// The content hash of the booted config folder, when the engine sets one.
-fn booted_config_hash() -> Option<String> {
-    booted_hash_in(std::env::var_os("CLAUDE_CONFIG_DIR").as_deref())
-}
-
+/// The content hash of the manifest in the booted config folder, when the engine sets one.
 fn booted_hash_in(config_dir: Option<&std::ffi::OsStr>) -> Option<String> {
     let dir = config_dir.filter(|d| !d.is_empty())?;
     match crate::materialize::manifest::CacheManifest::read(Path::new(dir)) {
@@ -181,7 +177,7 @@ pub(crate) fn record_for_event(
     let state_dir = state_dir
         .inspect_err(|e| tracing::error!("no state dir, agent config not written: {e}"))
         .ok()?;
-    let hash = booted_config_hash();
+    let hash = booted_hash_in(std::env::var_os("CLAUDE_CONFIG_DIR").as_deref());
     let facts = StartFacts::from_payload(
         payload,
         adapter_name,
