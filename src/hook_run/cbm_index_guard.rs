@@ -29,6 +29,30 @@
 //! Stateless, like `cd_guard`: the decision comes from the current call's
 //! arguments alone.
 
+/// The `__DENY__` text for an `index_repository` call whose `repo_path` is outside the roots
+/// codebase-memory-mcp may index (#2406), or an empty string.
+pub(crate) fn handle_roots(
+    stdin_payload: &serde_json::Value,
+    config: &crate::config::Config,
+) -> String {
+    if stdin_payload.get("tool_name").and_then(|v| v.as_str()) != Some(INDEX_REPOSITORY_TOOL) {
+        return String::new();
+    }
+    let Some(repo_path) = stdin_payload
+        .get("tool_input")
+        .and_then(|v| v.get("repo_path"))
+        .and_then(|v| v.as_str())
+        .filter(|p| !p.trim().is_empty())
+    else {
+        return String::new();
+    };
+    let Ok(project_root) = std::env::current_dir() else {
+        return String::new();
+    };
+    crate::mcp::cbm_roots::guard_decision(repo_path, config, &project_root)
+        .map_or_else(String::new, |reason| format!("__DENY__:{reason}"))
+}
+
 /// Tool name this guard fires on. Callers register a `PreToolUse` matcher for
 /// exactly this string, so the guard costs one anchored regex when idle.
 pub(crate) const INDEX_REPOSITORY_TOOL: &str = "mcp__codebase-memory-mcp__index_repository";
@@ -207,6 +231,27 @@ mod tests {
             }),
         ] {
             assert_eq!(handle_pre_tool_use(&p), "", "{p} should pass through");
+        }
+    }
+
+    #[test]
+    fn the_roots_guard_ignores_other_tools_and_calls_without_a_repo_path() {
+        let config = crate::config::Config::default();
+        for p in [
+            payload("Bash", serde_json::json!({ "repo_path": "/x" })),
+            payload(INDEX_REPOSITORY_TOOL, serde_json::json!({})),
+            payload(
+                INDEX_REPOSITORY_TOOL,
+                serde_json::json!({ "repo_path": "  " }),
+            ),
+            payload(INDEX_REPOSITORY_TOOL, serde_json::json!({ "repo_path": 7 })),
+            // No codebase_memory entry: the guard has no roots to enforce.
+            payload(
+                INDEX_REPOSITORY_TOOL,
+                serde_json::json!({ "repo_path": "/x" }),
+            ),
+        ] {
+            assert_eq!(handle_roots(&p, &config), "", "{p}");
         }
     }
 

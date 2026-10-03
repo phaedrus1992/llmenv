@@ -726,6 +726,7 @@ actual cache directory when `index_path` is unset.
 | `index_path` | no | Override the index storage directory; unset leaves it to codebase-memory-mcp's own default (`~/.cache/codebase-memory-mcp/`), not an llmenv-managed path — see below (changed in v3.11.1) |
 | `mcp_permissions` | no | (added in v3.10.0) Per-tier permission override for codebase-memory-mcp's tools — see [`mcp_permissions`](#featuresmcp_permissions) below |
 | `mem_budget_mb` | no | (added in v3.12.0) Memory budget for indexing in MB, from 1 to 1048576. Sets `CBM_MEM_BUDGET_MB` for the server and the SessionStart index. Unset leaves the server's own default |
+| `allowed_roots` | no | (added in v3.12.0) Extra folders codebase-memory-mcp may index, on top of the defaults. Each entry starts with `/`, `~`, or `$`. See [MCP](./mcp.md#codebase-memory-codebase_memory) |
 
 (added in v3.8.0) The default log directory (`<state_dir>/codebase-memory`,
 used when `index_path` is unset) is created owner-only (`0o700`). An explicit
