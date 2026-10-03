@@ -2798,11 +2798,8 @@ fn direct_index_stdout(
 /// removed first, so the open can neither follow a link nor reuse a file that another user made.
 fn create_result_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
-    match std::fs::remove_file(path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
+    // A failed removal shows below: `create_new` then fails on what is still there.
+    let _ = std::fs::remove_file(path);
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -2823,6 +2820,12 @@ fn result_stdout(path: &std::path::Path) -> std::process::Stdio {
             std::process::Stdio::null()
         }
     }
+}
+
+/// Whether an index job runs through the `cbm-index-run` wrapper: it needs a checkpoint and an
+/// executable to run it with (#2396).
+fn uses_wrapper(checkpoint: Option<&std::path::Path>, exe: Option<&std::path::Path>) -> bool {
+    checkpoint.is_some() && exe.is_some()
 }
 
 /// The process that runs one index job: `llmenv cbm-index-run` when there is a checkpoint and an
@@ -2883,7 +2886,7 @@ fn trigger_codebase_memory_index(
     );
     let exe = std::env::current_exe().ok();
     // The wrapper is used only with both a checkpoint and an executable (`index_job_command`).
-    let wrapped = checkpoint.is_some() && exe.is_some();
+    let wrapped = uses_wrapper(checkpoint.as_deref(), exe.as_deref());
     let mut cmd = index_job_command(checkpoint.as_deref(), exe, || {
         build_index_repository_command(project_root, cm)
     });
@@ -4994,6 +4997,25 @@ mod tests {
         };
         let cmd = build_index_repository_command(std::path::Path::new("/r"), &without);
         assert_eq!(env_of(&cmd, "CBM_MEM_BUDGET_MB"), None);
+    }
+
+    #[test]
+    fn the_wrapper_is_used_only_with_a_checkpoint_and_an_executable() {
+        let p = Some(std::path::Path::new("/c"));
+        let e = Some(std::path::Path::new("/exe"));
+        assert!(uses_wrapper(p, e));
+        assert!(!uses_wrapper(p, None));
+        assert!(!uses_wrapper(None, e));
+        assert!(!uses_wrapper(None, None));
+    }
+
+    #[test]
+    fn a_result_file_that_cannot_be_replaced_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("result.json");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("inside"), "x").unwrap();
+        assert!(create_result_file(&path).is_err());
     }
 
     #[test]

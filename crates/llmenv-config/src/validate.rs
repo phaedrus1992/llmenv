@@ -2088,12 +2088,12 @@ mod tests {
                 ..Default::default()
             }]);
             let result = config.validate();
-            assert_eq!(result.is_ok(), ok, "{budget}");
-            if !ok {
-                let err = result.unwrap_err().to_string();
+            if ok {
+                assert!(result.is_ok(), "{budget}");
+            } else {
                 assert!(
-                    err.contains(&budget.to_string()) && err.contains("mem_budget_mb"),
-                    "{err}"
+                    matches!(result, Err(ValidateError::CodebaseMemoryBudgetInvalid(b)) if b == budget),
+                    "{budget}"
                 );
             }
         }
