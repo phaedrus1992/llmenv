@@ -31,7 +31,7 @@ Verify on a live session that a stdio entry with `alwaysLoad: true` is honored t
 | Fact | Location |
 | --- | --- |
 | `McpServer { name, when, transport (serde "type"), command, args, env, url, headers, disabled, disabled_tools, timeout: Option<u32> }`, not `deny_unknown_fields` | `crates/llmenv-config/src/schema.rs` |
-| `ResolvedMcp { name, kind: Stdio | Remote, headers, timeout, disabled_tools, mcp_permissions, memory_hook }`; set in `resolve_static` (top-level and bundle `mcp`, both transports), `resolve_memory` (the built-in ICM entry, remote http, `timeout: None`), `resolve_codebase_memory` | `src/mcp/resolve.rs` |
+| `ResolvedMcp { name, kind, headers, timeout, disabled_tools, mcp_permissions, memory_hook }` where `kind` is `Stdio` or `Remote`; set in `resolve_static` (top-level and bundle `mcp`, both transports), `resolve_memory` (the built-in ICM entry, remote http, `timeout: None`), `resolve_codebase_memory` | `src/mcp/resolve.rs` |
 | `build_mcp_servers` renders stdio entries as `command`/`args`/`env` and remote entries as `type`/`url`/`headers`, with `timeout` only when `Some` and only on remote entries | `src/adapter/claude_code/mod.rs` |
 | `RENDERED_ENTRY_KEYS` must list every key `build_mcp_servers` writes; the test `rendered_entry_keys_cover_every_key_build_mcp_servers_writes` enforces it; `carry_runtime_keys` keeps Claude's own runtime keys across re-renders (#2376) | `src/adapter/claude_code/mod.rs` |
 | `overlay_native` applies `native_mcp.claude_code.mcpServers.<name>.*`, today's workaround | `src/adapter/claude_code/mod.rs` |

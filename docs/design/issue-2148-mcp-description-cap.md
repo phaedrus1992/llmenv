@@ -32,7 +32,7 @@ That prompt uses no tools, but the first turn of a non-interactive session waits
 | --- | --- |
 | `McpHttpClient { url, client, session_id }` with `new(url, timeout)`, `probe()`, `call_tool(name, args)`; `ensure_session` sends `initialize` and reads only the `Mcp-Session-Id` header, discarding the result body | `src/hook_run/mcp_client.rs` |
 | SSRF rules live in `validate_url_production`; `test_new` bypasses them for tests | `src/hook_run/mcp_client.rs` |
-| `ResolvedMcp.kind` is `Stdio { command, args, env }` or `Remote { transport: Http | Sse, url }`, with `headers` | `src/mcp/resolve.rs` |
+| `ResolvedMcp.kind` is `Stdio { command, args, env }` or `Remote { transport, url }` where `transport` is `Http` or `Sse`, with `headers` | `src/mcp/resolve.rs` |
 | `mcp_health::probe_stdio` starts a stdio server with `kill_on_drop`, performs the `initialize` handshake over its stdio, and kills it; `managed_servers()` lists ICM plus codebase-memory | `src/hook_run/mcp_health.rs` |
 | Doctor: `run_doctor_mcp_servers` is the template section; `effective_token_efficiency_var(native_claude_env, key)` reads an env var from the process or `native.claude_code.env` | `src/cli/doctor.rs` |
 | `wiremock` is a dev dependency | `Cargo.toml` |

@@ -98,7 +98,7 @@ The value is ignored with no message, so a user who sets it gets nothing.
 
 ## Tests
 
-1. Validation table: `fable`, `opus`, `sonnet`, `claude-opus-5-5`, `claude-sonnet-5-5` accepted; `small`, `Opus`, `claude-`, `claude-opus-5-5 ` (trailing space), `gpt-5`, empty string rejected with the value in the message.
+1. Validation table: `fable`, `opus`, `sonnet`, `claude-opus-5-5`, `claude-sonnet-5-5` accepted; `small`, `Opus`, `claude-`, `claude-opus-5-5` followed by a trailing space, `gpt-5`, empty string rejected with the value in the message.
 2. `advisor_size: medium` in config fails validation naming `advisor_model`.
 3. Merge precedence test renamed and passing; a bundle and the top level both setting `advisor_model` resolve by precedence, and an equal-precedence conflict errors as the other scalar capabilities do.
 4. Render: `advisor_model: opus` gives `settings.json` with `advisorModel: "opus"` and no `advisorSize`; unset renders neither.

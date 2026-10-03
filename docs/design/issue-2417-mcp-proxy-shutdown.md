@@ -14,7 +14,7 @@ It names what to instrument, what to try, and what to do for each outcome.
 On 2026-10-02 `mcp-proxy.log` shows a graceful shutdown (`Shutting down`, two `ASGI callable returned without completing response`, `Finished server process`) while requests were in flight.
 That is a SIGINT, SIGTERM, or SIGHUP, not a crash.
 Sessions that started in the next six minutes got `ECONNREFUSED`.
-#2358 now restarts a dead proxy at session start, but the cause is unknown.
+Issue #2358 now restarts a dead proxy at session start, but the cause is unknown.
 
 ## Verified facts (release/3.x)
 

@@ -9,7 +9,7 @@ This is a spec, not a plan.
 
 ## Problem
 
-Two PRs showed all checks green but merge was blocked with "Code scanning is waiting for results from zizmor for the commits <sha>".
+Two PRs showed all checks green but merge was blocked with "Code scanning is waiting for results from zizmor for the commits `<sha>`".
 The workflow triggers on `pull_request` and checks out GitHub's ephemeral test-merge ref (`refs/pull/N/merge`).
 GitHub recomputes that merge commit's SHA over time (observed drifting between two API calls minutes apart with no push to either branch).
 The SARIF upload is tied to `github.sha` at run time (the old merge SHA), while the `code_scanning` ruleset rule checks the PR's current `merge_commit_sha`.
