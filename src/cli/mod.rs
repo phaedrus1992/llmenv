@@ -299,7 +299,11 @@ enum Command {
     /// payload from stdin (the session id travels in the payload rather than
     /// as a CLI argument so it isn't visible in the process table).
     #[command(name = "session-log-record", hide = true)]
-    SessionLogRecord,
+    SessionLogRecord {
+        /// Checkpoint file the job deletes when it succeeds (#2396).
+        #[arg(long)]
+        checkpoint: Option<PathBuf>,
+    },
     /// Store WebFetch/WebSearch content into ICM memory.
     ///
     /// Internal plumbing: this is the detached-child entrypoint
@@ -308,7 +312,11 @@ enum Command {
     /// Not meant to be invoked directly. Reads the store-args JSON payload from
     /// stdin.
     #[command(name = "icm-store", hide = true)]
-    IcmStore,
+    IcmStore {
+        /// Checkpoint file the job deletes when it succeeds (#2396).
+        #[arg(long)]
+        checkpoint: Option<PathBuf>,
+    },
     /// Run post-session memory consolidation as a detached child process.
     ///
     /// Internal plumbing: entrypoint for `hook_run::detached_consolidation::
@@ -316,7 +324,22 @@ enum Command {
     /// immediately instead of blocking on the consolidation MCP calls. Not
     /// meant to be invoked directly.
     #[command(name = "consolidation-run", hide = true)]
-    ConsolidationRun,
+    ConsolidationRun {
+        /// Checkpoint file the job updates and deletes when it succeeds (#2396).
+        #[arg(long)]
+        checkpoint: Option<PathBuf>,
+    },
+    /// Run the codebase-memory index as a detached child and report its exit status.
+    ///
+    /// Internal plumbing: `hook_run::trigger_codebase_memory_index` launches it so
+    /// the checkpoint (#2396) learns whether the indexer succeeded. Not meant to be
+    /// invoked directly.
+    #[command(name = "cbm-index-run", hide = true)]
+    CbmIndexRun {
+        /// Checkpoint file that holds the project root and index path.
+        #[arg(long)]
+        checkpoint: PathBuf,
+    },
     /// Manage auth credentials for materialized folders (#172)
     Login {
         /// Apply to the global auth cache (all future materializations) rather
@@ -884,20 +907,30 @@ pub fn run() -> anyhow::Result<()> {
                 std::process::exit(2);
             }
         }
-        Some(Command::SessionLogRecord) => {
+        Some(Command::SessionLogRecord { checkpoint }) => {
             use std::io::Read;
             let mut payload_json = String::new();
             std::io::stdin().read_to_string(&mut payload_json)?;
-            crate::session_log::detached::run_record(&payload_json)?;
+            let checkpoint = checked_checkpoint(checkpoint)?;
+            crate::session_log::detached::run_record(&payload_json, checkpoint.as_deref())?;
         }
-        Some(Command::IcmStore) => {
+        Some(Command::IcmStore { checkpoint }) => {
             use std::io::Read;
             let mut payload_json = String::new();
             std::io::stdin().read_to_string(&mut payload_json)?;
-            crate::hook_run::detached_store::run_icm_store(&payload_json)?;
+            let checkpoint = checked_checkpoint(checkpoint)?;
+            crate::hook_run::detached_store::run_icm_store(&payload_json, checkpoint.as_deref())?;
         }
-        Some(Command::ConsolidationRun) => {
-            crate::hook_run::detached_consolidation::run_consolidation(&paths::config_path()?)?;
+        Some(Command::ConsolidationRun { checkpoint }) => {
+            let checkpoint = checked_checkpoint(checkpoint)?;
+            crate::hook_run::detached_consolidation::run_consolidation(
+                &paths::config_path()?,
+                checkpoint.as_deref(),
+            )?;
+        }
+        Some(Command::CbmIndexRun { checkpoint }) => {
+            let checkpoint = checked_checkpoint(Some(checkpoint))?.unwrap_or_default();
+            crate::hook_run::detached_cbm::run_cbm_index(&checkpoint)?;
         }
         Some(Command::Login { global }) => {
             run_login(global)?;
@@ -3255,6 +3288,16 @@ fn render_task_session_summary_human(
 
 /// Handle `llmenv task <subcommand>` (#231). Thin formatting layer over
 /// `crate::task`, which owns the store logic.
+/// The `--checkpoint` path of a detached child, checked to be a checkpoint file under the state
+/// dir (#2396). The child deletes and trusts the file, so it must not take an arbitrary path.
+fn checked_checkpoint(path: Option<PathBuf>) -> anyhow::Result<Option<PathBuf>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let state_dir = paths::state_dir()?;
+    crate::hook_run::checkpoint::validated_path(&state_dir, &path).map(Some)
+}
+
 fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()> {
     let state_dir = crate::paths::state_dir()?;
     match command {
