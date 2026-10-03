@@ -51,9 +51,14 @@ if [[ "${has_target_dir}" == no ]]; then
   # relative to the workspace root, which the pre-push hook may not be run from.
   # Fall back to the git root when jq is missing.
   if command -v jq >/dev/null 2>&1; then
-    target_root="$(cargo metadata --no-deps --format-version 1 | jq -r .target_directory)"
+    target_root="$(cargo metadata --no-deps --format-version 1 | jq -er .target_directory)"
   else
+    echo "hawk-check: jq not found; using CARGO_TARGET_DIR or <git root>/target (build.target-dir is ignored)" >&2
     target_root="${CARGO_TARGET_DIR:-$(git rev-parse --show-toplevel)/target}"
+  fi
+  if [[ -z "${target_root}" ]]; then
+    echo "hawk-check: cannot resolve the cargo target dir; pass --target-dir" >&2
+    exit 1
   fi
   args+=(--target-dir "${target_root}/hawk")
 fi

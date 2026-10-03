@@ -1,3 +1,6 @@
+# The ci profile below uses the leak-timeout table form, added in nextest 0.9.95.
+nextest-version = "0.9.95"
+
 # Cap the concurrency of tests that spawn the llmenv binary under a wall-clock
 # budget (#1254).
 #
