@@ -3308,7 +3308,7 @@ mod tests {
         };
         let err = cfg.validate().unwrap_err();
         assert!(matches!(err, ValidateError::AdvisorSizeRemoved { .. }));
-        assert!(err.to_string().contains("advisor_model"), "{err}");
+        assert!(err.to_string().contains("advisor_model"));
     }
 
     #[test]
