@@ -1470,6 +1470,11 @@ pub struct CodebaseMemory {
     /// and the SessionStart auto-index both get it, so the two agree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mem_budget_mb: Option<u32>,
+    /// Extra roots codebase-memory-mcp may index, on top of llmenv's defaults: the project root,
+    /// the llmenv config, cache, and state folders, and the code-explorer cache (#2406). `~` and
+    /// `$VAR` expand at session start, and an entry with an unset variable is dropped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_roots: Vec<String>,
 }
 
 fn default_throttle_cache_ttl() -> u64 {
@@ -2984,6 +2989,7 @@ force_for_plugin: true
         let caps = Capabilities {
             features: Some(Features {
                 codebase_memory: vec![CodebaseMemory {
+                    allowed_roots: vec![],
                     mem_budget_mb: None,
                     when: vec![],
                     index_path: None,

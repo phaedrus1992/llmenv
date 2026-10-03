@@ -863,6 +863,10 @@ fn resolve_pre_tool_decision(
     if !clobber_deny.is_empty() {
         return Some(clobber_deny);
     }
+    let roots_deny = crate::hook_run::cbm_index_guard::handle_roots(stdin_payload, config);
+    if !roots_deny.is_empty() {
+        return Some(roots_deny);
+    }
     match state_dir {
         Ok(state_dir) => resolve_pre_tool_text(
             stdin_payload,
@@ -1277,6 +1281,7 @@ fn run_inner(
         // Fire-and-forget: indexing a large repo can take minutes (the Linux
         // kernel benchmarks at ~3 per upstream docs), so this must never
         // block SessionStart.
+        let mut roots_notice: Option<String> = None;
         if event == HookEvent::SessionStart {
             let active_codebase_memory: Vec<&crate::config::CodebaseMemory> = config
                 .features
@@ -1297,6 +1302,9 @@ fn run_inner(
                     if let Ok((project_root, state_dir)) =
                         crate::mcp::resolve::codebase_memory_paths()
                     {
+                        // Before the index run, so the server accepts the repository (#2406).
+                        roots_notice =
+                            crate::mcp::cbm_roots::session_start_notice(&config, cm, &project_root);
                         trigger_codebase_memory_index(&project_root, cm, &state_dir);
                     }
                 }
@@ -1448,7 +1456,11 @@ fn run_inner(
             crate::paths::state_dir(),
         );
         let health_notice = if event == HookEvent::SessionStart {
-            mcp_health::session_start_notice(rt, &config, config_dir, &active)
+            let health = mcp_health::session_start_notice(rt, &config, config_dir, &active);
+            match (health, roots_notice) {
+                (Some(h), Some(r)) => Some(format!("{h}{r}")),
+                (h, r) => h.or(r),
+            }
         } else {
             None
         };
@@ -4878,6 +4890,7 @@ mod tests {
     #[test]
     fn index_repository_command_sets_args_and_no_scoping_env() {
         let cm = crate::config::CodebaseMemory {
+            allowed_roots: vec![],
             mem_budget_mb: None,
             when: vec!["proj".to_string()],
             index_path: None,
@@ -4918,6 +4931,7 @@ mod tests {
     #[test]
     fn index_repository_command_index_path_override_wins() {
         let cm = crate::config::CodebaseMemory {
+            allowed_roots: vec![],
             mem_budget_mb: None,
             when: vec!["proj".to_string()],
             index_path: Some("/custom/path".to_string()),
@@ -4944,6 +4958,7 @@ mod tests {
     #[test]
     fn codebase_memory_cache_dir_defaults_under_state_dir() {
         let cm = crate::config::CodebaseMemory {
+            allowed_roots: vec![],
             mem_budget_mb: None,
             when: vec!["proj".to_string()],
             index_path: None,
@@ -4958,6 +4973,7 @@ mod tests {
     #[test]
     fn codebase_memory_cache_dir_honors_index_path_override() {
         let cm = crate::config::CodebaseMemory {
+            allowed_roots: vec![],
             mem_budget_mb: None,
             when: vec!["proj".to_string()],
             index_path: Some("/custom/path".to_string()),
@@ -5059,6 +5075,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let state_dir = tempfile::tempdir().unwrap();
         let cm = crate::config::CodebaseMemory {
+            allowed_roots: vec![],
             mem_budget_mb: None,
             when: vec!["proj".to_string()],
             index_path: None,
@@ -5107,6 +5124,7 @@ mod tests {
         let index_dir = tempfile::tempdir().unwrap();
         std::fs::set_permissions(index_dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
         let cm = crate::config::CodebaseMemory {
+            allowed_roots: vec![],
             mem_budget_mb: None,
             when: vec!["proj".to_string()],
             index_path: Some(index_dir.path().to_str().unwrap().to_string()),
@@ -5187,7 +5205,7 @@ mod tests {
         fn index_repository_command_json_arg_always_valid_and_roundtrips(
             path_str in "[\\PC]{0,60}"
         ) {
-            let cm = crate::config::CodebaseMemory { mem_budget_mb: None,
+            let cm = crate::config::CodebaseMemory { allowed_roots: vec![], mem_budget_mb: None,
                 when: vec!["proj".to_string()],
                 index_path: None,
                 mcp_permissions: None,
@@ -5212,7 +5230,7 @@ mod tests {
         fn index_repository_command_no_scoping_env_when_index_path_none(
             path_str in "[\\PC]{0,60}"
         ) {
-            let cm = crate::config::CodebaseMemory { mem_budget_mb: None,
+            let cm = crate::config::CodebaseMemory { allowed_roots: vec![], mem_budget_mb: None,
                 when: vec!["proj".to_string()],
                 index_path: None,
                 mcp_permissions: None,

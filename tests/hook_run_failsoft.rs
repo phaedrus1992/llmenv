@@ -897,6 +897,67 @@ fn session_start_is_silent_when_codebase_memory_answers() {
         .stdout(predicate::str::contains("MCP health check failed").not());
 }
 
+/// A fake server that records each `allow-root <path>` call in `log` and lists no roots.
+#[cfg(unix)]
+fn recording_cbm(log: &std::path::Path, add_status: i32) -> String {
+    format!(
+        "if [ \"$1\" = allow-root ]; then\n\
+         if [ \"$2\" = --list ]; then echo 'allowed roots:'; exit 0; fi\n\
+         echo \"$2\" >> '{}'\n\
+         echo 'refused by the fake server' >&2\n\
+         exit {add_status}\n\
+         fi\n\
+         read line\nprintf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{}}}}'",
+        log.display()
+    )
+}
+
+// #2406: SessionStart records the project folder as an allowed root through the server's own
+// command.
+#[cfg(unix)]
+#[test]
+fn session_start_records_the_project_folder_as_an_allowed_root() {
+    let (dir, config_path) = setup_config(&config_with_codebase_memory());
+    let bin = TempDir::new().unwrap();
+    let log = bin.path().join("roots.log");
+    let mut cmd = hook_cmd(dir.path(), &config_path, "session_start");
+    cmd.current_dir(dir.path());
+    with_fake_cbm(&mut cmd, bin.path(), &recording_cbm(&log, 0));
+    cmd.timeout(Duration::from_secs(20))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cannot index").not());
+    let recorded = fs::read_to_string(&log).unwrap();
+    let name = dir
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        recorded.contains(&name),
+        "the project folder is recorded: {recorded}"
+    );
+}
+
+// #2406: a root the server refuses is named on stdout with the config fix.
+#[cfg(unix)]
+#[test]
+fn session_start_names_a_root_the_server_refuses() {
+    let (dir, config_path) = setup_config(&config_with_codebase_memory());
+    let bin = TempDir::new().unwrap();
+    let log = bin.path().join("roots.log");
+    let mut cmd = hook_cmd(dir.path(), &config_path, "session_start");
+    cmd.current_dir(dir.path());
+    with_fake_cbm(&mut cmd, bin.path(), &recording_cbm(&log, 1));
+    cmd.timeout(Duration::from_secs(20))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cannot index"))
+        .stdout(predicate::str::contains("refused by the fake server"))
+        .stdout(predicate::str::contains("allowed_roots"));
+}
+
 /// A config whose host scope matches `hostname`, so this host owns the ICM server.
 fn config_with_local_memory_server(port: u16, hostname: &str) -> String {
     format!(

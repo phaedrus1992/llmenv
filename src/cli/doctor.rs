@@ -2383,6 +2383,7 @@ mod tests {
         let config = Config {
             features: Some(crate::config::Features {
                 codebase_memory: vec![crate::config::CodebaseMemory {
+                    allowed_roots: vec![],
                     mem_budget_mb: None,
                     when: vec!["proj".to_string()],
                     index_path: None,
@@ -2403,6 +2404,7 @@ mod tests {
         let config = Config {
             features: Some(crate::config::Features {
                 codebase_memory: vec![crate::config::CodebaseMemory {
+                    allowed_roots: vec![],
                     mem_budget_mb: None,
                     when: vec!["never-emitted".to_string()],
                     index_path: None,
@@ -2423,6 +2425,7 @@ mod tests {
         let bundle_caps = Capabilities {
             features: Some(crate::config::Features {
                 codebase_memory: vec![crate::config::CodebaseMemory {
+                    allowed_roots: vec![],
                     mem_budget_mb: None,
                     when: vec!["bundle-tag".to_string()],
                     index_path: None,

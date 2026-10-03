@@ -65,6 +65,11 @@ pub enum ValidateError {
          number of megabytes the indexer may use, or remove it"
     )]
     CodebaseMemoryBudgetInvalid(u32),
+    #[error(
+        "features.codebase_memory allowed_roots entry '{0}' is not an absolute path. Use a path \
+         that starts with /, ~, or a $VARIABLE"
+    )]
+    CodebaseMemoryRootInvalid(String),
     #[error("throttle entry for '{0}' has no when: tags")]
     ThrottleNoTags(String),
     #[error("throttle entry has an empty 'backend' field")]
@@ -715,6 +720,15 @@ impl Config {
                 {
                     return Err(ValidateError::CodebaseMemoryBudgetInvalid(budget));
                 }
+                // The shape only: a variable may expand to an absolute path at session start.
+                if let Some(bad) = cm.allowed_roots.iter().find(|r| {
+                    let r = r.trim();
+                    // `~user` is not supported: only `~` alone or `~/...`.
+                    let tilde = r == "~" || r.starts_with("~/");
+                    !(r.starts_with('/') || tilde || r.starts_with('$'))
+                }) {
+                    return Err(ValidateError::CodebaseMemoryRootInvalid(bad.clone()));
+                }
             }
         }
         Ok(())
@@ -1235,13 +1249,17 @@ mod tests {
             prop::collection::vec(arb_string(), 1..3),
             prop::option::of(arb_string()),
             prop::option::of(1u32..2_000_000),
+            prop::collection::vec("/[a-z]{1,8}", 0..3),
         )
-            .prop_map(|(when, index_path, mem_budget_mb)| CodebaseMemory {
-                when,
-                index_path,
-                mcp_permissions: None,
-                mem_budget_mb,
-            })
+            .prop_map(
+                |(when, index_path, mem_budget_mb, allowed_roots)| CodebaseMemory {
+                    when,
+                    index_path,
+                    mcp_permissions: None,
+                    mem_budget_mb,
+                    allowed_roots,
+                },
+            )
     }
 
     proptest! {
@@ -2100,8 +2118,40 @@ mod tests {
     }
 
     #[test]
+    fn codebase_memory_roots_must_be_absolute_or_expandable() {
+        for (root, ok) in [
+            ("/srv/x", true),
+            ("~/notes", true),
+            ("$WORK/a", true),
+            ("${WORK}/a", true),
+            ("relative/dir", false),
+            ("~other/x", false),
+            ("~", true),
+            ("./here", false),
+            ("", false),
+            ("  ", false),
+        ] {
+            let config = config_with_codebase_memory(vec![crate::CodebaseMemory {
+                when: vec!["p".into()],
+                allowed_roots: vec![root.to_string()],
+                ..Default::default()
+            }]);
+            let result = config.validate();
+            if ok {
+                assert!(result.is_ok(), "{root:?}");
+            } else {
+                assert!(
+                    matches!(result, Err(ValidateError::CodebaseMemoryRootInvalid(ref r)) if r == root),
+                    "{root:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn codebase_memory_requires_tags() {
         let config = config_with_codebase_memory(vec![crate::CodebaseMemory {
+            allowed_roots: vec![],
             mem_budget_mb: None,
             when: vec![],
             index_path: None,
@@ -2116,6 +2166,7 @@ mod tests {
     #[test]
     fn codebase_memory_with_tags_is_valid() {
         let config = config_with_codebase_memory(vec![crate::CodebaseMemory {
+            allowed_roots: vec![],
             mem_budget_mb: None,
             when: vec!["my-project".to_string()],
             index_path: None,

@@ -301,8 +301,8 @@ pub(crate) fn codebase_memory_paths() -> anyhow::Result<(std::path::PathBuf, std
 /// process per project. `CBM_CACHE_DIR` is only set when the user explicitly
 /// configures `index_path` (#1493); otherwise `codebase-memory-mcp` falls
 /// back to its own default cache location. `CBM_ALLOWED_ROOT` is never set
-/// (#1495) — restricting the tool's scope is the end user's call via
-/// `codebase-memory-mcp`'s own config, not llmenv's to impose.
+/// (#1495). llmenv records the roots the server may index through `allow-root` at SessionStart
+/// instead (#2406); see `mcp::cbm_roots`.
 fn resolve_codebase_memory(
     cm: &CodebaseMemory,
     _project_root: &Path,
@@ -746,6 +746,7 @@ mod tests {
     #[test]
     fn codebase_memory_resolves_to_local_stdio() {
         let cm = CodebaseMemory {
+            allowed_roots: vec![],
             mem_budget_mb: None,
             when: vec!["proj".to_string()],
             index_path: None,
@@ -781,6 +782,7 @@ mod tests {
     #[test]
     fn codebase_memory_index_path_override_wins() {
         let cm = CodebaseMemory {
+            allowed_roots: vec![],
             mem_budget_mb: None,
             when: vec!["proj".to_string()],
             index_path: Some("/custom/path".to_string()),
@@ -801,6 +803,7 @@ mod tests {
     #[test]
     fn codebase_memory_not_selected_when_tags_inactive() {
         let entries = vec![CodebaseMemory {
+            allowed_roots: vec![],
             mem_budget_mb: None,
             when: vec!["other-tag".to_string()],
             index_path: None,
@@ -824,12 +827,14 @@ mod tests {
         // enforced here rather than left to crash later on a name collision.
         let entries = vec![
             CodebaseMemory {
+                allowed_roots: vec![],
                 mem_budget_mb: None,
                 when: vec!["proj-a".to_string()],
                 index_path: None,
                 mcp_permissions: None,
             },
             CodebaseMemory {
+                allowed_roots: vec![],
                 mem_budget_mb: None,
                 when: vec!["proj-b".to_string()],
                 index_path: None,
@@ -892,7 +897,7 @@ mod tests {
             fn resolve_codebase_memory_never_sets_allowed_root(
                 path_str in arb_path_component()
             ) {
-                let cm = CodebaseMemory { mem_budget_mb: None, when: vec!["proj".to_string()], index_path: None, mcp_permissions: None };
+                let cm = CodebaseMemory { allowed_roots: vec![], mem_budget_mb: None, when: vec!["proj".to_string()], index_path: None, mcp_permissions: None };
                 let project_root = std::path::PathBuf::from(&path_str);
                 let resolved = resolve_codebase_memory(&cm, &project_root, Path::new("/state"));
                 match resolved.kind {
@@ -912,7 +917,7 @@ mod tests {
                 project_root_str in arb_path_component(),
                 state_dir_str in arb_path_component(),
             ) {
-                let cm = CodebaseMemory { mem_budget_mb: None, when: vec!["proj".to_string()], index_path: None, mcp_permissions: None };
+                let cm = CodebaseMemory { allowed_roots: vec![], mem_budget_mb: None, when: vec!["proj".to_string()], index_path: None, mcp_permissions: None };
                 let project_root = std::path::PathBuf::from(&project_root_str);
                 let state_dir = std::path::PathBuf::from(&state_dir_str);
                 let resolved = resolve_codebase_memory(&cm, &project_root, &state_dir);
@@ -928,7 +933,7 @@ mod tests {
             fn resolve_codebase_memory_index_path_override_always_wins(
                 index_path in arb_path_component()
             ) {
-                let cm = CodebaseMemory { mem_budget_mb: None,
+                let cm = CodebaseMemory { allowed_roots: vec![], mem_budget_mb: None,
                     when: vec!["proj".to_string()],
                     index_path: Some(index_path.clone()),
                     mcp_permissions: None,
@@ -975,6 +980,7 @@ mod tests {
         // empty active set never resolves anything, for arbitrary tag sets.
         fn arb_codebase_memory_entry(idx: usize) -> impl Strategy<Value = CodebaseMemory> {
             prop::collection::vec("[a-z]{1,4}", 0..4).prop_map(move |when| CodebaseMemory {
+                allowed_roots: vec![],
                 mem_budget_mb: None,
                 when: if when.is_empty() {
                     vec![format!("only-tag-{idx}")]

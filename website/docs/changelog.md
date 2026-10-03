@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `llmenv doctor` measures the instructions and tool descriptions of each MCP server and warns when Claude Code would cut them at its 2,048-character limit. `llmenv doctor --probe-mcp` also measures stdio servers. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#doctor) (#2148)
 - Marketplace plugin entries with a `git-subdir` source install the plugin from the named folder of the repo, and a `sha` pins the exact commit for `github`, `url`, and `git-subdir` sources. `archive` and `command` sources are skipped with a warning that names the kind. See [Plugins](https://phaedrus1992.github.io/llmenv/docs/plugins#plugin-sources-in-a-marketplace-manifest) (#2441)
 - `features.codebase_memory[].mem_budget_mb` sets `CBM_MEM_BUDGET_MB` for the server and the SessionStart index. `llmenv doctor` reports the result of the last codebase-memory index, including the budget to set after an over-budget stop. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp#codebase-memory-codebase_memory) (#2154)
+- `features.codebase_memory[].allowed_roots` adds folders that codebase-memory-mcp may index. llmenv records the project root, its own folders, the code-explorer cache, and these entries at SessionStart, warns about a root the server refuses, and denies an `index_repository` call outside them. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp#codebase-memory-codebase_memory) (#2406)
 
 ### Changed
 

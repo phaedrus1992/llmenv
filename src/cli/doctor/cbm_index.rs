@@ -170,6 +170,40 @@ pub(super) fn run_doctor_cbm_index(
     let warn = super::super::doctor_warning(use_color);
     let info = super::super::doctor_info(use_color);
     super::print_check(check(&cache_dir, &project_root), &pass, &warn, &info);
+    print_roots(config, entry, &project_root, (&pass, &warn, &info));
+}
+
+/// Print the roots that codebase-memory-mcp may index, and any wanted root it lacks (#2406).
+fn print_roots(
+    config: &crate::config::Config,
+    entry: &crate::config::CodebaseMemory,
+    project_root: &Path,
+    (pass, warn, info): (&str, &str, &str),
+) {
+    use crate::mcp::cbm_roots;
+    let check = cbm_roots::RootBases::from_config(config, project_root)
+        .and_then(|bases| {
+            let wanted = cbm_roots::resolve_allowed_roots(entry, &bases);
+            cbm_roots::check_roots(entry, &wanted, bases.home.as_deref())
+        })
+        .map(|report| {
+            let (is_warn, text) = cbm_roots::describe(&report);
+            (
+                if is_warn {
+                    CheckLevel::Warn
+                } else {
+                    CheckLevel::Pass
+                },
+                text,
+            )
+        })
+        .unwrap_or_else(|e| {
+            (
+                CheckLevel::Info,
+                format!("codebase-memory: cannot check the allowed roots: {e}"),
+            )
+        });
+    super::print_check(check, pass, warn, info);
 }
 
 #[cfg(test)]
