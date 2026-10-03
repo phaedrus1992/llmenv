@@ -730,34 +730,69 @@ pub(crate) fn start_task(state_dir: &Path, input: &str, force: bool) -> anyhow::
         {
             anyhow::bail!("{block}");
         }
+        // The ancestors go first: if one cannot start, the sub-task stays `open`.
+        let promoted = ancestors_to_start(state_dir, &task, force)?;
+        let now = now_rfc3339();
+        for mut ancestor in promoted {
+            ancestor.state = TaskState::Wip;
+            ancestor.updated_at = now.clone();
+            save_task(state_dir, &ancestor)?;
+        }
         task.state = TaskState::Wip;
-        task.updated_at = now_rfc3339();
+        task.updated_at = now;
         save_task(state_dir, &task)?;
-        start_parent_of(state_dir, &task)?;
         Ok(task)
     })?;
     touch_task_session(state_dir, &task);
     Ok(task)
 }
 
-/// Starting a sub-task puts an `open` parent in progress too (#2455).
-fn start_parent_of(state_dir: &Path, child: &Task) -> anyhow::Result<()> {
-    if child.relation != Relation::Child {
-        return Ok(());
+/// The `open` ancestors that starting the sub-task `child` puts in progress (#2455). A queued
+/// ancestor is held by the queue like any task, and a `done` ancestor refuses unless `force`.
+/// A top-level task has no ancestors to start.
+fn ancestors_to_start(state_dir: &Path, child: &Task, force: bool) -> anyhow::Result<Vec<Task>> {
+    let mut promoted = Vec::new();
+    let mut seen = vec![child.slug.clone()];
+    let mut current = child.clone();
+    while current.relation == Relation::Child {
+        let Some(parent_slug) = current.parent.clone() else {
+            break;
+        };
+        if seen.contains(&parent_slug) {
+            break;
+        }
+        // A deleted parent leaves a dangling link, which the rest of the store tolerates. Any
+        // other read error is logged, and the start goes on.
+        let parent = match load_task(state_dir, &parent_slug) {
+            Ok(parent) => parent,
+            Err(e) => {
+                tracing::warn!("sub-task parent '{parent_slug}' cannot be read: {e:#}");
+                break;
+            }
+        };
+        if parent.state == TaskState::Done && !force {
+            anyhow::bail!(
+                "the parent '{parent_slug}' of '{}' is done. Reopen it with `llmenv task start \
+                 --reopen {parent_slug}`, or pass --force.",
+                child.slug
+            );
+        }
+        if parent.state == TaskState::Open {
+            if !force
+                && let Some(session_id) = &parent.session
+                && let Some(block) = relation::queue_block(
+                    &parent,
+                    &session::tasks_in_session(state_dir, session_id),
+                )
+            {
+                anyhow::bail!("the parent of '{}' cannot start: {block}", child.slug);
+            }
+            promoted.push(parent.clone());
+        }
+        seen.push(parent_slug);
+        current = parent;
     }
-    let Some(parent_slug) = &child.parent else {
-        return Ok(());
-    };
-    // A parent that was deleted leaves a dangling link, which the rest of the store tolerates.
-    let Ok(mut parent) = load_task(state_dir, parent_slug) else {
-        return Ok(());
-    };
-    if parent.state == TaskState::Open {
-        parent.state = TaskState::Wip;
-        parent.updated_at = now_rfc3339();
-        save_task(state_dir, &parent)?;
-    }
-    Ok(())
+    Ok(promoted)
 }
 
 /// Bump the `last_activity` of the session a task is tagged to, if any — so a
@@ -859,7 +894,7 @@ pub(crate) fn complete_task(
                  the work, or pass --force if it is done."
             );
         }
-        let all_tasks = list_tasks(state_dir);
+        let all_tasks = try_list_tasks(state_dir)?;
         let undone = relation::undone_descendants(&slug, &all_tasks);
         if !force && !undone.is_empty() {
             anyhow::bail!("{}", relation::undone_children_message(&slug, &undone));
@@ -2923,6 +2958,83 @@ mod tests {
             add_task_for_session_with(dir.path(), &bad, ParentSpec::Detached, "test-session")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn starting_a_grandchild_puts_every_open_ancestor_in_progress() {
+        let dir = TempDir::new().expect("test");
+        let top = mk(dir.path(), "Top", None).expect("test");
+        let mid = add_task_for_session_with(
+            dir.path(),
+            &child_new("Mid", &top.slug),
+            ParentSpec::Detached,
+            "test-session",
+        )
+        .expect("test");
+        let leaf = add_task_for_session_with(
+            dir.path(),
+            &child_new("Leaf", &mid.slug),
+            ParentSpec::Detached,
+            "test-session",
+        )
+        .expect("test");
+        start_task(dir.path(), &leaf.slug, false).expect("test");
+        for slug in [&top.slug, &mid.slug, &leaf.slug] {
+            assert_eq!(
+                load_task(dir.path(), slug).expect("test").state,
+                TaskState::Wip
+            );
+        }
+    }
+
+    #[test]
+    fn a_sub_task_of_a_queued_parent_waits_for_the_queue() {
+        let dir = TempDir::new().expect("test");
+        let first = mk(dir.path(), "First", None).expect("test");
+        let second = mk(dir.path(), "Second", None).expect("test");
+        let child = add_task_for_session_with(
+            dir.path(),
+            &child_new("Child", &second.slug),
+            ParentSpec::Detached,
+            "test-session",
+        )
+        .expect("test");
+        let err = start_task(dir.path(), &child.slug, false).expect_err("first is open");
+        assert!(
+            err.to_string()
+                .contains("cannot start: task 'second' is queued behind 'first'"),
+            "{err}"
+        );
+        assert_eq!(
+            load_task(dir.path(), &child.slug).expect("test").state,
+            TaskState::Open,
+            "the refusal leaves the sub-task open"
+        );
+        start_task(dir.path(), &first.slug, false).expect("test");
+        complete_task(dir.path(), &first.slug, false).expect("test");
+        start_task(dir.path(), &child.slug, false).expect("test");
+        assert_eq!(
+            load_task(dir.path(), &second.slug).expect("test").state,
+            TaskState::Wip
+        );
+    }
+
+    #[test]
+    fn a_sub_task_of_a_done_parent_refuses_unless_forced() {
+        let dir = TempDir::new().expect("test");
+        let parent = mk(dir.path(), "Review", None).expect("test");
+        let child = add_task_for_session_with(
+            dir.path(),
+            &child_new("Scan", &parent.slug),
+            ParentSpec::Detached,
+            "test-session",
+        )
+        .expect("test");
+        complete_task(dir.path(), &parent.slug, true).expect("test");
+        // The sub-task is open, so `--force` closed the parent past it.
+        let err = start_task(dir.path(), &child.slug, false).expect_err("parent is done");
+        assert!(err.to_string().contains("is done"), "{err}");
+        start_task(dir.path(), &child.slug, true).expect("test");
     }
 
     #[test]

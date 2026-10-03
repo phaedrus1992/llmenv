@@ -3534,7 +3534,7 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
         TaskCommand::Add {
             title,
             parent,
-            no_parent: _,
+            no_parent,
             child_of,
             parallel,
             after,
@@ -3542,6 +3542,11 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             detail,
         } => {
             let detail = detail.resolve()?;
+            if no_parent {
+                eprintln!(
+                    "llmenv: --no-parent has no effect since v3.12.0; a new task no longer chains"
+                );
+            }
             let parent_spec = match parent.as_deref() {
                 Some(p) => crate::task::ParentSpec::Explicit(p),
                 None => crate::task::ParentSpec::Detached,
@@ -3908,7 +3913,10 @@ fn run_task_session_command(
                     crate::task::ParentSpec::Detached,
                     crate::task::SessionChoice::Named(&session_id),
                     &project,
-                )?;
+                )
+                .with_context(|| {
+                    format!("session '{session_id}' started, but task '{title}' was not added")
+                })?;
                 println!("Added task '{}' ({})", task.slug, task.title);
             }
         }

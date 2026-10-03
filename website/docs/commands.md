@@ -391,13 +391,16 @@ unambiguous prefix of one.
 - `task add <title> [--child-of SLUG | --parallel] [--after SLUG] [--parent SLUG] [--session <id>]` — create
   a task (`open` state). (changed in v3.12.0) A new task joins the **queue** of its session: it cannot start
   until the task ahead of it is `done` or `waiting`, and until no other queued task is in progress.
-  `--child-of SLUG` makes it a **sub-task** instead. Sub-tasks run in parallel, starting one puts an `open`
-  parent in progress, and the parent cannot be marked `done` before every sub-task is. A sub-task needs an
+  `--child-of SLUG` makes it a **sub-task** instead. Sub-tasks run in parallel, starting one puts every `open`
+  ancestor in progress (a queued ancestor must be allowed to start, and a `done` parent refuses). The parent
+  cannot be marked `done` before every sub-task is. A sub-task needs an
   unfinished parent in its own session. `--parallel` takes a top-level task out of the queue, so it runs beside the
   head. `--after SLUG` records that another task must be done first, which `task start` enforces like
   `task block`. `--parent SLUG` only links the task for display. The two flags `--child-of` and `--parallel` conflict,
   and `--child-of` conflicts with `--parent`. Before v3.12.0 a plain `task add` chained onto the previous
-  task, and `--no-parent` opted out. A task no longer chains, and `--no-parent` is accepted and does nothing.
+  task, and `--no-parent` opted out. A task no longer chains, and `--no-parent` is accepted, warns, and does
+  nothing. Tasks stored before v3.12.0 keep their parent
+  as a display link and count as top-level tasks.
   **A task must belong to a session** (see below): with exactly one session open
   for the current project it auto-resolves; with two or more open it picks
   the one this conversation started or resumed (changed in v3.12.0; see

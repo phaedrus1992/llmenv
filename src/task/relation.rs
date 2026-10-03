@@ -3,7 +3,7 @@
 //! A sub-task (`Relation::Child`) belongs to a parent. Sub-tasks run in parallel, and the parent
 //! cannot finish before they do. A top-level task (`Relation::Queued`) waits for the task ahead
 //! of it in its session, unless it is marked `parallel`. The queue is computed from the stored
-//! tasks, so deleting a task never leaves a stale link.
+//! tasks, so deleting a task never leaves a stale queue link.
 //! Design: docs/design/issue-2438-task-tracking-nudges.md
 
 use serde::{Deserialize, Serialize};
