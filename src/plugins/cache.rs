@@ -322,72 +322,116 @@ pub(crate) fn read_marketplace_plugins(
         .and_then(|p| p.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|entry| {
-                    let name = match entry.get("name").and_then(|v| v.as_str()) {
-                        Some(n) => n.to_string(),
-                        None => {
-                            eprintln!(
-                                "warning: marketplace entry skipped: missing or non-string 'name' \
-                                 field (entry = {:?})",
-                                entry
-                            );
-                            return None;
-                        }
-                    };
-                    let raw = match entry.get("source") {
-                        Some(r) => r,
-                        None => {
-                            eprintln!(
-                                "warning: marketplace entry '{}': missing 'source' field — \
-                                 skipping entry",
-                                name
-                            );
-                            return None;
-                        }
-                    };
-                    let source = if let Some(s) = raw.as_str() {
-                        s.to_string()
-                    } else if raw.get("source").and_then(|v| v.as_str()) == Some("npm") {
-                        // #1014: an npm-source object ({"source": "npm", "package": ...,
-                        // "version": ...}) has no URL to clone — Claude Code's own
-                        // `/plugin install` resolves it directly from the npm registry.
-                        // Encode it as a source string `is_external_plugin_source`
-                        // recognizes as non-external (nothing for llmenv to clone),
-                        // matching the "./" -prefix sentinel this field already uses
-                        // for local-path sources.
-                        match raw.get("package").and_then(|v| v.as_str()) {
-                            Some(pkg) => match raw.get("version").and_then(|v| v.as_str()) {
-                                Some(version) => format!("npm:{pkg}@{version}"),
-                                None => format!("npm:{pkg}"),
-                            },
-                            None => {
-                                eprintln!(
-                                    "warning: marketplace entry '{}': npm-source object has no \
-                                     string 'package' field (source = {:?}) — skipping entry",
-                                    name, raw
-                                );
-                                return None;
-                            }
-                        }
-                    } else {
-                        match raw.get("url").and_then(|v| v.as_str()) {
-                            Some(u) => u.to_string(),
-                            None => {
-                                eprintln!(
-                                    "warning: marketplace entry '{}': object-form source has no \
-                                     string 'url' field (source = {:?}) — skipping entry",
-                                    name, raw
-                                );
-                                return None;
-                            }
-                        }
-                    };
-                    Some(MarketplacePluginEntry { name, source })
-                })
-                .collect()
+                .filter_map(|entry| parse_plugin_entry(entry).transpose())
+                .collect::<Result<Vec<_>>>()
         })
+        .transpose()?
         .unwrap_or_default();
     Ok(plugins)
+}
+
+/// Parse one `plugins[]` entry of a marketplace manifest. `Ok(None)` skips an entry that cannot
+/// be used, with a warning on stderr.
+fn parse_plugin_entry(entry: &serde_json::Value) -> Result<Option<MarketplacePluginEntry>> {
+    let name = match entry.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => {
+            eprintln!(
+                "warning: marketplace entry skipped: missing or non-string 'name' \
+                 field (entry = {:?})",
+                entry
+            );
+            return Ok(None);
+        }
+    };
+    let raw = match entry.get("source") {
+        Some(r) => r,
+        None => {
+            eprintln!(
+                "warning: marketplace entry '{}': missing 'source' field — \
+                 skipping entry",
+                name
+            );
+            return Ok(None);
+        }
+    };
+    let source = if let Some(s) = raw.as_str() {
+        s.to_string()
+    } else if raw.get("source").and_then(|v| v.as_str()) == Some("npm") {
+        // #1014: an npm-source object ({"source": "npm", "package": ...,
+        // "version": ...}) has no URL to clone — Claude Code's own
+        // `/plugin install` resolves it directly from the npm registry.
+        // Encode it as a source string `is_external_plugin_source`
+        // recognizes as non-external (nothing for llmenv to clone),
+        // matching the "./" -prefix sentinel this field already uses
+        // for local-path sources.
+        match raw.get("package").and_then(|v| v.as_str()) {
+            Some(pkg) => match raw.get("version").and_then(|v| v.as_str()) {
+                Some(version) => format!("npm:{pkg}@{version}"),
+                None => format!("npm:{pkg}"),
+            },
+            None => {
+                eprintln!(
+                    "warning: marketplace entry '{}': npm-source object has no \
+                     string 'package' field (source = {:?}) — skipping entry",
+                    name, raw
+                );
+                return Ok(None);
+            }
+        }
+    } else if let Some(url) = raw.get("url").and_then(|v| v.as_str()) {
+        url.to_string()
+    } else if let Some(github) = github_repo_source(&name, raw)? {
+        github
+    } else {
+        eprintln!(
+            "warning: marketplace entry '{name}': object-form source has no string 'url' field \
+             and no github 'repo' field (source = {raw:?}) — skipping entry"
+        );
+        return Ok(None);
+    };
+    Ok(Some(MarketplacePluginEntry { name, source }))
+}
+
+/// The clone source of a `{"source": "github", "repo": "owner/name"}` object (#2440), with the
+/// optional `ref` pinned as a `#<ref>` suffix. `Ok(None)` when the object is not a github source
+/// or has no string `repo`.
+///
+/// # Errors
+/// Errors when `repo` is not `owner/name`, or `ref` is empty or has a `#`.
+fn github_repo_source(name: &str, raw: &serde_json::Value) -> Result<Option<String>> {
+    if raw.get("source").and_then(|v| v.as_str()) != Some("github") {
+        return Ok(None);
+    }
+    let Some(repo) = raw.get("repo").and_then(|v| v.as_str()) else {
+        return Ok(None);
+    };
+    // The shape first, then the meaning of each part.
+    let shaped = repo.split_once('/').filter(|(_, rest)| !rest.contains('/'));
+    let part_ok = |part: &str| {
+        !part.is_empty()
+            && part != "."
+            && part != ".."
+            && !part.starts_with('-')
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    if !shaped.is_some_and(|(owner, repo_name)| part_ok(owner) && part_ok(repo_name)) {
+        anyhow::bail!(
+            "marketplace entry '{name}': github repo '{repo}' is not in owner/name form. \
+             Set \"repo\" to owner/name, for example \"jeffallan/claude-skills\""
+        );
+    }
+    let url = format!("https://github.com/{repo}.git");
+    match raw.get("ref").and_then(|v| v.as_str()) {
+        None => Ok(Some(url)),
+        Some(r) if r.is_empty() || r.contains('#') => anyhow::bail!(
+            "marketplace entry '{name}': github ref '{r}' is empty or contains '#'. \
+             Set \"ref\" to a branch, tag, or commit, or remove it to use the default branch"
+        ),
+        Some(r) => Ok(Some(format!("{url}#{r}"))),
+    }
 }
 
 /// True if a plugin source is an external git URL (not a relative path within
@@ -1242,6 +1286,120 @@ mod tests {
         let plugins = read_marketplace_plugins(tmp.path()).unwrap();
         assert_eq!(plugins.len(), 1);
         assert_eq!(plugins[0].name, "good");
+    }
+
+    fn read_manifest(plugins_json: &str) -> Result<Vec<MarketplacePluginEntry>> {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join(".claude-plugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("marketplace.json"),
+            format!(r#"{{"plugins": [{plugins_json}]}}"#),
+        )
+        .unwrap();
+        read_marketplace_plugins(tmp.path())
+    }
+
+    #[test]
+    fn a_github_source_with_a_repo_and_ref_becomes_a_pinned_clone_url() {
+        let plugins = read_manifest(
+            r#"{"name": "fullstack-dev-skills", "source":
+                {"source": "github", "repo": "jeffallan/claude-skills", "ref": "plugin"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            plugins[0].source,
+            "https://github.com/jeffallan/claude-skills.git#plugin"
+        );
+        assert!(is_external_plugin_source(&plugins[0].source));
+        assert!(reject_unsafe_source(&plugins[0].source).is_ok());
+    }
+
+    #[test]
+    fn a_github_source_without_a_ref_uses_the_default_branch() {
+        let plugins =
+            read_manifest(r#"{"name": "p", "source": {"source": "github", "repo": "o/n"}}"#)
+                .unwrap();
+        assert_eq!(plugins[0].source, "https://github.com/o/n.git");
+    }
+
+    #[test]
+    fn a_url_wins_over_a_github_repo() {
+        let plugins = read_manifest(
+            r#"{"name": "p", "source": {"source": "github", "repo": "o/n", "url": "https://x.example/p.git"}}"#,
+        )
+        .unwrap();
+        assert_eq!(plugins[0].source, "https://x.example/p.git");
+    }
+
+    #[test]
+    fn a_malformed_github_repo_fails_with_the_entry_the_value_and_the_fix() {
+        for repo in [
+            "just-a-name",
+            "a/b/c",
+            "/n",
+            "o/",
+            "-o/n",
+            "o/..",
+            "o/n m",
+            "o/né",
+            "",
+        ] {
+            let err = read_manifest(&format!(
+                r#"{{"name": "bad-entry", "source": {{"source": "github", "repo": "{repo}"}}}}"#
+            ))
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("bad-entry"), "{err}");
+            assert!(err.contains(&format!("'{repo}'")), "{err}");
+            assert!(err.contains("owner/name"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_github_ref_that_is_empty_or_has_a_hash_fails() {
+        for r in ["", "a#b"] {
+            let err = read_manifest(&format!(
+                r#"{{"name": "p", "source": {{"source": "github", "repo": "o/n", "ref": "{r}"}}}}"#
+            ))
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("'p'") && err.contains("ref"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_github_source_without_a_usable_repo_is_skipped_and_names_what_is_expected() {
+        for source in [
+            r#"{"source": "github"}"#,
+            r#"{"source": "github", "repo": 7}"#,
+            r#"{"source": "git", "repo": "o/n"}"#,
+        ] {
+            let plugins = read_manifest(&format!(
+                r#"{{"name": "bad", "source": {source}}}, {{"name": "good", "source": "./g"}}"#
+            ))
+            .unwrap();
+            assert_eq!(plugins.len(), 1, "{source}");
+            assert_eq!(plugins[0].name, "good");
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn any_owner_name_pair_of_safe_characters_becomes_a_github_url(
+            owner in "[A-Za-z0-9][A-Za-z0-9._-]{0,20}",
+            name in "[A-Za-z0-9][A-Za-z0-9._-]{0,20}",
+        ) {
+            let raw = serde_json::json!({"source": "github", "repo": format!("{owner}/{name}")});
+            let got = github_repo_source("p", &raw).unwrap();
+            proptest::prop_assert_eq!(got, Some(format!("https://github.com/{owner}/{name}.git")));
+        }
+
+        #[test]
+        fn a_repo_without_exactly_one_slash_is_rejected(repo in "[A-Za-z0-9._-]{0,12}(/[A-Za-z0-9._-]{0,12}){2,3}|[A-Za-z0-9_-]{1,12}") {
+            let raw = serde_json::json!({"source": "github", "repo": repo});
+            proptest::prop_assert!(github_repo_source("p", &raw).is_err());
+        }
     }
 
     #[test]

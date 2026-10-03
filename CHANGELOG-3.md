@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A marketplace plugin whose `source` is `{"source": "github", "repo": "owner/name"}` with no `url` now syncs, and its `ref` selects the branch or tag. Before, llmenv skipped it as "not found in marketplace manifest". See [Plugins](https://phaedrus1992.github.io/llmenv/docs/plugins#plugin-sources-in-a-marketplace-manifest) (#2440)
 - Background work is no longer lost when a child dies or ICM is down. Consolidation, the memory store of a web fetch, the transcript records, and the codebase-memory index write a checkpoint, and the next session start runs unfinished jobs again. `llmenv doctor` lists what is left. A request id keeps a resumed or retried store from writing the same memory twice. See [Troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#background-work-that-did-not-finish) (#2396, #2397)
 - `llmenv doctor` no longer recommends `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` when `autoCompactEnabled` is `false`, and it names the `autoCompactWindow` that the percentage applies to (#2345)
 - `llmenv task session finish` and the session resume commands no longer report a corrupt or unreadable session file as "no session found". They name the file and the cause (#2424)
