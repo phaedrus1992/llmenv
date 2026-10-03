@@ -13,6 +13,8 @@ workspace = true
 [dependencies]
 llmenv-scope = { path = "../llmenv-scope", version = "4.0.0-alpha.1" }
 llmenv-paths = { path = "../llmenv-paths", version = "4.0.0-alpha.1" }
+llmenv-util = { path = "../llmenv-util", version = "4.0.0-alpha.1" }
+llmenv-git = { path = "../llmenv-git", version = "4.0.0-alpha.1" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }

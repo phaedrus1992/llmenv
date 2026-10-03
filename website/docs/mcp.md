@@ -344,6 +344,29 @@ llmenv mcp-ls        # alias: llmenv mcps
 llmenv doctor
 ```
 
+### Session-start health check (added in v3.12.0)
+
+llmenv manages two MCP servers: the memory server (ICM) and `codebase-memory-mcp`.
+A server that is stopped, or that holds its socket but never answers, used to leave the session
+without memory or a code graph, with no sign of it.
+
+At session start, llmenv now sends a real MCP `initialize` request to each of these servers.
+It sends the requests in parallel and waits up to 5 seconds for each answer.
+A remote server such as ICM gets an HTTP request.
+A local server such as `codebase-memory-mcp` is started for the check and is stopped afterward.
+
+If a server does not answer, the session start output names the server, the reason, what stops working,
+and the command that fixes it.
+A server that answers adds nothing to the output.
+
+When this host serves memory and the proxy is stopped, llmenv starts the proxy first, as `llmenv export` does.
+Then it asks again before it reports anything.
+llmenv does not restart a proxy that holds its port but does not answer.
+The notice tells you how to stop that proxy instead.
+
+`llmenv doctor` runs the same check.
+Its `MCP servers:` section prints one line for each managed server: a pass, or a warning with the reason and the fix.
+
 ## Troubleshooting
 
 ### Wrong role on a host

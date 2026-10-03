@@ -13,6 +13,7 @@ pub(crate) mod cd_guard;
 pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
 mod launch_client;
+pub(crate) mod mcp_health;
 pub(crate) mod read_once;
 mod recall;
 mod relevance;
@@ -1426,6 +1427,11 @@ fn run_inner(
             ctx: &ctx,
             state_path: state_path.as_deref(),
         };
+        let health_notice = if event == HookEvent::SessionStart {
+            mcp_health::session_start_notice(rt, &config, config_dir, &active)
+        } else {
+            None
+        };
         let t_chunk = std::time::Instant::now();
         let out = rt.block_on(async {
             let mut out = String::new();
@@ -1442,7 +1448,7 @@ fn run_inner(
                 let actions = dispatch(event, &tag_queries, &bundle_queries, &tag_ranks, wake_call);
                 // Use minimal chunk for storage to avoid duplication. (#1792)
                 let store_content = store_content_for_event(event, &chunk, &storage_chunk);
-                out = run_event_memory(MemoryCall {
+                out = match run_event_memory(MemoryCall {
                     event,
                     client,
                     settings,
@@ -1459,7 +1465,21 @@ fn run_inner(
                     query: &query,
                     store_content,
                 })
-                .await?;
+                .await
+                {
+                    Ok(text) => text,
+                    // The health notice below still has to reach the agent. So does this error:
+                    // the notice may be about another server, and the agent would otherwise
+                    // read an empty memory block as "nothing to recall".
+                    Err(e) if health_notice.is_some() => {
+                        eprintln!("llmenv: memory {event} skipped: {e}");
+                        format!(
+                            "llmenv: memory {event} failed: {}\n",
+                            mcp_health::tidy_reason(&format!("{e:#}"))
+                        )
+                    }
+                    Err(e) => return Err(e),
+                };
 
                 // PostToolUse WebFetch/WebSearch: auto-store fetched content in ICM
                 // with fast-falloff memory (topic: web-fetch, importance: low) so it
@@ -1468,6 +1488,13 @@ fn run_inner(
                     // Detached: process-group-detached and outlives us regardless.
                     let _detached_child = handle_web_fetch_post_tool_use(stdin_payload);
                 }
+            }
+            if let Some(notice) = &health_notice {
+                out = if out.is_empty() {
+                    notice.clone()
+                } else {
+                    format!("{notice}\n{out}")
+                };
             }
             run_session_log(event, &session_log, stdin_payload).await;
 
