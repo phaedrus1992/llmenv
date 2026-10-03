@@ -68,7 +68,7 @@ pub(crate) struct StartFacts<'a> {
 
 impl<'a> StartFacts<'a> {
     /// Read the model, effort level, and source from a `SessionStart` payload.
-    pub(crate) fn from_payload(
+    fn from_payload(
         payload: &'a serde_json::Value,
         engine: &'a str,
         config_hash: Option<&'a str>,
@@ -244,7 +244,7 @@ enum Stored {
     Missing,
     /// The file exists and cannot be used.
     Unreadable,
-    Doc(AgentConfig),
+    Doc(Box<AgentConfig>),
 }
 
 fn read(state_dir: &Path, session_id: &str) -> Stored {
@@ -265,7 +265,7 @@ fn read(state_dir: &Path, session_id: &str) -> Stored {
             tracing::warn!("corrupt agent config {}: {e}", path.display());
             Stored::Unreadable
         },
-        Stored::Doc,
+        |doc| Stored::Doc(Box::new(doc)),
     )
 }
 
@@ -273,7 +273,7 @@ fn read(state_dir: &Path, session_id: &str) -> Stored {
 /// because the next write replaces the file.
 pub(crate) fn load(state_dir: &Path, session_id: &str) -> Option<AgentConfig> {
     match read(state_dir, session_id) {
-        Stored::Doc(doc) => Some(doc),
+        Stored::Doc(doc) => Some(*doc),
         Stored::Missing | Stored::Unreadable => None,
     }
 }
@@ -663,7 +663,7 @@ mod tests {
         assert_eq!(read(dir.path(), "s"), Stored::Missing);
         assert_eq!(read(dir.path(), "../x"), Stored::Missing);
         write_session_start(dir.path(), "s", doc());
-        assert_eq!(read(dir.path(), "s"), Stored::Doc(doc()));
+        assert_eq!(read(dir.path(), "s"), Stored::Doc(Box::new(doc())));
         std::fs::write(path(dir.path(), "s").unwrap(), "{not json").unwrap();
         assert_eq!(read(dir.path(), "s"), Stored::Unreadable);
         let blocked = path(dir.path(), "d").unwrap();
