@@ -10,7 +10,9 @@ use anyhow::{Context, anyhow};
 use serde_json::{Value, json};
 use tokio::process::Command;
 
-use crate::hook_run::mcp_client::{InitializeInfo, MAX_TOOL_PAGES, McpHttpClient, ToolSummary};
+use crate::hook_run::mcp_client::{
+    InitializeInfo, MAX_TOOL_PAGES, McpHttpClient, ToolSummary, parse_tools_page,
+};
 use crate::hook_run::mcp_health::StdioRpc;
 use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
 
@@ -21,12 +23,20 @@ const CLAUDE_MCP_TEXT_LIMIT: usize = 2048;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The limit `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH` sets: 1 to 9 ASCII digits, not zero.
-/// Anything else is ignored, as Claude Code ignores it.
-pub(crate) fn effective_limit(env_value: Option<&str>) -> usize {
-    env_value
-        .filter(|v| (1..=9).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_digit()))
+/// `None` for any other value, which Claude Code ignores.
+pub(crate) fn parse_limit(value: &str) -> Option<usize> {
+    (1..=9)
+        .contains(&value.len())
+        .then_some(value)
+        .filter(|v| v.bytes().all(|b| b.is_ascii_digit()))
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|n| *n > 0)
+}
+
+/// The limit Claude Code applies, given the variable's value.
+pub(crate) fn effective_limit(env_value: Option<&str>) -> usize {
+    env_value
+        .and_then(parse_limit)
         .unwrap_or(CLAUDE_MCP_TEXT_LIMIT)
 }
 
@@ -48,7 +58,8 @@ fn measure(server: &str, instructions: Option<&str>, tools: &[ToolSummary]) -> M
             .iter()
             .map(|t| {
                 let chars = t.description.as_deref().map_or(0, |d| d.chars().count());
-                (t.name.clone(), chars)
+                // A server controls the name, and doctor prints it to a terminal.
+                (crate::util::strip_unsafe_chars(&t.name), chars)
             })
             .collect(),
     }
@@ -95,18 +106,59 @@ async fn probe_stdio(
         .envs(env)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        // Its own process group, so the stop below also reaches what a wrapper such as `npx`
+        // started.
+        .process_group(0)
         .kill_on_drop(true)
         .spawn()
         .with_context(|| format!("cannot start `{command}`"))?;
     let stdin = child.stdin.take().context("child stdin is not piped")?;
     let stdout = child.stdout.take().context("child stdout is not piped")?;
+    let mut stderr = child.stderr.take();
     let result = stdio_exchange(StdioRpc::new(stdin, stdout)).await;
-    // Reap the process now. `kill_on_drop` is only the backstop for an early return.
+    stop_group(&mut child, command).await;
+    match result {
+        Ok(ok) => Ok(ok),
+        Err(e) => Err(match stderr_tail(stderr.as_mut()).await {
+            Some(tail) => e.context(format!("the server wrote: {tail}")),
+            None => e,
+        }),
+    }
+}
+
+/// Stop the child and its process group. `kill_on_drop` is only the backstop for an early return.
+async fn stop_group(child: &mut tokio::process::Child, command: &str) {
+    if let Some(pid) = child.id() {
+        let group = format!("-{pid}");
+        match Command::new("kill")
+            .args(["-TERM", "--", &group])
+            .output()
+            .await
+        {
+            Ok(out) if out.status.success() => {}
+            Ok(_) | Err(_) => tracing::debug!(command, "process group signal failed"),
+        }
+    }
     if let Err(e) = child.kill().await {
         tracing::warn!(command, error = %e, "cannot stop the MCP text probe process");
     }
-    result
+}
+
+/// What the stopped server left on stderr, as one clean line.
+async fn stderr_tail(stderr: Option<&mut tokio::process::ChildStderr>) -> Option<String> {
+    use tokio::io::AsyncReadExt as _;
+    let stderr = stderr?;
+    let mut buf = Vec::new();
+    // The child is stopped, so the pipe ends at its last write. The timeout is a backstop for a
+    // grandchild that still holds the pipe open.
+    let _ = tokio::time::timeout(
+        Duration::from_millis(200),
+        (&mut *stderr).take(2048).read_to_end(&mut buf),
+    )
+    .await;
+    let text = crate::hook_run::mcp_health::tidy_reason(&String::from_utf8_lossy(&buf));
+    (!text.is_empty()).then_some(text)
 }
 
 /// The `initialize` and `tools/list` exchange, over any line-delimited JSON-RPC pipe.
@@ -141,24 +193,9 @@ where
             .as_ref()
             .map_or_else(|| json!({}), |c| json!({ "cursor": c }));
         let page = rpc.request("tools/list", params).await?;
-        let listed = page
-            .get("tools")
-            .and_then(Value::as_array)
-            .context("tools/list reply has no tools array")?;
-        tools.extend(listed.iter().filter_map(|t| {
-            Some(ToolSummary {
-                name: t.get("name")?.as_str()?.to_string(),
-                description: t
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .map(String::from),
-            })
-        }));
-        cursor = page
-            .get("nextCursor")
-            .and_then(Value::as_str)
-            .filter(|c| !c.is_empty())
-            .map(String::from);
+        let (listed, next) = parse_tools_page(&page)?;
+        tools.extend(listed);
+        cursor = next;
         if cursor.is_none() {
             return Ok((info, tools));
         }
@@ -351,6 +388,127 @@ mod tests {
             .status
             .success();
         assert!(!alive, "the probe left process {pid} running");
+    }
+
+    fn stdio_server(script_body: &str, dir: &std::path::Path) -> ResolvedMcp {
+        let script = dir.join("stub.sh");
+        std::fs::write(&script, format!("#!/bin/sh\n{script_body}")).unwrap();
+        ResolvedMcp {
+            always_load: None,
+            name: "stub".into(),
+            kind: ResolvedKind::Stdio {
+                command: "sh".into(),
+                args: vec![script.display().to_string()],
+                env: Default::default(),
+            },
+            headers: Default::default(),
+            timeout: None,
+            disabled_tools: vec![],
+            mcp_permissions: None,
+            memory_hook: None,
+        }
+    }
+
+    fn alive(pid: &str) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", pid])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    }
+
+    #[tokio::test]
+    async fn a_server_that_fails_to_start_shows_what_it_wrote_to_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let mcp = stdio_server("echo 'missing API_TOKEN' >&2\nexit 1\n", dir.path());
+        let err = format!("{:#}", probe(&mcp).await.unwrap_err());
+        assert!(err.contains("missing API_TOKEN"), "{err}");
+        assert!(err.contains("exited before answering"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn the_probe_stops_a_process_the_server_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("grandchild");
+        let mcp = stdio_server(
+            &format!(
+                "sleep 300 &\necho $! > '{}'\nwhile IFS= read -r line; do\n  case \"$line\" in\n    *'\"method\":\"initialize\"'*) echo '{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{}}}}' ;;\n    *'\"method\":\"tools/list\"'*) echo '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"tools\":[]}}}}' ;;\n  esac\ndone\n",
+                pid_file.display()
+            ),
+            dir.path(),
+        );
+        probe(&mcp).await.unwrap();
+        let pid = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .to_string();
+        // The group signal is delivered at once, but the process may take a moment to exit.
+        let mut gone = false;
+        for _ in 0..50 {
+            if !alive(&pid) {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(gone, "the probe left process {pid} running");
+    }
+
+    #[tokio::test]
+    async fn a_malformed_tool_in_a_stdio_reply_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mcp = stdio_server(
+            "while IFS= read -r line; do\n  case \"$line\" in\n    *'\"method\":\"initialize\"'*) echo '{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{}}' ;;\n    *'\"method\":\"tools/list\"'*) echo '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[{\"description\":\"x\"}]}}' ;;\n  esac\ndone\n",
+            dir.path(),
+        );
+        let err = probe(&mcp).await.unwrap_err().to_string();
+        assert!(err.contains("no string name"), "{err}");
+    }
+
+    #[test]
+    fn tool_names_lose_control_and_invisible_characters() {
+        let report = measure(
+            "s",
+            None,
+            &[tool("a\u{1b}]52;c;x\u{7}\nb\u{202e}", Some("d"))],
+        );
+        assert_eq!(report.tools[0].0, "a]52;c;xb");
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn the_limit_is_always_positive_and_follows_the_digit_rule(value in "\\PC{0,14}") {
+            let got = effective_limit(Some(&value));
+            proptest::prop_assert!(got > 0);
+            let valid = (1..=9).contains(&value.len())
+                && value.bytes().all(|b| b.is_ascii_digit())
+                && value.parse::<usize>().is_ok_and(|n| n > 0);
+            if valid {
+                proptest::prop_assert_eq!(got, value.parse::<usize>().unwrap());
+            } else {
+                proptest::prop_assert_eq!(got, CLAUDE_MCP_TEXT_LIMIT);
+            }
+        }
+
+        #[test]
+        fn measure_counts_chars_keeps_order_and_zero_for_no_description(
+            descs in proptest::collection::vec(proptest::option::of("\\PC{0,40}"), 0..8),
+            instructions in proptest::option::of("\\PC{0,60}"),
+        ) {
+            let tools: Vec<ToolSummary> = descs
+                .iter()
+                .enumerate()
+                .map(|(i, d)| tool(&format!("t{i}"), d.as_deref()))
+                .collect();
+            let report = measure("s", instructions.as_deref(), &tools);
+            proptest::prop_assert_eq!(report.instructions_chars, instructions.map(|t| t.chars().count()));
+            proptest::prop_assert_eq!(report.tools.len(), descs.len());
+            for (i, (name, chars)) in report.tools.iter().enumerate() {
+                proptest::prop_assert_eq!(name.clone(), format!("t{i}"));
+                proptest::prop_assert_eq!(*chars, descs[i].as_deref().map_or(0, |d| d.chars().count()));
+            }
+        }
     }
 
     #[tokio::test]

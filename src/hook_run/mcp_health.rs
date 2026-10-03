@@ -170,9 +170,13 @@ fn parse_reply(line: &str) -> Option<anyhow::Result<()>> {
 /// banner or a notification is not mistaken for a failure.
 pub(crate) struct StdioRpc<W, R> {
     writer: W,
-    lines: tokio::io::Lines<BufReader<R>>,
+    lines: tokio::io::Lines<BufReader<tokio::io::Take<R>>>,
     next_id: u64,
 }
+
+/// The most output a probe reads from one server. A server that never stops writing cannot
+/// stall doctor or fill its memory.
+const MAX_STDIO_OUTPUT_BYTES: u64 = 4 * 1024 * 1024;
 
 impl<W, R> StdioRpc<W, R>
 where
@@ -182,7 +186,11 @@ where
     pub(crate) fn new(writer: W, reader: R) -> Self {
         Self {
             writer,
-            lines: BufReader::new(reader).lines(),
+            lines: BufReader::new(tokio::io::AsyncReadExt::take(
+                reader,
+                MAX_STDIO_OUTPUT_BYTES,
+            ))
+            .lines(),
             next_id: 0,
         }
     }
@@ -199,6 +207,7 @@ where
         self.send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))
             .await
             .with_context(|| format!("cannot send MCP {method}"))?;
+        let mut skipped = 0usize;
         while let Some(line) = self
             .lines
             .next_line()
@@ -206,9 +215,11 @@ where
             .context("cannot read server output")?
         {
             let Ok(reply) = serde_json::from_str::<Value>(line.trim()) else {
+                skipped += 1;
                 continue;
             };
-            if reply.get("id") != Some(&json!(id)) {
+            // A request or notification from the server has a `method`; it is not our reply.
+            if reply.get("id") != Some(&json!(id)) || reply.get("method").is_some() {
                 continue;
             }
             if let Some(error) = reply.get("error") {
@@ -216,14 +227,24 @@ where
                     .get("message")
                     .and_then(Value::as_str)
                     .unwrap_or("no message");
-                return Err(anyhow!("MCP {method} returned an error: {message}"));
+                let code = error
+                    .get("code")
+                    .map_or(String::new(), |c| format!(" (code {c})"));
+                return Err(anyhow!("MCP {method} returned an error: {message}{code}"));
             }
             return reply
                 .get("result")
                 .cloned()
                 .ok_or_else(|| anyhow!("MCP {method} reply has no result"));
         }
-        Err(anyhow!("the server exited before answering MCP {method}"))
+        let note = if skipped > 0 {
+            format!(" ({skipped} lines of output were not JSON)")
+        } else {
+            String::new()
+        };
+        Err(anyhow!(
+            "the server exited before answering MCP {method}{note}"
+        ))
     }
 
     /// Send a notification, which has no reply.
@@ -809,5 +830,41 @@ mod tests {
                 prop_assert!(parse_reply(&line).is_none());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn stdio_rpc_skips_server_requests_and_counts_non_json_lines() {
+        let (client_w, _server_r) = tokio::io::duplex(4096);
+        let (mut server_w, client_r) = tokio::io::duplex(4096);
+        server_w
+            .write_all(b"banner\n{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"ping\"}\n")
+            .await
+            .unwrap();
+        drop(server_w);
+        let mut rpc = StdioRpc::new(client_w, client_r);
+        let err = rpc
+            .request("initialize", json!({}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("exited before answering"), "{err}");
+        assert!(err.contains("1 lines of output were not JSON"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn stdio_rpc_names_the_error_code() {
+        let (client_w, _server_r) = tokio::io::duplex(4096);
+        let (mut server_w, client_r) = tokio::io::duplex(4096);
+        server_w
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":0,\"error\":{\"code\":-32601,\"message\":\"nope\"}}\n")
+            .await
+            .unwrap();
+        let mut rpc = StdioRpc::new(client_w, client_r);
+        let err = rpc
+            .request("tools/list", json!({}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("nope") && err.contains("-32601"), "{err}");
     }
 }

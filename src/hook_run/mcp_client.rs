@@ -153,10 +153,16 @@ impl McpHttpClient {
             value.set_sensitive(true);
             map.insert(name, value);
         }
-        let client = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .timeout(timeout)
             .default_headers(map)
-            .resolve_to_addrs(&host, &addrs)
+            .resolve_to_addrs(&host, &addrs);
+        // Configured headers can hold credentials. A redirect could send them to another host,
+        // which the address pin above does not cover.
+        if !headers.is_empty() {
+            builder = builder.redirect(reqwest::redirect::Policy::none());
+        }
+        let client = builder
             .build()
             .context("failed to build HTTP client (TLS backend unavailable)")?;
         Ok(Self {
@@ -182,6 +188,21 @@ impl McpHttpClient {
         })
     }
 
+    /// The server URL without credentials or a query string, for error text that reaches a
+    /// terminal.
+    fn display_url(&self) -> String {
+        url::Url::parse(&self.url).map_or_else(
+            |_| "(invalid URL)".to_string(),
+            |mut u| {
+                let _ = u.set_username("");
+                let _ = u.set_password(None);
+                u.set_query(None);
+                u.set_fragment(None);
+                u.to_string()
+            },
+        )
+    }
+
     /// Negotiate an MCP session if one hasn't already been established on this
     /// client: send `initialize`, capture the `Mcp-Session-Id` response header
     /// (if the server sends one — plain non-session-scoped servers won't), and
@@ -190,6 +211,12 @@ impl McpHttpClient {
     /// # Errors
     /// Network failure or a non-2xx status on the `initialize` request itself.
     async fn ensure_session(&self) -> anyhow::Result<Option<String>> {
+        self.ensure_session_with(false).await
+    }
+
+    /// [`Self::ensure_session`]. With `capture_info`, the `initialize` reply body is read into
+    /// `init_info`; the other callers never read it.
+    async fn ensure_session_with(&self, capture_info: bool) -> anyhow::Result<Option<String>> {
         let mut cached = self.session_id.lock().await;
         if let Some(sid) = cached.as_ref() {
             return Ok(Some(sid.clone()));
@@ -215,7 +242,7 @@ impl McpHttpClient {
             .json(&init_req)
             .send()
             .await
-            .with_context(|| format!("POST {} for MCP initialize", self.url))?;
+            .with_context(|| format!("POST {} for MCP initialize", self.display_url()))?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp
@@ -236,8 +263,15 @@ impl McpHttpClient {
             .get("mcp-session-id")
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
-        let text = resp.text().await.unwrap_or_default();
-        *self.init_info.lock().await = Some(parse_initialize_info(&text));
+        if capture_info {
+            let text = resp.text().await.with_context(|| {
+                format!(
+                    "reading the MCP initialize reply from {}",
+                    self.display_url()
+                )
+            })?;
+            *self.init_info.lock().await = Some(parse_initialize_info(&text)?);
+        }
 
         if let Some(sid) = &sid {
             // Best-effort: some servers require this ack before accepting
@@ -273,9 +307,11 @@ impl McpHttpClient {
     /// Ask the server for a fresh `initialize` and return what it said about itself.
     ///
     /// # Errors
-    /// Network failure, timeout, or a non-2xx status.
+    /// Network failure, timeout, a non-2xx status, or a reply with no readable `result`.
     pub(crate) async fn initialize_info(&self) -> anyhow::Result<InitializeInfo> {
-        self.probe().await?;
+        // Drop any cached session: the info must come from a fresh `initialize`.
+        *self.session_id.lock().await = None;
+        self.ensure_session_with(true).await?;
         Ok(self.init_info.lock().await.clone().unwrap_or_default())
     }
 
@@ -305,26 +341,9 @@ impl McpHttpClient {
                 }
                 Err(CallToolError::Fatal(e)) => return Err(e),
             };
-            let page = body
-                .get("result")
-                .and_then(|r| r.get("tools"))
-                .and_then(Value::as_array)
-                .context("tools/list reply has no result.tools array")?;
-            tools.extend(page.iter().filter_map(|t| {
-                Some(ToolSummary {
-                    name: t.get("name")?.as_str()?.to_string(),
-                    description: t
-                        .get("description")
-                        .and_then(Value::as_str)
-                        .map(String::from),
-                })
-            }));
-            cursor = body
-                .get("result")
-                .and_then(|r| r.get("nextCursor"))
-                .and_then(Value::as_str)
-                .filter(|c| !c.is_empty())
-                .map(String::from);
+            let (page, next) = parse_tools_page(body.get("result").unwrap_or(&Value::Null))?;
+            tools.extend(page);
+            cursor = next;
             if cursor.is_none() {
                 return Ok(tools);
             }
@@ -422,7 +441,7 @@ impl McpHttpClient {
             .json(&req)
             .send()
             .await
-            .with_context(|| format!("POST {} for {label}", self.url))
+            .with_context(|| format!("POST {} for {label}", self.display_url()))
             .map_err(CallToolError::Fatal)?;
 
         // Capture status and body for detailed error reporting.
@@ -447,10 +466,13 @@ impl McpHttpClient {
             });
         }
 
-        let body: Value = resp
-            .json()
+        let text = resp
+            .text()
             .await
             .with_context(|| format!("decoding JSON response for {label}"))
+            .map_err(CallToolError::Fatal)?;
+        let body = parse_rpc_body(&text)
+            .ok_or_else(|| anyhow!("decoding JSON response for {label}: the reply is not JSON"))
             .map_err(CallToolError::Fatal)?;
 
         if let Some(err) = body.get("error") {
@@ -462,20 +484,75 @@ impl McpHttpClient {
     }
 }
 
-/// Read `result.instructions` from an `initialize` reply, which is plain JSON or one SSE
-/// `data:` event. A body that is neither gives no instructions.
-fn parse_initialize_info(body: &str) -> InitializeInfo {
-    let json_text = body
-        .lines()
-        .find_map(|line| line.strip_prefix("data:"))
-        .map_or(body, str::trim);
-    let instructions = serde_json::from_str::<Value>(json_text).ok().and_then(|v| {
-        v.get("result")?
-            .get("instructions")?
-            .as_str()
-            .map(String::from)
-    });
-    InitializeInfo { instructions }
+/// Decode a JSON-RPC reply body, which is plain JSON or an SSE stream. A plain body is returned
+/// as it is. An SSE stream gives the first `data:` event that has a `result` or an `error`, so a
+/// notification event ahead of the reply is skipped.
+fn parse_rpc_body(body: &str) -> Option<Value> {
+    if let Ok(value) = serde_json::from_str::<Value>(body.trim()) {
+        return Some(value);
+    }
+    body.lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .filter_map(|data| serde_json::from_str::<Value>(data.trim()).ok())
+        .find(|v| v.get("result").is_some() || v.get("error").is_some())
+}
+
+/// Read `result.instructions` from an `initialize` reply.
+fn parse_initialize_info(body: &str) -> anyhow::Result<InitializeInfo> {
+    let reply = parse_rpc_body(body).context("the initialize reply is not JSON or SSE")?;
+    if let Some(error) = reply.get("error") {
+        return Err(anyhow!("MCP initialize JSON-RPC error: {error}"));
+    }
+    let result = reply
+        .get("result")
+        .context("the initialize reply has no result")?;
+    let instructions = match result.get("instructions") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(text)) => Some(text.clone()),
+        Some(other) => return Err(anyhow!("initialize instructions is not a string: {other}")),
+    };
+    Ok(InitializeInfo { instructions })
+}
+
+/// Read one `tools/list` `result`: its tools and its `nextCursor`. Both the HTTP and the stdio
+/// probe use it, so the two cannot disagree.
+///
+/// # Errors
+/// The result has no `tools` array, or a tool has no string `name` or a `description` that is not
+/// a string.
+pub(crate) fn parse_tools_page(
+    result: &Value,
+) -> anyhow::Result<(Vec<ToolSummary>, Option<String>)> {
+    let listed = result
+        .get("tools")
+        .and_then(Value::as_array)
+        .context("tools/list reply has no result.tools array")?;
+    let mut tools = Vec::with_capacity(listed.len());
+    for (index, tool) in listed.iter().enumerate() {
+        let name = tool
+            .get("name")
+            .and_then(Value::as_str)
+            .with_context(|| format!("tools/list entry {index} has no string name"))?;
+        let description = match tool.get("description") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(text)) => Some(text.clone()),
+            Some(_) => {
+                return Err(anyhow!(
+                    "tool '{name}' has a description that is not a string"
+                ));
+            }
+        };
+        tools.push(ToolSummary {
+            name: name.to_string(),
+            description,
+        });
+    }
+    let next = result
+        .get("nextCursor")
+        .and_then(Value::as_str)
+        .filter(|c| !c.is_empty())
+        .map(String::from);
+    Ok((tools, next))
 }
 
 /// Pull and concatenate every `text` entry from `result.content[]`.
@@ -842,21 +919,138 @@ mod tests {
     }
 
     #[test]
-    fn initialize_info_reads_json_and_sse_bodies_and_ignores_the_rest() {
+    fn initialize_info_reads_json_and_sse_bodies() {
         let json = r#"{"result":{"instructions":"a"}}"#;
         assert_eq!(
-            parse_initialize_info(json).instructions.as_deref(),
+            parse_initialize_info(json).unwrap().instructions.as_deref(),
             Some("a")
         );
         let sse = format!("event: message\ndata: {json}\n\n");
         assert_eq!(
-            parse_initialize_info(&sse).instructions.as_deref(),
+            parse_initialize_info(&sse).unwrap().instructions.as_deref(),
             Some("a")
         );
-        assert_eq!(parse_initialize_info("not json"), InitializeInfo::default());
-        assert_eq!(parse_initialize_info(""), InitializeInfo::default());
-        let numeric = r#"{"result":{"instructions":5}}"#;
-        assert_eq!(parse_initialize_info(numeric), InitializeInfo::default());
+        // A notification event ahead of the reply is skipped.
+        let two = format!("data: {{\"method\":\"notifications/x\"}}\n\ndata: {json}\n\n");
+        assert_eq!(
+            parse_initialize_info(&two).unwrap().instructions.as_deref(),
+            Some("a")
+        );
+        let none = r#"{"result":{}}"#;
+        assert_eq!(
+            parse_initialize_info(none).unwrap(),
+            InitializeInfo::default()
+        );
+    }
+
+    #[test]
+    fn initialize_info_fails_loudly_on_a_reply_it_cannot_read() {
+        for body in [
+            "not json",
+            "",
+            r#"{"id":0}"#,
+            r#"{"result":{"instructions":5}}"#,
+            r#"{"error":{"message":"no"}}"#,
+        ] {
+            assert!(parse_initialize_info(body).is_err(), "{body}");
+        }
+    }
+
+    #[test]
+    fn a_tools_page_rejects_malformed_entries() {
+        let ok = serde_json::json!({"tools":[{"name":"a"},{"name":"b","description":null}],"nextCursor":"n"});
+        let (tools, next) = parse_tools_page(&ok).unwrap();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(next.as_deref(), Some("n"));
+        for bad in [
+            serde_json::json!({}),
+            serde_json::json!({"tools":[{"description":"x"}]}),
+            serde_json::json!({"tools":[{"name":3}]}),
+            serde_json::json!({"tools":[{"name":"a","description":4}]}),
+        ] {
+            assert!(parse_tools_page(&bad).is_err(), "{bad}");
+        }
+        let empty_cursor = serde_json::json!({"tools":[],"nextCursor":""});
+        assert_eq!(parse_tools_page(&empty_cursor).unwrap().1, None);
+    }
+
+    #[test]
+    fn error_text_hides_the_url_query_and_credentials() {
+        let client = McpHttpClient::test_new(
+            "http://user:pw@127.0.0.1:9/mcp?token=secret#f".into(),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let shown = client.display_url();
+        assert!(!shown.contains("secret") && !shown.contains("pw") && !shown.contains("user"));
+        assert!(shown.contains("127.0.0.1:9/mcp"));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn an_initialize_reply_reads_the_same_as_json_or_sse(text in "[ -~é]{0,200}") {
+            let json = serde_json::json!({"result": {"instructions": text}}).to_string();
+            let sse = format!("event: message\ndata: {json}\n\n");
+            let plain = parse_initialize_info(&json).unwrap();
+            proptest::prop_assert_eq!(&plain, &parse_initialize_info(&sse).unwrap());
+            proptest::prop_assert_eq!(plain.instructions, Some(text));
+        }
+
+        #[test]
+        fn no_body_makes_the_reply_parser_panic(body in "\\PC{0,200}") {
+            let _ = parse_initialize_info(&body);
+            let _ = parse_rpc_body(&body);
+        }
+    }
+
+    #[tokio::test]
+    async fn initialize_info_fails_on_an_unreadable_reply_from_a_server() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("garbage"))
+            .mount(&server)
+            .await;
+        let client =
+            McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("valid URL");
+        assert!(client.initialize_info().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn list_tools_reads_an_sse_reply() {
+        let server = server_with_session(None).await;
+        let payload = serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"s"}]}});
+        Mock::given(method("POST"))
+            .and(JsonRpcMethod("tools/list"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(format!("event: message\ndata: {payload}\n\n")),
+            )
+            .mount(&server)
+            .await;
+        let client =
+            McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("valid URL");
+        assert_eq!(client.list_tools().await.unwrap()[0].name, "s");
+    }
+
+    #[tokio::test]
+    async fn with_headers_does_not_follow_a_redirect() {
+        let target = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(init_ok("s", None))
+            .expect(0)
+            .mount(&target)
+            .await;
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(307).insert_header("location", target.uri()))
+            .mount(&server)
+            .await;
+        let headers =
+            std::collections::BTreeMap::from([("x-api-key".to_string(), "k".to_string())]);
+        let client = McpHttpClient::with_headers(server.uri(), Duration::from_secs(2), &headers)
+            .expect("client");
+        assert!(client.probe().await.is_err());
     }
 
     #[tokio::test]

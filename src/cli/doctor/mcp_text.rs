@@ -3,7 +3,7 @@
 //! Design: docs/design/issue-2148-mcp-description-cap.md
 
 use super::CheckLevel;
-use crate::mcp::probe::{McpTextReport, effective_limit, probe};
+use crate::mcp::probe::{McpTextReport, effective_limit, parse_limit, probe};
 use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
 
 /// What doctor learned about one server.
@@ -114,10 +114,11 @@ async fn measure_all(servers: &[ResolvedMcp], probe_stdio: bool) -> Vec<Measured
             }
         }
     }
+    let mut crashes = Vec::new();
     while let Some(joined) = tasks.join_next().await {
         match joined {
             Ok((index, outcome)) => slots[index] = Some(outcome),
-            Err(e) => tracing::warn!("an MCP text probe task crashed: {e}"),
+            Err(e) => crashes.push(e.to_string()),
         }
     }
     slots
@@ -125,7 +126,10 @@ async fn measure_all(servers: &[ResolvedMcp], probe_stdio: bool) -> Vec<Measured
         .zip(servers)
         .map(|(slot, server)| {
             slot.unwrap_or_else(|| {
-                Measured::Failed(server.name.clone(), "the probe crashed".to_string())
+                Measured::Failed(
+                    server.name.clone(),
+                    format!("the probe crashed: {}", crashes.join("; ")),
+                )
             })
         })
         .collect()
@@ -148,6 +152,12 @@ pub(super) fn run_doctor_mcp_text(
     let limit = effective_limit(limit_env);
     eprintln!();
     eprintln!("MCP text limits (Claude Code keeps {limit} characters):");
+    if let Some(value) = limit_env.filter(|v| parse_limit(v).is_none()) {
+        eprintln!(
+            "{info} CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH={value:?} is not 1 to 9 digits and not \
+             zero, so Claude Code ignores it"
+        );
+    }
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
