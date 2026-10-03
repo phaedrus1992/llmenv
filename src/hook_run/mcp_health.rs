@@ -33,7 +33,7 @@ const MAX_REASON_CHARS: usize = 300;
 
 /// Make `text` safe to put in the notice: one line, no control, bidirectional, or zero-width
 /// characters, and at most [`MAX_REASON_CHARS`] characters.
-pub(super) fn tidy_reason(text: &str) -> String {
+pub(crate) fn tidy_reason(text: &str) -> String {
     let spaced: String = text
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
@@ -163,6 +163,85 @@ fn parse_reply(line: &str) -> Option<anyhow::Result<()>> {
         Some(_) => Ok(()),
         None => Err(anyhow!("MCP initialize reply has no result")),
     })
+}
+
+/// Line-delimited JSON-RPC over a child's stdio: the send and receive path that the text-limit
+/// probe uses (#2148). A reader skips lines that are not the reply to the request it sent, so a
+/// banner or a notification is not mistaken for a failure.
+pub(crate) struct StdioRpc<W, R> {
+    writer: W,
+    lines: tokio::io::Lines<BufReader<R>>,
+    next_id: u64,
+}
+
+impl<W, R> StdioRpc<W, R>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+    R: tokio::io::AsyncRead + Unpin,
+{
+    pub(crate) fn new(writer: W, reader: R) -> Self {
+        Self {
+            writer,
+            lines: BufReader::new(reader).lines(),
+            next_id: 0,
+        }
+    }
+
+    /// Send a request and return its `result`. The writer stays open between requests, because
+    /// some servers stop at end of input.
+    ///
+    /// # Errors
+    /// A write failure, an end of output before the reply, a JSON-RPC `error`, or a reply with
+    /// no `result`.
+    pub(crate) async fn request(&mut self, method: &str, params: Value) -> anyhow::Result<Value> {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))
+            .await
+            .with_context(|| format!("cannot send MCP {method}"))?;
+        while let Some(line) = self
+            .lines
+            .next_line()
+            .await
+            .context("cannot read server output")?
+        {
+            let Ok(reply) = serde_json::from_str::<Value>(line.trim()) else {
+                continue;
+            };
+            if reply.get("id") != Some(&json!(id)) {
+                continue;
+            }
+            if let Some(error) = reply.get("error") {
+                let message = error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("no message");
+                return Err(anyhow!("MCP {method} returned an error: {message}"));
+            }
+            return reply
+                .get("result")
+                .cloned()
+                .ok_or_else(|| anyhow!("MCP {method} reply has no result"));
+        }
+        Err(anyhow!("the server exited before answering MCP {method}"))
+    }
+
+    /// Send a notification, which has no reply.
+    ///
+    /// # Errors
+    /// A write failure.
+    pub(crate) async fn notify(&mut self, method: &str) -> anyhow::Result<()> {
+        self.send(&json!({ "jsonrpc": "2.0", "method": method }))
+            .await
+            .with_context(|| format!("cannot send MCP {method}"))
+    }
+
+    async fn send(&mut self, message: &Value) -> std::io::Result<()> {
+        self.writer
+            .write_all(format!("{message}\n").as_bytes())
+            .await?;
+        self.writer.flush().await
+    }
 }
 
 /// Probe every server in parallel and return the ones that failed, in input order.

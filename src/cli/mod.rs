@@ -129,6 +129,9 @@ enum Command {
         /// Check all scopes and bundles for orphans, not just the active context
         #[arg(long)]
         all: bool,
+        /// Also start stdio MCP servers to measure their instructions and tool descriptions
+        #[arg(long)]
+        probe_mcp: bool,
     },
     /// Export environment variables for a scope
     Export {
@@ -763,8 +766,8 @@ pub fn run() -> anyhow::Result<()> {
     let use_color = should_use_color(Some(cli.color.to_mode()), std::io::stdout().is_terminal());
 
     match cli.command {
-        Some(Command::Doctor { gc, all }) => {
-            doctor::run_doctor(gc, all, use_color)?;
+        Some(Command::Doctor { gc, all, probe_mcp }) => {
+            doctor::run_doctor(gc, all, probe_mcp, use_color)?;
         }
         Some(Command::Export {
             scope,

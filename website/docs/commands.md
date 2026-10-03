@@ -788,7 +788,7 @@ Supported platforms: macOS (aarch64, x86_64), Linux (aarch64, x86_64).
 ## `doctor`
 
 ```text
-llmenv doctor [--gc] [--all] [--verbose]
+llmenv doctor [--gc] [--all] [--probe-mcp] [--verbose]
 ```
 
 Validate adapter wiring and configuration. By default runs checks only for the
@@ -822,6 +822,16 @@ active context (active bundles, active MCP servers, etc.). Checks:
   on matching files and are counted by number, not size. Doctor measures the
   merged config, which is what the next `llmenv regenerate` writes. Fix a large
   file in its source bundle, not in the generated copy.
+- MCP text limits (added in v3.12.0) — Claude Code cuts each MCP tool description and each
+  server's `initialize` instructions to 2,048 characters, and the cut is silent.
+  Doctor asks each HTTP server for its instructions and tool list (`initialize` and `tools/list`
+  only, never a tool call) and warns for each item over the limit.
+  `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH` changes the limit; doctor reads it from the
+  environment or `native.claude_code.env`.
+  A server that does not answer in 5 seconds is reported as "not measured", not as a warning.
+  Doctor does not start stdio servers unless you pass `--probe-mcp`, because starting one can
+  have side effects. SSE servers are not probed.
+  The fix belongs to the server's owner, because llmenv does not change a server's text.
 - dependent-tool versions (added in v3.11.0) — reports the installed version of
   the external tools llmenv wires in but doesn't ship (`icm`,
   `codebase-memory-mcp`) and how to update each. `icm upgrade --apply` installs

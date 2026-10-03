@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 mod autocompact;
 mod background;
 mod instruction_size;
+mod mcp_text;
 
 /// Effective value of a token-efficiency env var: the process environment
 /// wins if set (matches what Claude Code will actually see if it inherited
@@ -1170,7 +1171,12 @@ fn report_retired_claude_settings(adapter_root: &Path, warn: &str, info: &str) {
     }
 }
 
-pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result<()> {
+pub(super) fn run_doctor(
+    gc: bool,
+    all: bool,
+    probe_mcp: bool,
+    use_color: bool,
+) -> anyhow::Result<()> {
     let pass = super::doctor_pass(use_color);
     let warn = super::doctor_warning(use_color);
     let info = super::doctor_info(use_color);
@@ -1406,6 +1412,17 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     let native_claude_settings = doctor_manifest
         .as_ref()
         .and_then(|(manifest, _)| manifest.native.get("claude_code"));
+
+    // #2148: MCP text that Claude Code cuts at its limit.
+    if let Some((manifest, _)) = &doctor_manifest
+        && claude_installed
+    {
+        let limit_env = effective_token_efficiency_var(
+            native_claude_env,
+            "CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH",
+        );
+        mcp_text::run_doctor_mcp_text(use_color, &manifest.mcps, limit_env.as_deref(), probe_mcp);
+    }
 
     if all {
         // Orphan detection

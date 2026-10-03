@@ -172,7 +172,10 @@ fn claude_command() -> tokio::process::Command {
         "--disable-slash-commands",
         "--no-session-persistence",
     ])
-    .env(CHILD_GUARD_ENV, "1");
+    .env(CHILD_GUARD_ENV, "1")
+    // The prompt calls no tools, so waiting for MCP servers to connect only adds start-up time.
+    // Claude Code 2.1.274 and later read this; older versions ignore it.
+    .env("CLAUDE_CODE_MCP_STARTUP_WAIT_MS", "0");
     cmd
 }
 
@@ -865,6 +868,11 @@ mod tests {
             .find(|(k, _)| *k == std::ffi::OsStr::new(CHILD_GUARD_ENV))
             .and_then(|(_, v)| v);
         assert_eq!(guard, Some(std::ffi::OsStr::new("1")));
+        let wait = std_cmd
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new("CLAUDE_CODE_MCP_STARTUP_WAIT_MS"))
+            .and_then(|(_, v)| v);
+        assert_eq!(wait, Some(std::ffi::OsStr::new("0")));
     }
 
     fn memory_entry(when: &str, enabled: Option<bool>) -> crate::config::Memory {
