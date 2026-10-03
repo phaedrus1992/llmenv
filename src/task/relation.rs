@@ -135,7 +135,7 @@ impl ChildProgress {
     }
 
     /// Every sub-task that is not done waits on the user.
-    pub(super) fn all_waiting(self) -> bool {
+    fn all_waiting(self) -> bool {
         self.waiting > 0 && self.wip == 0 && self.open == 0
     }
 

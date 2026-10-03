@@ -16,7 +16,7 @@ pub(crate) mod relation;
 pub(crate) mod resume;
 pub mod session;
 
-pub use relation::Placement;
+pub(crate) use relation::Placement;
 use relation::Relation;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -75,7 +75,7 @@ pub struct Task {
     parent: Option<String>,
     /// Whether the task is a sub-task of `parent` or a top-level task of the queue (#2455).
     #[serde(default, skip_serializing_if = "Relation::is_queued")]
-    pub(crate) relation: Relation,
+    relation: Relation,
     /// A queued task that runs beside the head of the queue instead of behind it (#2455).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     parallel: bool,
