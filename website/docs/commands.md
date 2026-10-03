@@ -788,8 +788,11 @@ Supported platforms: macOS (aarch64, x86_64), Linux (aarch64, x86_64).
 ## `doctor`
 
 ```text
-llmenv doctor [--gc] [--all] [--probe-mcp] [--verbose]
+llmenv doctor [--gc] [--all] [--probe-mcp] [--restart-memory-proxy] [--verbose]
 ```
+
+(added in v3.12.0) `--restart-memory-proxy` skips the checks. It stops the local memory proxy that the
+pidfile names and starts it again; see [Troubleshooting](troubleshooting.md#memory-backend-issues).
 
 Validate adapter wiring and configuration. By default runs checks only for the
 active context (active bundles, active MCP servers, etc.). Checks:

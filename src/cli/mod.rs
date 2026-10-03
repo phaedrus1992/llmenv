@@ -11,6 +11,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 mod doctor;
+mod proxy_restart;
 mod setup;
 mod status;
 pub(crate) mod statusline;
@@ -132,6 +133,9 @@ enum Command {
         /// Also start stdio MCP servers to measure their instructions and tool descriptions
         #[arg(long)]
         probe_mcp: bool,
+        /// Stop the local memory proxy that the pidfile names, then start it again
+        #[arg(long)]
+        restart_memory_proxy: bool,
     },
     /// Export environment variables for a scope
     Export {
@@ -766,7 +770,13 @@ pub fn run() -> anyhow::Result<()> {
     let use_color = should_use_color(Some(cli.color.to_mode()), std::io::stdout().is_terminal());
 
     match cli.command {
-        Some(Command::Doctor { gc, all, probe_mcp }) => {
+        Some(Command::Doctor {
+            restart_memory_proxy: true,
+            ..
+        }) => proxy_restart::run(use_color)?,
+        Some(Command::Doctor {
+            gc, all, probe_mcp, ..
+        }) => {
             doctor::run_doctor(gc, all, probe_mcp, use_color)?;
         }
         Some(Command::Export {
@@ -1206,6 +1216,7 @@ pub(crate) fn ensure_local_memory_proxy(
     config: &Config,
     config_dir: &Path,
     active: &ActiveScopes,
+    source: crate::mcp::proxy_ops::SpawnSource,
 ) -> ProxyStart {
     let Some(mem) = export_local_memory_entry(config, config_dir, active) else {
         return ProxyStart::NotLocal;
@@ -1216,7 +1227,7 @@ pub(crate) fn ensure_local_memory_proxy(
     match crate::mcp::proxy::default_pid_path() {
         Ok(pid_path) => {
             match crate::mcp::proxy::ensure_running(&bind, &pid_path, |bind| {
-                crate::mcp::proxy::spawn_mcp_proxy(bind, &pid_path)
+                crate::mcp::proxy::spawn_mcp_proxy(bind, &pid_path, source)
             }) {
                 Ok(outcome) => {
                     let spawned = outcome == crate::mcp::proxy::EnsureOutcome::Spawned;
@@ -1270,7 +1281,12 @@ fn run_export(
     // When the memory backend designates *this* host as its server, ensure the
     // local `mcp-proxy` is alive before agents try to reach it. A failure is logged but
     // not fatal: the export must still emit env vars so the shell hook stays usable.
-    ensure_local_memory_proxy(&config, &config_dir, &active);
+    ensure_local_memory_proxy(
+        &config,
+        &config_dir,
+        &active,
+        crate::mcp::proxy_ops::SpawnSource::Export,
+    );
 
     // Throttled pull: check sync interval and fetch+pull if enough time has elapsed.
     // Skipped entirely when remote_sync is disabled (e.g. 1Password locked).
@@ -6480,8 +6496,12 @@ mod tests {
     #[test]
     fn ensure_local_memory_proxy_is_not_local_without_a_memory_entry() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let outcome =
-            ensure_local_memory_proxy(&Config::default(), dir.path(), &active_as_server());
+        let outcome = ensure_local_memory_proxy(
+            &Config::default(),
+            dir.path(),
+            &active_as_server(),
+            crate::mcp::proxy_ops::SpawnSource::Export,
+        );
         assert_eq!(outcome, ProxyStart::NotLocal);
     }
 

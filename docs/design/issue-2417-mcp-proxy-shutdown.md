@@ -119,3 +119,11 @@ Compare against the 2026-10-02 log entry.
 - A supervisor (launchd, systemd) for the proxy.
 - Changing `mcp-proxy` or `icm serve` themselves.
 - Session-start recovery (#2358), which stays as is.
+
+## As built
+
+1. The attribution line is written by `spawn_mcp_proxy`, which takes a `SpawnSource`, instead of by `spawn_and_publish`. The code is in `src/mcp/proxy_ops.rs`. The terminal field is `stdin_tty=yes|no`, because `rustix` has no `termios` feature here.
+2. The restart is `llmenv doctor --restart-memory-proxy` (`src/cli/proxy_restart.rs`). It checks the command line of the pidfile pid, sends SIGTERM, waits 5 seconds, then calls `ensure_local_memory_proxy` with `SpawnSource::Restart`.
+3. `setsid` is not added. A proxy in its own process group does not get the SIGHUP that the kernel sends to the foreground group of a closing terminal, and a shell sends SIGHUP only to jobs it knows. No evidence supports hypothesis 2. The attribution line shows the spawner session if a shutdown happens again, and then decision 4 can proceed.
+4. The `codebase-memory-mcp` notice keeps `pkill -f cbm-daemon-internal`. Version 0.11.0 has no stop command, and the name matches one daemon.
+5. The five reproduction cases were not run by hand. Hypothesis 1 is the only llmenv path that signals a running proxy, and the notice no longer advises it.

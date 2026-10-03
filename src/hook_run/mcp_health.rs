@@ -359,7 +359,12 @@ pub(super) fn session_start_notice(
     }
     let mut down = rt.block_on(find_down(&servers, DEFAULT_PROBE_TIMEOUT));
     if down.iter().any(|d| d.name == MEMORY_MCP_NAME) {
-        let outcome = crate::cli::ensure_local_memory_proxy(config, config_dir, active);
+        let outcome = crate::cli::ensure_local_memory_proxy(
+            config,
+            config_dir,
+            active,
+            crate::mcp::proxy_ops::SpawnSource::SessionStart,
+        );
         if outcome == ProxyStart::Started {
             // This call started the proxy that was down, so ask it again before reporting.
             let memory: Vec<ResolvedMcp> = servers
@@ -443,8 +448,9 @@ pub(crate) fn effect_and_fix(name: &str) -> (&'static str, String) {
         MEMORY_MCP_NAME => (
             "Memory recall and store do not work in this session.",
             "Run `llmenv export > /dev/null` to restart a stopped proxy. If the proxy runs but \
-             does not answer, stop it with `pkill -f 'mcp-proxy .*-- icm serve'` first. That \
-             matches the proxy by its command line, so it cannot hit a reused process id."
+             does not answer, run `llmenv doctor --restart-memory-proxy`. It stops only the \
+             proxy that llmenv started, and starts it again. Do not use `pkill`: it stops the \
+             proxy of every other session too."
                 .to_string(),
         ),
         CODEBASE_MEMORY_MCP_NAME => (
@@ -769,8 +775,12 @@ mod tests {
         assert!(text.contains("connection refused") && text.contains("timed out"));
         assert!(text.contains("llmenv export"), "ICM fix missing: {text}");
         assert!(
-            text.contains("pkill -f"),
-            "ICM stop must match by command line: {text}"
+            text.contains("llmenv doctor --restart-memory-proxy"),
+            "ICM restart must go through llmenv: {text}"
+        );
+        assert!(
+            !text.contains("pkill -f 'mcp-proxy"),
+            "the notice must not tell the agent to stop every proxy: {text}"
         );
         assert!(
             !text.contains("kill $(cat"),
