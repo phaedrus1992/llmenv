@@ -87,7 +87,7 @@ fn separator_bundle(line: &str) -> Option<String> {
 }
 
 /// Measure the always-loaded instruction text of `manifest`.
-pub(super) fn measure(manifest: &MergedManifest) -> InstructionSizeReport {
+fn measure(manifest: &MergedManifest) -> InstructionSizeReport {
     let claude_md = crate::adapter::claude_code::claude_md_content(manifest);
     let claude_md_chars = claude_md.chars().count();
     let mut always_loaded = claude_md_chunks(&claude_md);
@@ -124,7 +124,7 @@ pub(super) fn measure(manifest: &MergedManifest) -> InstructionSizeReport {
 }
 
 /// The doctor lines for a report.
-pub(super) fn checks(report: &InstructionSizeReport) -> Vec<(CheckLevel, String)> {
+fn checks(report: &InstructionSizeReport) -> Vec<(CheckLevel, String)> {
     let mut out = Vec::new();
     let mut files: Vec<(&str, usize)> = report
         .rule_chars
@@ -187,7 +187,7 @@ pub(super) fn checks(report: &InstructionSizeReport) -> Vec<(CheckLevel, String)
 }
 
 /// The lines that name the largest contributors.
-pub(super) fn top_contributors(report: &InstructionSizeReport) -> Vec<String> {
+fn top_contributors(report: &InstructionSizeReport) -> Vec<String> {
     report
         .always_loaded
         .iter()
@@ -213,7 +213,6 @@ pub(super) fn run_doctor_instruction_size(use_color: bool, manifest: &MergedMani
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
     use super::*;
     use crate::merge::rules::RuleFile;
