@@ -48,12 +48,50 @@ fn run_cbm_index_with(
     );
     // The parent points this process's stderr at the index log; the indexer shares it.
     cmd.stderr(std::process::Stdio::inherit());
-    if let Some(result_path) = &inputs.result_path {
-        cmd.stdout(crate::hook_run::result_stdout(Path::new(result_path)));
+    // The indexer writes its result to a file of its own, which replaces the last result when the
+    // indexer exits. A run that is killed, or that cannot start, leaves the last result alone, and
+    // two runs never write to one file.
+    let pending = inputs.result_path.as_deref().and_then(|final_path| {
+        let pending = pending_result_path(Path::new(final_path));
+        match crate::hook_run::create_result_file(&pending) {
+            Ok(file) => {
+                cmd.stdout(std::process::Stdio::from(file));
+                Some((pending, final_path.to_string()))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "cannot create the index result file {}, so doctor cannot report the result: {e}",
+                    pending.display()
+                );
+                None
+            }
+        }
+    });
+    let status = cmd.status();
+    if let Some((pending, final_path)) = &pending {
+        publish_result(pending, Path::new(final_path), status.is_ok());
     }
-    let status = cmd.status().context("cannot start codebase-memory-mcp")?;
+    let status = status.context("cannot start codebase-memory-mcp")?;
     anyhow::ensure!(status.success(), "codebase-memory-mcp exited with {status}");
     checkpoint::complete(checkpoint_path)
+}
+
+/// The file one run writes before it replaces the result: unique to this process.
+fn pending_result_path(result: &Path) -> std::path::PathBuf {
+    let name = result.file_name().unwrap_or_default().to_string_lossy();
+    result.with_file_name(format!("{name}.{}.pending", std::process::id()))
+}
+
+/// Move the pending result over the last result when the indexer ran (`started`), and remove it
+/// when the indexer never started.
+fn publish_result(pending: &Path, result: &Path, started: bool) {
+    if started {
+        if let Err(e) = std::fs::rename(pending, result) {
+            tracing::warn!("cannot save the index result to {}: {e}", result.display());
+        }
+    } else if let Err(e) = std::fs::remove_file(pending) {
+        tracing::debug!("cannot remove {}: {e}", pending.display());
+    }
 }
 
 #[cfg(test)]
@@ -188,6 +226,84 @@ mod tests {
             std::fs::read_to_string(&result).unwrap().trim(),
             r#"{"status":"ok"}"#
         );
+    }
+
+    fn with_result(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        let result = dir.join("result.json");
+        let inputs = serde_json::to_value(IndexInputs {
+            project_root: "/repo".into(),
+            index_path: None,
+            mem_budget_mb: None,
+            result_path: Some(result.display().to_string()),
+        })
+        .unwrap();
+        let file = checkpoint::write(dir, &Checkpoint::new(JobKind::CbmIndex, inputs, None))
+            .unwrap()
+            .unwrap();
+        (file, result)
+    }
+
+    #[test]
+    fn a_failed_run_still_publishes_its_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let (file, result) = with_result(dir.path());
+        std::fs::write(&result, "the old result").unwrap();
+        let script = "echo '{\"status\":\"error\"}'; exit 3";
+        assert!(run_cbm_index_with(&file, |_, _, _| shell(script)).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&result).unwrap().trim(),
+            r#"{"status":"error"}"#
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".pending"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    #[test]
+    fn an_indexer_that_cannot_start_keeps_the_last_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let (file, result) = with_result(dir.path());
+        std::fs::write(&result, "the old result").unwrap();
+        let missing = || std::process::Command::new("llmenv-no-such-indexer");
+        assert!(run_cbm_index_with(&file, |_, _, _| missing()).is_err());
+        assert_eq!(std::fs::read_to_string(&result).unwrap(), "the old result");
+        assert!(!pending_result_path(&result).exists());
+    }
+
+    #[test]
+    fn the_last_result_stays_until_the_indexer_exits() {
+        let dir = tempfile::tempdir().unwrap();
+        let (file, result) = with_result(dir.path());
+        std::fs::write(&result, "the old result").unwrap();
+        let seen = std::cell::RefCell::new(String::new());
+        let watch = format!("cat '{}' > /dev/null; echo '{{}}'", result.display());
+        run_cbm_index_with(&file, |_, _, _| {
+            // While the indexer is being built the old result is still in place.
+            *seen.borrow_mut() = std::fs::read_to_string(&result).unwrap();
+            shell(&watch)
+        })
+        .unwrap();
+        assert_eq!(*seen.borrow(), "the old result");
+        assert_eq!(std::fs::read_to_string(&result).unwrap().trim(), "{}");
+    }
+
+    #[test]
+    fn a_result_file_is_owner_only_and_replaces_a_symlink_instead_of_following_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("victim");
+        std::fs::write(&target, "keep me").unwrap();
+        let link = dir.path().join("result.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let file = crate::hook_run::create_result_file(&link).unwrap();
+        drop(file);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep me");
+        let meta = std::fs::symlink_metadata(&link).unwrap();
+        assert!(meta.is_file());
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
     }
 
     #[test]

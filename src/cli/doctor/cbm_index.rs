@@ -29,7 +29,10 @@ fn format_time(time: SystemTime) -> String {
 /// Classify the text of a result file. `finished` is the file's modification time, and `log` is
 /// the path of the index log, which a failure points to.
 fn classify(text: &str, finished: &str, log: &Path) -> (CheckLevel, String) {
-    let Ok(result) = serde_json::from_str::<Value>(text.trim()) else {
+    let result = serde_json::from_str::<Value>(text.trim())
+        .ok()
+        .filter(Value::is_object);
+    let Some(result) = result else {
         return (
             CheckLevel::Info,
             format!(
@@ -82,26 +85,43 @@ fn classify(text: &str, finished: &str, log: &Path) -> (CheckLevel, String) {
     )
 }
 
+/// The most bytes of a result file that doctor reads. A result is one small JSON object.
+const MAX_RESULT_BYTES: u64 = 64 * 1024;
+
 /// The doctor line for the last index of `project_root`.
 fn check(cache_dir: &Path, project_root: &Path) -> (CheckLevel, String) {
+    use std::io::Read as _;
     let path = crate::hook_run::index_result_path(cache_dir, project_root);
     let log = cache_dir.join("index.log");
-    let finished = match std::fs::metadata(&path).and_then(|m| m.modified()) {
-        Ok(time) => format_time(time),
+    let cannot_read = |e: &dyn std::fmt::Display| {
+        (
+            CheckLevel::Info,
+            format!("codebase-memory: cannot read {}: {e}", path.display()),
+        )
+    };
+    // `symlink_metadata`: a link in a shared cache folder is not followed to another file.
+    let meta = match std::fs::symlink_metadata(&path) {
+        Ok(meta) => meta,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return (
                 CheckLevel::Info,
                 "codebase-memory: no index result for this project yet".to_string(),
             );
         }
-        Err(e) => {
-            return (
-                CheckLevel::Info,
-                format!("codebase-memory: cannot read {}: {e}", path.display()),
-            );
-        }
+        Err(e) => return cannot_read(&e),
     };
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    if !meta.is_file() {
+        return cannot_read(&"it is not a regular file");
+    }
+    let finished = meta
+        .modified()
+        .map_or_else(|_| "at an unknown time".to_string(), format_time);
+    let mut text = String::new();
+    let read = std::fs::File::open(&path)
+        .and_then(|file| file.take(MAX_RESULT_BYTES).read_to_string(&mut text));
+    if let Err(e) = read {
+        return cannot_read(&e);
+    }
     classify(&text, &finished, &log)
 }
 
@@ -111,20 +131,37 @@ pub(super) fn run_doctor_cbm_index(
     config: &crate::config::Config,
     active: &crate::scope::ActiveScopes,
 ) {
-    let Some(entry) = config
+    let entries = config
         .features
         .as_ref()
         .map(|f| f.codebase_memory.as_slice())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let mut active_entries = entries
         .iter()
-        .find(|cm| cm.when.iter().any(|t| active.tags.contains(t)))
-    else {
+        .filter(|cm| cm.when.iter().any(|t| active.tags.contains(t)));
+    let (Some(entry), None) = (active_entries.next(), active_entries.next()) else {
+        // None is fine. Two or more is ambiguous: the SessionStart index skips it too.
+        if entries
+            .iter()
+            .filter(|cm| cm.when.iter().any(|t| active.tags.contains(t)))
+            .count()
+            > 1
+        {
+            let info = super::super::doctor_info(use_color);
+            eprintln!(
+                "{info} codebase-memory: more than one entry is active, so no index runs and \
+                 there is no result to report"
+            );
+        }
         return;
     };
     let (project_root, state_dir) = match crate::mcp::resolve::codebase_memory_paths() {
         Ok(paths) => paths,
         Err(e) => {
-            tracing::debug!("doctor: no project root for the codebase-memory result: {e}");
+            let info = super::super::doctor_info(use_color);
+            eprintln!(
+                "{info} codebase-memory: cannot find the project root for the index result: {e}"
+            );
             return;
         }
     };
@@ -254,6 +291,67 @@ mod tests {
             "{text}"
         );
         assert!(text.ends_with(" UTC"), "{text}");
+    }
+
+    #[test]
+    fn json_that_is_not_an_object_is_not_a_result() {
+        for text in ["[]", "null", "\"x\"", "7", "true"] {
+            assert_eq!(run(text).0, CheckLevel::Info, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_result_path_that_is_not_a_regular_file_is_reported_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = Path::new("/work/p");
+        let path = crate::hook_run::index_result_path(dir.path(), project);
+        let target = dir.path().join("elsewhere");
+        std::fs::write(&target, r#"{"status":"error"}"#).unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        let (level, text) = check(dir.path(), project);
+        assert_eq!(level, CheckLevel::Info);
+        assert!(text.contains("not a regular file"), "{text}");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(check(dir.path(), project).1.contains("not a regular file"));
+    }
+
+    #[test]
+    fn a_huge_result_file_is_read_up_to_the_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = Path::new("/work/p");
+        let path = crate::hook_run::index_result_path(dir.path(), project);
+        let mut text = String::from(r#"{"status":"ok","pad":""#);
+        text.push_str(&"x".repeat(200_000));
+        text.push_str("\"}");
+        std::fs::write(path, text).unwrap();
+        // The bound cuts the JSON, so it does not parse and the line says so.
+        assert!(check(dir.path(), project).1.contains("result not readable"));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn no_text_makes_the_classification_panic(text in "\\PC{0,200}") {
+            let (_, message) = run(&text);
+            proptest::prop_assert!(message.starts_with("codebase-memory: "));
+        }
+
+        #[test]
+        fn any_object_of_scalars_classifies_without_panic(
+            status in proptest::option::of("[a-z_]{0,12}"),
+            reason in proptest::option::of("[a-z_]{0,12}"),
+            budget in proptest::option::of(proptest::prelude::any::<u64>()),
+            hint in proptest::option::of("\\PC{0,30}"),
+        ) {
+            let value = serde_json::json!({
+                "status": status, "reason": reason, "budget_mb": budget, "hint": hint,
+            });
+            let (level, message) = run(&value.to_string());
+            proptest::prop_assert!(message.starts_with("codebase-memory: "));
+            if reason.as_deref() == Some("over_memory_budget") {
+                proptest::prop_assert_eq!(level, CheckLevel::Warn);
+            }
+        }
     }
 
     #[test]

@@ -2782,30 +2782,44 @@ pub(crate) fn index_result_path(
     cache_dir.join(format!("index-result-{key}.json"))
 }
 
-/// Send the stdout of an indexer that `cmd` starts directly to the result file. With a checkpoint
-/// `cmd` is the wrapper, which does this for the indexer it starts (#2154).
+/// Send the stdout of an indexer that `cmd` starts directly to the result file. When `cmd` is the
+/// wrapper it does this for the indexer it starts (#2154).
 fn direct_index_stdout(
     cmd: &mut std::process::Command,
-    checkpointed: bool,
+    wrapped: bool,
     result_path: &std::path::Path,
 ) {
-    if !checkpointed {
+    if !wrapped {
         cmd.stdout(result_stdout(result_path));
     }
 }
 
-/// The stdout for an indexer that reports its result as JSON: the result file, or null when the
-/// file cannot be opened (a missing result is a smaller problem than skipping the index).
-fn result_stdout(path: &std::path::Path) -> std::process::Stdio {
-    let opened = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
+/// Create the result file at `path`, owner-only and new. An existing file or symlink at `path` is
+/// removed first, so the open can neither follow a link nor reuse a file that another user made.
+pub(crate) fn create_result_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    std::fs::OpenOptions::new()
         .write(true)
-        .open(path);
-    match opened {
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+/// The stdout for an indexer that reports its result as JSON: the result file, or null when the
+/// file cannot be created (a missing result is a smaller problem than skipping the index).
+fn result_stdout(path: &std::path::Path) -> std::process::Stdio {
+    match create_result_file(path) {
         Ok(file) => std::process::Stdio::from(file),
         Err(e) => {
-            tracing::debug!("cannot open the index result file {}: {e}", path.display());
+            tracing::warn!(
+                "cannot create the index result file {}, so doctor cannot report the result: {e}",
+                path.display()
+            );
             std::process::Stdio::null()
         }
     }
@@ -2867,7 +2881,10 @@ fn trigger_codebase_memory_index(
         &inputs,
         None,
     );
-    let mut cmd = index_job_command(checkpoint.as_deref(), std::env::current_exe().ok(), || {
+    let exe = std::env::current_exe().ok();
+    // The wrapper is used only with both a checkpoint and an executable (`index_job_command`).
+    let wrapped = checkpoint.is_some() && exe.is_some();
+    let mut cmd = index_job_command(checkpoint.as_deref(), exe, || {
         build_index_repository_command(project_root, cm)
     });
     let log_path = cache_dir.join("index.log");
@@ -2885,7 +2902,7 @@ fn trigger_codebase_memory_index(
     );
     // Without the wrapper the indexer starts here, so its stdout goes to the result file here. The
     // wrapper does the same for the indexer it starts. The log redirect above made the directory.
-    direct_index_stdout(&mut cmd, checkpoint.is_some(), &result_path);
+    direct_index_stdout(&mut cmd, wrapped, &result_path);
     crate::mcp::proxy::detach_process_group(&mut cmd);
     if let Err(e) = cmd.spawn() {
         tracing::debug!("codebase-memory-mcp index_repository: failed to spawn: {e}");
