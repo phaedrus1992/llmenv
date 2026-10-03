@@ -1908,12 +1908,12 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     settings.insert("syncClaudeAiSkills".into(), json!(false));
     settings.insert("syncClaudeAiPlugins".into(), json!(false));
 
-    // #221: Render first-class capability fields (effort level, advisor size)
+    // #221: Render first-class capability fields (effort level, advisor model)
     if let Some(effort_level) = &manifest.capabilities.effort_level {
         settings.insert("effortLevel".into(), json!(effort_level));
     }
-    if let Some(advisor_size) = &manifest.capabilities.advisor_size {
-        settings.insert("advisorSize".into(), json!(advisor_size));
+    if let Some(advisor_model) = &manifest.capabilities.advisor_model {
+        settings.insert("advisorModel".into(), json!(advisor_model));
     }
 
     // #1130: select an output style when exactly one non-`force_for_plugin`
@@ -2099,7 +2099,7 @@ pub(crate) const LLMENV_OWNED_SETTINGS_KEYS: [&str; 12] = [
     "syncClaudeAiSkills",
     "syncClaudeAiPlugins",
     "effortLevel",
-    "advisorSize",
+    "advisorModel",
     "outputStyle",
     "hooks",
     // Security: never allow these to be seeded from ~/.claude/settings.json —
@@ -2409,6 +2409,13 @@ fn reconcile_settings(
                 merged_obj.remove(key);
             }
         }
+    }
+
+    // Before v3.12.0 llmenv rendered `advisorSize`, which Claude Code never read (#2409). The key
+    // is no longer owned, so clear the stale copy here; the passthrough loop below restores it
+    // if `native.claude_code` sets it on purpose.
+    if merged_obj.remove("advisorSize").is_some() {
+        tracing::info!("removed stale advisorSize from settings.json; llmenv renders advisorModel");
     }
 
     // Native passthrough keys: any key llmenv computed into `fresh` (e.g. via
@@ -3617,12 +3624,24 @@ mod tests {
         let mut manifest = crate::merge::MergedManifest::default();
         manifest.capabilities.auto_memory_enabled = Some(true);
         manifest.capabilities.effort_level = Some("high".into());
-        manifest.capabilities.advisor_size = Some("large".into());
+        manifest.capabilities.advisor_model = Some("opus".into());
         manifest.native = std::collections::BTreeMap::from([(
             "claude_code".to_owned(),
             serde_yaml::Value::Mapping(fragment),
         )]);
         manifest
+    }
+
+    /// #2409: `advisor_model` renders Claude Code's `advisorModel`; unset renders neither key.
+    #[test]
+    fn advisor_model_renders_advisor_model_not_advisor_size() {
+        let mut manifest = crate::merge::MergedManifest::default();
+        manifest.capabilities.advisor_model = Some("opus".into());
+        let settings = render_settings_for_test(&manifest);
+        assert_eq!(settings["advisorModel"], "opus");
+        assert!(settings.get("advisorSize").is_none(), "{settings}");
+        let settings = render_settings_for_test(&crate::merge::MergedManifest::default());
+        assert!(settings.get("advisorModel").is_none() && settings.get("advisorSize").is_none());
     }
 
     /// #1264: `native.<engine>.<key>: null` means "delete the key", so the
@@ -3631,7 +3650,7 @@ mod tests {
     /// refused by `reject_modeled_keys_in_catch_all`, so they can't get here).
     #[test]
     fn native_null_removes_a_rendered_settings_key() {
-        for key in ["autoMemoryEnabled", "effortLevel", "advisorSize"] {
+        for key in ["autoMemoryEnabled", "effortLevel", "advisorModel"] {
             let settings = render_settings_for_test(&manifest_with_native_override(
                 key,
                 serde_yaml::Value::Null,
@@ -5095,6 +5114,20 @@ mod tests {
 
     use llmenv_util::testkit::arb_json;
 
+    /// #2409: llmenv wrote `advisorSize` before v3.12.0. The key is no longer owned, so a
+    /// re-render must clear the stale copy and still honor an explicit native override.
+    #[test]
+    fn reconcile_clears_stale_advisor_size_but_keeps_a_native_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        write_json(&path, &serde_json::json!({ "advisorSize": "large" }));
+        let out = reconcile_settings(&path, serde_json::json!({}), None, None).unwrap();
+        assert!(out.get("advisorSize").is_none(), "{out}");
+        let fresh = serde_json::json!({ "advisorSize": "native" });
+        let out = reconcile_settings(&path, fresh, None, None).unwrap();
+        assert_eq!(out["advisorSize"], "native");
+    }
+
     #[test]
     fn reconcile_drops_owned_key_llmenv_no_longer_renders() {
         // All plugins removed → llmenv renders no `enabledPlugins`; a stale value
@@ -5269,7 +5302,7 @@ mod tests {
     const OVERRIDABLE_SETTINGS_KEYS: [&str; 4] = [
         "autoMemoryEnabled",
         "effortLevel",
-        "advisorSize",
+        "advisorModel",
         "outputStyle",
     ];
 
@@ -5334,7 +5367,7 @@ mod tests {
                     native,
                     auto_memory_enabled,
                     effort_level,
-                    advisor_size,
+                    advisor_model,
                 )| crate::merge::MergedManifest {
                     capabilities: crate::config::Capabilities {
                         permissions: crate::config::Permissions {
@@ -5347,7 +5380,7 @@ mod tests {
                         hooks,
                         auto_memory_enabled,
                         effort_level,
-                        advisor_size,
+                        advisor_model,
                         ..Default::default()
                     },
                     session_log: crate::config::SessionLog {

@@ -124,8 +124,8 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
     })?;
     let effort_level =
         highest_precedence(contributors, "effort_level", |c| c.effort_level.as_ref())?;
-    let advisor_size =
-        highest_precedence(contributors, "advisor_size", |c| c.advisor_size.as_ref())?;
+    let advisor_model =
+        highest_precedence(contributors, "advisor_model", |c| c.advisor_model.as_ref())?;
 
     // Collect memory, throttle, and codebase_memory entries from all
     // contributors: concat + dedup (same list model as hooks, plugins, mcp).
@@ -201,7 +201,8 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         auto_memory_enabled,
         effort_level,
         model_effort,
-        advisor_size,
+        advisor_model,
+        advisor_size: None,
         native_permissions,
         native_hooks,
         native_plugins,
@@ -1932,16 +1933,16 @@ mod tests {
         assert!(merge_capabilities(&[b, a]).is_err());
     }
 
-    /// `advisor_size` was hardcoded to `None` in `merge_capabilities` — checked
+    /// `advisor_model` was hardcoded to `None` in `merge_capabilities` — checked
     /// by `Capabilities::is_empty()` and consumed downstream, but never actually
     /// resolved from any contributor. Found during pre-pr-review of #1025.
     #[test]
-    fn advisor_size_scalar_resolution() {
+    fn advisor_model_scalar_resolution() {
         let low = contributor(
             "low",
             1,
             Capabilities {
-                advisor_size: Some("small".into()),
+                advisor_model: Some("sonnet".into()),
                 ..Default::default()
             },
         );
@@ -1949,12 +1950,13 @@ mod tests {
             "high",
             5,
             Capabilities {
-                advisor_size: Some("large".into()),
+                advisor_model: Some("opus".into()),
                 ..Default::default()
             },
         );
         let out = merge_capabilities(&[low, high]).unwrap();
-        assert_eq!(out.advisor_size.as_deref(), Some("large"));
+        assert_eq!(out.advisor_model.as_deref(), Some("opus"));
+        assert!(out.advisor_size.is_none());
     }
 
     // #317: features created when any non-memory/non-throttle field is populated.
