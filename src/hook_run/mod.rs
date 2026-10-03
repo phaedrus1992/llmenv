@@ -3239,7 +3239,10 @@ mod tests {
         spawn_detached(cmd, Some("payload"), dir.path()).unwrap();
         let out = dir.path().join("out.txt");
         for _ in 0..200 {
-            if dir.path().join("cwd.txt").exists() {
+            // The shell creates the file before `pwd` writes it, so wait for content.
+            let written = std::fs::read_to_string(dir.path().join("cwd.txt"))
+                .is_ok_and(|text| !text.is_empty());
+            if written {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(25));
