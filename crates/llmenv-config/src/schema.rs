@@ -534,9 +534,15 @@ pub struct Capabilities {
     /// Merged per key: the highest-precedence contributor's whole entry wins.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub model_effort: std::collections::BTreeMap<String, ModelEffort>,
-    /// Advisor/expert capability size ("small", "medium", "large"). Optional scalar — resolves by
-    /// scope precedence. Adapters map to their engine-specific models via native overrides.
+    /// Claude Code advisor model (#2409): `fable`, `opus`, `sonnet`, or a canonical model ID such
+    /// as `claude-opus-5-5`. Optional scalar — resolves by scope precedence. Renders the
+    /// `advisorModel` setting. See <https://code.claude.com/docs/en/advisor>.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advisor_model: Option<String>,
+    /// Removed in v3.12.0, replaced by `advisor_model`. Parsed only so validation can name the fix
+    /// instead of dropping the key silently. Never merged, rendered, or written back. Remove the
+    /// field in the next major version.
+    #[serde(default, skip_serializing)]
     pub advisor_size: Option<String>,
     /// Per-engine native permission rule lists, keyed by engine name. The
     /// engine-only override for permissions — raw rule strings in the engine's
@@ -632,7 +638,7 @@ impl Capabilities {
             && self.auto_memory_enabled.is_none()
             && self.effort_level.is_none()
             && self.model_effort.is_empty()
-            && self.advisor_size.is_none()
+            && self.advisor_model.is_none()
             && self.native_permissions.is_empty()
             && self.native_hooks.is_empty()
             && self.native_plugins.is_empty()

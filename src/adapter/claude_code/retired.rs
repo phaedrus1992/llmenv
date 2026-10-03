@@ -55,6 +55,9 @@ const fn with_note(mut r: Retired, note: &'static str) -> Retired {
 /// Every row comes from Claude Code's settings reference, its environment-variable reference, or
 /// its changelog (verified 2026-09-26). Add a new row at the top of its kind's group.
 const RETIRED: &[Retired] = &[
+    // llmenv rendered this key by mistake before v3.12.0 (#2409), so `since` is left empty: it
+    // would read as a Claude Code version.
+    row(SettingsKey, "advisorSize", true, None, Some("advisorModel")),
     with_note(
         row(
             SettingsKey,
@@ -309,6 +312,16 @@ mod tests {
             let hits = scan(&settings, &claude);
             assert_eq!(names(&hits), vec![r.name], "row {} {:?}", r.name, r.kind);
         }
+    }
+
+    /// #2409: a `settings.json` that llmenv wrote before v3.12.0 holds `advisorSize`.
+    #[test]
+    fn stale_advisor_size_names_advisor_model() {
+        let hits = scan(&json!({ "advisorSize": "large" }), &json!({}));
+        assert_eq!(
+            hits.iter().map(RetiredHit::message).collect::<Vec<_>>(),
+            ["settings.json: advisorSize has no effect. Use advisorModel instead."]
+        );
     }
 
     #[test]

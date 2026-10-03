@@ -665,6 +665,12 @@ fn implicit_chaining_never_crosses_sessions() {
         .args(["task", "add", "In sprint one"])
         .assert()
         .success();
+    for verb in ["start", "done"] {
+        llmenv(dir.path())
+            .args(["task", verb, "in-sprint-one"])
+            .assert()
+            .success();
+    }
     llmenv(dir.path())
         .args(["task", "session", "finish"])
         .assert()
@@ -1018,7 +1024,7 @@ fn session_show_reports_progress() {
         .success()
         .stdout(predicates::str::contains("0/1 done"));
     llmenv(dir.path())
-        .args(["task", "done", "ship-the-release"])
+        .args(["task", "done", "ship-the-release", "--force"])
         .assert()
         .success();
     llmenv(dir.path())
@@ -1043,7 +1049,7 @@ fn session_summary_json_includes_tasks_and_notes() {
         .assert()
         .success();
     llmenv(dir.path())
-        .args(["task", "done", "ship-the-release"])
+        .args(["task", "done", "ship-the-release", "--force"])
         .assert()
         .success();
 
@@ -1094,6 +1100,12 @@ fn session_summary_by_explicit_id_works_with_no_open_session() {
         .args(["task", "add", "Ship the release", "--no-parent"])
         .assert()
         .success();
+    for verb in ["start", "done"] {
+        llmenv(dir.path())
+            .args(["task", verb, "ship-the-release"])
+            .assert()
+            .success();
+    }
     llmenv(dir.path())
         .args(["task", "session", "finish", "sprint"])
         .assert()
@@ -1172,6 +1184,12 @@ fn tasks_added_during_a_session_are_tagged_and_survive_it_finishing() {
         .args(["task", "add", "In the session"])
         .assert()
         .success();
+    for verb in ["start", "done"] {
+        llmenv(dir.path())
+            .args(["task", verb, "in-the-session"])
+            .assert()
+            .success();
+    }
     llmenv(dir.path())
         .args(["task", "session", "finish", "sprint"])
         .assert()
@@ -1407,7 +1425,7 @@ fn wait_on_done_task_fails() {
         .assert()
         .success();
     llmenv(dir.path())
-        .args(["task", "done", "ship-the-release"])
+        .args(["task", "done", "ship-the-release", "--force"])
         .assert()
         .success();
     llmenv(dir.path())
@@ -1695,7 +1713,7 @@ fn ls_hide_done_and_active_alias_hide_completed() {
         .assert()
         .success();
     llmenv(dir.path())
-        .args(["task", "done", "finish-me"])
+        .args(["task", "done", "finish-me", "--force"])
         .assert()
         .success();
 
@@ -1971,6 +1989,12 @@ fn ls_current_project_includes_a_task_from_a_finished_session() {
         .args(["task", "add", "Old task"])
         .assert()
         .success();
+    for verb in ["start", "done"] {
+        llmenv(dir.path())
+            .args(["task", verb, "old-task"])
+            .assert()
+            .success();
+    }
     llmenv(dir.path())
         .args(["task", "session", "finish", "old-sprint"])
         .assert()
@@ -2147,7 +2171,7 @@ fn show_next_skips_blocked_and_done_tasks() {
         .assert()
         .success();
     llmenv(dir.path())
-        .args(["task", "done", "task-3-finished"])
+        .args(["task", "done", "task-3-finished", "--force"])
         .assert()
         .success();
     llmenv(dir.path())
@@ -2287,7 +2311,7 @@ fn show_current_with_no_qualifying_task_reports_none_without_erroring() {
         .assert()
         .success();
     llmenv(dir.path())
-        .args(["task", "done", "only-task"])
+        .args(["task", "done", "only-task", "--force"])
         .assert()
         .success();
 
@@ -2386,7 +2410,7 @@ fn task_add_after_session_start_new_joins_the_callers_session() {
 // --- #2338: done without start, and reopen ---
 
 #[test]
-fn done_without_start_warns_and_reopen_restarts_it() {
+fn done_without_start_is_refused_and_force_completes_it() {
     let dir = TempDir::new().unwrap();
     start_session(dir.path(), "sprint");
     llmenv(dir.path())
@@ -2395,6 +2419,12 @@ fn done_without_start_warns_and_reopen_restarts_it() {
         .success();
     llmenv(dir.path())
         .args(["task", "done", "step-one"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("llmenv task start step-one"))
+        .stderr(predicates::str::contains("--force"));
+    llmenv(dir.path())
+        .args(["task", "done", "step-one", "--force"])
         .assert()
         .success()
         .stdout(predicates::str::contains("never started"));
@@ -2408,6 +2438,45 @@ fn done_without_start_warns_and_reopen_restarts_it() {
         .assert()
         .success()
         .stdout(predicates::str::contains("Wip"));
+}
+
+#[test]
+fn session_finish_with_an_open_task_is_refused_and_lists_it() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Step one"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "session", "finish", "sprint"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("open step-one Step one"))
+        .stderr(predicates::str::contains("--abandon-open"));
+}
+
+#[test]
+fn session_finish_abandon_open_finishes_and_untags_the_task() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Step one"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "session", "finish", "sprint", "--abandon-open"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("1 abandoned"))
+        .stdout(predicates::str::contains(
+            "abandoned open step-one Step one",
+        ));
+    llmenv(dir.path())
+        .args(["task", "ls", "--session", "sprint"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("step-one").not());
 }
 
 #[test]
@@ -2425,7 +2494,7 @@ fn reopen_that_cannot_start_says_the_task_is_reopened() {
         .assert()
         .success();
     llmenv(dir.path())
-        .args(["task", "done", "blocked"])
+        .args(["task", "done", "blocked", "--force"])
         .assert()
         .success();
     llmenv(dir.path())

@@ -43,5 +43,9 @@ TODOs.
   resolves the next actionable task after it (skipping `done`/`waiting` and
   anything still `blocked_on`). `llmenv task ls --current-project` narrows a
   full listing to this project's tasks.
+- Start a task before you finish it: `llmenv task done <slug>` refuses a task
+  that is still `open`. `--force` is for work that is done without tracking.
 - `llmenv task session finish [<id>]` / `session show [<id>]` to close out —
-  `finish` auto-resolves if exactly one session is open.
+  `finish` auto-resolves if exactly one session is open. It refuses while any
+  task is `open`, `wip`, or `waiting`; finish them, or pass `--abandon-open` to
+  untag them and finish anyway.
