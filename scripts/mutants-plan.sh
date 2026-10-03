@@ -5,7 +5,10 @@
 # stdout, ready to append to $GITHUB_OUTPUT:
 #
 #   shards=<N>          number of shards; 0 when the diff has no mutants
-#   matrix=[0,1,...]    zero-indexed shard list for a workflow matrix
+#   matrix=[{"shard":0,"label":"1/N"},...]
+#                       one object per shard for a workflow matrix: `shard` is
+#                       the zero-based index that `cargo mutants --shard k/N`
+#                       needs, `label` is the one-based text for a job name
 #
 # The shard count follows the mutant count, so a large diff does not run into
 # the job timeout and a small one does not pay for idle runners. Every shard
@@ -16,7 +19,7 @@
 set -euo pipefail
 
 usage() {
-    sed -n "2,15p" "$0" | sed 's/^# \{0,1\}//' >&2
+    sed -n "2,19p" "$0" | sed 's/^# \{0,1\}//' >&2
 }
 
 per_shard=6
@@ -84,7 +87,14 @@ fi
 
 matrix="[]"
 if ((shards > 0)); then
-    matrix="[$(seq -s, 0 $((shards - 1)))]"
+    entries=()
+    for ((k = 0; k < shards; k++)); do
+        entries+=("{\"shard\":${k},\"label\":\"$((k + 1))/${shards}\"}")
+    done
+    matrix="[$(
+        IFS=,
+        echo "${entries[*]}"
+    )]"
 fi
 
 echo "mutants-plan: $count mutants, $shards shards" >&2

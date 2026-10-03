@@ -68,7 +68,7 @@ jobs:
     # runner's 45 minutes and the job is killed mid-run — which reads as a CI
     # failure while telling you nothing about the code. The plan job sizes the
     # shard count, so wall-clock stays roughly constant as diffs grow.
-    name: mutants (changed lines, shard ${{ matrix.shard }}/${{ needs.plan.outputs.shards }})
+    name: mutants (changed lines, shard ${{ matrix.label }})
     needs: plan
     # A PR that touches no Rust has nothing to mutate, and cargo-mutants exits
     # non-zero on an empty set rather than treating it as "nothing to do" —
@@ -81,8 +81,9 @@ jobs:
       fail-fast: false
       matrix:
         # cargo-mutants shards are zero-indexed — `k/n` requires k < n, so the
-        # last shard is n-1, not n. The plan job emits the zero-indexed list.
-        shard: ${{ fromJSON(needs.plan.outputs.matrix) }}
+        # last shard is n-1, not n. The plan job emits `shard` (zero-based, for
+        # --shard) and `label` (one-based, for the job name) for each entry.
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -124,7 +125,7 @@ jobs:
           path: mutants.out/
 
   sweep:
-    name: mutants (full sweep, shard ${{ matrix.shard }}/8)
+    name: mutants (full sweep, shard ${{ matrix.label }})
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 330
@@ -134,10 +135,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Zero-indexed, as above. This list was 1-8, so shard 8/8 failed on
-        # every weekly run — invisible because the sweep is report-only, and
-        # one eighth of the backlog therefore went untested.
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        # `shard` is zero-indexed, as above, and `label` is the one-based job
+        # name. This list was 1-8, so shard 8/8 failed on every weekly run —
+        # invisible because the sweep is report-only, and one eighth of the
+        # backlog therefore went untested.
+        include:
+          - { shard: 0, label: "1/8" }
+          - { shard: 1, label: "2/8" }
+          - { shard: 2, label: "3/8" }
+          - { shard: 3, label: "4/8" }
+          - { shard: 4, label: "5/8" }
+          - { shard: 5, label: "6/8" }
+          - { shard: 6, label: "7/8" }
+          - { shard: 7, label: "8/8" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
