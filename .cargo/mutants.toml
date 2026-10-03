@@ -22,9 +22,15 @@ examine_globs = [
 # can observe the difference between `<` and `<=` at the exact boundary.
 exclude_re = [
   "replace < with <= in waves",
-  "replace > with >= in LedgerStore::prune_orphan_locks",
+  "replace > with >= in prune_orphan_locks",
   # A detached spawn with no in-process effect. Its command
   # (consolidation_run_command) and the decision to call it
   # (maybe_start_consolidation) are tested.
   "replace post_session_consolidation with \\(\\)",
+  # Reads the user's config and calls ICM, so a unit test cannot run it. Its pieces
+  # (store_once, the checkpoint settling in run_icm_store_with) are tested (#2396).
+  "replace run_icm_store_inner -> anyhow::Result<\\(\\)> with Ok\\(\\(\\)\\)",
+  # Returns no state dir under `cfg!(test)` on purpose, so that a unit test that spawns a
+  # detached child never writes into the user's state dir. The production branch is one call.
+  "replace spawner_state_dir",
 ]

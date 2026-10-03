@@ -10,8 +10,11 @@ pub(crate) mod action;
 mod adaptive;
 pub(crate) mod cbm_index_guard;
 pub(crate) mod cd_guard;
+pub(crate) mod checkpoint;
+pub(crate) mod detached_cbm;
 pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
+pub(crate) mod idempotency;
 mod launch_client;
 pub(crate) mod mcp_health;
 pub(crate) mod read_once;
@@ -1432,6 +1435,14 @@ fn run_inner(
         } else {
             None
         };
+        if resumes_checkpoints(
+            event,
+            stdin_payload,
+            std::env::var_os(crate::consolidation::CHILD_GUARD_ENV).as_deref(),
+        ) {
+            // After the notice, so the proxy it may restart is up (#2396).
+            resume_checkpoints(checkpoint::spawner_state_dir().as_deref());
+        }
         let t_chunk = std::time::Instant::now();
         let out = rt.block_on(async {
             let mut out = String::new();
@@ -2082,12 +2093,24 @@ fn web_fetch_store_args(payload: &serde_json::Value) -> Option<serde_json::Value
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
+    let content = format!(
+        "{label}: {source_value}\nTool: {tool_name}\nFetched at (epoch): {timestamp}\nContent preview:\n{truncated}"
+    );
+    // The id is derived from the event, so a re-spawn or a resumed job sends the same one (#2397).
+    let session = payload["session_id"].as_str().unwrap_or_default();
+    let event = payload["tool_use_id"]
+        .as_str()
+        .map_or_else(|| timestamp.to_string(), String::from);
+    // `content` holds the fetch time, so the id uses its stable parts: with a `tool_use_id` the
+    // same tool call gives the same id at any later second.
+    let request_id =
+        idempotency::request_id(&[session, "icm-store", &event, source_value, &truncated]);
     Some(json!({
-        "content": format!(
-            "{label}: {source_value}\nTool: {tool_name}\nFetched at (epoch): {timestamp}\nContent preview:\n{truncated}"
-        ),
+        "content": content,
         "topic": "web-fetch",
         "importance": "low",
+        detached_store::REQUEST_ID_FIELD: request_id,
+        detached_store::REQUEST_KEY_FIELD: session,
     }))
 }
 
@@ -2104,6 +2127,29 @@ fn web_fetch_store_args(payload: &serde_json::Value) -> Option<serde_json::Value
 /// identical to the previous behavior, since the child is
 /// process-group-detached and outlives this process regardless.
 fn handle_web_fetch_post_tool_use(payload: &serde_json::Value) -> Option<std::process::Child> {
+    handle_web_fetch_in(checkpoint::spawner_state_dir().as_deref(), payload)
+}
+
+/// The `llmenv icm-store` child, before its stderr log and process group are set.
+fn icm_store_command(
+    exe: std::path::PathBuf,
+    checkpoint: Option<&std::path::Path>,
+) -> std::process::Command {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("icm-store")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null());
+    if let Some(path) = checkpoint {
+        cmd.arg("--checkpoint").arg(path);
+    }
+    cmd
+}
+
+/// [`handle_web_fetch_post_tool_use`] with the state dir for the checkpoint given (#2396).
+fn handle_web_fetch_in(
+    state_dir: Option<&std::path::Path>,
+    payload: &serde_json::Value,
+) -> Option<std::process::Child> {
     let args = web_fetch_store_args(payload)?;
     let Ok(payload_json) = serde_json::to_string(&args) else {
         tracing::debug!("icm-store: failed to serialize store args");
@@ -2113,10 +2159,13 @@ fn handle_web_fetch_post_tool_use(payload: &serde_json::Value) -> Option<std::pr
         tracing::debug!("icm-store: cannot resolve current_exe for detached store");
         return None;
     };
-    let mut cmd = std::process::Command::new(exe);
-    cmd.arg("icm-store")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null());
+    let checkpoint = checkpoint::begin(
+        state_dir,
+        checkpoint::JobKind::IcmStore,
+        &args,
+        payload["session_id"].as_str(),
+    );
+    let mut cmd = icm_store_command(exe, checkpoint.as_deref());
     crate::session_log::redirect_stderr_to_detached_log(
         &mut cmd,
         crate::session_log::detached_child_log_path,
@@ -2163,6 +2212,15 @@ fn build_index_repository_command(
     project_root: &std::path::Path,
     cm: &crate::config::CodebaseMemory,
 ) -> std::process::Command {
+    index_command(project_root, cm.index_path.as_deref())
+}
+
+/// [`build_index_repository_command`] from the two values the command needs, so the checkpointed
+/// wrapper (`detached_cbm`) can rebuild it from a checkpoint file (#2396).
+fn index_command(
+    project_root: &std::path::Path,
+    index_path: Option<&str>,
+) -> std::process::Command {
     // repo_path must become JSON text regardless (the CLI arg is a JSON
     // string), so this lossy step is unavoidable here — unlike the env var
     // below, which can carry the raw OsStr straight through.
@@ -2173,10 +2231,31 @@ fn build_index_repository_command(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    if let Some(index_path) = &cm.index_path {
+    if let Some(index_path) = index_path {
         cmd.env("CBM_CACHE_DIR", index_path);
     }
     cmd
+}
+
+/// The process that runs one index job: `llmenv cbm-index-run` when there is a checkpoint and an
+/// executable to run it with, else the indexer itself (`direct`) (#2396).
+fn index_job_command(
+    checkpoint: Option<&std::path::Path>,
+    exe: Option<std::path::PathBuf>,
+    direct: impl FnOnce() -> std::process::Command,
+) -> std::process::Command {
+    match (checkpoint, exe) {
+        (Some(path), Some(exe)) => {
+            let mut cmd = std::process::Command::new(exe);
+            cmd.arg("cbm-index-run")
+                .arg("--checkpoint")
+                .arg(path)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null());
+            cmd
+        }
+        _ => direct(),
+    }
 }
 
 /// Fire-and-forget: registers `project_root` with codebase-memory-mcp's
@@ -2198,7 +2277,21 @@ fn trigger_codebase_memory_index(
     cm: &crate::config::CodebaseMemory,
     state_dir: &std::path::Path,
 ) {
-    let mut cmd = build_index_repository_command(project_root, cm);
+    // A checkpointed run goes through `llmenv cbm-index-run`, which observes the indexer's exit
+    // status. Without a checkpoint the indexer starts directly, as before (#2396).
+    let inputs = detached_cbm::IndexInputs {
+        project_root: project_root.display().to_string(),
+        index_path: cm.index_path.clone(),
+    };
+    let checkpoint = checkpoint::begin(
+        Some(state_dir),
+        checkpoint::JobKind::CbmIndex,
+        &inputs,
+        None,
+    );
+    let mut cmd = index_job_command(checkpoint.as_deref(), std::env::current_exe().ok(), || {
+        build_index_repository_command(project_root, cm)
+    });
     let cache_dir = codebase_memory_cache_dir(cm, state_dir);
     let log_path = cache_dir.join("index.log");
     // Only the default cache dir (under llmenv's own state tree) gets
@@ -2221,6 +2314,90 @@ fn trigger_codebase_memory_index(
     if let Err(e) = cmd.spawn() {
         tracing::debug!("codebase-memory-mcp index_repository: failed to spawn: {e}");
     }
+}
+
+/// Whether this hook run starts the unfinished background jobs again: a `SessionStart` that is
+/// not the continuation of an earlier conversation, outside the consolidation child (#2396).
+fn resumes_checkpoints(
+    event: HookEvent,
+    payload: &serde_json::Value,
+    consolidation_guard: Option<&std::ffi::OsStr>,
+) -> bool {
+    event == HookEvent::SessionStart
+        && !continues_session(payload)
+        && !is_consolidation_child(consolidation_guard)
+}
+
+/// Start the detached jobs whose checkpoints are stale: work that an earlier session started and
+/// never finished (#2396). Fail-soft: a failure is logged at debug level and the session goes on.
+fn resume_checkpoints(state_dir: Option<&std::path::Path>) {
+    resume_checkpoints_with(state_dir, respawn_job);
+}
+
+/// [`resume_checkpoints`] with the job starter injected, so a test starts no process.
+fn resume_checkpoints_with(
+    state_dir: Option<&std::path::Path>,
+    spawn: impl FnMut(&checkpoint::Checkpoint, &std::path::Path) -> anyhow::Result<()>,
+) -> usize {
+    let Some(state_dir) = state_dir else {
+        return 0;
+    };
+    let resumed = checkpoint::resume_pending(state_dir, checkpoint::now_secs(), spawn);
+    tracing::debug!("resumed {resumed} unfinished background job(s)");
+    resumed
+}
+
+/// Start the child for one stale checkpoint, with the inputs and the working directory of the
+/// first run. The memory backend and the project come from that directory, so a checkpoint whose
+/// directory is gone is not run: it would store into the project of the session that resumes it.
+fn respawn_job(cp: &checkpoint::Checkpoint, path: &std::path::Path) -> anyhow::Result<()> {
+    use checkpoint::JobKind;
+    let cwd = cp
+        .cwd
+        .as_deref()
+        .map(std::path::Path::new)
+        .filter(|d| d.is_dir())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "the working directory of the first run ({}) is gone",
+                cp.cwd.as_deref().unwrap_or("not recorded")
+            )
+        })?;
+    let exe = std::env::current_exe()?;
+    let stdin = cp.inputs.to_string();
+    match cp.kind {
+        JobKind::IcmStore => spawn_detached(icm_store_command(exe, Some(path)), Some(&stdin), cwd),
+        JobKind::SessionLogRecord => spawn_detached(
+            crate::session_log::detached::record_command(exe, Some(path)),
+            Some(&stdin),
+            cwd,
+        ),
+        JobKind::Consolidation => {
+            spawn_detached(consolidation_run_command(exe, Some(path)), None, cwd)
+        }
+        // Not resumable: `resume_pending` skips it, because `SessionStart` starts the indexer.
+        JobKind::CbmIndex => Ok(()),
+    }
+}
+
+/// Spawn `cmd` as a detached child in `cwd` with the shared bounded stderr log, and write `stdin`
+/// to it. Not waited on.
+fn spawn_detached(
+    mut cmd: std::process::Command,
+    stdin: Option<&str>,
+    cwd: &std::path::Path,
+) -> anyhow::Result<()> {
+    cmd.current_dir(cwd);
+    crate::session_log::redirect_stderr_to_detached_log(
+        &mut cmd,
+        crate::session_log::detached_child_log_path,
+    );
+    crate::mcp::proxy::detach_process_group(&mut cmd);
+    let mut child = cmd.spawn()?;
+    if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
+        pipe.write_all(text.as_bytes())?;
+    }
+    Ok(())
 }
 
 /// True for the event that ends a session and so starts consolidation.
@@ -2270,11 +2447,17 @@ fn is_consolidation_child(guard: Option<&std::ffi::OsStr>) -> bool {
 
 /// The `llmenv consolidation-run` child, before its stderr log and process
 /// group are set.
-fn consolidation_run_command(exe: std::path::PathBuf) -> std::process::Command {
+fn consolidation_run_command(
+    exe: std::path::PathBuf,
+    checkpoint: Option<&std::path::Path>,
+) -> std::process::Command {
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("consolidation-run")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null());
+    if let Some(path) = checkpoint {
+        cmd.arg("--checkpoint").arg(path);
+    }
     cmd
 }
 
@@ -2287,11 +2470,28 @@ fn consolidation_run_command(exe: std::path::PathBuf) -> std::process::Command {
 /// tests can reap it (#1095) — production drops it unwaited, since the child
 /// is process-group-detached and outlives this process regardless.
 fn post_session_consolidation() -> Option<std::process::Child> {
+    post_session_consolidation_in(checkpoint::spawner_state_dir().as_deref())
+}
+
+/// [`post_session_consolidation`] with the state dir for the checkpoint given (#2396). The
+/// checkpoint holds the working directory, because the child derives the project from it and a
+/// resumed run must start in the same place.
+fn post_session_consolidation_in(
+    state_dir: Option<&std::path::Path>,
+) -> Option<std::process::Child> {
     let Ok(exe) = std::env::current_exe() else {
         tracing::error!("consolidation-run: cannot resolve current_exe; consolidation skipped");
         return None;
     };
-    let mut cmd = consolidation_run_command(exe);
+    // The run tag keeps two sessions that end in one directory from sharing a checkpoint file, and
+    // it scopes the rule ids to this run (#2397).
+    let checkpoint = checkpoint::begin(
+        state_dir,
+        checkpoint::JobKind::Consolidation,
+        &serde_json::json!({ "run_tag": checkpoint::run_tag() }),
+        None,
+    );
+    let mut cmd = consolidation_run_command(exe, checkpoint.as_deref());
     crate::session_log::redirect_stderr_to_detached_log(
         &mut cmd,
         crate::session_log::detached_child_log_path,
@@ -2409,10 +2609,210 @@ mod tests {
 
     #[test]
     fn consolidation_run_command_runs_the_consolidation_subcommand() {
-        let cmd = consolidation_run_command("/bin/llmenv".into());
+        let cmd = consolidation_run_command("/bin/llmenv".into(), None);
         assert_eq!(cmd.get_program(), "/bin/llmenv");
         let args: Vec<_> = cmd.get_args().collect();
         assert_eq!(args, ["consolidation-run"]);
+    }
+
+    #[test]
+    fn each_detached_command_carries_its_checkpoint_path() {
+        let path = std::path::Path::new("/s/checkpoints/x.json");
+        let args = |cmd: std::process::Command| -> Vec<String> {
+            cmd.get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(
+            args(consolidation_run_command("/bin/llmenv".into(), Some(path))),
+            ["consolidation-run", "--checkpoint", "/s/checkpoints/x.json"]
+        );
+        assert_eq!(
+            args(icm_store_command("/bin/llmenv".into(), Some(path))),
+            ["icm-store", "--checkpoint", "/s/checkpoints/x.json"]
+        );
+        assert_eq!(
+            args(icm_store_command("/bin/llmenv".into(), None)),
+            ["icm-store"]
+        );
+    }
+
+    #[test]
+    fn a_web_fetch_writes_a_checkpoint_with_the_store_args() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = json!({
+            "session_id": "sess-1", "tool_use_id": "tu1", "tool_name": "WebFetch",
+            "tool_input": {"url": "https://example.com"}, "tool_response": "body",
+        });
+        let child = handle_web_fetch_in(Some(dir.path()), &payload);
+        let listed = checkpoint::checkpoint_entries_for_test(dir.path());
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        let (kind, inputs, session) = &listed[0];
+        assert_eq!(*kind, checkpoint::JobKind::IcmStore);
+        assert_eq!(inputs["topic"], "web-fetch");
+        assert!(
+            !inputs[detached_store::REQUEST_ID_FIELD]
+                .as_str()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(session.as_deref(), Some("sess-1"));
+        if let Some(mut child) = child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    #[test]
+    fn consolidation_spawn_writes_a_checkpoint_with_a_run_tag_and_the_working_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        post_session_consolidation_in(Some(dir.path()));
+        let listed = checkpoint::list(dir.path());
+        let [checkpoint::Entry::Ready(_, cp)] = &listed[..] else {
+            panic!("expected one checkpoint: {listed:?}");
+        };
+        assert_eq!(cp.kind, checkpoint::JobKind::Consolidation);
+        assert!(!cp.inputs["run_tag"].as_str().unwrap().is_empty());
+        let cwd = std::env::current_dir().unwrap().display().to_string();
+        assert_eq!(cp.cwd.as_deref(), Some(cwd.as_str()));
+        // A second run in the same directory is a second job, not the same file.
+        post_session_consolidation_in(Some(dir.path()));
+        assert_eq!(checkpoint::list(dir.path()).len(), 2);
+    }
+
+    #[test]
+    fn only_a_fresh_session_start_outside_the_consolidation_child_resumes_jobs() {
+        let fresh = json!({ "source": "startup" });
+        let guard = std::ffi::OsStr::new("1");
+        assert!(resumes_checkpoints(HookEvent::SessionStart, &fresh, None));
+        assert!(!resumes_checkpoints(
+            HookEvent::SessionStart,
+            &json!({ "source": "resume" }),
+            None
+        ));
+        assert!(!resumes_checkpoints(
+            HookEvent::SessionStart,
+            &json!({ "source": "fork" }),
+            None
+        ));
+        assert!(!resumes_checkpoints(
+            HookEvent::SessionStart,
+            &fresh,
+            Some(guard)
+        ));
+        assert!(!resumes_checkpoints(HookEvent::SessionEnd, &fresh, None));
+        assert!(!resumes_checkpoints(HookEvent::PostToolUse, &fresh, None));
+    }
+
+    #[test]
+    fn the_resume_step_runs_stale_jobs_through_the_starter_and_nothing_without_a_state_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut stale =
+            checkpoint::Checkpoint::new(checkpoint::JobKind::IcmStore, json!({"a": 1}), None);
+        stale.started_at = 1;
+        let path = checkpoint::write(dir.path(), &stale).unwrap().unwrap();
+        let mut started = Vec::new();
+        let resumed = resume_checkpoints_with(Some(dir.path()), |c, p| {
+            started.push((c.inputs.clone(), p.to_path_buf()));
+            Ok(())
+        });
+        assert_eq!(resumed, 1);
+        assert_eq!(started, vec![(json!({"a": 1}), path.clone())]);
+        assert_eq!(checkpoint::load(&path).unwrap().attempts, 2);
+        assert_eq!(resume_checkpoints_with(None, |_, _| Ok(())), 0);
+    }
+
+    #[test]
+    fn the_index_job_runs_through_the_wrapper_only_with_a_checkpoint_and_an_executable() {
+        let direct = || std::process::Command::new("codebase-memory-mcp");
+        let path = std::path::Path::new("/s/checkpoints/cbm-index-x.json");
+        let args = |cmd: &std::process::Command| -> Vec<String> {
+            cmd.get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let wrapped = index_job_command(Some(path), Some("/bin/llmenv".into()), direct);
+        assert_eq!(wrapped.get_program(), "/bin/llmenv");
+        assert_eq!(
+            args(&wrapped),
+            [
+                "cbm-index-run",
+                "--checkpoint",
+                "/s/checkpoints/cbm-index-x.json"
+            ]
+        );
+        assert_eq!(
+            index_job_command(None, Some("/bin/llmenv".into()), direct).get_program(),
+            "codebase-memory-mcp"
+        );
+        assert_eq!(
+            index_job_command(Some(path), None, direct).get_program(),
+            "codebase-memory-mcp"
+        );
+    }
+
+    #[test]
+    fn spawn_detached_runs_in_the_directory_and_feeds_stdin() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "cat > out.txt; pwd > cwd.txt"])
+            .stdin(std::process::Stdio::piped());
+        spawn_detached(cmd, Some("payload"), dir.path()).unwrap();
+        let out = dir.path().join("out.txt");
+        for _ in 0..200 {
+            if dir.path().join("cwd.txt").exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert_eq!(std::fs::read_to_string(out).unwrap(), "payload");
+        let cwd = std::fs::read_to_string(dir.path().join("cwd.txt")).unwrap();
+        assert_eq!(
+            std::path::Path::new(cwd.trim()).canonicalize().unwrap(),
+            dir.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn the_resume_step_starts_a_stale_job_in_its_working_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let mut stale = checkpoint::Checkpoint::new(checkpoint::JobKind::IcmStore, json!({}), None);
+        stale.started_at = 1;
+        stale.cwd = Some(work.path().display().to_string());
+        let path = checkpoint::write(dir.path(), &stale).unwrap().unwrap();
+        // The child is this test binary with arguments it rejects, so it exits at once.
+        resume_checkpoints(Some(dir.path()));
+        assert_eq!(checkpoint::load(&path).unwrap().attempts, 2);
+    }
+
+    #[test]
+    fn the_resume_step_skips_the_index_job_and_a_fresh_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut stale = checkpoint::Checkpoint::new(
+            checkpoint::JobKind::CbmIndex,
+            json!({"project_root": "/r", "index_path": null}),
+            None,
+        );
+        stale.started_at = 1;
+        let path = checkpoint::write(dir.path(), &stale).unwrap().unwrap();
+        resume_checkpoints(Some(dir.path()));
+        assert_eq!(
+            checkpoint::load(&path).unwrap().attempts,
+            1,
+            "SessionStart starts the indexer itself, so a resume would only count an attempt"
+        );
+    }
+
+    #[test]
+    fn a_job_whose_working_directory_is_gone_is_not_resumed() {
+        let mut cp = checkpoint::Checkpoint::new(checkpoint::JobKind::IcmStore, json!({}), None);
+        cp.cwd = Some("/definitely/not/a/directory".into());
+        let err = respawn_job(&cp, std::path::Path::new("/s/checkpoints/x.json")).unwrap_err();
+        assert!(err.to_string().contains("is gone"), "{err}");
+        cp.cwd = None;
+        let err = respawn_job(&cp, std::path::Path::new("/s/checkpoints/x.json")).unwrap_err();
+        assert!(err.to_string().contains("not recorded"), "{err}");
     }
 
     #[test]
@@ -4972,6 +5372,33 @@ mod tests {
             "timestamp in content"
         );
         assert!(content.contains("Hello"), "content preview in content");
+    }
+
+    #[test]
+    fn web_fetch_request_id_is_stable_per_tool_call_and_keyed_by_session() {
+        let payload = |tool_use_id: &str, url: &str| {
+            json!({
+                "session_id": "sess-1", "tool_use_id": tool_use_id, "tool_name": "WebFetch",
+                "tool_input": {"url": url}, "tool_response": "body",
+            })
+        };
+        let a = web_fetch_store_args(&payload("tu1", "https://a")).expect("args");
+        let again = web_fetch_store_args(&payload("tu1", "https://a")).expect("args");
+        assert_eq!(
+            a[detached_store::REQUEST_ID_FIELD],
+            again[detached_store::REQUEST_ID_FIELD]
+        );
+        assert_eq!(a[detached_store::REQUEST_KEY_FIELD], "sess-1");
+        let other_call = web_fetch_store_args(&payload("tu2", "https://a")).expect("args");
+        assert_ne!(
+            a[detached_store::REQUEST_ID_FIELD],
+            other_call[detached_store::REQUEST_ID_FIELD]
+        );
+        let other_url = web_fetch_store_args(&payload("tu1", "https://b")).expect("args");
+        assert_ne!(
+            a[detached_store::REQUEST_ID_FIELD],
+            other_url[detached_store::REQUEST_ID_FIELD]
+        );
     }
 
     #[test]
