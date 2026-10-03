@@ -12,6 +12,7 @@ pub(crate) mod cbm_index_guard;
 pub(crate) mod cd_guard;
 pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
+pub(crate) mod idempotency;
 pub(crate) mod mcp_client;
 pub(crate) mod mcp_health;
 pub(crate) mod read_once;
@@ -2491,12 +2492,24 @@ fn web_fetch_store_args(payload: &serde_json::Value) -> Option<serde_json::Value
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
+    let content = format!(
+        "{label}: {source_value}\nTool: {tool_name}\nFetched at (epoch): {timestamp}\nContent preview:\n{truncated}"
+    );
+    // The id is derived from the event, so a re-spawn or a resumed job sends the same one (#2397).
+    let session = payload["session_id"].as_str().unwrap_or_default();
+    let event = payload["tool_use_id"]
+        .as_str()
+        .map_or_else(|| timestamp.to_string(), String::from);
+    // `content` holds the fetch time, so the id uses its stable parts: with a `tool_use_id` the
+    // same tool call gives the same id at any later second.
+    let request_id =
+        idempotency::request_id(&[session, "icm-store", &event, source_value, &truncated]);
     Some(json!({
-        "content": format!(
-            "{label}: {source_value}\nTool: {tool_name}\nFetched at (epoch): {timestamp}\nContent preview:\n{truncated}"
-        ),
+        "content": content,
         "topic": "web-fetch",
         "importance": "low",
+        detached_store::REQUEST_ID_FIELD: request_id,
+        detached_store::REQUEST_KEY_FIELD: session,
     }))
 }
 
@@ -5617,6 +5630,33 @@ mod tests {
             "timestamp in content"
         );
         assert!(content.contains("Hello"), "content preview in content");
+    }
+
+    #[test]
+    fn web_fetch_request_id_is_stable_per_tool_call_and_keyed_by_session() {
+        let payload = |tool_use_id: &str, url: &str| {
+            json!({
+                "session_id": "sess-1", "tool_use_id": tool_use_id, "tool_name": "WebFetch",
+                "tool_input": {"url": url}, "tool_response": "body",
+            })
+        };
+        let a = web_fetch_store_args(&payload("tu1", "https://a")).expect("args");
+        let again = web_fetch_store_args(&payload("tu1", "https://a")).expect("args");
+        assert_eq!(
+            a[detached_store::REQUEST_ID_FIELD],
+            again[detached_store::REQUEST_ID_FIELD]
+        );
+        assert_eq!(a[detached_store::REQUEST_KEY_FIELD], "sess-1");
+        let other_call = web_fetch_store_args(&payload("tu2", "https://a")).expect("args");
+        assert_ne!(
+            a[detached_store::REQUEST_ID_FIELD],
+            other_call[detached_store::REQUEST_ID_FIELD]
+        );
+        let other_url = web_fetch_store_args(&payload("tu1", "https://b")).expect("args");
+        assert_ne!(
+            a[detached_store::REQUEST_ID_FIELD],
+            other_url[detached_store::REQUEST_ID_FIELD]
+        );
     }
 
     #[test]

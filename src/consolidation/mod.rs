@@ -30,6 +30,7 @@
 use std::process::Stdio;
 use std::time::Duration;
 
+use crate::hook_run::idempotency;
 use crate::hook_run::mcp_client::McpHttpClient;
 
 mod dedup;
@@ -387,21 +388,42 @@ fn parse_bullets(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Store a single consolidation rule via `icm_memory_store`.
-async fn store_rule(client: &McpHttpClient, project: &str, rule: &str) -> anyhow::Result<()> {
+/// Store a single consolidation rule via `icm_memory_store`, unless this exact rule was already
+/// stored for `project` (#2397). The seen-set catches a resumed run that repeats a stored rule;
+/// the similarity check in [`store_new_rules`] stays as the second line of defense.
+async fn store_rule(
+    client: &McpHttpClient,
+    state_dir: Option<&std::path::Path>,
+    project: &str,
+    rule: &str,
+) -> anyhow::Result<()> {
+    let id = idempotency::request_id(&[project, "consolidation", rule]);
+    let guard = idempotency::Guard::new(state_dir, project, &id);
+    if guard.as_ref().is_some_and(idempotency::Guard::already_done) {
+        return Ok(());
+    }
     let args = serde_json::json!({
         "content": rule,
         "topic": dedup::rule_topic(project),
         "type": "semantic",
         "importance": "high",
+        "keywords": [format!("request:{id}")],
     });
     client.call_tool("icm_memory_store", args).await?;
+    if let Some(guard) = &guard {
+        guard.done();
+    }
     Ok(())
 }
 
 /// Store each rule that no stored rule or earlier rule in `rules` matches.
 /// Returns the number stored and the number skipped as duplicates.
-async fn store_new_rules(client: &McpHttpClient, project: &str, rules: &[&str]) -> (usize, usize) {
+async fn store_new_rules(
+    client: &McpHttpClient,
+    state_dir: Option<&std::path::Path>,
+    project: &str,
+    rules: &[&str],
+) -> (usize, usize) {
     let mut stored = 0usize;
     let mut duplicates = 0usize;
     let mut batch: Vec<&str> = Vec::new();
@@ -421,7 +443,7 @@ async fn store_new_rules(client: &McpHttpClient, project: &str, rules: &[&str]) 
             }
         }
         batch.push(rule);
-        match store_rule(client, project, rule).await {
+        match store_rule(client, state_dir, project, rule).await {
             Ok(()) => stored += 1,
             Err(e) => {
                 tracing::error!("consolidation: failed to store rule (fail-soft): {e:#}");
@@ -539,7 +561,8 @@ pub(crate) async fn run(
     let rules: Vec<&str> = rules.iter().map(|s| s.as_str()).take(max_rules).collect();
 
     // Step 6: Store each rule
-    let (stored, duplicates) = store_new_rules(client, project, &rules).await;
+    let state_dir = crate::paths::state_dir().ok();
+    let (stored, duplicates) = store_new_rules(client, state_dir.as_deref(), project, &rules).await;
 
     let msg = format!(
         "consolidation: distilled {} memory records into {} semantic rule(s) \
@@ -798,6 +821,56 @@ mod tests {
         assert!(active_consolidation(&[memory_entry("on", None)], &tags).is_none());
         assert!(active_consolidation(&[memory_entry("off", Some(true))], &tags).is_none());
         assert!(active_consolidation(&[], &tags).is_none());
+    }
+
+    // -- request ids (#2397) --
+
+    fn ok_body(text: &str) -> serde_json::Value {
+        serde_json::json!({"jsonrpc":"2.0","id":1,
+            "result":{"content":[{"type":"text","text":text}]}})
+    }
+
+    async fn store_calls(server: &wiremock::MockServer) -> Vec<serde_json::Value> {
+        server
+            .received_requests()
+            .await
+            .expect("recorded")
+            .iter()
+            .filter_map(|r| serde_json::from_slice::<serde_json::Value>(&r.body).ok())
+            .filter(|b| b["params"]["name"] == "icm_memory_store")
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_resumed_batch_stores_each_rule_once_with_a_request_keyword() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body("")))
+            .mount(&server)
+            .await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("client");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rules = [
+            "Run the formatter before every commit",
+            "Pin action versions to a SHA",
+        ];
+        let first = store_new_rules(&client, Some(dir.path()), "proj", &rules).await;
+        let resumed = store_new_rules(&client, Some(dir.path()), "proj", &rules).await;
+        assert_eq!(first, (2, 0));
+        assert_eq!(
+            resumed,
+            (2, 0),
+            "the resumed run still reports its rules as handled"
+        );
+        let stored = store_calls(&server).await;
+        assert_eq!(stored.len(), 2, "the resumed run must store nothing new");
+        let keyword = &stored[0]["params"]["arguments"]["keywords"][0];
+        assert!(
+            keyword.as_str().expect("keyword").starts_with("request:"),
+            "{keyword}"
+        );
     }
 
     // -- child-process timeout lifecycle (#1093) --

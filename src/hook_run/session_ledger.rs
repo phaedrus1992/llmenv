@@ -3,8 +3,7 @@
 //! Design: docs/superpowers/specs/2026-09-27-adaptive-icm-recall-design.md
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::fs::{File, OpenOptions};
-use std::os::unix::fs::OpenOptionsExt;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -22,10 +21,6 @@ const MAX_AGENTS: usize = 32;
 const PENDING_TTL_SECS: i64 = 300;
 const ERROR_HEAD_BYTES: usize = 300;
 const TASK_HEAD_CHARS: usize = 600;
-/// A hook must not stall the agent on a busy ledger, so a write gives up after
-/// `LOCK_ATTEMPTS` polls, about 200 ms.
-const LOCK_ATTEMPTS: u32 = 20;
-const LOCK_POLL: Duration = Duration::from_millis(10);
 const STALE_DAYS: u64 = 7;
 /// Hex characters kept from the SHA-256 digest; 64 bits is enough to key one session.
 const HASH_HEX_CHARS: usize = 16;
@@ -212,7 +207,12 @@ fn head_bytes(text: &str, max: usize) -> String {
 /// A stable key for one recall record: whitespace layout does not change it.
 pub(crate) fn record_hash(record: &str) -> String {
     let normalized = record.split_whitespace().collect::<Vec<_>>().join(" ");
-    Sha256::digest(normalized.as_bytes())
+    hash_prefix(normalized.as_bytes())
+}
+
+/// The first [`HASH_HEX_CHARS`] lowercase hex characters of the SHA-256 of `bytes`.
+pub(crate) fn hash_prefix(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect::<String>()
@@ -262,41 +262,7 @@ impl LedgerStore {
     }
 
     fn lock(&self, session_id: &str) -> Option<File> {
-        // The id comes from hook stdin; an unsafe value must never reach a path join.
-        if !crate::paths::is_valid_short_name(session_id) {
-            tracing::error!("session_id failed path-safety validation for recall ledger");
-            return None;
-        }
-        if let Err(e) = crate::paths::create_dir_owner_only(&self.dir) {
-            tracing::error!("cannot create {}: {e}", self.dir.display());
-            return None;
-        }
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .mode(0o600)
-            .open(self.file(session_id, "lock"))
-            .inspect_err(|e| tracing::error!("cannot open recall ledger lock: {e}"))
-            .ok()?;
-        for _ in 0..LOCK_ATTEMPTS {
-            match file.try_lock() {
-                Ok(()) => {
-                    // The orphan prune goes by age, so a held lock must look new.
-                    if let Err(e) = file.set_modified(std::time::SystemTime::now()) {
-                        tracing::warn!("cannot refresh recall ledger lock age: {e}");
-                    }
-                    return Some(file);
-                }
-                Err(std::fs::TryLockError::WouldBlock) => std::thread::sleep(LOCK_POLL),
-                Err(e) => {
-                    tracing::warn!("recall ledger lock failed, access skipped: {e}");
-                    return None;
-                }
-            }
-        }
-        tracing::warn!("recall ledger busy, access skipped");
-        None
+        super::session_state::lock_state_file(&self.dir, session_id, "recall ledger")
     }
 
     /// The stored ledger: a default for a missing or corrupt file, `None` for a
