@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 mod autocompact;
+mod background;
 
 /// Effective value of a token-efficiency env var: the process environment
 /// wins if set (matches what Claude Code will actually see if it inherited
@@ -1979,6 +1980,9 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     run_doctor_sandbox(use_color, &config);
     run_doctor_icm_server(use_color, &config, &config_dir, &active);
     run_doctor_mcp_servers(use_color, &config, &config_dir, &active);
+    if let Ok(state_dir) = crate::paths::state_dir() {
+        background::run_doctor_checkpoints(use_color, &state_dir);
+    }
 
     // When context-mode is enabled, verify the marketplace clone exists so
     // inject_context_mode can actually resolve the plugin. A missing clone is
