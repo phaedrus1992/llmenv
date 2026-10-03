@@ -94,7 +94,7 @@ fn expand_root(
 
 /// The default roots, then the roots of `cm`, without duplicates (#2406). An entry whose variable
 /// is unset is dropped.
-pub(crate) fn resolve_allowed_roots_in(
+fn resolve_allowed_roots_in(
     cm: &CodebaseMemory,
     bases: &RootBases,
     env: &dyn Fn(&str) -> Option<String>,
@@ -135,7 +135,7 @@ pub(crate) fn resolve_allowed_roots(cm: &CodebaseMemory, bases: &RootBases) -> V
 }
 
 /// The cache folder codebase-memory-mcp serves: `index_path`, or its own default.
-pub(crate) fn cache_dir(cm: &CodebaseMemory, home: Option<&Path>) -> PathBuf {
+fn cache_dir(cm: &CodebaseMemory, home: Option<&Path>) -> PathBuf {
     cm.index_path
         .as_ref()
         .map(PathBuf::from)
@@ -194,7 +194,7 @@ fn parse_roots(listing: &str) -> Vec<PathBuf> {
 ///
 /// # Errors
 /// The command cannot run, times out, or exits non-zero.
-pub(crate) fn list_roots(cm: &CodebaseMemory) -> anyhow::Result<Vec<PathBuf>> {
+fn list_roots(cm: &CodebaseMemory) -> anyhow::Result<Vec<PathBuf>> {
     let output = run_with_timeout(cbm_command(cm, &["allow-root", "--list"]), COMMAND_TIMEOUT)
         .map_err(|e| anyhow::anyhow!("codebase-memory-mcp allow-root --list: {e}"))?;
     anyhow::ensure!(
@@ -260,7 +260,7 @@ pub(crate) fn check_roots(
 ///
 /// # Errors
 /// The list cannot be read (see [`list_roots`]).
-pub(crate) fn apply_roots(
+fn apply_roots(
     cm: &CodebaseMemory,
     wanted: &[PathBuf],
     home: Option<&Path>,
@@ -327,7 +327,7 @@ pub(crate) fn describe(report: &RootsReport) -> (bool, String) {
 /// The `repo_path` of an `index_repository` call that is outside the allowed roots, as the
 /// reason to deny it. `None` when it is inside one. Both sides must be canonical, so a link into
 /// a root passes and a `..` escape does not (#2406).
-pub(crate) fn path_outside_roots(repo_path: &Path, roots: &[PathBuf]) -> Option<String> {
+fn path_outside_roots(repo_path: &Path, roots: &[PathBuf]) -> Option<String> {
     if roots.iter().any(|root| repo_path.starts_with(root)) {
         return None;
     }
