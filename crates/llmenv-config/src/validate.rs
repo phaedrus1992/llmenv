@@ -70,6 +70,14 @@ pub enum ValidateError {
          that starts with /, ~, or a $VARIABLE"
     )]
     CodebaseMemoryRootInvalid(String),
+    #[error(
+        "features.task_tracker {0} must be 1 or more. Set the number of tool calls, or remove it"
+    )]
+    TaskTrackerNudgeCountInvalid(&'static str),
+    #[error(
+        "features.task_tracker workflow_skills has an empty entry. Name a skill, or remove the entry"
+    )]
+    TaskTrackerSkillEmpty,
     #[error("throttle entry for '{0}' has no when: tags")]
     ThrottleNoTags(String),
     #[error("throttle entry has an empty 'backend' field")]
@@ -709,6 +717,24 @@ impl Config {
                 }
                 if th.backend.is_empty() {
                     return Err(ValidateError::ThrottleEmptyBackend);
+                }
+            }
+            if let Some(tracker) = &features.task_tracker {
+                for (name, value) in [
+                    ("nudge_after", tracker.nudge_after),
+                    ("nudge_every", tracker.nudge_every),
+                ] {
+                    if value == Some(0) {
+                        return Err(ValidateError::TaskTrackerNudgeCountInvalid(name));
+                    }
+                }
+                if tracker
+                    .workflow_skills
+                    .iter()
+                    .flatten()
+                    .any(|s| s.trim().is_empty())
+                {
+                    return Err(ValidateError::TaskTrackerSkillEmpty);
                 }
             }
             for cm in &features.codebase_memory {
@@ -2146,6 +2172,50 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn task_tracker_nudge_counts_and_skills_are_checked() {
+        let with = |tracker: crate::TaskTracker| {
+            let mut config = config_with_codebase_memory(vec![]);
+            config.features.as_mut().unwrap().task_tracker = Some(tracker);
+            config.validate()
+        };
+        let base = crate::TaskTracker {
+            enabled: true,
+            ..Default::default()
+        };
+        assert!(with(base.clone()).is_ok());
+        assert!(
+            with(crate::TaskTracker {
+                nudge_after: Some(1),
+                nudge_every: Some(1),
+                workflow_skills: Some(vec!["dev-sprint".into()]),
+                ..base.clone()
+            })
+            .is_ok()
+        );
+        assert!(matches!(
+            with(crate::TaskTracker {
+                nudge_after: Some(0),
+                ..base.clone()
+            }),
+            Err(ValidateError::TaskTrackerNudgeCountInvalid("nudge_after"))
+        ));
+        assert!(matches!(
+            with(crate::TaskTracker {
+                nudge_every: Some(0),
+                ..base.clone()
+            }),
+            Err(ValidateError::TaskTrackerNudgeCountInvalid("nudge_every"))
+        ));
+        assert!(matches!(
+            with(crate::TaskTracker {
+                workflow_skills: Some(vec!["  ".into()]),
+                ..base
+            }),
+            Err(ValidateError::TaskTrackerSkillEmpty)
+        ));
     }
 
     #[test]

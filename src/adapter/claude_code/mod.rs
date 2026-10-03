@@ -325,6 +325,27 @@ const CLAUDE_CODE_HOOK_EVENTS: &[&str] = &[
     "SubagentStart",
 ];
 
+/// Whether `entries` already send every tool in `tools` to `command`: an entry with no matcher,
+/// or one whose anchored matcher names the tool, that runs `command`.
+fn routes_tool(entries: Option<&Vec<serde_json::Value>>, command: &str, tools: &[&str]) -> bool {
+    let runs = |entry: &serde_json::Value| {
+        entry["hooks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|h| h["command"].as_str() == Some(command))
+    };
+    tools.iter().all(|tool| {
+        entries.into_iter().flatten().any(|entry| {
+            runs(entry)
+                && match entry["matcher"].as_str() {
+                    None => true,
+                    Some(m) => m == format!("^{tool}$"),
+                }
+        })
+    })
+}
+
 impl AgentAdapter for ClaudeCodeAdapter {
     fn name(&self) -> &'static str {
         "claude-code"
@@ -1696,6 +1717,52 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             .push(json!({
                 "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} stop") }],
             }));
+    }
+
+    // #2456: the task nudges and the commit deny-once. An entry is skipped when another feature
+    // already routes that event and tool to hook-run, so one tool call does not run the handler
+    // twice. This runs after every other registration so it can see them.
+    if let Some(tracker) = manifest
+        .capabilities
+        .features
+        .as_ref()
+        .and_then(|f| f.task_tracker.as_ref())
+        .filter(|t| t.enabled)
+    {
+        let post = format!("{HOOK_RUN_COMMAND} post_tool_use");
+        let pre = format!("{HOOK_RUN_COMMAND} pre_tool_use");
+        if tracker.nudges
+            && !routes_tool(
+                hooks_by_event.get("PostToolUse"),
+                &post,
+                &[
+                    "Skill",
+                    "AskUserQuestion",
+                    "Bash",
+                    "Edit",
+                    "Write",
+                    "MultiEdit",
+                ],
+            )
+        {
+            hooks_by_event
+                .entry("PostToolUse".to_string())
+                .or_default()
+                .push(json!({
+                    "matcher": "^(Skill|Bash|Edit|Write|MultiEdit|AskUserQuestion)$",
+                    "hooks": [{ "type": "command", "command": post }],
+                }));
+        }
+        if tracker.enforce_commit && !routes_tool(hooks_by_event.get("PreToolUse"), &pre, &["Bash"])
+        {
+            hooks_by_event
+                .entry("PreToolUse".to_string())
+                .or_default()
+                .push(json!({
+                    "matcher": "^Bash$",
+                    "hooks": [{ "type": "command", "command": pre }],
+                }));
+        }
     }
 
     let mut hooks_obj = serde_json::Map::new();

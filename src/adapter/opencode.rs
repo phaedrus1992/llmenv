@@ -4333,6 +4333,7 @@ mod tests {
                 task_tracker: Some(crate::config::TaskTracker {
                     enabled,
                     block_engine_task_tools: block,
+                    ..Default::default()
                 }),
                 ..Default::default()
             });

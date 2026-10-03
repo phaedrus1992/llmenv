@@ -1058,12 +1058,19 @@ features:
   task_tracker:
     enabled: true
     block_engine_task_tools: true  # default; set false to opt out
+    nudges: true                   # default; set false to stop the in-work reminders
+    enforce_commit: true           # default; set false to stop the commit deny-once
 ```
 
 | Field                     | Required | Notes                                                                                                                                                                                                                                                                                                                                                        |
 |---------------------------|----------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `enabled`                 | no       | Default `false`. When `true`, also redirects the engine's built-in task tools into this tracker via an auto-injected `PreToolUse` hook — Claude Code's `TaskCreate`/`TaskList`/`TaskUpdate`, and opencode's `todowrite` (added in v3.11.0). See [Commands](commands.md#task) for opencode's list-reconciliation rules.                                       |
 | `block_engine_task_tools` | no       | (added in v3.10.0) Default `true`. Set `false` to keep the tracker's CLAUDE.md fragment and reminders while still letting the engine's native task tools through — e.g. for genuine multi-agent teammate coordination that isn't solo step tracking. Gates opencode's `todowrite` redirect too (added in v3.11.0). Has no effect while `enabled` is `false`. |
+| `nudges`                  | no       | (added in v3.12.0) Default `true`. Turns off the reminders that fire while work happens: after a workflow skill starts, after several tool calls with no task, and when the agent asks the user a question while a task is in progress. See [Commands](commands.md#task-nudges).                                                                             |
+| `enforce_commit`          | no       | (added in v3.12.0) Default `true`. Turns off the one-time deny of the first `git commit` or `gh pr create` of a session that has no task in progress.                                                                                                                                                                                                        |
+| `workflow_skills`         | no       | (added in v3.12.0) Skills that trigger the one-time reminder. Default `dev-sprint`, `ship-issue`, `pre-pr-review`, `executing-plans`, `writing-plans`. A plugin prefix such as `nbl-dev:` is ignored when matching.                                                                                                                                          |
+| `nudge_after`             | no       | (added in v3.12.0) Mutating tool calls with no task before the first nudge. Default `8`. Must be 1 or more.                                                                                                                                                                                                                                                  |
+| `nudge_every`             | no       | (added in v3.12.0) Mutating tool calls between later nudges. Default `20`. Must be 1 or more.                                                                                                                                                                                                                                                                |
 
 See [Commands](commands.md#task) for the full `llmenv task` CLI reference.
 

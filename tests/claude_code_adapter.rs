@@ -677,6 +677,7 @@ fn task_tracker_matcher_present(enabled: bool, block_engine_task_tools: bool) ->
                 task_tracker: Some(llmenv::config::TaskTracker {
                     enabled,
                     block_engine_task_tools,
+                    ..Default::default()
                 }),
                 ..Default::default()
             }),
@@ -722,6 +723,101 @@ fn task_tool_redirect_hook_absent_when_opted_out() {
         "task-tool redirect hook must not be registered when \
          block_engine_task_tools is false, even with the tracker enabled"
     );
+}
+
+// #2456: the nudge and commit-deny hooks follow the tracker switches.
+fn tracker_hooks(tracker: llmenv::config::TaskTracker, session_log_on: bool) -> serde_json::Value {
+    let session_log = if session_log_on {
+        llmenv::config::SessionLog::default()
+    } else {
+        llmenv::config::SessionLog {
+            file: None,
+            transcript: None,
+            max_content_bytes: None,
+        }
+    };
+    let m = llmenv::merge::MergedManifest {
+        session_log,
+        capabilities: llmenv::config::Capabilities {
+            features: Some(llmenv::config::Features {
+                task_tracker: Some(tracker),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let tmp = tempdir().expect("tempdir");
+    ClaudeCodeAdapter
+        .materialize(&m, tmp.path())
+        .expect("materialize");
+    let parsed: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(tmp.path().join("settings.json")).expect("read settings.json"),
+    )
+    .expect("parse settings.json");
+    parsed["hooks"].clone()
+}
+
+fn has_matcher(hooks: &serde_json::Value, event: &str, matcher: &str) -> bool {
+    hooks[event]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|e| e["matcher"].as_str() == Some(matcher))
+}
+
+fn command_count(hooks: &serde_json::Value, event: &str, command: &str) -> usize {
+    hooks[event]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|e| e["hooks"].as_array().into_iter().flatten())
+        .filter(|h| h["command"].as_str().is_some_and(|c| c.ends_with(command)))
+        .count()
+}
+
+const NUDGE_MATCHER: &str = "^(Skill|Bash|Edit|Write|MultiEdit|AskUserQuestion)$";
+
+#[test]
+fn task_nudge_hooks_follow_the_tracker_and_its_switches() {
+    let on = tracker_hooks(
+        llmenv::config::TaskTracker {
+            enabled: true,
+            ..Default::default()
+        },
+        false,
+    );
+    assert!(has_matcher(&on, "PostToolUse", NUDGE_MATCHER), "{on}");
+    assert!(has_matcher(&on, "PreToolUse", "^Bash$"));
+
+    let off = tracker_hooks(
+        llmenv::config::TaskTracker {
+            enabled: true,
+            nudges: false,
+            enforce_commit: false,
+            ..Default::default()
+        },
+        false,
+    );
+    assert!(!has_matcher(&off, "PostToolUse", NUDGE_MATCHER));
+    assert!(!has_matcher(&off, "PreToolUse", "^Bash$"));
+
+    // Session logging already routes every PostToolUse and PreToolUse to hook-run, so the tracker
+    // adds no second entry (a second entry would run the handler twice for each tool call).
+    let logged = tracker_hooks(
+        llmenv::config::TaskTracker {
+            enabled: true,
+            ..Default::default()
+        },
+        true,
+    );
+    assert_eq!(command_count(&logged, "PostToolUse", "post_tool_use"), 1);
+    assert!(!has_matcher(&logged, "PreToolUse", "^Bash$"));
+    assert!(!has_matcher(&logged, "PostToolUse", NUDGE_MATCHER));
+
+    let disabled = tracker_hooks(llmenv::config::TaskTracker::default(), false);
+    assert!(!has_matcher(&disabled, "PostToolUse", NUDGE_MATCHER));
+    assert!(!has_matcher(&disabled, "PreToolUse", "^Bash$"));
 }
 
 // Issue #97: native_plugins["claude_code"] is a settings.json fragment that
@@ -2033,12 +2129,15 @@ fn task_tracker_registers_stop_hook_when_session_log_disabled() {
         cmd.contains("hook-run") && cmd.contains("stop"),
         "Stop command must invoke `llmenv hook-run ... stop`: {cmd}"
     );
-    // Only Stop is registered for task_tracker alone — not the other six
-    // session-log events (this repo's Stop registration must not silently
-    // pull in unrelated per-turn hooks).
+    // Only Stop is registered without a matcher for task_tracker alone — not the other six
+    // session-log events (this repo's Stop registration must not silently pull in unrelated
+    // per-turn hooks). PostToolUse carries only the matched nudge entry (#2456).
+    let post = parsed["hooks"]["PostToolUse"]
+        .as_array()
+        .expect("the nudge entry registers PostToolUse");
     assert!(
-        parsed["hooks"].get("PostToolUse").is_none(),
-        "task_tracker alone must not register PostToolUse"
+        post.iter().all(|e| e["matcher"].is_string()),
+        "task_tracker alone must not register an unmatched PostToolUse: {post:?}"
     );
 }
 
