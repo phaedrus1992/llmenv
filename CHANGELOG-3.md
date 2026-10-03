@@ -11,6 +11,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Changed
+
+- `llmenv task done` refuses a task that was never started, and `llmenv task session finish` refuses while a task is `open`, `wip`, or `waiting`. Both exit non-zero with the fix. `task done --force` and `task session finish --abandon-open` override them, and the native-tool redirect never forces. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#task) (#2416)
+- `capabilities.advisor_size` is now `capabilities.advisor_model` and renders Claude Code's `advisorModel`. Use `fable`, `opus`, `sonnet`, or a model ID. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#advisor_model-claude-code) (#2409)
+
+### Removed
+
+- `capabilities.advisor_size`. It rendered an `advisorSize` key that Claude Code never read. A config that still sets it fails validation and names `advisor_model`, and `llmenv doctor` warns about a stale `advisorSize` in a rendered `settings.json` (#2409)
+
+### Fixed
+
+- Background work is no longer lost when a child dies or ICM is down. Consolidation, the memory store of a web fetch, the transcript records, and the codebase-memory index write a checkpoint, and the next session start runs unfinished jobs again. `llmenv doctor` lists what is left. A request id keeps a resumed or retried store from writing the same memory twice. See [Troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#background-work-that-did-not-finish) (#2396, #2397)
+- `llmenv doctor` no longer recommends `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` when `autoCompactEnabled` is `false`, and it names the `autoCompactWindow` that the percentage applies to (#2345)
+- `llmenv task session finish` and the session resume commands no longer report a corrupt or unreadable session file as "no session found". They name the file and the cause (#2424)
+- The Stop reminder for a session with open tasks no longer offers `llmenv task session finish`, which now refuses until the tasks are finished (#2416)
+
+## [3.12.0-alpha.1] - 2026-10-02
+
 ### Added
 
 - `llmenv doctor` warns about retired Claude Code settings, environment variables, permission tools, and MCP server types in the rendered config, and names what to use instead. See [Troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#doctor-warns-about-retired-claude-code-settings) (#2145)
@@ -940,7 +958,8 @@ the rc.1 and rc.2 sections below.
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.11.2...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.12.0-alpha.1...HEAD
+[3.12.0-alpha.1]: https://github.com/phaedrus1992/llmenv/compare/v3.11.2...v3.12.0-alpha.1
 [3.11.2]: https://github.com/phaedrus1992/llmenv/compare/v3.11.1...v3.11.2
 [3.11.1]: https://github.com/phaedrus1992/llmenv/compare/v3.11.0...v3.11.1
 [3.11.0]: https://github.com/phaedrus1992/llmenv/compare/v3.10.0...v3.11.0

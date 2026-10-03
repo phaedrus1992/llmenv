@@ -299,7 +299,11 @@ enum Command {
     /// payload from stdin (the session id travels in the payload rather than
     /// as a CLI argument so it isn't visible in the process table).
     #[command(name = "session-log-record", hide = true)]
-    SessionLogRecord,
+    SessionLogRecord {
+        /// Checkpoint file the job deletes when it succeeds (#2396).
+        #[arg(long)]
+        checkpoint: Option<PathBuf>,
+    },
     /// Store WebFetch/WebSearch content into ICM memory.
     ///
     /// Internal plumbing: this is the detached-child entrypoint
@@ -308,7 +312,11 @@ enum Command {
     /// Not meant to be invoked directly. Reads the store-args JSON payload from
     /// stdin.
     #[command(name = "icm-store", hide = true)]
-    IcmStore,
+    IcmStore {
+        /// Checkpoint file the job deletes when it succeeds (#2396).
+        #[arg(long)]
+        checkpoint: Option<PathBuf>,
+    },
     /// Run post-session memory consolidation as a detached child process.
     ///
     /// Internal plumbing: entrypoint for `hook_run::detached_consolidation::
@@ -316,7 +324,22 @@ enum Command {
     /// immediately instead of blocking on the consolidation MCP calls. Not
     /// meant to be invoked directly.
     #[command(name = "consolidation-run", hide = true)]
-    ConsolidationRun,
+    ConsolidationRun {
+        /// Checkpoint file the job updates and deletes when it succeeds (#2396).
+        #[arg(long)]
+        checkpoint: Option<PathBuf>,
+    },
+    /// Run the codebase-memory index as a detached child and report its exit status.
+    ///
+    /// Internal plumbing: `hook_run::trigger_codebase_memory_index` launches it so
+    /// the checkpoint (#2396) learns whether the indexer succeeded. Not meant to be
+    /// invoked directly.
+    #[command(name = "cbm-index-run", hide = true)]
+    CbmIndexRun {
+        /// Checkpoint file that holds the project root and index path.
+        #[arg(long)]
+        checkpoint: PathBuf,
+    },
     /// Manage auth credentials for materialized folders (#172)
     Login {
         /// Apply to the global auth cache (all future materializations) rather
@@ -408,8 +431,13 @@ enum TaskCommand {
         #[arg(long)]
         reopen: bool,
     },
-    /// Mark a task done. Warns when the task was never started.
-    Done { id: String },
+    /// Mark a task done. Refuses a task that was never started (#2416);
+    /// `--force` completes it anyway.
+    Done {
+        id: String,
+        #[arg(long)]
+        force: bool,
+    },
     /// List tasks. Requires `--session <id>` or `--all` (#1124) — no silent
     /// default to every session's tasks. `--state`/`--hide-done` filter by
     /// lifecycle state; `--current-project` further narrows to the current
@@ -552,8 +580,13 @@ enum TaskSessionCommand {
         id: Option<String>,
     },
     /// Finish a session by id. Auto-resolves when exactly one session is
-    /// open for the current project.
-    Finish { id: Option<String> },
+    /// open for the current project. Refuses while a task is `open`, `wip`,
+    /// or `waiting` (#2416); `--abandon-open` untags those tasks and finishes.
+    Finish {
+        id: Option<String>,
+        #[arg(long)]
+        abandon_open: bool,
+    },
     /// Show one session's progress. Auto-resolves like `finish`.
     Show { id: Option<String> },
     /// Roll up a session's tasks, notes, and states into one artifact —
@@ -874,20 +907,30 @@ pub fn run() -> anyhow::Result<()> {
                 std::process::exit(2);
             }
         }
-        Some(Command::SessionLogRecord) => {
+        Some(Command::SessionLogRecord { checkpoint }) => {
             use std::io::Read;
             let mut payload_json = String::new();
             std::io::stdin().read_to_string(&mut payload_json)?;
-            crate::session_log::detached::run_record(&payload_json)?;
+            let checkpoint = checked_checkpoint(checkpoint)?;
+            crate::session_log::detached::run_record(&payload_json, checkpoint.as_deref())?;
         }
-        Some(Command::IcmStore) => {
+        Some(Command::IcmStore { checkpoint }) => {
             use std::io::Read;
             let mut payload_json = String::new();
             std::io::stdin().read_to_string(&mut payload_json)?;
-            crate::hook_run::detached_store::run_icm_store(&payload_json)?;
+            let checkpoint = checked_checkpoint(checkpoint)?;
+            crate::hook_run::detached_store::run_icm_store(&payload_json, checkpoint.as_deref())?;
         }
-        Some(Command::ConsolidationRun) => {
-            crate::hook_run::detached_consolidation::run_consolidation(&paths::config_path()?)?;
+        Some(Command::ConsolidationRun { checkpoint }) => {
+            let checkpoint = checked_checkpoint(checkpoint)?;
+            crate::hook_run::detached_consolidation::run_consolidation(
+                &paths::config_path()?,
+                checkpoint.as_deref(),
+            )?;
+        }
+        Some(Command::CbmIndexRun { checkpoint }) => {
+            let checkpoint = checked_checkpoint(Some(checkpoint))?.unwrap_or_default();
+            crate::hook_run::detached_cbm::run_cbm_index(&checkpoint)?;
         }
         Some(Command::Login { global }) => {
             run_login(global)?;
@@ -3245,6 +3288,16 @@ fn render_task_session_summary_human(
 
 /// Handle `llmenv task <subcommand>` (#231). Thin formatting layer over
 /// `crate::task`, which owns the store logic.
+/// The `--checkpoint` path of a detached child, checked to be a checkpoint file under the state
+/// dir (#2396). The child deletes and trusts the file, so it must not take an arbitrary path.
+fn checked_checkpoint(path: Option<PathBuf>) -> anyhow::Result<Option<PathBuf>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let state_dir = paths::state_dir()?;
+    crate::hook_run::checkpoint::validated_path(&state_dir, &path).map(Some)
+}
+
 fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()> {
     let state_dir = crate::paths::state_dir()?;
     match command {
@@ -3327,11 +3380,11 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             }
             println!("Started '{}' — now {:?}", task.slug, task.state);
         }
-        TaskCommand::Done { id } => {
-            let completed = crate::task::complete_task(&state_dir, &id)?;
+        TaskCommand::Done { id, force } => {
+            let completed = crate::task::complete_task(&state_dir, &id, force)?;
             println!("Completed '{}'", completed.task.slug);
-            if let Some(warning) = completed.never_started_warning() {
-                println!("{warning}");
+            if let Some(note) = completed.skipped_start_note() {
+                println!("{note}");
             }
         }
         TaskCommand::Ls {
@@ -3653,11 +3706,25 @@ fn run_task_session_command(
             let session = session::update_resume(state_dir, &id, |r| r.append_note(text))?;
             println!("Noted session '{}'", session.id);
         }
-        TaskSessionCommand::Finish { id } => {
+        TaskSessionCommand::Finish { id, abandon_open } => {
             let id = resolve_session_id(state_dir, &project, id)?;
-            let session = session::finish_session(state_dir, &id)?;
-            let (done, total) = session::session_progress(state_dir, &session.id);
-            println!("Finished session '{}' ({done}/{total} done)", session.id);
+            let outcome = session::finish_session(state_dir, &id, abandon_open)?;
+            let (done, total) = (outcome.done, outcome.total);
+            let id = &outcome.session.id;
+            if outcome.abandoned.is_empty() {
+                println!("Finished session '{id}' ({done}/{total} done)");
+            } else {
+                let n = outcome.abandoned.len();
+                println!("Finished session '{id}' ({done}/{total} done, {n} abandoned)");
+                for task in &outcome.abandoned {
+                    println!(
+                        "  abandoned {} {} {}",
+                        task.state.as_str(),
+                        task.slug,
+                        task.title
+                    );
+                }
+            }
         }
         TaskSessionCommand::Show { id } => {
             let id = resolve_session_id(state_dir, &project, id)?;

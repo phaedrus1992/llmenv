@@ -30,3 +30,14 @@ details in [release.md](release.md).
 - [Engine capabilities](https://github.com/phaedrus1992/llmenv/blob/main/docs/design/engine-capabilities.md)
   — the two-layer <!-- markdownlint-disable-line MD013 -->
   (neutral + per-engine `native`) capability model.
+
+## Developer tooling
+
+- `scripts/hawk-check.sh` (the CI `hawk` job and the `cargo-hawk` pre-push hook) builds into `target/hawk`,
+  so `cargo clean` removes the hawk build.
+  Before this, hawk built into `$TMPDIR/cargo-hawk-target/`, which nothing cleaned.
+  Remove old directories once with `trash "${TMPDIR:-/tmp}/cargo-hawk-target"`.
+  A `--target-dir` argument or `CARGO_TARGET_DIR` overrides the default.
+- `.config/nextest.toml` sets a 2 s `leak-timeout`, because the 100 ms default flags file-I/O tests
+  under full parallel load.
+  CI runs `cargo nextest run --profile ci`, where a leaked handle fails the run.

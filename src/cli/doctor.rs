@@ -6,6 +6,9 @@ use anyhow::Context;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+mod autocompact;
+mod background;
+
 /// Effective value of a token-efficiency env var: the process environment
 /// wins if set (matches what Claude Code will actually see if it inherited
 /// the shell), otherwise fall back to `native.claude_code.env` in the
@@ -130,20 +133,15 @@ fn run_doctor_token_efficiency(
     eprintln!("Token-efficiency checks:");
     let get = |key: &str| effective_token_efficiency_var(native_claude_env, key);
 
-    match get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE") {
-        Some(val) => match val.parse::<u32>() {
-            Ok(pct) if pct <= 70 => eprintln!("{pass} CLAUDE_AUTOCOMPACT_PCT_OVERRIDE={pct}"),
-            Ok(pct) => eprintln!(
-                "{warn} CLAUDE_AUTOCOMPACT_PCT_OVERRIDE={pct} (recommend ≤70 for PreCompact cleanup)"
-            ),
-            Err(_) => {
-                eprintln!("{warn} CLAUDE_AUTOCOMPACT_PCT_OVERRIDE has invalid (non-numeric) value")
-            }
-        },
-        None => eprintln!(
-            "{warn} CLAUDE_AUTOCOMPACT_PCT_OVERRIDE not set (recommend 50 for PreCompact headroom)"
+    print_check(
+        autocompact::autocompact_check(
+            native_claude_settings,
+            get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"),
         ),
-    }
+        pass,
+        warn,
+        &info,
+    );
 
     let bash_max_chars = native_claude_settings.and_then(|v| v.get("bashOutputMaxChars"));
     print_check(
@@ -1982,6 +1980,9 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     run_doctor_sandbox(use_color, &config);
     run_doctor_icm_server(use_color, &config, &config_dir, &active);
     run_doctor_mcp_servers(use_color, &config, &config_dir, &active);
+    if let Ok(state_dir) = crate::paths::state_dir() {
+        background::run_doctor_checkpoints(use_color, &state_dir);
+    }
 
     // When context-mode is enabled, verify the marketplace clone exists so
     // inject_context_mode can actually resolve the plugin. A missing clone is

@@ -95,6 +95,10 @@ instead:
 ⚠ settings.json: voiceEnabled is deprecated. Use voice.enabled.
 ```
 
+A `settings.json` that an older llmenv rendered can hold `advisorSize`.
+llmenv wrote that key before v3.12.0 and Claude Code never read it, so doctor warns and names `advisorModel`.
+Run `llmenv regenerate` to clear it.
+
 The list follows Claude Code's own settings reference, environment-variable reference, and
 changelog.
 The rendered files collect entries from `native.claude_code`, `capabilities.env`, permission
@@ -103,14 +107,37 @@ of those holds it.
 The check only warns: it never changes the exit status, and `llmenv validate` does not report it.
 If a rendered file is not valid JSON, doctor names the file and skips it.
 
-Two token-efficiency recommendations also changed in v3.12.0:
+Three token-efficiency recommendations also changed in v3.12.0:
 
+- When `native.claude_code.autoCompactEnabled` is `false`, doctor reports info and recommends no
+  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, because automatic compaction is off. When `autoCompactWindow` is set, at top
+  level or under `modelSettings`, the message names the window the percentage applies to. The unset warning says
+  the variable only matters in sessions that compact before the model's limit.
 - When `native.claude_code.bashOutputMaxChars` is set, doctor reports it and skips
   `BASH_MAX_OUTPUT_LENGTH`, because Claude Code ignores the variable while the setting is set.
 - `CLAUDE_CODE_PROMPT_CACHE_TTL` takes precedence over `ENABLE_PROMPT_CACHING_1H`. The prompt-cache check
   passes when the TTL is `1h`, and warns when it is set to another value. When the TTL is unset, it checks
   `ENABLE_PROMPT_CACHING_1H`. When neither is set, it prints an info line instead of a warning:
   subscription plans get the 1-hour TTL on the main conversation without any variable.
+
+## Background work that did not finish
+
+(added in v3.12.0)
+
+llmenv runs four jobs in a detached child: post-session consolidation, the ICM store of a web fetch,
+the transcript record of a session event, and the `codebase-memory-mcp` index.
+Each job writes a checkpoint file to `<state dir>/checkpoints/` first, and deletes it when the job succeeds.
+A file that stays means the job did not finish, for example because the memory proxy was down.
+
+`llmenv doctor` prints a `Background work:` section with one line for each checkpoint:
+the job, its age, the attempts so far out of 3, its phase, and the log to read (`<state dir>/detached-hook.log`).
+A checkpoint that is not yet old enough to be stale shows as info, because its child may still be running.
+
+At each new session start, llmenv runs a stale job again, up to 3 attempts, and at most 20 jobs.
+A job runs in the directory of its first run. If that directory is gone, llmenv does not run it.
+After the third attempt the file stays, so doctor keeps showing it.
+To abandon a job, delete its file under `checkpoints/`.
+llmenv deletes checkpoints that are older than 7 days.
 
 ## Memory backend issues
 

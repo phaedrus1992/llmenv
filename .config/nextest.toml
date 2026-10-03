@@ -1,3 +1,6 @@
+# The ci profile below uses the leak-timeout table form, added in nextest 0.9.95.
+nextest-version = "0.9.95"
+
 # Cap the concurrency of tests that spawn the llmenv binary under a wall-clock
 # budget (#1254).
 #
@@ -32,3 +35,17 @@ filter = '''
     + binary(launch)
 '''
 test-group = 'cli-subprocess'
+
+# nextest's default 100 ms leak window flags tests that only read or write files
+# when the whole suite runs in parallel (#2343): under load, one test in a full
+# run reports LEAK although it starts no subprocess. Even 500 ms flagged a test
+# at 0.52 s under double load. A leaked handle never closes, so a longer window
+# delays the verdict only for a test that really leaks; a clean test is unaffected.
+[profile.default]
+leak-timeout = "2s"
+
+# A leaked handle is a bug, so CI fails on it instead of passing it silently.
+# The table form needs nextest 0.9.95 or later.
+[profile.ci]
+inherits = "default"
+leak-timeout = { period = "2s", result = "fail" }

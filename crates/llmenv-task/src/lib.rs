@@ -782,12 +782,12 @@ pub fn delete_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
     })
 }
 
-/// Mark a task done. Idempotent from any prior state (fast-path completion).
-/// Production callers use [`complete_task`], which also reports the prior
-/// state; tests use this shorter form.
+/// Mark a task done from any prior state, skipping the start check
+/// (`force = true`). Production callers use [`complete_task`]; test fixtures
+/// use this shorter form to build a done task without starting it.
 #[cfg(test)]
 pub(crate) fn done_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
-    complete_task(state_dir, input).map(|c| c.task)
+    complete_task(state_dir, input, true).map(|c| c.task)
 }
 
 /// The result of [`complete_task`]: the saved task and the state it left.
@@ -798,30 +798,38 @@ pub struct Completed {
 }
 
 impl Completed {
-    /// A warning when the task went from `open` straight to `done`. That jump
-    /// often means a step was closed without its work (#2338), so the CLI
-    /// says so and names the way back.
+    /// A note when `force` closed a task that was never started. The CLI prints
+    /// it so the skipped start stays visible, and names the way back.
     #[must_use]
-    pub fn never_started_warning(&self) -> Option<String> {
+    pub fn skipped_start_note(&self) -> Option<String> {
         (self.prior == TaskState::Open).then(|| {
             format!(
-                "Note: '{slug}' was never started (open -> done). If its work is not \
-                 finished, run `llmenv task start --reopen {slug}`.",
+                "Note: '{slug}' was never started (open -> done); --force skipped the start. If \
+                 its work is not finished, run `llmenv task start --reopen {slug}`.",
                 slug = self.task.slug
             )
         })
     }
 }
 
-/// [`done_task`], but also returns the state the task was in before.
+/// Mark a task done and report the state it was in before (#2416). A task that
+/// is still `open` was never started, so no work was tracked; refuse it unless
+/// `force` says the work is done without tracking. `done` stays idempotent.
 ///
 /// # Errors
-/// Errors if `input` does not resolve to a task, or the save fails.
-pub fn complete_task(state_dir: &Path, input: &str) -> anyhow::Result<Completed> {
+/// Errors if `input` does not resolve to a task, the task is `open` and `force`
+/// is false, or the save fails.
+pub fn complete_task(state_dir: &Path, input: &str, force: bool) -> anyhow::Result<Completed> {
     let completed = with_store_lock(state_dir, || {
         let slug = resolve_identifier(state_dir, input)?;
         let mut task = load_task(state_dir, &slug)?;
         let prior = task.state;
+        if prior == TaskState::Open && !force {
+            anyhow::bail!(
+                "'{slug}' was never started (open). Run `llmenv task start {slug}` and finish \
+                 the work, or pass --force if it is done."
+            );
+        }
         task.state = TaskState::Done;
         task.updated_at = now_rfc3339();
         save_task(state_dir, &task)?;
@@ -1207,9 +1215,9 @@ fn idle_reminder_lines(state_dir: &Path, project: &str) -> String {
             format!(
                 "Session '{label}' ({id}) has {count} open task(s) and none in progress. If \
                  you recognize this as your own session, run `llmenv task start {next}` \
-                 ({title}) before you work on that step, or close finished work with \
-                 `llmenv task done <slug>` / `llmenv task session finish {id}`. If you don't \
-                 recognize it, it belongs to a different session — leave it alone.",
+                 ({title}) before you work on that step. The session cannot be closed while \
+                 any task is open. If you don't recognize it, it belongs to a different \
+                 session — leave it alone.",
                 count = idle.open_count,
                 next = idle.next.slug,
                 title = idle.next.title,
@@ -2670,7 +2678,7 @@ mod tests {
         let created = start_session_here(all_done.path(), &resume::ResumeContext::default());
         let task = add_task_for_session(all_done.path(), "Step", ParentSpec::Detached, &created.id)
             .expect("add");
-        complete_task(all_done.path(), &task.slug).expect("done");
+        complete_task(all_done.path(), &task.slug, true).expect("done");
         assert!(!stop_hook_reminder(all_done.path()).contains("no resume context"));
     }
 
@@ -2719,6 +2727,10 @@ mod tests {
             "names the next task only: {reminder}"
         );
         assert!(reminder.contains("2 open task(s)"), "{reminder}");
+        assert!(
+            !reminder.contains("session finish"),
+            "a session with open tasks must not be offered `session finish` (#2416): {reminder}"
+        );
         assert!(
             reminder.contains("recognize"),
             "must not presume ownership: {reminder}"
@@ -2831,26 +2843,55 @@ mod tests {
     // --- done without start, reopen (#2338) ---
 
     #[test]
-    fn complete_task_reports_prior_state() {
+    fn complete_task_refuses_an_open_task_and_names_the_fix() {
         let dir = TempDir::new().expect("test");
         let task = mk(dir.path(), "Never started", None).expect("test");
-        let completed = complete_task(dir.path(), &task.slug).expect("test");
-        assert_eq!(completed.prior, TaskState::Open);
-        assert_eq!(completed.task.state, TaskState::Done);
-        let warning = completed
-            .never_started_warning()
-            .expect("open -> done must warn");
-        assert!(warning.contains(&format!("llmenv task start --reopen {}", task.slug)));
+        let err = complete_task(dir.path(), &task.slug, false).expect_err("open must refuse");
+        let text = err.to_string();
+        assert!(
+            text.contains(&format!("llmenv task start {}", task.slug)),
+            "{text}"
+        );
+        assert!(text.contains("--force"), "{text}");
+        assert_eq!(
+            load_task(dir.path(), &task.slug).expect("test").state,
+            TaskState::Open,
+            "a refused done must leave the task open"
+        );
     }
 
     #[test]
-    fn complete_task_after_start_has_no_warning() {
+    fn complete_task_force_completes_an_open_task_and_notes_the_skip() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Never started", None).expect("test");
+        let completed = complete_task(dir.path(), &task.slug, true).expect("test");
+        assert_eq!(completed.prior, TaskState::Open);
+        assert_eq!(completed.task.state, TaskState::Done);
+        let note = completed
+            .skipped_start_note()
+            .expect("forced open -> done notes");
+        assert!(note.contains(&format!("llmenv task start --reopen {}", task.slug)));
+    }
+
+    #[test]
+    fn complete_task_after_start_needs_no_force() {
         let dir = TempDir::new().expect("test");
         let task = mk(dir.path(), "Started", None).expect("test");
         start_task(dir.path(), &task.slug, false).expect("test");
-        let completed = complete_task(dir.path(), &task.slug).expect("test");
+        let completed = complete_task(dir.path(), &task.slug, false).expect("test");
         assert_eq!(completed.prior, TaskState::Wip);
-        assert!(completed.never_started_warning().is_none());
+        assert!(completed.skipped_start_note().is_none());
+    }
+
+    #[test]
+    fn complete_task_waiting_and_done_need_no_force() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Waits", None).expect("test");
+        start_task(dir.path(), &task.slug, false).expect("test");
+        wait_task(dir.path(), &task.slug, "review").expect("test");
+        complete_task(dir.path(), &task.slug, false).expect("waiting completes");
+        let again = complete_task(dir.path(), &task.slug, false).expect("done is idempotent");
+        assert_eq!(again.prior, TaskState::Done);
     }
 
     #[test]
