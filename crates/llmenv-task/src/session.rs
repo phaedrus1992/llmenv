@@ -263,6 +263,26 @@ fn load_session(state_dir: &Path, id: &str) -> anyhow::Result<Session> {
     Ok(serde_json::from_str(&content)?)
 }
 
+/// [`load_session`] for a session the caller expects to exist. A missing file reads "no session
+/// found"; a read or parse failure names the file and the cause, so a corrupt or unreadable
+/// session is not reported as a typo'd id (#2424).
+fn load_existing_session(state_dir: &Path, id: &str) -> anyhow::Result<Session> {
+    let path = session_path(state_dir, id);
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            anyhow::bail!("no session '{id}' found");
+        }
+        Err(e) => anyhow::bail!("cannot read session '{id}' at {}: {e}", path.display()),
+    };
+    serde_json::from_str(&content).map_err(|e| {
+        anyhow::anyhow!(
+            "session '{id}' at {} is not valid session JSON: {e}",
+            path.display()
+        )
+    })
+}
+
 /// Every session in the store, tolerating a missing or unreadable store by
 /// treating it as empty (logging the cause via `tracing::warn!`) — same
 /// tolerance policy as [`super::list_tasks`], a single bad file must never
@@ -448,8 +468,7 @@ pub fn start_session_as(
             Ok(StartOutcome::Created(create_session(state_dir, request)?))
         }
         StartDecision::Resume(id) => {
-            let mut session = load_session(state_dir, &id)
-                .map_err(|e| anyhow::anyhow!("no session '{id}' found: {e}"))?;
+            let mut session = load_existing_session(state_dir, &id)?;
             if !session.is_open() {
                 anyhow::bail!("session '{id}' is closed and cannot be resumed");
             }
@@ -720,8 +739,7 @@ pub fn finish_session(
     abandon_open: bool,
 ) -> anyhow::Result<FinishOutcome> {
     super::with_store_lock(state_dir, || {
-        let mut session = load_session(state_dir, id)
-            .map_err(|e| anyhow::anyhow!("no session '{id}' found: {e}"))?;
+        let mut session = load_existing_session(state_dir, id)?;
         if !session.is_open() {
             anyhow::bail!("session '{id}' is already closed");
         }
@@ -758,8 +776,7 @@ pub fn update_resume(
     change: impl FnOnce(&mut ResumeContext),
 ) -> anyhow::Result<Session> {
     super::with_store_lock(state_dir, || {
-        let mut session = load_session(state_dir, id)
-            .map_err(|e| anyhow::anyhow!("no session '{id}' found: {e}"))?;
+        let mut session = load_existing_session(state_dir, id)?;
         if !session.is_open() {
             anyhow::bail!("session '{id}' is closed and cannot be changed");
         }
@@ -1076,6 +1093,44 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let err = update_resume(dir.path(), "nope", |_| {}).expect_err("unknown id");
         assert!(err.to_string().contains("no session 'nope'"), "{err}");
+    }
+
+    #[test]
+    fn corrupt_session_file_is_reported_as_corrupt_not_missing() {
+        let dir = TempDir::new().expect("tempdir");
+        let session = start_with_resume(dir.path(), &ResumeContext::default(), StartDecision::Auto);
+        std::fs::write(session_path(dir.path(), &session.id), "{ not json").expect("write");
+        for err in [
+            update_resume(dir.path(), &session.id, |_| {}).expect_err("corrupt"),
+            finish_session(dir.path(), &session.id, false).expect_err("corrupt"),
+        ] {
+            let text = err.to_string();
+            assert!(text.contains("not valid session JSON"), "{text}");
+            assert!(
+                !text.contains("found"),
+                "must not claim a missing session: {text}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_session_file_names_the_cause() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().expect("tempdir");
+        let session = start_with_resume(dir.path(), &ResumeContext::default(), StartDecision::Auto);
+        let path = session_path(dir.path(), &session.id);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        let readable_anyway = std::fs::read_to_string(&path).is_ok();
+        let result = finish_session(dir.path(), &session.id, false);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+        if readable_anyway {
+            return; // running as root: the FS ignores permissions
+        }
+        let text = result.expect_err("unreadable").to_string();
+        assert!(text.contains("cannot read session"), "{text}");
+        assert!(!text.contains("no session"), "{text}");
     }
 
     #[test]
