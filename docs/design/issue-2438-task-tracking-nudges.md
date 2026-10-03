@@ -30,9 +30,9 @@ This document fixes the design, the split, and the order.
 
 ## The split
 
-1. **Change A — relations and completion rules.** The `relation` field, `--child-of`, `--parallel`, `--after`, the queue start rule, the parent completion rule, `session start --task`, and reminder grouping. Issue: filed as a sub-issue of #2438.
-2. **Change B — reminders and nudges.** The `Skill` reminder, the mid-work nudge, the zero-task session report, the deny-once on `git commit` and `gh pr create`, the waiting reminder, and the two config switches.
-3. **Change C — core instruction text and checks.** The text that SessionStart injects, the doctor check for contradicting text, the example `AGENTS.md` wording, and the release check for the #2416 behavior.
+1. **Change A — relations and completion rules.** The `relation` field, `--child-of`, `--parallel`, `--after`, the queue start rule, the parent completion rule, `session start --task`, and reminder grouping. Issue: #2455.
+2. **Change B — reminders and nudges (#2456).** The `Skill` reminder, the mid-work nudge, the zero-task session report, the deny-once on `git commit` and `gh pr create`, the waiting reminder, and the two config switches.
+3. **Change C — core instruction text and checks (#2457).** The text that SessionStart injects, the doctor check for contradicting text, the example `AGENTS.md` wording, and the release check for the #2416 behavior.
 
 A comes first: B and C refer to the rules that A adds.
 
