@@ -37,10 +37,10 @@ struct RecordPayload {
     request_id: String,
 }
 
-/// The id of one transcript record. `nonce` is new for each event: two events with the same kind
+/// The id of one transcript record. `run_tag` is new for each event: two events with the same kind
 /// and text inside one second are two records, so the time alone cannot tell them apart. The id
 /// travels in the payload, so a re-spawn or a resume of the same event sends the same id.
-fn record_request_id(session_id: &str, ev: &SessionLogEvent, nonce: &str) -> String {
+fn record_request_id(session_id: &str, ev: &SessionLogEvent, run_tag: &str) -> String {
     let kind = format!("{:?}", ev.kind);
     idempotency::request_id(&[
         "session-log-record",
@@ -48,7 +48,7 @@ fn record_request_id(session_id: &str, ev: &SessionLogEvent, nonce: &str) -> Str
         &ev.ts,
         &kind,
         &ev.content,
-        nonce,
+        run_tag,
     ])
 }
 
@@ -93,7 +93,7 @@ fn spawn_record_in(
     let payload = RecordPayload {
         session_id: session_id.to_string(),
         event: ev.clone(),
-        request_id: record_request_id(session_id, ev, &checkpoint::nonce()),
+        request_id: record_request_id(session_id, ev, &checkpoint::run_tag()),
     };
     let Ok(payload_json) = serde_json::to_string(&payload) else {
         tracing::debug!("session_log: cannot serialize event for detached record");

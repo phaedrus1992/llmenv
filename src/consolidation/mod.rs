@@ -395,11 +395,11 @@ struct RunScope<'a> {
     run_id: &'a str,
 }
 
-/// The id of this run: the nonce its checkpoint was written with, or empty without a checkpoint.
+/// The id of this run: the run tag its checkpoint was written with, or empty without a checkpoint.
 fn run_id(checkpoint: Option<&std::path::Path>) -> String {
     checkpoint
         .and_then(|p| checkpoint::load(p).ok())
-        .and_then(|c| c.inputs["nonce"].as_str().map(str::to_string))
+        .and_then(|c| c.inputs["run_tag"].as_str().map(str::to_string))
         .unwrap_or_default()
 }
 

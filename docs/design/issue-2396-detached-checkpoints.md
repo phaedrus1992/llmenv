@@ -169,7 +169,7 @@ Fail-soft: any error logs at debug and the session continues.
 - A resume starts at most 20 jobs, under a lock, and restores the file when the start fails, so a failed start does not use up an attempt.
 - The index job is not resumable, and its checkpoint keeps counting attempts across the rewrites that each session start makes.
 - A `--checkpoint` argument must be a regular `.json` file, not a symlink, directly inside `state_dir/checkpoints`.
-- Consolidation and session-log checkpoints carry a nonce. Two runs with equal inputs are two jobs, and the consolidation rule ids are scoped to the run.
+- Consolidation and session-log checkpoints carry a run tag. Two runs with equal inputs are two jobs, and the consolidation rule ids are scoped to the run.
 - The seen-set from #2397 keeps ids in insertion order, so the oldest id goes first (a `BTreeSet` with `pop_first` would drop the smallest id, not the oldest).
 
 ## Acceptance criteria

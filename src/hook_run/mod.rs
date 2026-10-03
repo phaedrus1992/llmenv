@@ -2919,12 +2919,12 @@ fn post_session_consolidation_in(state_dir: Option<&std::path::Path>) {
         tracing::error!("consolidation-run: cannot resolve current_exe; consolidation skipped");
         return;
     };
-    // The nonce keeps two sessions that end in one directory from sharing a checkpoint file, and
+    // The run tag keeps two sessions that end in one directory from sharing a checkpoint file, and
     // it scopes the rule ids to this run (#2397).
     let checkpoint = checkpoint::begin(
         state_dir,
         checkpoint::JobKind::Consolidation,
-        &serde_json::json!({ "nonce": checkpoint::nonce() }),
+        &serde_json::json!({ "run_tag": checkpoint::run_tag() }),
         None,
     );
     let mut cmd = consolidation_run_command(exe, checkpoint.as_deref());
@@ -3071,7 +3071,7 @@ mod tests {
     }
 
     #[test]
-    fn consolidation_spawn_writes_a_checkpoint_with_a_nonce_and_the_working_directory() {
+    fn consolidation_spawn_writes_a_checkpoint_with_a_run_tag_and_the_working_directory() {
         let dir = tempfile::tempdir().unwrap();
         post_session_consolidation_in(Some(dir.path()));
         let listed = checkpoint::list(dir.path());
@@ -3079,7 +3079,7 @@ mod tests {
             panic!("expected one checkpoint: {listed:?}");
         };
         assert_eq!(cp.kind, checkpoint::JobKind::Consolidation);
-        assert!(!cp.inputs["nonce"].as_str().unwrap().is_empty());
+        assert!(!cp.inputs["run_tag"].as_str().unwrap().is_empty());
         let cwd = std::env::current_dir().unwrap().display().to_string();
         assert_eq!(cp.cwd.as_deref(), Some(cwd.as_str()));
         // A second run in the same directory is a second job, not the same file.

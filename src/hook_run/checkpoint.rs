@@ -284,7 +284,7 @@ fn restart(
 /// A value no two jobs share, for the part of a job's id that must tell two runs of the same
 /// inputs apart: nanoseconds since the epoch plus a counter for the same nanosecond.
 #[must_use]
-pub(crate) fn nonce() -> String {
+pub(crate) fn run_tag() -> String {
     use std::sync::atomic::{AtomicU32, Ordering};
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let nanos = std::time::SystemTime::now()
@@ -615,8 +615,8 @@ mod tests {
     }
 
     #[test]
-    fn nonces_differ_and_the_first_attempt_records_the_working_directory() {
-        assert_ne!(nonce(), nonce());
+    fn run_tags_differ_and_the_first_attempt_records_the_working_directory() {
+        assert_ne!(run_tag(), run_tag());
         let c = cp(JobKind::IcmStore, 1);
         let cwd = std::env::current_dir().unwrap().display().to_string();
         assert_eq!(c.cwd.as_deref(), Some(cwd.as_str()));
