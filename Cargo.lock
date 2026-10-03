@@ -1457,8 +1457,10 @@ version = "5.0.0-alpha.1"
 dependencies = [
  "anyhow",
  "humantime",
+ "llmenv-git",
  "llmenv-paths",
  "llmenv-scope",
+ "llmenv-util",
  "proptest",
  "serde",
  "serde_json",

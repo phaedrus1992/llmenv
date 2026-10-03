@@ -118,6 +118,15 @@ Two token-efficiency recommendations also changed in v3.12.0:
   active. Check `llmenv tag-ls`.
 - **Client can't reach the server** — confirm the `host:` address resolves and
   the port is open: `nc -vz <addr> <port>`.
+- **A managed MCP server is down or stuck** (added in v3.12.0) — the session start output
+  starts with `MCP health check failed` and names each server that did not answer an MCP
+  `initialize` within 5 seconds, with the reason and the fix. `llmenv doctor` prints the same
+  result under `MCP servers:`. A stopped ICM proxy on the server host restarts by itself. For a
+  proxy that holds its port but does not answer, stop it with
+  `pkill -f 'mcp-proxy .*-- icm serve'`, then run `llmenv export > /dev/null`. The pattern matches
+  the proxy by its command line, so it cannot hit a reused process id. For a stuck
+  `codebase-memory-mcp` daemon, run `pkill -f cbm-daemon-internal`, then `/mcp` to reconnect.
+  See [Session-start health check](mcp.md#session-start-health-check-added-in-v3120).
 - **Old ICM server** (added in v3.12.0) — on the host that serves memory, `llmenv doctor`
   reports the `icm` version under `ICM server:`. It warns below 0.10.60, where recall filters by
   keyword and topic after the limit, so adaptive recall returns little or nothing. It warns again

@@ -56,10 +56,8 @@ fn config_context_places_hook_event_name_inside_hook_specific_output() {
     );
 }
 
-// #231: config-context is the only SessionStart hook whose additionalContext
-// Claude Code actually surfaces (hook-run's own SessionStart output is
-// suppressed, see emit_hook_context's #558 comment), so the task-tracker
-// SessionStart reminder rides this channel instead.
+// #231: the task-tracker SessionStart reminder rides the config-context hook. (hook-run's own
+// SessionStart output is accepted too since #2251, but this channel predates it.)
 #[test]
 fn config_context_includes_task_tracker_reminder_for_wip_tasks() {
     let dir = TempDir::new().unwrap();
@@ -175,4 +173,54 @@ fn config_context_exits_zero_on_empty_stdin() {
             .is_some(),
         "hookEventName must be present inside hookSpecificOutput"
     );
+}
+
+// #2339: the SessionStart reminder carries each open session's resume context and the command
+// that follows each ref, so a fresh agent after `/clear` does not rebuild it by hand.
+#[test]
+fn config_context_includes_resume_context_for_an_open_session() {
+    let dir = TempDir::new().unwrap();
+    let config_path = dir.path().join("config.yaml");
+    fs::write(
+        &config_path,
+        "adapter:\n  engine: claude-code\nscope:\n  network: []\n  host: []\n  user: []\n\
+         features:\n  task_tracker:\n    enabled: true\n",
+    )
+    .unwrap();
+    let state_dir = TempDir::new().unwrap();
+    let cwd = TempDir::new().unwrap();
+
+    support::isolated_llmenv_cmd(dir.path())
+        .env("LLMENV_CONFIG", &config_path)
+        .env("LLMENV_STATE_DIR", state_dir.path())
+        .current_dir(cwd.path())
+        .args([
+            "task",
+            "session",
+            "start",
+            "sprint",
+            "--context",
+            "pick up at step 4",
+            "--issue",
+            "2339",
+        ])
+        .assert()
+        .success();
+
+    let output = support::isolated_llmenv_cmd(dir.path())
+        .env("LLMENV_CONFIG", &config_path)
+        .env("LLMENV_STATE_DIR", state_dir.path())
+        .current_dir(cwd.path())
+        .arg("config-context")
+        .write_stdin(r#"{"hook_event_name":"SessionStart"}"#)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(output.stdout).unwrap()).unwrap();
+    let ctx = parsed["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("");
+    assert!(ctx.contains("pick up at step 4"), "got: {ctx}");
+    assert!(ctx.contains("gh issue view 2339"), "got: {ctx}");
 }
