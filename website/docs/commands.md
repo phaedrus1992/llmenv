@@ -720,6 +720,7 @@ re-ingestion on the next turn.
 
 ```text
 llmenv task add <title> [--parent SLUG | --no-parent] [--session <id>]
+  [--detail <text> | --detail-file <path>]
 llmenv task start <id> [--force] [--reopen]
 llmenv task done <id>
 llmenv task wait <id> [reason]
@@ -729,8 +730,13 @@ llmenv task note <id> [text]
 llmenv task block <id> --on <other>
 llmenv task edit <id> [--title <t>] [--parent SLUG | --no-parent]
   [--block-on <id>]... [--unblock <id>]... [--add-note <text>] [--delete-note <index-or-timestamp>]
+  [--detail <text> | --detail-file <path>]
 llmenv task clear <id>... | --session <id>
 llmenv task session start [name] [--description <text>] [--resume <id> | --replace | --new]
+  [--context <text> | --context-file <path>] [--issue <n>]... [--branch <b>] [--base <b>]
+  [--memory-topic <t>]... [--doc <path>]...
+llmenv task session edit [<id>] [same flags as session start]
+llmenv task session note [text] [--id <id>]
 llmenv task session finish [<id>]
 llmenv task session show [<id>]
 llmenv task session summary [<id>] [--format json]
@@ -755,7 +761,10 @@ unambiguous prefix of one.
   for the current project it auto-resolves; with two or more open it picks
   the one this conversation started or resumed (changed in v3.12.0; see
   "Session ownership" below), else asks for `--session <id>`; errors with
-  actionable guidance when none is open.
+  actionable guidance when none is open. `--detail <text>` or
+  `--detail-file <path>` (added in v3.12.0) stores what a cold reader needs to do
+  the task: files, acceptance criteria, and gotchas. The two flags conflict.
+  An unreadable `--detail-file` fails before llmenv adds the task.
 - `task start <id> [--force]` — claim a task, moving it to `wip`. Also the
   resume action for a `waiting` task — it accepts any non-`done` state as its
   starting point. `parent` and `blocked_on` (added in v3.8.0) are enforced
@@ -799,7 +808,8 @@ unambiguous prefix of one.
   since it narrows by project, not by session. Tasks with no session are
   excluded under `--current-project`. Filters compose with each other, and
   apply to the JSON output too when passed.
-- `task show <id>` — full detail for one task (notes, parent, blockers).
+- `task show <id>` — full detail for one task (notes, parent, blockers, and the
+  `detail` text when the task has one).
   `task show --current` / `task show --next` (added in v3.8.0, mutually
   exclusive with each other and with `<id>`) resolve the task in progress for
   the current project instead of naming one: `--current` is the `wip` task
@@ -809,7 +819,9 @@ unambiguous prefix of one.
   `done` tasks and any task whose `blocked_on` refs aren't all `done`. A
   single open session prints the same bare JSON as `task show <id>`; two or
   more each get a `# <name> (<id>)` header, separated by a `---` rule. Errors
-  if no session is open for the current project.
+  if no session is open for the current project. `--current` (changed in
+  v3.12.0) also prints each session's resume context on stderr, so the JSON on
+  stdout stays machine-readable.
 - `task note <id> [text]` — append a progress note; reads from stdin if
   `text` is omitted.
 - `task block <id> --on <other>` — record that `id` is blocked on `other`: a
@@ -834,7 +846,9 @@ unambiguous prefix of one.
   an already-present id or removing an absent one is a no-op, not an error.
   `--add-note` appends a note (reads from stdin if given as an empty string,
   e.g. `--add-note ''`); `--delete-note` removes one by its 0-based index in
-  `task show`'s `notes` array, or by its exact `at` timestamp.
+  `task show`'s `notes` array, or by its exact `at` timestamp. `--detail
+  <text>` or `--detail-file <path>` (added in v3.12.0) replaces the task's
+  detail. An empty `--detail ''` clears it.
 - `task clear <id>...` / `task clear --session <id>` — delete task(s)
   outright, for a batch that's being deliberately abandoned rather than just
   detached from a session (that's what `session start --replace` does,
@@ -901,6 +915,8 @@ project's hook.
   parent-before-children order `task ls` groups a session's tasks in.
   `--format json` is the stable, memory-ingestion-friendly form: session
   metadata plus an array of tasks (slug/title/state/parent/blocked_on/notes).
+  (changed in v3.12.0) Both forms also carry the session's resume context, as
+  a `resume` object in JSON, and each task's `detail` text.
 - `task session ls` — list every currently open session (id, name, project,
   description), current-project matches first. This is the recovery path
   after a compaction: with one session open for the project there's exactly
@@ -963,6 +979,55 @@ Claude's native Task tools through unblocked — for example, when a project
 genuinely uses them for multi-agent teammate coordination rather than solo step
 tracking. See [`features.task_tracker:`](configuration.md#featurestask_tracker)
 for the full field reference. (#980)
+
+### Resume context (added in v3.12.0)
+
+A session can record what a fresh agent needs to pick the work up after `/clear`.
+This record is the resume context.
+It holds free-text notes, issue numbers, the git branch and the base branch, ICM memory topics, and plan documents.
+
+Set it when you start the session:
+
+```text
+llmenv task session start sprint --context "pick up at step 4" \
+  --issue 2337 --doc docs/design/x.md --memory-topic decisions-llmenv \
+  --branch feat/2337-foo --base release/3.x
+```
+
+- `--context <text>` or `--context-file <path>` sets the notes. The two flags conflict.
+- `--issue <n>`, `--memory-topic <topic>`, and `--doc <path>` each repeat.
+- `--branch` and `--base` set the branches.
+
+`session start` fills in what it can detect.
+It reads the branch from git.
+It reads an issue number from a branch name such as `feat/2337-foo` or `fix/2358`.
+It never overwrites a value you set.
+A resumed session (`--resume`) keeps what it has, and only the flags you pass change it.
+
+Change the context after the session starts:
+
+- `task session edit [<id>]` takes the same flags.
+  A single-value flag replaces its value.
+  A repeatable flag adds the entries the session lacks.
+  The command picks the session the same way as `finish`.
+- `task session note [text] [--id <id>]` adds a line to the notes. It reads stdin when you omit `text`.
+
+The context appears in these places:
+
+- `task session show` and `task session summary` print it. In JSON, it is the `resume` object.
+- The SessionStart reminder lists the context of each open session in the current project.
+  It names the command for each reference: `gh issue view N`, and `icm_memory_recall` with the stored topics.
+  The reminder does not claim that the session is yours.
+  It labels the notes as data, not instructions, and it cuts each session at 2,000 characters.
+  The SessionStart and Stop reminders need `features.task_tracker.enabled`.
+- `task show --current` prints it on stderr.
+
+When a session has no notes, no issue, no doc, and no memory topic, `session start` prints one line that names the flags.
+The Stop reminder repeats that line for a session that has unfinished tasks.
+A branch alone does not count, because it does not say what the work is.
+
+llmenv removes control characters from this text before it prints the text.
+A state file from before v3.12.0 loads without these fields.
 
 ## `login`
 

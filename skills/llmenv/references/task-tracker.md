@@ -6,6 +6,13 @@ TODOs.
 - `llmenv task session start "<name>" [--description "<text>"]` — required
   before your first `task add`. Add `--description` for a session ls hint
   (issue number, topic) when you have one.
+- Record resume context at session start, so a fresh agent after `/clear` does not rebuild it
+  by hand: `--context "<where to pick up>"` (or `--context-file`), `--issue <n>` (repeatable),
+  `--doc <plan or spec path>`, `--memory-topic <icm topic>`. llmenv fills the git branch and
+  the issue from a branch like `feat/2337-foo`. Change it later with `llmenv task session edit`
+  or `session note "<text>"`. The SessionStart reminder and `session show` print it.
+- `llmenv task add "<title>" --detail "<text>"` (or `--detail-file`) — store what someone
+  needs to do the task cold: files, acceptance criteria, gotchas.
 - Name it after the high-level work, not a placeholder — `session ls` is the
   recovery path after a compaction, and an unnamed or auto-numbered session
   (`session-2`, `session-3`) tells a future read of that list nothing. Good:

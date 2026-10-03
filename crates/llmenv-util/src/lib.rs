@@ -579,10 +579,69 @@ pub mod testkit {
     }
 }
 
+/// The format characters that `strip_unsafe_chars` removes besides control characters: zero-width
+/// and joiner marks (U+200B to U+200F), bidirectional overrides and isolates (U+202A to U+202E,
+/// U+2066 to U+2069), word joiner and invisible operators (U+2060 to U+2064), the Arabic letter
+/// mark (U+061C), and the byte order mark (U+FEFF). `char::is_control` misses all of them.
+fn is_unsafe_format_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}'
+    )
+}
+
+/// Remove every character that can spoof or hide text on a terminal or in a prompt: control
+/// characters, including newline, and the invisible and bidirectional format characters.
+/// Use it on text that an agent or a user wrote and that llmenv prints back. Split the text into
+/// lines first when line breaks must survive.
+#[must_use]
+pub fn strip_unsafe_chars(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control() && !is_unsafe_format_char(*c))
+        .collect()
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::{dedup, escape_control, merge_json, merge_yaml, normalize_json};
+    use super::{
+        dedup, escape_control, merge_json, merge_yaml, normalize_json, strip_unsafe_chars,
+    };
+
+    #[test]
+    fn strip_unsafe_chars_removes_control_bidi_and_zero_width_characters() {
+        let spoof = "safe\u{202E}txt.exe\u{200B}\u{FEFF}\u{1b}[31m\n\tend\u{2066}";
+        assert_eq!(strip_unsafe_chars(spoof), "safetxt.exe[31mend");
+    }
+
+    #[test]
+    fn strip_unsafe_chars_keeps_ordinary_unicode() {
+        let text = "café 日本語 📄 — naïve";
+        assert_eq!(strip_unsafe_chars(text), text);
+    }
+
+    mod strip_props {
+        use super::strip_unsafe_chars;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn output_has_no_control_or_bidi_characters(text in ".*") {
+                let out = strip_unsafe_chars(&text);
+                let has_control = out.chars().any(char::is_control);
+                let has_bidi_or_zero_width = out.contains('\u{202E}') || out.contains('\u{200B}');
+                prop_assert!(!has_control);
+                prop_assert!(!has_bidi_or_zero_width);
+            }
+
+            #[test]
+            fn stripping_twice_changes_nothing(text in ".*") {
+                let once = strip_unsafe_chars(&text);
+                prop_assert_eq!(strip_unsafe_chars(&once), once);
+            }
+        }
+    }
 
     // A newline must not forge a second log line, and an ESC byte must not reach the terminal.
     #[test]
