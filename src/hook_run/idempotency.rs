@@ -66,9 +66,8 @@ impl SeenStore {
             return;
         }
         ids.push_back(id.to_string());
-        while ids.len() > MAX_IDS {
-            ids.pop_front();
-        }
+        let excess = ids.len().saturating_sub(MAX_IDS);
+        ids.drain(..excess);
         prune_stale_json_files(&self.dir, STALE_DAYS);
         prune_orphan_locks(&self.dir, STALE_DAYS);
         let path = self.path(key);

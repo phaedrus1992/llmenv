@@ -3210,6 +3210,19 @@ mod tests {
     }
 
     #[test]
+    fn the_resume_step_starts_a_stale_job_in_its_working_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let mut stale = checkpoint::Checkpoint::new(checkpoint::JobKind::IcmStore, json!({}), None);
+        stale.started_at = 1;
+        stale.cwd = Some(work.path().display().to_string());
+        let path = checkpoint::write(dir.path(), &stale).unwrap().unwrap();
+        // The child is this test binary with arguments it rejects, so it exits at once.
+        resume_checkpoints(Some(dir.path()));
+        assert_eq!(checkpoint::load(&path).unwrap().attempts, 2);
+    }
+
+    #[test]
     fn the_resume_step_skips_the_index_job_and_a_fresh_one() {
         let dir = tempfile::tempdir().unwrap();
         let mut stale = checkpoint::Checkpoint::new(
