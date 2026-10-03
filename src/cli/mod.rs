@@ -3256,6 +3256,16 @@ fn render_task_session_summary_human(
         out.push_str(&style::sanitize_for_terminal(desc));
     }
     out.push_str(&format!(" ({}/{} done)\n", summary.done, summary.total));
+    if let Some(running_as) = summary
+        .agent
+        .as_ref()
+        .and_then(crate::hook_run::agent_config::running_as_of_block)
+    {
+        out.push_str(&format!(
+            "running as {}\n",
+            style::sanitize_for_terminal(&running_as)
+        ));
+    }
     let resume = summary.resume.render();
     if !resume.is_empty() {
         out.push_str(&resume);
@@ -3758,7 +3768,9 @@ fn run_task_session_command(
         }
         TaskSessionCommand::Summary { id, format } => {
             let id = resolve_session_id(state_dir, &project, id)?;
-            let summary = session::session_summary(state_dir, &id)?;
+            let summary = session::session_summary_with_agent(state_dir, &id, |owner| {
+                crate::hook_run::agent_config::summary_block(state_dir, owner)
+            })?;
             match format {
                 Some(TaskListFormat::Json) => {
                     println!("{}", serde_json::to_string_pretty(&summary)?);
@@ -5900,6 +5912,7 @@ mod tests {
         Config {
             features: Some(Features {
                 memory: vec![Memory {
+                    always_load: None,
                     server_host: "srv".to_string(),
                     port,
                     listen_host: listen_host.to_string(),

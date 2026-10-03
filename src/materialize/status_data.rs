@@ -713,6 +713,7 @@ mod tests {
     #[test]
     fn collect_mcps_degrades_to_error_count_on_ambiguous_memory() {
         let mem = |host: &str| Memory {
+            always_load: None,
             server_host: host.into(),
             port: 9092,
             listen_host: "127.0.0.1".into(),

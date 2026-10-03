@@ -1041,6 +1041,7 @@ fn resolved_servers_land_in_claude_json_mcp_servers() {
     let m = llmenv::merge::MergedManifest {
         mcps: vec![
             ResolvedMcp {
+                always_load: None,
                 name: "playwright".into(),
                 kind: ResolvedKind::Stdio {
                     command: "npx".into(),
@@ -1054,6 +1055,7 @@ fn resolved_servers_land_in_claude_json_mcp_servers() {
                 memory_hook: None,
             },
             ResolvedMcp {
+                always_load: None,
                 name: "icm".into(),
                 kind: ResolvedKind::Remote {
                     url: "http://still.local:9100/mcp".into(),
@@ -1197,6 +1199,7 @@ fn global_and_bundle_mcps_both_render() {
 
     // Simulate a pre-resolved global MCP (as build_manifest does via resolve_mcps).
     manifest.mcps.push(ResolvedMcp {
+        always_load: None,
         name: "global-tool".into(),
         kind: ResolvedKind::Stdio {
             command: "global-cmd".into(),
@@ -1253,6 +1256,7 @@ fn native_mcp_enabled_list_is_dropped() {
     );
     let m = llmenv::merge::MergedManifest {
         mcps: vec![ResolvedMcp {
+            always_load: None,
             name: "playwright".into(),
             kind: ResolvedKind::Stdio {
                 command: "npx".into(),
@@ -1298,6 +1302,7 @@ fn auto_memory_disabled_when_icm_active() {
 
     let m = llmenv::merge::MergedManifest {
         mcps: vec![ResolvedMcp {
+            always_load: None,
             name: "icm".into(),
             kind: ResolvedKind::Remote {
                 url: "http://still.local:9100/mcp".into(),
@@ -1369,6 +1374,7 @@ fn user_native_auto_memory_overrides_icm_default() {
     );
     let m = llmenv::merge::MergedManifest {
         mcps: vec![ResolvedMcp {
+            always_load: None,
             name: "icm".into(),
             kind: ResolvedKind::Remote {
                 url: "http://still.local:9100/mcp".into(),

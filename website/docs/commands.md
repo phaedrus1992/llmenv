@@ -653,6 +653,9 @@ recall events also need `adaptive_recall` on):
   subagent's task, which `subagent_task` records
 - `subagent_task` (added in v3.12.0) — a `PreToolUse` hook on the `Agent` tool
   that queues the subagent's task text; no output
+- `post_model_switch` (added in v3.12.0) — a Claude Code `PostModelSwitch` hook. It records the new
+  model and the switch in the session's agent-config document (see
+  [Agent config](#agent-config)); no output
 - `session_end` — best-effort store of the active scope context
   (`icm_memory_store`); also emits the baseline `lifecycle_end` session-log event
 
@@ -1038,6 +1041,26 @@ A branch alone does not count, because it does not say what the work is.
 llmenv removes control characters from this text before it prints the text.
 A state file from before v3.12.0 loads without these fields.
 
+### Agent config
+
+(added in v3.12.0)
+
+Every Claude Code `SessionStart` writes a small JSON document at `<state dir>/agent_config/<session id>.json`.
+It records what the session runs as: the engine, the model, the effort level, the working directory,
+the project, the active tags and bundles, the booted config hash, and the llmenv and engine versions.
+Only the owner can read it.
+llmenv removes documents older than seven days.
+
+- A `PostModelSwitch` hook (Claude Code 2.1.251 and later) updates `model`.
+  It also adds an entry to `model_history`, which keeps the newest 20 switches.
+- On `resume` and `compact`, the SessionStart context starts with one line:
+  `[llmenv session] engine claude_code, model claude-opus-5, effort high, project llmenv, tags a, b, config 0123456789ab`.
+  A `startup`, `clear`, or `fork` session gets no line, because it has no earlier context to lose.
+- `effort` comes from the hook payload, so it reads `unset` when Claude Code sends none.
+- When the session's owner has a document, `task session summary` prints
+  `running as <engine> <model>, effort <level>` under the title.
+  The JSON form carries an `agent` object.
+
 ## `login`
 
 ```text
@@ -1179,10 +1202,10 @@ active context (active bundles, active MCP servers, etc.). Checks:
   network scope whose `match` has no `gateway_mac` (added in v3.8.0) — only
   `gateway_mac` is evaluated today, so `ssid`/`cidr` alone can never match
 - lifecycle hooks (added in v3.11.0) — lists which lifecycle events
-  (`session_start`, `session_end`, `turn_start`, `post_tool_batch`,
+  (`session_start`, `session_end`, `post_model_switch`, `turn_start`, `post_tool_batch`,
   `post_tool_use_failure`, `subagent_start`, `stop`) are wired for
   `claude_code` in the active scope, and for any that aren't, what would enable
-  them. `session_start`/`session_end` are always registered; `turn_start` needs
+  them. `session_start`/`session_end`/`post_model_switch` are always registered; `turn_start` needs
   a memory backend, and the three adaptive recall events (added in v3.12.0)
   also need `adaptive_recall` on;
   `stop` needs session logging or `features.task_tracker`.

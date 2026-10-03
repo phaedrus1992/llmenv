@@ -2101,13 +2101,14 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
 }
 
 /// The lifecycle hooks `doctor` reports for `engine`: the engine-neutral set, plus
-/// the adaptive recall hooks that only Claude Code registers (#2249).
+/// the hooks that only Claude Code registers (#2249, #2398).
 fn engine_lifecycle_hooks(
     engine: &str,
     manifest: &crate::merge::MergedManifest,
 ) -> Vec<(&'static str, bool, &'static str)> {
     let mut hooks = crate::adapter::lifecycle_hook_registrations(manifest);
     if engine == "claude_code" {
+        hooks.extend(crate::adapter::claude_code_baseline_hook_registrations());
         hooks.extend(crate::adapter::adaptive_recall_hook_registrations(manifest));
     }
     hooks
@@ -2486,6 +2487,7 @@ mod tests {
         let (root, mut config, active) = disabled_memory_bundle_fixture();
         config.features = Some(Features {
             memory: vec![Memory {
+                always_load: None,
                 server_host: "still".into(),
                 port: 7878,
                 listen_host: "127.0.0.1".into(),
@@ -2524,6 +2526,7 @@ mod tests {
         let (root, mut config, active) = disabled_memory_bundle_fixture();
         config.features = Some(Features {
             memory: vec![Memory {
+                always_load: None,
                 server_host: "elsewhere".into(),
                 port: 7878,
                 listen_host: "127.0.0.1".into(),
@@ -3445,6 +3448,7 @@ mod tests {
         let config = Config {
             features: Some(Features {
                 memory: vec![Memory {
+                    always_load: None,
                     server_host: "local".into(),
                     port: 4343,
                     listen_host: "127.0.0.1".into(),
@@ -3478,6 +3482,7 @@ mod tests {
         let config = Config {
             features: Some(Features {
                 memory: vec![Memory {
+                    always_load: None,
                     server_host: "remote".into(),
                     port: 4343,
                     listen_host: "0.0.0.0".into(),
@@ -3641,5 +3646,19 @@ mod tests {
         assert!(!events("codex").contains(&"subagent_start"));
         assert!(!events("opencode").contains(&"post_tool_batch"));
         assert!(events("codex").contains(&"turn_start"));
+    }
+
+    #[test]
+    fn only_claude_code_reports_the_model_switch_hook() {
+        let manifest = crate::merge::MergedManifest::default();
+        let hooks = |engine: &str| engine_lifecycle_hooks(engine, &manifest);
+        assert!(hooks("claude_code").contains(&("post_model_switch", true, "always registered")));
+        for engine in ["codex", "opencode", "crush"] {
+            assert!(
+                hooks(engine)
+                    .iter()
+                    .all(|(event, _, _)| *event != "post_model_switch")
+            );
+        }
     }
 }

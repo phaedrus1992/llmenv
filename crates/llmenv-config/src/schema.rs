@@ -1536,6 +1536,11 @@ pub struct Memory {
     /// restores the stateless per-turn recall.
     #[serde(default = "default_adaptive_recall")]
     pub adaptive_recall: bool,
+    /// Claude Code `alwaysLoad` for the ICM server (#2356). Unset means `true`: the ICM tools are
+    /// used on most prompts, so they stay in the prompt instead of behind tool search. Set `false`
+    /// to restore deferral.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub always_load: Option<bool>,
 }
 
 fn default_adaptive_recall() -> bool {
@@ -1564,6 +1569,7 @@ impl Default for Memory {
             mcp_permissions: None,
             wakeup_max_tokens: None,
             adaptive_recall: default_adaptive_recall(),
+            always_load: None,
         }
     }
 }
@@ -1671,6 +1677,11 @@ pub struct McpServer {
     /// #506: consumed by CrushAdapter when it renders its MCP config.
     #[serde(default)]
     pub timeout: Option<u32>,
+    /// Claude Code `alwaysLoad` (#2356): `true` keeps every tool of this server in the prompt
+    /// instead of behind tool search, `false` defers them all, unset leaves Claude Code's default.
+    /// Ignored by engines without the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub always_load: Option<bool>,
 }
 
 /// A first-class skill contributed directly by config or bundle, independent of
@@ -2982,6 +2993,7 @@ forward_ssh_agent: false
         let mut headers = BTreeMap::new();
         headers.insert("Authorization".to_string(), "Bearer tok".to_string());
         let original = McpServer {
+            always_load: None,
             name: "ctx7".to_string(),
             when: vec!["tag".to_string()],
             transport: McpTransport::Http,
@@ -3005,6 +3017,7 @@ forward_ssh_agent: false
         let mut headers = BTreeMap::new();
         headers.insert("X-Api-Key".to_string(), "secret".to_string());
         let original = McpServer {
+            always_load: None,
             name: "playwright".to_string(),
             when: vec![],
             transport: McpTransport::Stdio,
@@ -3043,6 +3056,7 @@ forward_ssh_agent: false
     fn mcp_server_dedup_respects_new_fields() {
         use std::collections::BTreeMap;
         let a = McpServer {
+            always_load: None,
             name: "ctx".to_string(),
             when: vec![],
             transport: McpTransport::Stdio,

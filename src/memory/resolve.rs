@@ -458,6 +458,7 @@ mod tests {
             mcp_permissions: None,
             wakeup_max_tokens: None,
             adaptive_recall: true,
+            always_load: None,
         }
     }
 

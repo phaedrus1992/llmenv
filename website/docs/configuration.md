@@ -523,6 +523,13 @@ mcp:
 | `args` | no | Arguments for `command` |
 | `env` | no | Environment for the launched process |
 | `url` | for http/sse | Remote endpoint |
+| `headers` | no | HTTP request headers for http/sse servers, such as an auth token (added in v3.0.0) |
+| `timeout` | no | Request timeout in seconds; unset uses the engine default (added in v3.0.0) |
+| `disabled_tools` | no | Tool names the engine hides from the model for this server (added in v3.0.0) |
+| `always_load` | no | Claude Code `alwaysLoad`: `true` keeps every tool of the server in the prompt, `false` puts them all behind tool search, unset keeps Claude Code's default. Other engines ignore it (added in v3.12.0) |
+
+Claude Code defers the tools of an MCP server behind tool search, so the model must search before it can call one.
+Set `always_load: true` for a server whose tools the model needs on most prompts.
 
 See [MCP & Memory](mcp.md) for the full model.
 
@@ -619,6 +626,7 @@ features:
 | `mcp_permissions` | no | Per-tier permission override for the ICM MCP's tools — see [`mcp_permissions`](#featuresmcp_permissions) below |
 | `wakeup_max_tokens` | no | Token budget for the `SessionStart` wake-up call, `20`-`4000` (added in v3.8.0) |
 | `adaptive_recall` | no | Per-session adaptive recall, `true` or `false`, default `true` (added in v3.12.0) |
+| `always_load` | no | Claude Code `alwaysLoad` for the ICM server, `true` or `false`, default `true`: the ICM tools load with the prompt instead of behind tool search. Set `false` to defer them again (added in v3.12.0) |
 | `retention` | no | Per-type retention durations for `llmenv memory prune`. While set, prune refuses to run — see [`llmenv memory prune`](commands.md#memory) (changed in v3.12.0) |
 | `consolidation` | no | Post-session memory consolidation — see [Post-session consolidation](#post-session-consolidation) below (added in v3.3.0) |
 

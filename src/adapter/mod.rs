@@ -72,6 +72,13 @@ pub(crate) fn lifecycle_hook_registrations(
     ]
 }
 
+/// The lifecycle hooks only Claude Code registers, and always (#2398), in the shape of
+/// [`lifecycle_hook_registrations`]. `post_model_switch` is Claude Code's `PostModelSwitch`; no
+/// other engine sends a model-switch event.
+pub(crate) fn claude_code_baseline_hook_registrations() -> Vec<(&'static str, bool, &'static str)> {
+    vec![("post_model_switch", true, "always registered")]
+}
+
 /// The adaptive ICM recall hooks (#2249), in the shape of
 /// [`lifecycle_hook_registrations`]. Only the Claude Code adapter registers them,
 /// so they stay out of that engine-neutral list.
@@ -1162,7 +1169,7 @@ mod tests {
                 ..Default::default()
             });
             if memory {
-                manifest.mcps.push(crate::mcp::resolve::ResolvedMcp {
+                manifest.mcps.push(crate::mcp::resolve::ResolvedMcp { always_load: None,
                     name: MEMORY_MCP_NAME.to_string(),
                     kind: crate::mcp::resolve::ResolvedKind::Remote {
                         url: "http://localhost:9999".into(),

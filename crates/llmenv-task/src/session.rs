@@ -827,6 +827,10 @@ pub struct SessionSummary {
     /// Resume context, so a fresh agent reading the rollup knows what the work is (#2339).
     #[serde(default, skip_serializing_if = "ResumeContext::is_empty")]
     pub resume: ResumeContext,
+    /// What the owning engine session runs as (#2398). The engine supplies it through
+    /// [`session_summary_with_agent`]; this crate does not read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<serde_json::Value>,
 }
 
 /// Build a [`SessionSummary`] for `session_id`.
@@ -834,6 +838,19 @@ pub struct SessionSummary {
 /// # Errors
 /// Errors if `session_id` doesn't name an existing session.
 pub fn session_summary(state_dir: &Path, session_id: &str) -> anyhow::Result<SessionSummary> {
+    session_summary_with_agent(state_dir, session_id, |_| None)
+}
+
+/// [`session_summary`] with an `agent` block. `agent_for` gets the id of the engine session that
+/// owns the task session, and only when the session has an owner.
+///
+/// # Errors
+/// Errors if `session_id` doesn't name an existing session.
+pub fn session_summary_with_agent(
+    state_dir: &Path,
+    session_id: &str,
+    agent_for: impl FnOnce(&str) -> Option<serde_json::Value>,
+) -> anyhow::Result<SessionSummary> {
     let session = list_sessions(state_dir)
         .into_iter()
         .find(|s| s.id == session_id)
@@ -861,6 +878,7 @@ pub fn session_summary(state_dir: &Path, session_id: &str) -> anyhow::Result<Ses
         })
         .collect();
 
+    let agent = session.owner_session.as_deref().and_then(agent_for);
     Ok(SessionSummary {
         id: session.id,
         name: session.name,
@@ -869,6 +887,7 @@ pub fn session_summary(state_dir: &Path, session_id: &str) -> anyhow::Result<Ses
         total,
         tasks,
         resume: session.resume,
+        agent,
     })
 }
 
@@ -2204,6 +2223,42 @@ mod tests {
         assert_eq!(one.state, TaskState::Done);
         assert_eq!(one.notes.len(), 1);
         assert_eq!(one.notes[0].text, "made progress");
+    }
+
+    #[test]
+    fn session_summary_asks_for_the_agent_block_of_the_owner_session_only() {
+        let dir = TempDir::new().expect("test");
+        let owned = start_as(
+            dir.path(),
+            "owned",
+            &owner("conv-1", 7),
+            StartDecision::Auto,
+        );
+        let summary = session_summary_with_agent(dir.path(), &owned.id, |id| {
+            Some(serde_json::json!({ "asked_for": id }))
+        })
+        .expect("test");
+        assert_eq!(
+            summary.agent,
+            Some(serde_json::json!({ "asked_for": "conv-1" }))
+        );
+
+        let loose =
+            start_session(dir.path(), None, None, PROJECT_B, StartDecision::Auto).expect("test");
+        let StartOutcome::Created(loose) = loose else {
+            panic!("expected Created");
+        };
+        let summary = session_summary_with_agent(dir.path(), &loose.id, |_| {
+            panic!("a session without an owner must not look up an agent")
+        })
+        .expect("test");
+        assert!(summary.agent.is_none());
+        assert!(
+            session_summary(dir.path(), &owned.id)
+                .expect("test")
+                .agent
+                .is_none()
+        );
     }
 
     #[test]

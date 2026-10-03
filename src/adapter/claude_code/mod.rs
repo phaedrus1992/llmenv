@@ -68,6 +68,8 @@ const COMPACT_SURVIVAL_FRAGMENT: &str = concat!(
 const BASELINE_HOOK_EVENTS: &[(&str, &str)] = &[
     ("session_start", "SessionStart"),
     ("session_end", "SessionEnd"),
+    // #2398: records the new model in the session's agent-config document.
+    ("post_model_switch", "PostModelSwitch"),
 ];
 
 /// `(engine-neutral event, native Claude event)` pairs registered for adaptive
@@ -216,6 +218,7 @@ pub struct ClaudeCodeAdapter;
 const CLAUDE_CODE_HOOK_EVENTS: &[&str] = &[
     "SessionStart",
     "SessionEnd",
+    "PostModelSwitch",
     "UserPromptSubmit",
     "PreToolUse",
     "PostToolUse",
@@ -760,7 +763,7 @@ fn build_mcp_servers(
         std::collections::BTreeMap::new();
 
     for (idx, m) in mcps.iter().enumerate() {
-        let entry = match &m.kind {
+        let mut entry = match &m.kind {
             ResolvedKind::Stdio { command, args, env } => {
                 let mut obj = json!({ "command": command, "args": args });
                 if !env.is_empty() {
@@ -782,6 +785,11 @@ fn build_mcp_servers(
                 obj
             }
         };
+
+        // #2356: the key is written only when set, so existing configs render unchanged.
+        if let Some(always_load) = m.always_load {
+            entry["alwaysLoad"] = json!(always_load);
+        }
 
         // #103: detect true same-identity-different-content conflicts.
         // If the server name already exists and the content differs, hard-error.
@@ -810,7 +818,14 @@ fn build_mcp_servers(
 /// render owns them: an absent key means "unset", so the on-disk value must not
 /// come back (#2376).
 const RENDERED_ENTRY_KEYS: &[&str] = &[
-    "type", "command", "args", "env", "url", "headers", "timeout",
+    "type",
+    "command",
+    "args",
+    "env",
+    "url",
+    "headers",
+    "timeout",
+    "alwaysLoad",
 ];
 
 /// Copy the runtime-added keys of an existing server entry (for example the
@@ -4221,6 +4236,7 @@ mod tests {
     fn cbm_manifest() -> crate::merge::MergedManifest {
         crate::merge::MergedManifest {
             mcps: vec![crate::mcp::resolve::ResolvedMcp {
+                always_load: None,
                 name: crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME.to_string(),
                 kind: crate::mcp::resolve::ResolvedKind::Stdio {
                     command: "codebase-memory-mcp".into(),
@@ -4332,6 +4348,7 @@ mod tests {
         // subagent start, so they share turn_start's memory-backend gate.
         let manifest = crate::merge::MergedManifest {
             mcps: vec![crate::mcp::resolve::ResolvedMcp {
+                always_load: None,
                 name: crate::mcp::resolve::MEMORY_MCP_NAME.to_string(),
                 kind: crate::mcp::resolve::ResolvedKind::Remote {
                     url: "http://localhost:9999".into(),
@@ -4381,6 +4398,7 @@ mod tests {
         // #2249: the rollback flag must also stop the per-tool ledger writes.
         let manifest = crate::merge::MergedManifest {
             mcps: vec![crate::mcp::resolve::ResolvedMcp {
+                always_load: None,
                 name: crate::mcp::resolve::MEMORY_MCP_NAME.to_string(),
                 kind: crate::mcp::resolve::ResolvedKind::Remote {
                     url: "http://localhost:9999".into(),
@@ -4421,6 +4439,7 @@ mod tests {
         // same manifest.mcps signal as autoMemoryEnabled, no new config field.
         let manifest = crate::merge::MergedManifest {
             mcps: vec![crate::mcp::resolve::ResolvedMcp {
+                always_load: None,
                 name: crate::mcp::resolve::MEMORY_MCP_NAME.to_string(),
                 kind: crate::mcp::resolve::ResolvedKind::Remote {
                     url: "http://localhost:9999".into(),
@@ -4574,6 +4593,7 @@ mod tests {
         // mutation allow, destructive asks.
         let manifest = crate::merge::MergedManifest {
             mcps: vec![crate::mcp::resolve::ResolvedMcp {
+                always_load: None,
                 name: crate::mcp::resolve::MEMORY_MCP_NAME.to_string(),
                 kind: crate::mcp::resolve::ResolvedKind::Remote {
                     url: "http://localhost:9999".into(),
@@ -4618,6 +4638,7 @@ mod tests {
         // the one destructive tool (delete_project) asks.
         let manifest = crate::merge::MergedManifest {
             mcps: vec![crate::mcp::resolve::ResolvedMcp {
+                always_load: None,
                 name: crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME.to_string(),
                 kind: crate::mcp::resolve::ResolvedKind::Stdio {
                     command: "codebase-memory-mcp".into(),
@@ -4667,6 +4688,7 @@ mod tests {
     fn codebase_memory_mcp_permissions_override_reaches_render() {
         let manifest = crate::merge::MergedManifest {
             mcps: vec![crate::mcp::resolve::ResolvedMcp {
+                always_load: None,
                 name: crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME.to_string(),
                 kind: crate::mcp::resolve::ResolvedKind::Stdio {
                     command: "codebase-memory-mcp".into(),
@@ -4893,6 +4915,7 @@ mod tests {
             },
         )]);
         let memory = crate::config::Memory {
+            always_load: None,
             server_host: "still".into(),
             port: 7878,
             listen_host: "127.0.0.1".into(),
@@ -5943,6 +5966,7 @@ mod tests {
 
     fn stdio_mcp(name: &str, command: &str) -> ResolvedMcp {
         ResolvedMcp {
+            always_load: None,
             name: name.into(),
             kind: ResolvedKind::Stdio {
                 command: command.into(),
@@ -5959,6 +5983,7 @@ mod tests {
 
     fn remote_mcp(name: &str, url: &str, transport: crate::config::McpTransport) -> ResolvedMcp {
         ResolvedMcp {
+            always_load: None,
             name: name.into(),
             kind: ResolvedKind::Remote {
                 url: url.into(),
@@ -6139,6 +6164,7 @@ mod tests {
             }),
         );
         let mcp = ResolvedMcp {
+            always_load: None,
             name: "icm".into(),
             kind: ResolvedKind::Stdio {
                 command: "icm-bin".into(),
@@ -6297,6 +6323,71 @@ mod tests {
         );
     }
 
+    // #2356: `alwaysLoad` is written on both transports when set, and only then.
+    #[test]
+    fn always_load_renders_on_both_transports_only_when_set() {
+        let render = |always_load: Option<bool>| {
+            let mut stdio = stdio_mcp("a", "bin");
+            stdio.always_load = always_load;
+            let mut remote =
+                remote_mcp("b", "https://x.example", crate::config::McpTransport::Http);
+            remote.always_load = always_load;
+            build_mcp_servers(&[stdio, remote]).unwrap()
+        };
+        for name in ["a", "b"] {
+            assert_eq!(
+                render(Some(true))[name]["alwaysLoad"],
+                serde_json::json!(true)
+            );
+            assert_eq!(
+                render(Some(false))[name]["alwaysLoad"],
+                serde_json::json!(false)
+            );
+            assert!(render(None)[name].get("alwaysLoad").is_none(), "{name}");
+        }
+    }
+
+    // #2356: an entry that loses `always_load` in config must not keep the old on-disk value.
+    #[test]
+    fn a_removed_always_load_is_dropped_on_rerender() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(CLAUDE_JSON_FILE);
+        write_json(
+            &path,
+            &serde_json::json!({ "mcpServers": { "icm": {
+                "type": "http", "url": "https://old.example", "alwaysLoad": true
+            } } }),
+        );
+        let remote = remote_mcp(
+            "icm",
+            "https://new.example",
+            crate::config::McpTransport::Http,
+        );
+        merge_mcp_into_claude_json(tmp.path(), &[remote], None).unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(
+            doc["mcpServers"]["icm"].get("alwaysLoad").is_none(),
+            "{doc}"
+        );
+    }
+
+    proptest! {
+        // #2356: the rendered entry has `alwaysLoad` if and only if the setting is set.
+        #[test]
+        fn always_load_renders_iff_set(setting in proptest::option::of(proptest::bool::ANY), http in proptest::bool::ANY) {
+            let mut mcp = if http {
+                remote_mcp("s", "https://x.example", crate::config::McpTransport::Http)
+            } else {
+                stdio_mcp("s", "bin")
+            };
+            mcp.always_load = setting;
+            let servers = build_mcp_servers(&[mcp]).unwrap();
+            prop_assert_eq!(servers["s"].get("alwaysLoad").and_then(serde_json::Value::as_bool), setting);
+            prop_assert_eq!(servers["s"].get("alwaysLoad").is_some(), setting.is_some());
+        }
+    }
+
     #[test]
     fn rendered_entry_keys_cover_every_key_build_mcp_servers_writes() {
         // A key the builder writes but RENDERED_ENTRY_KEYS lacks would survive a
@@ -6309,6 +6400,7 @@ mod tests {
         let mut remote = remote_mcp("b", "https://x.example", crate::config::McpTransport::Http);
         remote.headers.insert("H".into(), "V".into());
         remote.timeout = Some(5);
+        stdio.always_load = Some(true);
         let servers = build_mcp_servers(&[stdio, remote]).unwrap();
         for (name, entry) in &servers {
             for key in entry.as_object().unwrap().keys() {
@@ -7246,6 +7338,23 @@ mod tests {
     }
 
     #[test]
+    fn post_model_switch_is_registered_once_without_a_matcher() {
+        let settings = render_settings_for_test(&crate::merge::MergedManifest::default());
+        let entries = settings["hooks"]["PostModelSwitch"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].get("matcher").is_none());
+        assert_eq!(
+            hook_commands_for(&settings, "PostModelSwitch"),
+            [format!("{HOOK_RUN_COMMAND} post_model_switch")]
+        );
+        assert!(
+            ClaudeCodeAdapter
+                .supported_hook_events()
+                .contains(&"PostModelSwitch")
+        );
+    }
+
+    #[test]
     fn lifecycle_registrations_match_the_generated_settings() {
         for (label, manifest) in [
             ("bare", crate::merge::MergedManifest::default()),
@@ -7253,6 +7362,7 @@ mod tests {
                 "with memory",
                 crate::merge::MergedManifest {
                     mcps: vec![crate::mcp::resolve::ResolvedMcp {
+                        always_load: None,
                         name: crate::mcp::resolve::MEMORY_MCP_NAME.to_string(),
                         kind: crate::mcp::resolve::ResolvedKind::Remote {
                             url: "http://localhost:9999".into(),
@@ -7392,6 +7502,7 @@ mod tests {
             }
             if cbm {
                 manifest.mcps.push(crate::mcp::resolve::ResolvedMcp {
+                    always_load: None,
                     name: crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME.to_string(),
                     kind: crate::mcp::resolve::ResolvedKind::Remote {
                         url: "http://localhost:9999".into(),
