@@ -11,6 +11,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Changed
+
+- `llmenv task done` refuses a task that was never started, and `llmenv task session finish` refuses while a task is `open`, `wip`, or `waiting`. Both exit non-zero with the fix. `task done --force` and `task session finish --abandon-open` override them, and the native-tool redirect never forces. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#task) (#2416)
+- `capabilities.advisor_size` is now `capabilities.advisor_model` and renders Claude Code's `advisorModel`. Use `fable`, `opus`, `sonnet`, or a model ID. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#advisor_model-claude-code) (#2409)
+
+### Removed
+
+- `capabilities.advisor_size`. It rendered an `advisorSize` key that Claude Code never read. A config that still sets it fails validation and names `advisor_model`, and `llmenv doctor` warns about a stale `advisorSize` in a rendered `settings.json` (#2409)
+
+### Fixed
+
+- `llmenv doctor` no longer recommends `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` when `autoCompactEnabled` is `false`, and it names the `autoCompactWindow` that the percentage applies to (#2345)
+- The Stop reminder for a session with open tasks no longer offers `llmenv task session finish`, which now refuses until the tasks are finished (#2416)
+
 ## [3.12.0-alpha.1] - 2026-10-02
 
 ### Added

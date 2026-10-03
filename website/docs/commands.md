@@ -359,7 +359,7 @@ re-ingestion on the next turn.
 llmenv task add <title> [--parent SLUG | --no-parent] [--session <id>]
   [--detail <text> | --detail-file <path>]
 llmenv task start <id> [--force] [--reopen]
-llmenv task done <id>
+llmenv task done <id> [--force]
 llmenv task wait <id> [reason]
 llmenv task ls [--format json] (--session <id> | --all) [--current-project]
 llmenv task show <id> | --current | --next
@@ -374,7 +374,7 @@ llmenv task session start [name] [--description <text>] [--resume <id> | --repla
   [--memory-topic <t>]... [--doc <path>]...
 llmenv task session edit [<id>] [same flags as session start]
 llmenv task session note [text] [--id <id>]
-llmenv task session finish [<id>]
+llmenv task session finish [<id>] [--abandon-open]
 llmenv task session show [<id>]
 llmenv task session summary [<id>] [--format json]
 llmenv task session ls
@@ -415,9 +415,14 @@ unambiguous prefix of one.
   covers its whole child set (see `task block`, below). `--reopen` (added
   in v3.12.0) moves a `done` task back to `open` with a note, then starts
   it; without it, `start` refuses a `done` task.
-- `task done <id>` — mark a task complete. (changed in v3.12.0) Prints a
-  note when the task was never started (`open` straight to `done`), because
-  that jump often means a step was closed before its work was finished.
+- `task done <id> [--force]` — mark a task complete. (changed in v3.12.0)
+  Refuses a task that was never started (`open` straight to `done`) and exits
+  non-zero, because that jump means no work was tracked. Run `task start`
+  first. Pass `--force` when the work is done without tracking; it prints a
+  note that the start was skipped. A task in `wip` or `waiting` completes
+  as before, and `done` on a `done` task stays a no-op. The native-tool
+  redirect (`TaskUpdate`, `TodoWrite`) never forces: it returns the refusal as
+  the tool result.
 - `task wait <id> [reason]` — mark a task `waiting` on something outside the
   agent's control (a human review, a decision, external system access)
   instead of `wip`. `reason` is recorded as a note; reads from stdin if
@@ -537,11 +542,14 @@ project's hook.
   or a compaction — so `--resume` is the safe choice instead of `--new`.
   Outside an engine (no such variables) nothing is recorded, and resolution
   works as before.
-- `task session finish [<id>]` — close out a session; auto-resolves when
-  exactly one is open for the current project, or to the one this
-  conversation owns, otherwise pass an id. Never
-  touches its tasks' session tag — a finished session (even with incomplete
-  tasks) is a legitimate historical record.
+- `task session finish [<id>] [--abandon-open]` — close out a session;
+  auto-resolves when exactly one is open for the current project, or to the one
+  this conversation owns, otherwise pass an id. (changed in v3.12.0) Refuses
+  and exits non-zero while any task in the session is `open`, `wip`, or
+  `waiting`, and lists each one. Finish those tasks, drop one with `task
+  clear`, or pass `--abandon-open` to untag them (each gets a note) and finish
+  anyway; the output lists what it dropped. A task that is `done` keeps its
+  session tag as a historical record.
 - `task session show [<id>]` — print a session's progress; auto-resolves
   like `finish`.
 - `task session summary [<id>] [--format json]` — (added in v3.10.0) roll up
@@ -561,7 +569,8 @@ project's hook.
 
 When every task in an open session is done, the SessionStart/Stop hook
 reminders (below) nudge the agent to run `task session finish` or add more
-work to the session instead.
+work to the session instead. A session that still has an open task is never
+offered `session finish`; the reminder says to start the next task.
 
 The CLI subcommands always work. The injected `llmenv` skill guidance and
 the SessionStart/Stop lifecycle reminders are gated behind
