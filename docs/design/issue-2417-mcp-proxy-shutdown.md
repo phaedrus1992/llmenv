@@ -54,7 +54,9 @@ Issue #2358 now restarts a dead proxy at session start, but the cause is unknown
 3. **The `pkill` advice changes regardless of outcome.**
    Killing by command line is wrong on a machine with more than one proxy or more than one session.
    The notice should tell the agent to run `llmenv doctor` and, if the proxy is wedged, to restart it through llmenv.
-   Add a hidden-safe path for that: `ensure_local_memory_proxy` already restarts a dead one; add a `--restart-memory-proxy` flag to `doctor` (or a small `llmenv mcp restart-proxy` subcommand) that signals the pid from the pidfile with SIGTERM, waits up to 5 s, then respawns.
+   Add a hidden-safe path for that: `ensure_local_memory_proxy` already restarts a dead one; add a `--restart-memory-proxy` flag to `doctor` (or a small `llmenv mcp restart-proxy` subcommand) that reads the pid from the pidfile, confirms that pid's command line is an `mcp-proxy … -- icm serve` (`ps -o command= -p <pid>`), signals only then with SIGTERM, waits up to 5 s, then respawns.
+   The command-line check matters: PR #2415 chose `pkill -f` over `kill $(cat pidfile)` because a pid can be reused after the proxy dies, and a bare pidfile kill could hit an unrelated process.
+   Checking the command line of the pidfile pid keeps that protection and still touches one process, not every proxy on the machine.
    The notice names that command instead of `pkill`.
    Same change for the codebase-memory notice that suggests `pkill -f cbm-daemon-internal`, pointing to the cbm daemon's own stop command instead.
 4. **If SIGHUP from the session is confirmed, add `setsid`.**
