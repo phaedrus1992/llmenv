@@ -12,6 +12,7 @@
 //! ever becomes a real bottleneck — unlikely for a CLI task tracker.
 
 pub mod project;
+pub mod resume;
 pub mod session;
 
 use std::collections::{HashMap, HashSet};
@@ -73,6 +74,9 @@ pub struct Task {
     pub blocked_on: Vec<String>,
     #[serde(default)]
     notes: Vec<TaskNote>,
+    /// What a cold reader needs to do the task: files, acceptance criteria, gotchas (#2339).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
     /// Id of the session active when this task was created (`None` for a
     /// task added outside any session, or created before sessions existed —
     /// `#[serde(default)]` keeps old task files loadable). Set once at
@@ -486,16 +490,41 @@ pub fn add_task(
     session: SessionChoice<'_>,
     project: &str,
 ) -> anyhow::Result<Task> {
+    let new = NewTask {
+        title,
+        detail: None,
+    };
+    add_task_with(state_dir, &new, parent, session, project)
+}
+
+/// What a new task starts with.
+#[derive(Debug, Clone, Copy)]
+pub struct NewTask<'a> {
+    pub title: &'a str,
+    /// What a cold reader needs to do the task. Written in the same save that creates the task.
+    /// An empty string means no detail.
+    pub detail: Option<&'a str>,
+}
+
+/// [`add_task`] for a task that starts with a detail (#2339).
+///
+/// # Errors
+/// The same errors as [`add_task`].
+pub fn add_task_with(
+    state_dir: &Path,
+    new: &NewTask<'_>,
+    parent: ParentSpec<'_>,
+    session: SessionChoice<'_>,
+    project: &str,
+) -> anyhow::Result<Task> {
     let resolved_session = resolve_session_for_add(state_dir, session, project)?;
-    let task = add_task_for_session(state_dir, title, parent, &resolved_session)?;
+    let task = add_task_for_session_with(state_dir, new, parent, &resolved_session)?;
     touch_task_session(state_dir, &task);
     Ok(task)
 }
 
-/// `add_task`, but with the session id already resolved — skips the
-/// mandatory-session lookup dance. Used by `add_task` itself, and directly by
-/// `session.rs`'s own tests (and any caller that already has a validated
-/// session id in hand, e.g. the CLI's `--session <id>` path).
+/// A test convenience: add a task with no detail to a session whose id is already known, which
+/// skips the mandatory-session lookup. Production code calls [`add_task_for_session_with`].
 ///
 /// # Errors
 /// Errors if `parent` is [`ParentSpec::Explicit`] and doesn't resolve to an
@@ -506,6 +535,24 @@ pub fn add_task_for_session(
     parent: ParentSpec<'_>,
     session_id: &str,
 ) -> anyhow::Result<Task> {
+    let new = NewTask {
+        title,
+        detail: None,
+    };
+    add_task_for_session_with(state_dir, &new, parent, session_id)
+}
+
+/// [`add_task_for_session`] for a task that starts with a detail (#2339).
+///
+/// # Errors
+/// The same errors as [`add_task_for_session`].
+fn add_task_for_session_with(
+    state_dir: &Path,
+    new: &NewTask<'_>,
+    parent: ParentSpec<'_>,
+    session_id: &str,
+) -> anyhow::Result<Task> {
+    let title = new.title;
     with_store_lock(state_dir, || {
         let dir = tasks_dir(state_dir);
         let parent_slug = match parent {
@@ -533,6 +580,7 @@ pub fn add_task_for_session(
             parent: parent_slug,
             blocked_on: Vec::new(),
             notes: Vec::new(),
+            detail: new.detail.filter(|d| !d.is_empty()).map(str::to_string),
             session: Some(session_id.to_string()),
             created_at: now.clone(),
             updated_at: now,
@@ -903,6 +951,8 @@ pub struct TaskEdit<'a> {
     /// Remove a note, identified by its 0-based index or its exact RFC3339
     /// `at` timestamp.
     pub delete_note: Option<&'a str>,
+    /// Replace the detail. An empty string clears it.
+    pub detail: Option<&'a str>,
 }
 
 /// Mutate an existing task's title, parent, `blocked_on` set, and notes in a
@@ -960,6 +1010,10 @@ pub fn edit_task(state_dir: &Path, input: &str, edit: &TaskEdit<'_>) -> anyhow::
         if let Some(id) = edit.delete_note {
             let idx = resolve_note_index(&task.notes, id)?;
             task.notes.remove(idx);
+        }
+
+        if let Some(detail) = edit.detail {
+            task.detail = (!detail.is_empty()).then(|| detail.to_string());
         }
 
         task.updated_at = now_rfc3339();
@@ -1029,6 +1083,7 @@ fn reject_cycle(state_dir: &Path, slug: &str, new_parent: &str) -> anyhow::Resul
 pub fn session_start_reminder(state_dir: &Path) -> String {
     let tasks = tasks_for_current_project(state_dir, list_tasks(state_dir));
     combine_reminders([
+        for_current_project(|project| session::resume_reminders(state_dir, project)),
         wip_reminder(
             &tasks,
             "In-progress task(s) in this project",
@@ -1081,6 +1136,7 @@ pub fn stop_hook_reminder(state_dir: &Path) -> String {
         ),
         session_finish_reminders(state_dir),
         idle_session_reminders(state_dir),
+        for_current_project(|project| session::missing_context_reminders(state_dir, project)),
     ])
 }
 
@@ -1139,14 +1195,11 @@ fn idle_sessions(state_dir: &Path, project: &str) -> Vec<IdleSession> {
 /// [`session_finish_reminders`], it cannot tell whose session it names
 /// (#1028), so the nudge is conditioned on the agent recognizing it.
 fn idle_session_reminders(state_dir: &Path) -> String {
-    let project = match project::current_tag() {
-        Ok(project) => project,
-        Err(e) => {
-            tracing::error!("project::current_tag failed, so the task reminder is skipped: {e:#}");
-            return String::new();
-        }
-    };
-    idle_sessions(state_dir, &project)
+    for_current_project(|project| idle_reminder_lines(state_dir, project))
+}
+
+fn idle_reminder_lines(state_dir: &Path, project: &str) -> String {
+    idle_sessions(state_dir, project)
         .iter()
         .map(|idle| {
             let id = &idle.session.id;
@@ -1332,15 +1385,12 @@ fn execution_order(tasks: &[Task]) -> Vec<Task> {
 /// their bookkeeping, so the nudge is conditioned on recognizing the session
 /// rather than issued as a bare command.
 fn session_finish_reminders(state_dir: &Path) -> String {
-    let project = match project::current_tag() {
-        Ok(project) => project,
-        Err(e) => {
-            tracing::error!("project::current_tag failed, so the task reminder is skipped: {e:#}");
-            return String::new();
-        }
-    };
+    for_current_project(|project| finish_reminder_lines(state_dir, project))
+}
+
+fn finish_reminder_lines(state_dir: &Path, project: &str) -> String {
     let mut lines = Vec::new();
-    for session in session::open_sessions_for_project(state_dir, &project) {
+    for session in session::open_sessions_for_project(state_dir, project) {
         let (done, total) = session::session_progress(state_dir, &session.id);
         if total == 0 || done < total {
             continue;
@@ -1355,6 +1405,18 @@ fn session_finish_reminders(state_dir: &Path) -> String {
         ));
     }
     lines.join("\n\n")
+}
+
+/// Run `reminder` for the current project. A project tag that cannot be resolved is logged, and
+/// the reminder is skipped: a hook must never block the agent.
+fn for_current_project(reminder: impl FnOnce(&str) -> String) -> String {
+    match project::current_tag() {
+        Ok(project) => reminder(&project),
+        Err(e) => {
+            tracing::error!("project::current_tag failed, so the task reminder is skipped: {e:#}");
+            String::new()
+        }
+    }
 }
 
 /// Join non-empty reminder strings with a blank line between them; empty
@@ -2154,6 +2216,104 @@ mod tests {
     }
 
     #[test]
+    fn a_task_added_with_a_detail_stores_it_in_the_same_save() {
+        let dir = TempDir::new().expect("test");
+        let session = session::start_session(
+            dir.path(),
+            Some("s"),
+            None,
+            "p",
+            session::StartDecision::Auto,
+        )
+        .expect("start");
+        let session::StartOutcome::Created(session) = session else {
+            panic!("expected Created");
+        };
+        let new = NewTask {
+            title: "With detail",
+            detail: Some("files: a.rs"),
+        };
+        let task = add_task_for_session_with(dir.path(), &new, ParentSpec::Detached, &session.id)
+            .expect("add");
+        assert_eq!(task.detail.as_deref(), Some("files: a.rs"));
+        assert_eq!(
+            load_task(dir.path(), &task.slug)
+                .expect("load")
+                .detail
+                .as_deref(),
+            Some("files: a.rs")
+        );
+    }
+
+    #[test]
+    fn an_empty_detail_on_a_new_task_means_no_detail() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Plain", None).expect("test");
+        assert_eq!(task.detail, None);
+        let new = NewTask {
+            title: "Empty detail",
+            detail: Some(""),
+        };
+        let session_id = task.session.clone().expect("session");
+        let added = add_task_for_session_with(dir.path(), &new, ParentSpec::Detached, &session_id)
+            .expect("add");
+        assert_eq!(added.detail, None);
+    }
+
+    #[test]
+    fn edit_task_sets_replaces_and_clears_the_detail() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Has detail", None).expect("test");
+        assert_eq!(task.detail, None);
+        let set = |text| TaskEdit {
+            detail: Some(text),
+            ..Default::default()
+        };
+        let first = edit_task(dir.path(), &task.slug, &set("files: a.rs")).expect("test");
+        assert_eq!(first.detail.as_deref(), Some("files: a.rs"));
+        let second = edit_task(dir.path(), &task.slug, &set("files: b.rs")).expect("test");
+        assert_eq!(second.detail.as_deref(), Some("files: b.rs"));
+        let cleared = edit_task(dir.path(), &task.slug, &set("")).expect("test");
+        assert_eq!(cleared.detail, None);
+    }
+
+    #[test]
+    fn an_edit_without_detail_keeps_the_detail() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Keeps detail", None).expect("test");
+        let set = TaskEdit {
+            detail: Some("keep me"),
+            ..Default::default()
+        };
+        edit_task(dir.path(), &task.slug, &set).expect("test");
+        let retitle = TaskEdit {
+            title: Some("Retitled"),
+            ..Default::default()
+        };
+        let after = edit_task(dir.path(), &task.slug, &retitle).expect("test");
+        assert_eq!(after.detail.as_deref(), Some("keep me"));
+    }
+
+    #[test]
+    fn a_task_file_written_before_detail_existed_still_loads() {
+        let old = r#"{"slug":"old","title":"Old","created_at":"2026-01-01T00:00:00Z",
+            "updated_at":"2026-01-01T00:00:00Z"}"#;
+        let task: Task = serde_json::from_str(old).expect("old file loads");
+        assert_eq!(task.detail, None);
+    }
+
+    #[test]
+    fn a_task_without_detail_does_not_write_the_field() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Plain", None).expect("test");
+        assert!(
+            !serde_json::to_string(&task)
+                .expect("test")
+                .contains("detail")
+        );
+    }
+
+    #[test]
     fn edit_task_sets_and_clears_parent() {
         let dir = TempDir::new().expect("test");
         let parent = mk(dir.path(), "Parent", None).expect("test");
@@ -2428,6 +2588,90 @@ mod tests {
         let reminder = session_start_reminder(dir.path());
         assert!(reminder.contains("In progress task"));
         assert!(reminder.contains(&task.slug));
+    }
+
+    #[test]
+    fn session_start_reminder_includes_resume_context_for_an_open_session() {
+        let dir = TempDir::new().expect("test");
+        let project = project::current_tag().expect("project tag");
+        let owner = session::EngineIdentity::default();
+        let resume = resume::ResumeContext {
+            context: Some("pick up at step 4".to_string()),
+            issues: vec![2339],
+            ..Default::default()
+        };
+        let request = session::StartRequest {
+            name: Some("s"),
+            description: None,
+            project: &project,
+            owner: &owner,
+            resume: &resume,
+        };
+        session::start_session_as(dir.path(), &request, session::StartDecision::Auto)
+            .expect("start");
+        let reminder = session_start_reminder(dir.path());
+        assert!(reminder.contains("pick up at step 4"), "{reminder}");
+        assert!(reminder.contains("gh issue view 2339"), "{reminder}");
+    }
+
+    fn start_session_here(dir: &Path, resume: &resume::ResumeContext) -> session::Session {
+        let project = project::current_tag().expect("project tag");
+        let owner = session::EngineIdentity::default();
+        let request = session::StartRequest {
+            name: Some("s"),
+            description: None,
+            project: &project,
+            owner: &owner,
+            resume,
+        };
+        match session::start_session_as(dir, &request, session::StartDecision::Auto).expect("start")
+        {
+            session::StartOutcome::Created(s) => s,
+            other => panic!("expected Created, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stop_reminder_names_a_session_with_open_tasks_and_no_resume_context() {
+        let dir = TempDir::new().expect("test");
+        let created = start_session_here(dir.path(), &resume::ResumeContext::default());
+        add_task_for_session(dir.path(), "Step", ParentSpec::Detached, &created.id).expect("add");
+        let reminder = stop_hook_reminder(dir.path());
+        assert!(reminder.contains("no resume context"), "{reminder}");
+        assert!(reminder.contains("task session edit"), "{reminder}");
+        assert!(
+            reminder.contains("recognize"),
+            "must not presume ownership: {reminder}"
+        );
+    }
+
+    #[test]
+    fn stop_reminder_stays_quiet_about_context_when_it_is_set_or_no_task_is_open() {
+        let with_context = TempDir::new().expect("test");
+        let resume = resume::ResumeContext {
+            issues: vec![1],
+            ..Default::default()
+        };
+        let created = start_session_here(with_context.path(), &resume);
+        add_task_for_session(
+            with_context.path(),
+            "Step",
+            ParentSpec::Detached,
+            &created.id,
+        )
+        .expect("add");
+        assert!(!stop_hook_reminder(with_context.path()).contains("no resume context"));
+
+        let no_tasks = TempDir::new().expect("test");
+        start_session_here(no_tasks.path(), &resume::ResumeContext::default());
+        assert!(!stop_hook_reminder(no_tasks.path()).contains("no resume context"));
+
+        let all_done = TempDir::new().expect("test");
+        let created = start_session_here(all_done.path(), &resume::ResumeContext::default());
+        let task = add_task_for_session(all_done.path(), "Step", ParentSpec::Detached, &created.id)
+            .expect("add");
+        complete_task(all_done.path(), &task.slug).expect("done");
+        assert!(!stop_hook_reminder(all_done.path()).contains("no resume context"));
     }
 
     #[test]
@@ -2836,6 +3080,7 @@ mod tests {
             parent: parent.map(str::to_string),
             blocked_on: Vec::new(),
             notes: Vec::new(),
+            detail: None,
             session: session.map(str::to_string),
             // Identical timestamps on purpose: exercises the slug tiebreak.
             created_at: "2026-01-01T00:00:00Z".to_string(),
@@ -3265,6 +3510,7 @@ mod tests {
                 proptest::option::of(".{1,30}"),
                 proptest::collection::vec(".{1,30}", 0..4),
                 proptest::collection::vec(arb_task_note(), 0..4),
+                proptest::option::of(".{1,60}"),
                 proptest::option::of(".{1,30}"),
                 ".{1,30}",
                 ".{1,30}",
@@ -3277,6 +3523,7 @@ mod tests {
                         parent,
                         blocked_on,
                         notes,
+                        detail,
                         session,
                         created_at,
                         updated_at,
@@ -3288,6 +3535,7 @@ mod tests {
                             parent,
                             blocked_on,
                             notes,
+                            detail,
                             session,
                             created_at,
                             updated_at,
@@ -3334,6 +3582,7 @@ mod tests {
                                 parent,
                                 blocked_on: Vec::new(),
                                 notes: Vec::new(),
+                                detail: None,
                                 session: Some("s".to_string()),
                                 created_at: format!("2026-01-01T00:00:{:02}Z", i.min(59)),
                                 updated_at: "2026-01-01T00:00:00Z".to_string(),
@@ -3392,6 +3641,7 @@ mod tests {
                             parent,
                             blocked_on,
                             notes: Vec::new(),
+                            detail: None,
                             session: Some("s".to_string()),
                             created_at: format!("2026-01-01T00:00:{:02}Z", i.min(59)),
                             updated_at: "2026-01-01T00:00:00Z".to_string(),
@@ -3607,6 +3857,7 @@ mod tests {
                             parent: None,
                             blocked_on: Vec::new(),
                             notes: Vec::new(),
+                            detail: None,
                             session,
                             created_at: "2026-01-01T00:00:00Z".to_string(),
                             updated_at: "2026-01-01T00:00:00Z".to_string(),
@@ -3756,6 +4007,7 @@ mod tests {
                     parent: None,
                     blocked_on: Vec::new(),
                     notes: Vec::new(),
+                    detail: None,
                     session: Some("s".to_string()),
                     created_at: "2026-01-01T00:00:00Z".to_string(),
                     updated_at: "2026-01-01T00:00:00Z".to_string(),

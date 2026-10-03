@@ -119,7 +119,7 @@ pub(crate) struct MergedMemory<'a> {
     firing: Vec<&'a crate::config::Bundle>,
     bundle_refs: Vec<crate::merge::BundleRef>,
     pub(crate) memory: Vec<crate::config::Memory>,
-    host: std::collections::BTreeMap<String, crate::config::HostEntry>,
+    pub(crate) host: std::collections::BTreeMap<String, crate::config::HostEntry>,
 }
 
 /// Merge the memory and host entries for the active scopes. Endpoint resolution and

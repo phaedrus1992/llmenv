@@ -963,7 +963,6 @@ SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [lazy_static 1.5.0](https://github.com/rust-lang-nursery/lazy-static.rs)
 - [rayon-core 1.13.0](https://github.com/rayon-rs/rayon)
 - [rayon 1.12.0](https://github.com/rayon-rs/rayon)
 
@@ -2324,7 +2323,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [tokio-rustls 0.26.5](https://github.com/rustls/tokio-rustls)
+- [tokio-rustls 0.26.6](https://github.com/rustls/tokio-rustls)
 
 ```
 Copyright (c) 2017 quininer kel
@@ -3307,7 +3306,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [hyper-util 0.1.20](https://github.com/hyperium/hyper-util)
+- [hyper-util 0.1.21](https://github.com/hyperium/hyper-util)
 
 ```
 Copyright (c) 2023-2025 Sean McArthur
@@ -4009,6 +4008,7 @@ Used by:
 - [fastrand 2.5.0](https://github.com/smol-rs/fastrand)
 - [hermit-abi 0.5.3](https://github.com/hermit-os/hermit-rs)
 - [itoa 1.0.18](https://github.com/dtolnay/itoa)
+- [lazy_static 1.5.1](https://github.com/rust-lang-nursery/lazy-static.rs)
 - [linux-raw-sys 0.12.1](https://github.com/sunfishcode/linux-raw-sys)
 - [once_cell 1.21.4](https://github.com/matklad/once_cell)
 - [pin-project-lite 0.2.17](https://github.com/taiki-e/pin-project-lite)
@@ -5182,7 +5182,7 @@ Used by:
 - [potential_utf 0.1.6](https://github.com/unicode-org/icu4x)
 - [tinystr 0.8.4](https://github.com/unicode-org/icu4x)
 - [writeable 0.6.4](https://github.com/unicode-org/icu4x)
-- [yoke-derive 0.8.3](https://github.com/unicode-org/icu4x)
+- [yoke-derive 0.8.4](https://github.com/unicode-org/icu4x)
 - [yoke 0.8.3](https://github.com/unicode-org/icu4x)
 - [zerofrom-derive 0.1.8](https://github.com/unicode-org/icu4x)
 - [zerofrom 0.1.8](https://github.com/unicode-org/icu4x)
