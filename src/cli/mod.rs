@@ -2884,8 +2884,9 @@ fn sync_plugin_payloads(
             };
             let Some(entry) = entries.iter().find(|e| e.name == p.plugin) else {
                 tracing::warn!(
-                    "plugin '{}' not found in marketplace '{}' manifest — \
-                     verify plugin name or run `llmenv plugin-sync` to refresh the clone",
+                    "plugin '{}' not found in marketplace '{}' manifest — verify plugin name, \
+                     look for an earlier warning that skipped its entry, or run \
+                     `llmenv plugin-sync` to refresh the clone",
                     p.plugin,
                     p.marketplace
                 );
@@ -2909,7 +2910,7 @@ fn sync_plugin_payloads(
                 }
                 Err(e) => {
                     eprintln!(
-                        "warning: external plugin '{}@{}' payload lookup failed: {e}",
+                        "warning: external plugin '{}@{}' payload lookup failed: {e:#}",
                         p.plugin, p.marketplace
                     );
                 }
@@ -4611,7 +4612,8 @@ fn run_plugin_sync() -> anyhow::Result<()> {
         let Some(entry) = plugins.iter().find(|p| p.name == *plugin_name) else {
             eprintln!(
                 "✗ {plugin_name}@{mkt_name}: not found in marketplace manifest after sync — \
-                 check that the plugin name matches an entry in {mkt_name}"
+                 check that the plugin name matches an entry in {mkt_name}, and look for an \
+                 earlier warning that skipped the entry"
             );
             missing_plugins.push(format!("{plugin_name}@{mkt_name}"));
             continue;

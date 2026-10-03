@@ -354,8 +354,8 @@ pub(crate) fn read_marketplace_plugins(
 }
 
 /// Parse one `plugins[]` entry of a marketplace manifest. `Ok(None)` skips an entry that cannot
-/// be used, with a warning on stderr. An `Err` is a malformed github source, and the caller
-/// skips the entry with the error as the warning.
+/// be used, with a warning on stderr. An `Err` is a malformed source (github, git-subdir, or a
+/// pin), and the caller skips the entry with the error as the warning.
 fn parse_plugin_entry(entry: &serde_json::Value) -> Result<Option<MarketplacePluginEntry>> {
     let name = match entry.get("name").and_then(|v| v.as_str()) {
         Some(n) => n.to_string(),
@@ -468,6 +468,16 @@ fn is_commit_sha(text: &str) -> bool {
 /// # Errors
 /// `sha` is not a full commit id, or `ref` is empty, has a `#`, or is unsafe for git.
 fn pin_source(name: &str, base: &str, raw: &serde_json::Value) -> Result<String> {
+    // A pin that is present but not a string would otherwise read as no pin, and the plugin
+    // would float on the default branch.
+    for key in ["sha", "ref"] {
+        if raw.get(key).is_some_and(|v| !v.is_string()) {
+            anyhow::bail!(
+                "marketplace entry '{name}': \"{key}\" is not a string. Set \"{key}\" to a \
+                 string, or remove it"
+            );
+        }
+    }
     let text = |key: &str| raw.get(key).and_then(|v| v.as_str());
     let pin = match (text("sha"), text("ref")) {
         (Some(sha), _) if is_commit_sha(sha) => sha,
@@ -733,10 +743,13 @@ fn reject_unsafe_source(source: &str) -> Result<()> {
         ));
     }
     let lower = source.to_ascii_lowercase();
-    if lower.starts_with("ext::")
-        || lower.starts_with("fd::")
+    // `<helper>::<address>` runs the `git-remote-<helper>` program, and `git://` is plaintext and
+    // unauthenticated, like `http://`.
+    let base = lower.split('#').next().unwrap_or(&lower);
+    if base.contains("::")
         || lower.starts_with("file:")
         || lower.starts_with("http://")
+        || lower.starts_with("git://")
     {
         return Err(anyhow::anyhow!(
             "marketplace source uses a disallowed git transport: {source}"
@@ -793,8 +806,15 @@ fn run_git(args: &[&str], cwd: &Path, source: &str) -> Result<()> {
 /// partial clone, so a retry starts clean.
 fn git_clone_commit(url: &str, sha: &str, dest: &Path, source: &str) -> Result<()> {
     std::fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
+    let occupied = std::fs::read_dir(dest)
+        .with_context(|| format!("reading {}", dest.display()))?
+        .next()
+        .is_some();
+    if occupied {
+        anyhow::bail!("{} is not empty; cannot clone into it", dest.display());
+    }
     let result = run_git(&["init", "--quiet"], dest, source)
-        .and_then(|()| run_git(&["remote", "add", "origin", url], dest, source))
+        .and_then(|()| run_git(&["remote", "add", "--", "origin", url], dest, source))
         .and_then(|()| {
             run_git(
                 &["fetch", "--quiet", "--depth", "1", "origin", sha],
@@ -809,8 +829,10 @@ fn git_clone_commit(url: &str, sha: &str, dest: &Path, source: &str) -> Result<(
                 source,
             )
         });
-    if result.is_err() {
-        let _ = std::fs::remove_dir_all(dest);
+    if result.is_err()
+        && let Err(e) = std::fs::remove_dir_all(dest)
+    {
+        tracing::warn!("cannot remove the partial clone at {}: {e}", dest.display());
     }
     result
 }
@@ -1089,6 +1111,28 @@ mod tests {
     }
 
     #[test]
+    fn reject_unsafe_source_rejects_remote_helpers_and_plaintext_git() {
+        for source in [
+            "ext::sh -c evil",
+            "fd::3",
+            "foo::bar",
+            "git://github.com/o/n.git",
+            "GIT://github.com/o/n.git#v1",
+            "foo::bar#v1",
+        ] {
+            assert!(reject_unsafe_source(source).is_err(), "{source}");
+        }
+        for source in [
+            "https://github.com/o/n.git",
+            "git@github.com:o/n.git",
+            "ssh://git@host/o/n.git#v1::x",
+        ] {
+            // A `::` after the pin marker is part of a ref, not a helper.
+            assert!(reject_unsafe_source(source).is_ok(), "{source}");
+        }
+    }
+
+    #[test]
     fn reject_unsafe_source_rejects_empty_pin() {
         // `url#` with nothing after the `#` would otherwise reach
         // `git clone --branch ""`, a cryptic downstream failure instead of a
@@ -1261,9 +1305,6 @@ mod tests {
         );
     }
 
-    // #1198: plugin-payloads/ is a sibling tree to marketplaces/, not nested
-    // under it — #1196's marketplace_cache_root fix doesn't cover it.
-    #[cfg(unix)]
     /// A git backend that records its calls and marks each clone with the source it came from.
     #[derive(Default)]
     struct CallLog(std::sync::Mutex<Vec<String>>);
@@ -1367,6 +1408,9 @@ mod tests {
         );
     }
 
+    // #1198: plugin-payloads/ is a sibling tree to marketplaces/, not nested
+    // under it — #1196's marketplace_cache_root fix doesn't cover it.
+    #[cfg(unix)]
     #[test]
     fn sync_external_plugin_creates_payload_parent_owner_only() {
         use std::os::unix::fs::PermissionsExt;
@@ -1692,6 +1736,65 @@ mod tests {
     }
 
     #[test]
+    fn a_pin_that_is_not_a_string_is_an_error_not_an_unpinned_clone() {
+        for raw in [
+            serde_json::json!({"sha": 123}),
+            serde_json::json!({"sha": null}),
+            serde_json::json!({"ref": false}),
+            serde_json::json!({"ref": ["main"]}),
+        ] {
+            let err = pin_source("e", "https://x/y.git", &raw)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("'e'") && err.contains("not a string"), "{err}");
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn a_commit_id_is_exactly_40_or_64_hex_digits(text in "\\PC{0,70}") {
+            let want = matches!(text.len(), 40 | 64) && text.chars().all(|c| c.is_ascii_hexdigit());
+            proptest::prop_assert_eq!(is_commit_sha(&text), want);
+        }
+
+        #[test]
+        fn a_valid_commit_id_is_always_accepted(sha in "[0-9a-fA-F]{40}|[0-9a-fA-F]{64}") {
+            proptest::prop_assert!(is_commit_sha(&sha));
+        }
+
+        #[test]
+        fn a_pinned_source_splits_back_into_its_url_and_pin(
+            host in "[a-z]{1,10}",
+            r in "[A-Za-z0-9][A-Za-z0-9._/-]{0,20}",
+        ) {
+            let base = format!("https://{host}.example/o/n.git");
+            let raw = serde_json::json!({"ref": r});
+            let pinned = pin_source("e", &base, &raw).unwrap();
+            proptest::prop_assert_eq!(split_source_ref(&pinned), (base.as_str(), Some(r.as_str())));
+        }
+
+        #[test]
+        fn a_sha_beats_a_ref_and_no_pin_leaves_the_url_alone(
+            sha in "[0-9a-f]{40}",
+            r in "[A-Za-z0-9]{1,10}",
+        ) {
+            let base = "https://x.example/o/n.git";
+            let both = pin_source("e", base, &serde_json::json!({"sha": sha, "ref": r})).unwrap();
+            proptest::prop_assert_eq!(both, format!("{base}#{sha}"));
+            proptest::prop_assert_eq!(pin_source("e", base, &serde_json::json!({})).unwrap(), base);
+        }
+
+        #[test]
+        fn a_cleaned_subdir_is_idempotent_and_has_no_unsafe_parts(path in "\\PC{0,30}") {
+            if let Ok(clean) = clean_subdir("e", &path) {
+                proptest::prop_assert_eq!(clean_subdir("e", &clean).unwrap(), clean.clone());
+                proptest::prop_assert!(!clean.starts_with('/') && !clean.ends_with('/'));
+                proptest::prop_assert!(clean.split('/').all(|p| !p.is_empty() && p != "." && p != ".."));
+            }
+        }
+    }
+
+    #[test]
     fn a_git_subdir_source_carries_its_directory_pin_and_shorthand() {
         let plugins = read_manifest(&format!(
             r#"{{"name": "a", "source": {{"source": "git-subdir", "url": "your-org/monorepo", "path": "tools/my-plugin"}}}},
@@ -1751,6 +1854,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_subdir_root_is_inside_the_clone() {
         let dir = tempfile::tempdir().unwrap();
