@@ -116,6 +116,15 @@ features:
     default_topics: ["context-{project}", preferences]
 ```
 
+### Tool search and the ICM tools (added in v3.12.0)
+
+Claude Code defers the tools of an MCP server behind tool search:
+before the model can call a deferred tool, it must call `ToolSearch`.
+The instructions tell the model to use the `icm_*` tools on most prompts,
+so llmenv renders `alwaysLoad: true` for the ICM server by default, and its tools arrive with the prompt.
+Set `always_load: false` on the `features.memory` entry to defer them again.
+A server in `mcp:` takes the same field; see [`mcp:`](configuration.md#mcp).
+
 ### How the topology is resolved
 
 1. Scopes are evaluated against the current environment; the active host-scope

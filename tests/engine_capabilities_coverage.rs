@@ -283,6 +283,7 @@ fn o3_true_conflict_same_identity_different_content_mcp_servers() {
     let manifest = llmenv::merge::MergedManifest {
         mcps: vec![
             ResolvedMcp {
+                always_load: None,
                 name: "my-server".into(),
                 kind: ResolvedKind::Stdio {
                     command: "python3".into(),
@@ -296,6 +297,7 @@ fn o3_true_conflict_same_identity_different_content_mcp_servers() {
                 memory_hook: None,
             },
             ResolvedMcp {
+                always_load: None,
                 name: "my-server".into(),
                 kind: ResolvedKind::Stdio {
                     command: "python3".into(),
@@ -763,6 +765,7 @@ fn d3_mcp_servers_present_when_resolved() {
 
     let manifest = llmenv::merge::MergedManifest {
         mcps: vec![ResolvedMcp {
+            always_load: None,
             name: "test-server".into(),
             kind: ResolvedKind::Stdio {
                 command: "python3".into(),

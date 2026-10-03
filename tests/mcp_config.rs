@@ -32,6 +32,7 @@ fn read_claude_json(out: &std::path::Path) -> serde_json::Value {
 
 fn stdio(name: &str, command: &str, args: &[&str]) -> ResolvedMcp {
     ResolvedMcp {
+        always_load: None,
         name: name.into(),
         kind: ResolvedKind::Stdio {
             command: command.into(),
@@ -48,6 +49,7 @@ fn stdio(name: &str, command: &str, args: &[&str]) -> ResolvedMcp {
 
 fn remote(name: &str, url: &str) -> ResolvedMcp {
     ResolvedMcp {
+        always_load: None,
         name: name.into(),
         kind: ResolvedKind::Remote {
             url: url.into(),

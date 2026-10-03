@@ -45,6 +45,10 @@ pub struct ResolvedMcp {
     /// MCP (#1216, #2249). `None` for every other server. Consumed by
     /// `hook_run`'s live dispatch pipeline, not by static materialization.
     pub memory_hook: Option<MemoryHookSettings>,
+    /// Claude Code `alwaysLoad` (#2356): `Some(true)` keeps the server's tools out of tool-search
+    /// deferral, `Some(false)` defers them all, `None` leaves Claude Code's default. Rendered by
+    /// the Claude Code adapter only.
+    pub always_load: Option<bool>,
 }
 
 /// Settings that `hook_run` reads from the active `features.memory` entry.
@@ -236,6 +240,7 @@ fn resolve_static(m: &McpServer) -> Result<ResolvedMcp, ResolveError> {
         disabled_tools: m.disabled_tools.clone(),
         mcp_permissions: None,
         memory_hook: None,
+        always_load: m.always_load,
     })
 }
 
@@ -271,6 +276,8 @@ fn resolve_memory(
             default_type: mem.default_type,
             default_importance: mem.default_importance,
         }),
+        // #2356: the ICM tools are used on most prompts, so they load up front by default.
+        always_load: Some(mem.always_load.unwrap_or(true)),
     })
 }
 
@@ -317,6 +324,8 @@ fn resolve_codebase_memory(
         disabled_tools: vec![],
         mcp_permissions: cm.mcp_permissions.clone(),
         memory_hook: None,
+        // Its tools are used on demand, so tool search fits them (#2356).
+        always_load: None,
     }
 }
 
@@ -445,6 +454,7 @@ mod tests {
 
     fn memory() -> Memory {
         Memory {
+            always_load: None,
             server_host: "still".into(),
             port: 7878,
             listen_host: "127.0.0.1".into(), // mirrors schema::default_listen_host()
@@ -487,6 +497,41 @@ mod tests {
             Some("Bearer tok")
         );
         assert_eq!(resolved[0].timeout, Some(30));
+    }
+
+    // #2356: always_load survives resolution on both transports, and unset stays unset.
+    #[test]
+    fn always_load_flows_through_resolution() {
+        let mut stdio = stdio_server("a", &["t"], "bin");
+        stdio.always_load = Some(false);
+        let mut remote = stdio_server("b", &["t"], "bin");
+        remote.transport = McpTransport::Http;
+        remote.command = None;
+        remote.url = Some("https://b.example/mcp".to_string());
+        remote.always_load = Some(true);
+        let unset = stdio_server("c", &["t"], "bin");
+        let resolved =
+            resolve_mcps(&[stdio, remote, unset], &[], &base_host(), &tags(&["t"])).unwrap();
+        let by_name = |n: &str| resolved.iter().find(|r| r.name == n).unwrap().always_load;
+        assert_eq!(by_name("a"), Some(false));
+        assert_eq!(by_name("b"), Some(true));
+        assert_eq!(by_name("c"), None);
+    }
+
+    // #2356: the built-in ICM entry loads its tools up front unless the config says otherwise.
+    #[test]
+    fn the_memory_entry_defaults_to_always_load_and_honors_the_setting() {
+        let mut mem = memory();
+        mem.when = vec!["t".to_string()];
+        let load = |setting: Option<bool>| {
+            let mut m = mem.clone();
+            m.always_load = setting;
+            let resolved = resolve_mcps(&[], &[m], &base_host(), &tags(&["t"])).unwrap();
+            resolved[0].always_load
+        };
+        assert_eq!(load(None), Some(true));
+        assert_eq!(load(Some(true)), Some(true));
+        assert_eq!(load(Some(false)), Some(false));
     }
 
     #[test]
@@ -585,6 +630,7 @@ mod tests {
     #[test]
     fn memory_ambiguous_errors() {
         let home = Memory {
+            always_load: None,
             server_host: "still".into(),
             port: 9092,
             listen_host: "127.0.0.1".into(),
@@ -601,6 +647,7 @@ mod tests {
             adaptive_recall: true,
         };
         let work = Memory {
+            always_load: None,
             server_host: "hesitation-marks".into(),
             port: 9092,
             listen_host: "127.0.0.1".into(),
@@ -634,6 +681,7 @@ mod tests {
     fn memory_scoped_selects_matching_entry() {
         // Two daemons with different tags: only the one matching active tags resolves.
         let home = Memory {
+            always_load: None,
             server_host: "still".into(),
             port: 9092,
             listen_host: "127.0.0.1".into(),
@@ -650,6 +698,7 @@ mod tests {
             adaptive_recall: true,
         };
         let work = Memory {
+            always_load: None,
             server_host: "hesitation-marks".into(),
             port: 9092,
             listen_host: "127.0.0.1".into(),
@@ -698,6 +747,10 @@ mod tests {
         };
         let resolved = resolve_codebase_memory(&cm, Path::new("/repos/proj"), Path::new("/state"));
         assert_eq!(resolved.name, CODEBASE_MEMORY_MCP_NAME);
+        assert_eq!(
+            resolved.always_load, None,
+            "its tools suit tool search (#2356)"
+        );
         match resolved.kind {
             ResolvedKind::Stdio { command, args, env } => {
                 assert_eq!(command, "codebase-memory-mcp");

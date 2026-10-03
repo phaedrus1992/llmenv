@@ -8,6 +8,7 @@
 
 pub(crate) mod action;
 mod adaptive;
+pub(crate) mod agent_config;
 pub(crate) mod cbm_index_guard;
 pub(crate) mod cd_guard;
 pub(crate) mod checkpoint;
@@ -188,6 +189,9 @@ pub enum HookEvent {
     /// An `Agent` tool call is about to run (Claude Code: `PreToolUse` with the
     /// `^Agent$` matcher); queues the subagent task for adaptive recall (#2249).
     SubagentTask,
+    /// The model changed (Claude Code: `PostModelSwitch`); updates the session's
+    /// agent-config document (#2398). Emits nothing.
+    PostModelSwitch,
 }
 
 impl FromStr for HookEvent {
@@ -209,11 +213,12 @@ impl FromStr for HookEvent {
             "post_tool_use_failure" => Ok(HookEvent::PostToolUseFailure),
             "subagent_start" => Ok(HookEvent::SubagentStart),
             "subagent_task" => Ok(HookEvent::SubagentTask),
+            "post_model_switch" => Ok(HookEvent::PostModelSwitch),
             other => Err(anyhow::anyhow!(
                 "unknown hook event '{other}' (expected session_start|turn_start|session_end|\
                  user_prompt_submit|pre_tool_use|post_tool_use|notification|stop|\
                  subagent_stop|pre_compact|post_tool_batch|post_tool_use_failure|\
-                 subagent_start|subagent_task)"
+                 subagent_start|subagent_task|post_model_switch)"
             )),
         }
     }
@@ -237,6 +242,7 @@ impl std::fmt::Display for HookEvent {
             HookEvent::PostToolUseFailure => "post_tool_use_failure",
             HookEvent::SubagentStart => "subagent_start",
             HookEvent::SubagentTask => "subagent_task",
+            HookEvent::PostModelSwitch => "post_model_switch",
         };
         f.write_str(s)
     }
@@ -283,7 +289,8 @@ fn dispatch(
         | HookEvent::PostToolBatch
         | HookEvent::PostToolUseFailure
         | HookEvent::SubagentStart
-        | HookEvent::SubagentTask => vec![],
+        | HookEvent::SubagentTask
+        | HookEvent::PostModelSwitch => vec![],
         HookEvent::PostSession => vec![], // consolidation runs as a separate step
     }
 }
@@ -356,7 +363,8 @@ fn event_to_log_kind(event: HookEvent) -> Option<(EventKind, &'static str)> {
         HookEvent::PostToolBatch
         | HookEvent::PostToolUseFailure
         | HookEvent::SubagentStart
-        | HookEvent::SubagentTask => None,
+        | HookEvent::SubagentTask
+        | HookEvent::PostModelSwitch => None,
     }
 }
 
@@ -402,7 +410,8 @@ fn event_content(event: HookEvent, payload: &serde_json::Value) -> (Option<Strin
         | HookEvent::PostToolBatch
         | HookEvent::PostToolUseFailure
         | HookEvent::SubagentStart
-        | HookEvent::SubagentTask => (None, String::new()),
+        | HookEvent::SubagentTask
+        | HookEvent::PostModelSwitch => (None, String::new()),
     }
 }
 
@@ -1208,6 +1217,24 @@ fn run_inner(
         return Ok(reminder);
     }
 
+    // #2398: a model switch only updates the session's agent-config document. It needs no scope
+    // and no memory call, so it returns before the pipeline below.
+    if event == HookEvent::PostModelSwitch {
+        match (claude_session_id, crate::paths::state_dir()) {
+            (Some(session_id), Ok(state_dir)) => agent_config::record_model_switch(
+                &state_dir,
+                session_id,
+                stdin_payload,
+                adapter_name,
+                session_state::unix_now(),
+            ),
+            (None, _) => tracing::debug!("post_model_switch has no session id, skipped"),
+            (_, Err(e)) => tracing::error!("no state dir, model switch not recorded: {e}"),
+        }
+        emit_trace_timing(t0, t_config, None, None, None);
+        return Ok(String::new());
+    }
+
     // #867: the rest of the pipeline (scope evaluation, tag/bundle recall
     // query validation, memory URL/MCP resolution, tokio runtime
     // construction) is fallible, and an error anywhere in it propagates via
@@ -1412,6 +1439,14 @@ fn run_inner(
             ctx: &ctx,
             state_path: state_path.as_deref(),
         };
+        let agent_line = agent_config::record_for_event(
+            event,
+            claude_session_id,
+            stdin_payload,
+            adapter_name,
+            &ctx,
+            crate::paths::state_dir(),
+        );
         let health_notice = if event == HookEvent::SessionStart {
             mcp_health::session_start_notice(rt, &config, config_dir, &active)
         } else {
@@ -1487,6 +1522,13 @@ fn run_inner(
                     notice.clone()
                 } else {
                     format!("{notice}\n{out}")
+                };
+            }
+            if let Some(line) = &agent_line {
+                out = if out.is_empty() {
+                    line.clone()
+                } else {
+                    format!("{line}\n{out}")
                 };
             }
             run_session_log(event, &session_log, stdin_payload).await;
@@ -2990,6 +3032,7 @@ mod tests {
         "post_tool_use_failure",
         "subagent_start",
         "subagent_task",
+        "post_model_switch",
     ];
 
     #[test]
@@ -3336,6 +3379,7 @@ mod tests {
             ("post_tool_use_failure", HookEvent::PostToolUseFailure),
             ("subagent_start", HookEvent::SubagentStart),
             ("subagent_task", HookEvent::SubagentTask),
+            ("post_model_switch", HookEvent::PostModelSwitch),
         ] {
             assert_eq!(name.parse::<HookEvent>().unwrap(), event);
             assert_eq!(event.to_string(), name);
@@ -3361,7 +3405,7 @@ mod tests {
         }
         // `HookEvent` derives no variant count, so this guards the list
         // against a variant added to the enum but not to `from_str`.
-        assert_eq!(ALL_HOOK_EVENTS.len(), 15);
+        assert_eq!(ALL_HOOK_EVENTS.len(), 16);
     }
 
     // The gate is fed `AgentAdapter::name` (hyphenated), not `engine_id`
@@ -3690,6 +3734,7 @@ mod tests {
         let key = crate::merge::merge_signature(&config.capabilities, &config.native, &bundle_refs)
             .expect("test");
         let persisted_memory = vec![crate::config::Memory {
+            always_load: None,
             server_host: "still".into(),
             port: 7878,
             listen_host: "127.0.0.1".into(),
@@ -4086,6 +4131,7 @@ mod tests {
         let config = crate::config::Config {
             features: Some(crate::config::Features {
                 memory: vec![crate::config::Memory {
+                    always_load: None,
                     server_host: "still".into(),
                     port: 7878,
                     listen_host: "127.0.0.1".into(),
@@ -4136,6 +4182,7 @@ mod tests {
         let config = crate::config::Config {
             features: Some(crate::config::Features {
                 memory: vec![crate::config::Memory {
+                    always_load: None,
                     server_host: "still".into(),
                     port: 7878,
                     listen_host: "127.0.0.1".into(),
@@ -4404,6 +4451,7 @@ mod tests {
             }],
             features: Some(crate::config::Features {
                 memory: vec![crate::config::Memory {
+                    always_load: None,
                     server_host: "still".into(),
                     port: 7878,
                     listen_host: "127.0.0.1".into(),
@@ -5760,6 +5808,7 @@ mod tests {
     /// but the struct has no `Default` shorthand for the rest.
     fn memory_with_host(server_host: &str) -> crate::config::Memory {
         crate::config::Memory {
+            always_load: None,
             server_host: server_host.to_string(),
             port: 7878,
             listen_host: "127.0.0.1".into(),
