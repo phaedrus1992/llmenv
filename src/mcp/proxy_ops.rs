@@ -9,7 +9,7 @@ use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::mcp::proxy::{is_alive, log_path_for, open_proxy_log, read_pidfile};
+use crate::mcp::proxy::{log_path_for, open_proxy_log, read_pidfile};
 
 /// Which llmenv path started the proxy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,10 +57,16 @@ impl Spawner {
     }
 }
 
-fn attribution_line(pid: u32, source: SpawnSource, spawner: &Spawner, unix_secs: u64) -> String {
+fn attribution_line(
+    pid: u32,
+    source: SpawnSource,
+    spawner: &Spawner,
+    unix_secs: Option<u64>,
+) -> String {
     let id = |v: Option<u32>| v.map_or_else(|| "unknown".to_string(), |n| n.to_string());
+    let at = unix_secs.map_or_else(|| "unknown".to_string(), |n| n.to_string());
     format!(
-        "llmenv: started mcp-proxy pid={pid} source={} at={unix_secs} spawner_pid={} \
+        "llmenv: started mcp-proxy pid={pid} source={} at={at} spawner_pid={} \
          spawner_session={} spawner_group={} stdin_tty={}",
         source.label(),
         spawner.parent,
@@ -75,12 +81,15 @@ fn attribution_line(pid: u32, source: SpawnSource, spawner: &Spawner, unix_secs:
 pub(super) fn record_spawn(pid_path: &Path, child_pid: u32, source: SpawnSource) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
+        .ok()
+        .map(|d| d.as_secs());
     let line = attribution_line(child_pid, source, &Spawner::current(), now);
     let written = open_proxy_log(&log_path_for(pid_path))
         .and_then(|mut log| writeln!(log, "{line}").map_err(anyhow::Error::from));
     if let Err(e) = written {
-        tracing::debug!("proxy attribution line not written: {e:#}");
+        // `eprintln!`: the default tracing filter drops warnings, and only stdout feeds the
+        // shell hook, so stderr is safe.
+        eprintln!("llmenv: proxy attribution line not written: {e:#}");
     }
 }
 
@@ -99,19 +108,42 @@ pub(crate) enum StopOutcome {
     StillRunning,
 }
 
-/// A command line that starts the memory proxy: `mcp-proxy … -- icm serve`, also through `uvx`.
+/// A command line that starts the memory proxy: `mcp-proxy … -- icm serve`. A script runs
+/// through its interpreter, and `uvx` runs the tool by name, so `mcp-proxy` is the first or the
+/// second word.
 fn is_proxy_command(command: &str) -> bool {
-    command.contains("mcp-proxy") && command.trim_end().ends_with("-- icm serve")
+    let mut words = command.split_whitespace();
+    let leading: Vec<&str> = words.by_ref().take(2).collect();
+    let names_proxy = leading
+        .iter()
+        .any(|w| w.rsplit('/').next() == Some("mcp-proxy"));
+    names_proxy && command.trim_end().ends_with("-- icm serve")
 }
 
-fn command_of(pid: u32) -> Option<String> {
-    let out = std::process::Command::new("ps")
-        .args(["-o", "command=", "-p", &pid.to_string()])
+/// The command line of `pid`, or `None` when the process is gone. `-ww` stops `ps` from cutting
+/// a long line, which would hide the `-- icm serve` tail.
+fn command_of(pid: u32) -> anyhow::Result<Option<String>> {
+    // An absolute path: a `ps` earlier on PATH could answer for any pid.
+    let out = std::process::Command::new("/bin/ps")
+        .args(["-ww", "-o", "command=", "-p", &pid.to_string()])
         .stderr(std::process::Stdio::null())
         .output()
-        .ok()?;
+        .map_err(|e| anyhow::anyhow!("cannot run /bin/ps to read the command of pid {pid}: {e}"))?;
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (out.status.success() && !text.is_empty()).then_some(text)
+    // `ps -p` exits 1 with no output for a pid that does not exist.
+    Ok((!text.is_empty()).then_some(text))
+}
+
+/// Whether `pid` is a running process that this user can signal.
+fn is_running(pid: rustix::process::Pid) -> anyhow::Result<bool> {
+    match rustix::process::test_kill_process(pid) {
+        Ok(()) => Ok(true),
+        Err(rustix::io::Errno::SRCH) => Ok(false),
+        Err(e) => Err(anyhow::anyhow!(
+            "cannot check pid {}: {e}",
+            pid.as_raw_nonzero()
+        )),
+    }
 }
 
 /// Send SIGTERM to the proxy named by the pidfile, and wait up to `wait` for it to exit.
@@ -126,21 +158,24 @@ pub(crate) fn stop_proxy(pid_path: &Path, wait: Duration) -> anyhow::Result<Stop
         Ok(None) => return Ok(StopOutcome::NoPidfile),
         Err(e) => anyhow::bail!("cannot read {}: {e}", pid_path.display()),
     };
-    if is_alive(pid) != Some(true) {
+    let target = i32::try_from(pid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .ok_or_else(|| anyhow::anyhow!("pid {pid} in {} is not a process", pid_path.display()))?;
+    if !is_running(target)? {
         return Ok(StopOutcome::Gone);
     }
-    let command = command_of(pid).unwrap_or_default();
+    let Some(command) = command_of(pid)? else {
+        return Ok(StopOutcome::Gone);
+    };
     if !is_proxy_command(&command) {
         return Ok(StopOutcome::NotProxy(command));
     }
-    let raw = i32::try_from(pid).map_err(|e| anyhow::anyhow!("pid {pid} is out of range: {e}"))?;
-    let target = rustix::process::Pid::from_raw(raw)
-        .ok_or_else(|| anyhow::anyhow!("pid {pid} is not a process"))?;
     rustix::process::kill_process(target, rustix::process::Signal::TERM)
         .map_err(|e| anyhow::anyhow!("cannot send SIGTERM to mcp-proxy (pid {pid}): {e}"))?;
     let start = Instant::now();
     while start.elapsed() < wait {
-        if is_alive(pid) != Some(true) {
+        if !is_running(target)? {
             return Ok(StopOutcome::Stopped);
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -152,6 +187,7 @@ pub(crate) fn stop_proxy(pid_path: &Path, wait: Duration) -> anyhow::Result<Stop
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
     use super::*;
+    use crate::mcp::proxy::is_alive;
     use proptest::prelude::*;
 
     fn spawner() -> Spawner {
@@ -170,7 +206,7 @@ mod tests {
             (SpawnSource::SessionStart, "source=session-start"),
             (SpawnSource::Restart, "source=restart"),
         ] {
-            let line = attribution_line(7, source, &spawner(), 99);
+            let line = attribution_line(7, source, &spawner(), Some(99));
             assert_eq!(
                 line,
                 format!(
@@ -182,6 +218,12 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_time_is_written_as_unknown() {
+        let line = attribution_line(7, SpawnSource::Export, &spawner(), None);
+        assert!(line.contains("at=unknown"), "{line}");
+    }
+
+    #[test]
     fn only_a_proxy_for_icm_serve_is_a_proxy_command() {
         for (cmd, ok) in [
             ("mcp-proxy --host 0.0.0.0 --port 9092 -- icm serve", true),
@@ -190,6 +232,12 @@ mod tests {
                 true,
             ),
             ("uvx mcp-proxy --host 1 --port 2 -- icm serve", true),
+            (
+                "/venv/bin/python3 /venv/bin/mcp-proxy --host 1 --port 2 -- icm serve",
+                true,
+            ),
+            ("sh -c echo mcp-proxy -- icm serve", false),
+            ("/bin/other /x/mcp-proxy-fake --host 1 -- icm serve", false),
             ("mcp-proxy --host 1 --port 2 -- other serve", false),
             ("vim notes-about-mcp-proxy.txt", false),
             ("icm serve", false),

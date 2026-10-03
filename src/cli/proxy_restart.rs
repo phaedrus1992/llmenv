@@ -13,7 +13,6 @@ const STOP_WAIT: Duration = Duration::from_secs(5);
 /// Stop the proxy that the pidfile names, then start it again.
 pub(super) fn run(use_color: bool) -> anyhow::Result<()> {
     let pass = super::doctor_pass(use_color);
-    let warn = super::doctor_warning(use_color);
     let info = super::doctor_info(use_color);
     let config = crate::hook_run::load_cached_config(&paths::config_path()?)?;
     let config_dir = paths::config_dir()?;
@@ -44,7 +43,11 @@ pub(super) fn run(use_color: bool) -> anyhow::Result<()> {
     match ensure_local_memory_proxy(&config, &config_dir, &active, SpawnSource::Restart) {
         ProxyStart::Started => eprintln!("{pass} Started the memory proxy"),
         ProxyStart::AlreadyRunning => {
-            eprintln!("{warn} A proxy that llmenv does not track already holds the address");
+            anyhow::bail!(
+                "something that llmenv does not track already holds the memory proxy address, \
+                 so no new proxy started. Find it with `lsof -iTCP:<port> -sTCP:LISTEN`, stop \
+                 it, and run this command again."
+            );
         }
         ProxyStart::NotLocal => eprintln!("{info} This host does not serve memory"),
         ProxyStart::Failed(cause) => anyhow::bail!("cannot start the memory proxy: {cause}"),
