@@ -141,6 +141,16 @@ pub enum ValidateError {
     )]
     ModelEffortKey { context: String, model: String },
     #[error(
+        "{context}: capabilities.advisor_model is '{value}'; use fable, opus, sonnet, or a \
+         canonical model ID such as claude-opus-5-5."
+    )]
+    AdvisorModelInvalid { context: String, value: String },
+    #[error(
+        "{context}: capabilities.advisor_size was removed because Claude Code never read it; set \
+         capabilities.advisor_model to fable, opus, sonnet, or a model ID."
+    )]
+    AdvisorSizeRemoved { context: String },
+    #[error(
         "{context}: capabilities.env key '{key}' is reserved — it is emitted by the \
          adapter or state system and must not be overridden here. \
          Fix: remove this key from env:, or declare env vars in bundle.yaml under capabilities.env."
@@ -477,6 +487,7 @@ impl Config {
             validate_capabilities_env_key("config.yaml: capabilities", key)?;
         }
         crate::effort::validate_effort("config.yaml: capabilities", &self.capabilities)?;
+        crate::advisor::validate_advisor("config.yaml: capabilities", &self.capabilities)?;
         self.validate_mcps()?;
         self.validate_hooks()?;
         self.validate_lsp()?;
@@ -3283,6 +3294,40 @@ mod tests {
                 "valid env key should be accepted: {key}"
             );
         }
+    }
+
+    // #2409: the removed advisor_size field fails validation with the replacement named.
+    #[test]
+    fn capabilities_advisor_size_is_a_validation_error() {
+        let cfg = crate::Config {
+            capabilities: Capabilities {
+                advisor_size: Some("medium".into()),
+                ..Default::default()
+            },
+            ..minimal_config()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            matches!(err, ValidateError::AdvisorSizeRemoved { .. }),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("advisor_model"), "{err}");
+    }
+
+    #[test]
+    fn capabilities_advisor_model_is_validated() {
+        let cfg = crate::Config {
+            capabilities: Capabilities {
+                advisor_model: Some("small".into()),
+                ..Default::default()
+            },
+            ..minimal_config()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            matches!(err, ValidateError::AdvisorModelInvalid { .. }),
+            "{err:?}"
+        );
     }
 
     // #2144: config.yaml effort values go through validate_effort.

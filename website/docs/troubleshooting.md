@@ -95,6 +95,10 @@ instead:
 ⚠ settings.json: voiceEnabled is deprecated. Use voice.enabled.
 ```
 
+A `settings.json` that an older llmenv rendered can hold `advisorSize`.
+llmenv wrote that key before v3.12.0 and Claude Code never read it, so doctor warns and names `advisorModel`.
+Run `llmenv regenerate` to clear it.
+
 The list follows Claude Code's own settings reference, environment-variable reference, and
 changelog.
 The rendered files collect entries from `native.claude_code`, `capabilities.env`, permission
