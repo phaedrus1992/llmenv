@@ -828,6 +828,9 @@ pub struct SessionSummary {
     /// Resume context, so a fresh agent reading the rollup knows what the work is (#2339).
     #[serde(default, skip_serializing_if = "ResumeContext::is_empty")]
     pub(crate) resume: ResumeContext,
+    /// What the owning engine session runs as, when its agent-config document exists (#2398).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) agent: Option<crate::hook_run::agent_config::AgentConfig>,
 }
 
 /// Build a [`SessionSummary`] for `session_id`.
@@ -865,6 +868,10 @@ pub(crate) fn session_summary(
         })
         .collect();
 
+    let agent = session
+        .owner_session
+        .as_deref()
+        .and_then(|owner| crate::hook_run::agent_config::load(state_dir, owner));
     Ok(SessionSummary {
         id: session.id,
         name: session.name,
@@ -873,6 +880,7 @@ pub(crate) fn session_summary(
         total,
         tasks,
         resume: session.resume,
+        agent,
     })
 }
 
@@ -2211,6 +2219,55 @@ mod tests {
         assert_eq!(one.state, TaskState::Done);
         assert_eq!(one.notes.len(), 1);
         assert_eq!(one.notes[0].text, "made progress");
+    }
+
+    #[test]
+    fn session_summary_carries_the_agent_config_of_the_owner_session() {
+        use crate::hook_run::agent_config::{AgentConfig, StartFacts, write_session_start};
+        let dir = TempDir::new().expect("test");
+        let owned = start_as(
+            dir.path(),
+            "owned",
+            &owner("conv-1", 7),
+            StartDecision::Auto,
+        );
+        let ctx = crate::session_log::scope_header::ScopeContext {
+            tags: vec![],
+            bundles: vec![],
+            project: None,
+            cwd: "/w".into(),
+            adapter: "claude-code".into(),
+            llmenv_version: "3.12.0".into(),
+            claude_code_version: String::new(),
+        };
+        let facts = StartFacts {
+            engine: "claude-code",
+            model: Some("claude-opus-5"),
+            ..StartFacts::default()
+        };
+        write_session_start(
+            dir.path(),
+            "conv-1",
+            AgentConfig::from_scope_context(&ctx, &facts),
+        );
+        let summary = session_summary(dir.path(), &owned.id).expect("test");
+        let agent = summary.agent.expect("agent block");
+        assert_eq!(
+            agent.running_as(),
+            "claude_code claude-opus-5, effort unset"
+        );
+
+        let loose =
+            start_session(dir.path(), None, None, PROJECT_B, StartDecision::Auto).expect("test");
+        let StartOutcome::Created(loose) = loose else {
+            panic!("expected Created");
+        };
+        assert!(
+            session_summary(dir.path(), &loose.id)
+                .expect("test")
+                .agent
+                .is_none()
+        );
     }
 
     #[test]

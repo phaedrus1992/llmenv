@@ -3452,6 +3452,12 @@ fn render_task_session_summary_human(
         out.push_str(&style::sanitize_for_terminal(desc));
     }
     out.push_str(&format!(" ({}/{} done)\n", summary.done, summary.total));
+    if let Some(agent) = &summary.agent {
+        out.push_str(&format!(
+            "running as {}\n",
+            style::sanitize_for_terminal(&agent.running_as())
+        ));
+    }
     let resume = summary.resume.render();
     if !resume.is_empty() {
         out.push_str(&resume);

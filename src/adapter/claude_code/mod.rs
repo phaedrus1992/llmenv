@@ -68,6 +68,8 @@ const COMPACT_SURVIVAL_FRAGMENT: &str = concat!(
 const BASELINE_HOOK_EVENTS: &[(&str, &str)] = &[
     ("session_start", "SessionStart"),
     ("session_end", "SessionEnd"),
+    // #2398: records the new model in the session's agent-config document.
+    ("post_model_switch", "PostModelSwitch"),
 ];
 
 /// Which engine-neutral lifecycle events get a `hook-run` registration for this
@@ -117,6 +119,7 @@ pub(crate) fn lifecycle_hook_registrations(
     vec![
         ("session_start", true, "always registered"),
         ("session_end", true, "always registered"),
+        ("post_model_switch", true, "always registered"),
         (
             "turn_start",
             icm_active,
@@ -291,6 +294,7 @@ pub struct ClaudeCodeAdapter;
 const CLAUDE_CODE_HOOK_EVENTS: &[&str] = &[
     "SessionStart",
     "SessionEnd",
+    "PostModelSwitch",
     "UserPromptSubmit",
     "PreToolUse",
     "PostToolUse",
@@ -6869,6 +6873,23 @@ mod tests {
         assert!(
             hook_commands_for(&render_settings_for_test(&off), "Stop").is_empty(),
             "nothing but the layer should be registering Stop in this fixture"
+        );
+    }
+
+    #[test]
+    fn post_model_switch_is_registered_once_without_a_matcher() {
+        let settings = render_settings_for_test(&crate::merge::MergedManifest::default());
+        let entries = settings["hooks"]["PostModelSwitch"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].get("matcher").is_none());
+        assert_eq!(
+            hook_commands_for(&settings, "PostModelSwitch"),
+            [format!("{HOOK_RUN_COMMAND} post_model_switch")]
+        );
+        assert!(
+            ClaudeCodeAdapter
+                .supported_hook_events()
+                .contains(&"PostModelSwitch")
         );
     }
 
