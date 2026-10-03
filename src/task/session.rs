@@ -620,9 +620,8 @@ fn ownership_note(session: &Session, owner: &EngineIdentity) -> &'static str {
     }
 }
 
-/// Every task currently tagged with `session_id`. `pub(super)` so
-/// `add_task_for_session` (`task/mod.rs`) can find the implicit-chain
-/// parent for [`super::ParentSpec::Auto`] (#929).
+/// Every task currently tagged with `session_id`. `pub(super)` so the queue check of
+/// `start_task` (`task/mod.rs`) can read the session (#2455).
 pub(super) fn tasks_in_session(state_dir: &Path, session_id: &str) -> Vec<Task> {
     list_tasks(state_dir)
         .into_iter()
@@ -1512,7 +1511,7 @@ mod tests {
         let task = crate::task::add_task(
             dir.path(),
             "x",
-            ParentSpec::Auto,
+            ParentSpec::Detached,
             crate::task::SessionChoice::Resolve(&me),
             PROJECT_A,
         )
@@ -1995,14 +1994,14 @@ mod tests {
             match state {
                 TaskState::Open => {}
                 TaskState::Wip => {
-                    crate::task::start_task(dir, &task.slug, false).expect("test");
+                    crate::task::start_task(dir, &task.slug, true).expect("test");
                 }
                 TaskState::Waiting => {
-                    crate::task::start_task(dir, &task.slug, false).expect("test");
+                    crate::task::start_task(dir, &task.slug, true).expect("test");
                     crate::task::wait_task(dir, &task.slug, "review").expect("test");
                 }
                 TaskState::Done => {
-                    crate::task::start_task(dir, &task.slug, false).expect("test");
+                    crate::task::start_task(dir, &task.slug, true).expect("test");
                     crate::task::complete_task(dir, &task.slug, false).expect("test");
                 }
             }
@@ -2381,6 +2380,8 @@ mod tests {
                     session,
                     created_at: now_rfc3339(),
                     updated_at: now_rfc3339(),
+                    relation: crate::task::relation::Relation::Queued,
+                    parallel: false,
                 };
                 save_task(dir.path(), &task).expect("test");
             }

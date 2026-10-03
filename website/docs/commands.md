@@ -359,7 +359,7 @@ re-ingestion on the next turn.
 ## `task`
 
 ```text
-llmenv task add <title> [--parent SLUG | --no-parent] [--session <id>]
+llmenv task add <title> [--child-of SLUG | --parallel] [--after SLUG] [--parent SLUG] [--session <id>]
   [--detail <text> | --detail-file <path>]
 llmenv task start <id> [--force] [--reopen]
 llmenv task done <id> [--force]
@@ -373,6 +373,7 @@ llmenv task edit <id> [--title <t>] [--parent SLUG | --no-parent]
   [--detail <text> | --detail-file <path>]
 llmenv task clear <id>... | --session <id>
 llmenv task session start [name] [--description <text>] [--resume <id> | --replace | --new]
+  [--task <title>]...
   [--context <text> | --context-file <path>] [--issue <n>]... [--branch <b>] [--base <b>]
   [--memory-topic <t>]... [--doc <path>]...
 llmenv task session edit [<id>] [same flags as session start]
@@ -387,17 +388,20 @@ In-engine task tracker (#231): durable, cross-session "what am I working on"
 state, backed by one JSON file per task. `<id>` accepts an exact slug or any
 unambiguous prefix of one.
 
-- `task add <title> [--parent SLUG | --no-parent] [--session <id>]` — create
-  a task (`open` state). (added in v3.10.0) Omitting `--parent` no longer
-  means "no parent": it defaults to the most recently *created* task in the
-  same session, so a run of plain `task add`s forms an ordered chain by
-  default — the order agents add tasks in is usually the order they intend
-  to execute them. Pass `--parent SLUG` to nest under a specific task
-  instead (bypassing the chain), or `--no-parent` to force a deliberate
-  top-level task (the two flags conflict with each other). The chain never
-  crosses sessions — a new session's first task always starts with no
-  parent, regardless of what was last added in a different session. **A
-  task must belong to a session** (see below): with exactly one session open
+- `task add <title> [--child-of SLUG | --parallel] [--after SLUG] [--parent SLUG] [--session <id>]` — create
+  a task (`open` state). (changed in v3.12.0) A new task joins the **queue** of its session: it cannot start
+  until the task ahead of it is `done` or `waiting`, and until no other queued task is in progress.
+  `--child-of SLUG` makes it a **sub-task** instead. Sub-tasks run in parallel, starting one puts every `open`
+  ancestor in progress (a queued ancestor must be allowed to start, and a `done` parent refuses). The parent
+  cannot be marked `done` before every sub-task is. A sub-task needs an
+  unfinished parent in its own session. `--parallel` takes a top-level task out of the queue, so it runs beside the
+  head. `--after SLUG` records that another task must be done first, which `task start` enforces like
+  `task block`. `--parent SLUG` only links the task for display. The two flags `--child-of` and `--parallel` conflict,
+  and `--child-of` conflicts with `--parent`. Before v3.12.0 a plain `task add` chained onto the previous
+  task, and `--no-parent` opted out. A task no longer chains, and `--no-parent` is accepted, warns, and does
+  nothing. Tasks stored before v3.12.0 keep their parent
+  as a display link and count as top-level tasks.
+  **A task must belong to a session** (see below): with exactly one session open
   for the current project it auto-resolves; with two or more open it picks
   the one this conversation started or resumed (changed in v3.12.0; see
   "Session ownership" below), else asks for `--session <id>`; errors with
@@ -407,18 +411,18 @@ unambiguous prefix of one.
   An unreadable `--detail-file` fails before llmenv adds the task.
 - `task start <id> [--force]` — claim a task, moving it to `wip`. Also the
   resume action for a `waiting` task — it accepts any non-`done` state as its
-  starting point. `parent` and `blocked_on` (added in v3.8.0) are enforced
-  differently: an undone **parent** only warns — organizational grouping,
-  not an ordering guarantee, so starting a child while the parent is still
-  open is often fine. An undone **`blocked_on`** reference (`task block`,
-  below) hard-blocks — refuses to start — since that's an explicit
-  dependency the user configured on purpose; pass `--force` to override. A
+  starting point. An undone **`blocked_on`** reference (`task block`,
+  below) refuses to start, since that's an explicit dependency. (changed in v3.12.0) An `open`
+  queued task also refuses to start while the task ahead of it is not `done` or `waiting`, or while
+  another queued task is in progress; the error names that task. Sub-tasks and `--parallel` tasks are not
+  in the queue. Pass `--force` to override. A
   `blocked_on` reference resolves as done only once the target task *and
   every one of its descendants* are done, so blocking on a parent task alone
   covers its whole child set (see `task block`, below). `--reopen` (added
   in v3.12.0) moves a `done` task back to `open` with a note, then starts
   it; without it, `start` refuses a `done` task.
-- `task done <id> [--force]` — mark a task complete. (changed in v3.12.0)
+- `task done <id> [--force]` — mark a task complete. (changed in v3.12.0) Refuses a parent whose sub-tasks are
+  not all `done`, and lists them; `--force` closes it anyway and prints a note.
   Refuses a task that was never started (`open` straight to `done`) and exits
   non-zero, because that jump means no work was tracked. Run `task start`
   first. Pass `--force` when the work is done without tracking; it prints a
@@ -477,9 +481,7 @@ unambiguous prefix of one.
   on the **parent** rather than hand-wiring a `block` edge to each sibling —
   a `blocked_on` reference isn't satisfied until the target task *and every
   one of its descendants* are done. (changed in v3.12.0) The blocked task's
-  own subtree doesn't count: `task add` parents each new task under the
-  previous one, so a task blocked on its predecessor is usually that
-  predecessor's child, and it can start once the predecessor is done.
+  own subtree doesn't count, so a sub-task blocked on a sibling can start once the sibling is done.
 - `task edit <id> [--title <t>] [--parent SLUG | --no-parent] [--block-on
   <id>]... [--unblock <id>]... [--add-note <text>] [--delete-note
   <index-or-timestamp>]` — mutate an existing task. (added in v3.10.0) Every
@@ -513,7 +515,9 @@ task from a different project sharing this store never nags the wrong
 project's hook.
 
 - `task session start [name] [--description <text>] [--resume <id> |
-  --replace | --new]` — start a session for the current project. Pass
+  --replace | --new] [--task <title>]...` — start a session for the current project. `--task`
+  (added in v3.12.0) adds a task as the session starts and can repeat; the tasks join the queue in the
+  order given, so a session never exists with no tasks. Pass
   `--description` to attach free-text context (e.g. "dev-sprint issue 493"),
   shown in `session ls` and the checkpoint; it's separate from `name` and
   never feeds id generation. **Name the session after the high-level work**

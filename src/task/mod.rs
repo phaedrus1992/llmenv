@@ -12,9 +12,12 @@
 //! ever becomes a real bottleneck — unlikely for a CLI task tracker.
 
 pub(crate) mod project;
+pub(crate) mod relation;
 pub(crate) mod resume;
 pub mod session;
 
+pub(crate) use relation::Placement;
+use relation::Relation;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -70,6 +73,12 @@ pub struct Task {
     pub(crate) state: TaskState,
     #[serde(default)]
     parent: Option<String>,
+    /// Whether the task is a sub-task of `parent` or a top-level task of the queue (#2455).
+    #[serde(default, skip_serializing_if = "Relation::is_queued")]
+    relation: Relation,
+    /// A queued task that runs beside the head of the queue instead of behind it (#2455).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    parallel: bool,
     #[serde(default)]
     pub(crate) blocked_on: Vec<String>,
     #[serde(default)]
@@ -123,11 +132,10 @@ fn with_store_lock<T>(
 }
 
 /// Current RFC3339 timestamp (UTC).
-/// Nanosecond precision, not seconds: [`ParentSpec::Auto`] (#929) picks the
-/// implicit-chain parent by comparing `created_at` strings, and several
-/// sequential `task add` invocations (agent tool calls, shell loops) commonly
-/// land within the same wall-clock second — second precision made that tie
-/// resolve to readdir order, which is arbitrary, not creation order.
+/// Nanosecond precision, not seconds: the queue (#2455) orders tasks by comparing `created_at`
+/// strings, and several sequential `task add` invocations (agent tool calls, shell loops)
+/// commonly land within the same wall-clock second — second precision made that tie resolve to
+/// readdir order, which is arbitrary, not creation order.
 fn now_rfc3339() -> String {
     humantime::format_rfc3339_nanos(std::time::SystemTime::now()).to_string()
 }
@@ -415,28 +423,14 @@ fn most_recently_updated<'a>(tasks: impl Iterator<Item = &'a Task>) -> Option<&'
     tasks.max_by(|a, b| a.updated_at.cmp(&b.updated_at))
 }
 
-/// The most recently *created* of `tasks`, by `created_at` string comparison
-/// (RFC3339 sorts lexicographically). Used by [`ParentSpec::Auto`] to find
-/// the implicit-chain parent — `created_at`, not `updated_at`, since a task
-/// finishing (bumping `updated_at`) shouldn't retroactively change which
-/// task a *new* add chains onto. Ties resolve to `max_by`'s documented
-/// last-element-wins rule, same caveat as [`most_recently_updated`].
-fn most_recently_created<'a>(tasks: impl Iterator<Item = &'a Task>) -> Option<&'a Task> {
-    tasks.max_by(|a, b| a.created_at.cmp(&b.created_at))
-}
-
-/// How `add_task`/`add_task_for_session` should set the new task's `parent`.
-/// A plain `Option<&str>` can't distinguish "no `--parent` given, use the
-/// implicit-chain default" from "explicitly no parent" — this can (#929).
+/// How `add_task`/`add_task_for_session` should set the new task's `parent`, a display link
+/// for a top-level task. A sub-task takes its parent from [`Placement::Child`] instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParentSpec<'a> {
-    /// No `--parent` given: default to the most recently created task in
-    /// the same session (or no parent if this is the session's first task).
-    Auto,
     /// `--parent <id>` given explicitly.
     Explicit(&'a str),
-    /// `--no-parent` given explicitly: a deliberate top-level task, no
-    /// implicit chaining even if the session already has other tasks.
+    /// No parent. A new task no longer chains onto the previous one (#2455): the queue orders
+    /// top-level tasks.
     Detached,
 }
 
@@ -469,18 +463,22 @@ pub(crate) fn add_task(
 ) -> anyhow::Result<Task> {
     let new = NewTask {
         title,
-        detail: None,
+        ..NewTask::default()
     };
     add_task_with(state_dir, &new, parent, session, project)
 }
 
 /// What a new task starts with.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct NewTask<'a> {
     pub(crate) title: &'a str,
     /// What a cold reader needs to do the task. Written in the same save that creates the task.
     /// An empty string means no detail.
     pub(crate) detail: Option<&'a str>,
+    /// Whether the task is queued, parallel, or a sub-task (#2455).
+    pub(crate) placement: Placement<'a>,
+    /// A task that must be done before this one starts: written as a `blocked_on` edge.
+    pub(crate) after: Option<&'a str>,
 }
 
 /// [`add_task`] for a task that starts with a detail (#2339).
@@ -515,7 +513,7 @@ pub(crate) fn add_task_for_session(
 ) -> anyhow::Result<Task> {
     let new = NewTask {
         title,
-        detail: None,
+        ..NewTask::default()
     };
     add_task_for_session_with(state_dir, &new, parent, session_id)
 }
@@ -533,13 +531,22 @@ fn add_task_for_session_with(
     let title = new.title;
     with_store_lock(state_dir, || {
         let dir = tasks_dir(state_dir);
-        let parent_slug = match parent {
+        let explicit_parent = match parent {
             ParentSpec::Explicit(p) => Some(resolve_identifier(state_dir, p)?),
             ParentSpec::Detached => None,
-            ParentSpec::Auto => {
-                most_recently_created(session::tasks_in_session(state_dir, session_id).iter())
-                    .map(|t| t.slug.clone())
+        };
+        let (parent_slug, relation, parallel) = match new.placement {
+            Placement::Queue => (explicit_parent, Relation::Queued, false),
+            Placement::Parallel => (explicit_parent, Relation::Queued, true),
+            Placement::Child(p) => {
+                let slug = resolve_identifier(state_dir, p)?;
+                check_child_parent(&load_task(state_dir, &slug)?, session_id)?;
+                (Some(slug), Relation::Child, false)
             }
+        };
+        let blocked_on = match new.after {
+            Some(after) => vec![resolve_identifier(state_dir, after)?],
+            None => Vec::new(),
         };
         let now = now_rfc3339();
         let mut base_slug = slugify(title);
@@ -556,7 +563,9 @@ fn add_task_for_session_with(
             title: title.to_string(),
             state: TaskState::Open,
             parent: parent_slug,
-            blocked_on: Vec::new(),
+            relation,
+            parallel,
+            blocked_on,
             notes: Vec::new(),
             detail: new.detail.filter(|d| !d.is_empty()).map(str::to_string),
             session: Some(session_id.to_string()),
@@ -566,6 +575,25 @@ fn add_task_for_session_with(
         save_task(state_dir, &task)?;
         Ok(task)
     })
+}
+
+/// A sub-task needs an unfinished parent in its own session.
+fn check_child_parent(parent: &Task, session_id: &str) -> anyhow::Result<()> {
+    if parent.state == TaskState::Done {
+        anyhow::bail!(
+            "task '{}' is done, so it cannot take a sub-task. Reopen it with `llmenv task start \
+             --reopen {}`.",
+            parent.slug,
+            parent.slug
+        );
+    }
+    if parent.session.as_deref() != Some(session_id) {
+        anyhow::bail!(
+            "task '{}' belongs to another session, so it cannot take a sub-task of this one",
+            parent.slug
+        );
+    }
+    Ok(())
 }
 
 /// Resolve which session a `task add` belongs to, per the mandatory-sessions
@@ -695,8 +723,23 @@ pub(crate) fn start_task(state_dir: &Path, input: &str, force: bool) -> anyhow::
                 );
             }
         }
+        if !force
+            && let Some(session_id) = &task.session
+            && let Some(block) =
+                relation::queue_block(&task, &session::tasks_in_session(state_dir, session_id))
+        {
+            anyhow::bail!("{block}");
+        }
+        // The ancestors go first: if one cannot start, the sub-task stays `open`.
+        let promoted = ancestors_to_start(state_dir, &task, force)?;
+        let now = now_rfc3339();
+        for mut ancestor in promoted {
+            ancestor.state = TaskState::Wip;
+            ancestor.updated_at = now.clone();
+            save_task(state_dir, &ancestor)?;
+        }
         task.state = TaskState::Wip;
-        task.updated_at = now_rfc3339();
+        task.updated_at = now;
         save_task(state_dir, &task)?;
         Ok(task)
     })?;
@@ -704,28 +747,52 @@ pub(crate) fn start_task(state_dir: &Path, input: &str, force: bool) -> anyhow::
     Ok(task)
 }
 
-/// Soft-block advisory for [`start_task`] (#1164): `None` when `task` has no
-/// `parent`, the parent can't be loaded (dangling reference — nothing
-/// meaningful to warn about once the parent itself is gone), or the parent
-/// is already `done`. Otherwise a message naming the parent and its current
-/// state, for a caller to surface however it prefers (println, appended to
-/// a hook's response text, …) — starting the task is never blocked by this,
-/// unlike an unmet `blocked_on` reference.
-#[must_use]
-pub(crate) fn parent_soft_block_warning(state_dir: &Path, task: &Task) -> Option<String> {
-    let parent_slug = task.parent.as_ref()?;
-    let parent = load_task(state_dir, parent_slug).ok()?;
-    if parent.state == TaskState::Done {
-        return None;
+/// The `open` ancestors that starting the sub-task `child` puts in progress (#2455). A queued
+/// ancestor is held by the queue like any task, and a `done` ancestor refuses unless `force`.
+/// A top-level task has no ancestors to start.
+fn ancestors_to_start(state_dir: &Path, child: &Task, force: bool) -> anyhow::Result<Vec<Task>> {
+    let mut promoted = Vec::new();
+    let mut seen = vec![child.slug.clone()];
+    let mut current = child.clone();
+    while current.relation == Relation::Child {
+        let Some(parent_slug) = current.parent.clone() else {
+            break;
+        };
+        if seen.contains(&parent_slug) {
+            break;
+        }
+        // A deleted parent leaves a dangling link, which the rest of the store tolerates. Any
+        // other read error is logged, and the start goes on.
+        let parent = match load_task(state_dir, &parent_slug) {
+            Ok(parent) => parent,
+            Err(e) => {
+                tracing::warn!("sub-task parent '{parent_slug}' cannot be read: {e:#}");
+                break;
+            }
+        };
+        if parent.state == TaskState::Done && !force {
+            anyhow::bail!(
+                "the parent '{parent_slug}' of '{}' is done. Reopen it with `llmenv task start \
+                 --reopen {parent_slug}`, or pass --force.",
+                child.slug
+            );
+        }
+        if parent.state == TaskState::Open {
+            if !force
+                && let Some(session_id) = &parent.session
+                && let Some(block) = relation::queue_block(
+                    &parent,
+                    &session::tasks_in_session(state_dir, session_id),
+                )
+            {
+                anyhow::bail!("the parent of '{}' cannot start: {block}", child.slug);
+            }
+            promoted.push(parent.clone());
+        }
+        seen.push(parent_slug);
+        current = parent;
     }
-    Some(format!(
-        "Note: parent task '{parent_slug}' isn't done yet ({}) — starting '{}' anyway. \
-         Use `llmenv task block {} --on {parent_slug}` instead if this really can't start \
-         until the parent finishes.",
-        parent.state.as_str(),
-        task.slug,
-        task.slug
-    ))
+    Ok(promoted)
 }
 
 /// Bump the `last_activity` of the session a task is tagged to, if any — so a
@@ -773,9 +840,24 @@ pub(crate) fn done_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
 pub(crate) struct Completed {
     pub(crate) task: Task,
     prior: TaskState,
+    /// Sub-tasks that were not done when `--force` closed the parent (#2455).
+    undone_children: Vec<String>,
 }
 
 impl Completed {
+    /// A note when `force` closed a parent whose sub-tasks were not done.
+    #[must_use]
+    pub(crate) fn undone_children_note(&self) -> Option<String> {
+        (!self.undone_children.is_empty()).then(|| {
+            format!(
+                "Note: '{}' was closed while its sub-tasks were not done ({}); --force skipped \
+                 the check.",
+                self.task.slug,
+                self.undone_children.join(", ")
+            )
+        })
+    }
+
     /// A note when `force` closed a task that was never started. The CLI prints
     /// it so the skipped start stays visible, and names the way back.
     #[must_use]
@@ -812,10 +894,20 @@ pub(crate) fn complete_task(
                  the work, or pass --force if it is done."
             );
         }
+        let all_tasks = try_list_tasks(state_dir)?;
+        let undone = relation::undone_descendants(&slug, &all_tasks);
+        if !force && !undone.is_empty() {
+            anyhow::bail!("{}", relation::undone_children_message(&slug, &undone));
+        }
+        let undone_children: Vec<String> = undone.iter().map(|t| t.slug.clone()).collect();
         task.state = TaskState::Done;
         task.updated_at = now_rfc3339();
         save_task(state_dir, &task)?;
-        Ok(Completed { task, prior })
+        Ok(Completed {
+            task,
+            prior,
+            undone_children,
+        })
     })?;
     touch_task_session(state_dir, &completed.task);
     Ok(completed)
@@ -1193,7 +1285,11 @@ fn idle_session_reminders(state_dir: &Path) -> String {
 }
 
 fn idle_reminder_lines(state_dir: &Path, project: &str) -> String {
-    idle_sessions(state_dir, project)
+    let stalled = relation::stalled_parent_lines(
+        &list_tasks(state_dir),
+        &open_session_ids(state_dir, project),
+    );
+    let idle = idle_sessions(state_dir, project)
         .iter()
         .map(|idle| {
             let id = &idle.session.id;
@@ -1209,8 +1305,20 @@ fn idle_reminder_lines(state_dir: &Path, project: &str) -> String {
                 title = idle.next.title,
             )
         })
+        .collect::<Vec<_>>();
+    stalled
+        .into_iter()
+        .chain(idle)
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+/// The ids of the open sessions of `project`.
+fn open_session_ids(state_dir: &Path, project: &str) -> Vec<String> {
+    session::open_sessions_for_project(state_dir, project)
+        .into_iter()
+        .map(|s| s.id)
+        .collect()
 }
 
 /// Filter `tasks` down to those attributable to the current project
@@ -1464,7 +1572,11 @@ fn wip_reminder(tasks: &[Task], header: &str, footer: &str) -> String {
             // contract above, but `Task.session` stays `Option` for legacy
             // tasks created before sessions were mandatory.
             let session = t.session.as_deref().unwrap_or("unknown session");
-            format!("{} [session: {session}]", task_line(t))
+            format!(
+                "{} [session: {session}]{}",
+                task_line(t),
+                relation::progress_suffix(&t.slug, tasks)
+            )
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -1514,10 +1626,7 @@ mod tests {
     /// creation logic (`add_task_for_session`) the mandatory-session path
     /// resolves down to — lets the store-behavior tests below (slug/parent/
     /// nesting) skip the session-resolution dance, which has its own tests.
-    /// `None` maps to `ParentSpec::Detached`, not `Auto` — existing callers
-    /// pass `None` meaning "no parent" (independent tasks), predating #929's
-    /// implicit-chain default; a handful of dedicated tests exercise `Auto`
-    /// directly instead of through this helper.
+    /// `None` maps to `ParentSpec::Detached`: a task with no display parent.
     fn mk(dir: &Path, title: &str, parent: Option<&str>) -> anyhow::Result<Task> {
         let parent_spec = match parent {
             Some(p) => ParentSpec::Explicit(p),
@@ -1843,18 +1952,6 @@ mod tests {
         ];
         expected.sort_unstable();
         assert_eq!(slugs, expected);
-    }
-
-    #[test]
-    fn starting_and_completing_a_child_does_not_affect_parent_state() {
-        let dir = TempDir::new().expect("test");
-        let parent = mk(dir.path(), "Parent", None).expect("test");
-        let child = mk(dir.path(), "Child", Some(&parent.slug)).expect("test");
-        start_task(dir.path(), &child.slug, false).expect("test");
-        done_task(dir.path(), &child.slug).expect("test");
-
-        let reloaded_parent = load_task(dir.path(), &parent.slug).expect("test");
-        assert_eq!(reloaded_parent.state, TaskState::Open);
     }
 
     #[test]
@@ -2210,6 +2307,7 @@ mod tests {
         let new = NewTask {
             title: "With detail",
             detail: Some("files: a.rs"),
+            ..NewTask::default()
         };
         let task = add_task_for_session_with(dir.path(), &new, ParentSpec::Detached, &session.id)
             .expect("add");
@@ -2231,6 +2329,7 @@ mod tests {
         let new = NewTask {
             title: "Empty detail",
             detail: Some(""),
+            ..NewTask::default()
         };
         let session_id = task.session.clone().expect("session");
         let added = add_task_for_session_with(dir.path(), &new, ParentSpec::Detached, &session_id)
@@ -2672,9 +2771,9 @@ mod tests {
     fn idle_session_in_project(dir: &Path, project: &str) -> (String, Task, Task) {
         let session_id = session_for_project(dir, project);
         let first =
-            add_task_for_session(dir, "Step 1", ParentSpec::Auto, &session_id).expect("test");
+            add_task_for_session(dir, "Step 1", ParentSpec::Detached, &session_id).expect("test");
         let second =
-            add_task_for_session(dir, "Step 2", ParentSpec::Auto, &session_id).expect("test");
+            add_task_for_session(dir, "Step 2", ParentSpec::Detached, &session_id).expect("test");
         (session_id, first, second)
     }
 
@@ -2754,6 +2853,215 @@ mod tests {
         assert_eq!(idle[0].session.id, session_id);
         assert_eq!(idle[0].next.slug, second.slug);
         assert_eq!(idle[0].open_count, 2);
+    }
+
+    fn child_new<'a>(title: &'a str, parent: &'a str) -> NewTask<'a> {
+        NewTask {
+            title,
+            placement: Placement::Child(parent),
+            ..NewTask::default()
+        }
+    }
+
+    #[test]
+    fn the_stop_reminder_names_a_parent_with_only_unstarted_sub_tasks() {
+        let dir = TempDir::new().expect("test");
+        let session_id = session_for_project(dir.path(), &current_project());
+        let parent = add_task_for_session(dir.path(), "Review", ParentSpec::Detached, &session_id)
+            .expect("test");
+        let scan = add_task_for_session_with(
+            dir.path(),
+            &child_new("Scan", &parent.slug),
+            ParentSpec::Detached,
+            &session_id,
+        )
+        .expect("test");
+        let audit = add_task_for_session_with(
+            dir.path(),
+            &child_new("Audit", &parent.slug),
+            ParentSpec::Detached,
+            &session_id,
+        )
+        .expect("test");
+        start_task(dir.path(), &scan.slug, false).expect("test");
+        complete_task(dir.path(), &scan.slug, false).expect("test");
+
+        let reminder = stop_hook_reminder(dir.path());
+        assert!(reminder.contains("1 of 2 sub-tasks done"), "{reminder}");
+        assert!(
+            reminder.contains(&format!("llmenv task start {}", audit.slug)),
+            "{reminder}"
+        );
+    }
+
+    #[test]
+    fn the_wip_reminder_shows_how_far_the_sub_tasks_have_come() {
+        let dir = TempDir::new().expect("test");
+        let session_id = session_for_project(dir.path(), &current_project());
+        let parent = add_task_for_session(dir.path(), "Review", ParentSpec::Detached, &session_id)
+            .expect("test");
+        let scan = add_task_for_session_with(
+            dir.path(),
+            &child_new("Scan", &parent.slug),
+            ParentSpec::Detached,
+            &session_id,
+        )
+        .expect("test");
+        start_task(dir.path(), &scan.slug, false).expect("test");
+
+        let reminder = stop_hook_reminder(dir.path());
+        assert!(
+            reminder.contains("0 of 1 sub-tasks done, 1 in progress"),
+            "{reminder}"
+        );
+    }
+
+    #[test]
+    fn a_sub_task_must_belong_to_the_session_of_its_parent() {
+        let dir = TempDir::new().expect("test");
+        let session_a = session_for_project(dir.path(), "project-a-0000000000");
+        let session_b = session_for_project(dir.path(), "project-b-0000000000");
+        let parent = add_task_for_session(dir.path(), "Review", ParentSpec::Detached, &session_a)
+            .expect("test");
+        let err = add_task_for_session_with(
+            dir.path(),
+            &child_new("Scan", &parent.slug),
+            ParentSpec::Detached,
+            &session_b,
+        )
+        .expect_err("a sub-task of another session is refused");
+        assert!(
+            err.to_string().contains("belongs to another session"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn after_writes_a_blocked_on_edge_and_an_unknown_task_is_an_error() {
+        let dir = TempDir::new().expect("test");
+        let first = mk(dir.path(), "First", None).expect("test");
+        let new = NewTask {
+            title: "Second",
+            after: Some(&first.slug),
+            ..NewTask::default()
+        };
+        let second =
+            add_task_for_session_with(dir.path(), &new, ParentSpec::Detached, "test-session")
+                .expect("test");
+        assert_eq!(second.blocked_on, std::slice::from_ref(&first.slug));
+        let bad = NewTask {
+            title: "Third",
+            after: Some("no-such-task"),
+            ..NewTask::default()
+        };
+        assert!(
+            add_task_for_session_with(dir.path(), &bad, ParentSpec::Detached, "test-session")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn starting_a_grandchild_puts_every_open_ancestor_in_progress() {
+        let dir = TempDir::new().expect("test");
+        let top = mk(dir.path(), "Top", None).expect("test");
+        let mid = add_task_for_session_with(
+            dir.path(),
+            &child_new("Mid", &top.slug),
+            ParentSpec::Detached,
+            "test-session",
+        )
+        .expect("test");
+        let leaf = add_task_for_session_with(
+            dir.path(),
+            &child_new("Leaf", &mid.slug),
+            ParentSpec::Detached,
+            "test-session",
+        )
+        .expect("test");
+        start_task(dir.path(), &leaf.slug, false).expect("test");
+        for slug in [&top.slug, &mid.slug, &leaf.slug] {
+            assert_eq!(
+                load_task(dir.path(), slug).expect("test").state,
+                TaskState::Wip
+            );
+        }
+    }
+
+    #[test]
+    fn a_sub_task_of_a_queued_parent_waits_for_the_queue() {
+        let dir = TempDir::new().expect("test");
+        let first = mk(dir.path(), "First", None).expect("test");
+        let second = mk(dir.path(), "Second", None).expect("test");
+        let child = add_task_for_session_with(
+            dir.path(),
+            &child_new("Child", &second.slug),
+            ParentSpec::Detached,
+            "test-session",
+        )
+        .expect("test");
+        let err = start_task(dir.path(), &child.slug, false).expect_err("first is open");
+        assert!(
+            err.to_string()
+                .contains("cannot start: task 'second' is queued behind 'first'"),
+            "{err}"
+        );
+        assert_eq!(
+            load_task(dir.path(), &child.slug).expect("test").state,
+            TaskState::Open,
+            "the refusal leaves the sub-task open"
+        );
+        start_task(dir.path(), &first.slug, false).expect("test");
+        complete_task(dir.path(), &first.slug, false).expect("test");
+        start_task(dir.path(), &child.slug, false).expect("test");
+        assert_eq!(
+            load_task(dir.path(), &second.slug).expect("test").state,
+            TaskState::Wip
+        );
+    }
+
+    #[test]
+    fn a_sub_task_of_a_done_parent_refuses_unless_forced() {
+        let dir = TempDir::new().expect("test");
+        let parent = mk(dir.path(), "Review", None).expect("test");
+        let child = add_task_for_session_with(
+            dir.path(),
+            &child_new("Scan", &parent.slug),
+            ParentSpec::Detached,
+            "test-session",
+        )
+        .expect("test");
+        complete_task(dir.path(), &parent.slug, true).expect("test");
+        // The sub-task is open, so `--force` closed the parent past it.
+        let err = start_task(dir.path(), &child.slug, false).expect_err("parent is done");
+        assert!(err.to_string().contains("is done"), "{err}");
+        start_task(dir.path(), &child.slug, true).expect("test");
+    }
+
+    #[test]
+    fn done_on_a_parent_refuses_until_its_sub_tasks_are_done() {
+        let dir = TempDir::new().expect("test");
+        let parent = mk(dir.path(), "Review", None).expect("test");
+        let child = add_task_for_session_with(
+            dir.path(),
+            &child_new("Scan", &parent.slug),
+            ParentSpec::Detached,
+            "test-session",
+        )
+        .expect("test");
+        start_task(dir.path(), &child.slug, false).expect("test");
+        let err = complete_task(dir.path(), &parent.slug, false).expect_err("sub-task is wip");
+        assert!(err.to_string().contains("'scan' (wip)"), "{err}");
+        let forced = complete_task(dir.path(), &parent.slug, true).expect("test");
+        assert!(
+            forced
+                .undone_children_note()
+                .expect("note")
+                .contains("scan")
+        );
+        complete_task(dir.path(), &child.slug, false).expect("test");
+        // `done` stays idempotent once everything is done.
+        let again = complete_task(dir.path(), &parent.slug, false).expect("test");
+        assert_eq!(again.undone_children_note(), None);
     }
 
     proptest::proptest! {
@@ -3096,6 +3404,8 @@ mod tests {
             // Identical timestamps on purpose: exercises the slug tiebreak.
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
+            relation: Relation::Queued,
+            parallel: false,
         }
     }
 
@@ -3525,6 +3835,8 @@ mod tests {
                 proptest::option::of(".{1,30}"),
                 ".{1,30}",
                 ".{1,30}",
+                prop_oneof![Just(Relation::Queued), Just(Relation::Child)],
+                any::<bool>(),
             )
                 .prop_map(
                     |(
@@ -3538,12 +3850,16 @@ mod tests {
                         session,
                         created_at,
                         updated_at,
+                        relation,
+                        parallel,
                     )| {
                         Task {
                             slug,
                             title,
                             state,
                             parent,
+                            relation,
+                            parallel,
                             blocked_on,
                             notes,
                             detail,
@@ -3592,6 +3908,8 @@ mod tests {
                                 session: Some("s".to_string()),
                                 created_at: format!("2026-01-01T00:00:{:02}Z", i.min(59)),
                                 updated_at: "2026-01-01T00:00:00Z".to_string(),
+                                relation: Relation::Queued,
+                                parallel: false,
                             }
                         })
                         .collect()
@@ -3651,6 +3969,8 @@ mod tests {
                             session: Some("s".to_string()),
                             created_at: format!("2026-01-01T00:00:{:02}Z", i.min(59)),
                             updated_at: "2026-01-01T00:00:00Z".to_string(),
+                            relation: Relation::Queued,
+                            parallel: false,
                         }
                     })
                     .collect()
@@ -3867,6 +4187,8 @@ mod tests {
                             session,
                             created_at: "2026-01-01T00:00:00Z".to_string(),
                             updated_at: "2026-01-01T00:00:00Z".to_string(),
+                            relation: Relation::Queued,
+                            parallel: false,
                         }
                     })
                     .collect();
@@ -4017,6 +4339,8 @@ mod tests {
                     session: Some("s".to_string()),
                     created_at: "2026-01-01T00:00:00Z".to_string(),
                     updated_at: "2026-01-01T00:00:00Z".to_string(),
+                    relation: Relation::Queued,
+                    parallel: false,
                 };
                 prop_assert_eq!(resolve_next_task(&tasks, &tasks, &dangling), None);
             }
