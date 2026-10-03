@@ -3307,10 +3307,7 @@ mod tests {
             ..minimal_config()
         };
         let err = cfg.validate().unwrap_err();
-        assert!(
-            matches!(err, ValidateError::AdvisorSizeRemoved { .. }),
-            "{err:?}"
-        );
+        assert!(matches!(err, ValidateError::AdvisorSizeRemoved { .. }));
         assert!(err.to_string().contains("advisor_model"), "{err}");
     }
 
@@ -3324,10 +3321,7 @@ mod tests {
             ..minimal_config()
         };
         let err = cfg.validate().unwrap_err();
-        assert!(
-            matches!(err, ValidateError::AdvisorModelInvalid { .. }),
-            "{err:?}"
-        );
+        assert!(matches!(err, ValidateError::AdvisorModelInvalid { .. }));
     }
 
     // #2144: config.yaml effort values go through validate_effort.

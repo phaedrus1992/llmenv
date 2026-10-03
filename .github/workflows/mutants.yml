@@ -68,7 +68,7 @@ jobs:
     # runner's 45 minutes and the job is killed mid-run — which reads as a CI
     # failure while telling you nothing about the code. The plan job sizes the
     # shard count, so wall-clock stays roughly constant as diffs grow.
-    name: mutants (changed lines, shard ${{ matrix.label }})
+    name: mutants (changed lines)
     needs: plan
     # A PR that touches no Rust has nothing to mutate, and cargo-mutants exits
     # non-zero on an empty set rather than treating it as "nothing to do" —

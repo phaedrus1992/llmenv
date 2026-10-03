@@ -75,7 +75,7 @@ mod tests {
             let err = validate_advisor("ctx", &caps(bad)).unwrap_err();
             assert!(
                 matches!(&err, ValidateError::AdvisorModelInvalid { value, .. } if value == bad),
-                "{bad:?}: {err:?}"
+                "{bad:?}"
             );
             let text = err.to_string();
             assert!(

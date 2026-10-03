@@ -700,9 +700,10 @@ fn unfinished_error(id: &str, unfinished: &[&Task]) -> anyhow::Error {
         .map(|t| format!("\n  {} {} {}", t.state.as_str(), t.slug, t.title))
         .collect();
     anyhow::anyhow!(
-        "session '{id}' has {n} unfinished task(s):{list}\nFinish them with `llmenv task done \
+        "session '{session}' has {n} unfinished task(s):{list}\nFinish them with `llmenv task done \
          <slug>`, drop one with `llmenv task clear <slug>`, or pass --abandon-open to untag \
          them and finish the session anyway.",
+        session = id,
         n = unfinished.len()
     )
 }
