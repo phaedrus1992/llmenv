@@ -419,6 +419,65 @@ fn cbm_floor_warning(version: &str) -> Option<String> {
 const ICM_SERVER_FILTER_FIX: (u64, u64, u64) = (0, 10, 60);
 const ICM_SERVER_RANKING_FIX: (u64, u64, u64) = (0, 10, 64);
 
+/// Doctor's verdict on one managed MCP server's `initialize` probe (#2358).
+fn mcp_server_check(name: &str, outcome: Result<(), &str>) -> (CheckLevel, String) {
+    match outcome {
+        Ok(()) => (CheckLevel::Pass, format!("{name} answers MCP initialize")),
+        Err(reason) => {
+            let (effect, fix) = crate::hook_run::mcp_health::effect_and_fix(name);
+            (
+                CheckLevel::Warn,
+                format!("{name} failed MCP initialize: {reason}. {effect} {fix}"),
+            )
+        }
+    }
+}
+
+/// Send a real MCP `initialize` to each managed server and report the result (#2358).
+/// A process that holds its socket but never answers fails here, which a port check misses.
+/// Prints nothing when the active scope has no managed server.
+fn run_doctor_mcp_servers(
+    use_color: bool,
+    config: &Config,
+    config_dir: &Path,
+    active: &crate::scope::ActiveScopes,
+) {
+    let pass = super::doctor_pass(use_color);
+    let warn = super::doctor_warning(use_color);
+    let info = super::doctor_info(use_color);
+    let servers = match crate::hook_run::mcp_health::managed_servers(config, config_dir, active) {
+        Ok(servers) if servers.is_empty() => return,
+        Ok(servers) => servers,
+        Err(e) => {
+            eprintln!();
+            eprintln!("MCP servers:");
+            eprintln!("{warn} MCP server check skipped: cannot resolve the managed servers: {e:#}");
+            return;
+        }
+    };
+    eprintln!();
+    eprintln!("MCP servers:");
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            eprintln!("{warn} MCP server check skipped: cannot start a runtime: {e}");
+            return;
+        }
+    };
+    let down = runtime.block_on(crate::hook_run::mcp_health::find_down(
+        &servers,
+        crate::hook_run::mcp_health::DEFAULT_PROBE_TIMEOUT,
+    ));
+    for server in &servers {
+        let reason = down.iter().find(|d| d.name == server.name);
+        let outcome = reason.map_or(Ok(()), |d| Err(d.reason.as_str()));
+        print_check(mcp_server_check(&server.name, outcome), &pass, &warn, &info);
+    }
+}
+
 /// Doctor's verdict on the version of the `icm` binary that serves memory (#2261).
 fn icm_server_check(version: &str) -> (CheckLevel, String) {
     let upgrade = "Run `icm upgrade --apply`.";
@@ -1655,6 +1714,7 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     run_doctor_tool_availability(use_color, &config);
     run_doctor_dependent_tools(use_color);
     run_doctor_icm_server(use_color, &config, &config_dir, &active);
+    run_doctor_mcp_servers(use_color, &config, &config_dir, &active);
 
     // When context-mode is enabled, verify the marketplace clone exists so
     // inject_context_mode can actually resolve the plugin. A missing clone is
@@ -1866,6 +1926,29 @@ mod tests {
     }
 
     // -- icm_server_check (#2261) --
+
+    // -- mcp_server_check (#2358) --
+
+    #[test]
+    fn mcp_server_check_passes_a_server_that_answers() {
+        let (level, text) = mcp_server_check("icm", Ok(()));
+        assert_eq!(level, CheckLevel::Pass);
+        assert!(
+            text.contains("icm") && text.contains("initialize"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn mcp_server_check_warns_with_reason_and_fix_for_a_wedged_codebase_memory() {
+        let (level, text) = mcp_server_check(
+            crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME,
+            Err("did not answer MCP initialize within 5000 ms"),
+        );
+        assert_eq!(level, CheckLevel::Warn);
+        assert!(text.contains("did not answer"), "{text}");
+        assert!(text.contains("cbm-daemon-internal"), "{text}");
+    }
 
     #[test]
     fn icm_server_check_boundaries() {

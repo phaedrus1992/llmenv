@@ -396,6 +396,8 @@ enum TaskCommand {
         /// exactly one session is open for the current project.
         #[arg(long)]
         session: Option<String>,
+        #[command(flatten)]
+        detail: DetailArgs,
     },
     /// Claim a task, transitioning it to `wip`. An undone `parent` only
     /// warns (soft-block, starts anyway); an undone `blocked_on` reference
@@ -490,6 +492,8 @@ enum TaskCommand {
         /// Delete a note by its 0-based index or exact RFC3339 timestamp.
         #[arg(long = "delete-note")]
         delete_note: Option<String>,
+        #[command(flatten)]
+        detail: DetailArgs,
     },
     /// Delete task(s) outright — for a batch of work that's being
     /// deliberately abandoned, not just reshuffled. Provide explicit ids, or
@@ -532,6 +536,22 @@ enum TaskSessionCommand {
         /// this project untouched — true concurrency.
         #[arg(long, conflicts_with_all = ["resume", "replace"])]
         new: bool,
+        #[command(flatten)]
+        resume_context: ResumeArgs,
+    },
+    /// Change a session's resume context after it started. Lists gain the entries they lack;
+    /// a scalar flag replaces its value. Auto-resolves like `finish`.
+    Edit {
+        id: Option<String>,
+        #[command(flatten)]
+        resume_context: ResumeArgs,
+    },
+    /// Append a line to a session's resume context. Reads stdin when `text` is omitted.
+    /// Auto-resolves the session like `finish`, or pass `--id`.
+    Note {
+        text: Option<String>,
+        #[arg(long)]
+        id: Option<String>,
     },
     /// Finish a session by id. Auto-resolves when exactly one session is
     /// open for the current project.
@@ -548,6 +568,105 @@ enum TaskSessionCommand {
     },
     /// List every currently open session, current-project matches first.
     Ls,
+}
+
+/// The task detail flags shared by `task add` and `task edit` (#2339).
+#[derive(clap::Args, Default)]
+struct DetailArgs {
+    /// What a cold reader needs to do the task: files, acceptance criteria, gotchas.
+    /// On `task edit`, an empty string clears it.
+    #[arg(long, conflicts_with = "detail_file")]
+    detail: Option<String>,
+    /// Read the detail from a file.
+    #[arg(long, value_name = "PATH")]
+    detail_file: Option<std::path::PathBuf>,
+}
+
+impl DetailArgs {
+    fn resolve(self) -> anyhow::Result<Option<String>> {
+        match (self.detail, self.detail_file) {
+            (_, Some(path)) => Ok(Some(read_text_file(&path, "--detail-file")?)),
+            (text, None) => Ok(text),
+        }
+    }
+}
+
+/// The most a `--context-file` or `--detail-file` may hold. The text goes into every later
+/// SessionStart for the project, so a large file would flood the context window.
+const MAX_TEXT_FILE_BYTES: u64 = 64 * 1024;
+
+/// Read a text file named by `flag`. It refuses anything but a regular file, because a device
+/// such as `/dev/zero` never ends and a FIFO blocks on open. It refuses a file over
+/// [`MAX_TEXT_FILE_BYTES`].
+fn read_text_file(path: &std::path::Path, flag: &str) -> anyhow::Result<String> {
+    use anyhow::Context as _;
+    use std::io::Read as _;
+    let describe = || format!("cannot read {flag} {}", path.display());
+    let not_regular = || anyhow::anyhow!("{flag} {} is not a regular file", path.display());
+    // Check before `open`: opening a FIFO with no writer blocks.
+    anyhow::ensure!(
+        std::fs::metadata(path).with_context(describe)?.is_file(),
+        not_regular()
+    );
+    let file = std::fs::File::open(path).with_context(describe)?;
+    // Check again on the open handle, in case the path changed after the first check.
+    anyhow::ensure!(
+        file.metadata().with_context(describe)?.is_file(),
+        not_regular()
+    );
+    let mut text = String::new();
+    file.take(MAX_TEXT_FILE_BYTES + 1)
+        .read_to_string(&mut text)
+        .with_context(describe)?;
+    anyhow::ensure!(
+        text.len() as u64 <= MAX_TEXT_FILE_BYTES,
+        "{flag} {} is larger than {MAX_TEXT_FILE_BYTES} bytes",
+        path.display()
+    );
+    Ok(text.trim_end().to_string())
+}
+
+/// The resume-context flags shared by `session start` and `session edit` (#2339).
+#[derive(clap::Args, Default)]
+struct ResumeArgs {
+    /// What the work is and where to pick it up. Multi-line text is fine.
+    #[arg(long, conflicts_with = "context_file")]
+    context: Option<String>,
+    /// Read the resume notes from a file.
+    #[arg(long, value_name = "PATH")]
+    context_file: Option<std::path::PathBuf>,
+    /// A GitHub issue number the session works on. Repeatable.
+    #[arg(long = "issue", value_name = "N")]
+    issues: Vec<u32>,
+    /// The git branch. Detected from git when omitted.
+    #[arg(long)]
+    branch: Option<String>,
+    /// The branch the work merges into.
+    #[arg(long)]
+    base: Option<String>,
+    /// An ICM topic to recall when resuming. Repeatable.
+    #[arg(long = "memory-topic")]
+    memory_topics: Vec<String>,
+    /// A plan or spec file, relative to the repo root. Repeatable.
+    #[arg(long = "doc")]
+    docs: Vec<String>,
+}
+
+impl ResumeArgs {
+    fn into_context(self) -> anyhow::Result<crate::task::resume::ResumeContext> {
+        let context = match (self.context, self.context_file) {
+            (_, Some(path)) => Some(read_text_file(&path, "--context-file")?),
+            (text, None) => text,
+        };
+        Ok(crate::task::resume::ResumeContext {
+            context,
+            issues: self.issues,
+            branch: self.branch,
+            base: self.base,
+            memory_topics: self.memory_topics,
+            docs: self.docs,
+        })
+    }
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -1022,6 +1141,73 @@ fn installed_adapters(config: &Config) -> impl Iterator<Item = Box<dyn AgentAdap
         })
 }
 
+/// What [`ensure_local_memory_proxy`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProxyStart {
+    /// This host does not serve memory, so there is no local proxy to start.
+    NotLocal,
+    /// A proxy already holds the address.
+    AlreadyRunning,
+    /// This call started a new proxy.
+    Started,
+    /// llmenv could not start the proxy. Carries the cause.
+    Failed(String),
+}
+
+/// Start the local `mcp-proxy` when this host is the memory server and nothing serves its
+/// address. A failure prints a warning and is not fatal: the caller goes on without a proxy.
+pub(crate) fn ensure_local_memory_proxy(
+    config: &Config,
+    config_dir: &Path,
+    active: &ActiveScopes,
+) -> ProxyStart {
+    let Some(mem) = export_local_memory_entry(config, config_dir, active) else {
+        return ProxyStart::NotLocal;
+    };
+    let mut start = ProxyStart::AlreadyRunning;
+    let mem = &mem;
+    let bind = memory_bind_address(mem);
+    match crate::mcp::proxy::default_pid_path() {
+        Ok(pid_path) => {
+            match crate::mcp::proxy::ensure_running(&bind, &pid_path, |bind| {
+                crate::mcp::proxy::spawn_mcp_proxy(bind, &pid_path)
+            }) {
+                Ok(outcome) => {
+                    let spawned = outcome == crate::mcp::proxy::EnsureOutcome::Spawned;
+                    if spawned {
+                        start = ProxyStart::Started;
+                    }
+                    // Warn when binding to all interfaces only on startup — the ICM
+                    // daemon is unauthenticated.
+                    if spawned
+                        && let Ok(addr) = mem.listen_host.parse::<std::net::IpAddr>()
+                        && addr.is_unspecified()
+                    {
+                        eprintln!(
+                            "warning: memory.listen_host is '{}' — the ICM proxy \
+                             will accept connections on ALL network interfaces. \
+                             Set a specific IP to restrict access.",
+                            mem.listen_host
+                        );
+                    }
+                }
+                Err(e) => {
+                    // `{e:#}` so anyhow's context chain is shown: the outermost layer is a
+                    // label like "waiting on mcp-proxy child" and the io::Error
+                    // underneath it is the actual diagnosis.
+                    eprintln!("warning: failed to ensure mcp-proxy running: {e:#}");
+                    start = ProxyStart::Failed(format!("{e:#}"));
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("warning: cannot locate mcp-proxy pidfile: {e:#}");
+            start = ProxyStart::Failed(format!("cannot locate the mcp-proxy pidfile: {e:#}"));
+        }
+    }
+    start
+}
+
 fn run_export(
     scope: Option<String>,
     tag: Option<String>,
@@ -1036,45 +1222,9 @@ fn run_export(
     let active = crate::scope::evaluate(&config, &env);
 
     // When the memory backend designates *this* host as its server, ensure the
-    // local `mcp-proxy` is alive before agents try to reach it. Failures here
-    // are logged but non-fatal — the export must still emit env vars so the
-    // shell hook stays usable.
-    if let Some(mem) = export_local_memory_entry(&config, &config_dir, &active) {
-        let mem = &mem;
-        let bind = memory_bind_address(mem);
-        match crate::mcp::proxy::default_pid_path() {
-            Ok(pid_path) => {
-                match crate::mcp::proxy::ensure_running(&bind, &pid_path, |bind| {
-                    crate::mcp::proxy::spawn_mcp_proxy(bind, &pid_path)
-                }) {
-                    Ok(outcome) => {
-                        // Warn when binding to all interfaces only on startup — the ICM
-                        // daemon is unauthenticated.
-                        if outcome == crate::mcp::proxy::EnsureOutcome::Spawned
-                            && let Ok(addr) = mem.listen_host.parse::<std::net::IpAddr>()
-                            && addr.is_unspecified()
-                        {
-                            eprintln!(
-                                "warning: memory.listen_host is '{}' — the ICM proxy \
-                                 will accept connections on ALL network interfaces. \
-                                 Set a specific IP to restrict access.",
-                                mem.listen_host
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        // `{e:#}` so anyhow's context chain is shown: the outermost layer is a
-                        // label like "waiting on mcp-proxy child" and the io::Error
-                        // underneath it is the actual diagnosis.
-                        eprintln!("warning: failed to ensure mcp-proxy running: {e:#}");
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("warning: cannot locate mcp-proxy pidfile: {e:#}");
-            }
-        }
-    }
+    // local `mcp-proxy` is alive before agents try to reach it. A failure is logged but
+    // not fatal: the export must still emit env vars so the shell hook stays usable.
+    ensure_local_memory_proxy(&config, &config_dir, &active);
 
     // Throttled pull: check sync interval and fetch+pull if enough time has elapsed.
     // Skipped entirely when remote_sync is disabled (e.g. 1Password locked).
@@ -2470,11 +2620,9 @@ fn run_config_context() {
         bundles = bundles_dir.display(),
     );
 
-    // #231: append the task-tracker SessionStart reminder, if enabled. This
-    // is the only SessionStart hook whose additionalContext Claude Code
-    // actually surfaces (see emit_hook_context's #558 comment — hook-run's
-    // own SessionStart output is suppressed), so cross-session task pickup
-    // rides this existing channel rather than hook-run.
+    // #231: append the task-tracker SessionStart reminder, if enabled. Cross-session task
+    // pickup rides this channel, which predates hook-run's SessionStart output (accepted
+    // since #2251).
     match Config::load(&config_path) {
         Ok(config) => {
             let task_tracker_enabled = config
@@ -3261,6 +3409,11 @@ fn render_task_session_summary_human(
         out.push_str(&style::sanitize_for_terminal(desc));
     }
     out.push_str(&format!(" ({}/{} done)\n", summary.done, summary.total));
+    let resume = summary.resume.render();
+    if !resume.is_empty() {
+        out.push_str(&resume);
+        out.push('\n');
+    }
     if summary.tasks.is_empty() {
         out.push_str("No tasks.\n");
         return out;
@@ -3270,6 +3423,11 @@ fn render_task_session_summary_human(
         let label = format!("{:<7}", style::task_state_label(task.state));
         let title = style::sanitize_for_terminal(&task.title);
         out.push_str(&format!("{glyph} {label} {}  {title}\n", task.slug));
+        if let Some(detail) = &task.detail {
+            for line in detail.lines() {
+                out.push_str(&format!("    | {}\n", style::sanitize_for_terminal(line)));
+            }
+        }
         for note in &task.notes {
             out.push_str(&format!(
                 "    {} {}\n",
@@ -3291,7 +3449,9 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             parent,
             no_parent,
             session,
+            detail,
         } => {
+            let detail = detail.resolve()?;
             // New-project guard: warn before starting a deliberately
             // top-level task while another is still in progress. Only fires
             // on `--no-parent` now (#929) — omitting `--parent` no longer
@@ -3331,7 +3491,14 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 Some(id) => crate::task::SessionChoice::Named(id),
                 None => crate::task::SessionChoice::Resolve(&owner),
             };
-            let task = crate::task::add_task(&state_dir, &title, parent_spec, choice, &project)?;
+            if detail.as_deref().is_some_and(str::is_empty) {
+                eprintln!("llmenv: the task detail is empty, so none was saved");
+            }
+            let new = crate::task::NewTask {
+                title: &title,
+                detail: detail.as_deref(),
+            };
+            let task = crate::task::add_task_with(&state_dir, &new, parent_spec, choice, &project)?;
             println!("Added task '{}' ({})", task.slug, task.title);
         }
         TaskCommand::Start { id, force, reopen } => {
@@ -3472,7 +3639,9 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             unblock,
             add_note,
             delete_note,
+            detail,
         } => {
+            let detail = detail.resolve()?;
             let add_note = match add_note.as_deref() {
                 Some("") => {
                     use std::io::Read;
@@ -3491,6 +3660,7 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 unblock: &unblock,
                 add_note: add_note.as_deref(),
                 delete_note: delete_note.as_deref(),
+                detail: detail.as_deref(),
             };
             let task = crate::task::edit_task(&state_dir, &id, &edit)?;
             println!("Updated '{}'", task.slug);
@@ -3584,6 +3754,11 @@ fn run_task_show_current_or_next(state_dir: &Path, target: ShowTarget) -> anyhow
             Some(task) => println!("{}", serde_json::to_string_pretty(&task)?),
             None => println!("No {} task.", target.label()),
         }
+        // On stderr so the JSON on stdout stays machine-readable (#2339).
+        let resume = session.resume.render();
+        if matches!(target, ShowTarget::Current) && !resume.is_empty() {
+            eprintln!("{resume}");
+        }
     }
     Ok(())
 }
@@ -3604,7 +3779,14 @@ fn run_task_session_command(
             resume,
             replace,
             new,
+            resume_context,
         } => {
+            let explicit = resume_context.into_context()?;
+            let mut detected = explicit.clone();
+            detected.fill_detected(
+                crate::task::resume::git_branch(&std::env::current_dir()?).as_deref(),
+            );
+            let is_resume = resume.is_some();
             let decision = match (resume, replace, new) {
                 (Some(id), false, false) => StartDecision::Resume(id),
                 (None, true, false) => StartDecision::Replace,
@@ -3618,8 +3800,11 @@ fn run_task_session_command(
                 description: description.as_deref(),
                 project: &project,
                 owner: &owner,
+                // A resumed session keeps what it has: only explicit flags change it.
+                resume: if is_resume { &explicit } else { &detected },
             };
             let outcome = session::start_session_as(state_dir, &request, decision)?;
+            let nudge = start_outcome_lacks_context(&outcome);
             match outcome {
                 StartOutcome::Created(s) => println!(
                     "Started session '{}'{}",
@@ -3640,6 +3825,29 @@ fn run_task_session_command(
                     println!("Started session '{}'", session.id);
                 }
             }
+            if nudge {
+                println!("{}", crate::task::resume::MISSING_CONTEXT_NUDGE);
+            }
+        }
+        TaskSessionCommand::Edit { id, resume_context } => {
+            let update = resume_context.into_context()?;
+            let id = resolve_session_id(state_dir, &project, id)?;
+            let session = session::update_resume(state_dir, &id, |r| r.apply(&update))?;
+            println!("Updated resume context for session '{}'", session.id);
+        }
+        TaskSessionCommand::Note { text, id } => {
+            let text = match text {
+                Some(text) => text,
+                None => std::io::read_to_string(std::io::stdin())?,
+            };
+            let text = text.trim_end();
+            anyhow::ensure!(
+                !text.is_empty(),
+                "the note is empty: pass text or pipe it on stdin"
+            );
+            let id = resolve_session_id(state_dir, &project, id)?;
+            let session = session::update_resume(state_dir, &id, |r| r.append_note(text))?;
+            println!("Noted session '{}'", session.id);
         }
         TaskSessionCommand::Finish { id } => {
             let id = resolve_session_id(state_dir, &project, id)?;
@@ -3672,6 +3880,10 @@ fn run_task_session_command(
                     .map(|n| format!(" ({n})"))
                     .unwrap_or_default(),
             );
+            let resume = session.resume.render();
+            if !resume.is_empty() {
+                println!("{resume}");
+            }
         }
         TaskSessionCommand::Summary { id, format } => {
             let id = resolve_session_id(state_dir, &project, id)?;
@@ -3709,6 +3921,15 @@ fn run_task_session_command(
         }
     }
     Ok(())
+}
+
+/// Whether the session that `session start` produced has nothing a cold reader could use.
+fn start_outcome_lacks_context(outcome: &crate::task::session::StartOutcome) -> bool {
+    use crate::task::session::StartOutcome;
+    match outcome {
+        StartOutcome::Created(s) | StartOutcome::Resumed(s) => s.resume.needs_nudge(),
+        StartOutcome::Replaced { session, .. } => session.resume.needs_nudge(),
+    }
 }
 
 /// Resolve an explicit-or-omitted session id the same way `add_task` does:
@@ -6186,6 +6407,14 @@ mod tests {
             host,
             ..Config::default()
         }
+    }
+
+    #[test]
+    fn ensure_local_memory_proxy_is_not_local_without_a_memory_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outcome =
+            ensure_local_memory_proxy(&Config::default(), dir.path(), &active_as_server());
+        assert_eq!(outcome, ProxyStart::NotLocal);
     }
 
     /// Build an ActiveScopes with the host-scope "srv" matched and tag "mem" active.

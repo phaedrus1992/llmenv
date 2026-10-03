@@ -4,5 +4,4 @@
 #
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
-cc 7729292b977287612d960826fb72751d6af2f7e6c5c816b3ce9f0b2419655148 # shrinks to dst = Null, src = Object {"a": Null}
-cc 843f56e7cd5717fde2fbc7681c1f3a6e4f5c8645bdc843f67796d94307e8e87c # shrinks to text = "\u{202e}"
+cc 07730ca5398fe5e6ec8ecb046f2af96ba6d86ec22d1668f8d52042ff987d339a # shrinks to result = Object {}

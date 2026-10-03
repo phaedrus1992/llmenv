@@ -219,6 +219,16 @@ impl McpHttpClient {
         Ok(sid)
     }
 
+    /// Check that the server answers a fresh MCP `initialize` within the client timeout.
+    ///
+    /// # Errors
+    /// Network failure, timeout, or a non-2xx status.
+    pub async fn probe(&self) -> anyhow::Result<()> {
+        // Drop any cached session: a probe must ask the server, not trust an old id.
+        *self.session_id.lock().await = None;
+        self.ensure_session().await.map(|_| ())
+    }
+
     /// Call one MCP tool and return the concatenated text content.
     ///
     /// A cached `Mcp-Session-Id` the server no longer recognizes (expired, or
@@ -579,6 +589,80 @@ mod tests {
                 .as_deref()
                 == Some(self.0)
         }
+    }
+
+    #[tokio::test]
+    async fn probe_succeeds_when_server_answers_initialize() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(JsonRpcMethod("initialize"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("mcp-session-id", "s1")
+                    .set_body_json(serde_json::json!({"jsonrpc": "2.0", "id": 0, "result": {}})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(JsonRpcMethod("notifications/initialized"))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+
+        let client =
+            McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("valid URL");
+        client.probe().await.expect("probe ok");
+    }
+
+    #[tokio::test]
+    async fn probe_errors_on_http_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+
+        let client =
+            McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("valid URL");
+        let err = client.probe().await.expect_err("500 must fail the probe");
+        assert!(err.to_string().contains("500"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn probe_errors_when_server_accepts_but_never_answers() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(5)))
+            .mount(&server)
+            .await;
+
+        let client =
+            McpHttpClient::test_new(server.uri(), Duration::from_millis(200)).expect("valid URL");
+        assert!(client.probe().await.is_err(), "a wedged server must fail");
+    }
+
+    #[tokio::test]
+    async fn probe_ignores_a_cached_session() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(JsonRpcMethod("initialize"))
+            .respond_with(ResponseTemplate::new(200).insert_header("mcp-session-id", "s1"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+
+        let client =
+            McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("valid URL");
+        client.probe().await.expect("first probe ok");
+        assert!(
+            client.probe().await.is_err(),
+            "second probe must re-ask the server"
+        );
     }
 
     #[tokio::test]

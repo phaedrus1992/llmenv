@@ -170,6 +170,16 @@ fn assert_fail_soft(mut cmd: Command, stderr_needle: &str) {
         .stderr(predicate::str::contains(stderr_needle));
 }
 
+/// Assert the session-start contract for a dead backend (#2358): exit 0, a stderr warning
+/// containing `stderr_needle`, and the health notice on stdout so the agent sees it.
+fn assert_fail_soft_with_health_notice(mut cmd: Command, stderr_needle: &str) {
+    cmd.timeout(Duration::from_secs(25))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MCP health check failed"))
+        .stderr(predicate::str::contains(stderr_needle));
+}
+
 #[test]
 fn unknown_event_exits_zero_with_warning() {
     // The event name is rejected before any config load, so a near-empty config
@@ -202,7 +212,7 @@ fn malformed_backend_url_exits_zero_with_warning() {
     // reserved by RFC 2606 and guaranteed to never resolve.
     let (dir, config_path) = setup_config(&config_with_memory_addr("no-such-host.invalid", 9));
 
-    assert_fail_soft(
+    assert_fail_soft_with_health_notice(
         hook_cmd(dir.path(), &config_path, "session_start"),
         "invalid memory backend URL",
     );
@@ -217,7 +227,7 @@ fn loopback_url_is_allowed_not_ssrf_rejected() {
     // fail-soft ("skipped"), not an "invalid ... SSRF" rejection.
     let (dir, config_path) = setup_config(&config_with_memory_addr("127.0.0.1", 9));
 
-    assert_fail_soft(
+    assert_fail_soft_with_health_notice(
         hook_cmd(dir.path(), &config_path, "session_start"),
         "session_start skipped",
     );
@@ -229,7 +239,7 @@ fn private_network_url_is_allowed_not_ssrf_rejected() {
     // `icm serve` (AGENTS.md) and must not be SSRF-rejected.
     let (dir, config_path) = setup_config(&config_with_memory_addr("10.0.0.1", 8080));
 
-    assert_fail_soft(
+    assert_fail_soft_with_health_notice(
         hook_cmd(dir.path(), &config_path, "session_start"),
         "session_start skipped",
     );
@@ -244,7 +254,7 @@ fn unreachable_public_backend_exits_zero_with_warning() {
     // host.
     let (dir, config_path) = setup_config(&config_with_memory_addr("192.0.2.1", 9));
 
-    assert_fail_soft(
+    assert_fail_soft_with_health_notice(
         hook_cmd(dir.path(), &config_path, "session_start"),
         "session_start skipped",
     );
@@ -277,7 +287,7 @@ fn all_events_fail_soft_without_backend() {
 #[test]
 fn adaptive_events_fail_soft_with_an_unreachable_backend() {
     // #2249: with a session id, these events take the adaptive flow and write
-    // the recall ledger. A dead backend must still give exit 0 and no output.
+    // the recall ledger. A dead backend must still give exit 0.
     let (dir, config_path) = setup_config(&config_with_memory_addr("127.0.0.1", 9));
     for (event, payload) in [
         (
@@ -301,12 +311,17 @@ fn adaptive_events_fail_soft_with_an_unreachable_backend() {
             r#"{"hook_event_name":"PostToolBatch","session_id":"s1","tool_calls":[]}"#,
         ),
     ] {
-        hook_cmd(dir.path(), &config_path, event)
+        let assert = hook_cmd(dir.path(), &config_path, event)
             .write_stdin(payload)
-            .timeout(Duration::from_secs(20))
+            .timeout(Duration::from_secs(25))
             .assert()
-            .success()
-            .stdout(predicate::str::is_empty());
+            .success();
+        // Only session start prints on a dead backend: the health notice (#2358).
+        if event == "session_start" {
+            assert.stdout(predicate::str::contains("MCP health check failed"));
+        } else {
+            assert.stdout(predicate::str::is_empty());
+        }
     }
 }
 
@@ -836,6 +851,178 @@ fn session_start_with_codebase_memory_exits_zero_without_binary() {
         .success();
 }
 
+/// Put a fake `codebase-memory-mcp` with the given shell body first on `PATH`.
+#[cfg(unix)]
+fn with_fake_cbm(cmd: &mut Command, bin_dir: &std::path::Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let script = bin_dir.join("codebase-memory-mcp");
+    fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    cmd.env("PATH", format!("{}:{old_path}", bin_dir.display()));
+}
+
+// #2358: a codebase-memory server that exits at once is named on stdout, with its fix.
+#[cfg(unix)]
+#[test]
+fn session_start_names_a_dead_codebase_memory_server() {
+    let (dir, config_path) = setup_config(&config_with_codebase_memory());
+    let bin = TempDir::new().unwrap();
+    let mut cmd = hook_cmd(dir.path(), &config_path, "session_start");
+    with_fake_cbm(&mut cmd, bin.path(), "exit 1");
+    cmd.timeout(Duration::from_secs(20))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MCP health check failed"))
+        .stdout(predicate::str::contains("codebase-memory-mcp"))
+        .stdout(predicate::str::contains("cbm-daemon-internal"));
+}
+
+// #2358: a healthy server adds nothing to the session start output.
+#[cfg(unix)]
+#[test]
+fn session_start_is_silent_when_codebase_memory_answers() {
+    let (dir, config_path) = setup_config(&config_with_codebase_memory());
+    let bin = TempDir::new().unwrap();
+    let mut cmd = hook_cmd(dir.path(), &config_path, "session_start");
+    let reply = r#"{"jsonrpc":"2.0","id":0,"result":{}}"#;
+    with_fake_cbm(
+        &mut cmd,
+        bin.path(),
+        &format!("read line\nprintf '%s\\n' '{reply}'"),
+    );
+    cmd.timeout(Duration::from_secs(20))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MCP health check failed").not());
+}
+
+/// A config whose host scope matches `hostname`, so this host owns the ICM server.
+fn config_with_local_memory_server(port: u16, hostname: &str) -> String {
+    format!(
+        r#"
+scope:
+  network: []
+  host:
+    - id: me
+      match:
+        hostname: "{hostname}"
+      tags: []
+  user:
+    - id: test-user
+      match:
+        user: {user}
+      tags: [test]
+
+tag:
+  test: ""
+
+host:
+  me:
+    addr: "127.0.0.1"
+
+features:
+  memory:
+    - server_host: me
+      port: {port}
+      listen_host: "127.0.0.1"
+      when: [test]
+
+cache:
+  sync_interval_minutes: 60
+
+adapter:
+  engine: claude-code
+"#,
+        user = current_user(),
+        port = port,
+        hostname = hostname,
+    )
+}
+
+/// A stand-in `mcp-proxy`: serves HTTP on `--host`/`--port` and answers every POST with 200.
+#[cfg(unix)]
+const FAKE_MCP_PROXY: &str = r#"#!/usr/bin/env python3
+import http.server, sys
+a = sys.argv
+host, port = a[a.index("--host") + 1], int(a[a.index("--port") + 1])
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("content-length", 0)))
+        self.send_response(200)
+        self.send_header("mcp-session-id", "s")
+        self.send_header("content-length", "2")
+        self.end_headers()
+        self.wfile.write(b"{}")
+    def log_message(self, *args):
+        pass
+http.server.HTTPServer((host, port), H).serve_forever()
+"#;
+
+/// Kills the proxy that the hook started, so the test leaves no process behind.
+#[cfg(unix)]
+struct ProxyReaper(std::path::PathBuf);
+
+#[cfg(unix)]
+impl Drop for ProxyReaper {
+    fn drop(&mut self) {
+        if let Ok(pid) = fs::read_to_string(&self.0) {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", pid.trim()])
+                .status();
+        }
+    }
+}
+
+/// Run session start on a host that owns ICM, with nothing listening and the given stand-in
+/// `mcp-proxy` first on `PATH`. The hook starts that stand-in when it finds ICM down.
+#[cfg(unix)]
+fn session_start_on_the_icm_host(fake_proxy: &str) -> assert_cmd::assert::Assert {
+    use std::os::unix::fs::PermissionsExt;
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let hostname = rustix::system::uname()
+        .nodename()
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    let (dir, config_path) = setup_config(&config_with_local_memory_server(port, &hostname));
+    let _reaper = ProxyReaper(dir.path().join("llmenv").join("mcp-proxy.pid"));
+    let bin = TempDir::new().unwrap();
+    let script = bin.path().join("mcp-proxy");
+    fs::write(&script, fake_proxy).unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    hook_cmd(dir.path(), &config_path, "session_start")
+        .env("PATH", format!("{}:{old_path}", bin.path().display()))
+        .timeout(Duration::from_secs(30))
+        .assert()
+        .success()
+}
+
+// #2358: a stopped proxy on the host that owns ICM is restarted at session start, so no
+// notice is needed.
+#[cfg(unix)]
+#[test]
+fn session_start_restarts_a_stopped_proxy_on_the_icm_host() {
+    session_start_on_the_icm_host(FAKE_MCP_PROXY)
+        .stdout(predicate::str::contains("MCP health check failed").not());
+}
+
+// #2358 review: a restart that starts a proxy which still does not answer must leave ICM in the
+// notice, with the reason from the second probe.
+#[cfg(unix)]
+#[test]
+fn session_start_still_reports_icm_when_the_restarted_proxy_does_not_answer() {
+    let broken = FAKE_MCP_PROXY.replace("self.send_response(200)", "self.send_response(500)");
+    assert_ne!(broken, FAKE_MCP_PROXY);
+    session_start_on_the_icm_host(&broken)
+        .stdout(predicate::str::contains("MCP health check failed"))
+        .stdout(predicate::str::contains("icm"))
+        .stdout(predicate::str::contains("500"));
+}
+
 fn config_with_task_tracker() -> String {
     format!(
         r#"
@@ -973,4 +1160,147 @@ fn stop_with_task_tracker_enabled_exits_zero() {
         .timeout(Duration::from_secs(10))
         .assert()
         .success();
+}
+
+#[test]
+fn session_start_names_a_dead_backend_on_stdout_with_the_fix() {
+    let (dir, config_path) = setup_config(&config_with_memory_addr("127.0.0.1", 9));
+    hook_cmd(dir.path(), &config_path, "session_start")
+        .write_stdin(r#"{"hook_event_name":"SessionStart","session_id":"s1","source":"startup"}"#)
+        .timeout(Duration::from_secs(25))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("icm"))
+        .stdout(predicate::str::contains("llmenv export"))
+        .stdout(predicate::str::contains("does not serve memory"));
+}
+
+// #2358 review: a config that stops the managed servers from resolving must not turn the
+// health check off in silence. Two active codebase-memory entries are ambiguous.
+#[test]
+fn session_start_says_when_the_health_check_could_not_run() {
+    let config = config_with_codebase_memory().replace(
+        "  codebase_memory:\n    - when: [test]\n",
+        "  codebase_memory:\n    - when: [test]\n    - when: [test]\n",
+    );
+    assert!(config.matches("when: [test]").count() >= 2, "{config}");
+    let (dir, config_path) = setup_config(&config);
+    hook_cmd(dir.path(), &config_path, "session_start")
+        .timeout(Duration::from_secs(20))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MCP health check could not run"));
+}
+
+/// A stand-in ICM endpoint: it answers `initialize`, then fails every other request with a 500.
+#[cfg(unix)]
+const FAKE_ICM_FAILING_CALLS: &str = r#"#!/usr/bin/env python3
+import http.server, sys
+port = int(sys.argv[1])
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("content-length", 0)))
+        if b'"initialize"' in body:
+            self.send_response(200)
+            self.send_header("mcp-session-id", "s")
+            self.send_header("content-length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+        elif b"notifications/initialized" in body:
+            self.send_response(202)
+            self.send_header("content-length", "0")
+            self.end_headers()
+        else:
+            self.send_response(500)
+            self.send_header("content-length", "16")
+            self.end_headers()
+            self.wfile.write(b"upstream failure")
+    def log_message(self, *args):
+        pass
+http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
+"#;
+
+/// Kills the fake server when the test ends.
+#[cfg(unix)]
+struct ChildGuard(std::process::Child);
+
+#[cfg(unix)]
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+// #2358 review: with a notice for one server, a memory error from a different cause must
+// still reach the agent, not only stderr.
+#[cfg(unix)]
+#[test]
+fn session_start_shows_the_memory_error_when_another_server_needs_a_notice() {
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let script_dir = TempDir::new().unwrap();
+    let script = script_dir.path().join("fake_icm.py");
+    fs::write(&script, FAKE_ICM_FAILING_CALLS).unwrap();
+    let server = std::process::Command::new("python3")
+        .arg(&script)
+        .arg(port.to_string())
+        .spawn()
+        .unwrap();
+    let _guard = ChildGuard(server);
+    for _ in 0..100 {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let config = config_with_memory_addr("127.0.0.1", port).replace(
+        "      when: [test]\n\ncache:",
+        "      when: [test]\n  codebase_memory:\n    - when: [test]\n\ncache:",
+    );
+    assert!(config.contains("codebase_memory"), "{config}");
+    let (dir, config_path) = setup_config(&config);
+    let bin = TempDir::new().unwrap();
+    let mut cmd = hook_cmd(dir.path(), &config_path, "session_start");
+    with_fake_cbm(&mut cmd, bin.path(), "exit 1");
+    cmd.timeout(Duration::from_secs(25))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("codebase-memory-mcp"))
+        .stdout(predicate::str::contains("memory session_start failed"));
+}
+
+// #2358 review: with no health notice, a failing memory call stays a stderr warning and adds
+// nothing to stdout. Only a notice for another server brings the memory error into the output.
+#[cfg(unix)]
+#[test]
+fn session_start_prints_nothing_when_only_the_memory_call_fails() {
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let script_dir = TempDir::new().unwrap();
+    let script = script_dir.path().join("fake_icm.py");
+    fs::write(&script, FAKE_ICM_FAILING_CALLS).unwrap();
+    let server = std::process::Command::new("python3")
+        .arg(&script)
+        .arg(port.to_string())
+        .spawn()
+        .unwrap();
+    let _guard = ChildGuard(server);
+    for _ in 0..100 {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let (dir, config_path) = setup_config(&config_with_memory_addr("127.0.0.1", port));
+    hook_cmd(dir.path(), &config_path, "session_start")
+        .timeout(Duration::from_secs(25))
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("session_start skipped"));
 }

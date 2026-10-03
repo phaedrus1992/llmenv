@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - ICM recall now adapts to the session instead of sending the same memory block on every prompt. Each memory goes out once per context (again after a compaction or `/clear`), and each prompt pulls memories that match what you're asking and what the session just touched, plus related topics; a failed tool call gets memories about that error, and a new subagent gets memories for its task. On by default; set `features.memory[].adaptive_recall: false` to get the old behavior. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#featuresmemory) (#2249)
 - `capabilities.model_effort` sets the start effort and an effort cap per Claude model, rendered into Claude Code's `modelSettings`. Levels you save with `/effort` for other models survive `llmenv regenerate`. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#effort_level-and-model_effort-claude-code) (#2144)
 - `llmenv task start --reopen` moves a `done` task back to `open` and starts it, for a step closed before its work was finished. See [`task`](https://phaedrus1992.github.io/llmenv/docs/commands#task) (#2338)
+- Session start checks that the memory server and `codebase-memory-mcp` answer an MCP `initialize`, restarts a stopped ICM proxy on the host that serves memory, and names any server that stays down, with the fix. `llmenv doctor` runs the same check under `MCP servers:`. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp#session-start-health-check-added-in-v3120) (#2358)
+- `llmenv task session start` records resume context: notes, issues, branch, base, memory topics, and plan docs, with `session edit` and `session note` to change it. The SessionStart reminder, `session show`, and `session summary` print it, and llmenv fills the branch and issue from git. See [`task`](https://phaedrus1992.github.io/llmenv/docs/commands#resume-context-added-in-v3120) (#2339)
+- `llmenv task add --detail` and `task edit --detail` store what someone needs to do a task cold. See [`task`](https://phaedrus1992.github.io/llmenv/docs/commands#task) (#2339)
 
 ### Changed
 
@@ -36,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The session-start memory block in Claude Code and opencode now starts with `[ICM MEMORY CONTEXT (session start)]`, so the model can tell it apart from per-prompt recall. A resumed or forked session no longer fetches and injects a second wake-up pack, since its conversation already holds the first one. opencode also receives the block now, in its first message; llmenv used to drop it. See [`hook-run`](https://phaedrus1992.github.io/llmenv/docs/commands#hook-run) (#2142)
 - With `adaptive_recall: false`, the per-prompt natural-language recall now names the session's project. It used to be filtered by whatever directory the `icm serve` process happened to run in, which on a remote ICM server meant memories from an unrelated project (#2253)
 - `effort_level` (in `capabilities` and `features.slippage`) now fails validation unless it is `low`, `medium`, `high`, or `xhigh`, the values Claude Code accepts in settings. It used to take any string. For `max` or `ultracode`, the error names the setting to use instead. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#effort_level-and-model_effort-claude-code) (#2144)
+- `llmenv task show --current` prints each session's resume context on stderr. Its JSON on stdout does not change (#2339)
 
 ### Fixed
 
