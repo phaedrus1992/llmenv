@@ -652,6 +652,8 @@ and `enforce_commit: false` turns off the fifth.
 - The first `git commit` or `gh pr create` of a session with no task in progress is denied once, with the commands to
   run. The same command runs on the next try. The deny comes back when a later gap leaves no task in progress.
 
+The tracker looks at the whole project: a task in progress in any open session of the project counts as tracked work.
+The deny is once for each session, not once for each commit, and a failed state write lets the command through.
 The hooks register on Claude Code. When session logging already routes every tool call to `hook-run`, the tracker adds no
 second entry. See [`features.task_tracker:`](configuration.md#featurestask_tracker) for the fields. (#2456)
 

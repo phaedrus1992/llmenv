@@ -1332,8 +1332,9 @@ pub(crate) enum Tracking {
     },
 }
 
-/// The tracking state of the current project. A read error counts as [`Tracking::Unknown`], so a
-/// hook never nudges on a guess.
+/// The tracking state of the current project, over every open session of the project: a task in
+/// progress in any of them counts. A read error is [`Tracking::Unknown`], so a hook never nudges
+/// on a guess.
 pub(crate) fn tracking(state_dir: &Path) -> Tracking {
     let project = match project::current_tag() {
         Ok(project) => project,
@@ -1342,11 +1343,21 @@ pub(crate) fn tracking(state_dir: &Path) -> Tracking {
             return Tracking::Unknown;
         }
     };
-    let ids = open_session_ids(state_dir, &project);
+    // A store that cannot be read is unknown, not empty: a hook never nudges or denies on a guess.
+    let (sessions, tasks) = match (
+        session::try_open_sessions_for_project(state_dir, &project),
+        try_list_tasks(state_dir),
+    ) {
+        (Ok(sessions), Ok(tasks)) => (sessions, tasks),
+        (Err(e), _) | (_, Err(e)) => {
+            tracing::error!("task store cannot be read, so tracking is unknown: {e:#}");
+            return Tracking::Unknown;
+        }
+    };
+    let ids: Vec<String> = sessions.into_iter().map(|s| s.id).collect();
     if ids.is_empty() {
         return Tracking::NoSession;
     }
-    let tasks = list_tasks(state_dir);
     let unfinished: Vec<&Task> = tasks
         .iter()
         .filter(|t| t.state != TaskState::Done)

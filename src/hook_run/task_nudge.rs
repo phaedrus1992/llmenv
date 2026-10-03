@@ -5,8 +5,11 @@
 //! a question to the user, and before the first `git commit` or `gh pr create` with no task in
 //! progress. Per-session counters live in `state_dir/task_nudge/{session_id}.json`.
 //!
-//! Fail-soft: an I/O error logs and passes the call through. Load-modify-save has no lock, on
-//! the same assumption as `repeat_detect`: the hooks of one session run one after the other.
+//! Fail-soft: an I/O error logs and passes the call through, and a deny needs its marker saved.
+//! Load-modify-save has no lock, like `repeat_detect`. Parallel tool calls of one session can
+//! lose an update, which costs one extra or one missed nudge and nothing more.
+//! The tracker state is per project, not per session: a task in progress in any open session of
+//! the project counts as tracked work.
 //! Design: docs/design/issue-2438-task-tracking-nudges.md
 
 use std::path::{Path, PathBuf};
@@ -74,7 +77,9 @@ fn load(path: &Path) -> NudgeState {
     }
 }
 
-fn save(path: &Path, state: &NudgeState) {
+/// Whether the state was saved. A caller that depends on the state, such as the deny marker,
+/// must not act when it was not.
+fn save(path: &Path, state: &NudgeState) -> bool {
     let written = path
         .parent()
         .map_or(Ok(()), crate::paths::create_dir_owner_only)
@@ -82,9 +87,10 @@ fn save(path: &Path, state: &NudgeState) {
             let json = serde_json::to_string(state)?;
             crate::paths::write_owner_only_atomic(path, json.as_bytes())
         });
-    if let Err(e) = written {
+    if let Err(e) = &written {
         tracing::error!("task nudge state {} cannot be saved: {e:#}", path.display());
     }
+    written.is_ok()
 }
 
 /// The commands that register work, for the state of the project.
@@ -249,16 +255,101 @@ pub(crate) fn handle_stop(
     }
 }
 
-/// Whether one command segment starts a commit or a pull request.
-fn starts_commit_or_pr(segment: &str) -> bool {
-    let words: Vec<&str> = segment
-        .split_whitespace()
-        .skip_while(|w| w.contains('=') && !w.starts_with('-'))
-        .collect();
-    match words.as_slice() {
-        ["gh", "pr", "create", ..] => true,
-        ["git", rest @ ..] => {
-            let mut iter = rest.iter();
+/// Split `command` into segments at the shell operators `;`, `|`, `&`, and a newline, and each
+/// segment into words. Quotes group a word and are dropped, so an operator inside quotes does not
+/// split.
+fn shell_segments(command: &str) -> Vec<Vec<String>> {
+    let mut segments: Vec<Vec<String>> = Vec::new();
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
+    let mut chars = command.chars();
+    let end_word = |words: &mut Vec<String>, word: &mut String, in_word: &mut bool| {
+        if *in_word {
+            words.push(std::mem::take(word));
+            *in_word = false;
+        }
+    };
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some('"'), '\\') => {
+                if let Some(next) = chars.next() {
+                    word.push(next);
+                }
+            }
+            (Some(_), c) => word.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                in_word = true;
+            }
+            (None, '\\') => {
+                if let Some(next) = chars.next() {
+                    word.push(next);
+                    in_word = true;
+                }
+            }
+            (None, ';' | '|' | '&' | '\n') => {
+                end_word(&mut words, &mut word, &mut in_word);
+                if !words.is_empty() {
+                    segments.push(std::mem::take(&mut words));
+                }
+            }
+            (None, c) if c.is_whitespace() => end_word(&mut words, &mut word, &mut in_word),
+            (None, c) => {
+                word.push(c);
+                in_word = true;
+            }
+        }
+    }
+    end_word(&mut words, &mut word, &mut in_word);
+    if !words.is_empty() {
+        segments.push(words);
+    }
+    segments
+}
+
+/// The program name of a word: `/usr/bin/git` is `git`.
+fn program(word: &str) -> &str {
+    word.rsplit('/').next().unwrap_or(word)
+}
+
+/// Words that run the next command with another environment or privilege.
+const WRAPPERS: [&str; 7] = ["env", "sudo", "command", "time", "nohup", "exec", "nice"];
+
+/// Whether one segment starts a commit or a pull request.
+fn starts_commit_or_pr(words: &[String]) -> bool {
+    // Group and subshell openers, an env assignment, and a wrapper come before the program.
+    let mut rest = words
+        .iter()
+        .map(|w| w.trim_start_matches(['(', '{']))
+        .filter(|w| !w.is_empty())
+        .skip_while(|w| (w.contains('=') && !w.starts_with('-')) || WRAPPERS.contains(&program(w)));
+    let Some(first) = rest.next() else {
+        return false;
+    };
+    let tail: Vec<&str> = rest.collect();
+    match program(first) {
+        "gh" => {
+            let mut iter = tail.iter();
+            let mut subcommands: Vec<&str> = Vec::new();
+            while let Some(word) = iter.next() {
+                match *word {
+                    "-R" | "--repo" => {
+                        iter.next();
+                    }
+                    w if w.starts_with('-') => {}
+                    w => subcommands.push(w),
+                }
+                if subcommands.len() == 2 {
+                    break;
+                }
+            }
+            subcommands == ["pr", "create"]
+        }
+        "git" => {
+            let mut iter = tail.iter();
             while let Some(word) = iter.next() {
                 match *word {
                     "-C" | "-c" | "--git-dir" | "--work-tree" => {
@@ -270,15 +361,19 @@ fn starts_commit_or_pr(segment: &str) -> bool {
             }
             false
         }
+        "sh" | "bash" | "zsh" => match tail.as_slice() {
+            ["-c", script, ..] => runs_commit_or_pr(script),
+            _ => false,
+        },
         _ => false,
     }
 }
 
 /// Whether the shell command runs `git commit` or `gh pr create` in any of its parts.
 fn runs_commit_or_pr(command: &str) -> bool {
-    command
-        .split(['\n', ';', '|', '&'])
-        .any(|segment| starts_commit_or_pr(segment.trim()))
+    shell_segments(command)
+        .iter()
+        .any(|words| starts_commit_or_pr(words))
 }
 
 /// The `__DENY__` text for the first commit or pull request with no task in progress, or an
@@ -315,7 +410,10 @@ pub(crate) fn handle_pre_tool_use(
         _ if state.commit_denied => String::new(),
         tracking => {
             state.commit_denied = true;
-            save(&path, &state);
+            // Without the marker the retry would be denied again, so a failed save allows.
+            if !save(&path, &state) {
+                return String::new();
+            }
             format!(
                 "__DENY__:llmenv blocked this commit or pull request once: no task is in \
                  progress. {} Then run the same command again, and it goes through. To turn this \
@@ -387,6 +485,20 @@ mod tests {
             ("gh issue create", false),
             ("git commit-tree abc", false),
             ("", false),
+            ("FOO=\"a b\" git commit -m x", true),
+            ("env git commit", true),
+            ("command git commit", true),
+            ("/usr/bin/git commit -m x", true),
+            ("(git commit -m x)", true),
+            ("{ git commit; }", true),
+            ("bash -c \"git add . && git commit -m x\"", true),
+            ("gh -R owner/repo pr create", true),
+            ("gh pr create --title \"a && b\"", true),
+            ("echo \"x; git commit\"", false),
+            ("echo 'a && gh pr create'", false),
+            ("git commit -m \"fix: a; b\"", true),
+            ("git status 2>&1", false),
+            ("bash script.sh", false),
         ] {
             assert_eq!(runs_commit_or_pr(command), expected, "{command:?}");
         }

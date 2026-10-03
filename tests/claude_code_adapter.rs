@@ -727,6 +727,14 @@ fn task_tool_redirect_hook_absent_when_opted_out() {
 
 // #2456: the nudge and commit-deny hooks follow the tracker switches.
 fn tracker_hooks(tracker: llmenv::config::TaskTracker, session_log_on: bool) -> serde_json::Value {
+    tracker_hooks_with(tracker, session_log_on, None)
+}
+
+fn tracker_hooks_with(
+    tracker: llmenv::config::TaskTracker,
+    session_log_on: bool,
+    slippage: Option<llmenv::config::SlippageControl>,
+) -> serde_json::Value {
     let session_log = if session_log_on {
         llmenv::config::SessionLog::default()
     } else {
@@ -741,6 +749,7 @@ fn tracker_hooks(tracker: llmenv::config::TaskTracker, session_log_on: bool) -> 
         capabilities: llmenv::config::Capabilities {
             features: Some(llmenv::config::Features {
                 task_tracker: Some(tracker),
+                slippage,
                 ..Default::default()
             }),
             ..Default::default()
@@ -774,6 +783,36 @@ fn command_count(hooks: &serde_json::Value, event: &str, command: &str) -> usize
         .flat_map(|e| e["hooks"].as_array().into_iter().flatten())
         .filter(|h| h["command"].as_str().is_some_and(|c| c.ends_with(command)))
         .count()
+}
+
+// A feature that already routes `Bash` to hook-run leaves only the missing tools to the tracker.
+#[test]
+fn task_nudge_hooks_do_not_repeat_a_route_that_another_feature_registered() {
+    let hooks = tracker_hooks_with(
+        llmenv::config::TaskTracker {
+            enabled: true,
+            ..Default::default()
+        },
+        false,
+        Some(llmenv::config::SlippageControl {
+            enabled: true,
+            answer_before_act: true,
+            metrics: true,
+            ..Default::default()
+        }),
+    );
+    // `answer_before_act` registers `^Bash$` and `metrics` registers every PostToolUse.
+    assert_eq!(
+        hooks["PreToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["matcher"].as_str() == Some("^Bash$"))
+            .count(),
+        1
+    );
+    assert!(!has_matcher(&hooks, "PostToolUse", NUDGE_MATCHER));
+    assert_eq!(command_count(&hooks, "PostToolUse", "post_tool_use"), 1);
 }
 
 const NUDGE_MATCHER: &str = "^(Skill|Bash|Edit|Write|MultiEdit|AskUserQuestion)$";

@@ -82,6 +82,17 @@ struct SessionStats {
     tools: std::collections::BTreeMap<String, u64>,
 }
 
+/// `session_id` comes straight from the hook's stdin JSON. It becomes a file name, so only a
+/// plain name is accepted: a `../` or an absolute value would escape the state dir.
+fn safe_session(session_id: Option<&str>) -> Option<&str> {
+    let id = session_id?;
+    if crate::paths::is_valid_short_name(id) {
+        return Some(id);
+    }
+    tracing::error!("session_id failed path-safety validation for slippage, rejecting");
+    None
+}
+
 pub(super) fn stats_path(state_dir: &std::path::Path, session_id: &str) -> std::path::PathBuf {
     state_dir
         .join("slippage")
@@ -121,7 +132,7 @@ pub(crate) fn handle_pre_tool_use(
     if !cfg.enabled || !cfg.read_before_edit {
         return String::new();
     }
-    let Some(session_id) = session_id else {
+    let Some(session_id) = safe_session(session_id) else {
         // Without a session id there is nothing to scope the log to, and a
         // global one would leak across concurrent sessions.
         return String::new();
@@ -206,7 +217,7 @@ pub(crate) fn handle_post_tool_use(
         return;
     }
     let (Some(session_id), Some(tool)) = (
-        session_id,
+        safe_session(session_id),
         payload.get("tool_name").and_then(serde_json::Value::as_str),
     ) else {
         return;
@@ -231,7 +242,7 @@ pub(crate) fn session_metrics_summary(
     if !cfg.enabled || !cfg.metrics {
         return None;
     }
-    let stats = load_stats(state_dir, session_id?);
+    let stats = load_stats(state_dir, safe_session(session_id)?);
     if stats.tools.is_empty() {
         return None;
     }
@@ -646,6 +657,30 @@ mod tests {
         assert!(summary.contains("4 reads"), "{summary}");
         assert!(summary.contains("2 edits"), "{summary}");
         assert!(summary.contains("2.0 reads per edit"), "{summary}");
+    }
+
+    #[test]
+    fn a_session_id_that_is_not_a_plain_name_writes_no_state_file() {
+        let state = tempfile::tempdir().unwrap();
+        let cfg = SlippageControl {
+            enabled: true,
+            metrics: true,
+            read_before_edit: true,
+            ..Default::default()
+        };
+        for bad in ["../escape", "a/b", ""] {
+            handle_post_tool_use(
+                Some(&cfg),
+                &serde_json::json!({ "tool_name": "Read" }),
+                Some(bad),
+                state.path(),
+            );
+            let read = payload("Read", state.path());
+            handle_pre_tool_use(Some(&cfg), &read, Some(bad), state.path());
+            assert!(session_metrics_summary(Some(&cfg), Some(bad), state.path()).is_none());
+        }
+        assert!(!state.path().join("slippage").exists());
+        assert!(!state.path().parent().unwrap().join("escape.json").exists());
     }
 
     #[test]
