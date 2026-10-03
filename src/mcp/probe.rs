@@ -15,10 +15,10 @@ use crate::hook_run::mcp_health::StdioRpc;
 use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
 
 /// Claude Code's default cut for MCP tool descriptions and server instructions.
-pub(crate) const CLAUDE_MCP_TEXT_LIMIT: usize = 2048;
+const CLAUDE_MCP_TEXT_LIMIT: usize = 2048;
 
 /// How long one server may take to connect and answer both calls.
-pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The limit `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH` sets: 1 to 9 ASCII digits, not zero.
 /// Anything else is ignored, as Claude Code ignores it.
@@ -40,11 +40,7 @@ pub(crate) struct McpTextReport {
 }
 
 /// Count the text of one server. A tool with no description counts as 0.
-pub(crate) fn measure(
-    server: &str,
-    instructions: Option<&str>,
-    tools: &[ToolSummary],
-) -> McpTextReport {
+fn measure(server: &str, instructions: Option<&str>, tools: &[ToolSummary]) -> McpTextReport {
     McpTextReport {
         server: server.to_string(),
         instructions_chars: instructions.map(|text| text.chars().count()),
