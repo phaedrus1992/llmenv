@@ -32,6 +32,26 @@ HEAD is mixed into the materialized scope's content hash, so a marketplace updat
 re-renders the agent config. Local-path marketplaces are content-hashed by their
 current state and need no sync.
 
+### Plugin sources in a marketplace manifest
+
+(added in v3.12.0)
+
+A plugin entry in a marketplace's `.claude-plugin/marketplace.json` has a `source`.
+llmenv reads these forms:
+
+| `source` | Result |
+| --- | --- |
+| `"./path"` | A plugin inside the marketplace clone. |
+| `"https://host/repo.git"` or `{"source": "url", "url": ...}` | A separate clone under `plugin-payloads/`. |
+| `{"source": "github", "repo": "owner/name", "ref": "plugin"}` | A clone of `https://github.com/owner/name.git`. |
+| `{"source": "npm", "package": ..., "version": ...}` | Left to the engine, which installs it from npm. |
+
+For a `github` source, `ref` selects the branch or tag, and no `ref` uses the default branch.
+When an object has both `url` and `repo`, `url` wins.
+A `repo` that is not `owner/name` skips that entry, and the warning names the entry, the value, and the fix.
+An object with neither `url` nor a github `repo` is skipped with a warning.
+The `git-subdir`, `archive`, and `command` kinds and `sha` pins are not supported yet (#2441).
+
 ## Plugin collections
 
 A `plugin-collection` is a named bag of plugins that activates by tag:
