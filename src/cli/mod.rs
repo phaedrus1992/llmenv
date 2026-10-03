@@ -2894,13 +2894,8 @@ fn sync_plugin_payloads(
             if !crate::plugins::cache::is_external_plugin_source(&entry.source) {
                 return p;
             }
-            match crate::plugins::cache::sync_external_plugin(
-                cache_root,
-                &p.marketplace,
-                &p.plugin,
-                &entry.source,
-                false,
-            ) {
+            match crate::plugins::cache::sync_plugin_entry(cache_root, &p.marketplace, entry, false)
+            {
                 Ok(state) => {
                     p.install_path = Some(state.install_location.to_string_lossy().into_owned());
                     p.git_commit_sha = state.head;
@@ -4624,14 +4619,8 @@ fn run_plugin_sync() -> anyhow::Result<()> {
         if !crate::plugins::cache::is_external_plugin_source(&entry.source) {
             continue;
         }
-        let state = crate::plugins::cache::sync_external_plugin(
-            &cache_root,
-            mkt_name,
-            plugin_name,
-            &entry.source,
-            true,
-        )
-        .with_context(|| format!("syncing external plugin '{plugin_name}@{mkt_name}'"))?;
+        let state = crate::plugins::cache::sync_plugin_entry(&cache_root, mkt_name, entry, true)
+            .with_context(|| format!("syncing external plugin '{plugin_name}@{mkt_name}'"))?;
         let head = state.head.as_deref().unwrap_or("(unknown)");
         println!(
             "✓ {}@{} (external) → {} [{}]",

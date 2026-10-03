@@ -310,6 +310,8 @@ fn plugin_payload_path(cache_dir: &Path, marketplace: &str, plugin: &str) -> Pat
 pub struct MarketplacePluginEntry {
     pub(crate) name: String,
     pub(crate) source: String,
+    /// For a `git-subdir` source: the directory of the clone that holds the plugin (#2441).
+    pub(crate) subdir: Option<String>,
 }
 
 /// Parse plugin entries from a marketplace clone's `.claude-plugin/marketplace.json`.
@@ -377,6 +379,7 @@ fn parse_plugin_entry(entry: &serde_json::Value) -> Result<Option<MarketplacePlu
             return Ok(None);
         }
     };
+    let mut subdir = None;
     let source = if let Some(s) = raw.as_str() {
         s.to_string()
     } else if raw.get("source").and_then(|v| v.as_str()) == Some("npm") {
@@ -401,8 +404,18 @@ fn parse_plugin_entry(entry: &serde_json::Value) -> Result<Option<MarketplacePlu
                 return Ok(None);
             }
         }
+    } else if let Some(kind) = unsupported_kind(raw) {
+        eprintln!(
+            "warning: marketplace entry '{name}': source kind '{kind}' is not supported — \
+             skipping entry"
+        );
+        return Ok(None);
+    } else if raw.get("source").and_then(|v| v.as_str()) == Some("git-subdir") {
+        let (source, path) = git_subdir_source(&name, raw)?;
+        subdir = Some(path);
+        source
     } else if let Some(url) = raw.get("url").and_then(|v| v.as_str()) {
-        url.to_string()
+        pin_source(&name, url, raw)?
     } else if let Some(github) = github_repo_source(&name, raw)? {
         github
     } else {
@@ -412,22 +425,18 @@ fn parse_plugin_entry(entry: &serde_json::Value) -> Result<Option<MarketplacePlu
         );
         return Ok(None);
     };
-    Ok(Some(MarketplacePluginEntry { name, source }))
+    Ok(Some(MarketplacePluginEntry {
+        name,
+        source,
+        subdir,
+    }))
 }
 
-/// The clone source of a `{"source": "github", "repo": "owner/name"}` object (#2440), with the
-/// optional `ref` pinned as a `#<ref>` suffix. `Ok(None)` when the object is not a github source
-/// or has no string `repo`.
+/// The `https://github.com/<repo>.git` URL for an `owner/name` repo.
 ///
 /// # Errors
-/// Errors when `repo` is not `owner/name`, or `ref` is empty or has a `#`.
-fn github_repo_source(name: &str, raw: &serde_json::Value) -> Result<Option<String>> {
-    if raw.get("source").and_then(|v| v.as_str()) != Some("github") {
-        return Ok(None);
-    }
-    let Some(repo) = raw.get("repo").and_then(|v| v.as_str()) else {
-        return Ok(None);
-    };
+/// `repo` is not `owner/name`.
+fn github_clone_url(name: &str, repo: &str) -> Result<String> {
     // The shape first, then the meaning of each part.
     let shaped = repo.split_once('/').filter(|(_, rest)| !rest.contains('/'));
     let part_ok = |part: &str| {
@@ -445,20 +454,108 @@ fn github_repo_source(name: &str, raw: &serde_json::Value) -> Result<Option<Stri
              Set \"repo\" to owner/name, for example \"jeffallan/claude-skills\""
         );
     }
-    let url = format!("https://github.com/{repo}.git");
-    match raw.get("ref").and_then(|v| v.as_str()) {
-        None => Ok(Some(url)),
-        Some(r) if r.is_empty() || r.contains('#') => anyhow::bail!(
-            "marketplace entry '{name}': github ref '{r}' is empty or contains '#'. \
+    Ok(format!("https://github.com/{repo}.git"))
+}
+
+/// True for a full git commit id: 40 hex digits (SHA-1) or 64 (SHA-256).
+pub(crate) fn is_commit_sha(text: &str) -> bool {
+    matches!(text.len(), 40 | 64) && text.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// `base` with the pin of the source object appended as `#<pin>`: the `sha` when there is one,
+/// else the `ref`, else no pin (#2441).
+///
+/// # Errors
+/// `sha` is not a full commit id, or `ref` is empty, has a `#`, or is unsafe for git.
+fn pin_source(name: &str, base: &str, raw: &serde_json::Value) -> Result<String> {
+    let text = |key: &str| raw.get(key).and_then(|v| v.as_str());
+    let pin = match (text("sha"), text("ref")) {
+        (Some(sha), _) if is_commit_sha(sha) => sha,
+        (Some(sha), _) => anyhow::bail!(
+            "marketplace entry '{name}': sha '{sha}' is not a full commit id. \
+             Set \"sha\" to 40 hex digits, or remove it"
+        ),
+        (None, Some(r)) if r.is_empty() || r.contains('#') => anyhow::bail!(
+            "marketplace entry '{name}': ref '{r}' is empty or contains '#'. \
              Set \"ref\" to a branch, tag, or commit, or remove it to use the default branch"
         ),
-        Some(r) => {
-            let pinned = format!("{url}#{r}");
-            reject_unsafe_source(&pinned)
-                .with_context(|| format!("marketplace entry '{name}': github ref '{r}'"))?;
-            Ok(Some(pinned))
-        }
+        (None, Some(r)) => r,
+        (None, None) => return Ok(base.to_string()),
+    };
+    let pinned = format!("{base}#{pin}");
+    reject_unsafe_source(&pinned)
+        .with_context(|| format!("marketplace entry '{name}': pin '{pin}' (ref or sha)"))?;
+    Ok(pinned)
+}
+
+/// The kind of an object source that llmenv cannot fetch: `archive` and `command` (#2441).
+fn unsupported_kind(raw: &serde_json::Value) -> Option<&str> {
+    raw.get("source")
+        .and_then(|v| v.as_str())
+        .filter(|kind| matches!(*kind, "archive" | "command"))
+}
+
+/// The clone source of a `{"source": "github", "repo": "owner/name"}` object (#2440), with the
+/// pin of the object appended. `Ok(None)` when the object is not a github source or has no
+/// string `repo`.
+///
+/// # Errors
+/// Errors when `repo` is not `owner/name`, or the pin is not valid (see [`pin_source`]).
+fn github_repo_source(name: &str, raw: &serde_json::Value) -> Result<Option<String>> {
+    if raw.get("source").and_then(|v| v.as_str()) != Some("github") {
+        return Ok(None);
     }
+    let Some(repo) = raw.get("repo").and_then(|v| v.as_str()) else {
+        return Ok(None);
+    };
+    pin_source(name, &github_clone_url(name, repo)?, raw).map(Some)
+}
+
+/// The clone source and plugin directory of a `{"source": "git-subdir", "url": ..., "path": ...}`
+/// object (#2441). `url` is a git URL or an `owner/name` GitHub shorthand.
+///
+/// # Errors
+/// `url` or `path` is missing, the shorthand is malformed, `path` is not a relative path inside
+/// the repo, or the pin is not valid.
+fn git_subdir_source(name: &str, raw: &serde_json::Value) -> Result<(String, String)> {
+    let url = raw.get("url").and_then(|v| v.as_str()).with_context(|| {
+        format!("marketplace entry '{name}': git-subdir source has no string \"url\"")
+    })?;
+    let path = raw.get("path").and_then(|v| v.as_str()).with_context(|| {
+        format!("marketplace entry '{name}': git-subdir source has no string \"path\"")
+    })?;
+    let is_shorthand = !url.contains(':') && !url.contains('@') && url.matches('/').count() == 1;
+    let is_git_url = url.contains("://") || (url.contains('@') && url.contains(':'));
+    let base = if is_shorthand {
+        github_clone_url(name, url)?
+    } else if is_git_url {
+        url.to_string()
+    } else {
+        anyhow::bail!(
+            "marketplace entry '{name}': git-subdir url '{url}' is neither a git URL nor \
+             owner/name. Set \"url\" to a clone URL or to owner/name"
+        );
+    };
+    Ok((pin_source(name, &base, raw)?, clean_subdir(name, path)?))
+}
+
+/// `path` as a relative directory inside a clone: no leading `./` or trailing `/`, no `..`, no
+/// empty or control-character parts.
+fn clean_subdir(name: &str, path: &str) -> Result<String> {
+    let trimmed = path.trim_start_matches("./").trim_end_matches('/');
+    let bad = trimmed.is_empty()
+        || trimmed.starts_with('/')
+        || trimmed
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+        || trimmed.chars().any(char::is_control);
+    if bad {
+        anyhow::bail!(
+            "marketplace entry '{name}': git-subdir path '{path}' is not a relative directory \
+             inside the repo. Set \"path\" to a folder such as \"tools/my-plugin\""
+        );
+    }
+    Ok(trimmed.to_string())
 }
 
 /// True if a plugin source is an external git URL (not a relative path within
@@ -576,6 +673,43 @@ fn sync_external_plugin_with(
     })
 }
 
+/// [`sync_external_plugin`] for a parsed manifest entry. For a `git-subdir` source the install
+/// location is the entry's directory inside the clone (#2441).
+///
+/// # Errors
+/// As [`sync_external_plugin`], and `SyncError::Other` when the directory is missing from the
+/// clone or leaves it through a symlink.
+pub(crate) fn sync_plugin_entry(
+    cache_dir: &Path,
+    marketplace: &str,
+    entry: &MarketplacePluginEntry,
+    refresh: bool,
+) -> Result<MarketplaceState, SyncError> {
+    let mut state =
+        sync_external_plugin(cache_dir, marketplace, &entry.name, &entry.source, refresh)?;
+    if let Some(subdir) = &entry.subdir {
+        state.install_location =
+            subdir_root(&state.install_location, subdir, &entry.name).map_err(SyncError::Other)?;
+    }
+    Ok(state)
+}
+
+/// The directory `subdir` of the clone at `clone`, checked to exist and to stay inside the clone.
+fn subdir_root(clone: &Path, subdir: &str, plugin: &str) -> Result<PathBuf> {
+    let root = clone.join(subdir);
+    let canonical = std::fs::canonicalize(&root).with_context(|| {
+        format!("plugin '{plugin}': directory '{subdir}' is not in the cloned repository")
+    })?;
+    let clone_canonical = std::fs::canonicalize(clone)
+        .with_context(|| format!("plugin '{plugin}': cannot resolve {}", clone.display()))?;
+    if !canonical.starts_with(&clone_canonical) || !canonical.is_dir() {
+        anyhow::bail!(
+            "plugin '{plugin}': '{subdir}' is not a directory inside the cloned repository"
+        );
+    }
+    Ok(canonical)
+}
+
 /// Split a marketplace source on its first `#`, returning `(url, Some(ref))`
 /// when a ref (tag/branch/commit) is pinned, or `(source, None)` when it
 /// isn't (#496). Git URLs practically never contain a literal `#` in the
@@ -634,8 +768,58 @@ fn reject_unsafe_source(source: &str) -> Result<()> {
     Ok(())
 }
 
+/// Run one git command in `cwd`, and fail with git's scrubbed error text.
+fn run_git(args: &[&str], cwd: &Path, source: &str) -> Result<()> {
+    let mut cmd = git::secure_git();
+    let output = git::apply_git_timeout(&mut cmd, git::DEFAULT_GIT_PLUGIN_TIMEOUT_SECS)
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .with_context(|| format!("spawning git {}", args.first().copied().unwrap_or("")))?;
+    if !output.status.success() {
+        // Git's stderr can carry embedded credentials, so scrub it (#312).
+        anyhow::bail!(
+            "git {} failed for {}: {}",
+            args.first().copied().unwrap_or(""),
+            git::sanitize_git_url(source),
+            git::git_failure_detail(&output.stderr, &output.stdout, output.status)
+        );
+    }
+    Ok(())
+}
+
+/// Clone `url` at the exact commit `sha` into `dest` (#2441). A branch clone cannot reach an
+/// arbitrary commit, so this fetches the one commit and checks it out. A failure removes the
+/// partial clone, so a retry starts clean.
+fn git_clone_commit(url: &str, sha: &str, dest: &Path, source: &str) -> Result<()> {
+    std::fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
+    let result = run_git(&["init", "--quiet"], dest, source)
+        .and_then(|()| run_git(&["remote", "add", "origin", url], dest, source))
+        .and_then(|()| {
+            run_git(
+                &["fetch", "--quiet", "--depth", "1", "origin", sha],
+                dest,
+                source,
+            )
+        })
+        .and_then(|()| {
+            run_git(
+                &["checkout", "--quiet", "--detach", "FETCH_HEAD"],
+                dest,
+                source,
+            )
+        });
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(dest);
+    }
+    result
+}
+
 fn git_clone(source: &str, dest: &Path) -> Result<()> {
     let (url, pin) = split_source_ref(source);
+    if let Some(sha) = pin.filter(|p| is_commit_sha(p)) {
+        return git_clone_commit(url, sha, dest, source);
+    }
     let mut cmd = git::secure_git();
     let cmd = git::apply_git_timeout(&mut cmd, git::DEFAULT_GIT_PLUGIN_TIMEOUT_SECS);
     cmd.args(["clone", "--depth", "1"]);
@@ -1373,7 +1557,7 @@ mod tests {
         let manifest = r#"{"plugins": [
             {"name": "first-party", "source": "./plugins/first-party"},
             {"name": "external-str", "source": "https://github.com/example/external.git"},
-            {"name": "external-obj", "source": {"source": "url", "url": "https://github.com/example/obj.git", "sha": "abc123"}}
+            {"name": "external-obj", "source": {"source": "url", "url": "https://github.com/example/obj.git", "sha": "0123456789abcdef0123456789abcdef01234567"}}
         ]}"#;
         std::fs::write(plugin_dir.join("marketplace.json"), manifest).unwrap();
         let plugins = read_marketplace_plugins(tmp.path()).unwrap();
@@ -1383,7 +1567,10 @@ mod tests {
         assert_eq!(plugins[1].name, "external-str");
         assert!(is_external_plugin_source(&plugins[1].source));
         assert_eq!(plugins[2].name, "external-obj");
-        assert_eq!(plugins[2].source, "https://github.com/example/obj.git");
+        assert_eq!(
+            plugins[2].source,
+            "https://github.com/example/obj.git#0123456789abcdef0123456789abcdef01234567"
+        );
         assert!(is_external_plugin_source(&plugins[2].source));
     }
 
@@ -1457,6 +1644,220 @@ mod tests {
             read_manifest(r#"{"name": "p", "source": {"source": "github", "repo": "o/n"}}"#)
                 .unwrap();
         assert_eq!(plugins[0].source, "https://github.com/o/n.git");
+    }
+
+    const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    #[test]
+    fn a_sha_pin_wins_over_a_ref_on_github_and_url_sources() {
+        let plugins = read_manifest(&format!(
+            r#"{{"name": "g", "source": {{"source": "github", "repo": "o/n", "ref": "main", "sha": "{SHA}"}}}},
+               {{"name": "u", "source": {{"source": "url", "url": "https://x.example/p.git", "ref": "v2"}}}}"#
+        ))
+        .unwrap();
+        assert_eq!(
+            plugins[0].source,
+            format!("https://github.com/o/n.git#{SHA}")
+        );
+        assert_eq!(plugins[1].source, "https://x.example/p.git#v2");
+        assert!(plugins.iter().all(|p| p.subdir.is_none()));
+    }
+
+    #[test]
+    fn a_sha_that_is_not_a_full_commit_id_skips_the_entry() {
+        for sha in [
+            "abc123",
+            "",
+            &SHA.to_uppercase()[..39],
+            "zz23456789abcdef0123456789abcdef01234567",
+        ] {
+            let plugins = read_manifest(&format!(
+                r#"{{"name": "bad", "source": {{"source": "url", "url": "https://x.example/p.git", "sha": "{sha}"}}}},
+                   {{"name": "good", "source": "./g"}}"#
+            ))
+            .unwrap();
+            assert_eq!(plugins.len(), 1, "{sha:?}");
+        }
+        let err = pin_source(
+            "e",
+            "https://x/y.git",
+            &serde_json::json!({"sha": "abc123"}),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("'e'") && err.contains("abc123") && err.contains("40 hex"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_git_subdir_source_carries_its_directory_pin_and_shorthand() {
+        let plugins = read_manifest(&format!(
+            r#"{{"name": "a", "source": {{"source": "git-subdir", "url": "your-org/monorepo", "path": "tools/my-plugin"}}}},
+               {{"name": "b", "source": {{"source": "git-subdir", "url": "https://git.example/r.git", "path": "./p/", "ref": "v1"}}}},
+               {{"name": "c", "source": {{"source": "git-subdir", "url": "git@host:o/r.git", "path": "p", "sha": "{SHA}"}}}}"#
+        ))
+        .unwrap();
+        assert_eq!(
+            plugins[0].source,
+            "https://github.com/your-org/monorepo.git"
+        );
+        assert_eq!(plugins[0].subdir.as_deref(), Some("tools/my-plugin"));
+        assert_eq!(plugins[1].source, "https://git.example/r.git#v1");
+        assert_eq!(plugins[1].subdir.as_deref(), Some("p"));
+        assert_eq!(plugins[2].source, format!("git@host:o/r.git#{SHA}"));
+    }
+
+    #[test]
+    fn a_git_subdir_source_with_a_bad_path_or_a_missing_field_is_skipped() {
+        for source in [
+            r#"{"source": "git-subdir", "url": "o/r", "path": "../up"}"#,
+            r#"{"source": "git-subdir", "url": "o/r", "path": "/abs"}"#,
+            r#"{"source": "git-subdir", "url": "o/r", "path": "a//b"}"#,
+            r#"{"source": "git-subdir", "url": "o/r", "path": ""}"#,
+            r#"{"source": "git-subdir", "url": "o/r", "path": "./"}"#,
+            r#"{"source": "git-subdir", "url": "o/r"}"#,
+            r#"{"source": "git-subdir", "path": "p"}"#,
+            r#"{"source": "git-subdir", "url": "a/b/c", "path": "p"}"#,
+        ] {
+            let plugins = read_manifest(&format!(
+                r#"{{"name": "bad", "source": {source}}}, {{"name": "good", "source": "./g"}}"#
+            ))
+            .unwrap();
+            assert_eq!(plugins.len(), 1, "{source}");
+        }
+        let err = clean_subdir("e", "../up").unwrap_err().to_string();
+        assert!(
+            err.contains("'e'") && err.contains("../up") && err.contains("relative"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn archive_and_command_sources_are_skipped_naming_the_kind() {
+        for kind in ["archive", "command"] {
+            let raw = serde_json::json!({"source": kind, "url": "https://x/y.zip"});
+            assert_eq!(unsupported_kind(&raw), Some(kind));
+            let plugins = read_manifest(&format!(
+                r#"{{"name": "bad", "source": {{"source": "{kind}", "url": "https://x/y.zip"}}}}, {{"name": "good", "source": "./g"}}"#
+            ))
+            .unwrap();
+            assert_eq!(plugins.len(), 1, "{kind}");
+        }
+        assert_eq!(
+            unsupported_kind(&serde_json::json!({"source": "url"})),
+            None
+        );
+    }
+
+    #[test]
+    fn the_subdir_root_is_inside_the_clone() {
+        let dir = tempfile::tempdir().unwrap();
+        let clone = dir.path().join("clone");
+        std::fs::create_dir_all(clone.join("tools/p")).unwrap();
+        std::fs::write(clone.join("file"), "x").unwrap();
+        let ok = subdir_root(&clone, "tools/p", "plug").unwrap();
+        assert_eq!(ok, std::fs::canonicalize(clone.join("tools/p")).unwrap());
+        let missing = subdir_root(&clone, "nope", "plug").unwrap_err().to_string();
+        assert!(
+            missing.contains("plug") && missing.contains("nope"),
+            "{missing}"
+        );
+        assert!(
+            subdir_root(&clone, "file", "plug").is_err(),
+            "a file is not a plugin directory"
+        );
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, clone.join("escape")).unwrap();
+        let escaped = subdir_root(&clone, "escape", "plug")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            escaped.contains("inside the cloned repository"),
+            "{escaped}"
+        );
+    }
+
+    #[test]
+    fn a_sync_with_a_subdir_entry_installs_from_the_subdirectory() {
+        struct SubdirGit;
+        impl GitBackend for SubdirGit {
+            fn clone(&self, _: &str, dest: &Path) -> Result<()> {
+                std::fs::create_dir_all(dest.join(".git")).unwrap();
+                std::fs::create_dir_all(dest.join("tools/p")).unwrap();
+                Ok(())
+            }
+            fn pull(&self, _: &Path) -> Result<()> {
+                Ok(())
+            }
+            fn head(&self, _: &Path) -> Option<String> {
+                Some("abc".into())
+            }
+        }
+        let cache = tempfile::tempdir().unwrap();
+        let state = sync_external_plugin_with(
+            cache.path(),
+            "m",
+            "p",
+            "https://x.example/r.git",
+            true,
+            &SubdirGit,
+        )
+        .unwrap();
+        let root = subdir_root(&state.install_location, "tools/p", "p").unwrap();
+        assert!(root.ends_with("tools/p"));
+    }
+
+    #[test]
+    fn a_commit_pin_is_fetched_and_checked_out_by_git() {
+        // A local repository with two commits. The pin names the first, which is not the tip.
+        let src = tempfile::tempdir().unwrap();
+        let git_in = |dir: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@example.com",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git_in(src.path(), &["init", "--quiet"]);
+        std::fs::write(src.path().join("f"), "one").unwrap();
+        git_in(src.path(), &["add", "f"]);
+        git_in(src.path(), &["commit", "--quiet", "-m", "one"]);
+        let first = git_in(src.path(), &["rev-parse", "HEAD"]);
+        std::fs::write(src.path().join("f"), "two").unwrap();
+        git_in(src.path(), &["commit", "--quiet", "-am", "two"]);
+        git_in(
+            src.path(),
+            &["config", "uploadpack.allowAnySHA1InWant", "true"],
+        );
+
+        let dest = tempfile::tempdir().unwrap();
+        let clone = dest.path().join("clone");
+        let source = format!("{}#{first}", src.path().display());
+        git_clone(&source, &clone).unwrap();
+        assert_eq!(std::fs::read_to_string(clone.join("f")).unwrap(), "one");
+        assert_eq!(git_head(&clone).as_deref(), Some(first.as_str()));
+
+        let bad = dest.path().join("bad");
+        let missing = format!("{}#{}", src.path().display(), "0".repeat(40));
+        assert!(git_clone(&missing, &bad).is_err());
+        assert!(!bad.exists(), "a failed commit clone leaves nothing behind");
     }
 
     #[test]
