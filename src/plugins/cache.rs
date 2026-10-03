@@ -322,16 +322,23 @@ pub(crate) fn read_marketplace_plugins(
         .and_then(|p| p.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|entry| parse_plugin_entry(entry).transpose())
-                .collect::<Result<Vec<_>>>()
+                .filter_map(|entry| match parse_plugin_entry(entry) {
+                    Ok(parsed) => parsed,
+                    // One bad entry must not hide the other plugins of the marketplace.
+                    Err(e) => {
+                        eprintln!("warning: {e:#} — skipping entry");
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
         })
-        .transpose()?
         .unwrap_or_default();
     Ok(plugins)
 }
 
 /// Parse one `plugins[]` entry of a marketplace manifest. `Ok(None)` skips an entry that cannot
-/// be used, with a warning on stderr.
+/// be used, with a warning on stderr. An `Err` is a malformed github source, and the caller
+/// skips the entry with the error as the warning.
 fn parse_plugin_entry(entry: &serde_json::Value) -> Result<Option<MarketplacePluginEntry>> {
     let name = match entry.get("name").and_then(|v| v.as_str()) {
         Some(n) => n.to_string(),
@@ -430,7 +437,12 @@ fn github_repo_source(name: &str, raw: &serde_json::Value) -> Result<Option<Stri
             "marketplace entry '{name}': github ref '{r}' is empty or contains '#'. \
              Set \"ref\" to a branch, tag, or commit, or remove it to use the default branch"
         ),
-        Some(r) => Ok(Some(format!("{url}#{r}"))),
+        Some(r) => {
+            let pinned = format!("{url}#{r}");
+            reject_unsafe_source(&pinned)
+                .with_context(|| format!("marketplace entry '{name}': github ref '{r}'"))?;
+            Ok(Some(pinned))
+        }
     }
 }
 
@@ -1345,11 +1357,10 @@ mod tests {
             "o/né",
             "",
         ] {
-            let err = read_manifest(&format!(
-                r#"{{"name": "bad-entry", "source": {{"source": "github", "repo": "{repo}"}}}}"#
-            ))
-            .unwrap_err()
-            .to_string();
+            let raw = serde_json::json!({"source": "github", "repo": repo});
+            let err = github_repo_source("bad-entry", &raw)
+                .unwrap_err()
+                .to_string();
             assert!(err.contains("bad-entry"), "{err}");
             assert!(err.contains(&format!("'{repo}'")), "{err}");
             assert!(err.contains("owner/name"), "{err}");
@@ -1358,14 +1369,22 @@ mod tests {
 
     #[test]
     fn a_github_ref_that_is_empty_or_has_a_hash_fails() {
-        for r in ["", "a#b"] {
-            let err = read_manifest(&format!(
-                r#"{{"name": "p", "source": {{"source": "github", "repo": "o/n", "ref": "{r}"}}}}"#
-            ))
-            .unwrap_err()
-            .to_string();
+        for r in ["", "a#b", "--upload-pack=x", "né", "a\u{7}b"] {
+            let raw = serde_json::json!({"source": "github", "repo": "o/n", "ref": r});
+            let err = github_repo_source("p", &raw).unwrap_err().to_string();
             assert!(err.contains("'p'") && err.contains("ref"), "{err}");
         }
+    }
+
+    #[test]
+    fn a_malformed_github_entry_is_skipped_and_leaves_the_other_plugins() {
+        let plugins = read_manifest(
+            r#"{"name": "bad", "source": {"source": "github", "repo": "nope"}},
+               {"name": "good", "source": "./g"}"#,
+        )
+        .unwrap();
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].name, "good");
     }
 
     #[test]

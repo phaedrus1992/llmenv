@@ -48,7 +48,7 @@ llmenv reads these forms:
 
 For a `github` source, `ref` selects the branch or tag, and no `ref` uses the default branch.
 When an object has both `url` and `repo`, `url` wins.
-A `repo` that is not `owner/name` fails the sync with an error that names the entry.
+A `repo` that is not `owner/name` skips that entry, and the warning names the entry, the value, and the fix.
 An object with neither `url` nor a github `repo` is skipped with a warning.
 The `git-subdir`, `archive`, and `command` kinds and `sha` pins are not supported yet (#2441).
 
