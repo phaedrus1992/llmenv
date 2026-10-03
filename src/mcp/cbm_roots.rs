@@ -73,19 +73,16 @@ fn expand_root(
         }
         let mut name = String::new();
         while let Some(&n) = chars.peek() {
-            let ok = if braced {
-                n != '}'
-            } else {
-                n.is_ascii_alphanumeric() || n == '_'
-            };
-            if !ok {
+            if !(n.is_ascii_alphanumeric() || n == '_') {
                 break;
             }
             name.push(n);
             chars.next();
         }
-        if braced {
-            chars.next();
+        // A bare `$`, a `${` that does not close after a plain name, and `${bad name}` are not
+        // variables.
+        if name.is_empty() || (braced && chars.next() != Some('}')) {
+            return None;
         }
         out.push_str(&env(&name).filter(|v| !v.is_empty())?);
     }
