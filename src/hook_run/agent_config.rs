@@ -97,7 +97,7 @@ impl AgentConfig {
     }
 
     /// The one line that tells a resumed agent what it runs as.
-    pub(crate) fn resume_line(&self) -> String {
+    fn resume_line(&self) -> String {
         let project = self.project.as_deref().unwrap_or("none");
         let hash = self
             .config_hash
@@ -182,7 +182,7 @@ pub(crate) fn record_model_switch(
 }
 
 /// The file for `session_id`. `None` for an id that is not safe in a path.
-pub(crate) fn path(state_dir: &Path, session_id: &str) -> Option<PathBuf> {
+fn path(state_dir: &Path, session_id: &str) -> Option<PathBuf> {
     crate::paths::is_valid_short_name(session_id)
         .then(|| state_dir.join(DIR).join(format!("{session_id}.json")))
 }
@@ -219,7 +219,7 @@ pub(crate) fn write_session_start(state_dir: &Path, session_id: &str, mut doc: A
 }
 
 /// Record a `PostModelSwitch`. A missing document is created from the payload alone.
-pub(crate) fn apply_model_switch(
+fn apply_model_switch(
     state_dir: &Path,
     session_id: &str,
     switch: ModelSwitch,
