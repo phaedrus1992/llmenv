@@ -239,6 +239,48 @@ mod tests {
         }
     }
 
+    fn config_with_entry(index_path: &std::path::Path) -> crate::config::Config {
+        crate::config::Config {
+            features: Some(crate::config::Features {
+                codebase_memory: vec![crate::config::CodebaseMemory {
+                    when: vec!["p".into()],
+                    index_path: Some(index_path.display().to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_roots_guard_denies_a_folder_outside_the_roots_and_allows_the_project() {
+        let cache = tempfile::tempdir().unwrap();
+        let config = config_with_entry(cache.path());
+        let project = std::env::current_dir().unwrap();
+        let inside = payload(
+            INDEX_REPOSITORY_TOOL,
+            serde_json::json!({ "repo_path": project.display().to_string() }),
+        );
+        assert_eq!(handle_roots(&inside, &config), "");
+        let outside = payload(
+            INDEX_REPOSITORY_TOOL,
+            serde_json::json!({ "repo_path": "/usr" }),
+        );
+        let out = handle_roots(&outside, &config);
+        assert!(out.starts_with("__DENY__:"), "{out:?}");
+        assert!(out.contains("allowed_roots"), "{out:?}");
+        // A blank path is not a repo_path: the server rejects it, the guard does not.
+        let blank = payload(
+            INDEX_REPOSITORY_TOOL,
+            serde_json::json!({ "repo_path": "  " }),
+        );
+        assert_eq!(handle_roots(&blank, &config), "");
+        // Another tool is never guarded.
+        let other = payload("Bash", serde_json::json!({ "repo_path": "/usr" }));
+        assert_eq!(handle_roots(&other, &config), "");
+    }
+
     #[test]
     fn the_roots_guard_ignores_other_tools_and_calls_without_a_repo_path() {
         let config = crate::config::Config::default();
