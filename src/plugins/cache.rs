@@ -159,6 +159,40 @@ fn sync_path(m: &Marketplace) -> Result<MarketplaceState, SyncError> {
     })
 }
 
+/// Replace the clone at `dest` with a fresh clone of `source`. Used for a pinned source: a pull
+/// would move past the pin, and the cache path is keyed by name only, so a changed pin has to
+/// replace the clone (#496, #2442).
+///
+/// #536: the clone goes into a staging directory beside `dest` first, so a slow or failing clone
+/// never touches the working clone. Only a successful clone is swapped in with `rename`.
+fn reclone_staged(
+    git: &dyn GitBackend,
+    source: &str,
+    dest: &Path,
+    name: &str,
+) -> Result<(), SyncError> {
+    let staging = dest.with_file_name(format!("{name}.{}.tmp", std::process::id()));
+    let _ = std::fs::remove_dir_all(&staging);
+    git.clone(source, &staging)
+        .map_err(|e| SyncError::CloneFailed {
+            name: name.to_string(),
+            source: e,
+        })?;
+    if let Err(e) = std::fs::remove_dir_all(dest) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(SyncError::Other(anyhow::anyhow!(
+            "removing stale pinned clone at {}: {e}",
+            dest.display()
+        )));
+    }
+    std::fs::rename(&staging, dest).map_err(|e| {
+        SyncError::Other(anyhow::anyhow!(
+            "moving refreshed pinned clone into place at {}: {e}",
+            dest.display()
+        ))
+    })
+}
+
 fn sync_git(
     cache_dir: &Path,
     m: &Marketplace,
@@ -205,26 +239,7 @@ fn sync_git(
                 // a confirmed-successful clone gets swapped in via `rename`
                 // (near-instant), collapsing the "dest doesn't exist" window
                 // from the whole clone duration down to a couple of syscalls.
-                let staging = dest.with_file_name(format!("{}.{}.tmp", m.name, std::process::id()));
-                let _ = std::fs::remove_dir_all(&staging);
-                git.clone(&m.source, &staging)
-                    .map_err(|e| SyncError::CloneFailed {
-                        name: m.name.clone(),
-                        source: e,
-                    })?;
-                if let Err(e) = std::fs::remove_dir_all(&dest) {
-                    let _ = std::fs::remove_dir_all(&staging);
-                    return Err(SyncError::Other(anyhow::anyhow!(
-                        "removing stale pinned clone at {}: {e}",
-                        dest.display()
-                    )));
-                }
-                std::fs::rename(&staging, &dest).map_err(|e| {
-                    SyncError::Other(anyhow::anyhow!(
-                        "moving refreshed pinned clone into place at {}: {e}",
-                        dest.display()
-                    ))
-                })?;
+                reclone_staged(git, &m.source, &dest, &m.name)?;
             } else {
                 git.pull(&dest).map_err(SyncError::Other)?;
             }
@@ -507,7 +522,13 @@ fn sync_external_plugin_with(
     let dest = plugin_payload_path(cache_dir, marketplace, plugin);
     if dest.join(".git").exists() {
         if refresh {
-            git.pull(&dest).map_err(SyncError::Other)?;
+            if split_source_ref(source).1.is_some() {
+                // #2442: a pinned source is frozen, so a refresh re-clones it. This also applies
+                // a pin that the manifest changed since the last clone.
+                reclone_staged(git, source, &dest, plugin)?;
+            } else {
+                git.pull(&dest).map_err(SyncError::Other)?;
+            }
         }
     } else if !refresh {
         return Err(SyncError::NotCloned {
@@ -1059,6 +1080,109 @@ mod tests {
     // #1198: plugin-payloads/ is a sibling tree to marketplaces/, not nested
     // under it — #1196's marketplace_cache_root fix doesn't cover it.
     #[cfg(unix)]
+    /// A git backend that records its calls and marks each clone with the source it came from.
+    #[derive(Default)]
+    struct CallLog(std::sync::Mutex<Vec<String>>);
+
+    impl CallLog {
+        fn calls(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl GitBackend for CallLog {
+        fn clone(&self, source: &str, dest: &Path) -> Result<()> {
+            self.0.lock().unwrap().push(format!("clone {source}"));
+            std::fs::create_dir_all(dest.join(".git")).unwrap();
+            std::fs::write(dest.join("source.txt"), source).unwrap();
+            Ok(())
+        }
+        fn pull(&self, _: &Path) -> Result<()> {
+            self.0.lock().unwrap().push("pull".into());
+            Ok(())
+        }
+        fn head(&self, _: &Path) -> Option<String> {
+            Some("abc123".into())
+        }
+    }
+
+    fn sync_plugin(cache: &Path, source: &str, refresh: bool, git: &CallLog) {
+        sync_external_plugin_with(cache, "market", "plugin", source, refresh, git).unwrap();
+    }
+
+    #[test]
+    fn a_changed_pin_re_clones_the_plugin_payload() {
+        let cache = tempfile::tempdir().unwrap();
+        let git = CallLog::default();
+        let v1 = "https://github.com/o/n.git#v1";
+        let v2 = "https://github.com/o/n.git#v2";
+        sync_plugin(cache.path(), v1, true, &git);
+        sync_plugin(cache.path(), v2, true, &git);
+        assert_eq!(git.calls(), [format!("clone {v1}"), format!("clone {v2}")]);
+        let dest = plugin_payload_path(cache.path(), "market", "plugin");
+        assert_eq!(
+            std::fs::read_to_string(dest.join("source.txt")).unwrap(),
+            v2
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(dest.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            leftovers.len(),
+            1,
+            "no staging directory is left: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn an_unpinned_plugin_payload_is_pulled_and_a_no_refresh_changes_nothing() {
+        let cache = tempfile::tempdir().unwrap();
+        let git = CallLog::default();
+        let src = "https://github.com/o/n.git";
+        sync_plugin(cache.path(), src, true, &git);
+        sync_plugin(cache.path(), src, true, &git);
+        sync_plugin(cache.path(), "https://github.com/o/n.git#v9", false, &git);
+        assert_eq!(git.calls(), [format!("clone {src}"), "pull".to_string()]);
+    }
+
+    #[test]
+    fn a_failed_re_clone_keeps_the_working_payload() {
+        struct FailingClone;
+        impl GitBackend for FailingClone {
+            fn clone(&self, _: &str, _: &Path) -> Result<()> {
+                anyhow::bail!("network down")
+            }
+            fn pull(&self, _: &Path) -> Result<()> {
+                Ok(())
+            }
+            fn head(&self, _: &Path) -> Option<String> {
+                Some("abc".into())
+            }
+        }
+        let cache = tempfile::tempdir().unwrap();
+        sync_plugin(
+            cache.path(),
+            "https://github.com/o/n.git#v1",
+            true,
+            &CallLog::default(),
+        );
+        let err = sync_external_plugin_with(
+            cache.path(),
+            "market",
+            "plugin",
+            "https://github.com/o/n.git#v2",
+            true,
+            &FailingClone,
+        );
+        assert!(matches!(err, Err(SyncError::CloneFailed { .. })));
+        let dest = plugin_payload_path(cache.path(), "market", "plugin");
+        assert_eq!(
+            std::fs::read_to_string(dest.join("source.txt")).unwrap(),
+            "https://github.com/o/n.git#v1"
+        );
+    }
+
     #[test]
     fn sync_external_plugin_creates_payload_parent_owner_only() {
         use std::os::unix::fs::PermissionsExt;
