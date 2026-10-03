@@ -172,25 +172,65 @@ fn reclone_staged(
     name: &str,
 ) -> Result<(), SyncError> {
     let staging = dest.with_file_name(format!("{name}.{}.tmp", std::process::id()));
-    let _ = std::fs::remove_dir_all(&staging);
+    remove_dir_logged(&staging);
     git.clone(source, &staging)
         .map_err(|e| SyncError::CloneFailed {
             name: name.to_string(),
             source: e,
         })?;
-    if let Err(e) = std::fs::remove_dir_all(dest) {
-        let _ = std::fs::remove_dir_all(&staging);
+    swap_in(&staging, dest, &|from, to| std::fs::rename(from, to))
+}
+
+/// Put the fresh clone at `staging` in place of `dest`. The old clone moves aside first, so a
+/// failed swap puts it back, and the staging folder never outlives a failure (#2447).
+fn swap_in(
+    staging: &Path,
+    dest: &Path,
+    rename: &dyn Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), SyncError> {
+    // Appended to the folder name, not set as an extension: names may hold dots, and `foo` and
+    // `foo.bar` must not share a backup.
+    let file_name = dest.file_name().unwrap_or_default().to_string_lossy();
+    let backup = dest.with_file_name(format!("{file_name}.{}.old", std::process::id()));
+    remove_dir_logged(&backup);
+    if let Err(e) = rename(dest, &backup) {
+        remove_dir_logged(staging);
         return Err(SyncError::Other(anyhow::anyhow!(
-            "removing stale pinned clone at {}: {e}",
+            "moving the stale pinned clone aside at {}: {e}; the old clone is unchanged",
             dest.display()
         )));
     }
-    std::fs::rename(&staging, dest).map_err(|e| {
-        SyncError::Other(anyhow::anyhow!(
-            "moving refreshed pinned clone into place at {}: {e}",
+    if let Err(e) = rename(staging, dest) {
+        let restored = rename(&backup, dest);
+        remove_dir_logged(staging);
+        let note = match restored {
+            Ok(()) => "the old clone is back in place".to_string(),
+            Err(r) => {
+                tracing::error!(
+                    "cannot restore the old clone to {}: {r}; it is at {}",
+                    dest.display(),
+                    backup.display()
+                );
+                format!("the old clone is at {} ({r})", backup.display())
+            }
+        };
+        return Err(SyncError::Other(anyhow::anyhow!(
+            "moving refreshed pinned clone into place at {}: {e}; {note}",
             dest.display()
-        ))
-    })
+        )));
+    }
+    remove_dir_logged(&backup);
+    Ok(())
+}
+
+/// Remove a scratch folder. A folder that is already gone is fine. Any other failure leaks the
+/// folder, so it is logged.
+fn remove_dir_logged(path: &Path) {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!("cannot remove the folder {}: {e}", path.display()),
+    }
 }
 
 fn sync_git(
@@ -669,14 +709,6 @@ fn sync_external_plugin_with(
         )));
     }
 
-    let manifest = dest.join("plugin.json");
-    if !manifest.exists() {
-        tracing::warn!(
-            "plugin manifest missing at {}; plugin may not load correctly",
-            manifest.display()
-        );
-    }
-
     Ok(MarketplaceState {
         install_location: dest,
         head,
@@ -701,7 +733,32 @@ pub(crate) fn sync_plugin_entry(
         state.install_location =
             subdir_root(&state.install_location, subdir, &entry.name).map_err(SyncError::Other)?;
     }
+    warn_if_no_manifest(&state.install_location, &entry.name);
     Ok(state)
+}
+
+/// Where Claude Code reads a plugin's manifest: `.claude-plugin/plugin.json`, or `plugin.json` at
+/// the plugin root.
+fn plugin_manifest(root: &Path) -> Option<PathBuf> {
+    [
+        root.join(".claude-plugin/plugin.json"),
+        root.join("plugin.json"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
+}
+
+/// Warn when the plugin at `root` has no manifest. Returns whether it warned (#2448).
+fn warn_if_no_manifest(root: &Path, plugin: &str) -> bool {
+    let missing = plugin_manifest(root).is_none();
+    if missing {
+        tracing::warn!(
+            "plugin '{plugin}' has no .claude-plugin/plugin.json or plugin.json under {}; it may not \
+             load correctly unless the marketplace entry carries the manifest",
+            root.display()
+        );
+    }
+    missing
 }
 
 /// The directory `subdir` of the clone at `clone`, checked to exist and to stay inside the clone.
@@ -1333,6 +1390,122 @@ mod tests {
 
     fn sync_plugin(cache: &Path, source: &str, refresh: bool, git: &CallLog) {
         sync_external_plugin_with(cache, "market", "plugin", source, refresh, git).unwrap();
+    }
+
+    #[test]
+    fn a_swap_replaces_the_clone_and_leaves_no_staging_or_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let (staging, dest) = (dir.path().join("p.1.tmp"), dir.path().join("p"));
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(staging.join("v"), "new").unwrap();
+        std::fs::write(dest.join("v"), "old").unwrap();
+        swap_in(&staging, &dest, &|a, b| std::fs::rename(a, b)).unwrap();
+        assert_eq!(std::fs::read_to_string(dest.join("v")).unwrap(), "new");
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["p"]);
+    }
+
+    #[test]
+    fn a_failed_swap_restores_the_old_clone_and_removes_the_staging_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (staging, dest) = (dir.path().join("p.1.tmp"), dir.path().join("p"));
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("v"), "old").unwrap();
+        // The second rename (staging into place) fails; the others work.
+        let calls = std::cell::Cell::new(0);
+        let rename = |a: &Path, b: &Path| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 2 {
+                return Err(std::io::Error::other("disk full"));
+            }
+            std::fs::rename(a, b)
+        };
+        let err = swap_in(&staging, &dest, &rename).unwrap_err().to_string();
+        assert!(
+            err.contains("disk full") && err.contains("back in place"),
+            "{err}"
+        );
+        assert_eq!(std::fs::read_to_string(dest.join("v")).unwrap(), "old");
+        assert!(!staging.exists());
+    }
+
+    #[test]
+    fn dotted_names_do_not_share_a_backup_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (foo, dotted) = (dir.path().join("foo"), dir.path().join("foo.bar"));
+        let pid = std::process::id();
+        // A backup that an earlier failed restore left for `foo.bar`.
+        let kept = dir.path().join(format!("foo.bar.{pid}.old"));
+        for p in [&foo, &dotted, &kept] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        std::fs::write(kept.join("v"), "the only copy").unwrap();
+        let staging = dir.path().join("foo.1.tmp");
+        std::fs::create_dir_all(&staging).unwrap();
+        swap_in(&staging, &foo, &|a, b| std::fs::rename(a, b)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(kept.join("v")).unwrap(),
+            "the only copy"
+        );
+    }
+
+    #[test]
+    fn a_failed_restore_names_where_the_old_clone_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let (staging, dest) = (dir.path().join("p.1.tmp"), dir.path().join("p"));
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+        let calls = std::cell::Cell::new(0);
+        let rename = |a: &Path, b: &Path| {
+            calls.set(calls.get() + 1);
+            if calls.get() >= 2 {
+                return Err(std::io::Error::other("io broke"));
+            }
+            std::fs::rename(a, b)
+        };
+        let err = swap_in(&staging, &dest, &rename).unwrap_err().to_string();
+        assert!(
+            err.contains("the old clone is at") && err.contains(".old"),
+            "{err}"
+        );
+        assert!(!staging.exists());
+    }
+
+    #[test]
+    fn a_swap_that_cannot_move_the_old_clone_aside_keeps_it_and_cleans_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let (staging, dest) = (dir.path().join("p.1.tmp"), dir.path().join("p"));
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+        let err = swap_in(&staging, &dest, &|_, _| Err(std::io::Error::other("busy")))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("busy") && err.contains("aside"), "{err}");
+        assert!(dest.exists() && !staging.exists());
+    }
+
+    #[test]
+    fn the_manifest_is_found_at_either_location_and_a_missing_one_warns() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert!(plugin_manifest(root).is_none());
+        assert!(warn_if_no_manifest(root, "p"));
+        std::fs::write(root.join("plugin.json"), "{}").unwrap();
+        assert_eq!(plugin_manifest(root), Some(root.join("plugin.json")));
+        assert!(!warn_if_no_manifest(root, "p"));
+        std::fs::remove_file(root.join("plugin.json")).unwrap();
+        std::fs::create_dir_all(root.join(".claude-plugin")).unwrap();
+        std::fs::write(root.join(".claude-plugin/plugin.json"), "{}").unwrap();
+        assert_eq!(
+            plugin_manifest(root),
+            Some(root.join(".claude-plugin/plugin.json"))
+        );
+        assert!(!warn_if_no_manifest(root, "p"));
     }
 
     #[test]
