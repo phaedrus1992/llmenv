@@ -2572,7 +2572,7 @@ fn handle_web_fetch_in(
     let checkpoint = checkpoint::begin(
         state_dir,
         checkpoint::JobKind::IcmStore,
-        args,
+        &args,
         payload["session_id"].as_str(),
     );
     let mut cmd = icm_store_command(exe, checkpoint.as_deref());
@@ -2744,7 +2744,7 @@ fn trigger_codebase_memory_index(
     let checkpoint = checkpoint::begin(
         Some(state_dir),
         checkpoint::JobKind::CbmIndex,
-        serde_json::to_value(&inputs).unwrap_or_default(),
+        &inputs,
         None,
     );
     let mut cmd = match (&checkpoint, std::env::current_exe()) {
@@ -2792,41 +2792,47 @@ fn resume_checkpoints(state_dir: Option<&std::path::Path>) {
     }
 }
 
-/// Start the child for one stale checkpoint, with the inputs the first run had.
+/// Start the child for one stale checkpoint, with the inputs and the working directory of the
+/// first run. The memory backend and the project come from that directory, so a checkpoint whose
+/// directory is gone is not run: it would store into the project of the session that resumes it.
 fn respawn_job(cp: &checkpoint::Checkpoint, path: &std::path::Path) -> anyhow::Result<()> {
     use checkpoint::JobKind;
+    let cwd = cp
+        .cwd
+        .as_deref()
+        .map(std::path::Path::new)
+        .filter(|d| d.is_dir())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "the working directory of the first run ({}) is gone",
+                cp.cwd.as_deref().unwrap_or("not recorded")
+            )
+        })?;
     let exe = std::env::current_exe()?;
+    let stdin = cp.inputs.to_string();
     match cp.kind {
-        JobKind::IcmStore => spawn_detached(
-            icm_store_command(exe, Some(path)),
-            Some(&cp.inputs.to_string()),
-            None,
-        ),
+        JobKind::IcmStore => spawn_detached(icm_store_command(exe, Some(path)), Some(&stdin), cwd),
         JobKind::SessionLogRecord => spawn_detached(
             crate::session_log::detached::record_command(exe, Some(path)),
-            Some(&cp.inputs.to_string()),
-            None,
+            Some(&stdin),
+            cwd,
         ),
-        JobKind::Consolidation => spawn_detached(
-            consolidation_run_command(exe, Some(path)),
-            None,
-            cp.inputs["cwd"].as_str().map(std::path::Path::new),
-        ),
-        // `SessionStart` starts the indexer itself, and that run rewrites this checkpoint.
+        JobKind::Consolidation => {
+            spawn_detached(consolidation_run_command(exe, Some(path)), None, cwd)
+        }
+        // Not resumable: `resume_pending` skips it, because `SessionStart` starts the indexer.
         JobKind::CbmIndex => Ok(()),
     }
 }
 
-/// Spawn `cmd` as a detached child with the shared bounded stderr log, optionally in `cwd`, and
-/// write `stdin` to it. Not waited on.
+/// Spawn `cmd` as a detached child in `cwd` with the shared bounded stderr log, and write `stdin`
+/// to it. Not waited on.
 fn spawn_detached(
     mut cmd: std::process::Command,
     stdin: Option<&str>,
-    cwd: Option<&std::path::Path>,
+    cwd: &std::path::Path,
 ) -> anyhow::Result<()> {
-    if let Some(cwd) = cwd.filter(|c| c.is_dir()) {
-        cmd.current_dir(cwd);
-    }
+    cmd.current_dir(cwd);
     redirect_stderr_to_detached_log(&mut cmd);
     crate::mcp::proxy::detach_process_group(&mut cmd);
     let mut child = cmd.spawn()?;
@@ -2913,13 +2919,12 @@ fn post_session_consolidation_in(state_dir: Option<&std::path::Path>) {
         tracing::error!("consolidation-run: cannot resolve current_exe; consolidation skipped");
         return;
     };
-    let cwd = std::env::current_dir()
-        .map(|d| d.display().to_string())
-        .unwrap_or_default();
+    // The nonce keeps two sessions that end in one directory from sharing a checkpoint file, and
+    // it scopes the rule ids to this run (#2397).
     let checkpoint = checkpoint::begin(
         state_dir,
         checkpoint::JobKind::Consolidation,
-        serde_json::json!({ "cwd": cwd }),
+        &serde_json::json!({ "nonce": checkpoint::nonce() }),
         None,
     );
     let mut cmd = consolidation_run_command(exe, checkpoint.as_deref());
@@ -3066,18 +3071,24 @@ mod tests {
     }
 
     #[test]
-    fn consolidation_spawn_writes_a_checkpoint_with_the_working_directory() {
+    fn consolidation_spawn_writes_a_checkpoint_with_a_nonce_and_the_working_directory() {
         let dir = tempfile::tempdir().unwrap();
         post_session_consolidation_in(Some(dir.path()));
-        let listed = checkpoint::checkpoint_entries_for_test(dir.path());
-        assert_eq!(listed.len(), 1, "{listed:?}");
-        assert_eq!(listed[0].0, checkpoint::JobKind::Consolidation);
+        let listed = checkpoint::list(dir.path());
+        let [checkpoint::Entry::Ready(_, cp)] = &listed[..] else {
+            panic!("expected one checkpoint: {listed:?}");
+        };
+        assert_eq!(cp.kind, checkpoint::JobKind::Consolidation);
+        assert!(!cp.inputs["nonce"].as_str().unwrap().is_empty());
         let cwd = std::env::current_dir().unwrap().display().to_string();
-        assert_eq!(listed[0].1["cwd"], cwd.as_str());
+        assert_eq!(cp.cwd.as_deref(), Some(cwd.as_str()));
+        // A second run in the same directory is a second job, not the same file.
+        post_session_consolidation_in(Some(dir.path()));
+        assert_eq!(checkpoint::list(dir.path()).len(), 2);
     }
 
     #[test]
-    fn the_resume_step_starts_a_stale_job_once_and_leaves_a_fresh_one() {
+    fn the_resume_step_skips_the_index_job_and_a_fresh_one() {
         let dir = tempfile::tempdir().unwrap();
         let mut stale = checkpoint::Checkpoint::new(
             checkpoint::JobKind::CbmIndex,
@@ -3086,12 +3097,23 @@ mod tests {
         );
         stale.started_at = 1;
         let path = checkpoint::write(dir.path(), &stale).unwrap().unwrap();
-        let fresh =
-            checkpoint::Checkpoint::new(checkpoint::JobKind::CbmIndex, json!({"n": 2}), None);
-        let fresh_path = checkpoint::write(dir.path(), &fresh).unwrap().unwrap();
         resume_checkpoints(Some(dir.path()));
-        assert_eq!(checkpoint::load(&path).unwrap().attempts, 2);
-        assert_eq!(checkpoint::load(&fresh_path).unwrap().attempts, 1);
+        assert_eq!(
+            checkpoint::load(&path).unwrap().attempts,
+            1,
+            "SessionStart starts the indexer itself, so a resume would only count an attempt"
+        );
+    }
+
+    #[test]
+    fn a_job_whose_working_directory_is_gone_is_not_resumed() {
+        let mut cp = checkpoint::Checkpoint::new(checkpoint::JobKind::IcmStore, json!({}), None);
+        cp.cwd = Some("/definitely/not/a/directory".into());
+        let err = respawn_job(&cp, std::path::Path::new("/s/checkpoints/x.json")).unwrap_err();
+        assert!(err.to_string().contains("is gone"), "{err}");
+        cp.cwd = None;
+        let err = respawn_job(&cp, std::path::Path::new("/s/checkpoints/x.json")).unwrap_err();
+        assert!(err.to_string().contains("not recorded"), "{err}");
     }
 
     #[test]

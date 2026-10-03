@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 use super::session_ledger::hash_prefix;
-use super::session_state::{lock_state_file, prune_stale_json_files};
+use super::session_state::{lock_state_file, prune_orphan_locks, prune_stale_json_files};
 
 /// Ids kept per key. The oldest id goes first.
 const MAX_IDS: usize = 1000;
@@ -70,6 +70,7 @@ impl SeenStore {
             ids.pop_front();
         }
         prune_stale_json_files(&self.dir, STALE_DAYS);
+        prune_orphan_locks(&self.dir, STALE_DAYS);
         let path = self.path(key);
         let result = serde_json::to_vec(&ids)
             .map_err(std::io::Error::other)
@@ -250,6 +251,13 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn state_key_is_idempotent_and_always_a_valid_file_name(raw in ".{0,40}") {
+            let key = state_key(&raw);
+            prop_assert!(crate::paths::is_valid_short_name(&key), "{key:?}");
+            prop_assert_eq!(state_key(&key), key);
+        }
+
         #[test]
         fn distinct_part_lists_give_distinct_ids(
             lists in prop::collection::hash_set(

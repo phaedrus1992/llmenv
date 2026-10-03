@@ -37,10 +37,19 @@ struct RecordPayload {
     request_id: String,
 }
 
-/// The id of one transcript record: the same transcript, time, kind, and content give the same id.
-fn record_request_id(session_id: &str, ev: &SessionLogEvent) -> String {
+/// The id of one transcript record. `nonce` is new for each event: two events with the same kind
+/// and text inside one second are two records, so the time alone cannot tell them apart. The id
+/// travels in the payload, so a re-spawn or a resume of the same event sends the same id.
+fn record_request_id(session_id: &str, ev: &SessionLogEvent, nonce: &str) -> String {
     let kind = format!("{:?}", ev.kind);
-    idempotency::request_id(&["session-log-record", session_id, &ev.ts, &kind, &ev.content])
+    idempotency::request_id(&[
+        "session-log-record",
+        session_id,
+        &ev.ts,
+        &kind,
+        &ev.content,
+        nonce,
+    ])
 }
 
 /// `ev` with the request id added to its `fields`, which become the record's `metadata`, so the id
@@ -84,7 +93,7 @@ fn spawn_record_in(
     let payload = RecordPayload {
         session_id: session_id.to_string(),
         event: ev.clone(),
-        request_id: record_request_id(session_id, ev),
+        request_id: record_request_id(session_id, ev, &checkpoint::nonce()),
     };
     let Ok(payload_json) = serde_json::to_string(&payload) else {
         tracing::debug!("session_log: cannot serialize event for detached record");
@@ -93,7 +102,7 @@ fn spawn_record_in(
     let checkpoint = checkpoint::begin(
         state_dir,
         JobKind::SessionLogRecord,
-        serde_json::to_value(&payload).unwrap_or_default(),
+        &payload,
         Some(session_id),
     );
     let mut cmd = record_command(exe, checkpoint.as_deref());
@@ -147,7 +156,11 @@ pub(crate) fn run_record(
     payload_json: &str,
     checkpoint: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
-    run_record_with(payload_json, checkpoint, run_record_inner)
+    // The error is logged here and not in `run_record_with`: a test of that function would
+    // otherwise reach this callsite outside a subscriber and break the capture test below.
+    run_record_with(payload_json, checkpoint, run_record_inner).inspect_err(|e| {
+        tracing::error!("session_log: detached record failed: {e}");
+    })
 }
 
 /// [`run_record`] with the record call injected, so a test needs no memory backend. A payload that
@@ -162,8 +175,7 @@ fn run_record_with(
     let result = parsed.and_then(record);
     match &result {
         Ok(()) => checkpoint::finish(checkpoint),
-        Err(e) => {
-            tracing::error!("session_log: detached record failed: {e}");
+        Err(_) => {
             if unparseable {
                 checkpoint::finish(checkpoint);
             }
@@ -353,6 +365,22 @@ mod tests {
         assert_eq!(back.request_id, "abc");
     }
 
+    proptest::proptest! {
+        #[test]
+        fn record_payload_survives_serialization(
+            session in ".{0,30}", id in "[0-9a-f]{0,16}", content in ".{0,60}",
+        ) {
+            let mut event = ev();
+            event.content = content;
+            let payload = RecordPayload { session_id: session, event, request_id: id };
+            let back: RecordPayload =
+                serde_json::from_str(&serde_json::to_string(&payload).unwrap()).unwrap();
+            proptest::prop_assert_eq!(back.session_id, payload.session_id);
+            proptest::prop_assert_eq!(back.request_id, payload.request_id);
+            proptest::prop_assert_eq!(back.event, payload.event);
+        }
+    }
+
     #[test]
     fn a_payload_from_an_older_llmenv_parses_with_an_empty_request_id() {
         let json = serde_json::json!({"session_id": "s", "event": ev()}).to_string();
@@ -362,15 +390,20 @@ mod tests {
 
     #[test]
     fn record_request_id_follows_session_time_kind_and_content() {
-        let base = record_request_id("s1", &ev());
-        assert_eq!(base, record_request_id("s1", &ev()));
-        assert_ne!(base, record_request_id("s2", &ev()));
+        let base = record_request_id("s1", &ev(), "n");
+        assert_eq!(base, record_request_id("s1", &ev(), "n"));
+        assert_ne!(base, record_request_id("s2", &ev(), "n"));
         let mut later = ev();
         later.ts = "t2".into();
-        assert_ne!(base, record_request_id("s1", &later));
+        assert_ne!(base, record_request_id("s1", &later, "n"));
         let mut other = ev();
         other.content = "bye".into();
-        assert_ne!(base, record_request_id("s1", &other));
+        assert_ne!(base, record_request_id("s1", &other, "n"));
+        assert_ne!(
+            base,
+            record_request_id("s1", &ev(), "m"),
+            "two identical events in one second are two records"
+        );
     }
 
     #[test]

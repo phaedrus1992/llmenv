@@ -5,7 +5,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -290,36 +289,13 @@ impl LedgerStore {
 
     fn write(&self, session_id: &str, ledger: &Ledger) {
         super::session_state::prune_stale_json_files(&self.dir, STALE_DAYS);
-        self.prune_orphan_locks();
+        super::session_state::prune_orphan_locks(&self.dir, STALE_DAYS);
         let path = self.file(session_id, "json");
         let result = serde_json::to_vec(ledger)
             .map_err(std::io::Error::other)
             .and_then(|bytes| crate::paths::write_owner_only_atomic(&path, &bytes));
         if let Err(e) = result {
             tracing::error!("cannot save recall ledger {}: {e}", path.display());
-        }
-    }
-
-    /// Remove stale `.lock` files whose `.json` is gone. A session in its first
-    /// update holds a lock with no `.json` yet; a removal of that lock lets a
-    /// second writer lock a new file and lose an update, so only old locks go.
-    fn prune_orphan_locks(&self) {
-        let Ok(entries) = std::fs::read_dir(&self.dir) else {
-            return;
-        };
-        let max_age = Duration::from_secs(STALE_DAYS * 86_400);
-        for path in entries.flatten().map(|e| e.path()) {
-            let stale = std::fs::metadata(&path)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.elapsed().ok())
-                .is_some_and(|age| age > max_age);
-            if stale
-                && path.extension().and_then(|e| e.to_str()) == Some("lock")
-                && !path.with_extension("json").exists()
-            {
-                let _ignored = std::fs::remove_file(&path);
-            }
         }
     }
 }
@@ -580,7 +556,7 @@ mod tests {
         let (_dir, store) = store();
         let held = store.lock("s1").unwrap();
         let release = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(std::time::Duration::from_millis(50));
             drop(held);
         });
         assert!(store.update("s1", |l| l.last_turn_at = 1).is_some());

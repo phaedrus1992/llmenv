@@ -133,7 +133,8 @@ A file that stays means the job did not finish, for example because the memory p
 the job, its age, the attempts so far out of 3, its phase, and the log to read (`<state dir>/detached-hook.log`).
 A checkpoint that is not yet old enough to be stale shows as info, because its child may still be running.
 
-At each new session start, llmenv runs a stale job again, up to 3 attempts.
+At each new session start, llmenv runs a stale job again, up to 3 attempts, and at most 20 jobs.
+A job runs in the directory of its first run. If that directory is gone, llmenv does not run it.
 After the third attempt the file stays, so doctor keeps showing it.
 To abandon a job, delete its file under `checkpoints/`.
 llmenv deletes checkpoints that are older than 7 days.

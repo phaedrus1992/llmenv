@@ -12,7 +12,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use super::session_ledger::hash_prefix;
-use super::session_state::{prune_stale_json_files, unix_now};
+use super::session_state::{lock_state_file, prune_stale_json_files, unix_now};
 
 /// Runs of one job before it stays for doctor. The first run counts as attempt 1.
 const MAX_ATTEMPTS: u32 = 3;
@@ -22,6 +22,9 @@ const PRUNE_DAYS: u64 = 7;
 const MAX_INPUT_BYTES: usize = 64 * 1024;
 /// Seconds added to a job's longest timeout before its checkpoint counts as stale.
 const DEADLINE_MARGIN_SECS: u64 = 60;
+/// Jobs one `SessionStart` runs again. A long outage leaves one checkpoint per event, and an
+/// unbounded resume would start one process for each. The rest wait for the next session.
+const MAX_RESUMED_PER_START: usize = 20;
 
 /// The detached jobs that keep a checkpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +44,12 @@ impl JobKind {
             Self::SessionLogRecord => "session-log-record",
             Self::CbmIndex => "cbm-index",
         }
+    }
+
+    /// Whether a stale checkpoint of this kind is run again from a later `SessionStart`. The index
+    /// job is not: every `SessionStart` starts the indexer itself and rewrites its checkpoint.
+    fn resumable(self) -> bool {
+        self != Self::CbmIndex
     }
 
     /// Seconds a healthy job can run: its longest timeout plus a margin. The cbm indexer has no
@@ -69,6 +78,10 @@ pub(crate) struct Checkpoint {
     pub(crate) started_at: u64,
     pub(crate) attempts: u32,
     session_id: Option<String>,
+    /// The working directory of the first run. The memory backend and the project come from it,
+    /// so a resumed job starts there and never in the directory of the session that resumes it.
+    #[serde(default)]
+    pub(crate) cwd: Option<String>,
 }
 
 impl Checkpoint {
@@ -83,6 +96,9 @@ impl Checkpoint {
             started_at: now_secs(),
             attempts: 1,
             session_id: session_id.map(str::to_string),
+            cwd: std::env::current_dir()
+                .ok()
+                .map(|d| d.display().to_string()),
         }
     }
 
@@ -198,35 +214,111 @@ pub(crate) fn list(state_dir: &Path) -> Vec<Entry> {
 }
 
 /// Run every stale checkpoint again: bump its attempt count, restart its clock, and hand it to
-/// `spawn`. A checkpoint at [`MAX_ATTEMPTS`] stays for doctor, and a fresh one is left alone
-/// because its child may still be running. Old files are pruned first. Returns the number of jobs
-/// handed to `spawn`.
+/// `spawn`. A checkpoint at [`MAX_ATTEMPTS`] stays for doctor, a fresh one is left alone because
+/// its child may still be running, and a kind that is not resumable is skipped. At most
+/// [`MAX_RESUMED_PER_START`] jobs start. A lock keeps two sessions that start together from
+/// running the same job twice. If `spawn` fails, the checkpoint goes back to its earlier state, so
+/// a failure to start does not use up an attempt. Old files are pruned first. Returns the number
+/// of jobs handed to `spawn`.
 pub(crate) fn resume_pending(
     state_dir: &Path,
     now: u64,
     mut spawn: impl FnMut(&Checkpoint, &Path) -> anyhow::Result<()>,
 ) -> usize {
     prune_stale_json_files(&dir(state_dir), PRUNE_DAYS);
+    let Some(_lock) = lock_state_file(&dir(state_dir), "resume", "checkpoint resume") else {
+        return 0;
+    };
     let mut resumed = 0;
     for entry in list(state_dir) {
-        let Entry::Ready(path, mut checkpoint) = entry else {
+        let Entry::Ready(path, checkpoint) = entry else {
             continue;
         };
-        if !checkpoint.is_stale(now) || checkpoint.attempts >= MAX_ATTEMPTS {
+        if !checkpoint.kind.resumable() || !checkpoint.is_stale(now) {
             continue;
         }
-        checkpoint.attempts += 1;
-        checkpoint.started_at = now;
-        if let Err(e) = save(&path, &checkpoint) {
-            tracing::debug!("checkpoint {} not resumed: {e:#}", path.display());
+        if checkpoint.attempts >= MAX_ATTEMPTS {
+            tracing::error!(
+                "background job {} gave up after {MAX_ATTEMPTS} attempts; see `llmenv doctor`",
+                path.display()
+            );
             continue;
         }
-        match spawn(&checkpoint, &path) {
-            Ok(()) => resumed += 1,
-            Err(e) => tracing::debug!("checkpoint {} spawn failed: {e:#}", path.display()),
+        if resumed >= MAX_RESUMED_PER_START {
+            tracing::error!(
+                "more than {MAX_RESUMED_PER_START} unfinished background jobs; the rest wait for the next session"
+            );
+            break;
+        }
+        if restart(&path, &checkpoint, now, &mut spawn) {
+            resumed += 1;
         }
     }
     resumed
+}
+
+/// Save the bumped checkpoint, start the job, and restore the old file when the start fails.
+fn restart(
+    path: &Path,
+    checkpoint: &Checkpoint,
+    now: u64,
+    spawn: &mut impl FnMut(&Checkpoint, &Path) -> anyhow::Result<()>,
+) -> bool {
+    let mut bumped = checkpoint.clone();
+    bumped.attempts += 1;
+    bumped.started_at = now;
+    if let Err(e) = save(path, &bumped) {
+        tracing::error!("background job {} not resumed: {e:#}", path.display());
+        return false;
+    }
+    if let Err(e) = spawn(&bumped, path) {
+        tracing::error!("background job {} not resumed: {e:#}", path.display());
+        if let Err(e) = save(path, checkpoint) {
+            tracing::error!("{e:#}");
+        }
+        return false;
+    }
+    true
+}
+
+/// A value no two jobs share, for the part of a job's id that must tell two runs of the same
+/// inputs apart: nanoseconds since the epoch plus a counter for the same nanosecond.
+#[must_use]
+pub(crate) fn nonce() -> String {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!("{nanos:x}-{:x}", COUNTER.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Accept a `--checkpoint` argument only when it is a regular file, not a symlink, directly inside
+/// `state_dir/checkpoints`, named like a checkpoint. A hidden subcommand that deletes and trusts
+/// the file it is given must not act on an arbitrary path.
+///
+/// # Errors
+/// The path is outside the checkpoint directory, is a symlink, or is not a checkpoint file name.
+pub(crate) fn validated_path(state_dir: &Path, path: &Path) -> anyhow::Result<PathBuf> {
+    let dir = dir(state_dir);
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| n.ends_with(".json"))
+        .ok_or_else(|| anyhow::anyhow!("--checkpoint {} is not a .json file", path.display()))?;
+    anyhow::ensure!(
+        path.parent() == Some(dir.as_path()),
+        "--checkpoint {} is not inside {}",
+        path.display(),
+        dir.display()
+    );
+    let meta = std::fs::symlink_metadata(path)
+        .with_context(|| format!("--checkpoint {} cannot be read", path.display()))?;
+    anyhow::ensure!(
+        meta.file_type().is_file(),
+        "--checkpoint {name} is not a regular file"
+    );
+    Ok(path.to_path_buf())
 }
 
 /// The state dir the spawners write checkpoints into. Unit tests spawn real children, and those
@@ -241,16 +333,27 @@ pub(crate) fn spawner_state_dir() -> Option<PathBuf> {
 
 /// Write the checkpoint of a job that is about to spawn, and return its path. `None` when there
 /// is no state dir, the inputs are too large, or the write failed: the job then runs without a
-/// checkpoint, as it did before #2396.
+/// checkpoint, as it did before #2396. A failed write is logged at error level, because it turns
+/// the durability of the job off. The index job keeps counting its attempts across the checkpoints
+/// that every session start rewrites, so an indexer that always fails shows as exhausted.
 pub(crate) fn begin(
     state_dir: Option<&Path>,
     kind: JobKind,
-    inputs: serde_json::Value,
+    inputs: &impl Serialize,
     session_id: Option<&str>,
 ) -> Option<PathBuf> {
-    let checkpoint = Checkpoint::new(kind, inputs, session_id);
-    write(state_dir?, &checkpoint)
-        .inspect_err(|e| tracing::debug!("{} checkpoint not written: {e:#}", kind.as_str()))
+    let state_dir = state_dir?;
+    let inputs = serde_json::to_value(inputs)
+        .inspect_err(|e| tracing::error!("{} checkpoint not written: {e}", kind.as_str()))
+        .ok()?;
+    let mut checkpoint = Checkpoint::new(kind, inputs, session_id);
+    if kind == JobKind::CbmIndex
+        && let Ok(earlier) = load(&dir(state_dir).join(checkpoint.file_name()))
+    {
+        checkpoint.attempts = earlier.attempts.saturating_add(1).min(MAX_ATTEMPTS);
+    }
+    write(state_dir, &checkpoint)
+        .inspect_err(|e| tracing::error!("{} checkpoint not written: {e:#}", kind.as_str()))
         .ok()
         .flatten()
 }
@@ -294,15 +397,11 @@ pub(crate) fn describe(checkpoint: &Checkpoint, now: u64, log: &Path) -> String 
 }
 
 fn format_age(secs: u64) -> String {
-    match secs {
-        0..=119 => format!("{secs}s"),
-        120..=7199 => format!("{}m", secs / 60),
-        _ => format!("{}h", secs / 3600),
-    }
+    humantime::format_duration(std::time::Duration::from_secs(secs)).to_string()
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "test code")]
+#[expect(clippy::unwrap_used, clippy::panic, reason = "test code")]
 mod tests {
     use super::*;
     use proptest::prelude::*;
@@ -437,6 +536,125 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_start_restores_the_checkpoint_so_no_attempt_is_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut stale = cp(JobKind::IcmStore, 1);
+        stale.started_at = 1000;
+        let path = write(dir.path(), &stale).unwrap().unwrap();
+        let now = 1000 + JobKind::IcmStore.deadline_secs() + 1;
+        let resumed = resume_pending(dir.path(), now, |_, _| anyhow::bail!("no such directory"));
+        assert_eq!(resumed, 0);
+        assert_eq!(load(&path).unwrap(), stale, "the file is as it was");
+    }
+
+    #[test]
+    fn at_most_the_cap_of_jobs_start_and_the_rest_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in 0..(MAX_RESUMED_PER_START as u32 + 5) {
+            let mut c = cp(JobKind::SessionLogRecord, n);
+            c.started_at = 1;
+            write(dir.path(), &c).unwrap();
+        }
+        let now = 1 + JobKind::SessionLogRecord.deadline_secs() + 1;
+        let resumed = resume_pending(dir.path(), now, |_, _| Ok(()));
+        assert_eq!(resumed, MAX_RESUMED_PER_START);
+        let waiting = list(dir.path())
+            .iter()
+            .filter(|e| matches!(e, Entry::Ready(_, c) if c.attempts == 1))
+            .count();
+        assert_eq!(
+            waiting, 5,
+            "the rest keep their attempt count for the next session"
+        );
+    }
+
+    #[test]
+    fn a_kind_that_is_not_resumable_is_never_handed_to_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = cp(JobKind::CbmIndex, 1);
+        c.started_at = 1;
+        let path = write(dir.path(), &c).unwrap().unwrap();
+        assert_eq!(
+            resume_pending(dir.path(), 1_000_000, |_, _| panic!("spawned")),
+            0
+        );
+        assert_eq!(load(&path).unwrap().attempts, 1);
+    }
+
+    #[test]
+    fn a_second_resume_in_progress_blocks_this_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut stale = cp(JobKind::IcmStore, 1);
+        stale.started_at = 1;
+        write(dir.path(), &stale).unwrap();
+        let held = lock_state_file(&super::dir(dir.path()), "resume", "test").unwrap();
+        assert_eq!(
+            resume_pending(dir.path(), 1_000_000, |_, _| panic!(
+                "spawned under a held lock"
+            )),
+            0
+        );
+        drop(held);
+        assert_eq!(resume_pending(dir.path(), 1_000_000, |_, _| Ok(())), 1);
+    }
+
+    #[test]
+    fn the_index_job_counts_attempts_across_the_checkpoints_each_session_rewrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let inputs = serde_json::json!({ "project_root": "/r", "index_path": null });
+        let path = begin(Some(dir.path()), JobKind::CbmIndex, &inputs, None).unwrap();
+        assert_eq!(load(&path).unwrap().attempts, 1);
+        begin(Some(dir.path()), JobKind::CbmIndex, &inputs, None).unwrap();
+        begin(Some(dir.path()), JobKind::CbmIndex, &inputs, None).unwrap();
+        begin(Some(dir.path()), JobKind::CbmIndex, &inputs, None).unwrap();
+        assert_eq!(
+            load(&path).unwrap().attempts,
+            MAX_ATTEMPTS,
+            "capped at the limit"
+        );
+    }
+
+    #[test]
+    fn nonces_differ_and_the_first_attempt_records_the_working_directory() {
+        assert_ne!(nonce(), nonce());
+        let c = cp(JobKind::IcmStore, 1);
+        let cwd = std::env::current_dir().unwrap().display().to_string();
+        assert_eq!(c.cwd.as_deref(), Some(cwd.as_str()));
+    }
+
+    #[test]
+    fn only_a_regular_checkpoint_file_inside_the_checkpoint_dir_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = write(dir.path(), &cp(JobKind::IcmStore, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(validated_path(dir.path(), &good).unwrap(), good);
+        let outside = dir.path().join("elsewhere.json");
+        std::fs::write(&outside, "{}").unwrap();
+        assert!(
+            validated_path(dir.path(), &outside).is_err(),
+            "outside the directory"
+        );
+        let not_json = super::dir(dir.path()).join("x.txt");
+        std::fs::write(&not_json, "{}").unwrap();
+        assert!(
+            validated_path(dir.path(), &not_json).is_err(),
+            "not a .json name"
+        );
+        let link = super::dir(dir.path()).join("icm-store-link.json");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        assert!(
+            validated_path(dir.path(), &link).is_err(),
+            "a symlink is refused"
+        );
+        let traversal = super::dir(dir.path()).join("../elsewhere.json");
+        assert!(
+            validated_path(dir.path(), &traversal).is_err(),
+            "a .. path is refused"
+        );
+    }
+
+    #[test]
     fn describe_names_kind_age_attempts_phase_and_log() {
         let mut c = cp(JobKind::Consolidation, 1);
         c.started_at = 100;
@@ -444,11 +662,18 @@ mod tests {
         let text = describe(&c, 100 + 7300, Path::new("/s/detached-hook.log"));
         assert_eq!(
             text,
-            "consolidation started 2h ago, 3/3 attempts, phase started; log: /s/detached-hook.log"
+            "consolidation started 2h 1m 40s ago, 3/3 attempts, phase started; log: /s/detached-hook.log"
         );
     }
 
     proptest! {
+        #[test]
+        fn format_age_is_never_empty_and_ends_in_a_unit(secs in 0u64..10_000_000) {
+            let text = format_age(secs);
+            prop_assert!(!text.is_empty());
+            prop_assert!(text.ends_with(['s', 'm', 'h', 'd']), "{text}");
+        }
+
         #[test]
         fn a_checkpoint_survives_serialization(
             n in 0u32..1000, attempts in 0u32..10, started in 0u64..u64::MAX / 2,

@@ -31,7 +31,11 @@ const STORE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Malformed payload, no active memory backend, an invalid backend URL, or
 /// the MCP call itself failing.
 pub fn run_icm_store(payload_json: &str, checkpoint: Option<&Path>) -> anyhow::Result<()> {
-    run_icm_store_with(payload_json, checkpoint, run_icm_store_inner)
+    // The error is logged here and not in `run_icm_store_with`: a test of that function would
+    // otherwise reach this callsite outside a subscriber and break the capture test below.
+    run_icm_store_with(payload_json, checkpoint, run_icm_store_inner).inspect_err(|e| {
+        tracing::error!("icm-store: detached store failed: {e}");
+    })
 }
 
 /// [`run_icm_store`] with the store call injected, so a test needs no memory backend.
@@ -46,8 +50,7 @@ fn run_icm_store_with(
     match &result {
         // A payload that does not parse cannot succeed on a retry, so its checkpoint goes too.
         Ok(()) => checkpoint::finish(checkpoint),
-        Err(e) => {
-            tracing::error!("icm-store: detached store failed: {e}");
+        Err(_) => {
             if serde_json::from_str::<serde_json::Value>(payload_json).is_err() {
                 checkpoint::finish(checkpoint);
             }

@@ -389,16 +389,33 @@ fn parse_bullets(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// What names one consolidation run: the project, and the id of the run that started it.
+struct RunScope<'a> {
+    project: &'a str,
+    run_id: &'a str,
+}
+
+/// The id of this run: the nonce its checkpoint was written with, or empty without a checkpoint.
+fn run_id(checkpoint: Option<&std::path::Path>) -> String {
+    checkpoint
+        .and_then(|p| checkpoint::load(p).ok())
+        .and_then(|c| c.inputs["nonce"].as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
 /// Store a single consolidation rule via `icm_memory_store`, unless this exact rule was already
 /// stored for `project` (#2397). The seen-set catches a resumed run that repeats a stored rule;
 /// the similarity check in [`store_new_rules`] stays as the second line of defense.
 async fn store_rule(
     client: &McpHttpClient,
     state_dir: Option<&std::path::Path>,
-    project: &str,
+    run: &RunScope<'_>,
     rule: &str,
 ) -> anyhow::Result<()> {
-    let id = idempotency::request_id(&[project, "consolidation", rule]);
+    let project = run.project;
+    // The run id keeps a rule that the user later forgot from being skipped as already stored; it
+    // is the same for a resumed run, which is the repeat the seen-set exists to catch.
+    let id = idempotency::request_id(&[project, "consolidation", run.run_id, rule]);
     let guard = idempotency::Guard::new(state_dir, project, &id);
     if guard.as_ref().is_some_and(idempotency::Guard::already_done) {
         return Ok(());
@@ -422,9 +439,10 @@ async fn store_rule(
 async fn store_new_rules(
     client: &McpHttpClient,
     state_dir: Option<&std::path::Path>,
-    project: &str,
+    run: &RunScope<'_>,
     rules: &[&str],
 ) -> (usize, usize) {
+    let project = run.project;
     let mut stored = 0usize;
     let mut duplicates = 0usize;
     let mut batch: Vec<&str> = Vec::new();
@@ -444,7 +462,7 @@ async fn store_new_rules(
             }
         }
         batch.push(rule);
-        match store_rule(client, state_dir, project, rule).await {
+        match store_rule(client, state_dir, run, rule).await {
             Ok(()) => stored += 1,
             Err(e) => {
                 tracing::error!("consolidation: failed to store rule (fail-soft): {e:#}");
@@ -563,7 +581,13 @@ fn note_phase(checkpoint: Option<&std::path::Path>, phase: &str, summary: Option
 
 /// The model summary a previous run saved, when this run resumes after the model step.
 fn saved_summary(checkpoint: Option<&std::path::Path>) -> Option<String> {
-    let loaded = checkpoint::load(checkpoint?).ok()?;
+    let loaded = checkpoint::load(checkpoint?)
+        .inspect_err(|e| {
+            tracing::error!(
+                "consolidation: the model summary is lost, so the run asks again: {e:#}"
+            );
+        })
+        .ok()?;
     if loaded.phase != "summarized" {
         return None;
     }
@@ -633,7 +657,12 @@ pub(crate) async fn run(
     let rules: Vec<&str> = rules.iter().map(|s| s.as_str()).take(max_rules).collect();
 
     // Step 6: Store each rule
-    let (stored, duplicates) = store_new_rules(client, state_dir, project, &rules).await;
+    let run_id = run_id(checkpoint);
+    let scope = RunScope {
+        project,
+        run_id: &run_id,
+    };
+    let (stored, duplicates) = store_new_rules(client, state_dir, &scope, &rules).await;
 
     let msg = format!(
         "consolidation: distilled {records} memory records into {} semantic rule(s) \
@@ -927,8 +956,12 @@ mod tests {
             "Run the formatter before every commit",
             "Pin action versions to a SHA",
         ];
-        let first = store_new_rules(&client, Some(dir.path()), "proj", &rules).await;
-        let resumed = store_new_rules(&client, Some(dir.path()), "proj", &rules).await;
+        let run = RunScope {
+            project: "proj",
+            run_id: "run-1",
+        };
+        let first = store_new_rules(&client, Some(dir.path()), &run, &rules).await;
+        let resumed = store_new_rules(&client, Some(dir.path()), &run, &rules).await;
         assert_eq!(first, (2, 0));
         assert_eq!(
             resumed,
@@ -937,6 +970,18 @@ mod tests {
         );
         let stored = store_calls(&server).await;
         assert_eq!(stored.len(), 2, "the resumed run must store nothing new");
+        let later = RunScope {
+            project: "proj",
+            run_id: "run-2",
+        };
+        let relearned = store_new_rules(&client, Some(dir.path()), &later, &rules).await;
+        assert_eq!(
+            relearned,
+            (2, 0),
+            "a later run may store a rule that was forgotten from ICM"
+        );
+        assert_eq!(store_calls(&server).await.len(), 4);
+
         let keyword = &stored[0]["params"]["arguments"]["keywords"][0];
         assert!(
             keyword.as_str().expect("keyword").starts_with("request:"),

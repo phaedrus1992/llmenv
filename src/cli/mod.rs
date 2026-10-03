@@ -878,21 +878,25 @@ pub fn run() -> anyhow::Result<()> {
             use std::io::Read;
             let mut payload_json = String::new();
             std::io::stdin().read_to_string(&mut payload_json)?;
+            let checkpoint = checked_checkpoint(checkpoint)?;
             crate::session_log::detached::run_record(&payload_json, checkpoint.as_deref())?;
         }
         Some(Command::IcmStore { checkpoint }) => {
             use std::io::Read;
             let mut payload_json = String::new();
             std::io::stdin().read_to_string(&mut payload_json)?;
+            let checkpoint = checked_checkpoint(checkpoint)?;
             crate::hook_run::detached_store::run_icm_store(&payload_json, checkpoint.as_deref())?;
         }
         Some(Command::ConsolidationRun { checkpoint }) => {
+            let checkpoint = checked_checkpoint(checkpoint)?;
             crate::hook_run::detached_consolidation::run_consolidation(
                 &paths::config_path()?,
                 checkpoint.as_deref(),
             )?;
         }
         Some(Command::CbmIndexRun { checkpoint }) => {
+            let checkpoint = checked_checkpoint(Some(checkpoint))?.unwrap_or_default();
             crate::hook_run::detached_cbm::run_cbm_index(&checkpoint)?;
         }
         Some(Command::Login { global }) => {
@@ -3480,6 +3484,16 @@ fn render_task_session_summary_human(
 
 /// Handle `llmenv task <subcommand>` (#231). Thin formatting layer over
 /// `crate::task`, which owns the store logic.
+/// The `--checkpoint` path of a detached child, checked to be a checkpoint file under the state
+/// dir (#2396). The child deletes and trusts the file, so it must not take an arbitrary path.
+fn checked_checkpoint(path: Option<PathBuf>) -> anyhow::Result<Option<PathBuf>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let state_dir = paths::state_dir()?;
+    crate::hook_run::checkpoint::validated_path(&state_dir, &path).map(Some)
+}
+
 fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()> {
     let state_dir = crate::paths::state_dir()?;
     match command {

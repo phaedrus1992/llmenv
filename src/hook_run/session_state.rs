@@ -143,6 +143,29 @@ fn remove_if_present(path: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Remove `.lock` files in `dir` older than `max_age_days` whose `.json` is gone. A session in its
+/// first update holds a lock with no `.json` yet; removing that lock would let a second writer
+/// lock a new file and lose an update, so only old locks go.
+pub(crate) fn prune_orphan_locks(dir: &Path, max_age_days: u64) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let max_age = Duration::from_secs(max_age_days * 86_400);
+    for path in entries.flatten().map(|e| e.path()) {
+        let stale = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > max_age);
+        if stale
+            && path.extension().and_then(|e| e.to_str()) == Some("lock")
+            && !path.with_extension("json").exists()
+        {
+            let _ignored = std::fs::remove_file(&path);
+        }
+    }
+}
+
 /// Seconds since the Unix epoch; 0 for a clock set before 1970.
 pub(crate) fn unix_now() -> i64 {
     std::time::SystemTime::now()

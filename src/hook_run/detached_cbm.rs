@@ -69,6 +69,18 @@ mod tests {
         cmd
     }
 
+    proptest::proptest! {
+        #[test]
+        fn index_inputs_survive_serialization(
+            root in ".{0,40}", index in proptest::option::of(".{0,40}"),
+        ) {
+            let inputs = IndexInputs { project_root: root, index_path: index };
+            let back: IndexInputs =
+                serde_json::from_value(serde_json::to_value(&inputs).unwrap()).unwrap();
+            proptest::prop_assert_eq!(back, inputs);
+        }
+    }
+
     #[test]
     fn exit_zero_completes_the_checkpoint() {
         let dir = tempfile::tempdir().unwrap();
