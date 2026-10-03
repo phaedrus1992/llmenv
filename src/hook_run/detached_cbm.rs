@@ -82,6 +82,25 @@ mod tests {
     }
 
     #[test]
+    fn the_real_entry_point_reports_an_indexer_that_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let inputs = serde_json::to_value(IndexInputs {
+            project_root: "/definitely/not/a/project/root".into(),
+            index_path: None,
+        })
+        .unwrap();
+        let file = checkpoint::write(
+            dir.path(),
+            &Checkpoint::new(JobKind::CbmIndex, inputs, None),
+        )
+        .unwrap()
+        .unwrap();
+        // Either codebase-memory-mcp is missing, or it rejects the path: both are errors.
+        assert!(run_cbm_index(&file).is_err());
+        assert!(file.exists());
+    }
+
+    #[test]
     fn exit_zero_completes_the_checkpoint() {
         let dir = tempfile::tempdir().unwrap();
         let file = written(dir.path());

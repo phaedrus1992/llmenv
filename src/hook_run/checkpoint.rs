@@ -450,6 +450,60 @@ mod tests {
     }
 
     #[test]
+    fn inputs_up_to_the_cap_are_checkpointed_and_one_byte_more_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        // The JSON text of a string is the string plus two quotes.
+        let at_cap = serde_json::json!("x".repeat(MAX_INPUT_BYTES - 2));
+        let over = serde_json::json!("x".repeat(MAX_INPUT_BYTES - 1));
+        assert_eq!(MAX_INPUT_BYTES, 65_536);
+        assert!(
+            write(
+                dir.path(),
+                &Checkpoint::new(JobKind::IcmStore, at_cap, None)
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert!(
+            write(dir.path(), &Checkpoint::new(JobKind::IcmStore, over, None))
+                .unwrap()
+                .is_none()
+        );
+        let modest = serde_json::json!({ "content": "y".repeat(10_000) });
+        assert!(
+            write(
+                dir.path(),
+                &Checkpoint::new(JobKind::SessionLogRecord, modest, None)
+            )
+            .unwrap()
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn deadlines_are_the_longest_timeout_plus_the_margin() {
+        assert_eq!(JobKind::Consolidation.deadline_secs(), 150 + 60);
+        assert_eq!(JobKind::IcmStore.deadline_secs(), 5 + 60);
+        assert_eq!(JobKind::SessionLogRecord.deadline_secs(), 5 + 60);
+        assert_eq!(JobKind::CbmIndex.deadline_secs(), 1800 + 60);
+    }
+
+    #[test]
+    fn now_secs_is_the_current_time() {
+        assert!(now_secs() > 1_700_000_000, "{}", now_secs());
+        assert!(now_secs() < 4_000_000_000);
+    }
+
+    #[test]
+    fn completing_a_path_that_cannot_be_removed_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let not_a_file = dir.path().join("adir");
+        std::fs::create_dir_all(not_a_file.join("inner")).unwrap();
+        assert!(complete(&not_a_file).is_err());
+        assert!(complete(&dir.path().join("missing.json")).is_ok());
+    }
+
+    #[test]
     fn inputs_above_the_cap_are_not_checkpointed() {
         let dir = tempfile::tempdir().unwrap();
         let big = Checkpoint::new(

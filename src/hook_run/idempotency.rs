@@ -214,6 +214,21 @@ mod tests {
     }
 
     #[test]
+    fn a_seen_set_that_cannot_be_read_is_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SeenStore::new(dir.path());
+        // A directory where the file belongs: reading it fails, and the error is not "missing".
+        std::fs::create_dir_all(store.path("sess")).unwrap();
+        assert!(store.read("sess").is_none());
+        store.record("sess", "abc");
+        assert!(
+            store.path("sess").is_dir(),
+            "an unreadable set is left alone"
+        );
+        assert!(!store.contains("sess", "abc"));
+    }
+
+    #[test]
     fn unsafe_key_is_never_seen_and_never_written() {
         let dir = tempfile::tempdir().unwrap();
         let store = SeenStore::new(dir.path());

@@ -1417,12 +1417,11 @@ fn run_inner(
         } else {
             None
         };
-        if event == HookEvent::SessionStart
-            && !continues_session(stdin_payload)
-            && !is_consolidation_child(
-                std::env::var_os(crate::consolidation::CHILD_GUARD_ENV).as_deref(),
-            )
-        {
+        if resumes_checkpoints(
+            event,
+            stdin_payload,
+            std::env::var_os(crate::consolidation::CHILD_GUARD_ENV).as_deref(),
+        ) {
             // After the notice, so the proxy it may restart is up (#2396).
             resume_checkpoints(checkpoint::spawner_state_dir().as_deref());
         }
@@ -2716,6 +2715,27 @@ fn index_command(
     cmd
 }
 
+/// The process that runs one index job: `llmenv cbm-index-run` when there is a checkpoint and an
+/// executable to run it with, else the indexer itself (`direct`) (#2396).
+fn index_job_command(
+    checkpoint: Option<&std::path::Path>,
+    exe: Option<std::path::PathBuf>,
+    direct: impl FnOnce() -> std::process::Command,
+) -> std::process::Command {
+    match (checkpoint, exe) {
+        (Some(path), Some(exe)) => {
+            let mut cmd = std::process::Command::new(exe);
+            cmd.arg("cbm-index-run")
+                .arg("--checkpoint")
+                .arg(path)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null());
+            cmd
+        }
+        _ => direct(),
+    }
+}
+
 /// Fire-and-forget: registers `project_root` with codebase-memory-mcp's
 /// index + background auto-watch (#365). Mirrors `post_session_consolidation`'s
 /// detached-spawn pattern — indexing a large repo can take minutes (the
@@ -2747,18 +2767,9 @@ fn trigger_codebase_memory_index(
         &inputs,
         None,
     );
-    let mut cmd = match (&checkpoint, std::env::current_exe()) {
-        (Some(path), Ok(exe)) => {
-            let mut cmd = std::process::Command::new(exe);
-            cmd.arg("cbm-index-run")
-                .arg("--checkpoint")
-                .arg(path)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null());
-            cmd
-        }
-        _ => build_index_repository_command(project_root, cm),
-    };
+    let mut cmd = index_job_command(checkpoint.as_deref(), std::env::current_exe().ok(), || {
+        build_index_repository_command(project_root, cm)
+    });
     let cache_dir = codebase_memory_cache_dir(cm, state_dir);
     let log_path = cache_dir.join("index.log");
     // Only the default cache dir (under llmenv's own state tree) gets
@@ -2779,17 +2790,35 @@ fn trigger_codebase_memory_index(
     }
 }
 
+/// Whether this hook run starts the unfinished background jobs again: a `SessionStart` that is
+/// not the continuation of an earlier conversation, outside the consolidation child (#2396).
+fn resumes_checkpoints(
+    event: HookEvent,
+    payload: &serde_json::Value,
+    consolidation_guard: Option<&std::ffi::OsStr>,
+) -> bool {
+    event == HookEvent::SessionStart
+        && !continues_session(payload)
+        && !is_consolidation_child(consolidation_guard)
+}
+
 /// Start the detached jobs whose checkpoints are stale: work that an earlier session started and
 /// never finished (#2396). Fail-soft: a failure is logged at debug level and the session goes on.
 fn resume_checkpoints(state_dir: Option<&std::path::Path>) {
+    resume_checkpoints_with(state_dir, respawn_job);
+}
+
+/// [`resume_checkpoints`] with the job starter injected, so a test starts no process.
+fn resume_checkpoints_with(
+    state_dir: Option<&std::path::Path>,
+    spawn: impl FnMut(&checkpoint::Checkpoint, &std::path::Path) -> anyhow::Result<()>,
+) -> usize {
     let Some(state_dir) = state_dir else {
-        return;
+        return 0;
     };
-    let now = checkpoint::now_secs();
-    let resumed = checkpoint::resume_pending(state_dir, now, respawn_job);
-    if resumed > 0 {
-        tracing::info!("resumed {resumed} unfinished background job(s)");
-    }
+    let resumed = checkpoint::resume_pending(state_dir, checkpoint::now_secs(), spawn);
+    tracing::debug!("resumed {resumed} unfinished background job(s)");
+    resumed
 }
 
 /// Start the child for one stale checkpoint, with the inputs and the working directory of the
@@ -3085,6 +3114,99 @@ mod tests {
         // A second run in the same directory is a second job, not the same file.
         post_session_consolidation_in(Some(dir.path()));
         assert_eq!(checkpoint::list(dir.path()).len(), 2);
+    }
+
+    #[test]
+    fn only_a_fresh_session_start_outside_the_consolidation_child_resumes_jobs() {
+        let fresh = json!({ "source": "startup" });
+        let guard = std::ffi::OsStr::new("1");
+        assert!(resumes_checkpoints(HookEvent::SessionStart, &fresh, None));
+        assert!(!resumes_checkpoints(
+            HookEvent::SessionStart,
+            &json!({ "source": "resume" }),
+            None
+        ));
+        assert!(!resumes_checkpoints(
+            HookEvent::SessionStart,
+            &json!({ "source": "fork" }),
+            None
+        ));
+        assert!(!resumes_checkpoints(
+            HookEvent::SessionStart,
+            &fresh,
+            Some(guard)
+        ));
+        assert!(!resumes_checkpoints(HookEvent::SessionEnd, &fresh, None));
+        assert!(!resumes_checkpoints(HookEvent::PostToolUse, &fresh, None));
+    }
+
+    #[test]
+    fn the_resume_step_runs_stale_jobs_through_the_starter_and_nothing_without_a_state_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut stale =
+            checkpoint::Checkpoint::new(checkpoint::JobKind::IcmStore, json!({"a": 1}), None);
+        stale.started_at = 1;
+        let path = checkpoint::write(dir.path(), &stale).unwrap().unwrap();
+        let mut started = Vec::new();
+        let resumed = resume_checkpoints_with(Some(dir.path()), |c, p| {
+            started.push((c.inputs.clone(), p.to_path_buf()));
+            Ok(())
+        });
+        assert_eq!(resumed, 1);
+        assert_eq!(started, vec![(json!({"a": 1}), path.clone())]);
+        assert_eq!(checkpoint::load(&path).unwrap().attempts, 2);
+        assert_eq!(resume_checkpoints_with(None, |_, _| Ok(())), 0);
+    }
+
+    #[test]
+    fn the_index_job_runs_through_the_wrapper_only_with_a_checkpoint_and_an_executable() {
+        let direct = || std::process::Command::new("codebase-memory-mcp");
+        let path = std::path::Path::new("/s/checkpoints/cbm-index-x.json");
+        let args = |cmd: &std::process::Command| -> Vec<String> {
+            cmd.get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let wrapped = index_job_command(Some(path), Some("/bin/llmenv".into()), direct);
+        assert_eq!(wrapped.get_program(), "/bin/llmenv");
+        assert_eq!(
+            args(&wrapped),
+            [
+                "cbm-index-run",
+                "--checkpoint",
+                "/s/checkpoints/cbm-index-x.json"
+            ]
+        );
+        assert_eq!(
+            index_job_command(None, Some("/bin/llmenv".into()), direct).get_program(),
+            "codebase-memory-mcp"
+        );
+        assert_eq!(
+            index_job_command(Some(path), None, direct).get_program(),
+            "codebase-memory-mcp"
+        );
+    }
+
+    #[test]
+    fn spawn_detached_runs_in_the_directory_and_feeds_stdin() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "cat > out.txt; pwd > cwd.txt"])
+            .stdin(std::process::Stdio::piped());
+        spawn_detached(cmd, Some("payload"), dir.path()).unwrap();
+        let out = dir.path().join("out.txt");
+        for _ in 0..200 {
+            if dir.path().join("cwd.txt").exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert_eq!(std::fs::read_to_string(out).unwrap(), "payload");
+        let cwd = std::fs::read_to_string(dir.path().join("cwd.txt")).unwrap();
+        assert_eq!(
+            std::path::Path::new(cwd.trim()).canonicalize().unwrap(),
+            dir.path().canonicalize().unwrap()
+        );
     }
 
     #[test]
@@ -6048,6 +6170,7 @@ mod tests {
         // process-group-detached), but this test process is still its OS
         // parent — leaving it un-waited leaks a zombie for the rest of the
         // cargo-test run (#1095).
+        assert!(child.is_some(), "the store child must start");
         if let Some(mut child) = child {
             reap_test_child(&mut child, std::time::Duration::from_secs(5));
         }
