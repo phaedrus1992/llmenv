@@ -2796,7 +2796,7 @@ fn direct_index_stdout(
 
 /// The stdout for an indexer that reports its result as JSON: the result file, or null when the
 /// file cannot be opened (a missing result is a smaller problem than skipping the index).
-pub(crate) fn result_stdout(path: &std::path::Path) -> std::process::Stdio {
+fn result_stdout(path: &std::path::Path) -> std::process::Stdio {
     let opened = std::fs::OpenOptions::new()
         .create(true)
         .truncate(true)
