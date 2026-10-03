@@ -172,7 +172,7 @@ fn reclone_staged(
     name: &str,
 ) -> Result<(), SyncError> {
     let staging = dest.with_file_name(format!("{name}.{}.tmp", std::process::id()));
-    let _ = std::fs::remove_dir_all(&staging);
+    remove_dir_logged(&staging);
     git.clone(source, &staging)
         .map_err(|e| SyncError::CloneFailed {
             name: name.to_string(),
@@ -188,34 +188,49 @@ fn swap_in(
     dest: &Path,
     rename: &dyn Fn(&Path, &Path) -> std::io::Result<()>,
 ) -> Result<(), SyncError> {
-    let backup = dest.with_extension(format!("{}.old", std::process::id()));
-    let _ = std::fs::remove_dir_all(&backup);
+    // Appended to the folder name, not set as an extension: names may hold dots, and `foo` and
+    // `foo.bar` must not share a backup.
+    let file_name = dest.file_name().unwrap_or_default().to_string_lossy();
+    let backup = dest.with_file_name(format!("{file_name}.{}.old", std::process::id()));
+    remove_dir_logged(&backup);
     if let Err(e) = rename(dest, &backup) {
-        let _ = std::fs::remove_dir_all(staging);
+        remove_dir_logged(staging);
         return Err(SyncError::Other(anyhow::anyhow!(
-            "moving the stale pinned clone aside at {}: {e}",
+            "moving the stale pinned clone aside at {}: {e}; the old clone is unchanged",
             dest.display()
         )));
     }
     if let Err(e) = rename(staging, dest) {
         let restored = rename(&backup, dest);
-        let _ = std::fs::remove_dir_all(staging);
+        remove_dir_logged(staging);
         let note = match restored {
             Ok(()) => "the old clone is back in place".to_string(),
-            Err(r) => format!("the old clone is at {} ({r})", backup.display()),
+            Err(r) => {
+                tracing::error!(
+                    "cannot restore the old clone to {}: {r}; it is at {}",
+                    dest.display(),
+                    backup.display()
+                );
+                format!("the old clone is at {} ({r})", backup.display())
+            }
         };
         return Err(SyncError::Other(anyhow::anyhow!(
             "moving refreshed pinned clone into place at {}: {e}; {note}",
             dest.display()
         )));
     }
-    if let Err(e) = std::fs::remove_dir_all(&backup) {
-        tracing::warn!(
-            "cannot remove the replaced clone at {}: {e}",
-            backup.display()
-        );
-    }
+    remove_dir_logged(&backup);
     Ok(())
+}
+
+/// Remove a scratch folder. A folder that is already gone is fine. Any other failure leaks the
+/// folder, so it is logged.
+fn remove_dir_logged(path: &Path) {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!("cannot remove the folder {}: {e}", path.display()),
+    }
 }
 
 fn sync_git(
@@ -738,7 +753,8 @@ fn warn_if_no_manifest(root: &Path, plugin: &str) -> bool {
     let missing = plugin_manifest(root).is_none();
     if missing {
         tracing::warn!(
-            "plugin '{plugin}' has no .claude-plugin/plugin.json under {}; it may not load correctly",
+            "plugin '{plugin}' has no .claude-plugin/plugin.json or plugin.json under {}; it may not \
+             load correctly unless the marketplace entry carries the manifest",
             root.display()
         );
     }
@@ -1415,6 +1431,48 @@ mod tests {
             "{err}"
         );
         assert_eq!(std::fs::read_to_string(dest.join("v")).unwrap(), "old");
+        assert!(!staging.exists());
+    }
+
+    #[test]
+    fn dotted_names_do_not_share_a_backup_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (foo, dotted) = (dir.path().join("foo"), dir.path().join("foo.bar"));
+        let pid = std::process::id();
+        // A backup that an earlier failed restore left for `foo.bar`.
+        let kept = dir.path().join(format!("foo.bar.{pid}.old"));
+        for p in [&foo, &dotted, &kept] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        std::fs::write(kept.join("v"), "the only copy").unwrap();
+        let staging = dir.path().join("foo.1.tmp");
+        std::fs::create_dir_all(&staging).unwrap();
+        swap_in(&staging, &foo, &|a, b| std::fs::rename(a, b)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(kept.join("v")).unwrap(),
+            "the only copy"
+        );
+    }
+
+    #[test]
+    fn a_failed_restore_names_where_the_old_clone_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let (staging, dest) = (dir.path().join("p.1.tmp"), dir.path().join("p"));
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+        let calls = std::cell::Cell::new(0);
+        let rename = |a: &Path, b: &Path| {
+            calls.set(calls.get() + 1);
+            if calls.get() >= 2 {
+                return Err(std::io::Error::other("io broke"));
+            }
+            std::fs::rename(a, b)
+        };
+        let err = swap_in(&staging, &dest, &rename).unwrap_err().to_string();
+        assert!(
+            err.contains("the old clone is at") && err.contains(".old"),
+            "{err}"
+        );
         assert!(!staging.exists());
     }
 
