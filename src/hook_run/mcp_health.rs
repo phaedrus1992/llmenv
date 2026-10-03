@@ -898,8 +898,7 @@ mod tests {
             .unwrap();
         drop(server_w);
         let mut rpc = StdioRpc::new(client_w, client_r);
-        let err = rpc
-            .request("initialize", json!({}))
+        let err = quickly(rpc.request("initialize", json!({})))
             .await
             .unwrap_err()
             .to_string();
@@ -916,8 +915,7 @@ mod tests {
             .await
             .unwrap();
         let mut rpc = StdioRpc::new(client_w, client_r);
-        let err = rpc
-            .request("tools/list", json!({}))
+        let err = quickly(rpc.request("tools/list", json!({})))
             .await
             .unwrap_err()
             .to_string();

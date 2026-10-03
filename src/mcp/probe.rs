@@ -334,6 +334,8 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("exited before answering"), "{err}");
+        // No line of output was skipped, so the error must not claim any.
+        assert!(!err.contains("not JSON"), "{err}");
     }
 
     #[tokio::test]
