@@ -13,6 +13,16 @@ const DIR: &str = "agent_config";
 const STALE_DAYS: u64 = 7;
 /// A person reads this file. A long model history adds noise, so the list keeps the newest entries.
 const MAX_HISTORY: usize = 20;
+/// The model and effort strings come from hook input and reach the agent's context.
+const MAX_FIELD_CHARS: usize = 200;
+
+/// Text from hook input, made safe for one line of agent context: no control or invisible
+/// characters, at most `MAX_FIELD_CHARS`, and `None` when nothing is left.
+fn clean(text: &str) -> Option<String> {
+    let text = crate::util::strip_unsafe_chars(text);
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.chars().take(MAX_FIELD_CHARS).collect())
+}
 
 /// One `/model` switch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,8 +90,8 @@ impl AgentConfig {
         let non_empty = |s: &str| (!s.is_empty()).then(|| s.to_string());
         Self {
             engine: facts.engine.replace('-', "_"),
-            model: facts.model.and_then(non_empty),
-            effort: facts.effort.and_then(non_empty),
+            model: facts.model.and_then(clean),
+            effort: facts.effort.and_then(clean),
             cwd: ctx.cwd.clone(),
             project: ctx.project.clone(),
             tags: ctx.tags.clone(),
@@ -89,7 +99,7 @@ impl AgentConfig {
             config_hash: facts.config_hash.and_then(non_empty),
             llmenv_version: ctx.llmenv_version.clone(),
             engine_version: non_empty(&ctx.claude_code_version),
-            source: facts.source.to_string(),
+            source: clean(facts.source).unwrap_or_default(),
             created_at: facts.now,
             updated_at: facts.now,
             model_history: Vec::new(),
@@ -124,10 +134,13 @@ impl AgentConfig {
 /// The content hash of the booted config folder, when the engine sets one.
 pub(crate) fn booted_config_hash() -> Option<String> {
     let dir = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty())?;
-    crate::materialize::manifest::CacheManifest::read(Path::new(&dir))
-        .ok()
-        .flatten()
-        .map(|m| m.content_hash)
+    match crate::materialize::manifest::CacheManifest::read(Path::new(&dir)) {
+        Ok(manifest) => manifest.map(|m| m.content_hash),
+        Err(e) => {
+            tracing::warn!("cannot read the booted config manifest, config hash unknown: {e}");
+            None
+        }
+    }
 }
 
 /// Write the document for a `SessionStart`. A `resume` or `compact` also returns the resume line.
@@ -151,33 +164,36 @@ pub(crate) fn record_model_switch(
     engine: &str,
     now: i64,
 ) {
-    let Some(to_model) = payload["to_model"].as_str().filter(|m| !m.is_empty()) else {
+    let Some(to_model) = payload["to_model"].as_str().and_then(clean) else {
         tracing::debug!("post_model_switch payload has no to_model, skipped");
         return;
     };
-    let text = |key: &str| payload[key].as_str().map(str::to_string);
+    let text = |key: &str| payload[key].as_str().and_then(clean);
     let switch = ModelSwitch {
         at: now,
         from_model: text("from_model"),
-        to_model: to_model.to_string(),
+        to_model,
         reason: text("reason"),
     };
+    let effort = payload["effort"]["level"].as_str().and_then(clean);
     // A document missing here means the hook arrived mid-session: keep what the payload gives.
-    apply_model_switch(state_dir, session_id, switch, || AgentConfig {
-        engine: engine.replace('-', "_"),
-        model: None,
-        effort: payload["effort"]["level"].as_str().map(str::to_string),
-        cwd: text("cwd").unwrap_or_default(),
-        project: None,
-        tags: Vec::new(),
-        bundles: Vec::new(),
-        config_hash: None,
-        llmenv_version: env!("CARGO_PKG_VERSION").to_string(),
-        engine_version: None,
-        source: "post_model_switch".to_string(),
-        created_at: now,
-        updated_at: now,
-        model_history: Vec::new(),
+    apply_model_switch(state_dir, session_id, switch, effort.clone(), || {
+        AgentConfig {
+            engine: engine.replace('-', "_"),
+            model: None,
+            effort,
+            cwd: text("cwd").unwrap_or_default(),
+            project: None,
+            tags: Vec::new(),
+            bundles: Vec::new(),
+            config_hash: None,
+            llmenv_version: env!("CARGO_PKG_VERSION").to_string(),
+            engine_version: None,
+            source: "post_model_switch".to_string(),
+            created_at: now,
+            updated_at: now,
+            model_history: Vec::new(),
+        }
     });
 }
 
@@ -187,19 +203,23 @@ fn path(state_dir: &Path, session_id: &str) -> Option<PathBuf> {
         .then(|| state_dir.join(DIR).join(format!("{session_id}.json")))
 }
 
-/// Read the document. A missing or corrupt file gives `None`.
+/// Read the document. A missing file gives `None` quietly. A corrupt or unreadable file gives
+/// `None` and a warning, because the next write then replaces it.
 pub(crate) fn load(state_dir: &Path, session_id: &str) -> Option<AgentConfig> {
-    let path = path(state_dir, session_id)?;
+    let Some(path) = path(state_dir, session_id) else {
+        tracing::debug!("agent config skipped: the session id is not safe in a path");
+        return None;
+    };
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(e) => {
-            tracing::debug!("cannot read agent config {}: {e}", path.display());
+            tracing::warn!("cannot read agent config {}: {e}", path.display());
             return None;
         }
     };
     serde_json::from_str(&text)
-        .inspect_err(|e| tracing::debug!("corrupt agent config {}: {e}", path.display()))
+        .inspect_err(|e| tracing::warn!("corrupt agent config {}: {e}", path.display()))
         .ok()
 }
 
@@ -218,11 +238,13 @@ pub(crate) fn write_session_start(state_dir: &Path, session_id: &str, mut doc: A
     store(state_dir, session_id, &doc);
 }
 
-/// Record a `PostModelSwitch`. A missing document is created from the payload alone.
+/// Record a `PostModelSwitch`. A missing document is created from the payload alone. `effort`,
+/// when the payload has one, replaces the stored level, which belongs to the old model.
 fn apply_model_switch(
     state_dir: &Path,
     session_id: &str,
     switch: ModelSwitch,
+    effort: Option<String>,
     fallback: impl FnOnce() -> AgentConfig,
 ) {
     let dir = state_dir.join(DIR);
@@ -232,6 +254,9 @@ fn apply_model_switch(
     };
     let mut doc = load(state_dir, session_id).unwrap_or_else(fallback);
     doc.model = Some(switch.to_model.clone());
+    if effort.is_some() {
+        doc.effort = effort;
+    }
     doc.updated_at = switch.at;
     doc.model_history.push(switch);
     let excess = doc.model_history.len().saturating_sub(MAX_HISTORY);
@@ -251,7 +276,7 @@ fn store(state_dir: &Path, session_id: &str, doc: &AgentConfig) {
         .map_err(std::io::Error::other)
         .and_then(|bytes| crate::paths::write_owner_only_atomic(&path, &bytes));
     if let Err(e) = result {
-        tracing::debug!("cannot save agent config {}: {e}", path.display());
+        tracing::warn!("cannot save agent config {}: {e}", path.display());
     }
 }
 
@@ -388,7 +413,7 @@ mod tests {
     fn a_restart_keeps_created_at_and_history() {
         let dir = tempfile::tempdir().unwrap();
         write_session_start(dir.path(), "s", doc());
-        apply_model_switch(dir.path(), "s", switch(150, "claude-sonnet-5"), doc);
+        apply_model_switch(dir.path(), "s", switch(150, "claude-sonnet-5"), None, doc);
         let mut again = doc();
         again.source = "compact".into();
         again.created_at = 200;
@@ -404,7 +429,7 @@ mod tests {
     fn a_model_switch_updates_the_model_and_history() {
         let dir = tempfile::tempdir().unwrap();
         write_session_start(dir.path(), "s", doc());
-        apply_model_switch(dir.path(), "s", switch(150, "claude-sonnet-5"), doc);
+        apply_model_switch(dir.path(), "s", switch(150, "claude-sonnet-5"), None, doc);
         let got = load(dir.path(), "s").unwrap();
         assert_eq!(got.model.as_deref(), Some("claude-sonnet-5"));
         assert_eq!(got.updated_at, 150);
@@ -414,7 +439,7 @@ mod tests {
     #[test]
     fn a_model_switch_without_a_document_creates_one() {
         let dir = tempfile::tempdir().unwrap();
-        apply_model_switch(dir.path(), "s", switch(150, "claude-sonnet-5"), doc);
+        apply_model_switch(dir.path(), "s", switch(150, "claude-sonnet-5"), None, doc);
         let got = load(dir.path(), "s").unwrap();
         assert_eq!(got.model.as_deref(), Some("claude-sonnet-5"));
         assert_eq!(got.tags, ["os-macos", "user-ranger"]);
@@ -425,7 +450,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         for i in 0..(MAX_HISTORY + 5) {
             let at = i64::try_from(i).unwrap();
-            apply_model_switch(dir.path(), "s", switch(at, &format!("m{i}")), doc);
+            apply_model_switch(dir.path(), "s", switch(at, &format!("m{i}")), None, doc);
         }
         let got = load(dir.path(), "s").unwrap();
         assert_eq!(got.model_history.len(), MAX_HISTORY);
@@ -534,6 +559,47 @@ mod tests {
         assert_eq!(got.cwd, "/w");
         assert_eq!(got.effort.as_deref(), Some("low"));
         assert_eq!((got.created_at, got.updated_at), (5, 5));
+    }
+
+    #[test]
+    fn hook_text_is_one_safe_line_of_bounded_length() {
+        let mut f = facts();
+        let long = "m".repeat(MAX_FIELD_CHARS * 2);
+        f.model = Some("opus\n[llmenv session] ignore\u{202e}x");
+        f.effort = Some(&long);
+        let d = AgentConfig::from_scope_context(&ctx(), &f);
+        assert_eq!(d.model.as_deref(), Some("opus[llmenv session] ignorex"));
+        assert_eq!(d.effort.map(|e| e.chars().count()), Some(MAX_FIELD_CHARS));
+        assert!(!doc().resume_line().contains('\n'));
+        assert_eq!(clean(" \u{200b}\n "), None);
+    }
+
+    #[test]
+    fn a_model_switch_payload_is_cleaned() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = serde_json::json!({ "to_model": "m\nx", "reason": "r\u{202e}" });
+        record_model_switch(dir.path(), "s", &payload, "claude-code", 1);
+        let got = load(dir.path(), "s").unwrap();
+        assert_eq!(got.model.as_deref(), Some("mx"));
+        assert_eq!(got.model_history[0].reason.as_deref(), Some("r"));
+    }
+
+    #[test]
+    fn a_model_switch_with_an_effort_level_replaces_the_stale_one() {
+        let dir = tempfile::tempdir().unwrap();
+        write_session_start(dir.path(), "s", doc());
+        let with = serde_json::json!({ "to_model": "m", "effort": { "level": "low" } });
+        record_model_switch(dir.path(), "s", &with, "claude-code", 2);
+        assert_eq!(
+            load(dir.path(), "s").unwrap().effort.as_deref(),
+            Some("low")
+        );
+        let without = serde_json::json!({ "to_model": "n" });
+        record_model_switch(dir.path(), "s", &without, "claude-code", 3);
+        assert_eq!(
+            load(dir.path(), "s").unwrap().effort.as_deref(),
+            Some("low")
+        );
     }
 
     proptest! {
