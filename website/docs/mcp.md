@@ -367,6 +367,27 @@ The notice tells you how to stop that proxy instead.
 `llmenv doctor` runs the same check.
 Its `MCP servers:` section prints one line for each managed server: a pass, or a warning with the reason and the fix.
 
+### Background work: request ids and checkpoints (added in v3.12.0)
+
+Four jobs run in a detached child so a hook returns at once:
+post-session consolidation, the ICM store of a web fetch, the transcript record of a session event,
+and the `codebase-memory-mcp` index.
+Each job writes a checkpoint file under `<state dir>/checkpoints/` before it starts,
+and deletes the file when it succeeds.
+If the child dies, or ICM is down, the file stays.
+The next session start runs the job again, up to 3 attempts, and `llmenv doctor` lists what is left.
+Consolidation keeps the model summary in its checkpoint, so a resume never pays for the model twice.
+The index job is not resumed, because every session start runs the indexer anyway.
+See [Background work](troubleshooting.md#background-work-that-did-not-finish).
+
+A resumed memory store or transcript record must not store the same thing twice.
+llmenv derives a request id from the event, so a resume sends the same id.
+The child records each stored id in `<state dir>/idempotency/<session>.json` (the last 1000 ids)
+and skips an id that is already there.
+The id also goes to ICM as the keyword `request:<id>` on a memory,
+and in the `metadata` of a transcript record.
+ICM accepts no request id yet, so a write whose response was lost can still land twice.
+
 ## Troubleshooting
 
 ### Wrong role on a host

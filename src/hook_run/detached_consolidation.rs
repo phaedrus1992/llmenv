@@ -18,16 +18,34 @@ const CONSOLIDATION_TIMEOUT: Duration = Duration::from_secs(30);
 /// (`RUST_LOG` unset) is ERROR-only and dropped the warning before it could
 /// reach that log (#1133).
 ///
+/// With a `checkpoint` (#2396) the run records its phase there. The file stays after a failure
+/// that a later run may fix, and goes away when nothing is left to do.
+///
 /// # Errors
 /// Malformed or missing config, no active memory backend, invalid backend URL,
 /// or an MCP call failure.
-pub fn run_consolidation(config_path: &std::path::Path) -> anyhow::Result<()> {
-    run_consolidation_at(config_path).inspect_err(|e| {
+pub fn run_consolidation(
+    config_path: &std::path::Path,
+    checkpoint: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    run_consolidation_at(config_path, checkpoint).inspect_err(|e| {
         tracing::error!("consolidation-run: detached consolidation failed: {e:#}");
     })
 }
 
-fn run_consolidation_at(config_path: &std::path::Path) -> anyhow::Result<()> {
+/// Delete the checkpoint of a run that has nothing to do, such as consolidation switched off.
+fn settle(checkpoint: Option<&std::path::Path>) {
+    if let Some(path) = checkpoint
+        && let Err(e) = crate::hook_run::checkpoint::complete(path)
+    {
+        tracing::error!("consolidation-run: {e:#}");
+    }
+}
+
+fn run_consolidation_at(
+    config_path: &std::path::Path,
+    checkpoint: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
     let config = crate::config::Config::load(config_path)?;
     let env = crate::scope::matcher::Env::detect_for_config(&config);
     let active = crate::scope::evaluate(&config, &env);
@@ -38,6 +56,7 @@ fn run_consolidation_at(config_path: &std::path::Path) -> anyhow::Result<()> {
     // settings count (#2355), the same as its endpoint does.
     let merged = crate::hook_run::merged_memory(&config, config_dir, &active)?;
     let Some(cc) = consolidation::active_consolidation(&merged.memory, &active.tags) else {
+        settle(checkpoint);
         return Ok(());
     };
     let url = crate::hook_run::memory_url(&config, config_dir, &active)?.into_url()?;
@@ -54,13 +73,21 @@ fn run_consolidation_at(config_path: &std::path::Path) -> anyhow::Result<()> {
             "consolidation-run: no project name for {}; consolidation skipped",
             cwd.display()
         );
+        settle(checkpoint);
         return Ok(());
     };
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    let _result = rt.block_on(consolidation::run(cc, &client, &project))?;
+    let state_dir = crate::paths::state_dir().ok();
+    let _result = rt.block_on(consolidation::run(
+        cc,
+        &client,
+        &project,
+        state_dir.as_deref(),
+        checkpoint,
+    ))?;
     Ok(())
 }
 
@@ -72,7 +99,7 @@ mod tests {
     #[test]
     fn run_consolidation_reports_a_missing_config() {
         let dir = tempfile::tempdir().unwrap();
-        let err = run_consolidation(&dir.path().join("config.yaml")).unwrap_err();
+        let err = run_consolidation(&dir.path().join("config.yaml"), None).unwrap_err();
         assert!(!format!("{err:#}").is_empty());
     }
 
@@ -81,6 +108,31 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
         std::fs::write(&path, "adapter:\n  engine: claude-code\n").unwrap();
-        run_consolidation(&path).unwrap();
+        run_consolidation(&path, None).unwrap();
+    }
+
+    #[test]
+    fn a_run_with_consolidation_off_deletes_its_checkpoint() {
+        use crate::hook_run::checkpoint::{self, Checkpoint, JobKind};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "adapter:\n  engine: claude-code\n").unwrap();
+        let cp = Checkpoint::new(JobKind::Consolidation, serde_json::json!({}), None);
+        let file = checkpoint::write(dir.path(), &cp).unwrap().unwrap();
+        run_consolidation(&path, Some(&file)).unwrap();
+        assert!(!file.exists(), "nothing left to do, so the checkpoint goes");
+    }
+
+    #[test]
+    fn a_failed_run_keeps_its_checkpoint() {
+        use crate::hook_run::checkpoint::{self, Checkpoint, JobKind};
+        let dir = tempfile::tempdir().unwrap();
+        let cp = Checkpoint::new(JobKind::Consolidation, serde_json::json!({}), None);
+        let file = checkpoint::write(dir.path(), &cp).unwrap().unwrap();
+        run_consolidation(&dir.path().join("missing.yaml"), Some(&file)).unwrap_err();
+        assert!(
+            file.exists(),
+            "a failure a later run may fix keeps the file"
+        );
     }
 }

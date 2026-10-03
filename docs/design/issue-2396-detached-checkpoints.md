@@ -159,6 +159,19 @@ Fail-soft: any error logs at debug and the session continues.
 9. Property test: for any `Checkpoint`, serialize → deserialize is identity; `attempts` never decreases through `resume_pending`.
 10. The cbm wrapper subcommand completes the checkpoint on exit 0 and leaves it on non-zero (use a stub `codebase-memory-mcp` script on `PATH`).
 
+## As built
+
+- The cbm index is checkpointed through `llmenv cbm-index-run`, but it is not resumed: `SessionStart` already starts the indexer and rewrites the same checkpoint, so a resume would run it twice.
+- The deadlines are 150 s plus the 60 s margin for consolidation (120 s model call and 30 s ICM calls), 5 s plus the margin for the store and the record, and 1800 s plus the margin for the index.
+- The consolidation checkpoint stores the working directory, and a resume starts the child there.
+- A payload that does not parse deletes its checkpoint. Any other failure keeps it, and the attempt cap bounds the retries.
+- A checkpoint stores the working directory of the first run, and a resume starts the child there. A checkpoint whose directory is gone is not resumed, because the child would pick the memory backend and project of the resuming session.
+- A resume starts at most 20 jobs, under a lock, and restores the file when the start fails, so a failed start does not use up an attempt.
+- The index job is not resumable, and its checkpoint keeps counting attempts across the rewrites that each session start makes.
+- A `--checkpoint` argument must be a regular `.json` file, not a symlink, directly inside `state_dir/checkpoints`.
+- Consolidation and session-log checkpoints carry a run tag. Two runs with equal inputs are two jobs, and the consolidation rule ids are scoped to the run.
+- The seen-set from #2397 keeps ids in insertion order, so the oldest id goes first (a `BTreeSet` with `pop_first` would drop the smallest id, not the oldest).
+
 ## Acceptance criteria
 
 1. Kill the memory proxy, end a session: a `consolidation-*.json` checkpoint appears; start the proxy and a new session: consolidation runs and the file disappears.
