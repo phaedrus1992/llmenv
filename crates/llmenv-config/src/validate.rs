@@ -1165,6 +1165,7 @@ mod tests {
                     disabled_tools,
                     timeout,
                 )| McpServer {
+                    always_load: None,
                     name,
                     when,
                     transport,
@@ -1304,6 +1305,7 @@ mod tests {
                     wakeup_max_tokens,
                 )| {
                     Memory {
+                        always_load: None,
                         server_host,
                         port,
                         listen_host,
@@ -1929,6 +1931,7 @@ mod tests {
 
     fn arb_memory_entry(server_host: &str, when: Vec<String>) -> crate::Memory {
         crate::Memory {
+            always_load: None,
             server_host: server_host.to_string(),
             port: 9092,
             listen_host: "127.0.0.1".to_string(),

@@ -6446,6 +6446,7 @@ mod tests {
         Config {
             features: Some(Features {
                 memory: vec![Memory {
+                    always_load: None,
                     server_host: "srv".to_string(),
                     port,
                     listen_host: listen_host.to_string(),

@@ -383,6 +383,7 @@ mod tests {
 
     fn server(name: &str, kind: ResolvedKind) -> ResolvedMcp {
         ResolvedMcp {
+            always_load: None,
             name: name.to_string(),
             kind,
             headers: BTreeMap::new(),

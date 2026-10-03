@@ -1119,6 +1119,7 @@ mod tests {
             )
                 .prop_map(
                     |(name, tags, timeout, headers, disabled_tools, disabled)| McpServer {
+                        always_load: None,
                         name,
                         when: tags,
                         transport: McpTransport::Stdio,
@@ -1987,6 +1988,7 @@ mod tests {
             Capabilities {
                 features: Some(Features {
                     memory: vec![Memory {
+                        always_load: None,
                         server_host: server_host.into(),
                         port: 9092,
                         listen_host: "127.0.0.1".into(),
@@ -2030,6 +2032,7 @@ mod tests {
             Capabilities {
                 features: Some(Features {
                     memory: vec![Memory {
+                        always_load: None,
                         server_host: server_host.into(),
                         port: 9092,
                         listen_host: "127.0.0.1".into(),

@@ -3690,6 +3690,7 @@ mod tests {
         let key = crate::merge::merge_signature(&config.capabilities, &config.native, &bundle_refs)
             .expect("test");
         let persisted_memory = vec![crate::config::Memory {
+            always_load: None,
             server_host: "still".into(),
             port: 7878,
             listen_host: "127.0.0.1".into(),
@@ -4086,6 +4087,7 @@ mod tests {
         let config = crate::config::Config {
             features: Some(crate::config::Features {
                 memory: vec![crate::config::Memory {
+                    always_load: None,
                     server_host: "still".into(),
                     port: 7878,
                     listen_host: "127.0.0.1".into(),
@@ -4136,6 +4138,7 @@ mod tests {
         let config = crate::config::Config {
             features: Some(crate::config::Features {
                 memory: vec![crate::config::Memory {
+                    always_load: None,
                     server_host: "still".into(),
                     port: 7878,
                     listen_host: "127.0.0.1".into(),
@@ -4404,6 +4407,7 @@ mod tests {
             }],
             features: Some(crate::config::Features {
                 memory: vec![crate::config::Memory {
+                    always_load: None,
                     server_host: "still".into(),
                     port: 7878,
                     listen_host: "127.0.0.1".into(),
@@ -5760,6 +5764,7 @@ mod tests {
     /// but the struct has no `Default` shorthand for the rest.
     fn memory_with_host(server_host: &str) -> crate::config::Memory {
         crate::config::Memory {
+            always_load: None,
             server_host: server_host.to_string(),
             port: 7878,
             listen_host: "127.0.0.1".into(),

@@ -11,8 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- `mcp[].always_load` and `features.memory[].always_load` render Claude Code's per-server `alwaysLoad`, which keeps a server's tools out of tool-search deferral. Unset renders nothing. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#mcp) (#2356)
+
 ### Changed
 
+- The ICM tools now load with the prompt in Claude Code, so the model no longer calls tool search before a recall or a store. Set `features.memory[].always_load: false` to defer them again (#2356)
 - `llmenv task done` refuses a task that was never started, and `llmenv task session finish` refuses while a task is `open`, `wip`, or `waiting`. Both exit non-zero with the fix. `task done --force` and `task session finish --abandon-open` override them, and the native-tool redirect never forces. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#task) (#2416)
 - `capabilities.advisor_size` is now `capabilities.advisor_model` and renders Claude Code's `advisorModel`. Use `fable`, `opus`, `sonnet`, or a model ID. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#advisor_model-claude-code) (#2409)
 

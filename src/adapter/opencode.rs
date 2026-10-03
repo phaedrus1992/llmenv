@@ -2088,11 +2088,38 @@ mod tests {
         );
     }
 
+    // #2356: opencode has no `alwaysLoad`, so the setting changes nothing in its output.
+    #[test]
+    fn always_load_does_not_change_the_opencode_output() {
+        let render = |always_load: Option<bool>| {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut manifest = MergedManifest::default();
+            manifest.mcps.push(ResolvedMcp {
+                always_load,
+                name: "srv".into(),
+                kind: super::ResolvedKind::Stdio {
+                    command: "npx".into(),
+                    args: vec![],
+                    env: std::collections::BTreeMap::new(),
+                },
+                headers: std::collections::BTreeMap::new(),
+                timeout: None,
+                disabled_tools: vec![],
+                mcp_permissions: None,
+                memory_hook: None,
+            });
+            OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+            std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap()
+        };
+        assert_eq!(render(Some(true)), render(None));
+    }
+
     #[test]
     fn materialize_mcp_local_server_written() {
         let tmp = tempfile::tempdir().unwrap();
         let mut manifest = MergedManifest::default();
         manifest.mcps.push(ResolvedMcp {
+            always_load: None,
             name: "local-srv".into(),
             kind: super::ResolvedKind::Stdio {
                 command: "npx".into(),
@@ -2122,6 +2149,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut manifest = MergedManifest::default();
         manifest.mcps.push(ResolvedMcp {
+            always_load: None,
             name: "remote-srv".into(),
             kind: super::ResolvedKind::Remote {
                 url: "http://localhost:3000/mcp".into(),
@@ -2153,6 +2181,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut manifest = MergedManifest::default();
         manifest.mcps.push(ResolvedMcp {
+            always_load: None,
             name: "minimal".into(),
             kind: super::ResolvedKind::Remote {
                 url: "http://example.com".into(),
@@ -3876,6 +3905,7 @@ mod tests {
             ..Default::default()
         };
         manifest.mcps.push(ResolvedMcp {
+            always_load: None,
             name: "shared".into(),
             kind: super::ResolvedKind::Remote {
                 url: "http://example.com".into(),
