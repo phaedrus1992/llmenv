@@ -3642,7 +3642,7 @@ mod tests {
         let task = crate::task::add_task(
             state_dir.path(),
             "finish the parser",
-            crate::task::ParentSpec::Auto,
+            crate::task::ParentSpec::Detached,
             crate::task::SessionChoice::Resolve(&crate::task::session::EngineIdentity::default()),
             &project,
         )

@@ -395,7 +395,7 @@ enum Command {
     /// Manage the in-engine task tracker (#231).
     Task {
         #[command(subcommand)]
-        command: TaskCommand,
+        command: Box<TaskCommand>,
     },
 }
 
@@ -413,15 +413,24 @@ enum TaskCommand {
     /// the current project (auto-resolved), or an explicit `--session`.
     Add {
         title: String,
-        /// Slug of the parent task, if this is a sub-task. Omit to default
-        /// to the previously-added task in the same session (#929) — pass
-        /// `--no-parent` for a deliberate top-level task instead.
-        #[arg(long, conflicts_with = "no_parent")]
+        /// Slug of a task to link as the display parent of this top-level task. A sub-task
+        /// uses `--child-of` instead.
+        #[arg(long, conflicts_with_all = ["no_parent", "child_of"])]
         parent: Option<String>,
-        /// Force this task to have no parent, overriding the implicit
-        /// previously-added-task default (#929).
-        #[arg(long)]
+        /// Accepted for older scripts. A task no longer chains onto the previous one, so this
+        /// changes nothing (#2455).
+        #[arg(long, hide = true, conflicts_with = "child_of")]
         no_parent: bool,
+        /// Make this a sub-task of the given task. Sub-tasks run in parallel, and the parent
+        /// cannot be marked done before they are (#2455).
+        #[arg(long, value_name = "PARENT", conflicts_with = "parallel")]
+        child_of: Option<String>,
+        /// Run this top-level task beside the head of the queue, not behind it (#2455).
+        #[arg(long)]
+        parallel: bool,
+        /// A task that must be done before this one can start (a `blocked_on` edge).
+        #[arg(long, value_name = "TASK")]
+        after: Option<String>,
         /// Session id to tag this task with. Omit to auto-resolve when
         /// exactly one session is open for the current project.
         #[arg(long)]
@@ -429,9 +438,9 @@ enum TaskCommand {
         #[command(flatten)]
         detail: DetailArgs,
     },
-    /// Claim a task, transitioning it to `wip`. An undone `parent` only
-    /// warns (soft-block, starts anyway); an undone `blocked_on` reference
-    /// refuses to start (hard-block) unless `--force` is passed.
+    /// Claim a task, transitioning it to `wip`. An undone `blocked_on` reference, or a queued
+    /// task ahead of this one that is not done or waiting, refuses to start unless `--force` is
+    /// passed.
     Start {
         id: String,
         #[arg(long)]
@@ -571,6 +580,10 @@ enum TaskSessionCommand {
         /// this project untouched — true concurrency.
         #[arg(long, conflicts_with_all = ["resume", "replace"])]
         new: bool,
+        /// Add a task to the session as it starts. Repeat for more tasks. They join the queue
+        /// in the order given, so the session never exists with no tasks (#2455).
+        #[arg(long = "task", value_name = "TITLE")]
+        tasks: Vec<String>,
         #[command(flatten)]
         resume_context: ResumeArgs,
     },
@@ -927,7 +940,7 @@ pub fn run() -> anyhow::Result<()> {
         Some(Command::Upgrade { check, track }) => {
             upgrade::run_upgrade(track, check)?;
         }
-        Some(Command::Task { command }) => run_task_command(command, cli.color.to_mode())?,
+        Some(Command::Task { command }) => run_task_command(*command, cli.color.to_mode())?,
         Some(Command::Prune {
             all,
             older_than,
@@ -3521,43 +3534,22 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
         TaskCommand::Add {
             title,
             parent,
-            no_parent,
+            no_parent: _,
+            child_of,
+            parallel,
+            after,
             session,
             detail,
         } => {
             let detail = detail.resolve()?;
-            // New-project guard: warn before starting a deliberately
-            // top-level task while another is still in progress. Only fires
-            // on `--no-parent` now (#929) — omitting `--parent` no longer
-            // means "no parent", it means "chain onto the previous task in
-            // this session", so the guard's original concern (an unrelated
-            // task silently landing with no nesting) only still applies to
-            // an explicit, deliberate detach. CLI-side check beats a
-            // transcript heuristic — this is a plain fact about current
-            // task state, not something to infer. Only `wip` counts: a
-            // `waiting` task is correctly paused on something external, so
-            // starting new work alongside it is legitimate, not a mistake to
-            // warn about.
-            if no_parent {
-                let wip: Vec<String> = crate::task::list_tasks(&state_dir)
-                    .into_iter()
-                    .filter(|t| t.state == crate::task::TaskState::Wip)
-                    .map(|t| t.title)
-                    .collect();
-                if !wip.is_empty() {
-                    println!(
-                        "Note: you have {} task(s) already in progress ({}). \
-                         Consider `--parent <slug>` to make this a sub-task, \
-                         or finish the current work first.",
-                        wip.len(),
-                        wip.join(", ")
-                    );
-                }
-            }
-            let parent_spec = match (parent.as_deref(), no_parent) {
-                (Some(p), _) => crate::task::ParentSpec::Explicit(p),
-                (None, true) => crate::task::ParentSpec::Detached,
-                (None, false) => crate::task::ParentSpec::Auto,
+            let parent_spec = match parent.as_deref() {
+                Some(p) => crate::task::ParentSpec::Explicit(p),
+                None => crate::task::ParentSpec::Detached,
+            };
+            let placement = match (child_of.as_deref(), parallel) {
+                (Some(p), _) => crate::task::Placement::Child(p),
+                (None, true) => crate::task::Placement::Parallel,
+                (None, false) => crate::task::Placement::Queue,
             };
             let project = current_project_tag()?;
             let owner = crate::task::session::EngineIdentity::from_env();
@@ -3571,6 +3563,8 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             let new = crate::task::NewTask {
                 title: &title,
                 detail: detail.as_deref(),
+                placement,
+                after: after.as_deref(),
             };
             let task = crate::task::add_task_with(&state_dir, &new, parent_spec, choice, &project)?;
             println!("Added task '{}' ({})", task.slug, task.title);
@@ -3588,19 +3582,15 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                     e
                 }
             })?;
-            // Parent is a soft-block (#1164): unlike an unmet blocked_on
-            // (hard-blocked inside start_task itself), an undone parent
-            // only warns here, mirroring Add's own wip-in-progress warning
-            // above -- the agent may have a legitimate reason to proceed.
-            if let Some(warning) = crate::task::parent_soft_block_warning(&state_dir, &task) {
-                println!("{warning}");
-            }
             println!("Started '{}' — now {:?}", task.slug, task.state);
         }
         TaskCommand::Done { id, force } => {
             let completed = crate::task::complete_task(&state_dir, &id, force)?;
             println!("Completed '{}'", completed.task.slug);
             if let Some(note) = completed.skipped_start_note() {
+                println!("{note}");
+            }
+            if let Some(note) = completed.undone_children_note() {
                 println!("{note}");
             }
         }
@@ -3853,6 +3843,7 @@ fn run_task_session_command(
             resume,
             replace,
             new,
+            tasks,
             resume_context,
         } => {
             let explicit = resume_context.into_context()?;
@@ -3879,6 +3870,10 @@ fn run_task_session_command(
             };
             let outcome = session::start_session_as(state_dir, &request, decision)?;
             let nudge = start_outcome_lacks_context(&outcome);
+            let session_id = match &outcome {
+                StartOutcome::Created(s) | StartOutcome::Resumed(s) => s.id.clone(),
+                StartOutcome::Replaced { session, .. } => session.id.clone(),
+            };
             match outcome {
                 StartOutcome::Created(s) => println!(
                     "Started session '{}'{}",
@@ -3901,6 +3896,20 @@ fn run_task_session_command(
             }
             if nudge {
                 println!("{}", crate::task::resume::MISSING_CONTEXT_NUDGE);
+            }
+            for title in &tasks {
+                let new = crate::task::NewTask {
+                    title,
+                    ..crate::task::NewTask::default()
+                };
+                let task = crate::task::add_task_with(
+                    state_dir,
+                    &new,
+                    crate::task::ParentSpec::Detached,
+                    crate::task::SessionChoice::Named(&session_id),
+                    &project,
+                )?;
+                println!("Added task '{}' ({})", task.slug, task.title);
             }
         }
         TaskSessionCommand::Edit { id, resume_context } => {
