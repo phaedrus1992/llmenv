@@ -4,8 +4,10 @@
 - **Milestone:** `v3.12.0`
 - **Base branch:** `release/3.x` (forward-merges to `release/4.x`)
 - **Type:** feature
+- **Related:** #2406 (`allowed_roots` lands on the same `CodebaseMemory` struct; see `issue-2406-cbm-allowed-roots.md`), #2396 (the index child gets a checkpoint and an llmenv wrapper subcommand, which is the natural owner of the result file below; see `issue-2396-detached-checkpoints.md`)
 
 This is a spec, not a plan.
+Re-verified against `release/3.x` on 2026-10-02 after PR #2410: the functions named below still exist with the same roles, and no `mem_budget_mb` field exists yet.
 
 ## Problem
 
@@ -24,23 +26,24 @@ Users also have no llmenv setting for cbm's memory budget (`CBM_MEM_BUDGET_MB`).
 
 | Fact | Location |
 | --- | --- |
-| `cli <tool> <json>` prints the tool result with `printf("%s\n", result)` on stdout | `src/main.c` line 1037 |
-| Log lines go to stderr, as JSON or as `level=… msg=… key=value` text | `src/foundation/log.c` line 264 |
-| Over-budget result fields: `status: "error"`, `reason: "over_memory_budget"`, `previous_index: "preserved"`, `budget_mb`, `peak_rss_mb`, `suggested_budget_mb`, `hint` | `src/mcp/mcp.c` lines 11224 to 11260 |
-| Other non-success `status` values in `handle_index_repository`: `aborted_previous_preserved`, `ambiguous`, `persist_failed` | `src/mcp/mcp.c` from line 10984 |
-| `CBM_MEM_BUDGET_MB`: strict decimal parse; a value above total RAM is refused; unset means a fraction of RAM | `src/foundation/mem.c` near lines 200 to 240 |
-| `watcher_enabled` is a key in cbm's own config (`codebase-memory-mcp config`), default `true`, not an environment variable | `src/cli/cli.h` line 428, `src/cli/cli.c` line 7403 |
+| `cli <tool> <json>` prints the tool result on stdout as one line | the CLI entry point in `src/main.c` |
+| Log lines go to stderr, as JSON or as `level=… msg=… key=value` text | `src/foundation/log.c` |
+| Over-budget result fields: `status: "error"`, `reason: "over_memory_budget"`, `previous_index: "preserved"`, `budget_mb`, `peak_rss_mb`, `suggested_budget_mb`, `hint` | `handle_index_repository` in `src/mcp/mcp.c` |
+| Other non-success `status` values in `handle_index_repository`: `aborted_previous_preserved`, `ambiguous`, `persist_failed` | `src/mcp/mcp.c` |
+| `CBM_MEM_BUDGET_MB`: strict decimal parse; a value above total RAM is refused; unset means a fraction of RAM | the budget parser in `src/foundation/mem.c` |
+| `watcher_enabled` is a key in cbm's own config (`codebase-memory-mcp config`), default `true`, not an environment variable | the config table in `src/cli/cli.h` and its handler in `src/cli/cli.c` |
 
 ## Verified locations (release/3.x)
 
 | Fact | Location |
 | --- | --- |
-| `CodebaseMemory { when, index_path, mcp_permissions }` | `crates/llmenv-config/src/schema.rs` line 1407 |
-| MCP launch env: `CBM_CACHE_DIR` only when `index_path` is set | `resolve_codebase_memory`, `src/mcp/resolve.rs` near line 285 |
-| Auto-index command: same env rule, stdout and stderr set to null in the builder | `build_index_repository_command`, `src/hook_run/mod.rs` |
-| Log path: `codebase_memory_cache_dir(cm, state_dir).join("index.log")` | `trigger_codebase_memory_index`, `src/hook_run/mod.rs` |
-| `state_dir` is global (`crate::paths::state_dir()`), not per project | `codebase_memory_paths`, `src/mcp/resolve.rs` line 267 |
-| `sha2` and `hex` are dependencies | `Cargo.toml` lines 68 to 69 |
+| `CodebaseMemory { when, index_path, mcp_permissions }`; #2406 adds `allowed_roots` beside the new `mem_budget_mb` | `crates/llmenv-config/src/schema.rs` |
+| MCP launch env: `CBM_CACHE_DIR` only when `index_path` is set | `resolve_codebase_memory` in `src/mcp/resolve.rs` |
+| Auto-index command: same env rule, stdout and stderr set to null in the builder | `build_index_repository_command` in `src/hook_run/mod.rs` |
+| Log path: `codebase_memory_cache_dir(cm, state_dir).join("index.log")`; the trigger replaces stderr with the bounded log and sets owner-only permissions on the default cache dir | `trigger_codebase_memory_index` and `codebase_memory_cache_dir` in `src/hook_run/mod.rs` |
+| `state_dir` is global (`crate::paths::state_dir()`), not per project | `codebase_memory_paths` in `src/mcp/resolve.rs` |
+| `sha2` and `hex` are dependencies; `jiff` is built with `default-features = false, features = ["std"]` | `Cargo.toml` |
+| If #2396 lands first, the index runs through an llmenv wrapper subcommand that waits for the cbm child. The wrapper then owns the result file: it captures the child's stdout itself instead of passing a file handle. The result path and the doctor classification below do not change | `issue-2396-detached-checkpoints.md` |
 
 ## Decisions
 
