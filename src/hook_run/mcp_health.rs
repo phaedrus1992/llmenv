@@ -174,9 +174,9 @@ pub(crate) struct StdioRpc<W, R> {
     next_id: u64,
 }
 
-/// The most output a probe reads from one server. A server that never stops writing cannot
+/// The most output a probe reads from one server (4 MiB). A server that never stops writing cannot
 /// stall doctor or fill its memory.
-const MAX_STDIO_OUTPUT_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_STDIO_OUTPUT_BYTES: u64 = 4_194_304;
 
 impl<W, R> StdioRpc<W, R>
 where
@@ -204,9 +204,16 @@ where
     pub(crate) async fn request(&mut self, method: &str, params: Value) -> anyhow::Result<Value> {
         let id = self.next_id;
         self.next_id += 1;
-        self.send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))
+        // A closed pipe means the server is gone. Waiting on its output would only hide that
+        // behind a timeout.
+        if let Err(e) = self
+            .send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))
             .await
-            .with_context(|| format!("cannot send MCP {method}"))?;
+        {
+            return Err(anyhow!(
+                "the server exited before answering MCP {method} (write failed: {e})"
+            ));
+        }
         let mut skipped = 0usize;
         while let Some(line) = self
             .lines

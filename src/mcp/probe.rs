@@ -70,29 +70,33 @@ fn measure(server: &str, instructions: Option<&str>, tools: &[ToolSummary]) -> M
 /// # Errors
 /// The transport is not probed, the server does not answer in [`PROBE_TIMEOUT`], or a call fails.
 pub(crate) async fn probe(mcp: &ResolvedMcp) -> anyhow::Result<McpTextReport> {
-    let work = async {
-        match &mcp.kind {
-            ResolvedKind::Remote {
-                url,
-                transport: crate::config::McpTransport::Http,
-            } => {
+    match &mcp.kind {
+        ResolvedKind::Remote {
+            url,
+            transport: crate::config::McpTransport::Http,
+        } => {
+            let work = async {
                 let client = McpHttpClient::with_headers(url.clone(), PROBE_TIMEOUT, &mcp.headers)?;
                 let info = client.initialize_info().await?;
                 let tools = client.list_tools().await?;
                 Ok(measure(&mcp.name, info.instructions.as_deref(), &tools))
-            }
-            ResolvedKind::Remote { transport, .. } => {
-                Err(anyhow!("transport {transport:?} is not probed"))
-            }
-            ResolvedKind::Stdio { command, args, env } => {
-                let (info, tools) = probe_stdio(command, args, env).await?;
-                Ok(measure(&mcp.name, info.instructions.as_deref(), &tools))
-            }
+            };
+            tokio::time::timeout(PROBE_TIMEOUT, work)
+                .await
+                .unwrap_or_else(|_| Err(timeout_error()))
         }
-    };
-    tokio::time::timeout(PROBE_TIMEOUT, work)
-        .await
-        .unwrap_or_else(|_| Err(anyhow!("no answer within {} ms", PROBE_TIMEOUT.as_millis())))
+        ResolvedKind::Remote { transport, .. } => {
+            Err(anyhow!("transport {transport:?} is not probed"))
+        }
+        ResolvedKind::Stdio { command, args, env } => {
+            let (info, tools) = probe_stdio(command, args, env).await?;
+            Ok(measure(&mcp.name, info.instructions.as_deref(), &tools))
+        }
+    }
+}
+
+fn timeout_error() -> anyhow::Error {
+    anyhow!("no answer within {} ms", PROBE_TIMEOUT.as_millis())
 }
 
 /// Start the server, run the handshake and `tools/list` on its stdio, and stop it.
@@ -116,7 +120,11 @@ async fn probe_stdio(
     let stdin = child.stdin.take().context("child stdin is not piped")?;
     let stdout = child.stdout.take().context("child stdout is not piped")?;
     let mut stderr = child.stderr.take();
-    let result = stdio_exchange(StdioRpc::new(stdin, stdout)).await;
+    // The timeout wraps the exchange only, so the stop below always runs: a dropped future would
+    // leave the server and what it started running.
+    let result = tokio::time::timeout(PROBE_TIMEOUT, stdio_exchange(StdioRpc::new(stdin, stdout)))
+        .await
+        .unwrap_or_else(|_| Err(timeout_error()));
     stop_group(&mut child, command).await;
     match result {
         Ok(ok) => Ok(ok),
@@ -432,6 +440,31 @@ mod tests {
         let err = format!("{:#}", probe(&mcp).await.unwrap_err());
         assert!(err.contains("missing API_TOKEN"), "{err}");
         assert!(err.contains("exited before answering"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_silent_server_times_out_and_is_still_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let mcp = stdio_server(
+            &format!("echo $$ > '{}'\nsleep 300\n", pid_file.display()),
+            dir.path(),
+        );
+        let err = probe(&mcp).await.unwrap_err().to_string();
+        assert!(err.contains("no answer within"), "{err}");
+        let pid = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .to_string();
+        let mut gone = false;
+        for _ in 0..50 {
+            if !alive(&pid) {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(gone, "the probe left process {pid} running");
     }
 
     #[tokio::test]
