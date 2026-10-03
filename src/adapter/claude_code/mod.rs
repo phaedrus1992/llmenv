@@ -57,6 +57,24 @@ const COMPACT_SURVIVAL_FRAGMENT: &str = concat!(
     "across compactions to catch gaps your restored context might miss.\n",
 );
 
+/// The text of the rendered `CLAUDE.md`: the merged `agents_md`, plus the slippage compact-survival
+/// fragment when that layer is on (#317). Doctor measures this same text (#2357).
+pub(crate) fn claude_md_content(manifest: &MergedManifest) -> String {
+    let mut content = manifest.agents_md.clone();
+    if let Some(s) = manifest
+        .capabilities
+        .features
+        .as_ref()
+        .and_then(|f| f.slippage.as_ref())
+        && s.enabled
+        && s.compact_survival
+    {
+        content.push_str("\n\n<!-- from slippage control: compact_survival -->\n");
+        content.push_str(COMPACT_SURVIVAL_FRAGMENT);
+    }
+    content
+}
+
 /// `(engine-neutral event, native Claude event)` pairs for the always-on
 /// baseline hooks. Registered unconditionally — `hook-run` itself no-ops
 /// cheaply when neither memory nor session logging is configured — so this
@@ -424,20 +442,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
         std::fs::create_dir_all(out)?;
         reject_hardcoded_config_path(&manifest.agents_md, "CLAUDE.md")?;
 
-        // #317: build CLAUDE.md content, appending compact_survival fragment
-        // when slippage is enabled with compact_survival on.
-        let mut claude_md_content = manifest.agents_md.clone();
-        if let Some(s) = manifest
-            .capabilities
-            .features
-            .as_ref()
-            .and_then(|f| f.slippage.as_ref())
-            && s.enabled
-            && s.compact_survival
-        {
-            claude_md_content.push_str("\n\n<!-- from slippage control: compact_survival -->\n");
-            claude_md_content.push_str(COMPACT_SURVIVAL_FRAGMENT);
-        }
+        let claude_md_content = claude_md_content(manifest);
 
         // #1262: skip the file entirely when nothing resolved, rather than
         // leaving a 0-byte CLAUDE.md. Staying out of `owned` also means a copy

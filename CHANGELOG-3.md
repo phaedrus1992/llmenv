@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `mcp[].always_load` and `features.memory[].always_load` render Claude Code's per-server `alwaysLoad`, which keeps a server's tools out of tool-search deferral. Unset renders nothing. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#mcp) (#2356)
 
 - Claude Code sessions write an agent-config document (engine, model, effort, project, tags, config hash) to the state dir, and a `PostModelSwitch` hook keeps the model current. A resumed or compacted session starts with a one-line `[llmenv session]` summary of it, and `llmenv task session summary` shows a `running as` line. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#agent-config) (#2398)
+- `llmenv doctor` reports the size of the always-loaded instruction text (`CLAUDE.md` and rules without a `paths:` filter), names the largest bundles, and warns over Claude Code's large-file limit. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#doctor) (#2357)
 
 ### Changed
 

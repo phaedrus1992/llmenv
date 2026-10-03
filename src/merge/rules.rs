@@ -28,19 +28,8 @@ pub struct RuleFile {
     /// Raw frontmatter text between the `---` fences, exclusive. `None`
     /// when the file has no frontmatter block.
     ///
-    /// Not read today: the module docs above define `frontmatter`/`body` as the
-    /// split every AGENTS.md-only adapter consumes, but the two adapters that
-    /// exist both inline rule bodies themselves (see
-    /// `adapter::claude_code`'s note on `concat_with_rules`). Kept rather than
-    /// deleted because dropping it would silently retire that documented
-    /// contract, which is a design decision and not a lint cleanup (#1314).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "documented AGENTS.md adapter contract, not yet consumed"
-        )
-    )]
+    /// Read by [`RuleFile::load_mode`] (#2357). The AGENTS.md-only adapters inline rule
+    /// bodies themselves, so they do not read it (#1314).
     pub(crate) frontmatter: Option<String>,
     /// File body with the frontmatter block removed. The leading newline
     /// after the closing `---` fence is also stripped so the body starts
@@ -56,6 +45,38 @@ pub struct RuleFile {
     /// Raw file contents — frontmatter + body — for adapters that want to
     /// pass the file through verbatim.
     pub(crate) raw: String,
+}
+
+/// How Claude Code loads a rule file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoadMode {
+    /// No `paths:` filter, so the rule is in every session.
+    Always,
+    /// A non-empty `paths:` list, so the rule loads only when a matching file is open.
+    PathFiltered,
+    /// The frontmatter is not valid YAML. Claude Code may ignore it, so count the rule as loaded.
+    UnparsedFrontmatter,
+}
+
+/// The only frontmatter key that decides when Claude Code loads a rule.
+#[derive(Debug, Default, serde::Deserialize)]
+struct RuleFrontmatter {
+    #[serde(default)]
+    paths: Vec<String>,
+}
+
+impl RuleFile {
+    /// When Claude Code loads this rule (#2357).
+    pub(crate) fn load_mode(&self) -> LoadMode {
+        let Some(frontmatter) = self.frontmatter.as_deref().filter(|f| !f.trim().is_empty()) else {
+            return LoadMode::Always;
+        };
+        match serde_yaml::from_str::<RuleFrontmatter>(frontmatter) {
+            Ok(parsed) if parsed.paths.is_empty() => LoadMode::Always,
+            Ok(_) => LoadMode::PathFiltered,
+            Err(_) => LoadMode::UnparsedFrontmatter,
+        }
+    }
 }
 
 /// Walk `<bundle_root>/rules/` and return all `.md` files. Non-`.md` files
