@@ -20,6 +20,9 @@ const CLAUDE_INSTRUCTION_TOTAL_LIMIT_CHARS: usize = 2 * CLAUDE_INSTRUCTION_FILE_
 /// How many of the largest contributors doctor prints.
 const TOP_CONTRIBUTORS: usize = 5;
 
+/// The separator the Claude Code adapter writes before the slippage fragment.
+const SLIPPAGE_SEPARATOR: &str = "<!-- from slippage control: compact_survival -->";
+
 const FIX: &str = "fix it in the source bundle, then run llmenv regenerate; Claude Code's \
                    /doctor prompt-audit reads the generated copies.";
 
@@ -39,7 +42,7 @@ pub(super) struct InstructionSizeReport {
     /// Every always-loaded contributor, largest first.
     pub always_loaded: Vec<Contributor>,
     pub path_filtered_rules: usize,
-    pub unparsed_frontmatter: usize,
+    pub unparsed_frontmatter: Vec<String>,
     /// The size of each rule file that loads in every session.
     rule_chars: Vec<(String, usize)>,
 }
@@ -76,14 +79,15 @@ fn claude_md_chunks(text: &str) -> Vec<Contributor> {
 /// The bundle a separator line names, or `None` for any other line.
 fn separator_bundle(line: &str) -> Option<String> {
     let line = line.trim_end();
+    if line == SLIPPAGE_SEPARATOR {
+        return Some("slippage control".to_string());
+    }
     if let Some(rest) = line.strip_prefix("<!-- # from bundle: ") {
         let name = rest.strip_suffix(" -->")?;
         // A rule separator reads `<bundle> rules/<file>`; the bundle is the first word.
         return Some(name.split(' ').next().unwrap_or(name).to_string());
     }
-    line.strip_prefix("<!-- from ")
-        .and_then(|rest| rest.split(':').next())
-        .map(str::to_string)
+    None
 }
 
 /// Measure the always-loaded instruction text of `manifest`.
@@ -92,14 +96,17 @@ fn measure(manifest: &MergedManifest) -> InstructionSizeReport {
     let claude_md_chars = claude_md.chars().count();
     let mut always_loaded = claude_md_chunks(&claude_md);
     let mut rule_chars = Vec::new();
-    let (mut path_filtered_rules, mut unparsed_frontmatter) = (0, 0);
+    let mut path_filtered_rules = 0;
+    let mut unparsed_frontmatter = Vec::new();
     for rule in &manifest.rules {
         match rule.load_mode() {
             LoadMode::PathFiltered => {
                 path_filtered_rules += 1;
                 continue;
             }
-            LoadMode::UnparsedFrontmatter => unparsed_frontmatter += 1,
+            LoadMode::UnparsedFrontmatter => {
+                unparsed_frontmatter.push(format!("{}/{}", rule.bundle, rule.rel.display()));
+            }
             LoadMode::Always => {}
         }
         let chars = rule.raw.chars().count();
@@ -140,7 +147,8 @@ fn checks(report: &InstructionSizeReport) -> Vec<(CheckLevel, String)> {
                 CheckLevel::Warn,
                 format!(
                     "{file} is {chars} characters, over the {CLAUDE_INSTRUCTION_FILE_LIMIT_CHARS} \
-                     that Claude Code accepts for one instruction file; {FIX}"
+                     that Claude Code accepts for one instruction file (the floor; the limit is higher for \
+                     a large context window); {FIX}"
                 ),
             ));
         }
@@ -160,7 +168,7 @@ fn checks(report: &InstructionSizeReport) -> Vec<(CheckLevel, String)> {
         out.push((
             CheckLevel::Pass,
             format!(
-                "always-loaded instructions total {} characters ({} in CLAUDE.md)",
+                "always-loaded instructions from llmenv bundles total {} characters ({} in CLAUDE.md)",
                 report.total_chars, report.claude_md_chars
             ),
         ));
@@ -174,12 +182,14 @@ fn checks(report: &InstructionSizeReport) -> Vec<(CheckLevel, String)> {
             ),
         ));
     }
-    if report.unparsed_frontmatter > 0 {
+    if !report.unparsed_frontmatter.is_empty() {
         out.push((
             CheckLevel::Info,
             format!(
-                "{} rules have frontmatter that is not valid YAML and are counted as always loaded",
-                report.unparsed_frontmatter
+                "{} rules have frontmatter that llmenv cannot read and are counted as always \
+                 loaded: {}",
+                report.unparsed_frontmatter.len(),
+                report.unparsed_frontmatter.join(", ")
             ),
         ));
     }
@@ -268,7 +278,7 @@ mod tests {
         let r = measure(&m);
         assert_eq!(r.claude_md_chars, m.agents_md.chars().count());
         assert_eq!(r.path_filtered_rules, 1);
-        assert_eq!(r.unparsed_frontmatter, 1);
+        assert_eq!(r.unparsed_frontmatter, ["rust/rules/c.md"]);
         let rules: usize = ["12345", "---\npaths: [x\n---\n12"]
             .iter()
             .map(|s| s.chars().count())
@@ -282,7 +292,7 @@ mod tests {
 
     #[test]
     fn claude_md_chunks_follow_the_separators() {
-        let text = "intro\n<!-- # from bundle: base -->\naaa\n<!-- # from bundle: rust rules/x.md -->\nbb\n\n<!-- from slippage control: compact_survival -->\nc\n";
+        let text = "intro\n<!-- # from bundle: base -->\naaa\n<!-- # from bundle: rust rules/x.md -->\nbb\n\n<!-- from slippage control: compact_survival -->\nc\n<!-- from a user note -->\nd\n";
         let chunks = claude_md_chunks(text);
         let named: Vec<(&str, usize)> = chunks
             .iter()
@@ -304,7 +314,7 @@ mod tests {
             claude_md_chars: claude_md,
             always_loaded: vec![],
             path_filtered_rules: 0,
-            unparsed_frontmatter: 0,
+            unparsed_frontmatter: vec![],
             rule_chars: rules
                 .iter()
                 .enumerate()
@@ -366,18 +376,16 @@ mod tests {
     fn informational_lines_report_skipped_and_unparsed_rules() {
         let mut r = report_of(10, &[]);
         r.path_filtered_rules = 3;
-        r.unparsed_frontmatter = 2;
+        r.unparsed_frontmatter = vec!["a/x.md".into(), "b/y.md".into()];
         let lines = checks(&r);
         assert!(
             lines
                 .iter()
                 .any(|(l, t)| *l == CheckLevel::Info && t.starts_with("3 rules load"))
         );
-        assert!(
-            lines
-                .iter()
-                .any(|(l, t)| *l == CheckLevel::Info && t.starts_with("2 rules have"))
-        );
+        assert!(lines.iter().any(|(l, t)| *l == CheckLevel::Info
+            && t.starts_with("2 rules have")
+            && t.contains("a/x.md, b/y.md")));
     }
 
     #[test]

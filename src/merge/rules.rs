@@ -62,7 +62,24 @@ pub(crate) enum LoadMode {
 #[derive(Debug, Default, serde::Deserialize)]
 struct RuleFrontmatter {
     #[serde(default)]
-    paths: Vec<String>,
+    paths: Option<PathsField>,
+}
+
+/// Claude Code accepts `paths:` as one glob or a list of globs.
+#[derive(Debug, serde::Deserialize)]
+#[serde(untagged)]
+enum PathsField {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl PathsField {
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::One(glob) => glob.trim().is_empty(),
+            Self::Many(globs) => globs.is_empty(),
+        }
+    }
 }
 
 impl RuleFile {
@@ -72,7 +89,9 @@ impl RuleFile {
             return LoadMode::Always;
         };
         match serde_yaml::from_str::<RuleFrontmatter>(frontmatter) {
-            Ok(parsed) if parsed.paths.is_empty() => LoadMode::Always,
+            Ok(parsed) if parsed.paths.as_ref().is_none_or(PathsField::is_empty) => {
+                LoadMode::Always
+            }
             Ok(_) => LoadMode::PathFiltered,
             Err(_) => LoadMode::UnparsedFrontmatter,
         }
