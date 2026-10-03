@@ -87,7 +87,7 @@ impl<'a> StartFacts<'a> {
 
 impl AgentConfig {
     /// Build the document for a `SessionStart` from the scope and the hook facts.
-    pub(crate) fn from_scope_context(ctx: &ScopeContext, facts: &StartFacts<'_>) -> Self {
+    fn from_scope_context(ctx: &ScopeContext, facts: &StartFacts<'_>) -> Self {
         let non_empty = |s: &str| (!s.is_empty()).then(|| s.to_string());
         Self {
             engine: facts.engine.replace('-', "_"),
@@ -125,7 +125,7 @@ impl AgentConfig {
     }
 
     /// The `running as` text for `task session summary`.
-    pub(crate) fn running_as(&self) -> String {
+    fn running_as(&self) -> String {
         let model = self.model.as_deref().unwrap_or("unset");
         let effort = self.effort.as_deref().unwrap_or("unset");
         format!("{} {model}, effort {effort}", self.engine)
@@ -282,7 +282,7 @@ fn read(state_dir: &Path, session_id: &str) -> Stored {
 
 /// Read the document. A missing, corrupt, or unreadable file gives `None`. The last two warn,
 /// because the next write replaces the file.
-pub(crate) fn load(state_dir: &Path, session_id: &str) -> Option<AgentConfig> {
+fn load(state_dir: &Path, session_id: &str) -> Option<AgentConfig> {
     match read(state_dir, session_id) {
         Stored::Doc(doc) => Some(*doc),
         Stored::Missing | Stored::Unreadable => None,
@@ -291,7 +291,7 @@ pub(crate) fn load(state_dir: &Path, session_id: &str) -> Option<AgentConfig> {
 
 /// Replace the document for a `SessionStart`. A restart keeps `created_at` and the model history.
 /// A failure is logged and does not stop the hook.
-pub(crate) fn write_session_start(state_dir: &Path, session_id: &str, mut doc: AgentConfig) {
+fn write_session_start(state_dir: &Path, session_id: &str, mut doc: AgentConfig) {
     let dir = state_dir.join(DIR);
     let Some(_lock) = super::session_state::lock_state_file(&dir, session_id, "agent config")
     else {
