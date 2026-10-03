@@ -14,6 +14,12 @@ use crate::hook_run::checkpoint;
 pub(crate) struct IndexInputs {
     pub(crate) project_root: String,
     pub(crate) index_path: Option<String>,
+    /// `CBM_MEM_BUDGET_MB` for the indexer (#2154).
+    #[serde(default)]
+    pub(crate) mem_budget_mb: Option<u32>,
+    /// The file that receives the indexer's JSON result on stdout (#2154).
+    #[serde(default)]
+    pub(crate) result_path: Option<String>,
 }
 
 /// Child entrypoint: read the inputs from `checkpoint_path`, run the indexer, wait for it, and
@@ -30,7 +36,7 @@ pub fn run_cbm_index(checkpoint_path: &Path) -> anyhow::Result<()> {
 /// [`run_cbm_index`] with the command builder injected, so a test can run a stub indexer.
 fn run_cbm_index_with(
     checkpoint_path: &Path,
-    build: impl FnOnce(&Path, Option<&str>) -> std::process::Command,
+    build: impl FnOnce(&Path, Option<&str>, Option<u32>) -> std::process::Command,
 ) -> anyhow::Result<()> {
     let loaded = checkpoint::load(checkpoint_path)?;
     let inputs: IndexInputs = serde_json::from_value(loaded.inputs)
@@ -38,9 +44,13 @@ fn run_cbm_index_with(
     let mut cmd = build(
         Path::new(&inputs.project_root),
         inputs.index_path.as_deref(),
+        inputs.mem_budget_mb,
     );
     // The parent points this process's stderr at the index log; the indexer shares it.
     cmd.stderr(std::process::Stdio::inherit());
+    if let Some(result_path) = &inputs.result_path {
+        cmd.stdout(crate::hook_run::result_stdout(Path::new(result_path)));
+    }
     let status = cmd.status().context("cannot start codebase-memory-mcp")?;
     anyhow::ensure!(status.success(), "codebase-memory-mcp exited with {status}");
     checkpoint::complete(checkpoint_path)
@@ -56,6 +66,8 @@ mod tests {
         let inputs = serde_json::to_value(IndexInputs {
             project_root: "/repo".into(),
             index_path: None,
+            mem_budget_mb: None,
+            result_path: None,
         })
         .unwrap();
         checkpoint::write(dir, &Checkpoint::new(JobKind::CbmIndex, inputs, None))
@@ -73,8 +85,15 @@ mod tests {
         #[test]
         fn index_inputs_survive_serialization(
             root in ".{0,40}", index in proptest::option::of(".{0,40}"),
+            budget in proptest::option::of(proptest::prelude::any::<u32>()),
+            result in proptest::option::of(".{0,40}"),
         ) {
-            let inputs = IndexInputs { project_root: root, index_path: index };
+            let inputs = IndexInputs {
+                project_root: root,
+                index_path: index,
+                mem_budget_mb: budget,
+                result_path: result,
+            };
             let back: IndexInputs =
                 serde_json::from_value(serde_json::to_value(&inputs).unwrap()).unwrap();
             proptest::prop_assert_eq!(back, inputs);
@@ -87,6 +106,8 @@ mod tests {
         let inputs = serde_json::to_value(IndexInputs {
             project_root: "/definitely/not/a/project/root".into(),
             index_path: None,
+            mem_budget_mb: None,
+            result_path: None,
         })
         .unwrap();
         let file = checkpoint::write(
@@ -104,7 +125,7 @@ mod tests {
     fn exit_zero_completes_the_checkpoint() {
         let dir = tempfile::tempdir().unwrap();
         let file = written(dir.path());
-        run_cbm_index_with(&file, |_, _| shell("exit 0")).unwrap();
+        run_cbm_index_with(&file, |_, _, _| shell("exit 0")).unwrap();
         assert!(!file.exists());
     }
 
@@ -112,7 +133,7 @@ mod tests {
     fn a_non_zero_exit_leaves_the_checkpoint_and_errors() {
         let dir = tempfile::tempdir().unwrap();
         let file = written(dir.path());
-        let err = run_cbm_index_with(&file, |_, _| shell("exit 3")).unwrap_err();
+        let err = run_cbm_index_with(&file, |_, _, _| shell("exit 3")).unwrap_err();
         assert!(err.to_string().contains("exited"), "{err}");
         assert!(file.exists());
     }
@@ -123,6 +144,8 @@ mod tests {
         let inputs = serde_json::to_value(IndexInputs {
             project_root: "/repo".into(),
             index_path: Some("/idx".into()),
+            mem_budget_mb: Some(4096),
+            result_path: None,
         })
         .unwrap();
         let file = checkpoint::write(
@@ -132,12 +155,46 @@ mod tests {
         .unwrap()
         .unwrap();
         let mut seen = None;
-        run_cbm_index_with(&file, |root, idx| {
-            seen = Some((root.to_path_buf(), idx.map(str::to_string)));
+        run_cbm_index_with(&file, |root, idx, budget| {
+            seen = Some((root.to_path_buf(), idx.map(str::to_string), budget));
             shell("exit 0")
         })
         .unwrap();
-        assert_eq!(seen, Some(("/repo".into(), Some("/idx".to_string()))));
+        assert_eq!(
+            seen,
+            Some(("/repo".into(), Some("/idx".to_string()), Some(4096)))
+        );
+    }
+
+    #[test]
+    fn the_indexer_stdout_goes_to_the_result_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = dir.path().join("result.json");
+        let inputs = serde_json::to_value(IndexInputs {
+            project_root: "/repo".into(),
+            index_path: None,
+            mem_budget_mb: None,
+            result_path: Some(result.display().to_string()),
+        })
+        .unwrap();
+        let file = checkpoint::write(
+            dir.path(),
+            &Checkpoint::new(JobKind::CbmIndex, inputs, None),
+        )
+        .unwrap()
+        .unwrap();
+        run_cbm_index_with(&file, |_, _, _| shell("echo '{\"status\":\"ok\"}'")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&result).unwrap().trim(),
+            r#"{"status":"ok"}"#
+        );
+    }
+
+    #[test]
+    fn a_checkpoint_from_before_the_result_file_still_loads() {
+        let value = serde_json::json!({ "project_root": "/repo", "index_path": null });
+        let inputs: IndexInputs = serde_json::from_value(value).unwrap();
+        assert_eq!((inputs.mem_budget_mb, inputs.result_path), (None, None));
     }
 
     #[test]
@@ -145,7 +202,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cp = Checkpoint::new(JobKind::CbmIndex, serde_json::json!({}), None);
         let file = checkpoint::write(dir.path(), &cp).unwrap().unwrap();
-        assert!(run_cbm_index_with(&file, |_, _| shell("exit 0")).is_err());
+        assert!(run_cbm_index_with(&file, |_, _, _| shell("exit 0")).is_err());
         assert!(file.exists());
     }
 }

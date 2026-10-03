@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 mod autocompact;
 mod background;
+mod cbm_index;
 mod instruction_size;
 mod mcp_text;
 
@@ -1738,6 +1739,7 @@ pub(super) fn run_doctor(
     run_doctor_dependent_tools(use_color);
     run_doctor_icm_server(use_color, &config, &config_dir, &active);
     run_doctor_mcp_servers(use_color, &config, &config_dir, &active);
+    cbm_index::run_doctor_cbm_index(use_color, &config, &active);
     if let Ok(state_dir) = crate::paths::state_dir() {
         background::run_doctor_checkpoints(use_color, &state_dir);
     }
@@ -2381,6 +2383,7 @@ mod tests {
         let config = Config {
             features: Some(crate::config::Features {
                 codebase_memory: vec![crate::config::CodebaseMemory {
+                    mem_budget_mb: None,
                     when: vec!["proj".to_string()],
                     index_path: None,
                     mcp_permissions: None,
@@ -2400,6 +2403,7 @@ mod tests {
         let config = Config {
             features: Some(crate::config::Features {
                 codebase_memory: vec![crate::config::CodebaseMemory {
+                    mem_budget_mb: None,
                     when: vec!["never-emitted".to_string()],
                     index_path: None,
                     mcp_permissions: None,
@@ -2419,6 +2423,7 @@ mod tests {
         let bundle_caps = Capabilities {
             features: Some(crate::config::Features {
                 codebase_memory: vec![crate::config::CodebaseMemory {
+                    mem_budget_mb: None,
                     when: vec!["bundle-tag".to_string()],
                     index_path: None,
                     mcp_permissions: None,

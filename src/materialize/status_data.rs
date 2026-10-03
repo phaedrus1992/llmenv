@@ -581,6 +581,7 @@ mod tests {
         let config = Config {
             features: Some(crate::config::Features {
                 codebase_memory: vec![crate::config::CodebaseMemory {
+                    mem_budget_mb: None,
                     when: vec!["proj".to_string()],
                     index_path: None,
                     mcp_permissions: None,

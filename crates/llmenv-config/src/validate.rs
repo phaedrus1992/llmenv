@@ -60,6 +60,11 @@ pub enum ValidateError {
     MemoryWakeupMaxTokensInvalid(u32),
     #[error("features.codebase_memory entry has no `when` tags")]
     CodebaseMemoryNoTags,
+    #[error(
+        "features.codebase_memory mem_budget_mb ({0}) must be between 1 and 1048576. Set it to the \
+         number of megabytes the indexer may use, or remove it"
+    )]
+    CodebaseMemoryBudgetInvalid(u32),
     #[error("throttle entry for '{0}' has no when: tags")]
     ThrottleNoTags(String),
     #[error("throttle entry has an empty 'backend' field")]
@@ -705,6 +710,11 @@ impl Config {
                 if cm.when.is_empty() {
                     return Err(ValidateError::CodebaseMemoryNoTags);
                 }
+                if let Some(budget) = cm.mem_budget_mb
+                    && !(1..=1_048_576).contains(&budget)
+                {
+                    return Err(ValidateError::CodebaseMemoryBudgetInvalid(budget));
+                }
             }
         }
         Ok(())
@@ -1224,11 +1234,13 @@ mod tests {
         (
             prop::collection::vec(arb_string(), 1..3),
             prop::option::of(arb_string()),
+            prop::option::of(1u32..2_000_000),
         )
-            .prop_map(|(when, index_path)| CodebaseMemory {
+            .prop_map(|(when, index_path, mem_budget_mb)| CodebaseMemory {
                 when,
                 index_path,
                 mcp_permissions: None,
+                mem_budget_mb,
             })
     }
 
@@ -2068,8 +2080,29 @@ mod tests {
     }
 
     #[test]
+    fn codebase_memory_budget_must_be_between_1_and_1048576() {
+        for (budget, ok) in [(0, false), (1, true), (1_048_576, true), (1_048_577, false)] {
+            let config = config_with_codebase_memory(vec![crate::CodebaseMemory {
+                when: vec!["p".into()],
+                mem_budget_mb: Some(budget),
+                ..Default::default()
+            }]);
+            let result = config.validate();
+            assert_eq!(result.is_ok(), ok, "{budget}");
+            if !ok {
+                let err = result.unwrap_err().to_string();
+                assert!(
+                    err.contains(&budget.to_string()) && err.contains("mem_budget_mb"),
+                    "{err}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn codebase_memory_requires_tags() {
         let config = config_with_codebase_memory(vec![crate::CodebaseMemory {
+            mem_budget_mb: None,
             when: vec![],
             index_path: None,
             mcp_permissions: None,
@@ -2083,6 +2116,7 @@ mod tests {
     #[test]
     fn codebase_memory_with_tags_is_valid() {
         let config = config_with_codebase_memory(vec![crate::CodebaseMemory {
+            mem_budget_mb: None,
             when: vec!["my-project".to_string()],
             index_path: None,
             mcp_permissions: None,

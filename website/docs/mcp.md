@@ -255,6 +255,31 @@ server only when there's something explicit to set:
   [Configuration reference](./configuration.md#featurescodebase_memory) for
   the full detail on this change.
 
+(added in v3.12.0) `mem_budget_mb` sets `CBM_MEM_BUDGET_MB` for both the server and the
+SessionStart index, so the two agree:
+
+```yaml
+features:
+  codebase_memory:
+    - when: [my-project]
+      mem_budget_mb: 4096
+```
+
+codebase-memory-mcp stops an index that goes over its budget, keeps the previous index, and
+reports the numbers.
+llmenv saves that result for each project next to `index.log`, in `index-result-<key>.json`.
+`llmenv doctor` reads it and prints one line:
+
+- `last index finished <time>` when the index worked
+- a warning with the budget, the peak, and the `mem_budget_mb` to set, when the index stopped at the
+  budget
+- a warning with the status, the reason, and the log path, when it failed another way
+- `no index result for this project yet` before the first run
+
+The time is in UTC.
+The background watcher is a setting of codebase-memory-mcp itself, not of llmenv.
+Turn it off with `codebase-memory-mcp config set watcher_enabled false`.
+
 Multiple `codebase_memory` entries may be active simultaneously — each is an
 independent local process, not a shared resource like the memory backend, so
 there's no "at most one active" restriction.

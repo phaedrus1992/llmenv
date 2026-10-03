@@ -312,6 +312,11 @@ fn resolve_codebase_memory(
     if let Some(index_path) = &cm.index_path {
         env.insert("CBM_CACHE_DIR".to_string(), index_path.clone());
     }
+    // The SessionStart auto-index sets the same variable (`index_command`), so the server and the
+    // indexer agree on the budget (#2154).
+    if let Some(budget) = cm.mem_budget_mb {
+        env.insert("CBM_MEM_BUDGET_MB".to_string(), budget.to_string());
+    }
     ResolvedMcp {
         name: CODEBASE_MEMORY_MCP_NAME.to_string(),
         kind: ResolvedKind::Stdio {
@@ -741,6 +746,7 @@ mod tests {
     #[test]
     fn codebase_memory_resolves_to_local_stdio() {
         let cm = CodebaseMemory {
+            mem_budget_mb: None,
             when: vec!["proj".to_string()],
             index_path: None,
             mcp_permissions: None,
@@ -775,6 +781,7 @@ mod tests {
     #[test]
     fn codebase_memory_index_path_override_wins() {
         let cm = CodebaseMemory {
+            mem_budget_mb: None,
             when: vec!["proj".to_string()],
             index_path: Some("/custom/path".to_string()),
             mcp_permissions: None,
@@ -794,6 +801,7 @@ mod tests {
     #[test]
     fn codebase_memory_not_selected_when_tags_inactive() {
         let entries = vec![CodebaseMemory {
+            mem_budget_mb: None,
             when: vec!["other-tag".to_string()],
             index_path: None,
             mcp_permissions: None,
@@ -816,11 +824,13 @@ mod tests {
         // enforced here rather than left to crash later on a name collision.
         let entries = vec![
             CodebaseMemory {
+                mem_budget_mb: None,
                 when: vec!["proj-a".to_string()],
                 index_path: None,
                 mcp_permissions: None,
             },
             CodebaseMemory {
+                mem_budget_mb: None,
                 when: vec!["proj-b".to_string()],
                 index_path: None,
                 mcp_permissions: None,
@@ -882,7 +892,7 @@ mod tests {
             fn resolve_codebase_memory_never_sets_allowed_root(
                 path_str in arb_path_component()
             ) {
-                let cm = CodebaseMemory { when: vec!["proj".to_string()], index_path: None, mcp_permissions: None };
+                let cm = CodebaseMemory { mem_budget_mb: None, when: vec!["proj".to_string()], index_path: None, mcp_permissions: None };
                 let project_root = std::path::PathBuf::from(&path_str);
                 let resolved = resolve_codebase_memory(&cm, &project_root, Path::new("/state"));
                 match resolved.kind {
@@ -902,7 +912,7 @@ mod tests {
                 project_root_str in arb_path_component(),
                 state_dir_str in arb_path_component(),
             ) {
-                let cm = CodebaseMemory { when: vec!["proj".to_string()], index_path: None, mcp_permissions: None };
+                let cm = CodebaseMemory { mem_budget_mb: None, when: vec!["proj".to_string()], index_path: None, mcp_permissions: None };
                 let project_root = std::path::PathBuf::from(&project_root_str);
                 let state_dir = std::path::PathBuf::from(&state_dir_str);
                 let resolved = resolve_codebase_memory(&cm, &project_root, &state_dir);
@@ -918,7 +928,7 @@ mod tests {
             fn resolve_codebase_memory_index_path_override_always_wins(
                 index_path in arb_path_component()
             ) {
-                let cm = CodebaseMemory {
+                let cm = CodebaseMemory { mem_budget_mb: None,
                     when: vec!["proj".to_string()],
                     index_path: Some(index_path.clone()),
                     mcp_permissions: None,
@@ -937,11 +947,35 @@ mod tests {
             }
         }
 
+        // #2154: the memory budget reaches the MCP server's environment only when it is set.
+        #[test]
+        fn resolve_codebase_memory_sets_the_budget_only_when_configured() {
+            let env_of = |budget: Option<u32>| {
+                let cm = CodebaseMemory {
+                    when: vec!["proj".to_string()],
+                    mem_budget_mb: budget,
+                    ..Default::default()
+                };
+                match resolve_codebase_memory(&cm, Path::new("/r"), Path::new("/s")).kind {
+                    ResolvedKind::Stdio { env, .. } => env,
+                    ResolvedKind::Remote { .. } => BTreeMap::new(),
+                }
+            };
+            assert_eq!(
+                env_of(Some(8192))
+                    .get("CBM_MEM_BUDGET_MB")
+                    .map(String::as_str),
+                Some("8192")
+            );
+            assert!(!env_of(None).contains_key("CBM_MEM_BUDGET_MB"));
+        }
+
         // #365: tag-intersection filtering in resolve_codebase_memory_entries
         // — every resolved entry's tags must intersect active_tags, and an
         // empty active set never resolves anything, for arbitrary tag sets.
         fn arb_codebase_memory_entry(idx: usize) -> impl Strategy<Value = CodebaseMemory> {
             prop::collection::vec("[a-z]{1,4}", 0..4).prop_map(move |when| CodebaseMemory {
+                mem_budget_mb: None,
                 when: if when.is_empty() {
                     vec![format!("only-tag-{idx}")]
                 } else {
