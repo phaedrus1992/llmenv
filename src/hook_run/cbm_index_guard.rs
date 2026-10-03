@@ -46,8 +46,13 @@ pub(crate) fn handle_roots(
     else {
         return String::new();
     };
-    let Ok(project_root) = std::env::current_dir() else {
-        return String::new();
+    // The hook runs in the project folder, as the SessionStart index does.
+    let project_root = match std::env::current_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            tracing::warn!("codebase-memory root guard skipped: cannot read the folder: {e}");
+            return String::new();
+        }
     };
     crate::mcp::cbm_roots::guard_decision(repo_path, config, &project_root)
         .map_or_else(String::new, |reason| format!("__DENY__:{reason}"))

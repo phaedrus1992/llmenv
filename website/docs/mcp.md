@@ -298,12 +298,14 @@ features:
 
 `~` and `$VAR` expand at session start.
 An entry with an unset variable is dropped.
-A relative entry is rejected by `llmenv validate`.
-llmenv skips a root that does not exist yet.
+A relative entry or a `~user` entry is rejected by `llmenv validate`.
+llmenv skips a default root that does not exist yet, and warns about a configured entry that is not a folder.
 The SessionStart notice and `llmenv doctor` list the roots, and warn about a root that the server did not accept.
 A `PreToolUse` guard denies an `index_repository` call whose `repo_path` is outside the configured roots
 and the roots the server lists.
 The deny text names the config fix.
+A root stays recorded after you remove it from the config, because codebase-memory-mcp has no command to remove one.
+To revoke a root, delete its line from `<cache dir>/allowed_roots`.
 Do not run `allow-root` by hand: the config is the source of the roots.
 
 The background watcher is a setting of codebase-memory-mcp itself, not of llmenv.

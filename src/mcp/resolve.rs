@@ -301,8 +301,8 @@ pub(crate) fn codebase_memory_paths() -> anyhow::Result<(std::path::PathBuf, std
 /// process per project. `CBM_CACHE_DIR` is only set when the user explicitly
 /// configures `index_path` (#1493); otherwise `codebase-memory-mcp` falls
 /// back to its own default cache location. `CBM_ALLOWED_ROOT` is never set
-/// (#1495) — restricting the tool's scope is the end user's call via
-/// `codebase-memory-mcp`'s own config, not llmenv's to impose.
+/// (#1495). llmenv records the roots the server may index through `allow-root` at SessionStart
+/// instead (#2406); see `mcp::cbm_roots`.
 fn resolve_codebase_memory(
     cm: &CodebaseMemory,
     _project_root: &Path,

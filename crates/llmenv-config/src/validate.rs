@@ -723,7 +723,9 @@ impl Config {
                 // The shape only: a variable may expand to an absolute path at session start.
                 if let Some(bad) = cm.allowed_roots.iter().find(|r| {
                     let r = r.trim();
-                    !(r.starts_with('/') || r.starts_with('~') || r.starts_with('$'))
+                    // `~user` is not supported: only `~` alone or `~/...`.
+                    let tilde = r == "~" || r.starts_with("~/");
+                    !(r.starts_with('/') || tilde || r.starts_with('$'))
                 }) {
                     return Err(ValidateError::CodebaseMemoryRootInvalid(bad.clone()));
                 }
@@ -2123,6 +2125,8 @@ mod tests {
             ("$WORK/a", true),
             ("${WORK}/a", true),
             ("relative/dir", false),
+            ("~other/x", false),
+            ("~", true),
             ("./here", false),
             ("", false),
             ("  ", false),

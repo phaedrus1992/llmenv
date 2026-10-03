@@ -279,9 +279,14 @@ fn apply_roots(
                     &out.stderr
                 })
                 .into_owned();
-                still_missing.push((root, crate::hook_run::mcp_health::tidy_reason(&text)));
+                let reason = crate::hook_run::mcp_health::tidy_reason(&text);
+                tracing::warn!("codebase-memory-mcp allow-root {path} failed: {reason}");
+                still_missing.push((root, reason));
             }
-            Err(e) => still_missing.push((root, e.to_string())),
+            Err(e) => {
+                tracing::warn!("codebase-memory-mcp allow-root {path} failed: {e}");
+                still_missing.push((root, e.to_string()));
+            }
         }
     }
     report.missing = still_missing;
@@ -344,6 +349,17 @@ fn path_outside_roots(repo_path: &Path, roots: &[PathBuf]) -> Option<String> {
     ))
 }
 
+/// The configured roots that expand to a path that is not a folder. A default root may be absent,
+/// but a root the user wrote is a typo or a missing mount.
+fn absent_configured(cm: &CodebaseMemory, bases: &RootBases) -> Vec<PathBuf> {
+    let env = |name: &str| std::env::var(name).ok();
+    cm.allowed_roots
+        .iter()
+        .filter_map(|entry| expand_root(entry, bases.home.as_deref(), &env))
+        .filter(|root| root.is_absolute() && !root.is_dir())
+        .collect()
+}
+
 /// Apply the roots at `SessionStart`. Returns the text to show the user when a root is missing
 /// or the server cannot be asked, and `None` when all is well (#2406).
 pub(crate) fn session_start_notice(
@@ -356,10 +372,24 @@ pub(crate) fn session_start_notice(
         Err(e) => return Some(format!("codebase-memory: cannot resolve the roots: {e}\n")),
     };
     let wanted = resolve_allowed_roots(cm, &bases);
+    let absent = absent_configured(cm, &bases);
     match apply_roots(cm, &wanted, bases.home.as_deref()) {
         Ok(report) => {
             let (warn, text) = describe(&report);
-            warn.then(|| format!("{text}\n"))
+            let absent_text = (!absent.is_empty()).then(|| {
+                let list: Vec<String> = absent.iter().map(|p| p.display().to_string()).collect();
+                format!(
+                    "codebase-memory: allowed_roots entries that are not folders: {}. Fix the \
+                     entry in the llmenv config.",
+                    list.join(", ")
+                )
+            });
+            let text = [warn.then_some(text), absent_text]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!text.is_empty()).then(|| format!("{text}\n"))
         }
         Err(e) => {
             tracing::warn!(error = %e, "codebase-memory roots could not be applied");
@@ -721,6 +751,25 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn expanding_never_panics_and_leaves_no_dollar(
+            entry in "\\PC{0,40}",
+        ) {
+            let env = |name: &str| Some(format!("/v/{name}"));
+            if let Some(path) = expand_root(&entry, Some(Path::new("/home/u")), &env) {
+                let text = path.to_string_lossy().into_owned();
+                prop_assert!(!text.contains('$'), "{text}");
+            }
+        }
+
+        #[test]
+        fn every_parsed_root_is_an_absolute_line_of_the_input(listing in "(\\PC{0,30}\n){0,6}") {
+            for root in parse_roots(&listing) {
+                prop_assert!(root.is_absolute());
+                prop_assert!(listing.lines().any(|l| l.trim() == root.to_string_lossy()));
+            }
+        }
+
         #[test]
         fn a_path_under_any_root_is_inside_and_a_path_under_none_is_outside(
             roots in prop::collection::vec("/[a-z]{1,6}(/[a-z]{1,6}){0,2}", 1..4),

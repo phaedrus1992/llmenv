@@ -200,7 +200,7 @@ fn print_roots(
         .unwrap_or_else(|e| {
             (
                 CheckLevel::Info,
-                format!("codebase-memory: roots not checked: {e}"),
+                format!("codebase-memory: cannot check the allowed roots: {e}"),
             )
         });
     super::print_check(check, pass, warn, info);
