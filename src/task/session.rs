@@ -658,7 +658,7 @@ fn untag_unfinished(
 /// The tasks that keep a session from finishing: every `open`, `wip`, or
 /// `waiting` task (#2416).
 #[must_use]
-pub(crate) fn unfinished_tasks(tasks: &[Task]) -> Vec<&Task> {
+fn unfinished_tasks(tasks: &[Task]) -> Vec<&Task> {
     tasks
         .iter()
         .filter(|t| t.state != TaskState::Done)
