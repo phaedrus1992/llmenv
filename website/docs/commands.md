@@ -831,7 +831,11 @@ active context (active bundles, active MCP servers, etc.). Checks:
   the hook's bundle by file type instead.
 - token-efficiency settings — warns when `BASH_MAX_OUTPUT_LENGTH`,
   `MAX_MCP_OUTPUT_TOKENS`, `ENABLE_PROMPT_CACHING_1H`, and
-  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` are not set; reports (info) whether
+  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` are not set. The autocompact check reads
+  `native.claude_code` `autoCompactEnabled` and `autoCompactWindow` too
+  (changed in v3.12.0): with `autoCompactEnabled: false` it reports info and
+  recommends nothing, and with a window set it names the window the percentage
+  applies to. It reports (info) whether
   `CLAUDE_CODE_SUBAGENT_MODEL` is set; and checks whether a context-mode MCP
   server is registered
 - cached OAuth credential (added in v3.8.0) — reports whether a token is cached

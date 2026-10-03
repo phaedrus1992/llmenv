@@ -103,8 +103,12 @@ of those holds it.
 The check only warns: it never changes the exit status, and `llmenv validate` does not report it.
 If a rendered file is not valid JSON, doctor names the file and skips it.
 
-Two token-efficiency recommendations also changed in v3.12.0:
+Three token-efficiency recommendations also changed in v3.12.0:
 
+- When `native.claude_code.autoCompactEnabled` is `false`, doctor reports info and recommends no
+  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, because automatic compaction is off. When `autoCompactWindow` is set, at top
+  level or under `modelSettings`, the message names the window the percentage applies to. The unset warning says
+  the variable only matters in sessions that compact before the model's limit.
 - When `native.claude_code.bashOutputMaxChars` is set, doctor reports it and skips
   `BASH_MAX_OUTPUT_LENGTH`, because Claude Code ignores the variable while the setting is set.
 - `CLAUDE_CODE_PROMPT_CACHE_TTL` takes precedence over `ENABLE_PROMPT_CACHING_1H`. The prompt-cache check
