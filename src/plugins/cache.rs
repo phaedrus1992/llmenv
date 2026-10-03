@@ -311,7 +311,7 @@ pub struct MarketplacePluginEntry {
     pub(crate) name: String,
     pub(crate) source: String,
     /// For a `git-subdir` source: the directory of the clone that holds the plugin (#2441).
-    pub(crate) subdir: Option<String>,
+    subdir: Option<String>,
 }
 
 /// Parse plugin entries from a marketplace clone's `.claude-plugin/marketplace.json`.
@@ -458,7 +458,7 @@ fn github_clone_url(name: &str, repo: &str) -> Result<String> {
 }
 
 /// True for a full git commit id: 40 hex digits (SHA-1) or 64 (SHA-256).
-pub(crate) fn is_commit_sha(text: &str) -> bool {
+fn is_commit_sha(text: &str) -> bool {
     matches!(text.len(), 40 | 64) && text.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
@@ -579,7 +579,7 @@ pub(crate) fn is_external_plugin_source(source: &str) -> bool {
 /// Returns `SyncError::NotCloned` when the payload is not present and `refresh`
 /// is false. Returns `SyncError::CloneFailed` on clone failure. Returns
 /// `SyncError::Other` when git HEAD cannot be resolved after a successful clone.
-pub(crate) fn sync_external_plugin(
+fn sync_external_plugin(
     cache_dir: &Path,
     marketplace: &str,
     plugin: &str,
