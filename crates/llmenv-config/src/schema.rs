@@ -1465,6 +1465,11 @@ pub struct CodebaseMemory {
     /// override shape as [`Memory::mcp_permissions`].
     #[serde(default)]
     pub mcp_permissions: Option<McpPermissions>,
+    /// Memory budget for codebase-memory-mcp indexing, in MB (`CBM_MEM_BUDGET_MB`, #2154).
+    /// Unset leaves the variable unset, so the server uses its own default. The MCP server launch
+    /// and the SessionStart auto-index both get it, so the two agree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_budget_mb: Option<u32>,
 }
 
 fn default_throttle_cache_ttl() -> u64 {
@@ -2979,6 +2984,7 @@ force_for_plugin: true
         let caps = Capabilities {
             features: Some(Features {
                 codebase_memory: vec![CodebaseMemory {
+                    mem_budget_mb: None,
                     when: vec![],
                     index_path: None,
                     mcp_permissions: None,

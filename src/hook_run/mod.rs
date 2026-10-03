@@ -2638,7 +2638,7 @@ fn handle_web_fetch_in(
 /// default. Single source of truth for both the spawned child's
 /// `CBM_CACHE_DIR` and the indexer's own diagnostic log (#1091), so they
 /// can't drift apart.
-fn codebase_memory_cache_dir(
+pub(crate) fn codebase_memory_cache_dir(
     cm: &crate::config::CodebaseMemory,
     state_dir: &std::path::Path,
 ) -> std::path::PathBuf {
@@ -2725,14 +2725,15 @@ pub(crate) fn redirect_stderr_to_detached_log(cmd: &mut std::process::Command) {
 /// assert on the command shape without launching a real process (#365).
 ///
 /// `CBM_CACHE_DIR` is only set when `cm.index_path` is explicit (#1493);
-/// `CBM_ALLOWED_ROOT` is never set (#1495) — same treatment as
-/// `resolve_codebase_memory` (`src/mcp/resolve.rs`), which this mirrors so
-/// the SessionStart auto-index and the MCP server launch agree on scope.
+/// `CBM_ALLOWED_ROOT` is never set (#1495). `CBM_MEM_BUDGET_MB` is set when
+/// `cm.mem_budget_mb` is (#2154). Same treatment as `resolve_codebase_memory`
+/// (`src/mcp/resolve.rs`), which this mirrors so the SessionStart auto-index
+/// and the MCP server launch agree on scope and budget.
 fn build_index_repository_command(
     project_root: &std::path::Path,
     cm: &crate::config::CodebaseMemory,
 ) -> std::process::Command {
-    index_command(project_root, cm.index_path.as_deref())
+    index_command(project_root, cm.index_path.as_deref(), cm.mem_budget_mb)
 }
 
 /// [`build_index_repository_command`] from the two values the command needs, so the checkpointed
@@ -2740,6 +2741,7 @@ fn build_index_repository_command(
 fn index_command(
     project_root: &std::path::Path,
     index_path: Option<&str>,
+    mem_budget_mb: Option<u32>,
 ) -> std::process::Command {
     // repo_path must become JSON text regardless (the CLI arg is a JSON
     // string), so this lossy step is unavoidable here — unlike the env var
@@ -2754,7 +2756,76 @@ fn index_command(
     if let Some(index_path) = index_path {
         cmd.env("CBM_CACHE_DIR", index_path);
     }
+    if let Some(budget) = mem_budget_mb {
+        cmd.env("CBM_MEM_BUDGET_MB", budget.to_string());
+    }
     cmd
+}
+
+/// Where the last index result of `project_root` is kept, under `cache_dir`. The cache directory
+/// is shared by every project, so the file name carries a stable key of the project root. The
+/// writer and `llmenv doctor` both call this (#2154).
+pub(crate) fn index_result_path(
+    cache_dir: &std::path::Path,
+    project_root: &std::path::Path,
+) -> std::path::PathBuf {
+    use sha2::{Digest, Sha256};
+    #[cfg(unix)]
+    let bytes = {
+        use std::os::unix::ffi::OsStrExt;
+        project_root.as_os_str().as_bytes().to_vec()
+    };
+    #[cfg(not(unix))]
+    let bytes = project_root.to_string_lossy().into_owned().into_bytes();
+    let digest = Sha256::digest(&bytes);
+    let key: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    cache_dir.join(format!("index-result-{key}.json"))
+}
+
+/// Send the stdout of an indexer that `cmd` starts directly to the result file. When `cmd` is the
+/// wrapper it does this for the indexer it starts (#2154).
+fn direct_index_stdout(
+    cmd: &mut std::process::Command,
+    wrapped: bool,
+    result_path: &std::path::Path,
+) {
+    if !wrapped {
+        cmd.stdout(result_stdout(result_path));
+    }
+}
+
+/// Create the result file at `path`, owner-only and new. An existing file or symlink at `path` is
+/// removed first, so the open can neither follow a link nor reuse a file that another user made.
+fn create_result_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    // A failed removal shows below: `create_new` then fails on what is still there.
+    let _ = std::fs::remove_file(path);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+/// The stdout for an indexer that reports its result as JSON: the result file, or null when the
+/// file cannot be created (a missing result is a smaller problem than skipping the index).
+fn result_stdout(path: &std::path::Path) -> std::process::Stdio {
+    match create_result_file(path) {
+        Ok(file) => std::process::Stdio::from(file),
+        Err(e) => {
+            tracing::warn!(
+                "cannot create the index result file {}, so doctor cannot report the result: {e}",
+                path.display()
+            );
+            std::process::Stdio::null()
+        }
+    }
+}
+
+/// Whether an index job runs through the `cbm-index-run` wrapper: it needs a checkpoint and an
+/// executable to run it with (#2396).
+fn uses_wrapper(checkpoint: Option<&std::path::Path>, exe: Option<&std::path::Path>) -> bool {
+    checkpoint.is_some() && exe.is_some()
 }
 
 /// The process that runs one index job: `llmenv cbm-index-run` when there is a checkpoint and an
@@ -2799,9 +2870,13 @@ fn trigger_codebase_memory_index(
 ) {
     // A checkpointed run goes through `llmenv cbm-index-run`, which observes the indexer's exit
     // status. Without a checkpoint the indexer starts directly, as before (#2396).
+    let cache_dir = codebase_memory_cache_dir(cm, state_dir);
+    let result_path = index_result_path(&cache_dir, project_root);
     let inputs = detached_cbm::IndexInputs {
         project_root: project_root.display().to_string(),
         index_path: cm.index_path.clone(),
+        mem_budget_mb: cm.mem_budget_mb,
+        result_path: Some(result_path.display().to_string()),
     };
     let checkpoint = checkpoint::begin(
         Some(state_dir),
@@ -2809,10 +2884,12 @@ fn trigger_codebase_memory_index(
         &inputs,
         None,
     );
-    let mut cmd = index_job_command(checkpoint.as_deref(), std::env::current_exe().ok(), || {
+    let exe = std::env::current_exe().ok();
+    // The wrapper is used only with both a checkpoint and an executable (`index_job_command`).
+    let wrapped = uses_wrapper(checkpoint.as_deref(), exe.as_deref());
+    let mut cmd = index_job_command(checkpoint.as_deref(), exe, || {
         build_index_repository_command(project_root, cm)
     });
-    let cache_dir = codebase_memory_cache_dir(cm, state_dir);
     let log_path = cache_dir.join("index.log");
     // Only the default cache dir (under llmenv's own state tree) gets
     // hardened to 0700. A user-configured `index_path` (#1196) can be shared
@@ -2826,6 +2903,9 @@ fn trigger_codebase_memory_index(
         harden_dir,
         "codebase-memory-mcp index_repository",
     );
+    // Without the wrapper the indexer starts here, so its stdout goes to the result file here. The
+    // wrapper does the same for the indexer it starts. The log redirect above made the directory.
+    direct_index_stdout(&mut cmd, wrapped, &result_path);
     crate::mcp::proxy::detach_process_group(&mut cmd);
     if let Err(e) = cmd.spawn() {
         tracing::debug!("codebase-memory-mcp index_repository: failed to spawn: {e}");
@@ -4798,6 +4878,7 @@ mod tests {
     #[test]
     fn index_repository_command_sets_args_and_no_scoping_env() {
         let cm = crate::config::CodebaseMemory {
+            mem_budget_mb: None,
             when: vec!["proj".to_string()],
             index_path: None,
             mcp_permissions: None,
@@ -4837,6 +4918,7 @@ mod tests {
     #[test]
     fn index_repository_command_index_path_override_wins() {
         let cm = crate::config::CodebaseMemory {
+            mem_budget_mb: None,
             when: vec!["proj".to_string()],
             index_path: Some("/custom/path".to_string()),
             mcp_permissions: None,
@@ -4862,6 +4944,7 @@ mod tests {
     #[test]
     fn codebase_memory_cache_dir_defaults_under_state_dir() {
         let cm = crate::config::CodebaseMemory {
+            mem_budget_mb: None,
             when: vec!["proj".to_string()],
             index_path: None,
             mcp_permissions: None,
@@ -4875,6 +4958,7 @@ mod tests {
     #[test]
     fn codebase_memory_cache_dir_honors_index_path_override() {
         let cm = crate::config::CodebaseMemory {
+            mem_budget_mb: None,
             when: vec!["proj".to_string()],
             index_path: Some("/custom/path".to_string()),
             mcp_permissions: None,
@@ -4894,10 +4978,88 @@ mod tests {
     /// before the spawn is attempted.
     #[cfg(unix)]
     #[test]
+    fn the_index_command_and_the_mcp_server_agree_on_the_memory_budget() {
+        let env_of = |cmd: &std::process::Command, key: &str| {
+            cmd.get_envs()
+                .find(|(k, _)| *k == std::ffi::OsStr::new(key))
+                .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+        };
+        let with = crate::config::CodebaseMemory {
+            when: vec!["p".into()],
+            mem_budget_mb: Some(8192),
+            ..Default::default()
+        };
+        let cmd = build_index_repository_command(std::path::Path::new("/r"), &with);
+        assert_eq!(env_of(&cmd, "CBM_MEM_BUDGET_MB").as_deref(), Some("8192"));
+        let without = crate::config::CodebaseMemory {
+            when: vec!["p".into()],
+            ..Default::default()
+        };
+        let cmd = build_index_repository_command(std::path::Path::new("/r"), &without);
+        assert_eq!(env_of(&cmd, "CBM_MEM_BUDGET_MB"), None);
+    }
+
+    #[test]
+    fn the_wrapper_is_used_only_with_a_checkpoint_and_an_executable() {
+        let p = Some(std::path::Path::new("/c"));
+        let e = Some(std::path::Path::new("/exe"));
+        assert!(uses_wrapper(p, e));
+        assert!(!uses_wrapper(p, None));
+        assert!(!uses_wrapper(None, e));
+        assert!(!uses_wrapper(None, None));
+    }
+
+    #[test]
+    fn a_result_file_that_cannot_be_replaced_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("result.json");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("inside"), "x").unwrap();
+        assert!(create_result_file(&path).is_err());
+    }
+
+    #[test]
+    fn the_result_path_is_stable_per_project_and_differs_between_projects() {
+        let dir = std::path::Path::new("/cache");
+        let a = index_result_path(dir, std::path::Path::new("/work/a"));
+        assert_eq!(a, index_result_path(dir, std::path::Path::new("/work/a")));
+        assert_ne!(a, index_result_path(dir, std::path::Path::new("/work/b")));
+        assert_eq!(a.parent(), Some(dir));
+        let name = a.file_name().unwrap().to_string_lossy().into_owned();
+        let key = name
+            .strip_prefix("index-result-")
+            .and_then(|n| n.strip_suffix(".json"))
+            .unwrap();
+        assert!(
+            key.len() == 16 && key.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{name}"
+        );
+    }
+
+    #[test]
+    fn the_result_stdout_truncates_the_file_and_falls_back_to_null() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("result.json");
+        std::fs::write(&path, "old result that is long").unwrap();
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "echo new"]).stdout(result_stdout(&path));
+        assert!(cmd.status().unwrap().success());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\n");
+        // A path in a folder that does not exist cannot be opened: the child still runs.
+        let missing = dir.path().join("no/such/dir/result.json");
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "echo ignored"])
+            .stdout(result_stdout(&missing));
+        assert!(cmd.status().unwrap().success());
+        assert!(!missing.exists());
+    }
+
+    #[test]
     fn trigger_codebase_memory_index_creates_owner_only_bounded_log() {
         use std::os::unix::fs::PermissionsExt;
         let state_dir = tempfile::tempdir().unwrap();
         let cm = crate::config::CodebaseMemory {
+            mem_budget_mb: None,
             when: vec!["proj".to_string()],
             index_path: None,
             mcp_permissions: None,
@@ -4908,6 +5070,26 @@ mod tests {
         let meta = std::fs::metadata(&log_path)
             .unwrap_or_else(|e| panic!("expected {} to exist: {e}", log_path.display()));
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn an_indexer_started_directly_writes_its_result_but_the_wrapper_does_it_otherwise() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = dir.path().join("result.json");
+        let run = |checkpointed: bool| {
+            let mut cmd = std::process::Command::new("sh");
+            cmd.args(["-c", "echo '{}'"])
+                .stdout(std::process::Stdio::null());
+            direct_index_stdout(&mut cmd, checkpointed, &result);
+            cmd.status().unwrap();
+        };
+        run(true);
+        assert!(
+            !result.exists(),
+            "the wrapper writes the file when there is a checkpoint"
+        );
+        run(false);
+        assert_eq!(std::fs::read_to_string(&result).unwrap().trim(), "{}");
     }
 
     // #1196: a user-configured `index_path` can be shared with a
@@ -4925,6 +5107,7 @@ mod tests {
         let index_dir = tempfile::tempdir().unwrap();
         std::fs::set_permissions(index_dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
         let cm = crate::config::CodebaseMemory {
+            mem_budget_mb: None,
             when: vec!["proj".to_string()],
             index_path: Some(index_dir.path().to_str().unwrap().to_string()),
             mcp_permissions: None,
@@ -5004,7 +5187,7 @@ mod tests {
         fn index_repository_command_json_arg_always_valid_and_roundtrips(
             path_str in "[\\PC]{0,60}"
         ) {
-            let cm = crate::config::CodebaseMemory {
+            let cm = crate::config::CodebaseMemory { mem_budget_mb: None,
                 when: vec!["proj".to_string()],
                 index_path: None,
                 mcp_permissions: None,
@@ -5029,7 +5212,7 @@ mod tests {
         fn index_repository_command_no_scoping_env_when_index_path_none(
             path_str in "[\\PC]{0,60}"
         ) {
-            let cm = crate::config::CodebaseMemory {
+            let cm = crate::config::CodebaseMemory { mem_budget_mb: None,
                 when: vec!["proj".to_string()],
                 index_path: None,
                 mcp_permissions: None,
