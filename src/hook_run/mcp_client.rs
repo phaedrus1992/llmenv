@@ -45,7 +45,26 @@ pub struct McpHttpClient {
     /// `ensure_session` — the workspace denies `await_holding_lock` for the
     /// std variant.
     session_id: std::sync::Arc<tokio::sync::Mutex<Option<String>>>,
+    /// What the server said in its last `initialize` reply (#2148).
+    init_info: std::sync::Arc<tokio::sync::Mutex<Option<InitializeInfo>>>,
 }
+
+/// What an MCP server reports about itself in its `initialize` reply.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct InitializeInfo {
+    pub instructions: Option<String>,
+}
+
+/// One tool of a server's `tools/list` reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ToolSummary {
+    pub name: String,
+    pub description: Option<String>,
+}
+
+/// The most `tools/list` pages [`McpHttpClient::list_tools`] follows, so a server that always
+/// returns a cursor cannot loop doctor.
+pub(crate) const MAX_TOOL_PAGES: usize = 50;
 
 /// Internal result of one [`McpHttpClient::try_call_tool`] attempt: whether a
 /// failure is worth clearing the cached session and retrying once (#1094), or
@@ -107,25 +126,50 @@ impl McpHttpClient {
     /// Returns an error if the URL is invalid, uses an unsupported scheme, or
     /// points to a private/loopback IP address (SSRF protection).
     pub fn new(url: String, timeout: Duration) -> anyhow::Result<Self> {
-        // Resolve and SSRF-validate up front, then pin reqwest to exactly the
-        // vetted addresses. Pinning closes the DNS-rebinding TOCTOU: reqwest never
-        // performs its own (re-)resolution at send() time, so a hostname cannot
-        // resolve to a public IP during validation and a private one at connect
-        // time — the connection can only target an address we already approved.
+        Self::with_headers(url, timeout, &std::collections::BTreeMap::new())
+    }
+
+    /// [`Self::new`] that also sends `headers` on every request, so a `Remote` entry's
+    /// configured headers reach the probe (#2148).
+    ///
+    /// # Errors
+    /// As [`Self::new`], and when a header name or value is not valid HTTP.
+    pub(crate) fn with_headers(
+        url: String,
+        timeout: Duration,
+        headers: &std::collections::BTreeMap<String, String>,
+    ) -> anyhow::Result<Self> {
+        // Resolve and SSRF-validate up front, then pin reqwest to exactly the vetted
+        // addresses. Pinning closes the DNS-rebinding TOCTOU: reqwest never re-resolves at
+        // send() time, so the connection can only target an address we already approved.
         let (host, addrs) =
             validate_url_production(&url, SsrfPolicy::AllowPrivateNetwork, timeout)?;
-        // Pin unconditionally to the host/addrs the SSRF check just vetted.
-        // validation already guaranteed a non-empty host, so there is no
-        // fall-through path where reqwest could re-resolve at send() time.
-        let client = reqwest::Client::builder()
+        let mut map = reqwest::header::HeaderMap::new();
+        for (name, value) in headers {
+            let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+                .with_context(|| format!("MCP header name '{name}' is not valid"))?;
+            let mut value = reqwest::header::HeaderValue::from_str(value)
+                .with_context(|| format!("MCP header '{name}' has a value that is not valid"))?;
+            value.set_sensitive(true);
+            map.insert(name, value);
+        }
+        let mut builder = reqwest::Client::builder()
             .timeout(timeout)
-            .resolve_to_addrs(&host, &addrs)
+            .default_headers(map)
+            .resolve_to_addrs(&host, &addrs);
+        // Configured headers can hold credentials. A redirect could send them to another host,
+        // which the address pin above does not cover.
+        if !headers.is_empty() {
+            builder = builder.redirect(reqwest::redirect::Policy::none());
+        }
+        let client = builder
             .build()
             .context("failed to build HTTP client (TLS backend unavailable)")?;
         Ok(Self {
             url,
             client,
             session_id: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            init_info: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         })
     }
 
@@ -140,7 +184,23 @@ impl McpHttpClient {
             url,
             client,
             session_id: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            init_info: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         })
+    }
+
+    /// The server URL without credentials or a query string, for error text that reaches a
+    /// terminal.
+    fn display_url(&self) -> String {
+        url::Url::parse(&self.url).map_or_else(
+            |_| "(invalid URL)".to_string(),
+            |mut u| {
+                let _ = u.set_username("");
+                let _ = u.set_password(None);
+                u.set_query(None);
+                u.set_fragment(None);
+                u.to_string()
+            },
+        )
     }
 
     /// Negotiate an MCP session if one hasn't already been established on this
@@ -151,6 +211,12 @@ impl McpHttpClient {
     /// # Errors
     /// Network failure or a non-2xx status on the `initialize` request itself.
     async fn ensure_session(&self) -> anyhow::Result<Option<String>> {
+        self.ensure_session_with(false).await
+    }
+
+    /// [`Self::ensure_session`]. With `capture_info`, the `initialize` reply body is read into
+    /// `init_info`; the other callers never read it.
+    async fn ensure_session_with(&self, capture_info: bool) -> anyhow::Result<Option<String>> {
         let mut cached = self.session_id.lock().await;
         if let Some(sid) = cached.as_ref() {
             return Ok(Some(sid.clone()));
@@ -176,7 +242,7 @@ impl McpHttpClient {
             .json(&init_req)
             .send()
             .await
-            .with_context(|| format!("POST {} for MCP initialize", self.url))?;
+            .with_context(|| format!("POST {} for MCP initialize", self.display_url()))?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp
@@ -197,6 +263,15 @@ impl McpHttpClient {
             .get("mcp-session-id")
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
+        if capture_info {
+            let text = resp.text().await.with_context(|| {
+                format!(
+                    "reading the MCP initialize reply from {}",
+                    self.display_url()
+                )
+            })?;
+            *self.init_info.lock().await = Some(parse_initialize_info(&text)?);
+        }
 
         if let Some(sid) = &sid {
             // Best-effort: some servers require this ack before accepting
@@ -227,6 +302,55 @@ impl McpHttpClient {
         // Drop any cached session: a probe must ask the server, not trust an old id.
         *self.session_id.lock().await = None;
         self.ensure_session().await.map(|_| ())
+    }
+
+    /// Ask the server for a fresh `initialize` and return what it said about itself.
+    ///
+    /// # Errors
+    /// Network failure, timeout, a non-2xx status, or a reply with no readable `result`.
+    pub(crate) async fn initialize_info(&self) -> anyhow::Result<InitializeInfo> {
+        // Drop any cached session: the info must come from a fresh `initialize`.
+        *self.session_id.lock().await = None;
+        self.ensure_session_with(true).await?;
+        Ok(self.init_info.lock().await.clone().unwrap_or_default())
+    }
+
+    /// List every tool of the server, following `nextCursor` for at most [`MAX_TOOL_PAGES`] pages.
+    /// A session the server no longer knows is re-initialized once, as in [`Self::call_tool`].
+    ///
+    /// # Errors
+    /// Network failure, a non-2xx status, a JSON-RPC `error`, a reply with no `result.tools`
+    /// array, or more than [`MAX_TOOL_PAGES`] pages.
+    pub(crate) async fn list_tools(&self) -> anyhow::Result<Vec<ToolSummary>> {
+        let mut tools = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..MAX_TOOL_PAGES {
+            let params = cursor
+                .as_ref()
+                .map_or_else(|| json!({}), |c| json!({ "cursor": c }));
+            let body = match self.post_rpc("tools/list", &params, "tools/list").await {
+                Ok(body) => body,
+                Err(CallToolError::StaleSession(first_err)) => {
+                    *self.session_id.lock().await = None;
+                    self.post_rpc("tools/list", &params, "tools/list")
+                        .await
+                        .map_err(anyhow::Error::from)
+                        .with_context(|| {
+                            format!("retry after stale session; first attempt: {first_err}")
+                        })?
+                }
+                Err(CallToolError::Fatal(e)) => return Err(e),
+            };
+            let (page, next) = parse_tools_page(body.get("result").unwrap_or(&Value::Null))?;
+            tools.extend(page);
+            cursor = next;
+            if cursor.is_none() {
+                return Ok(tools);
+            }
+        }
+        Err(anyhow!(
+            "tools/list returned more than {MAX_TOOL_PAGES} pages; stopped at the cap"
+        ))
     }
 
     /// Call one MCP tool and return the concatenated text content.
@@ -277,14 +401,28 @@ impl McpHttpClient {
     /// One attempt at `call_tool`, distinguishing a stale-session rejection
     /// (worth clearing the cache and retrying once) from every other failure.
     async fn try_call_tool(&self, name: &str, arguments: &Value) -> Result<String, CallToolError> {
+        let params = json!({ "name": name, "arguments": arguments });
+        let body = self
+            .post_rpc("tools/call", &params, &format!("tool {name}"))
+            .await?;
+        extract_text(&body).ok_or_else(|| {
+            CallToolError::Fatal(anyhow!(
+                "tool {name} response missing result.content[].text"
+            ))
+        })
+    }
+
+    /// Send one JSON-RPC request on the session and return the decoded reply. `label` names the
+    /// request in error text. The one request path for `tools/call` and `tools/list`.
+    async fn post_rpc(
+        &self,
+        method: &str,
+        params: &Value,
+        label: &str,
+    ) -> Result<Value, CallToolError> {
         let session_id = self.ensure_session().await.map_err(CallToolError::Fatal)?;
 
-        let req = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": { "name": name, "arguments": arguments }
-        });
+        let req = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
         let mut builder = self
             .client
             .post(&self.url)
@@ -303,7 +441,7 @@ impl McpHttpClient {
             .json(&req)
             .send()
             .await
-            .with_context(|| format!("POST {} for tool {name}", self.url))
+            .with_context(|| format!("POST {} for {label}", self.display_url()))
             .map_err(CallToolError::Fatal)?;
 
         // Capture status and body for detailed error reporting.
@@ -315,12 +453,12 @@ impl McpHttpClient {
                 .inspect_err(|e| {
                     tracing::warn!(
                         error = %e,
-                        tool = %name,
-                        "failed to read MCP tool error response body"
+                        request = %label,
+                        "failed to read MCP error response body"
                     )
                 })
                 .unwrap_or_else(|_| "(failed to read error body)".to_string());
-            let err = anyhow!("tool {name} returned HTTP {}: {}", status, body);
+            let err = anyhow!("{label} returned HTTP {}: {}", status, body);
             return Err(if is_stale_session_status(status) {
                 CallToolError::StaleSession(err)
             } else {
@@ -328,23 +466,93 @@ impl McpHttpClient {
             });
         }
 
-        let body: Value = resp
-            .json()
+        let text = resp
+            .text()
             .await
-            .with_context(|| format!("decoding JSON response for tool {name}"))
+            .with_context(|| format!("decoding JSON response for {label}"))
+            .map_err(CallToolError::Fatal)?;
+        let body = parse_rpc_body(&text)
+            .ok_or_else(|| anyhow!("decoding JSON response for {label}: the reply is not JSON"))
             .map_err(CallToolError::Fatal)?;
 
         if let Some(err) = body.get("error") {
             return Err(CallToolError::Fatal(anyhow!(
-                "tool {name} JSON-RPC error: {err}"
+                "{label} JSON-RPC error: {err}"
             )));
         }
-        extract_text(&body).ok_or_else(|| {
-            CallToolError::Fatal(anyhow!(
-                "tool {name} response missing result.content[].text"
-            ))
-        })
+        Ok(body)
     }
+}
+
+/// Decode a JSON-RPC reply body, which is plain JSON or an SSE stream. A plain body is returned
+/// as it is. An SSE stream gives the first `data:` event that has a `result` or an `error`, so a
+/// notification event ahead of the reply is skipped.
+fn parse_rpc_body(body: &str) -> Option<Value> {
+    if let Ok(value) = serde_json::from_str::<Value>(body.trim()) {
+        return Some(value);
+    }
+    body.lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .filter_map(|data| serde_json::from_str::<Value>(data.trim()).ok())
+        .find(|v| v.get("result").is_some() || v.get("error").is_some())
+}
+
+/// Read `result.instructions` from an `initialize` reply.
+fn parse_initialize_info(body: &str) -> anyhow::Result<InitializeInfo> {
+    let reply = parse_rpc_body(body).context("the initialize reply is not JSON or SSE")?;
+    if let Some(error) = reply.get("error") {
+        return Err(anyhow!("MCP initialize JSON-RPC error: {error}"));
+    }
+    let result = reply
+        .get("result")
+        .context("the initialize reply has no result")?;
+    let instructions = match result.get("instructions") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(text)) => Some(text.clone()),
+        Some(other) => return Err(anyhow!("initialize instructions is not a string: {other}")),
+    };
+    Ok(InitializeInfo { instructions })
+}
+
+/// Read one `tools/list` `result`: its tools and its `nextCursor`. Both the HTTP and the stdio
+/// probe use it, so the two cannot disagree.
+///
+/// # Errors
+/// The result has no `tools` array, or a tool has no string `name` or a `description` that is not
+/// a string.
+pub(crate) fn parse_tools_page(
+    result: &Value,
+) -> anyhow::Result<(Vec<ToolSummary>, Option<String>)> {
+    let listed = result
+        .get("tools")
+        .and_then(Value::as_array)
+        .context("tools/list reply has no result.tools array")?;
+    let mut tools = Vec::with_capacity(listed.len());
+    for (index, tool) in listed.iter().enumerate() {
+        let name = tool
+            .get("name")
+            .and_then(Value::as_str)
+            .with_context(|| format!("tools/list entry {index} has no string name"))?;
+        let description = match tool.get("description") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(text)) => Some(text.clone()),
+            Some(_) => {
+                return Err(anyhow!(
+                    "tool '{name}' has a description that is not a string"
+                ));
+            }
+        };
+        tools.push(ToolSummary {
+            name: name.to_string(),
+            description,
+        });
+    }
+    let next = result
+        .get("nextCursor")
+        .and_then(Value::as_str)
+        .filter(|c| !c.is_empty())
+        .map(String::from);
+    Ok((tools, next))
 }
 
 /// Pull and concatenate every `text` entry from `result.content[]`.
@@ -640,6 +848,339 @@ mod tests {
         let client =
             McpHttpClient::test_new(server.uri(), Duration::from_millis(200)).expect("valid URL");
         assert!(client.probe().await.is_err(), "a wedged server must fail");
+    }
+
+    fn init_ok(sid: &str, instructions: Option<&str>) -> ResponseTemplate {
+        let mut result = serde_json::json!({ "protocolVersion": "2025-06-18" });
+        if let Some(text) = instructions {
+            result["instructions"] = text.into();
+        }
+        ResponseTemplate::new(200)
+            .insert_header("mcp-session-id", sid)
+            .set_body_json(serde_json::json!({ "jsonrpc": "2.0", "id": 0, "result": result }))
+    }
+
+    /// Matches a `tools/list` request by its `params.cursor`.
+    struct Cursor(Option<&'static str>);
+
+    impl wiremock::Match for Cursor {
+        fn matches(&self, request: &wiremock::Request) -> bool {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or_default();
+            body["params"]["cursor"].as_str() == self.0
+        }
+    }
+
+    fn tools_page(names: &[&str], next: Option<&str>) -> ResponseTemplate {
+        let tools: Vec<_> = names
+            .iter()
+            .map(|n| serde_json::json!({ "name": n, "description": format!("about {n}") }))
+            .collect();
+        let mut result = serde_json::json!({ "tools": tools });
+        if let Some(cursor) = next {
+            result["nextCursor"] = cursor.into();
+        }
+        ResponseTemplate::new(200)
+            .set_body_json(serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": result }))
+    }
+
+    async fn server_with_session(instructions: Option<&str>) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(JsonRpcMethod("initialize"))
+            .respond_with(init_ok("s1", instructions))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(JsonRpcMethod("notifications/initialized"))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn initialize_info_returns_the_instructions() {
+        let server = server_with_session(Some("be careful")).await;
+        let client =
+            McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("valid URL");
+        let info = client.initialize_info().await.expect("info");
+        assert_eq!(info.instructions.as_deref(), Some("be careful"));
+    }
+
+    #[tokio::test]
+    async fn initialize_info_is_empty_when_the_server_sends_no_instructions() {
+        let server = server_with_session(None).await;
+        let client =
+            McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("valid URL");
+        assert_eq!(
+            client.initialize_info().await.expect("info"),
+            InitializeInfo::default()
+        );
+    }
+
+    #[test]
+    fn initialize_info_reads_json_and_sse_bodies() {
+        let json = r#"{"result":{"instructions":"a"}}"#;
+        assert_eq!(
+            parse_initialize_info(json).unwrap().instructions.as_deref(),
+            Some("a")
+        );
+        let sse = format!("event: message\ndata: {json}\n\n");
+        assert_eq!(
+            parse_initialize_info(&sse).unwrap().instructions.as_deref(),
+            Some("a")
+        );
+        // A notification event ahead of the reply is skipped.
+        let two = format!("data: {{\"method\":\"notifications/x\"}}\n\ndata: {json}\n\n");
+        assert_eq!(
+            parse_initialize_info(&two).unwrap().instructions.as_deref(),
+            Some("a")
+        );
+        let none = r#"{"result":{}}"#;
+        assert_eq!(
+            parse_initialize_info(none).unwrap(),
+            InitializeInfo::default()
+        );
+    }
+
+    #[test]
+    fn initialize_info_fails_loudly_on_a_reply_it_cannot_read() {
+        for body in [
+            "not json",
+            "",
+            r#"{"id":0}"#,
+            r#"{"result":{"instructions":5}}"#,
+            r#"{"error":{"message":"no"}}"#,
+        ] {
+            assert!(parse_initialize_info(body).is_err(), "{body}");
+        }
+    }
+
+    #[test]
+    fn a_tools_page_rejects_malformed_entries() {
+        let ok = serde_json::json!({"tools":[{"name":"a"},{"name":"b","description":null}],"nextCursor":"n"});
+        let (tools, next) = parse_tools_page(&ok).unwrap();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(next.as_deref(), Some("n"));
+        for bad in [
+            serde_json::json!({}),
+            serde_json::json!({"tools":[{"description":"x"}]}),
+            serde_json::json!({"tools":[{"name":3}]}),
+            serde_json::json!({"tools":[{"name":"a","description":4}]}),
+        ] {
+            assert!(parse_tools_page(&bad).is_err(), "{bad}");
+        }
+        let empty_cursor = serde_json::json!({"tools":[],"nextCursor":""});
+        assert_eq!(parse_tools_page(&empty_cursor).unwrap().1, None);
+    }
+
+    #[test]
+    fn error_text_hides_the_url_query_and_credentials() {
+        let client = McpHttpClient::test_new(
+            "http://user:pw@127.0.0.1:9/mcp?token=secret#f".into(),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let shown = client.display_url();
+        assert!(!shown.contains("secret") && !shown.contains("pw") && !shown.contains("user"));
+        assert!(shown.contains("127.0.0.1:9/mcp"));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn an_initialize_reply_reads_the_same_as_json_or_sse(text in "[ -~é]{0,200}") {
+            let json = serde_json::json!({"result": {"instructions": text}}).to_string();
+            let sse = format!("event: message\ndata: {json}\n\n");
+            let plain = parse_initialize_info(&json).unwrap();
+            proptest::prop_assert_eq!(&plain, &parse_initialize_info(&sse).unwrap());
+            proptest::prop_assert_eq!(plain.instructions, Some(text));
+        }
+
+        #[test]
+        fn no_body_makes_the_reply_parser_panic(body in "\\PC{0,200}") {
+            let _ = parse_initialize_info(&body);
+            let _ = parse_rpc_body(&body);
+        }
+    }
+
+    #[tokio::test]
+    async fn initialize_info_fails_on_an_unreadable_reply_from_a_server() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("garbage"))
+            .mount(&server)
+            .await;
+        let client =
+            McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("valid URL");
+        assert!(client.initialize_info().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn list_tools_reads_an_sse_reply() {
+        let server = server_with_session(None).await;
+        let payload = serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"s"}]}});
+        Mock::given(method("POST"))
+            .and(JsonRpcMethod("tools/list"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(format!("event: message\ndata: {payload}\n\n")),
+            )
+            .mount(&server)
+            .await;
+        let client =
+            McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("valid URL");
+        assert_eq!(client.list_tools().await.unwrap()[0].name, "s");
+    }
+
+    #[tokio::test]
+    async fn with_headers_does_not_follow_a_redirect() {
+        let target = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(init_ok("s", None))
+            .expect(0)
+            .mount(&target)
+            .await;
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(307).insert_header("location", target.uri()))
+            .mount(&server)
+            .await;
+        let headers =
+            std::collections::BTreeMap::from([("x-api-key".to_string(), "k".to_string())]);
+        let client = McpHttpClient::with_headers(server.uri(), Duration::from_secs(2), &headers)
+            .expect("client");
+        assert!(client.probe().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn list_tools_joins_the_pages_in_order() {
+        let server = server_with_session(None).await;
+        Mock::given(method("POST"))
+            .and(JsonRpcMethod("tools/list"))
+            .and(Cursor(None))
+            .respond_with(tools_page(&["a", "b"], Some("p2")))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(JsonRpcMethod("tools/list"))
+            .and(Cursor(Some("p2")))
+            .respond_with(tools_page(&["c"], None))
+            .mount(&server)
+            .await;
+        let client =
+            McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("valid URL");
+        let tools = client.list_tools().await.expect("tools");
+        let names: Vec<_> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["a", "b", "c"]);
+        assert_eq!(tools[2].description.as_deref(), Some("about c"));
+    }
+
+    #[tokio::test]
+    async fn list_tools_with_one_page_makes_one_request() {
+        let server = server_with_session(None).await;
+        Mock::given(method("POST"))
+            .and(JsonRpcMethod("tools/list"))
+            .respond_with(tools_page(&["only"], None))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client =
+            McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("valid URL");
+        assert_eq!(client.list_tools().await.expect("tools").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn list_tools_stops_at_the_page_cap_and_names_it() {
+        let server = server_with_session(None).await;
+        Mock::given(method("POST"))
+            .and(JsonRpcMethod("tools/list"))
+            .respond_with(tools_page(&["t"], Some("again")))
+            .mount(&server)
+            .await;
+        let client =
+            McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("valid URL");
+        let err = client.list_tools().await.expect_err("cap").to_string();
+        assert!(err.contains(&MAX_TOOL_PAGES.to_string()), "{err}");
+    }
+
+    #[tokio::test]
+    async fn list_tools_reinitializes_once_after_a_stale_session() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(JsonRpcMethod("initialize"))
+            .respond_with(init_ok("sess-stale", None))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(JsonRpcMethod("initialize"))
+            .respond_with(init_ok("sess-fresh", None))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(JsonRpcMethod("tools/list"))
+            .and(wiremock::matchers::header("mcp-session-id", "sess-stale"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(JsonRpcMethod("tools/list"))
+            .and(wiremock::matchers::header("mcp-session-id", "sess-fresh"))
+            .respond_with(tools_page(&["ok"], None))
+            .mount(&server)
+            .await;
+        let client =
+            McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("valid URL");
+        assert_eq!(client.list_tools().await.expect("tools")[0].name, "ok");
+    }
+
+    #[tokio::test]
+    async fn list_tools_fails_on_a_reply_without_a_tools_array() {
+        let server = server_with_session(None).await;
+        Mock::given(method("POST"))
+            .and(JsonRpcMethod("tools/list"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": {} })),
+            )
+            .mount(&server)
+            .await;
+        let client =
+            McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("valid URL");
+        let err = client.list_tools().await.expect_err("no tools").to_string();
+        assert!(err.contains("result.tools"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn with_headers_sends_the_configured_headers() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::header("x-api-key", "secret"))
+            .respond_with(init_ok("s1", None))
+            .expect(2) // the initialize and its acknowledgement both carry the header
+            .mount(&server)
+            .await;
+        let headers =
+            std::collections::BTreeMap::from([("x-api-key".to_string(), "secret".to_string())]);
+        let client = McpHttpClient::with_headers(server.uri(), Duration::from_secs(2), &headers)
+            .expect("client");
+        client.probe().await.expect("probe");
+    }
+
+    #[test]
+    fn with_headers_rejects_an_invalid_header_name_and_value() {
+        for (name, value) in [("bad name", "v"), ("x-ok", "line\nbreak")] {
+            let headers = std::collections::BTreeMap::from([(name.to_string(), value.to_string())]);
+            let err = McpHttpClient::with_headers(
+                "http://127.0.0.1:9".into(),
+                Duration::from_secs(1),
+                &headers,
+            )
+            .expect_err("invalid header")
+            .to_string();
+            assert!(err.contains("header"), "{err}");
+        }
     }
 
     #[tokio::test]

@@ -14,15 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 
 - `mcp[].always_load` and `features.memory[].always_load` render Claude Code's per-server `alwaysLoad`, which keeps a server's tools out of tool-search deferral. Unset renders nothing. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#mcp) (#2356)
-
 - Claude Code sessions write an agent-config document (engine, model, effort, project, tags, config hash) to the state dir, and a `PostModelSwitch` hook keeps the model current. A resumed or compacted session starts with a one-line `[llmenv session]` summary of it, and `llmenv task session summary` shows a `running as` line. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#agent-config) (#2398)
 - `llmenv doctor` reports the size of the always-loaded instruction text (`CLAUDE.md` and rules without a `paths:` filter), names the largest bundles, and warns over Claude Code's large-file limit. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#doctor) (#2357)
+- `llmenv doctor` measures the instructions and tool descriptions of each MCP server and warns when Claude Code would cut them at its 2,048-character limit. `llmenv doctor --probe-mcp` also measures stdio servers. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#doctor) (#2148)
 
 ### Changed
 
 - The ICM tools now load with the prompt in Claude Code, so the model no longer calls tool search before a recall or a store. Set `features.memory[].always_load: false` to defer them again (#2356)
 - `llmenv task done` refuses a task that was never started, and `llmenv task session finish` refuses while a task is `open`, `wip`, or `waiting`. Both exit non-zero with the fix. `task done --force` and `task session finish --abandon-open` override them, and the native-tool redirect never forces. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#task) (#2416)
 - `capabilities.advisor_size` is now `capabilities.advisor_model` and renders Claude Code's `advisorModel`. Use `fable`, `opus`, `sonnet`, or a model ID. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#advisor_model-claude-code) (#2409)
+- The consolidation `claude -p` call no longer waits for MCP servers to connect (`CLAUDE_CODE_MCP_STARTUP_WAIT_MS=0`), so it starts faster (#2148)
 
 ### Removed
 
