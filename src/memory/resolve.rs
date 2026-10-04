@@ -444,6 +444,7 @@ mod tests {
     /// but the struct has no `Default` shorthand for the rest.
     fn memory_with_host(server_host: &str) -> crate::config::Memory {
         crate::config::Memory {
+            always_load: None,
             server_host: server_host.to_string(),
             port: 7878,
             listen_host: "127.0.0.1".into(),

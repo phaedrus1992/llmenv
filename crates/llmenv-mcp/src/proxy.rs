@@ -5,6 +5,7 @@
 //! if something is serving it, the proxy is up. The pidfile records *which*
 //! process to signal, and is never treated as evidence of life (#1085).
 
+use crate::proxy_ops::{SpawnSource, record_spawn};
 use anyhow::Context;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -505,7 +506,7 @@ fn pid_path_from_env(get_env: impl Fn(&str) -> Option<String>) -> anyhow::Result
 }
 
 /// Path of the proxy's stderr log, a sibling of the pidfile.
-fn log_path_for(pid_path: &Path) -> PathBuf {
+pub(super) fn log_path_for(pid_path: &Path) -> PathBuf {
     pid_path.with_file_name("mcp-proxy.log")
 }
 
@@ -590,7 +591,7 @@ fn check_icm_db(icm_db: Option<&std::ffi::OsStr>) -> anyhow::Result<()> {
 
 /// Opens the proxy's stderr log for appending, rotating it to `mcp-proxy.log.1`
 /// first if it has reached [`PROXY_LOG_MAX_BYTES`].
-fn open_proxy_log(path: &Path) -> anyhow::Result<std::fs::File> {
+pub(crate) fn open_proxy_log(path: &Path) -> anyhow::Result<std::fs::File> {
     open_bounded_log(path, PROXY_LOG_MAX_BYTES, LogDirMode::OwnerOnly)
 }
 
@@ -882,7 +883,7 @@ fn parse_bind(bind: &str) -> anyhow::Result<std::net::SocketAddr> {
 /// Returns an error if `bind` has no `:port` suffix, if neither `mcp-proxy` nor
 /// `uvx` is on `PATH`, if the filesystem root holds a `.git` directory, or if
 /// the child cannot be spawned.
-pub fn spawn_mcp_proxy(bind: &str, pid_path: &Path) -> anyhow::Result<Child> {
+pub fn spawn_mcp_proxy(bind: &str, pid_path: &Path, source: SpawnSource) -> anyhow::Result<Child> {
     let addr = parse_bind(bind)?;
     let (program, leading) = mcp_proxy_command()?;
     let mut cmd = Command::new(&program);
@@ -915,12 +916,15 @@ pub fn spawn_mcp_proxy(bind: &str, pid_path: &Path) -> anyhow::Result<Child> {
         }
     };
     configure_detached(&mut cmd, stderr);
-    cmd.spawn().with_context(|| {
+    let child = cmd.spawn().with_context(|| {
         format!(
             "spawning `{}` to run mcp-proxy (resolved from PATH)",
             program.display()
         )
-    })
+    })?;
+    // One line per spawn, so a later unexplained shutdown can be tied to a spawner (#2417).
+    record_spawn(pid_path, child.id(), source);
+    Ok(child)
 }
 
 /// Configures `cmd` to run as a detached background daemon rather than a
@@ -978,7 +982,7 @@ pub fn detach_process_group(cmd: &mut Command) {
 /// an unreadable file must be left alone — so they can't be collapsed into one
 /// error.
 #[derive(Debug)]
-enum PidfileError {
+pub(super) enum PidfileError {
     /// The file was read but doesn't contain a pid.
     Unparseable(String),
     /// The file couldn't be read at all (permissions, I/O).
@@ -994,7 +998,7 @@ impl std::fmt::Display for PidfileError {
     }
 }
 
-fn read_pidfile(pid_path: &Path) -> Result<Option<u32>, PidfileError> {
+pub(super) fn read_pidfile(pid_path: &Path) -> Result<Option<u32>, PidfileError> {
     // #893: a single read that distinguishes NotFound (→ absent) from other I/O
     // errors (→ report), rather than an exists() stat that masked every stat
     // failure (e.g. EACCES) as "no pidfile".

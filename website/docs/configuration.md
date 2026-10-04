@@ -523,6 +523,13 @@ mcp:
 | `args` | no | Arguments for `command` |
 | `env` | no | Environment for the launched process |
 | `url` | for http/sse | Remote endpoint |
+| `headers` | no | HTTP request headers for http/sse servers, such as an auth token (added in v3.0.0) |
+| `timeout` | no | Request timeout in seconds; unset uses the engine default (added in v3.0.0) |
+| `disabled_tools` | no | Tool names the engine hides from the model for this server (added in v3.0.0) |
+| `always_load` | no | Claude Code `alwaysLoad`: `true` keeps every tool of the server in the prompt, `false` puts them all behind tool search, unset keeps Claude Code's default. Other engines ignore it (added in v3.12.0) |
+
+Claude Code defers the tools of an MCP server behind tool search, so the model must search before it can call one.
+Set `always_load: true` for a server whose tools the model needs on most prompts.
 
 See [MCP & Memory](mcp.md) for the full model.
 
@@ -619,6 +626,7 @@ features:
 | `mcp_permissions` | no | Per-tier permission override for the ICM MCP's tools — see [`mcp_permissions`](#featuresmcp_permissions) below |
 | `wakeup_max_tokens` | no | Token budget for the `SessionStart` wake-up call, `20`-`4000` (added in v3.8.0) |
 | `adaptive_recall` | no | Per-session adaptive recall, `true` or `false`, default `true` (added in v3.12.0) |
+| `always_load` | no | Claude Code `alwaysLoad` for the ICM server, `true` or `false`, default `true`: the ICM tools load with the prompt instead of behind tool search. Set `false` to defer them again (added in v3.12.0) |
 | `retention` | no | Per-type retention durations for `llmenv memory prune`. While set, prune refuses to run — see [`llmenv memory prune`](commands.md#memory) (changed in v3.12.0) |
 | `consolidation` | no | Post-session memory consolidation — see [Post-session consolidation](#post-session-consolidation) below (added in v3.3.0) |
 
@@ -717,6 +725,8 @@ actual cache directory when `index_path` is unset.
 | `when` | yes | Activation tags; an entry with none is rejected at validate time |
 | `index_path` | no | Override the index storage directory; unset leaves it to codebase-memory-mcp's own default (`~/.cache/codebase-memory-mcp/`), not an llmenv-managed path — see below (changed in v3.11.1) |
 | `mcp_permissions` | no | (added in v3.10.0) Per-tier permission override for codebase-memory-mcp's tools — see [`mcp_permissions`](#featuresmcp_permissions) below |
+| `mem_budget_mb` | no | (added in v3.12.0) Memory budget for indexing in MB, from 1 to 1048576. Sets `CBM_MEM_BUDGET_MB` for the server and the SessionStart index. Unset leaves the server's own default |
+| `allowed_roots` | no | (added in v3.12.0) Extra folders codebase-memory-mcp may index, on top of the defaults. Each entry starts with `/`, `~`, or `$`. See [MCP](./mcp.md#codebase-memory-codebase_memory) |
 
 (added in v3.8.0) The default log directory (`<state_dir>/codebase-memory`,
 used when `index_path` is unset) is created owner-only (`0o700`). An explicit
@@ -1048,12 +1058,19 @@ features:
   task_tracker:
     enabled: true
     block_engine_task_tools: true  # default; set false to opt out
+    nudges: true                   # default; set false to stop the in-work reminders
+    enforce_commit: true           # default; set false to stop the commit deny-once
 ```
 
 | Field                     | Required | Notes                                                                                                                                                                                                                                                                                                                                                        |
 |---------------------------|----------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `enabled`                 | no       | Default `false`. When `true`, also redirects the engine's built-in task tools into this tracker via an auto-injected `PreToolUse` hook — Claude Code's `TaskCreate`/`TaskList`/`TaskUpdate`, and opencode's `todowrite` (added in v3.11.0). See [Commands](commands.md#task) for opencode's list-reconciliation rules.                                       |
 | `block_engine_task_tools` | no       | (added in v3.10.0) Default `true`. Set `false` to keep the tracker's CLAUDE.md fragment and reminders while still letting the engine's native task tools through — e.g. for genuine multi-agent teammate coordination that isn't solo step tracking. Gates opencode's `todowrite` redirect too (added in v3.11.0). Has no effect while `enabled` is `false`. |
+| `nudges`                  | no       | (added in v3.12.0) Default `true`. Turns off the reminders that fire while work happens: after a workflow skill starts, after several tool calls with no task, and when the agent asks the user a question while a task is in progress. See [Commands](commands.md#task-nudges).                                                                             |
+| `enforce_commit`          | no       | (added in v3.12.0) Default `true`. Turns off the one-time deny of the first `git commit` or `gh pr create` of a session that has no task in progress.                                                                                                                                                                                                        |
+| `workflow_skills`         | no       | (added in v3.12.0) Skills that trigger the one-time reminder. Default `dev-sprint`, `ship-issue`, `pre-pr-review`, `executing-plans`, `writing-plans`. A plugin prefix such as `nbl-dev:` is ignored when matching.                                                                                                                                          |
+| `nudge_after`             | no       | (added in v3.12.0) Mutating tool calls with no task before the first nudge. Default `8`. Must be 1 or more.                                                                                                                                                                                                                                                  |
+| `nudge_every`             | no       | (added in v3.12.0) Mutating tool calls between later nudges. Default `20`. Must be 1 or more.                                                                                                                                                                                                                                                                |
 
 See [Commands](commands.md#task) for the full `llmenv task` CLI reference.
 

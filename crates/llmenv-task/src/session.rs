@@ -619,9 +619,8 @@ fn ownership_note(session: &Session, owner: &EngineIdentity) -> &'static str {
     }
 }
 
-/// Every task currently tagged with `session_id`. `pub(super)` so
-/// `add_task_for_session` (`task/mod.rs`) can find the implicit-chain
-/// parent for [`super::ParentSpec::Auto`] (#929).
+/// Every task currently tagged with `session_id`. `pub(super)` so the queue check of
+/// `start_task` (`task/mod.rs`) can read the session (#2455).
 pub(super) fn tasks_in_session(state_dir: &Path, session_id: &str) -> Vec<Task> {
     list_tasks(state_dir)
         .into_iter()
@@ -827,13 +826,31 @@ pub struct SessionSummary {
     /// Resume context, so a fresh agent reading the rollup knows what the work is (#2339).
     #[serde(default, skip_serializing_if = "ResumeContext::is_empty")]
     pub resume: ResumeContext,
+    /// What the owning engine session runs as, when its agent-config document exists (#2398).
+    /// The root crate owns the shape of the document, so it stays an opaque value here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<serde_json::Value>,
 }
 
-/// Build a [`SessionSummary`] for `session_id`.
+/// Build a [`SessionSummary`] for `session_id`, with no agent block.
 ///
 /// # Errors
 /// Errors if `session_id` doesn't name an existing session.
 pub fn session_summary(state_dir: &Path, session_id: &str) -> anyhow::Result<SessionSummary> {
+    session_summary_with_agent(state_dir, session_id, |_, _| None)
+}
+
+/// Build a [`SessionSummary`] for `session_id`. `load_agent` reads the agent-config document of
+/// the engine session that owns the task session (#2398). The document's shape belongs to the
+/// root crate, so this crate carries it as an opaque value.
+///
+/// # Errors
+/// Errors if `session_id` doesn't name an existing session.
+pub fn session_summary_with_agent(
+    state_dir: &Path,
+    session_id: &str,
+    load_agent: impl Fn(&Path, &str) -> Option<serde_json::Value>,
+) -> anyhow::Result<SessionSummary> {
     let session = list_sessions(state_dir)
         .into_iter()
         .find(|s| s.id == session_id)
@@ -861,6 +878,10 @@ pub fn session_summary(state_dir: &Path, session_id: &str) -> anyhow::Result<Ses
         })
         .collect();
 
+    let agent = session
+        .owner_session
+        .as_deref()
+        .and_then(|owner| load_agent(state_dir, owner));
     Ok(SessionSummary {
         id: session.id,
         name: session.name,
@@ -869,6 +890,7 @@ pub fn session_summary(state_dir: &Path, session_id: &str) -> anyhow::Result<Ses
         total,
         tasks,
         resume: session.resume,
+        agent,
     })
 }
 
@@ -1497,7 +1519,7 @@ mod tests {
         let task = crate::add_task(
             dir.path(),
             "x",
-            ParentSpec::Auto,
+            ParentSpec::Detached,
             crate::SessionChoice::Resolve(&me),
             PROJECT_A,
         )
@@ -1980,14 +2002,14 @@ mod tests {
             match state {
                 TaskState::Open => {}
                 TaskState::Wip => {
-                    crate::start_task(dir, &task.slug, false).expect("test");
+                    crate::start_task(dir, &task.slug, true).expect("test");
                 }
                 TaskState::Waiting => {
-                    crate::start_task(dir, &task.slug, false).expect("test");
+                    crate::start_task(dir, &task.slug, true).expect("test");
                     crate::wait_task(dir, &task.slug, "review").expect("test");
                 }
                 TaskState::Done => {
-                    crate::start_task(dir, &task.slug, false).expect("test");
+                    crate::start_task(dir, &task.slug, true).expect("test");
                     crate::complete_task(dir, &task.slug, false).expect("test");
                 }
             }
@@ -2207,6 +2229,35 @@ mod tests {
     }
 
     #[test]
+    fn session_summary_carries_the_agent_block_of_the_owner_session_only() {
+        let dir = TempDir::new().expect("test");
+        let owned = start_as(
+            dir.path(),
+            "owned",
+            &owner("conv-1", 7),
+            StartDecision::Auto,
+        );
+        let load =
+            |_: &Path, id: &str| (id == "conv-1").then(|| serde_json::json!({"engine": "x"}));
+        let summary = session_summary_with_agent(dir.path(), &owned.id, load).expect("test");
+        assert_eq!(summary.agent, Some(serde_json::json!({"engine": "x"})));
+
+        let loose =
+            start_session(dir.path(), None, None, PROJECT_B, StartDecision::Auto).expect("test");
+        let StartOutcome::Created(loose) = loose else {
+            panic!("expected Created");
+        };
+        let summary = session_summary_with_agent(dir.path(), &loose.id, load).expect("test");
+        assert!(summary.agent.is_none());
+        assert!(
+            session_summary(dir.path(), &owned.id)
+                .expect("test")
+                .agent
+                .is_none()
+        );
+    }
+
+    #[test]
     fn session_summary_orders_tasks_parent_before_children() {
         let dir = TempDir::new().expect("test");
         let StartOutcome::Created(session) =
@@ -2317,6 +2368,8 @@ mod tests {
                     session,
                     created_at: now_rfc3339(),
                     updated_at: now_rfc3339(),
+                    relation: crate::relation::Relation::Queued,
+                    parallel: false,
                 };
                 save_task(dir.path(), &task).expect("test");
             }

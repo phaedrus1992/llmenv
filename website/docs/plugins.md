@@ -32,6 +32,38 @@ HEAD is mixed into the materialized scope's content hash, so a marketplace updat
 re-renders the agent config. Local-path marketplaces are content-hashed by their
 current state and need no sync.
 
+### Plugin sources in a marketplace manifest
+
+(added in v3.12.0)
+
+A plugin entry in a marketplace's `.claude-plugin/marketplace.json` has a `source`.
+llmenv reads these forms:
+
+| `source` | Result |
+| --- | --- |
+| `"./path"` | A plugin inside the marketplace clone. |
+| `"https://host/repo.git"` | A separate clone under `plugin-payloads/`. |
+| `{"source": "url", "url": ...}` | The same as a plain URL. |
+| `{"source": "github", "repo": "owner/name"}` | A clone of `https://github.com/owner/name.git`. |
+| `{"source": "git-subdir", "url": ..., "path": ...}` | A clone of the repo. The plugin is the folder `path`. |
+| `{"source": "npm", "package": ..., "version": ...}` | Left to the engine, which installs it from npm. |
+
+`url`, `github`, and `git-subdir` sources accept a `ref` and a `sha`.
+A `git-subdir` `url` is a clone URL or `owner/name`.
+A `sha` must be a full commit id (40 hex digits).
+llmenv fetches that one commit, so the plugin does not move when the branch does.
+When an object has a `sha` and a `ref`, the `sha` wins.
+A `ref` selects a branch or tag, and no pin uses the default branch.
+When an object has both `url` and `repo`, `url` wins.
+`plugin-sync` re-clones a pinned plugin, so a changed `ref` or `sha` takes effect on the next sync.
+An unpinned plugin is pulled.
+
+A malformed entry is skipped with a warning that names the entry, the value, and the fix.
+This covers a `repo` that is not `owner/name`, a `sha` that is not a full commit id,
+a `ref` that is empty or unsafe, and a `path` that is not a relative folder inside the repo.
+The `archive` and `command` kinds are skipped with a warning that names the kind, because llmenv does not fetch them.
+An object with neither `url` nor a github `repo` is skipped with a warning.
+
 ## Plugin collections
 
 A `plugin-collection` is a named bag of plugins that activates by tag:

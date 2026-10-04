@@ -670,6 +670,8 @@ mod tests {
         let config = Config {
             features: Some(crate::config::Features {
                 codebase_memory: vec![crate::config::CodebaseMemory {
+                    allowed_roots: vec![],
+                    mem_budget_mb: None,
                     when: vec!["proj".to_string()],
                     index_path: None,
                     mcp_permissions: None,
@@ -713,6 +715,7 @@ mod tests {
     #[test]
     fn collect_mcps_degrades_to_error_count_on_ambiguous_memory() {
         let mem = |host: &str| Memory {
+            always_load: None,
             server_host: host.into(),
             port: 9092,
             listen_host: "127.0.0.1".into(),
