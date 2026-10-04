@@ -2722,9 +2722,15 @@ fn run_config_context() {
                             text.push_str(&reminder);
                         }
                     }
-                    Err(e) => eprintln!(
-                        "llmenv config-context: failed to resolve state dir for task-tracker reminder: {e}"
-                    ),
+                    Err(e) => {
+                        eprintln!(
+                            "llmenv config-context: failed to resolve state dir for task-tracker reminder: {e}"
+                        );
+                        text.push_str(&format!(
+                            "\n\nllmenv: the task tracker reminders could not be loaded ({e}). Run \
+                             `llmenv doctor`."
+                        ));
+                    }
                 }
             }
         }

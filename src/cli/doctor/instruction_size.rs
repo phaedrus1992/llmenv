@@ -77,7 +77,7 @@ fn claude_md_chunks(text: &str) -> Vec<Contributor> {
 }
 
 /// The bundle a separator line names, or `None` for any other line.
-fn separator_bundle(line: &str) -> Option<String> {
+pub(super) fn separator_bundle(line: &str) -> Option<String> {
     let line = line.trim_end();
     if line == SLIPPAGE_SEPARATOR {
         return Some("slippage control".to_string());
