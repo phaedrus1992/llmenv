@@ -2700,11 +2700,19 @@ fn run_config_context() {
     // since #2251).
     match Config::load(&config_path) {
         Ok(config) => {
-            let task_tracker_enabled = config
+            let tracker = config
                 .features
                 .as_ref()
                 .and_then(|f| f.task_tracker.as_ref())
-                .is_some_and(|tt| tt.enabled);
+                .filter(|tt| tt.enabled);
+            let task_tracker_enabled = tracker.is_some();
+            // #2457: the rules come from llmenv itself, so an empty personal config gets them.
+            if let Some(tt) = tracker.filter(|tt| tt.nudges) {
+                text.push_str("\n\n");
+                text.push_str(&crate::task::core_text::core_instruction_text(
+                    tt.block_engine_task_tools,
+                ));
+            }
             if task_tracker_enabled {
                 match paths::state_dir() {
                     Ok(state_dir) => {
@@ -2714,9 +2722,15 @@ fn run_config_context() {
                             text.push_str(&reminder);
                         }
                     }
-                    Err(e) => eprintln!(
-                        "llmenv config-context: failed to resolve state dir for task-tracker reminder: {e}"
-                    ),
+                    Err(e) => {
+                        eprintln!(
+                            "llmenv config-context: failed to resolve state dir for task-tracker reminder: {e}"
+                        );
+                        text.push_str(&format!(
+                            "\n\nllmenv: the task tracker reminders could not be loaded ({e}). Run \
+                             `llmenv doctor`."
+                        ));
+                    }
                 }
             }
         }

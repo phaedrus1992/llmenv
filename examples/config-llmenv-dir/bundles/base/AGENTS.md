@@ -81,7 +81,7 @@ Two separate things. No conflate.
 - Asks investigation/plan resulting in code changes
 - Mentions future work ("should also…", "what about…")
 
-No use Claude's TaskCreate/TaskList/TaskUpdate (ephemeral multi-agent only).
+Claude's TaskCreate/TaskList/TaskUpdate calls are redirected to the task tracker when it is on (`llmenv task`). llmenv injects the tracking rules itself.
 
 Check list at breaks (finishing task). Put enough context for offline implementation.
 

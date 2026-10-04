@@ -34,13 +34,6 @@ pub struct RuleFile {
     /// File body with the frontmatter block removed. The leading newline
     /// after the closing `---` fence is also stripped so the body starts
     /// at meaningful content.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "documented AGENTS.md adapter contract, not yet consumed"
-        )
-    )]
     pub(crate) body: String,
     /// Raw file contents — frontmatter + body — for adapters that want to
     /// pass the file through verbatim.

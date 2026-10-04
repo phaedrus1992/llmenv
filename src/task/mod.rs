@@ -11,6 +11,7 @@
 //! ponytail: per-task locking (rather than whole-store) if write throughput
 //! ever becomes a real bottleneck — unlikely for a CLI task tracker.
 
+pub(crate) mod core_text;
 pub(crate) mod project;
 pub(crate) mod relation;
 pub(crate) mod resume;

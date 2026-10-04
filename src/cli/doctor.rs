@@ -11,6 +11,7 @@ mod background;
 mod cbm_index;
 mod instruction_size;
 mod mcp_text;
+mod task_text;
 
 /// Effective value of a token-efficiency env var: the process environment
 /// wins if set (matches what Claude Code will actually see if it inherited
@@ -1379,6 +1380,11 @@ pub(super) fn run_doctor(
         && claude_installed
     {
         instruction_size::run_doctor_instruction_size(use_color, manifest);
+    }
+
+    // #2457: instruction text that says the task tools are blocked contradicts the tracker.
+    if let Some((manifest, _)) = &doctor_manifest {
+        task_text::run_doctor_task_text(use_color, manifest);
     }
 
     if let Some((manifest, _)) = &doctor_manifest {
