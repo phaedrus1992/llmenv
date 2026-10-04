@@ -882,8 +882,24 @@ mod tests {
         }
     }
 
+    // #2356: Crush has no `alwaysLoad`, so the setting changes nothing in its output.
+    #[test]
+    fn always_load_does_not_change_the_crush_output() {
+        let render = |always_load: Option<bool>| {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut manifest = manifest_with_caps(crate::config::Capabilities::default());
+            let mut mcp = stdio_mcp("srv");
+            mcp.always_load = always_load;
+            manifest.mcps.push(mcp);
+            CrushAdapter.materialize(&manifest, tmp.path()).unwrap();
+            std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap()
+        };
+        assert_eq!(render(Some(true)), render(None));
+    }
+
     fn stdio_mcp(name: &str) -> ResolvedMcp {
         ResolvedMcp {
+            always_load: None,
             name: name.into(),
             kind: ResolvedKind::Stdio {
                 command: "npx".into(),
@@ -1617,6 +1633,7 @@ mod tests {
         let mut manifest = manifest_with_caps(caps);
         manifest.mcps.push(stdio_mcp("stdio-server"));
         manifest.mcps.push(ResolvedMcp {
+            always_load: None,
             name: "http-server".into(),
             kind: ResolvedKind::Remote {
                 url: "http://localhost:3000/mcp".into(),
@@ -1632,6 +1649,7 @@ mod tests {
             memory_hook: None,
         });
         manifest.mcps.push(ResolvedMcp {
+            always_load: None,
             name: "sse-server".into(),
             kind: ResolvedKind::Remote {
                 url: "http://localhost:4000/sse".into(),

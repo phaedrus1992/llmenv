@@ -1416,6 +1416,7 @@ dependencies = [
  "llmenv-util",
  "proptest",
  "reqwest",
+ "rustix",
  "serde_json",
  "tempfile",
  "thiserror",

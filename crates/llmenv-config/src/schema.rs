@@ -982,6 +982,26 @@ pub struct TaskTracker {
     /// isn't solo step tracking.
     #[serde(default = "default_block_engine_task_tools")]
     pub block_engine_task_tools: bool,
+    /// Whether the tracker nudges the agent while it works (#2456): the reminder after a
+    /// workflow skill starts, the nudge after several tool calls with no task, and the reminder
+    /// to park a task when the agent asks the user a question. Default `true`.
+    #[serde(default = "default_block_engine_task_tools")]
+    pub nudges: bool,
+    /// Whether the first `git commit` or `gh pr create` of a session with no task in progress is
+    /// denied once, with the `llmenv task` commands to run first (#2456). Default `true`.
+    #[serde(default = "default_block_engine_task_tools")]
+    pub enforce_commit: bool,
+    /// Skills that start a multi-step workflow and trigger the one-time reminder. Absent means
+    /// `dev-sprint`, `ship-issue`, `pre-pr-review`, `executing-plans`, and `writing-plans`. A
+    /// plugin prefix (`nbl-dev:ship-issue`) is ignored when matching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_skills: Option<Vec<String>>,
+    /// Mutating tool calls with no task before the first nudge. Absent means 8.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nudge_after: Option<u32>,
+    /// Mutating tool calls between later nudges. Absent means 20.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nudge_every: Option<u32>,
 }
 
 fn default_block_engine_task_tools() -> bool {
@@ -993,6 +1013,11 @@ impl Default for TaskTracker {
         Self {
             enabled: false,
             block_engine_task_tools: default_block_engine_task_tools(),
+            nudges: default_block_engine_task_tools(),
+            enforce_commit: default_block_engine_task_tools(),
+            workflow_skills: None,
+            nudge_after: None,
+            nudge_every: None,
         }
     }
 }
@@ -1536,6 +1561,11 @@ pub struct Memory {
     /// restores the stateless per-turn recall.
     #[serde(default = "default_adaptive_recall")]
     pub adaptive_recall: bool,
+    /// Claude Code `alwaysLoad` for the ICM server (#2356). Unset means `true`: the ICM tools are
+    /// used on most prompts, so they stay in the prompt instead of behind tool search. Set `false`
+    /// to restore deferral.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub always_load: Option<bool>,
 }
 
 fn default_adaptive_recall() -> bool {
@@ -1564,6 +1594,7 @@ impl Default for Memory {
             mcp_permissions: None,
             wakeup_max_tokens: None,
             adaptive_recall: default_adaptive_recall(),
+            always_load: None,
         }
     }
 }
@@ -1601,6 +1632,16 @@ pub struct CodebaseMemory {
     /// override shape as [`Memory::mcp_permissions`].
     #[serde(default)]
     pub mcp_permissions: Option<McpPermissions>,
+    /// Memory budget for codebase-memory-mcp indexing, in MB (`CBM_MEM_BUDGET_MB`, #2154).
+    /// Unset leaves the variable unset, so the server uses its own default. The MCP server launch
+    /// and the SessionStart auto-index both get it, so the two agree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_budget_mb: Option<u32>,
+    /// Extra roots codebase-memory-mcp may index, on top of llmenv's defaults: the project root,
+    /// the llmenv config, cache, and state folders, and the code-explorer cache (#2406). `~` and
+    /// `$VAR` expand at session start, and an entry with an unset variable is dropped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_roots: Vec<String>,
 }
 
 fn default_throttle_cache_ttl() -> u64 {
@@ -1671,6 +1712,11 @@ pub struct McpServer {
     /// #506: consumed by CrushAdapter when it renders its MCP config.
     #[serde(default)]
     pub timeout: Option<u32>,
+    /// Claude Code `alwaysLoad` (#2356): `true` keeps every tool of this server in the prompt
+    /// instead of behind tool search, `false` defers them all, unset leaves Claude Code's default.
+    /// Ignored by engines without the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub always_load: Option<bool>,
 }
 
 /// A first-class skill contributed directly by config or bundle, independent of
@@ -2982,6 +3028,7 @@ forward_ssh_agent: false
         let mut headers = BTreeMap::new();
         headers.insert("Authorization".to_string(), "Bearer tok".to_string());
         let original = McpServer {
+            always_load: None,
             name: "ctx7".to_string(),
             when: vec!["tag".to_string()],
             transport: McpTransport::Http,
@@ -3005,6 +3052,7 @@ forward_ssh_agent: false
         let mut headers = BTreeMap::new();
         headers.insert("X-Api-Key".to_string(), "secret".to_string());
         let original = McpServer {
+            always_load: None,
             name: "playwright".to_string(),
             when: vec![],
             transport: McpTransport::Stdio,
@@ -3043,6 +3091,7 @@ forward_ssh_agent: false
     fn mcp_server_dedup_respects_new_fields() {
         use std::collections::BTreeMap;
         let a = McpServer {
+            always_load: None,
             name: "ctx".to_string(),
             when: vec![],
             transport: McpTransport::Stdio,
@@ -3261,6 +3310,8 @@ forward_ssh_agent: false
         let caps = Capabilities {
             features: Some(Features {
                 codebase_memory: vec![CodebaseMemory {
+                    allowed_roots: vec![],
+                    mem_budget_mb: None,
                     when: vec![],
                     index_path: None,
                     mcp_permissions: None,

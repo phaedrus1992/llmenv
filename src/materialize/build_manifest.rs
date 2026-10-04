@@ -319,8 +319,9 @@ fn sync_plugin_payloads(
             };
             let Some(entry) = entries.iter().find(|e| e.name == p.plugin) else {
                 tracing::warn!(
-                    "plugin '{}' not found in marketplace '{}' manifest — \
-                     verify plugin name or run `llmenv plugin-sync` to refresh the clone",
+                    "plugin '{}' not found in marketplace '{}' manifest — verify plugin name, \
+                     look for an earlier warning that skipped its entry, or run \
+                     `llmenv plugin-sync` to refresh the clone",
                     p.plugin,
                     p.marketplace
                 );
@@ -329,13 +330,8 @@ fn sync_plugin_payloads(
             if !crate::plugins::cache::is_external_plugin_source(&entry.source) {
                 return p;
             }
-            match crate::plugins::cache::sync_external_plugin(
-                cache_root,
-                &p.marketplace,
-                &p.plugin,
-                &entry.source,
-                false,
-            ) {
+            match crate::plugins::cache::sync_plugin_entry(cache_root, &p.marketplace, entry, false)
+            {
                 Ok(state) => {
                     p.install_path = Some(state.install_location.to_string_lossy().into_owned());
                     p.git_commit_sha = state.head;
@@ -349,7 +345,7 @@ fn sync_plugin_payloads(
                 }
                 Err(e) => {
                     eprintln!(
-                        "warning: external plugin '{}@{}' payload lookup failed: {e}",
+                        "warning: external plugin '{}@{}' payload lookup failed: {e:#}",
                         p.plugin, p.marketplace
                     );
                 }

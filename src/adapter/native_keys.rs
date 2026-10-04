@@ -202,6 +202,7 @@ mod tests {
 
     fn mcp_named(name: &str) -> McpServer {
         McpServer {
+            always_load: None,
             name: name.into(),
             when: vec![],
             transport: McpTransport::Stdio,

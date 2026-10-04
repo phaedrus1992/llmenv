@@ -140,3 +140,20 @@ Validation: each entry non-empty and, after a syntactic `~`/`$VAR` check, absolu
 - Owning cbm's `watcher_enabled` or other runtime keys (#2154 stance).
 - Indexing more than one project per session (one active entry stays the rule).
 - Changing cbm.
+
+## As built
+
+Pinned facts about codebase-memory-mcp 0.11.0:
+
+| Command | Effect |
+| --- | --- |
+| `allow-root <path>` | Records the root in `<cache dir>/allowed_roots`. |
+| `allow-root --list` | Prints `allowed roots:` and one path per line. Read-only. With no roots it prints that indexing is unconfined. |
+| `allow-root --approve-sensitive <path>` | Approves a sensitive path. llmenv does not use it. |
+
+Differences from the plan:
+
+1. `src/mcp/cbm_roots.rs` holds the resolver, the command runner, the report, and the guard decision.
+2. The guard allows the configured roots of every `codebase_memory` entry plus the roots that `allow-root --list` prints, not the active entry only. This avoids scope evaluation in a hook.
+3. llmenv cannot detect a cache-dir mismatch, because the server has no query for its cache dir. The notice and doctor print the expected cache dir (`index_path`, or the server default) instead.
+4. The SessionStart step runs `allow-root` only for roots that `--list` lacks, and skips a root that does not exist.
