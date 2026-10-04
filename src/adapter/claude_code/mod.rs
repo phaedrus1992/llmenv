@@ -325,6 +325,43 @@ const CLAUDE_CODE_HOOK_EVENTS: &[&str] = &[
     "SubagentStart",
 ];
 
+/// The tools of `tools` that `entries` do not yet send to `command`: an entry with no matcher,
+/// or one whose anchored matcher names the tool, that runs `command`, counts as a route.
+fn unrouted_tools<'a>(
+    entries: Option<&Vec<serde_json::Value>>,
+    command: &str,
+    tools: &[&'a str],
+) -> Vec<&'a str> {
+    let runs = |entry: &serde_json::Value| {
+        entry["hooks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|h| h["command"].as_str() == Some(command))
+    };
+    tools
+        .iter()
+        .copied()
+        .filter(|tool| {
+            !entries.into_iter().flatten().any(|entry| {
+                runs(entry)
+                    && match entry["matcher"].as_str() {
+                        None => true,
+                        Some(m) => m == format!("^{tool}$"),
+                    }
+            })
+        })
+        .collect()
+}
+
+/// The anchored matcher for `tools`.
+fn tools_matcher(tools: &[&str]) -> String {
+    match tools {
+        [one] => format!("^{one}$"),
+        many => format!("^({})$", many.join("|")),
+    }
+}
+
 impl AgentAdapter for ClaudeCodeAdapter {
     fn name(&self) -> &'static str {
         "claude-code"
@@ -1696,6 +1733,51 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             .push(json!({
                 "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} stop") }],
             }));
+    }
+
+    // #2456: the task nudges and the commit deny-once. An entry is skipped when another feature
+    // already routes that event and tool to hook-run, so one tool call does not run the handler
+    // twice. This runs after every other registration so it can see them.
+    if let Some(tracker) = manifest
+        .capabilities
+        .features
+        .as_ref()
+        .and_then(|f| f.task_tracker.as_ref())
+        .filter(|t| t.enabled)
+    {
+        let post = format!("{HOOK_RUN_COMMAND} post_tool_use");
+        let pre = format!("{HOOK_RUN_COMMAND} pre_tool_use");
+        let post_tools = unrouted_tools(
+            hooks_by_event.get("PostToolUse"),
+            &post,
+            &[
+                "Skill",
+                "Bash",
+                "Edit",
+                "Write",
+                "MultiEdit",
+                "AskUserQuestion",
+            ],
+        );
+        if tracker.nudges && !post_tools.is_empty() {
+            hooks_by_event
+                .entry("PostToolUse".to_string())
+                .or_default()
+                .push(json!({
+                    "matcher": tools_matcher(&post_tools),
+                    "hooks": [{ "type": "command", "command": post }],
+                }));
+        }
+        let pre_tools = unrouted_tools(hooks_by_event.get("PreToolUse"), &pre, &["Bash"]);
+        if tracker.enforce_commit && !pre_tools.is_empty() {
+            hooks_by_event
+                .entry("PreToolUse".to_string())
+                .or_default()
+                .push(json!({
+                    "matcher": tools_matcher(&pre_tools),
+                    "hooks": [{ "type": "command", "command": pre }],
+                }));
+        }
     }
 
     let mut hooks_obj = serde_json::Map::new();

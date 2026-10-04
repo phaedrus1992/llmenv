@@ -25,6 +25,7 @@ pub(crate) mod repeat_detect;
 mod session_ledger;
 mod session_state;
 pub(crate) mod slippage;
+pub(crate) mod task_nudge;
 pub(crate) mod task_tools;
 pub(crate) mod transcript;
 
@@ -920,6 +921,24 @@ fn resolve_pre_tool_text(
         return Some(write_guard);
     }
 
+    // #2456: the first commit or pull request with no task in progress is denied once.
+    if task_tracker_enabled
+        && let Some(tracker) = config
+            .features
+            .as_ref()
+            .and_then(|f| f.task_tracker.as_ref())
+    {
+        let deny = crate::hook_run::task_nudge::handle_pre_tool_use(
+            tracker,
+            stdin_payload,
+            claude_session_id,
+            state_dir,
+        );
+        if !deny.is_empty() {
+            return Some(deny);
+        }
+    }
+
     let primary = if task_tracker_enabled
         && let Some(t) = crate::hook_run::task_tools::handle_pre_tool_use(stdin_payload, state_dir)
     {
@@ -984,8 +1003,23 @@ fn resolve_stop_reminder(
     state_dir: &std::path::Path,
     claude_session_id: Option<&str>,
     config: &crate::config::Config,
+    stop_payload: &serde_json::Value,
 ) -> String {
     let mut reminder = crate::task::stop_hook_reminder(state_dir);
+    // #2456: a turn that ends with a question to the user parks the task that waits for it.
+    if let Some(tracker) = config
+        .features
+        .as_ref()
+        .and_then(|f| f.task_tracker.as_ref())
+    {
+        let waiting = crate::hook_run::task_nudge::handle_stop(tracker, stop_payload, state_dir);
+        if !waiting.is_empty() {
+            if !reminder.is_empty() {
+                reminder.push_str("\n\n");
+            }
+            reminder.push_str(&waiting);
+        }
+    }
     // #317: appended before repeat-detect wraps the text, so a repeat warning
     // stays the last thing read — it's about the turn that just happened,
     // while the checklist is about what to do before ending.
@@ -1208,6 +1242,27 @@ fn run_inner(
         None
     };
 
+    // #2456: the nudges after a tool call. They need no scope or memory work. They are not
+    // returned early, because a PostToolUse also feeds the WebFetch auto-store below.
+    let nudge_text = if event == HookEvent::PostToolUse
+        && task_tracker_enabled
+        && let Some(tracker) = config
+            .features
+            .as_ref()
+            .and_then(|f| f.task_tracker.as_ref())
+        && let Ok(state_dir) = crate::paths::state_dir()
+    {
+        let text = crate::hook_run::task_nudge::handle_post_tool_use(
+            tracker,
+            stdin_payload,
+            claude_session_id,
+            &state_dir,
+        );
+        (!text.is_empty()).then_some(text)
+    } else {
+        None
+    };
+
     // #231: the task tracker's Stop reminder is computed before the #702
     // early-exit (below) so it can take the cheap fast path when session-log
     // has no interest in Stop, and be appended to `out` further down when
@@ -1216,7 +1271,7 @@ fn run_inner(
     // (that early-return shape was tried and reverted; see the git history).
     if event == HookEvent::Stop && task_tracker_enabled && !log_cfg.any_sink_enabled() {
         let state_dir = crate::paths::state_dir()?;
-        let reminder = resolve_stop_reminder(&state_dir, claude_session_id, &config);
+        let reminder = resolve_stop_reminder(&state_dir, claude_session_id, &config, stdin_payload);
         emit_trace_timing(t0, t_config, None, None, None);
         return Ok(reminder);
     }
@@ -1562,7 +1617,8 @@ fn run_inner(
             // this never displaces run_session_log, it just adds to `out`.
             if event == HookEvent::Stop && task_tracker_enabled {
                 let state_dir = crate::paths::state_dir()?;
-                let reminder = resolve_stop_reminder(&state_dir, claude_session_id, &config);
+                let reminder =
+                    resolve_stop_reminder(&state_dir, claude_session_id, &config, stdin_payload);
                 if !reminder.is_empty() {
                     if !out.is_empty() {
                         out.push('\n');
@@ -1586,6 +1642,9 @@ fn run_inner(
             // here is dead — and a dead condition is one a future edit can
             // silently invert.
             if let Some(text) = &turn_text {
+                append_read_once_result(&mut out, text);
+            }
+            if let Some(text) = &nudge_text {
                 append_read_once_result(&mut out, text);
             }
 
@@ -3594,7 +3653,12 @@ mod tests {
             }),
             ..Default::default()
         };
-        let text = resolve_stop_reminder(state_dir.path(), Some("s1"), &with_critique);
+        let text = resolve_stop_reminder(
+            state_dir.path(),
+            Some("s1"),
+            &with_critique,
+            &serde_json::Value::Null,
+        );
         assert!(text.contains("tests"), "the critique is present: {text:?}");
 
         let without = crate::config::Config {
@@ -3607,7 +3671,12 @@ mod tests {
             }),
             ..Default::default()
         };
-        let plain = resolve_stop_reminder(state_dir.path(), Some("s1"), &without);
+        let plain = resolve_stop_reminder(
+            state_dir.path(),
+            Some("s1"),
+            &without,
+            &serde_json::Value::Null,
+        );
         assert!(
             !plain.contains("tests"),
             "no critique when the layer is off: {plain:?}"
@@ -3664,7 +3733,12 @@ mod tests {
             }),
             ..Default::default()
         };
-        let text = resolve_stop_reminder(state_dir.path(), Some("s1"), &config);
+        let text = resolve_stop_reminder(
+            state_dir.path(),
+            Some("s1"),
+            &config,
+            &serde_json::Value::Null,
+        );
         let tracker_only = crate::task::stop_hook_reminder(state_dir.path());
         assert!(
             !tracker_only.is_empty(),
@@ -3683,6 +3757,67 @@ mod tests {
             !text.starts_with('\n'),
             "no leading separator when the tracker already spoke: {text:?}"
         );
+    }
+
+    // #2456: a turn that ends with a question adds the waiting reminder after the tracker text,
+    // and adds it alone when the tracker said nothing.
+    #[test]
+    fn stop_reminder_appends_the_waiting_reminder_after_a_question() {
+        let state_dir = tempfile::tempdir().expect("test");
+        let project = crate::task::project::current_tag().expect("test");
+        let config = crate::config::Config {
+            features: Some(crate::config::Features {
+                task_tracker: Some(crate::config::TaskTracker {
+                    enabled: true,
+                    ..Default::default()
+                }),
+                repeat_detect: Some(crate::config::RepeatDetect {
+                    enabled: false,
+                    threshold: 1,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let question = serde_json::json!({ "last_assistant_message": "Which one?" });
+        // No task: nothing to say, and no stray separator.
+        let empty = resolve_stop_reminder(state_dir.path(), Some("s1"), &config, &question);
+        assert_eq!(empty, "");
+        crate::task::session::start_session(
+            state_dir.path(),
+            None,
+            None,
+            &project,
+            crate::task::session::StartDecision::Auto,
+        )
+        .expect("test");
+        let task = crate::task::add_task(
+            state_dir.path(),
+            "finish the parser",
+            crate::task::ParentSpec::Detached,
+            crate::task::SessionChoice::Resolve(&crate::task::session::EngineIdentity::default()),
+            &project,
+        )
+        .expect("test");
+        crate::task::start_task(state_dir.path(), &task.slug, false).expect("test");
+        let text = resolve_stop_reminder(state_dir.path(), Some("s1"), &config, &question);
+        let tracker_only = crate::task::stop_hook_reminder(state_dir.path());
+        assert!(
+            !tracker_only.is_empty(),
+            "the fixture must produce tracker text"
+        );
+        let expected_tail = format!(
+            "\n\nllmenv task tracker: you asked the user a question while '{}'",
+            task.slug
+        );
+        assert!(text.starts_with(tracker_only.as_str()), "{text:?}");
+        assert!(
+            text[tracker_only.len()..].starts_with(&expected_tail),
+            "{text:?}"
+        );
+        let statement = serde_json::json!({ "last_assistant_message": "Done." });
+        let quiet = resolve_stop_reminder(state_dir.path(), Some("s1"), &config, &statement);
+        assert_eq!(quiet, tracker_only);
     }
 
     #[test]

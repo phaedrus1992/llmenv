@@ -633,6 +633,30 @@ genuinely uses them for multi-agent teammate coordination rather than solo step
 tracking. See [`features.task_tracker:`](configuration.md#featurestask_tracker)
 for the full field reference. (#980)
 
+### Task nudges (added in v3.12.0)
+
+The tracker reminds the agent while work happens, and not only at the start and the end of a session.
+Each reminder names the exact `llmenv task` commands to run.
+`features.task_tracker.nudges: false` turns off the reminders in the first four items,
+and `enforce_commit: false` turns off the fifth.
+
+- After a workflow skill starts (`dev-sprint`, `ship-issue`, and the others in `workflow_skills`), a project with no
+  session or no unfinished task gets one reminder for each session to start a session with its first tasks.
+- After `nudge_after` (default 8) edits, writes, or shell commands with no unfinished task, the agent gets a nudge.
+  Later nudges come every `nudge_every` (default 20) calls. The count resets once a task exists.
+- An open session with no task at all is named in the Stop and SessionStart reminders.
+  It is an error state: add a task, or finish the session.
+- When the agent asks the user a question (the `AskUserQuestion` tool, or a turn that ends with `?`) while a task is
+  in progress, the reminder tells it to run `llmenv task wait <slug> "<reason>"`, and `llmenv task start <slug>` after
+  the answer. A waiting task is reported as "waiting on the user".
+- The first `git commit` or `gh pr create` of a session with no task in progress is denied once, with the commands to
+  run. The same command runs on the next try. The deny comes back when a later gap leaves no task in progress.
+
+The tracker looks at the whole project: a task in progress in any open session of the project counts as tracked work.
+The deny is once for each session, not once for each commit, and a failed state write lets the command through.
+The hooks register on Claude Code. When session logging already routes every tool call to `hook-run`, the tracker adds no
+second entry. See [`features.task_tracker:`](configuration.md#featurestask_tracker) for the fields. (#2456)
+
 ### Resume context (added in v3.12.0)
 
 A session can record what a fresh agent needs to pick the work up after `/clear`.
