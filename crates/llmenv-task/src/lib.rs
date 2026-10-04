@@ -854,7 +854,7 @@ pub fn delete_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
 /// (`force = true`). Production callers use [`complete_task`]; test fixtures
 /// use this shorter form to build a done task without starting it.
 #[cfg(test)]
-pub fn done_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
+pub(crate) fn done_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
     complete_task(state_dir, input, true).map(|c| c.task)
 }
 

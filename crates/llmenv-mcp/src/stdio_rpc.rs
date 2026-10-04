@@ -30,7 +30,7 @@ pub fn tidy_reason(text: &str) -> String {
 /// Line-delimited JSON-RPC over a child's stdio: the send and receive path that the text-limit
 /// probe uses (#2148). A reader skips lines that are not the reply to the request it sent, so a
 /// banner or a notification is not mistaken for a failure.
-pub struct StdioRpc<W, R> {
+pub(crate) struct StdioRpc<W, R> {
     writer: W,
     lines: tokio::io::Lines<BufReader<tokio::io::Take<R>>>,
     next_id: u64,
@@ -45,7 +45,7 @@ where
     W: tokio::io::AsyncWrite + Unpin,
     R: tokio::io::AsyncRead + Unpin,
 {
-    pub fn new(writer: W, reader: R) -> Self {
+    pub(crate) fn new(writer: W, reader: R) -> Self {
         Self {
             writer,
             lines: BufReader::new(tokio::io::AsyncReadExt::take(
@@ -63,7 +63,7 @@ where
     /// # Errors
     /// A write failure, an end of output before the reply, a JSON-RPC `error`, or a reply with
     /// no `result`.
-    pub async fn request(&mut self, method: &str, params: Value) -> anyhow::Result<Value> {
+    pub(crate) async fn request(&mut self, method: &str, params: Value) -> anyhow::Result<Value> {
         let id = self.next_id;
         self.next_id += 1;
         // A closed pipe means the server is gone. Waiting on its output would only hide that
@@ -120,7 +120,7 @@ where
     ///
     /// # Errors
     /// A write failure.
-    pub async fn notify(&mut self, method: &str) -> anyhow::Result<()> {
+    pub(crate) async fn notify(&mut self, method: &str) -> anyhow::Result<()> {
         self.send(&json!({ "jsonrpc": "2.0", "method": method }))
             .await
             .with_context(|| format!("cannot send MCP {method}"))

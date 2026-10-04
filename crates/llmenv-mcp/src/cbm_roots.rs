@@ -17,10 +17,10 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 /// The directories that the default roots come from.
 #[derive(Debug, Clone)]
 pub struct RootBases {
-    pub project_root: PathBuf,
-    pub config_dir: PathBuf,
-    pub cache_dir: PathBuf,
-    pub state_dir: PathBuf,
+    project_root: PathBuf,
+    config_dir: PathBuf,
+    cache_dir: PathBuf,
+    state_dir: PathBuf,
     pub home: Option<PathBuf>,
 }
 
@@ -206,10 +206,10 @@ fn list_roots(cm: &CodebaseMemory) -> anyhow::Result<Vec<PathBuf>> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootsReport {
     /// The roots the server has recorded.
-    pub listed: Vec<PathBuf>,
+    listed: Vec<PathBuf>,
     /// The wanted roots that exist and are not recorded, with the reason.
-    pub missing: Vec<(PathBuf, String)>,
-    pub cache_dir: PathBuf,
+    missing: Vec<(PathBuf, String)>,
+    cache_dir: PathBuf,
 }
 
 /// The wanted roots that the server has not recorded. A root that does not exist cannot be
