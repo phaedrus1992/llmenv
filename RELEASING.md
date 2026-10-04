@@ -257,6 +257,11 @@ Before cutting the tag, confirm the changelog is complete for the version
 you're shipping — every user-facing change since the last tag must be listed
 under its `[Unreleased]` section. This applies equally to pre-releases (see below).
 
+Also confirm that the release binary refuses `llmenv task done` on an unstarted task (#2416). The
+integration test `done_without_start_is_refused_and_force_completes_it` in `tests/task_cli.rs` runs
+that against the built binary, so a green `cargo nextest run` on the tagged commit is the check. An
+installed alpha that predates the fix would hide the refusal.
+
 ### 5. Close the milestone and move remaining issues
 
 After the release tag is pushed and CI completes:

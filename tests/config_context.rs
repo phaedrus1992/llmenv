@@ -224,3 +224,65 @@ fn config_context_includes_resume_context_for_an_open_session() {
     assert!(ctx.contains("pick up at step 4"), "got: {ctx}");
     assert!(ctx.contains("gh issue view 2339"), "got: {ctx}");
 }
+
+fn context_for(tracker_yaml: &str) -> String {
+    let dir = TempDir::new().unwrap();
+    let config_path = dir.path().join("config.yaml");
+    fs::write(
+        &config_path,
+        format!(
+            "adapter:\n  engine: claude-code\nscope:\n  network: []\n  host: []\n  user: []\n{tracker_yaml}"
+        ),
+    )
+    .unwrap();
+    let state_dir = TempDir::new().unwrap();
+    let output = support::isolated_llmenv_cmd(dir.path())
+        .env("LLMENV_CONFIG", &config_path)
+        .env("LLMENV_STATE_DIR", state_dir.path())
+        .arg("config-context")
+        .write_stdin(r#"{"hook_event_name":"SessionStart"}"#)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    parsed["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("")
+        .to_string()
+}
+
+// #2457: with the tracker on and an empty personal config, SessionStart carries the four behaviors
+// and their commands. The text comes from llmenv, not from a bundle.
+#[test]
+fn config_context_carries_the_core_task_rules_with_an_empty_config() {
+    let ctx = context_for("features:\n  task_tracker:\n    enabled: true\n");
+    for needle in [
+        "llmenv task session start",
+        "llmenv task add",
+        "llmenv task start <slug>",
+        "llmenv task done <slug>",
+        "llmenv task wait <slug>",
+        "redirected to `llmenv task`",
+    ] {
+        assert!(ctx.contains(needle), "missing {needle:?}: {ctx}");
+    }
+}
+
+#[test]
+fn config_context_core_rules_follow_the_nudges_switch_and_the_redirect_switch() {
+    let off = context_for("features:\n  task_tracker:\n    enabled: true\n    nudges: false\n");
+    assert!(!off.contains("llmenv task session start"), "{off}");
+    let no_redirect = context_for(
+        "features:\n  task_tracker:\n    enabled: true\n    block_engine_task_tools: false\n",
+    );
+    assert!(
+        no_redirect.contains("llmenv task session start"),
+        "{no_redirect}"
+    );
+    assert!(!no_redirect.contains("redirected to"), "{no_redirect}");
+    let disabled = context_for("");
+    assert!(
+        !disabled.contains("llmenv task session start"),
+        "{disabled}"
+    );
+}

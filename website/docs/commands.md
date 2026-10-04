@@ -633,6 +633,15 @@ genuinely uses them for multi-agent teammate coordination rather than solo step
 tracking. See [`features.task_tracker:`](configuration.md#featurestask_tracker)
 for the full field reference. (#980)
 
+### Core task rules (added in v3.12.0)
+
+While the tracker is on, SessionStart injects a short statement of the tracking rules with the exact commands: open a
+session when the work has more than one part, give a session its tasks, do one queued task at a time, and park a task that
+waits for the user. The text lives in llmenv itself, so it needs no bundle or personal instruction. It also says that the
+engine task tools are redirected to `llmenv task` while `block_engine_task_tools` is on, and that it overrides an
+instruction that says they are blocked. `features.task_tracker.nudges: false` removes the text.
+`llmenv doctor` warns about an instruction line that says the task tools are blocked or forbids `llmenv task`.
+
 ### Task nudges (added in v3.12.0)
 
 The tracker reminds the agent while work happens, and not only at the start and the end of a session.
