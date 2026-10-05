@@ -1131,11 +1131,14 @@ fn copy_dir_owner_only_inner(
             }
             // Any other symlinked entry (reference file, helper script) is
             // skipped, not fatal — no TOCTOU-safe way to follow it into a
-            // bounded dir. Raised from debug to warn (#1341): silently
-            // dropping a referenced file previously left no trace at any
-            // default log level, and the skill still validated as if the
-            // reference existed.
-            tracing::warn!(path = %src_path.display(), "copy_dir_owner_only: skipping symlink");
+            // bounded dir. The skip prints to stderr (#1341): `tracing` warnings are off at
+            // the default log level, and the skill still validates as if the reference
+            // existed.
+            eprintln!(
+                "warning: skipping the symlink {} inside a skill; a skill folder copies real \
+                 files only",
+                src_path.display()
+            );
             continue;
         }
         let dest_path = dest.join(&file_name);
