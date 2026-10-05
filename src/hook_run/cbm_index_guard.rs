@@ -49,9 +49,13 @@ pub(crate) fn handle_roots(
     // The hook runs in the project folder, as the SessionStart index does.
     let project_root = match std::env::current_dir() {
         Ok(dir) => dir,
+        // The guard denies a call outside the allowed roots, so a folder that cannot be read
+        // denies too. An allow here would open the guard on the one input it cannot check.
         Err(e) => {
-            tracing::warn!("codebase-memory root guard skipped: cannot read the folder: {e}");
-            return String::new();
+            return format!(
+                "__DENY__:cannot check {repo_path} against the codebase-memory allowed roots: \
+                 the session folder cannot be read: {e}"
+            );
         }
     };
     crate::mcp::cbm_roots::guard_decision(repo_path, config, &project_root)
@@ -279,6 +283,24 @@ mod tests {
         // Another tool is never guarded.
         let other = payload("Bash", serde_json::json!({ "repo_path": "/usr" }));
         assert_eq!(handle_roots(&other, &config), "");
+    }
+
+    // Changes the working folder of the process, so it needs a process of its own: nextest runs
+    // each test in one.
+    #[test]
+    fn the_roots_guard_denies_when_the_session_folder_cannot_be_read() {
+        let cache = tempfile::tempdir().unwrap();
+        let config = config_with_entry(cache.path());
+        let gone = tempfile::tempdir().unwrap();
+        std::env::set_current_dir(gone.path()).unwrap();
+        std::fs::remove_dir(gone.path()).unwrap();
+        let call = payload(
+            INDEX_REPOSITORY_TOOL,
+            serde_json::json!({ "repo_path": "/usr" }),
+        );
+        let out = handle_roots(&call, &config);
+        assert!(out.starts_with("__DENY__:"), "{out:?}");
+        assert!(out.contains("cannot be read"), "{out:?}");
     }
 
     #[test]
