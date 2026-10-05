@@ -55,6 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A detached background job keeps its input when the parent fails to pipe all of it: the job reads the checkpoint instead of losing the event. A checkpoint folder or file that cannot be read shows in `llmenv doctor`.
 - `llmenv memory prune` checks `retention` on the merged active memory entry, so a bundle-declared entry counts, and a failed auto-prune prints a warning.
 - `features.codebase_memory[].allowed_roots` entries are checked with the same `$NAME` and `${NAME}` rules that expand them, so `$` or `${` alone fails `llmenv validate`. An entry that cannot expand, and an entry that is not a folder, are reported in `llmenv doctor` and the SessionStart notice. The `index_repository` guard denies when it cannot read its inputs, and its deny text says when the recorded roots could not be read.
+- `llmenv memory prune` no longer takes a line inside a memory's text for a record header, so stored text cannot choose which other memory is forgotten.
 - `llmenv doctor` warns when `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` is above 100, and reports a state folder that it cannot resolve.
 - Failures of the hooks that run in the background (state folder, recall ledger, agent-config document, spawn and pipe errors) log at error level, so they show at the default log level.
 

@@ -159,10 +159,15 @@ fn parse_recall_output(text: &str) -> Vec<MemoryRecord> {
     // `has_weight` guards against partial records: we only finalize a record
     // once both importance and weight have been seen.
     let mut has_weight = false;
+    let mut weight_seen = false;
 
+    // A record header starts at column 0, and the fields of a record are indented. Memory
+    // content is free text, so a line inside it must not forge a header: only an unindented
+    // header counts. The first `importance` and `weight` of a record win, so a later line in
+    // the summary cannot change them.
     for line in text.lines() {
         let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("--- ") {
+        if let Some(rest) = line.strip_prefix("--- ") {
             // new record start: "--- <id> ---"
             if let Some(id) = rest.strip_suffix(" ---") {
                 // Finalize previous record
@@ -172,11 +177,17 @@ fn parse_recall_output(text: &str) -> Vec<MemoryRecord> {
                     records.push(MemoryRecord { id, importance });
                 }
                 has_weight = false;
+                weight_seen = false;
                 current_id = Some(id.to_string());
             }
         } else if let Some(rest) = trimmed.strip_prefix("importance:") {
-            current_importance = Some(Importance::from_str(rest));
-        } else if let Some(rest) = trimmed.strip_prefix("weight:") {
+            if current_importance.is_none() {
+                current_importance = Some(Importance::from_str(rest));
+            }
+        } else if let Some(rest) = trimmed.strip_prefix("weight:")
+            && !weight_seen
+        {
+            weight_seen = true;
             has_weight = rest.trim().parse::<f64>().is_ok();
         }
     }
@@ -443,6 +454,23 @@ mod tests {
         let text = "--- id-1 ---\n  importance: low\n  weight: not-a-number\n  topic: test\n";
         let records = parse_recall_output(text);
         assert_eq!(records.len(), 0);
+    }
+
+    #[test]
+    fn a_line_in_the_summary_cannot_forge_a_record() {
+        let text = "--- real ---\n  importance: high\n  weight: 0.9\n  summary: x\n  --- victim ---\n  importance: low\n  weight: 0.1\n";
+        let records = parse_recall_output(text);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, "real");
+        assert_eq!(records[0].importance, Importance::High);
+    }
+
+    #[test]
+    fn the_first_importance_and_weight_of_a_record_win() {
+        let text = "--- r ---\n  importance: critical\n  weight: 0.9\n  summary: s\n  importance: low\n  weight: nope\n";
+        let records = parse_recall_output(text);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].importance, Importance::Critical);
     }
 
     mod props {
