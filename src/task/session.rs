@@ -253,7 +253,7 @@ fn session_path(state_dir: &Path, id: &str) -> PathBuf {
 
 /// A session id goes into a file path, so it must be a plain name. An id such as `../../x` from
 /// `--resume` or `session edit` would otherwise read or write a file outside the session folder.
-fn check_session_id(id: &str) -> anyhow::Result<()> {
+fn ensure_plain_name(id: &str) -> anyhow::Result<()> {
     if !crate::paths::is_valid_short_name(id) {
         anyhow::bail!("'{id}' is not a valid session id");
     }
@@ -261,7 +261,7 @@ fn check_session_id(id: &str) -> anyhow::Result<()> {
 }
 
 fn save_session(state_dir: &Path, session: &Session) -> anyhow::Result<()> {
-    check_session_id(&session.id)?;
+    ensure_plain_name(&session.id)?;
     crate::paths::create_dir_owner_only(&sessions_dir(state_dir))?;
     let json = serde_json::to_string_pretty(session)?;
     crate::paths::write_owner_only_atomic(&session_path(state_dir, &session.id), json.as_bytes())?;
@@ -269,7 +269,7 @@ fn save_session(state_dir: &Path, session: &Session) -> anyhow::Result<()> {
 }
 
 fn load_session(state_dir: &Path, id: &str) -> anyhow::Result<Session> {
-    check_session_id(id)?;
+    ensure_plain_name(id)?;
     let content = std::fs::read_to_string(session_path(state_dir, id))?;
     Ok(serde_json::from_str(&content)?)
 }
@@ -278,7 +278,7 @@ fn load_session(state_dir: &Path, id: &str) -> anyhow::Result<Session> {
 /// found"; a read or parse failure names the file and the cause, so a corrupt or unreadable
 /// session is not reported as a typo'd id (#2424).
 fn load_existing_session(state_dir: &Path, id: &str) -> anyhow::Result<Session> {
-    check_session_id(id)?;
+    ensure_plain_name(id)?;
     let path = session_path(state_dir, id);
     let content = match std::fs::read_to_string(&path) {
         Ok(content) => content,
