@@ -187,16 +187,17 @@ fn normalize_json(value: &mut serde_json::Value) {
     }
 }
 
-/// Replace every control character in `s` with its Rust-literal escape (a newline becomes the
-/// two characters `\n`) and leave every other character, including non-ASCII text, as it is.
+/// Replace every control character and every bidirectional or zero-width format character in
+/// `s` with its Rust-literal escape (a newline becomes the two characters `\n`) and leave every
+/// other character, including non-ASCII text, as it is.
 /// Use it on text from files or the network before it reaches a terminal or a line-based log:
-/// a raw newline can forge an extra line, and a raw ESC byte reaches the terminal as a control
-/// sequence.
+/// a raw newline can forge an extra line, a raw ESC byte reaches the terminal as a control
+/// sequence, and a bidirectional override can reorder the text that the reader sees.
 #[must_use]
 pub fn escape_control(s: &str) -> String {
     s.chars()
         .flat_map(|c| {
-            if c.is_control() {
+            if c.is_control() || is_unsafe_format_char(c) {
                 c.escape_default().collect::<Vec<_>>()
             } else {
                 vec![c]
@@ -374,6 +375,14 @@ mod tests {
         assert_eq!(escape_control(path), path);
     }
 
+    #[test]
+    fn escape_control_escapes_a_bidi_override_and_a_zero_width_space() {
+        assert_eq!(
+            escape_control("a\u{202E}b\u{200B}c"),
+            "a\\u{202e}b\\u{200b}c"
+        );
+    }
+
     mod escape_control_props {
         use super::escape_control;
         use proptest::prelude::*;
@@ -387,7 +396,15 @@ mod tests {
             #[test]
             fn control_free_text_is_unchanged(s in "\\PC{0,40}") {
                 prop_assume!(!s.chars().any(char::is_control));
+                prop_assume!(!s.chars().any(super::super::is_unsafe_format_char));
                 prop_assert_eq!(escape_control(&s), s);
+            }
+
+            #[test]
+            fn output_has_no_bidi_or_zero_width_chars(s in any::<String>()) {
+                prop_assert!(
+                    !escape_control(&s).chars().any(super::super::is_unsafe_format_char)
+                );
             }
         }
     }
