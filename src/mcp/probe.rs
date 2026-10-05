@@ -137,20 +137,30 @@ async fn probe_stdio(
 
 /// Stop the child and its process group. `kill_on_drop` is only the backstop for an early return.
 async fn stop_group(child: &mut tokio::process::Child, command: &str) {
-    if let Some(pid) = child.id() {
-        let group = format!("-{pid}");
-        match Command::new("kill")
-            .args(["-TERM", "--", &group])
-            .output()
-            .await
-        {
-            Ok(out) if out.status.success() => {}
-            Ok(_) | Err(_) => tracing::debug!(command, "process group signal failed"),
-        }
+    if let Some(pid) = child.id()
+        && let Err(e) = signal_group(pid)
+    {
+        // `tracing` warnings are off at the default log level, and the user must learn that a
+        // process may still run.
+        eprintln!(
+            "warning: cannot stop the process group of `{command}`: {e}. What the server \
+             started may still run."
+        );
     }
     if let Err(e) = child.kill().await {
-        tracing::warn!(command, error = %e, "cannot stop the MCP text probe process");
+        eprintln!("warning: cannot stop the MCP text probe process `{command}`: {e}");
     }
+}
+
+/// Send `SIGTERM` to the process group that `pid` leads. The probe starts the server with
+/// `process_group(0)`, so `pid` is the group's own id. A direct syscall: no `kill` process starts.
+fn signal_group(pid: u32) -> std::io::Result<()> {
+    let pid = i32::try_from(pid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .ok_or_else(|| std::io::Error::other(format!("pid {pid} is not a process")))?;
+    rustix::process::kill_process_group(pid, rustix::process::Signal::TERM)
+        .map_err(std::io::Error::from)
 }
 
 /// What the stopped server left on stderr, as one clean line.
@@ -220,6 +230,25 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     /// A broken exchange waits for a reply forever, so bound it: the test then fails at once.
+    #[test]
+    fn signal_group_ends_a_group_leader_and_what_it_started() {
+        use std::os::unix::process::CommandExt;
+        let mut leader = std::process::Command::new("sh")
+            .args(["-c", "sleep 30 & wait"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        signal_group(leader.id()).unwrap();
+        let status = leader.wait().unwrap();
+        assert!(!status.success());
+    }
+
+    #[test]
+    fn signal_group_reports_a_pid_that_is_not_a_process() {
+        let err = signal_group(u32::MAX).unwrap_err().to_string();
+        assert!(err.contains("not a process"), "{err}");
+    }
+
     async fn quickly<T>(future: impl std::future::Future<Output = T>) -> T {
         tokio::time::timeout(Duration::from_secs(3), future)
             .await

@@ -394,9 +394,10 @@ pub(crate) fn discover_plugin_skills(
         let path = entry.path();
         let meta = std::fs::symlink_metadata(&path)?;
         if meta.file_type().is_symlink() {
-            tracing::warn!(
-                path = %path.display(),
-                "discover_plugin_skills: skipping symlinked skill directory"
+            eprintln!(
+                "warning: skipping the symlinked skill folder {}; a skill folder must be a real \
+                 folder",
+                path.display()
             );
             continue;
         }

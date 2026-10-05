@@ -20,7 +20,7 @@ skills; on by default).
 ## Gaps vs llmenv
 
 Today `ClaudeCodeAdapter` **validates** SKILL.md (name+description frontmatter,
-`validate_skills` at `src/adapter/claude_code.rs:115`) but doesn't generate the
+`validate_skills` at `src/adapter/claude_code/mod.rs:115`) but doesn't generate the
 skill content — bundle files supply it.
 
 For Codex a `CodexAdapter` would:

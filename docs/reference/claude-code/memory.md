@@ -48,9 +48,9 @@ each session. Toggle with `/memory` or `autoMemoryEnabled`.
 This is the **best-supported** surface:
 
 - `CLAUDE.md` is generated from `manifest.agents_md` and written at the config
-  root (`src/adapter/claude_code.rs:37`).
+  root (`src/adapter/claude_code/mod.rs:37`).
 - `rules/*.md` are written verbatim with frontmatter preserved
-  (`src/adapter/claude_code.rs:43`), correctly using Claude Code's native rules
+  (`src/adapter/claude_code/mod.rs:43`), correctly using Claude Code's native rules
   convention. The adapter comment even notes that adapters lacking this
   convention should inline via `merge::agents_md::concat_with_rules`.
 

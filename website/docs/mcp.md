@@ -1,3 +1,5 @@
+<!-- markdownlint-disable MD013 -->
+
 # MCP Servers and the Memory Backend
 
 llmenv treats MCP (Model Context Protocol) servers as a first-class config
@@ -61,7 +63,9 @@ host — including the one running it — reaches over the network. The daemon
 `mcp-proxy` to expose it on a TCP port; agents everywhere connect to that port.
 
 - On the **designated server host**, llmenv launches a local `mcp-proxy` bound
-  to `0.0.0.0:<port>` that bridges the stdio daemon onto the network.
+  to `<listen_host>:<port>` that bridges the stdio daemon onto the network.
+  `listen_host` defaults to `127.0.0.1` (loopback), so set `listen_host: 0.0.0.0`
+  (or one interface address) for agents on other hosts to connect.
 - **Every agent**, on every host, is configured with a **remote** client
   pointed at the server host's address: `http://<addr>:<port>`.
 
@@ -75,8 +79,8 @@ a TCP port. llmenv resolves it one of two ways:
   (`uvx mcp-proxy`), which fetches and caches it without a persistent install.
 
 So the server host needs **either** `mcp-proxy` **or** `uvx` installed. If
-neither is present, `llmenv export` fails with an error telling you to install
-one or remove the `memory:` block. Client hosts need neither — they only open an
+neither is present, `llmenv export` prints a warning that tells you to install
+one, and the proxy does not start. Client hosts need neither — they only open an
 HTTP connection to the server.
 
 (changed in v3.12.0) llmenv starts `mcp-proxy` and `icm serve` in the
@@ -110,10 +114,11 @@ host:
 
 features:
   memory:
-    server_host: fixed       # key into the `host:` table
-    port: 7878
-    when: [base]             # activates the backend (same model as bundles)
-    default_topics: ["context-{project}", preferences]
+    - server_host: fixed     # key into the `host:` table
+      port: 7878
+      listen_host: 0.0.0.0   # default 127.0.0.1; needed for other hosts to connect
+      when: [base]           # activates the backend (same model as bundles)
+      default_topics: ["context-{project}", preferences]
 ```
 
 ### Tool search and the ICM tools (added in v3.12.0)
@@ -124,6 +129,7 @@ The instructions tell the model to use the `icm_*` tools on most prompts,
 so llmenv renders `alwaysLoad: true` for the ICM server by default, and its tools arrive with the prompt.
 Set `always_load: false` on the `features.memory` entry to defer them again.
 A server in `mcp:` takes the same field; see [`mcp:`](configuration.md#mcp).
+Only Claude Code has `alwaysLoad`. opencode and Crush ignore the field.
 
 ### How the topology is resolved
 
@@ -132,7 +138,7 @@ A server in `mcp:` takes the same field; see [`mcp:`](configuration.md#mcp).
 2. If any of `memory.when` is active, the backend is selected: every agent gets
    a remote client at `http://<addr>:<port>` built from the host-table address.
 3. If this host matches `server_host` (its id is among the matched host scopes),
-   the CLI also launches the local `mcp-proxy` bound to `0.0.0.0:<port>`.
+   the CLI also launches the local `mcp-proxy` bound to `<listen_host>:<port>`.
    (changed in v3.12.0) The `memory:` entry can come from `config.yaml` or
    from a firing bundle's `bundle.yaml`; `llmenv export` reads the same merged
    list that the hooks use.
@@ -190,9 +196,21 @@ warning: failed to ensure mcp-proxy running: mcp-proxy (pid 32097) exited
 A failure here is a warning, not an error: `llmenv export` still emits its
 environment variables so the shell hook keeps working without the memory backend.
 
+**Each start is attributed** (added in v3.12.0).
+Every time llmenv starts the proxy, it appends one line to `mcp-proxy.log`.
+The line names the new pid, the time, the pid, session, and process group of the process that started it, and whether that process had a terminal.
+The `source=` field says which llmenv path started the proxy: `export` (a shell prompt), `session-start` (the session-start health check), or `restart` (the command below).
+Use the line to find what started a proxy that later stopped without a reason.
+
+**Restart the proxy with llmenv, not with `pkill`** (added in v3.12.0).
+`llmenv doctor --restart-memory-proxy` sends SIGTERM to the one process that the pidfile names, waits up to 5 seconds for it to exit, and starts a new proxy.
+It first checks that the command line of that process is an `mcp-proxy` for `icm serve`, so a reused pid is never signaled.
+`pkill -f mcp-proxy` stops the proxy of every session on the machine, so do not use it.
+The command fails with the fix when the old proxy does not exit, when the pid is another program, or when a process that llmenv does not track holds the port.
+
 ### Placing a host on a network manually
 
-Network auto-detection (gateway MAC, SSID, CIDR) doesn't always work — a VPN, a
+Network auto-detection (by gateway MAC; `ssid` and `cidr` are not evaluated) doesn't always work — a VPN, a
 captive network, or an unrecognized gateway can all leave the network scope
 unmatched, so the memory tag never activates and clients can't find the server.
 
@@ -214,9 +232,9 @@ scope:
 
 features:
   memory:
-    server_host: fixed
-    port: 7878
-    when: [home]             # active via either route
+    - server_host: fixed
+      port: 7878
+      when: [home]           # active via either route
 ```
 
 With this, `laptop` always emits `home`, so its agents always get the memory
@@ -378,12 +396,17 @@ for the full field reference.
 
 The memory backend has no transport security and no access control:
 
-- The proxy binds to `0.0.0.0:<port>` (all interfaces), and every client
+- The proxy binds to `<listen_host>:<port>`. With `listen_host: 0.0.0.0` that is
+  every interface, and llmenv warns when it starts such a proxy. Every client
   connects over plaintext **`http://`** — there is no TLS, so anything stored
   in memory crosses the wire in the clear.
 - There is no authentication. Any host that can reach `<addr>:<port>` can read
   and write the memory backend. Access is gated **only** by network reachability
   — that is the trust model.
+
+llmenv checks the address of an MCP endpoint against its private-network and SSRF rules before it connects, and the client follows no redirect (changed in v3.12.0).
+Before v3.12.0 a client with no configured headers followed up to 10 redirects, and a redirect could reach an address that the check had not approved.
+A tool call that the server answers with `isError: true` fails in llmenv, so a failed store is not recorded as stored (changed in v3.12.0).
 
 Deploy it only on a network you trust (home LAN, a private VPN, a firewalled
 subnet). Do not expose the port to the public internet, and do not point the
@@ -396,7 +419,7 @@ opening it directly.
 List the MCP servers that resolve for the current environment:
 
 ```bash
-llmenv mcp-ls        # alias: llmenv mcps
+llmenv status mcps
 ```
 
 `llmenv doctor` flags orphaned MCP config:
@@ -404,6 +427,9 @@ llmenv mcp-ls        # alias: llmenv mcps
 - a server (or the memory backend) whose tags are never emitted by any scope
   (it can never activate),
 - a memory `server_host` with no entry in the `host:` table.
+
+(added in v3.12.0) On the host that serves memory, `llmenv doctor` also reports the ICM server version.
+It warns below 0.10.60, where adaptive recall returns little, and below 0.10.64, where the ranking is weaker.
 
 ```bash
 llmenv doctor
@@ -440,7 +466,8 @@ and the `codebase-memory-mcp` index.
 Each job writes a checkpoint file under `<state dir>/checkpoints/` before it starts,
 and deletes the file when it succeeds.
 If the child dies, or ICM is down, the file stays.
-The next session start runs the job again, up to 3 attempts, and `llmenv doctor` lists what is left.
+The next session start runs the job again, up to 3 attempts and at most 20 jobs for each start, and `llmenv doctor` lists what is left.
+llmenv deletes a checkpoint after 7 days.
 Consolidation keeps the model summary in its checkpoint, so a resume never pays for the model twice.
 The index job is not resumed, because every session start runs the indexer anyway.
 See [Background work](troubleshooting.md#background-work-that-did-not-finish).
@@ -461,8 +488,8 @@ Which host runs the memory server keys off whether the current host matches a
 host-scope whose id equals `server_host`. Verify the active scopes and tags:
 
 ```bash
-llmenv scope-ls
-llmenv tag-ls
+llmenv status scopes
+llmenv status tags
 ```
 
 ### Client can't reach the server
@@ -476,7 +503,7 @@ nc -vz fixed.local 7878
 ### Server not activating
 
 The server only renders when one of its tags is active. Check that a scope in
-the current environment emits a matching tag (`llmenv tag-ls`).
+the current environment emits a matching tag (`llmenv status tags`).
 
 ### Proxy won't start
 
@@ -573,18 +600,34 @@ neutral events:
 - **SessionEnd** — `hook-run session_end` stores the active scope context
   (`icm_memory_store`) when the session closes
 
-The Claude Code adapter registers `SessionStart`/`SessionEnd` unconditionally —
+The Claude Code adapter registers `SessionStart`, `SessionEnd`, and (added in v3.12.0)
+`PostModelSwitch` unconditionally —
 `hook-run` itself no-ops cheaply when no memory backend is configured, so this
 costs nothing for users who only want [session logging](configuration.md#session_log)
-and not ICM memory. **`TurnStart` is not yet wired into settings.json**
-(tracked in [#499](https://github.com/phaedrus1992/llmenv/issues/499)); running
-`hook-run turn_start` manually still works, but Claude Code doesn't call it
-automatically on every prompt today.
+and not ICM memory.
+It registers `TurnStart` (a `UserPromptSubmit` hook) only when the ICM memory server is
+one of the resolved MCP servers, because that hook runs on every prompt.
+Only the Claude Code adapter registers these `hook-run` hooks by itself.
+`PostModelSwitch` exists in Claude Code only.
 
 Each hook talks to the memory backend over MCP. Failures degrade gracefully: a
 missing or unreachable backend logs a warning and exits cleanly (exit code 0) so
 hooks never block the agent. See [`docs/commands.md`](commands.md#hook-run) for
 details.
+
+### Adaptive recall (added in v3.12.0)
+
+By default, llmenv sends each memory once per model context.
+It chooses memories from the prompt, the recent tool calls, the newest tool error, and the task of a new subagent.
+A compaction or `/clear` resets the state, so the scope-tagged memories go out again.
+Set `features.memory[].adaptive_recall: false` to send the same scope-tagged memories on every prompt.
+See [`memory:`](configuration.md#featuresmemory) and [`hook-run`](commands.md#hook-run).
+
+### Post-session consolidation (added in v3.12.0)
+
+Consolidation runs from the `session_end` hook.
+It reads only the memories of the current project and stores each new rule under `llmenv-consolidation-<project>`.
+See [Post-session consolidation](configuration.md#post-session-consolidation).
 
 ### Session logging
 

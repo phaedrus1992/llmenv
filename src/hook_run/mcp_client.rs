@@ -153,16 +153,14 @@ impl McpHttpClient {
             value.set_sensitive(true);
             map.insert(name, value);
         }
-        let mut builder = reqwest::Client::builder()
+        // A redirect could reach a host that the address pin above does not cover, such as a
+        // cloud metadata address, and could carry configured headers with it. An MCP endpoint
+        // has no reason to redirect, so no redirect is followed.
+        let client = reqwest::Client::builder()
             .timeout(timeout)
             .default_headers(map)
-            .resolve_to_addrs(&host, &addrs);
-        // Configured headers can hold credentials. A redirect could send them to another host,
-        // which the address pin above does not cover.
-        if !headers.is_empty() {
-            builder = builder.redirect(reqwest::redirect::Policy::none());
-        }
-        let client = builder
+            .resolve_to_addrs(&host, &addrs)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .context("failed to build HTTP client (TLS backend unavailable)")?;
         Ok(Self {
@@ -405,11 +403,19 @@ impl McpHttpClient {
         let body = self
             .post_rpc("tools/call", &params, &format!("tool {name}"))
             .await?;
-        extract_text(&body).ok_or_else(|| {
+        let text = extract_text(&body).ok_or_else(|| {
             CallToolError::Fatal(anyhow!(
                 "tool {name} response missing result.content[].text"
             ))
-        })
+        })?;
+        // MCP reports a tool-level failure as a successful reply with `isError: true`. Treating
+        // it as success would mark a failed store as stored in the idempotency set.
+        if body["result"]["isError"].as_bool() == Some(true) {
+            return Err(CallToolError::Fatal(anyhow!(
+                "tool {name} reported an error: {text}"
+            )));
+        }
+        Ok(text)
     }
 
     /// Send one JSON-RPC request on the session and return the decoded reply. `label` names the
@@ -759,6 +765,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn call_tool_returns_an_error_when_the_tool_reports_is_error() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "isError": true,
+                "content": [{ "type": "text", "text": "database is locked" }]
+            }
+        });
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        let client =
+            McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("valid URL");
+        let err = client
+            .call_tool("icm_memory_store", serde_json::json!({}))
+            .await
+            .expect_err("a tool error must not look like success")
+            .to_string();
+        assert!(err.contains("database is locked"), "{err}");
+        assert!(err.contains("icm_memory_store"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn call_tool_treats_is_error_false_as_success() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": { "isError": false, "content": [{ "type": "text", "text": "ok" }] }
+        });
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        let client =
+            McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("valid URL");
+        let text = client
+            .call_tool("icm_memory_store", serde_json::json!({}))
+            .await
+            .expect("isError false is success");
+        assert_eq!(text, "ok");
+    }
+
+    #[tokio::test]
     async fn call_tool_returns_text_content() {
         let server = MockServer::start().await;
         // MCP tools/call response: result.content[0].text
@@ -1031,6 +1086,23 @@ mod tests {
         let client =
             McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("valid URL");
         assert_eq!(client.list_tools().await.unwrap()[0].name, "s");
+    }
+
+    #[tokio::test]
+    async fn a_client_without_headers_does_not_follow_a_redirect() {
+        let target = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(init_ok("s", None))
+            .expect(0)
+            .mount(&target)
+            .await;
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(307).insert_header("location", target.uri()))
+            .mount(&server)
+            .await;
+        let client = McpHttpClient::new(server.uri(), Duration::from_secs(2)).expect("client");
+        assert!(client.probe().await.is_err());
     }
 
     #[tokio::test]

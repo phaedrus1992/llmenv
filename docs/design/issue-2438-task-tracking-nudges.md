@@ -81,6 +81,17 @@ A comes first: B and C refer to the rules that A adds.
 14. **Doctor (C).** `llmenv doctor` warns when an instruction file in scope says the engine task tools are "blocked", or forbids `llmenv task`.
 15. **Release check (C).** A test runs `complete_task` on an unstarted task and expects the #2416 refusal. A CI step compares `llmenv --version` of the built binary with the source, so a stale alpha cannot hide it.
 
+## Implemented as
+
+- `ParentSpec::Auto` is replaced by `ParentSpec::Detached` (no parent).
+  Queue, parallel, and sub-task placement is the `Placement` enum (`Queue`, `Parallel`, `Child`) in `src/task/relation.rs`.
+- The nudge counter in `src/hook_run/task_nudge.rs` counts `Bash`, `Edit`, `Write` and `MultiEdit`.
+  Counters live in `state_dir/task_nudge/{session_id}.json`.
+- `features.task_tracker` has three more optional keys: `workflow_skills` (the skills that trigger the `Skill` reminder; default `dev-sprint`, `ship-issue`, `pre-pr-review`, `executing-plans`, `writing-plans`), `nudge_after` (default 8) and `nudge_every` (default 20).
+- The doctor check for contradicting text is `src/cli/doctor/task_text.rs`.
+- The example base bundle no longer says the engine task tools are "blocked", so that row of "Verified facts" is out of date.
+- Decision 15 is built: the `complete_task` refusal has tests, and `scripts/check-binary-version.sh` runs in the `test` job to compare `llmenv --version` of the built binary with the source.
+
 ## Tests
 
 - A: parent with three children, all started, all `wip`; `done` on the parent refuses with two done and one `wip`, then succeeds; two queued tasks, `start` of the second refuses until the first is `done` or `waiting`, `--parallel` removes the refusal; the chain no longer warns; the `pre-pr-review` shape (one parent, six children, a summary task queued after the parent) runs end to end.

@@ -92,7 +92,11 @@ llmenv doctor
   the rendered config (added in v3.12.0) — see
   [Troubleshooting](troubleshooting#doctor-warns-about-retired-claude-code-settings);
 - the ICM server version, when this host serves memory (added in v3.12.0) — see
-  [Troubleshooting](troubleshooting#memory-backend-issues).
+  [Troubleshooting](troubleshooting#memory-backend-issues);
+- the size of the always-loaded instruction text, and the length of each MCP server's instructions and tool
+  descriptions (added in v3.12.0) — see [Commands](commands.md#doctor);
+- MCP server health, the last codebase-memory index, and background jobs that did not finish (added in
+  v3.12.0) — see [Commands](commands.md#doctor).
 
 Then inspect what resolves for your current directory:
 
@@ -157,8 +161,9 @@ Everyday commands:
 | `llmenv export [--compress]` | Resolve + export the environment |
 | `llmenv regenerate` | Re-materialize without exporting env vars |
 | `llmenv status [section]` | Show active scopes, tags, and config status |
-| `llmenv doctor [--gc]` | Validate wiring |
+| `llmenv doctor [--gc] [--all] [--probe-mcp]` | Validate wiring |
 | `llmenv prune [--all]` | Clean stale cache folders |
+| `llmenv task ...` | Track work across sessions (see [`task`](commands.md#task)) |
 
 Full per-command reference: [commands.md](commands.md).
 

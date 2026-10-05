@@ -195,6 +195,27 @@ pub enum HookEvent {
     PostModelSwitch,
 }
 
+/// Every event name that `hook-run` accepts. A test keeps this list in step with the parser, and
+/// the `hook-run` help text lists the same names.
+pub(crate) const HOOK_EVENT_NAMES: [&str; 16] = [
+    "session_start",
+    "turn_start",
+    "session_end",
+    "user_prompt_submit",
+    "post_session",
+    "pre_tool_use",
+    "post_tool_use",
+    "notification",
+    "stop",
+    "subagent_stop",
+    "pre_compact",
+    "post_tool_batch",
+    "post_tool_use_failure",
+    "subagent_start",
+    "subagent_task",
+    "post_model_switch",
+];
+
 impl FromStr for HookEvent {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -216,10 +237,8 @@ impl FromStr for HookEvent {
             "subagent_task" => Ok(HookEvent::SubagentTask),
             "post_model_switch" => Ok(HookEvent::PostModelSwitch),
             other => Err(anyhow::anyhow!(
-                "unknown hook event '{other}' (expected session_start|turn_start|session_end|\
-                 user_prompt_submit|pre_tool_use|post_tool_use|notification|stop|\
-                 subagent_stop|pre_compact|post_tool_batch|post_tool_use_failure|\
-                 subagent_start|subagent_task|post_model_switch)"
+                "unknown hook event '{other}' (expected {})",
+                HOOK_EVENT_NAMES.join("|")
             )),
         }
     }
@@ -780,6 +799,14 @@ pub fn set_preloaded_config(config: crate::config::Config) {
 /// `set_preloaded_config` call. Test-only: production code always runs in a
 /// fresh process, so there is nothing to reset outside `cargo test`'s shared
 /// binary.
+/// The state folder, or `None` after an error that names what the missing folder disables.
+/// The error level shows at the default log level, so a hook that cannot keep its state is seen.
+fn state_dir_or_log(disabled: &str) -> Option<std::path::PathBuf> {
+    crate::paths::state_dir()
+        .inspect_err(|e| tracing::error!("no state dir, {disabled}: {e:#}"))
+        .ok()
+}
+
 #[cfg(test)]
 fn reset_preloaded_config_for_test() {
     *PRELOADED_CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -1215,7 +1242,7 @@ fn run_inner(
     // #702 early-exit can skip entirely — a metric that only accrues when
     // something else happens to want the event would undercount silently.
     if counts_tool_use(event)
-        && let Ok(state_dir) = crate::paths::state_dir()
+        && let Some(state_dir) = state_dir_or_log("slippage counters not updated")
     {
         crate::hook_run::slippage::handle_post_tool_use(
             config.features.as_ref().and_then(|f| f.slippage.as_ref()),
@@ -1250,7 +1277,7 @@ fn run_inner(
             .features
             .as_ref()
             .and_then(|f| f.task_tracker.as_ref())
-        && let Ok(state_dir) = crate::paths::state_dir()
+        && let Some(state_dir) = state_dir_or_log("task nudges skipped")
     {
         let text = crate::hook_run::task_nudge::handle_post_tool_use(
             tracker,
@@ -1353,16 +1380,18 @@ fn run_inner(
             // since this is a best-effort side effect, not manifest building.
             match active_codebase_memory.as_slice() {
                 [] => {}
-                [cm] => {
-                    if let Ok((project_root, state_dir)) =
-                        crate::mcp::resolve::codebase_memory_paths()
-                    {
+                [cm] => match crate::mcp::resolve::codebase_memory_paths() {
+                    Ok((project_root, state_dir)) => {
                         // Before the index run, so the server accepts the repository (#2406).
                         roots_notice =
                             crate::mcp::cbm_roots::session_start_notice(&config, cm, &project_root);
                         trigger_codebase_memory_index(&project_root, cm, &state_dir);
                     }
-                }
+                    Err(e) => tracing::error!(
+                        "cannot resolve the codebase-memory paths, so the session-start index \
+                         is skipped: {e:#}"
+                    ),
+                },
                 _ => {
                     tracing::debug!(
                         "codebase_memory: multiple entries active simultaneously, \
@@ -1399,7 +1428,7 @@ fn run_inner(
         // session end keeps the memory readable and halves the round trips.
         // Append session metrics to both chunks (injection and storage).
         if stores_session_metrics(event)
-            && let Ok(state_dir) = crate::paths::state_dir()
+            && let Some(state_dir) = state_dir_or_log("session metrics not stored")
             && let Some(summary) = crate::hook_run::slippage::session_metrics_summary(
                 config.features.as_ref().and_then(|f| f.slippage.as_ref()),
                 claude_session_id,
@@ -2674,11 +2703,11 @@ fn handle_web_fetch_in(
 ) -> Option<std::process::Child> {
     let args = web_fetch_store_args(payload)?;
     let Ok(payload_json) = serde_json::to_string(&args) else {
-        tracing::debug!("icm-store: failed to serialize store args");
+        tracing::error!("icm-store: failed to serialize store args");
         return None;
     };
     let Ok(exe) = std::env::current_exe() else {
-        tracing::debug!("icm-store: cannot resolve current_exe for detached store");
+        tracing::error!("icm-store: cannot resolve current_exe for detached store");
         return None;
     };
     let checkpoint = checkpoint::begin(
@@ -2691,13 +2720,13 @@ fn handle_web_fetch_in(
     redirect_stderr_to_detached_log(&mut cmd);
     crate::mcp::proxy::detach_process_group(&mut cmd);
     let Ok(mut child) = cmd.spawn() else {
-        tracing::debug!("icm-store: failed to spawn detached store child");
+        tracing::error!("icm-store: failed to spawn detached store child");
         return None;
     };
     if let Some(mut stdin) = child.stdin.take()
         && let Err(e) = stdin.write_all(payload_json.as_bytes())
     {
-        tracing::debug!("icm-store: failed to pipe args to detached child: {e}");
+        tracing::error!("icm-store: failed to pipe args to detached child: {e}");
     }
     // Not waited on by the caller: the child is process-group-detached and
     // outlives us.
@@ -2979,7 +3008,7 @@ fn trigger_codebase_memory_index(
     direct_index_stdout(&mut cmd, wrapped, &result_path);
     crate::mcp::proxy::detach_process_group(&mut cmd);
     if let Err(e) = cmd.spawn() {
-        tracing::debug!("codebase-memory-mcp index_repository: failed to spawn: {e}");
+        tracing::error!("codebase-memory-mcp index_repository: failed to spawn: {e}");
     }
 }
 
@@ -3163,6 +3192,18 @@ fn post_session_consolidation_in(state_dir: Option<&std::path::Path>) {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    #[test]
+    fn every_listed_hook_event_name_parses_and_round_trips() {
+        for name in HOOK_EVENT_NAMES {
+            let event: HookEvent = name.parse().unwrap();
+            assert_eq!(event.to_string(), name);
+        }
+        let err = "nope".parse::<HookEvent>().unwrap_err().to_string();
+        for name in HOOK_EVENT_NAMES {
+            assert!(err.contains(name), "{name} missing from: {err}");
+        }
+    }
+
     use super::*;
 
     /// Every event `from_str` accepts. Kept as strings so a new variant that

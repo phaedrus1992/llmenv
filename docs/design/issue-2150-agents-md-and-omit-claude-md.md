@@ -46,6 +46,7 @@ A subagent with `omitClaudeMd: true` therefore runs without any llmenv rule.
 
 Delete `CLAUDE.md` and `examples/config-llmenv-dir/CLAUDE.md`.
 Do not add a `CLAUDE.local.md`.
+Implemented as: both shims are deleted on this branch, so the "Verified facts" rows that name `CLAUDE.md` describe the repository before the change.
 
 Contributors on Claude Code older than 2.1.277 lose the automatic load.
 The repo has no `CONTRIBUTING.md` and no contributor section in `README.md`. Add a `## Contributing` section at the end of `README.md` with one sentence: `Agent instructions for this repo are in AGENTS.md; Claude Code 2.1.277 or later reads it directly.`

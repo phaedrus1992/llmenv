@@ -34,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `capabilities.advisor_size` is now `capabilities.advisor_model` and renders Claude Code's `advisorModel`. Use `fable`, `opus`, `sonnet`, or a model ID. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#advisor_model-claude-code) (#2409)
 - The consolidation `claude -p` call no longer waits for MCP servers to connect (`CLAUDE_CODE_MCP_STARTUP_WAIT_MS=0`), so it starts faster (#2148)
 - Plugin and marketplace sources that use `git://` or a `<helper>::` remote helper are rejected, like `ext::` and `http://` before. A pin (`sha` or `ref`) that is not a string is an error, not an unpinned clone (#2441)
+- `llmenv memory prune` reads only the memories of the current project and refuses to run when it cannot tell the project, where it used to read whatever ICM's own working folder held. The `memory prune`, `hook-run`, and `check-stale` help text now matches what the commands do. See [`memory`](https://phaedrus1992.github.io/llmenv/docs/commands#memory)
+- A session started in `$HOME`, in a parent of `$HOME`, or in `/` is no longer recorded as an allowed codebase-memory root, because the server keeps a root for good. `llmenv doctor` and the SessionStart notice say so. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#featurescodebase_memory)
 
 ### Removed
 
@@ -48,6 +50,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `llmenv doctor` no longer recommends `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` when `autoCompactEnabled` is `false`, and it names the `autoCompactWindow` that the percentage applies to (#2345)
 - `llmenv task session finish` and the session resume commands no longer report a corrupt or unreadable session file as "no session found". They name the file and the cause (#2424)
 - The Stop reminder for a session with open tasks no longer offers `llmenv task session finish`, which now refuses until the tasks are finished (#2416)
+- A codebase-memory tool error is no longer taken for success. An MCP reply with `isError: true` fails the call, so a failed ICM store is not marked as stored and is retried.
+- A corrupt `settings.json` is moved to `settings.json.corrupt` before llmenv writes a new one, instead of being overwritten. A skipped skill symlink, a plugin without a manifest, an unwritable hooks record, and a bundle hook path that cannot be moved to the cache folder now print a warning at the default log level.
+- A detached background job keeps its input when the parent fails to pipe all of it: the job reads the checkpoint instead of losing the event. A checkpoint folder or file that cannot be read shows in `llmenv doctor`.
+- `llmenv memory prune` checks `retention` on the merged active memory entry, so a bundle-declared entry counts, and a failed auto-prune prints a warning.
+- `features.codebase_memory[].allowed_roots` entries are checked with the same `$NAME` and `${NAME}` rules that expand them, so `$` or `${` alone fails `llmenv validate`. An entry that cannot expand, and an entry that is not a folder, are reported in `llmenv doctor` and the SessionStart notice. The `index_repository` guard denies when it cannot read its inputs, and its deny text says when the recorded roots could not be read.
+- `llmenv memory prune` no longer takes a line inside a memory's text for a record header, so stored text cannot choose which other memory is forgotten.
+- `llmenv doctor` warns when `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` is above 100, and reports a state folder that it cannot resolve.
+- Failures of the hooks that run in the background (state folder, recall ledger, agent-config document, spawn and pipe errors) log at error level, so they show at the default log level.
+
+### Security
+
+- The MCP HTTP client follows no redirect. Before, it did when no header was set, and a redirect could reach an address that the SSRF check had not approved.
+- A session id that is not a plain name is rejected by the `llmenv task session` commands, so `../x` cannot reach a file outside the session folder.
+- Bidirectional-override and zero-width characters in text from files or the network are escaped before they reach the terminal.
 
 ## [3.12.0-alpha.1] - 2026-10-02
 

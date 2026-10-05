@@ -194,23 +194,50 @@ pub(crate) fn complete(path: &Path) -> anyhow::Result<()> {
 }
 
 /// Every checkpoint under `state_dir`, oldest name first. A missing directory is empty.
+///
+/// A directory or an entry that cannot be read is an [`Entry::Unreadable`], so doctor reports it
+/// instead of showing no work.
 pub(crate) fn list(state_dir: &Path) -> Vec<Entry> {
-    let Ok(read) = std::fs::read_dir(dir(state_dir)) else {
-        return Vec::new();
+    let directory = dir(state_dir);
+    let read = match std::fs::read_dir(&directory) {
+        Ok(read) => read,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => {
+            return vec![Entry::Unreadable(
+                directory.clone(),
+                format!(
+                    "cannot read the checkpoint folder {}: {e}",
+                    directory.display()
+                ),
+            )];
+        }
     };
-    let mut paths: Vec<PathBuf> = read
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
-        .collect();
+    let mut unreadable = Vec::new();
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for entry in read {
+        match entry {
+            Ok(entry) => {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                    paths.push(path);
+                }
+            }
+            Err(e) => unreadable.push(Entry::Unreadable(
+                directory.clone(),
+                format!("cannot read an entry of the checkpoint folder: {e}"),
+            )),
+        }
+    }
     paths.sort();
-    paths
+    let mut entries: Vec<Entry> = paths
         .into_iter()
         .map(|path| match load(&path) {
             Ok(checkpoint) => Entry::Ready(path, checkpoint),
             Err(e) => Entry::Unreadable(path, format!("{e:#}")),
         })
-        .collect()
+        .collect();
+    entries.extend(unreadable);
+    entries
 }
 
 /// Run every stale checkpoint again: bump its attempt count, restart its clock, and hand it to
@@ -347,15 +374,50 @@ pub(crate) fn begin(
         .inspect_err(|e| tracing::error!("{} checkpoint not written: {e}", kind.as_str()))
         .ok()?;
     let mut checkpoint = Checkpoint::new(kind, inputs, session_id);
-    if kind == JobKind::CbmIndex
-        && let Ok(earlier) = load(&dir(state_dir).join(checkpoint.file_name()))
-    {
-        checkpoint.attempts = earlier.attempts.saturating_add(1).min(MAX_ATTEMPTS);
+    if kind == JobKind::CbmIndex {
+        let earlier_path = dir(state_dir).join(checkpoint.file_name());
+        match load(&earlier_path) {
+            Ok(earlier) => {
+                checkpoint.attempts = earlier.attempts.saturating_add(1).min(MAX_ATTEMPTS);
+            }
+            Err(_) if !earlier_path.exists() => {}
+            // A count that restarts at 1 hides an indexer that always fails.
+            Err(e) => {
+                tracing::error!("earlier index checkpoint unreadable, attempts restart: {e:#}")
+            }
+        }
     }
     write(state_dir, &checkpoint)
         .inspect_err(|e| tracing::error!("{} checkpoint not written: {e:#}", kind.as_str()))
         .ok()
         .flatten()
+}
+
+/// The inputs of a detached job. `stdin_text` is what the parent piped to the child. When that
+/// text does not parse as `T`, for example because the parent failed to write all of it, the inputs
+/// that the parent recorded in the checkpoint at `path` are used. The job then runs, and a
+/// truncated pipe does not lose it.
+///
+/// # Errors
+/// The text does not parse, and there is no readable checkpoint whose inputs parse.
+pub(crate) fn inputs_or_checkpoint<T: serde::de::DeserializeOwned>(
+    stdin_text: &str,
+    path: Option<&Path>,
+) -> anyhow::Result<T> {
+    let stdin_error = match serde_json::from_str::<T>(stdin_text) {
+        Ok(inputs) => return Ok(inputs),
+        Err(e) => e,
+    };
+    let recorded = path
+        .and_then(|p| load(p).ok())
+        .and_then(|cp| serde_json::from_value::<T>(cp.inputs).ok());
+    match recorded {
+        Some(inputs) => {
+            tracing::error!("job input on stdin is unusable ({stdin_error}); using the checkpoint");
+            Ok(inputs)
+        }
+        None => Err(stdin_error.into()),
+    }
 }
 
 /// Delete the checkpoint of a job that finished, or that cannot succeed on a retry. A job that
@@ -408,6 +470,90 @@ mod tests {
 
     fn cp(kind: JobKind, n: u32) -> Checkpoint {
         Checkpoint::new(kind, serde_json::json!({ "n": n }), Some("sess"))
+    }
+
+    #[test]
+    fn job_inputs_come_from_stdin_when_it_parses() {
+        let got: serde_json::Value = inputs_or_checkpoint(r#"{"a":1}"#, None).unwrap();
+        assert_eq!(got, serde_json::json!({"a": 1}));
+    }
+
+    #[test]
+    fn a_truncated_stdin_falls_back_to_the_checkpoint_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let cp = Checkpoint::new(JobKind::IcmStore, serde_json::json!({"a": 1}), Some("s"));
+        let path = write(dir.path(), &cp).unwrap().unwrap();
+        let got: serde_json::Value = inputs_or_checkpoint(r#"{"a":"#, Some(&path)).unwrap();
+        assert_eq!(got, serde_json::json!({"a": 1}));
+        let got: serde_json::Value = inputs_or_checkpoint("", Some(&path)).unwrap();
+        assert_eq!(got, serde_json::json!({"a": 1}));
+    }
+
+    #[test]
+    fn unusable_stdin_without_a_usable_checkpoint_is_an_error() {
+        assert!(inputs_or_checkpoint::<serde_json::Value>("{", None).is_err());
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("x.json");
+        std::fs::write(&bad, "not a checkpoint").unwrap();
+        assert!(inputs_or_checkpoint::<serde_json::Value>("{", Some(&bad)).is_err());
+        assert!(
+            inputs_or_checkpoint::<serde_json::Value>("{", Some(&dir.path().join("none.json")))
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_checkpoint_folder_that_cannot_be_read_is_listed_as_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("checkpoints");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // A user that ignores permissions (root) can read the folder, so the case cannot arise.
+        let readable = std::fs::read_dir(&folder).is_ok();
+        let entries = list(dir.path());
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if readable {
+            return;
+        }
+        assert!(
+            matches!(entries.as_slice(), [Entry::Unreadable(_, why)] if why.contains("cannot read")),
+            "{entries:?}"
+        );
+    }
+
+    #[test]
+    fn a_missing_checkpoint_folder_lists_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(list(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn the_index_job_counts_attempts_and_logs_an_unreadable_earlier_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let inputs = serde_json::json!({ "root": "/r" });
+        let begin_index = || begin(Some(dir.path()), JobKind::CbmIndex, &inputs, None).unwrap();
+
+        // No earlier file: attempt 1, and nothing is logged.
+        let mut path = PathBuf::new();
+        let logs = crate::test_log_capture::capture_logs(|| path = begin_index());
+        assert_eq!(load(&path).unwrap().attempts, 1);
+        assert!(!logs.contains("unreadable"), "{logs}");
+
+        // A readable earlier file: the count goes up by one.
+        let logs = crate::test_log_capture::capture_logs(|| path = begin_index());
+        assert_eq!(load(&path).unwrap().attempts, 2);
+        assert!(!logs.contains("unreadable"), "{logs}");
+
+        // An unreadable earlier file: the count restarts, and the loss is logged.
+        std::fs::write(&path, "not a checkpoint").unwrap();
+        let logs = crate::test_log_capture::capture_logs(|| path = begin_index());
+        assert_eq!(load(&path).unwrap().attempts, 1);
+        assert!(
+            logs.contains("earlier index checkpoint unreadable"),
+            "{logs}"
+        );
     }
 
     #[test]

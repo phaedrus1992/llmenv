@@ -29,6 +29,7 @@ The config directory is resolved in this order:
 | `marketplace:` | list | Plugin marketplaces (git URL or local path) |
 | `plugin-collection:` | list | Named bags of plugins, selected by tag |
 | `skills:` | list | First-class skill declarations, selected by tag (same model as `lsp:`) |
+| `output_styles:` | list | Claude Code output styles, selected by tag (added in v3.10.0; see [`output_styles:`](#output_styles)) |
 | `host:` | map | Host name → reachable address (used by `features.memory:`) |
 | `init:` | map | Settings seeded into new materialized folders by `llmenv init` |
 | `disabled_engines` | list | Engine IDs to skip during materialization (#562) |
@@ -78,6 +79,11 @@ regardless of this setting.
 Useful when your SSH credential helper (e.g. 1Password's SSH agent) is locked
 and an SSH askpass prompt would hang terminal-based git operations during
 startup:
+
+```yaml
+cache:
+  remote_sync: false
+```
 
 ### `hashing` — how materialized folders are named
 
@@ -246,6 +252,13 @@ capabilities:
   `command` (with `command:`) or `mcp_tool` (with `tool:`). Hook command paths
   declared in a bundle are bundle-relative and resolved at materialize time.
 - `plugins` are `<marketplace>:<plugin>` strings.
+- `env` is a map of environment variables that llmenv exports for the session.
+  A later contributor overrides an earlier one.
+  A key that starts with `LLMENV_`, or that llmenv sets itself (`LLMENV_STATE_DIR`, `CLAUDE_CONFIG_DIR`), fails validation.
+  A key must match `[A-Za-z_][A-Za-z0-9_]*`.
+- `auto_memory_enabled` (added in v1.0.3) is an optional boolean scalar.
+  llmenv renders it to Claude Code's `autoMemoryEnabled` setting.
+  Leave it unset to let Claude Code decide.
 - `native_<feature>` maps are per-engine raw fragments emitted verbatim. They are
   the escape hatch for engine-specific rules with no neutral form. See
   [Engines](engines.md).
@@ -526,6 +539,7 @@ mcp:
 | `headers` | no | HTTP request headers for http/sse servers, such as an auth token (added in v3.0.0) |
 | `timeout` | no | Request timeout in seconds; unset uses the engine default (added in v3.0.0) |
 | `disabled_tools` | no | Tool names the engine hides from the model for this server (added in v3.0.0) |
+| `disabled` | no | `true` excludes the server from every engine (added in v3.0.0) |
 | `always_load` | no | Claude Code `alwaysLoad`: `true` keeps every tool of the server in the prompt, `false` puts them all behind tool search, unset keeps Claude Code's default. Other engines ignore it (added in v3.12.0) |
 
 Claude Code defers the tools of an MCP server behind tool search, so the model must search before it can call one.
@@ -627,6 +641,10 @@ features:
 | `wakeup_max_tokens` | no | Token budget for the `SessionStart` wake-up call, `20`-`4000` (added in v3.8.0) |
 | `adaptive_recall` | no | Per-session adaptive recall, `true` or `false`, default `true` (added in v3.12.0) |
 | `always_load` | no | Claude Code `alwaysLoad` for the ICM server, `true` or `false`, default `true`: the ICM tools load with the prompt instead of behind tool search. Set `false` to defer them again (added in v3.12.0) |
+| `default_type` | no | Memory type, `episodic`, `semantic`, or `procedural`, that llmenv tags on the memories it stores (added in v3.0.0) |
+| `default_importance` | no | Importance, `low`, `medium`, `high`, or `critical`, that llmenv tags on the memories it stores (added in v3.0.0) |
+| `type_importance` | no | Map from memory type to importance, for a per-type default (added in v3.0.0) |
+| `auto_prune` | no | `true` runs `llmenv memory prune` during `llmenv materialize`; default `false` (added in v3.3.0) |
 | `retention` | no | Per-type retention durations for `llmenv memory prune`. While set, prune refuses to run — see [`llmenv memory prune`](commands.md#memory) (changed in v3.12.0) |
 | `consolidation` | no | Post-session memory consolidation — see [Post-session consolidation](#post-session-consolidation) below (added in v3.3.0) |
 
@@ -750,6 +768,8 @@ process only when there's something explicit to set:
   handed to `codebase-memory-mcp` as its cache: with `index_path` unset, the
   actual index now lives wherever `codebase-memory-mcp` puts its own default
   (`~/.cache/codebase-memory-mcp/`), a different location than the log.
+- `CBM_MEM_BUDGET_MB` — set to `mem_budget_mb` when you configure one
+  (added in v3.12.0); otherwise left unset.
 - `CBM_ALLOWED_ROOT` — no longer set at all. Earlier versions pinned it to
   the current working directory to stop `index_repository` from being
   steered outside the intended project; per explicit user direction, llmenv
@@ -770,6 +790,12 @@ current as files change — llmenv doesn't re-implement reindex scheduling.
 `llmenv doctor` checks that the `codebase-memory-mcp` binary is on `PATH`
 whenever this feature is configured, and flags entries whose tags no scope
 emits.
+(added in v3.12.0) It also reports the result of the last index run, including the `mem_budget_mb` to set after an over-budget stop.
+
+(changed in v3.12.0) The scoping caveat above applies less when `codebase-memory-mcp` is 0.11.0 or later.
+At each `SessionStart`, llmenv records the project root, its own folders, the code-explorer cache, and the `allowed_roots` entries as allowed roots.
+A `PreToolUse` guard denies an `index_repository` call outside those roots.
+See [MCP](./mcp.md#codebase-memory-codebase_memory).
 
 (added in v3.10.0) Claude Code renders a tiered allow/ask policy for
 `mcp__codebase-memory-mcp__*`, mirroring the ICM memory MCP's tiering —
@@ -1066,11 +1092,16 @@ features:
 |---------------------------|----------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `enabled`                 | no       | Default `false`. When `true`, also redirects the engine's built-in task tools into this tracker via an auto-injected `PreToolUse` hook — Claude Code's `TaskCreate`/`TaskList`/`TaskUpdate`, and opencode's `todowrite` (added in v3.11.0). See [Commands](commands.md#task) for opencode's list-reconciliation rules.                                       |
 | `block_engine_task_tools` | no       | (added in v3.10.0) Default `true`. Set `false` to keep the tracker's CLAUDE.md fragment and reminders while still letting the engine's native task tools through — e.g. for genuine multi-agent teammate coordination that isn't solo step tracking. Gates opencode's `todowrite` redirect too (added in v3.11.0). Has no effect while `enabled` is `false`. |
-| `nudges`                  | no       | (added in v3.12.0) Default `true`. Turns off the reminders that fire while work happens: after a workflow skill starts, after several tool calls with no task, and when the agent asks the user a question while a task is in progress. See [Commands](commands.md#task-nudges).                                                                             |
+| `nudges`                  | no       | (added in v3.12.0) Default `true`. Turns off the reminders that fire while work happens: after a workflow skill starts, after several tool calls with no task, and when the agent asks the user a question while a task is in progress. See [Commands](commands.md#task-nudges-added-in-v3120).                                                              |
 | `enforce_commit`          | no       | (added in v3.12.0) Default `true`. Turns off the one-time deny of the first `git commit` or `gh pr create` of a session that has no task in progress.                                                                                                                                                                                                        |
 | `workflow_skills`         | no       | (added in v3.12.0) Skills that trigger the one-time reminder. Default `dev-sprint`, `ship-issue`, `pre-pr-review`, `executing-plans`, `writing-plans`. A plugin prefix such as `nbl-dev:` is ignored when matching.                                                                                                                                          |
 | `nudge_after`             | no       | (added in v3.12.0) Mutating tool calls with no task before the first nudge. Default `8`. Must be 1 or more.                                                                                                                                                                                                                                                  |
 | `nudge_every`             | no       | (added in v3.12.0) Mutating tool calls between later nudges. Default `20`. Must be 1 or more.                                                                                                                                                                                                                                                                |
+
+(added in v3.12.0) While the tracker is on, SessionStart also injects a short statement of the core tracking rules.
+`nudges: false` removes that text too.
+See [Commands](commands.md#core-task-rules-added-in-v3120).
+`llmenv validate` rejects a `nudge_after` or `nudge_every` of `0`, and a `workflow_skills` entry that is empty.
 
 See [Commands](commands.md#task) for the full `llmenv task` CLI reference.
 
@@ -1155,10 +1186,11 @@ session_log:
 
 | Sub-field | Required | Notes |
 | --------- | -------- | ----- |
-| `enabled` | yes | Enable/disable the ICM transcript sink |
+| `enabled` | no | Enable/disable the ICM transcript sink; default `true` |
 | `level` | no | Minimum event level (`info`, `debug`, `trace`); default `info` |
 | `retention_days` | no | Stale file-sink transcripts on disk are best-effort removed when older than this many days; `null` = disabled; must be >= 1 |
 
+`retention_days: 0` is a config error (`transcript.retention_days must be >= 1`).
 In this shape, `file` is also a mapping (`FileSinkConfig: enabled, level, path`) and the
 shorthand `verbose` flag is unavailable — set `level: debug` on each sink instead.
 
@@ -1579,6 +1611,14 @@ with `/`, `~`, `./`, or `../` is a path.
 A `plugin-collection` fires by tag like a bundle; its plugins are
 `<marketplace>:<plugin>` references. See [Plugins](plugins.md).
 
+A marketplace `name` must match `[A-Za-z0-9._-]+`, must not be `.` or `..`, and must not start with `-`.
+The names `claude-plugins-official`, `claude-code-plugins`, `claude-code-marketplace`, `anthropic-marketplace`, and `anthropic-plugins` are reserved.
+They need a GitHub `source` in the `anthropics` org.
+A `plugin-collection` entry that names an unknown marketplace is a config error.
+
+(added in v3.12.0) The plugins inside a marketplace manifest can come from other repositories, with `ref` and `sha` pins.
+See [Plugin sources in a marketplace manifest](plugins.md#plugin-sources-in-a-marketplace-manifest).
+
 ## `host:`
 
 A static table mapping host names to reachable addresses, consumed by `memory:`.
@@ -1588,6 +1628,9 @@ host:
   fixed:
     addr: "fixed.local"
 ```
+
+`addr` must be a valid hostname or an IP literal.
+Any other value is a config error.
 
 ## `init:`
 

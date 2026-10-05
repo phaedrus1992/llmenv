@@ -70,7 +70,7 @@ CLI: `claude mcp add --transport http <name> <url> --header "Authorization: Bear
 
 ## Gaps vs llmenv (mostly parity — narrow gaps)
 
-llmenv's `merge_mcp_into_claude_json` (`src/adapter/claude_code.rs`) produces
+llmenv's `merge_mcp_into_claude_json` (`src/adapter/claude_code/mod.rs`) produces
 correct `mcpServers` entries: stdio (`command`/`args`/optional `env`) and remote
 (`type` + `url`). The YAML schema (`McpServer`, `McpTransport`) models
 stdio/http/sse with tag-intersection selection, and the `memory`/ICM backend

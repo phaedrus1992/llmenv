@@ -24,6 +24,9 @@ So:
 The design below has one open fact: **how cbm stores allowed roots**.
 Read the cbm source at the installed version (the code-explorer cache holds it; check `codebase-memory-mcp --version` and pin the clone to that tag) and record the answer in this table before writing code.
 
+The paths in the "Where to look" column are in the codebase-memory-mcp repository, not in llmenv.
+The answers are in "As built" below.
+
 | Question | Where to look | Why it matters |
 | --- | --- | --- |
 | Is `allow-root` a CLI command that writes a runtime config file under `CBM_CACHE_DIR`, or does the server read an env list? | `src/cli/cli.c` (the `allow-root` and `config` handlers), `src/foundation/` config loading | Picks between "llmenv runs `codebase-memory-mcp allow-root <path>` with the same `CBM_CACHE_DIR`" and "llmenv sets an env var in both launch paths" |
@@ -154,6 +157,8 @@ Pinned facts about codebase-memory-mcp 0.11.0:
 Differences from the plan:
 
 1. `src/mcp/cbm_roots.rs` holds the resolver, the command runner, the report, and the guard decision.
+   The resolver is `resolve_allowed_roots(cm, &RootBases)` there, not `resolve_allowed_roots(cm, project_root, env)` in `src/mcp/resolve.rs`; `RootBases` carries the project root, config dir, cache dir, state dir and home.
+   The `Design` sections above that name `src/mcp/resolve.rs` and `src/hook_run/mcp_health.rs` for this logic are superseded by that module.
 2. The guard allows the configured roots of every `codebase_memory` entry plus the roots that `allow-root --list` prints, not the active entry only. This avoids scope evaluation in a hook.
 3. llmenv cannot detect a cache-dir mismatch, because the server has no query for its cache dir. The notice and doctor print the expected cache dir (`index_path`, or the server default) instead.
 4. The SessionStart step runs `allow-root` only for roots that `--list` lacks, and skips a root that does not exist.

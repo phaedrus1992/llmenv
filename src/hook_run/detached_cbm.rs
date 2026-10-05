@@ -59,7 +59,7 @@ fn run_cbm_index_with(
                 Some((pending, final_path.to_string()))
             }
             Err(e) => {
-                tracing::warn!(
+                tracing::error!(
                     "cannot create the index result file {}, so doctor cannot report the result: {e}",
                     pending.display()
                 );
@@ -87,7 +87,7 @@ fn pending_result_path(result: &Path) -> std::path::PathBuf {
 fn publish_result(pending: &Path, result: &Path, started: bool) {
     if started {
         if let Err(e) = std::fs::rename(pending, result) {
-            tracing::warn!("cannot save the index result to {}: {e}", result.display());
+            tracing::error!("cannot save the index result to {}: {e}", result.display());
         }
     } else if let Err(e) = std::fs::remove_file(pending) {
         tracing::debug!("cannot remove {}: {e}", pending.display());

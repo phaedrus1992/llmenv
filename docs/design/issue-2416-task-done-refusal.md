@@ -106,6 +106,15 @@ Keep each function under the project's 100-line limit; the listing and the error
 - `skills/llmenv/references/task-tracker.md`: same two flags, and the rule "start before done".
 - Changelog under `Changed`: `task done` refuses a never-started task and `task session finish` refuses with open tasks; `--force` and `--abandon-open` override.
 
+## Implemented as
+
+- `complete_task(state_dir, input, force)` also refuses to close a parent whose sub-tasks are not done unless `force` is set (#2455).
+  `Completed` carries `skipped_start_note()` and `undone_children_note()` for the forced path; `never_started_warning()` is gone.
+- The native-tool redirect forces only a todo that was added and completed in the same `TodoWrite` call (`existing.is_none()`).
+  Every other completion, and every `update` to `completed`, passes `force = false`.
+- `unfinished_tasks` and `unfinished_error` are private to `src/task/session.rs`.
+  `FinishOutcome` is `{ session, done, total, abandoned: Vec<Task> }`, and `total` counts abandoned tasks.
+
 ## Tests
 
 1. Unit, `complete_task`: `Open` without force errors and the message names `task start` and `--force`; `Open` with force completes and reports `prior == Open`; `Wip`, `Waiting`, `Done` unchanged.

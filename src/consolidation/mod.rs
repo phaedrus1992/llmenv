@@ -401,7 +401,13 @@ struct RunScope<'a> {
 /// The id of this run: the run tag its checkpoint was written with, or empty without a checkpoint.
 fn run_id(checkpoint: Option<&std::path::Path>) -> String {
     checkpoint
-        .and_then(|p| checkpoint::load(p).ok())
+        .and_then(|p| {
+            // An empty id on a resumed run makes the rule request ids differ from the first
+            // run, so the seen-set misses a repeat.
+            checkpoint::load(p)
+                .inspect_err(|e| tracing::error!("consolidation run id unknown: {e:#}"))
+                .ok()
+        })
         .and_then(|c| c.inputs["run_tag"].as_str().map(str::to_string))
         .unwrap_or_default()
 }

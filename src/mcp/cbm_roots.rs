@@ -61,36 +61,19 @@ fn expand_root(
     } else {
         entry
     };
-    let mut chars = rest.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '$' {
-            out.push(c);
-            continue;
-        }
-        let braced = chars.peek() == Some(&'{');
-        if braced {
-            chars.next();
-        }
-        let mut name = String::new();
-        while let Some(&n) = chars.peek() {
-            if !(n.is_ascii_alphanumeric() || n == '_') {
-                break;
-            }
-            name.push(n);
-            chars.next();
-        }
-        // A bare `$`, a `${` that does not close after a plain name, and `${bad name}` are not
-        // variables.
-        if name.is_empty() || (braced && chars.next() != Some('}')) {
-            return None;
-        }
-        out.push_str(&env(&name).filter(|v| !v.is_empty())?);
-    }
+    out.push_str(&crate::util::expand_env_refs(rest, env)?);
     Some(PathBuf::from(out))
 }
 
+/// Whether `path` is too broad to allow as the project folder: the filesystem root, the home
+/// folder, or a parent of it. The server keeps an allowed root for good, so a session started in
+/// such a folder would leave every project below it open to `index_repository`.
+fn is_broad_root(path: &Path, home: Option<&Path>) -> bool {
+    path.parent().is_none() || home.is_some_and(|h| h.starts_with(path))
+}
+
 /// The default roots, then the roots of `cm`, without duplicates (#2406). An entry whose variable
-/// is unset is dropped.
+/// is unset is dropped, and so is a project folder that is too broad ([`is_broad_root`]).
 fn resolve_allowed_roots_in(
     cm: &CodebaseMemory,
     bases: &RootBases,
@@ -102,21 +85,17 @@ fn resolve_allowed_roots_in(
         .or_else(|| bases.home.as_ref().map(|h| h.join(".cache/nbl-diag")))
         .map(|dir| dir.join("repos"));
     let defaults = [
-        Some(bases.project_root.clone()),
+        (!is_broad_root(&bases.project_root, bases.home.as_deref()))
+            .then(|| bases.project_root.clone()),
         Some(bases.config_dir.clone()),
         Some(bases.cache_dir.clone()),
         Some(bases.state_dir.clone()),
         nbl_diag,
     ];
-    let configured = cm.allowed_roots.iter().filter_map(|entry| {
-        let expanded = expand_root(entry, bases.home.as_deref(), env);
-        if expanded.is_none() {
-            tracing::debug!(
-                "codebase_memory allowed_roots entry '{entry}' dropped: unset variable"
-            );
-        }
-        expanded
-    });
+    let configured = cm
+        .allowed_roots
+        .iter()
+        .filter_map(|entry| expand_root(entry, bases.home.as_deref(), env));
     let mut roots: Vec<PathBuf> = Vec::new();
     for root in defaults.into_iter().flatten().chain(configured) {
         if !roots.contains(&root) {
@@ -346,15 +325,54 @@ fn path_outside_roots(repo_path: &Path, roots: &[PathBuf]) -> Option<String> {
     ))
 }
 
-/// The configured roots that expand to a path that is not a folder. A default root may be absent,
-/// but a root the user wrote is a typo or a missing mount.
-fn absent_configured(cm: &CodebaseMemory, bases: &RootBases) -> Vec<PathBuf> {
-    let env = |name: &str| std::env::var(name).ok();
-    cm.allowed_roots
-        .iter()
-        .filter_map(|entry| expand_root(entry, bases.home.as_deref(), &env))
-        .filter(|root| root.is_absolute() && !root.is_dir())
-        .collect()
+/// The problems in the roots that the user wrote or started a session in, as lines to show:
+/// an entry that cannot expand (an unset variable or `~user`), an entry that is not a folder, and
+/// a project folder that is too broad to allow. A default root may be absent, but a root the
+/// user wrote is a typo or a missing mount.
+pub(crate) fn root_problems(cm: &CodebaseMemory, bases: &RootBases) -> Vec<String> {
+    root_problems_in(cm, bases, &|name| std::env::var(name).ok())
+}
+
+fn root_problems_in(
+    cm: &CodebaseMemory,
+    bases: &RootBases,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut unexpandable = Vec::new();
+    let mut absent = Vec::new();
+    for entry in &cm.allowed_roots {
+        match expand_root(entry, bases.home.as_deref(), env) {
+            None => unexpandable.push(entry.as_str()),
+            Some(root) if root.is_absolute() && !root.is_dir() => {
+                absent.push(root.display().to_string());
+            }
+            Some(_) => {}
+        }
+    }
+    if !unexpandable.is_empty() {
+        problems.push(format!(
+            "codebase-memory: allowed_roots entries that cannot expand (an unset or empty \
+             variable, or ~user): {}. Fix the entry in the llmenv config.",
+            unexpandable.join(", ")
+        ));
+    }
+    if !absent.is_empty() {
+        problems.push(format!(
+            "codebase-memory: allowed_roots entries that are not folders: {}. Fix the entry in \
+             the llmenv config.",
+            absent.join(", ")
+        ));
+    }
+    if is_broad_root(&bases.project_root, bases.home.as_deref()) {
+        problems.push(format!(
+            "codebase-memory: the session folder {} is too broad to allow, so it is not an \
+             allowed root. Start the session in a project folder, or add the folders to index \
+             to allowed_roots.",
+            bases.project_root.display()
+        ));
+    }
+    problems
 }
 
 /// Apply the roots at `SessionStart`. Returns the text to show the user when a root is missing
@@ -369,21 +387,14 @@ pub(crate) fn session_start_notice(
         Err(e) => return Some(format!("codebase-memory: cannot resolve the roots: {e}\n")),
     };
     let wanted = resolve_allowed_roots(cm, &bases);
-    let absent = absent_configured(cm, &bases);
+    let problems = root_problems(cm, &bases);
     match apply_roots(cm, &wanted, bases.home.as_deref()) {
         Ok(report) => {
             let (warn, text) = describe(&report);
-            let absent_text = (!absent.is_empty()).then(|| {
-                let list: Vec<String> = absent.iter().map(|p| p.display().to_string()).collect();
-                format!(
-                    "codebase-memory: allowed_roots entries that are not folders: {}. Fix the \
-                     entry in the llmenv config.",
-                    list.join(", ")
-                )
-            });
-            let text = [warn.then_some(text), absent_text]
+            let text = [warn.then_some(text)]
                 .into_iter()
                 .flatten()
+                .chain(problems)
                 .collect::<Vec<_>>()
                 .join("\n");
             (!text.is_empty()).then(|| format!("{text}\n"))
@@ -409,10 +420,41 @@ pub(crate) fn guard_decision(
         .features
         .as_ref()
         .map(|f| f.codebase_memory.as_slice())?;
-    let first = entries.first()?;
-    let bases = RootBases::from_config(config, project_root).ok()?;
-    let listed = list_roots(first).unwrap_or_default();
+    if entries.is_empty() {
+        return None;
+    }
+    // This guard denies an `index_repository` call, so a failure to read its inputs denies too.
+    let bases = match RootBases::from_config(config, project_root) {
+        Ok(bases) => bases,
+        Err(e) => {
+            return Some(format!(
+                "cannot check {repo_path} against the codebase-memory allowed roots: {e:#}. Run \
+                 `llmenv doctor`."
+            ));
+        }
+    };
+    let mut listed = Vec::new();
+    let mut unreadable = Vec::new();
+    for cm in entries {
+        match list_roots(cm) {
+            Ok(roots) => listed.extend(roots),
+            Err(e) => unreadable.push(format!("{e:#}")),
+        }
+    }
     decide(repo_path, entries, &bases, listed)
+        .map(|reason| with_unreadable_note(reason, &unreadable))
+}
+
+/// `reason` with the failures to read the server's recorded roots, so a deny that came from a
+/// failed read does not look like a root the user forgot to add.
+fn with_unreadable_note(reason: String, unreadable: &[String]) -> String {
+    if unreadable.is_empty() {
+        return reason;
+    }
+    format!(
+        "{reason} The roots that the server recorded could not be read: {}.",
+        unreadable.join("; ")
+    )
 }
 
 /// [`guard_decision`] with the bases and the listed roots given. A `repo_path` that does not
@@ -535,6 +577,54 @@ mod tests {
         b.home = None;
         let roots = strings(resolve_allowed_roots_in(&cm(&["~/x"]), &b, &no_env));
         assert_eq!(roots.len(), 4);
+    }
+
+    #[test]
+    fn a_broad_project_folder_is_not_an_allowed_root() {
+        for project in ["/", "/home", "/home/u"] {
+            let mut b = bases();
+            b.project_root = project.into();
+            let roots = strings(resolve_allowed_roots_in(&cm(&[]), &b, &no_env));
+            assert!(!roots.iter().any(|r| r == project), "{project}: {roots:?}");
+            let problems = root_problems_in(&cm(&[]), &b, &no_env);
+            assert!(
+                problems.iter().any(|p| p.contains("too broad")),
+                "{project}: {problems:?}"
+            );
+        }
+        let roots = strings(resolve_allowed_roots_in(&cm(&[]), &bases(), &no_env));
+        assert_eq!(roots[0], "/work/proj");
+        assert!(root_problems_in(&cm(&[]), &bases(), &no_env).is_empty());
+    }
+
+    #[test]
+    fn an_entry_that_cannot_expand_is_reported_not_dropped_silently() {
+        let problems =
+            root_problems_in(&cm(&["$MISSING/c", "~other/x", "/srv"]), &bases(), &no_env);
+        let text = problems.join("\n");
+        assert!(
+            text.contains("$MISSING/c") && text.contains("~other/x"),
+            "{text}"
+        );
+        assert!(text.contains("cannot expand"), "{text}");
+    }
+
+    #[test]
+    fn an_entry_that_is_not_a_folder_is_reported() {
+        let problems = root_problems_in(&cm(&["/no/such/folder/x"]), &bases(), &no_env);
+        assert!(
+            problems.iter().any(|p| p.contains("/no/such/folder/x")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_deny_names_a_failed_read_of_the_recorded_roots() {
+        assert_eq!(with_unreadable_note("denied.".into(), &[]), "denied.");
+        let text =
+            with_unreadable_note("denied.".into(), &["timed out".into(), "no binary".into()]);
+        assert!(text.starts_with("denied. "), "{text}");
+        assert!(text.contains("timed out; no binary"), "{text}");
     }
 
     #[test]

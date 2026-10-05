@@ -1,7 +1,7 @@
 # Issue #2147 — full Claude Code hook event list, matcher and handler checks
 
 - **Issue:** https://github.com/phaedrus1992/llmenv/issues/2147
-- **Milestone:** `v3.12.0`
+- **Milestone:** `v3.13.0` (moved from `v3.12.0`; this design is not implemented on `release/3.x`)
 - **Base branch:** `release/3.x` (forward-merges to `release/4.x`)
 - **Type:** feature, plus a fix to a wrong doctor message
 
@@ -9,9 +9,9 @@ This is a spec, not a plan.
 
 ## Problem
 
-1. `CLAUDE_CODE_HOOK_EVENTS` (`src/adapter/claude_code.rs` line 251) lists 9 events. Claude Code has 33.
+1. `CLAUDE_CODE_HOOK_EVENTS` (`src/adapter/claude_code/mod.rs` line 251) lists 9 events. Claude Code has 33.
 2. `llmenv doctor` prints `hook event '<e>' is not supported by the claude-code adapter — it will be skipped, not materialized` for any event outside the 9.
-   That is false for Claude Code: the render loop (`src/adapter/claude_code.rs` near line 1221) writes every hook under its `event` name without a check.
+   That is false for Claude Code: the render loop (`src/adapter/claude_code/mod.rs` near line 1221) writes every hook under its `event` name without a check.
    So the warning fires for valid events such as `SubagentStart`, and a misspelled event such as `PreToolUSe` is written with no real warning.
 3. llmenv accepts a `matcher` on events that ignore matchers, and `mcp_tool` handlers on `SessionStart` and `Setup`, where Claude Code skips them at launch.
 
@@ -76,7 +76,7 @@ Crush and opencode keep the default, `true`.
 
 ### Checks
 
-Put the Claude-specific checks in one pure function in `src/adapter/claude_code.rs`:
+Put the Claude-specific checks in one pure function in `src/adapter/claude_code/mod.rs`:
 
 ```rust
 pub(crate) fn hook_warnings(hooks: &[crate::config::Hook]) -> Vec<String>

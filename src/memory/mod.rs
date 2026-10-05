@@ -79,8 +79,13 @@ pub(crate) fn stats() -> anyhow::Result<()> {
 /// The `icm_memory_recall` arguments for the project that `cwd` belongs to.
 /// ICM's default filter is the ICM server's cwd, which is unrelated to this
 /// process when ICM runs on another host (#2253). No cwd searches all projects.
-fn scope_recall_args(cwd: Option<&std::path::Path>) -> serde_json::Value {
+pub(crate) fn scope_recall_args(cwd: Option<&std::path::Path>) -> serde_json::Value {
     let project = cwd.and_then(project::session_project).unwrap_or_default();
+    if project.is_empty() {
+        eprintln!(
+            "warning: cannot tell the project of this folder, so memories of all projects are used"
+        );
+    }
     serde_json::json!({ "query": "", "project": project })
 }
 
