@@ -44,14 +44,15 @@ fn run_icm_store_with(
     checkpoint: Option<&Path>,
     store: impl FnOnce(serde_json::Value) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
-    let result = serde_json::from_str(payload_json)
-        .map_err(anyhow::Error::from)
-        .and_then(store);
+    // The parent can fail to pipe all of the payload, so the checkpoint backs it up.
+    let parsed = checkpoint::inputs_or_checkpoint::<serde_json::Value>(payload_json, checkpoint);
+    let unparseable = parsed.is_err();
+    let result = parsed.and_then(store);
     match &result {
         // A payload that does not parse cannot succeed on a retry, so its checkpoint goes too.
         Ok(()) => checkpoint::finish(checkpoint),
         Err(_) => {
-            if serde_json::from_str::<serde_json::Value>(payload_json).is_err() {
+            if unparseable {
                 checkpoint::finish(checkpoint);
             }
         }
@@ -139,13 +140,23 @@ mod tests {
     }
 
     #[test]
-    fn a_payload_that_does_not_parse_deletes_its_checkpoint() {
+    fn a_truncated_payload_runs_the_job_from_its_checkpoint_inputs() {
         let dir = tempfile::tempdir().unwrap();
-        let cp =
-            checkpoint::Checkpoint::new(checkpoint::JobKind::IcmStore, serde_json::json!({}), None);
+        let inputs = serde_json::json!({ "content": "c" });
+        let cp = checkpoint::Checkpoint::new(checkpoint::JobKind::IcmStore, inputs.clone(), None);
         let file = checkpoint::write(dir.path(), &cp).unwrap().unwrap();
-        run_icm_store("not json", Some(&file)).unwrap_err();
-        assert!(!file.exists());
+        run_icm_store_with("{\"content\": \"", Some(&file), |args| {
+            assert_eq!(args, inputs);
+            Ok(())
+        })
+        .unwrap();
+        assert!(!file.exists(), "success deletes the file");
+    }
+
+    #[test]
+    fn a_payload_that_does_not_parse_and_has_no_checkpoint_is_an_error() {
+        let err = run_icm_store_with("not json", None, |_| Ok(())).unwrap_err();
+        assert!(err.to_string().contains("expected"), "{err}");
     }
 
     #[test]

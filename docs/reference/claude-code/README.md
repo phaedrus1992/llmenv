@@ -13,7 +13,7 @@ generate, validate, or model.
 
 ## What llmenv generates today
 
-`ClaudeCodeAdapter::materialize` (`src/adapter/claude_code.rs`) writes, into the
+`ClaudeCodeAdapter::materialize` (`src/adapter/claude_code/mod.rs`) writes, into the
 `CLAUDE_CONFIG_DIR` it points Claude Code at:
 
 | Artifact | Source | Status |

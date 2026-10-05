@@ -90,5 +90,7 @@ your personal defaults at the user level and let each repo tighten or expand fro
 ### No magic, no daemon
 
 llmenv is a CLI with a shell hook. It doesn't run a background service or intercept your shell.
+The one process it can start is the memory proxy, and only on the host that you name as the memory server (see [MCP & Memory](mcp.md#proxy-lifecycle-on-the-server-host)).
+Background work that a hook starts, such as consolidation, ends by itself and leaves a checkpoint if it dies.
 The hook is one line in your shell rc: `eval "$(llmenv hook zsh)"`. All state lives in files at
 paths you can inspect.

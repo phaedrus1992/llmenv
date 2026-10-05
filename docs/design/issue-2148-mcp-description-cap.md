@@ -96,6 +96,8 @@ pub(crate) async fn probe(mcp: &ResolvedMcp, timeout: Duration) -> anyhow::Resul
 
 ### Doctor output
 
+Implemented as: the section and its formatting live in `src/cli/doctor/mcp_text.rs`, and `src/cli/doctor.rs` calls it.
+
 Add `probe_mcp: bool` to `Command::Doctor` (`#[arg(long)]`, help `Also start stdio MCP servers to measure their instructions and tool descriptions`) and pass it to `run_doctor` (4 positional parameters after the change, inside the limit of 5).
 
 After the retired-settings section (#2145), when the Claude Code adapter is installed and the manifest has MCP servers, print `MCP text limits (Claude Code keeps <limit> characters):`, then one block per server in manifest order:

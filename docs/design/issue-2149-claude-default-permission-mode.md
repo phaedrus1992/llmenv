@@ -37,8 +37,8 @@ With telemetry off, auto mode's safety review runs on the server by default from
 
 | Fact | Location |
 | --- | --- |
-| llmenv modes and their Claude values: `acceptEdits`, `plan`, `default`, `bypassPermissions`, `auto`, `dontAsk`, `manual` | `permission_mode_str`, `src/adapter/claude_code.rs` |
-| Rendered as `permissions.defaultMode` only when `default_mode` is set | settings render function, `src/adapter/claude_code.rs` |
+| llmenv modes and their Claude values: `acceptEdits`, `plan`, `default`, `bypassPermissions`, `auto`, `dontAsk`, `manual` | `permission_mode_str`, `src/adapter/claude_code/mod.rs` |
+| Rendered as `permissions.defaultMode` only when `default_mode` is set | settings render function, `src/adapter/claude_code/mod.rs` |
 | Docs example comment lists only `acceptEdits \| plan \| default \| bypassPermissions` | `website/docs/configuration.md` line 184 |
 
 ## Changes
@@ -56,7 +56,7 @@ With telemetry off, auto mode's safety review runs on the server by default from
 
 ### Doctor
 
-Add a pure function in `src/adapter/claude_code.rs`:
+Add a pure function in `src/adapter/claude_code/mod.rs`:
 
 ```rust
 /// The starting permission mode Claude Code will use for an interactive

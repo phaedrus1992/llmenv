@@ -1,3 +1,5 @@
+<!-- markdownlint-disable MD013 -->
+
 # Release Process
 
 llmenv follows semantic versioning and automates release distribution via GitHub Actions.
@@ -6,20 +8,23 @@ llmenv follows semantic versioning and automates release distribution via GitHub
 
 Releases are triggered by pushing a `v*` tag. The release workflow:
 
-1. **Builds binaries** for macOS (arm64, x86_64) and Linux (x86_64)
+1. **Builds binaries** for macOS (arm64, x86_64) and Linux (x86_64, arm64; static musl builds)
 2. **Generates SHA256 checksums** and SLSA v1.0 provenance attestations
-3. **Publishes to crates.io** (requires valid `CARGO_REGISTRY_TOKEN` secret)
+3. **Publishes to crates.io** with trusted publishing (no stored token): the workspace crates `llmenv-util`, `llmenv-paths`, `llmenv-git`, and `llmenv-config`, then `llmenv`. A crate version that is already on crates.io is skipped, so a re-run is safe.
 4. **Creates a GitHub Release** with binaries, checksums, SLSA provenance, and the changelog
    notes for the version in the release body
 
 ## Changelog
 
-`CHANGELOG.md` follows [Keep a Changelog](https://keepachangelog.com/) and
+The changelog follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/). There is exactly one rule that
 matters and it is easy to get wrong:
 
 > **A version section only exists once that version has been git-tagged.
 > Until then, everything lives under `## [Unreleased]`.**
+
+There is one changelog file for each major version: `CHANGELOG-<major>.md` at the repo root.
+`website/docs/changelog.md` is generated from them by `scripts/sync-changelog-doc.sh`.
 
 The `Cargo.toml` version and the changelog must never run ahead of the tags.
 If `git tag -l` shows no `vX.Y.Z` tag, there is no `[X.Y.Z]` changelog section
@@ -75,9 +80,11 @@ git tag -a "vX.Y.Z" -m "vX.Y.Z"
 git push origin "vX.Y.Z"
 ```
 
-The release workflow triggers on any `v*` tag push. Tags should always point at a
-commit on `main`; the workflow has no branch filter, so a tag pointed at a stale
-commit would still fire — make sure you're tagging the merged result.
+The release workflow triggers on any `v*` tag push. A release of the newest major
+is tagged on `main`; a patch or minor release of an older major is tagged on its
+`release/X.x` branch (see [Branch Strategy](#branch-strategy)). The workflow has no
+branch filter, so a tag pointed at a stale commit would still fire — make sure
+you're tagging the merged result.
 
 ## Binary Distribution
 
@@ -86,6 +93,7 @@ commit would still fire — make sure you're tagging the merged result.
 Pre-built binaries are attached to each release on GitHub:
 
 - `llmenv-linux-x86_64` — Linux x86_64
+- `llmenv-linux-aarch64` — Linux arm64
 - `llmenv-macos-x86_64` — macOS Intel (x86_64)
 - `llmenv-macos-aarch64` — macOS Apple Silicon (arm64)
 - `checksums.txt` — SHA256 checksums for all binaries
@@ -121,8 +129,8 @@ cargo install llmenv
 
 **Prerequisites:**
 
-- A valid `CARGO_REGISTRY_TOKEN` must be set as a GitHub Actions secret
-- Generate tokens at [crates.io/me](https://crates.io/me)
+- Each of the five crates has a trusted publisher on crates.io that names the `phaedrus1992/llmenv` repo and the `release.yml` workflow.
+- The workflow gets a short-lived token from crates.io for each run. No `CARGO_REGISTRY_TOKEN` secret is stored.
 
 ### Homebrew
 
@@ -174,35 +182,54 @@ cargo yank --vers X.Y.Z
 
 ## Secrets Configuration
 
-The release workflow requires two secrets (repo Settings → Secrets and variables → Actions):
+The release workflow requires one secret (repo Settings → Secrets and variables → Actions):
 
-- `CARGO_REGISTRY_TOKEN` — crates.io API token (scoped to publish only)
 - `HOMEBREW_TAP_TOKEN` — GitHub PAT with write access to `phaedrus1992/homebrew-tap`
+
+crates.io needs no secret, because the workflow uses trusted publishing.
+The `forward-merge-release` workflow also reads an optional `FORWARD_MERGE_PAT` secret (see [Branch Strategy](#branch-strategy)).
 
 **Security notes:**
 
-- The token is passed via environment variable (never command-line arguments)
+- The Homebrew token is passed via environment variable (never command-line arguments)
 - GitHub Actions automatically masks secret values in logs
 - Always use fine-grained tokens with minimal scope (publish-only)
 
 ## Branch Strategy
 
-Feature development happens on `main`. Each major.minor version gets a
-`release/X.X.x` branch (created from the release tag) for managing bug fixes
-without picking up new feature work.
+Feature development happens on `main`.
+Each major version gets one long-lived `release/X.x` branch, created from the first release tag of that major.
+Bug fixes and small enhancements for that major land there, and the same branch hosts every patch and minor release of that major (`3.11.2`, `3.12.0`).
 
 **Backport policy** — fixes are applied (when feasible) to:
 
 | Branch | Description |
 | -------- | ------------- |
-| `release/X.X.x` | Current major.minor — always patched |
-| `release/X.(X-1).x` | Previous minor of the current major — always patched |
-| `release/(X-1).Y.x` | Last minor branch of the previous major — always patched |
+| `release/X.x` | Current major — always patched |
+| `release/(X-1).x` | Previous major — always patched |
 
-Fix in the **oldest applicable branch** first, then merge forward through the
-chain (`release/1.0.x` → `release/1.1.x` → `main`). The fix and its CHANGELOG
-entry propagate automatically via the merges — no cherry-picking needed. Full
-workflow in [`RELEASING.md`](https://github.com/phaedrus1992/llmenv/blob/main/RELEASING.md).
+Fix in the **oldest applicable branch** first.
+The `forward-merge-release` workflow then carries the fix, with its changelog entry, into every newer branch.
+Do not cherry-pick it by hand.
+Full workflow in [`RELEASING.md`](https://github.com/phaedrus1992/llmenv/blob/main/RELEASING.md).
+
+### Forward-merge workflow
+
+The `forward-merge-release` workflow runs on every push to a `release/X.x` branch.
+It merges the branch into the next release branch, and that branch into the next one, and so on up to `main`.
+Each link of the chain merges the previous link, so `main` also receives the commits of the branches in between.
+
+- A target that already holds the source is skipped.
+- Without the `FORWARD_MERGE_PAT` secret, the workflow pushes the merge to the target branch.
+  If the push is rejected, it opens a pull request and stops.
+- With `FORWARD_MERGE_PAT` set, the workflow never pushes to a target.
+  It always opens a `forward-merge/<source>-to-<target>` pull request, so the required checks run first.
+  When someone merges that pull request, the workflow starts again from the same source, so the rest of the chain is merged.
+- A merge that conflicts is resolved by the workflow only for three kinds of file.
+  It regenerates `website/docs/changelog.md` and the two lockfiles (`Cargo.lock`, `website/package-lock.json`).
+  It keeps the target's own version in the `Cargo.toml` files, when the source changed nothing else there.
+- Any other conflict stops the chain and fails the run with the `git merge` command to run by hand.
+  Resolve it on the target branch, then push.
 
 ## Troubleshooting
 
@@ -214,8 +241,8 @@ workflow in [`RELEASING.md`](https://github.com/phaedrus1992/llmenv/blob/main/RE
 
 ### Publish fails with "unauthorized"
 
-- Verify `CARGO_REGISTRY_TOKEN` is valid and has `publish` scope
-- Check token hasn't expired
+- Check that each crate on crates.io has a trusted publisher for the `release.yml` workflow
+- Check the `Get crates.io token` step of the `publish-crate` job
 
 ### Binary artifacts missing from release
 

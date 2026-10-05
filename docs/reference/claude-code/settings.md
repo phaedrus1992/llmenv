@@ -188,7 +188,7 @@ See [permissions.md](./permissions.md) for the full `permissions.*` and
 
 ## Gaps vs llmenv
 
-llmenv's `generate_settings_json` (`src/adapter/claude_code.rs:183`) emits a fixed
+llmenv's `generate_settings_json` (`src/adapter/claude_code/mod.rs:183`) emits a fixed
 stub:
 
 ```json

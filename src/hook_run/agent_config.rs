@@ -138,7 +138,7 @@ fn booted_hash_in(config_dir: Option<&std::ffi::OsStr>) -> Option<String> {
     match crate::materialize::manifest::CacheManifest::read(Path::new(dir)) {
         Ok(manifest) => manifest.map(|m| m.content_hash),
         Err(e) => {
-            tracing::warn!("cannot read the booted config manifest, config hash unknown: {e}");
+            tracing::error!("cannot read the booted config manifest, config hash unknown: {e}");
             None
         }
     }
@@ -252,13 +252,13 @@ fn read(state_dir: &Path, session_id: &str) -> Stored {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Stored::Missing,
         Err(e) => {
-            tracing::warn!("cannot read agent config {}: {e}", path.display());
+            tracing::error!("cannot read agent config {}: {e}", path.display());
             return Stored::Unreadable;
         }
     };
     serde_json::from_str(&text).map_or_else(
         |e| {
-            tracing::warn!("corrupt agent config {}: {e}", path.display());
+            tracing::error!("corrupt agent config {}: {e}", path.display());
             Stored::Unreadable
         },
         |doc| Stored::Doc(Box::new(doc)),
@@ -327,7 +327,7 @@ fn store(state_dir: &Path, session_id: &str, doc: &AgentConfig) {
         .map_err(std::io::Error::other)
         .and_then(|bytes| crate::paths::write_owner_only_atomic(&path, &bytes));
     if let Err(e) = result {
-        tracing::warn!("cannot save agent config {}: {e}", path.display());
+        tracing::error!("cannot save agent config {}: {e}", path.display());
     }
 }
 

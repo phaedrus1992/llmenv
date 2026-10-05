@@ -364,13 +364,18 @@ jobs:
 
           # Extract changelog section for this version. Use index() for literal
           # match so version dots aren't treated as awk regex metacharacters.
+          CHANGELOG_FILE="CHANGELOG-${MAJOR}.md"
+          if [[ ! -f "${CHANGELOG_FILE}" ]]; then
+            echo "Error: ${CHANGELOG_FILE} not found for version ${VERSION}" >&2
+            exit 1
+          fi
           # $0 is an awk field variable; SC2016 fires because it sees $ in single quotes.
           # shellcheck disable=SC2016
           awk -v ver="[${VERSION}]" '
             index($0, "## " ver) == 1 { found=1; next }
             found && /^## \[/ { exit }
             found { print }
-          ' "CHANGELOG-${MAJOR}.md" | sed '/./,$!d' > changelog-notes.txt
+          ' "${CHANGELOG_FILE}" | sed '/./,$!d' > changelog-notes.txt
 
           # Reflow prose paragraphs for readable GitHub release notes (#320).
           if [[ ! -s changelog-notes.txt ]]; then

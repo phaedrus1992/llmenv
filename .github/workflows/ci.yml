@@ -96,6 +96,8 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo nextest run --workspace --profile ci --test-threads "$CARGO_BUILD_JOBS"
+      # A stale binary must not pass the tests unnoticed (#2438).
+      - run: bash scripts/check-binary-version.sh
   deny:
     needs: changes
     if: needs.changes.outputs.rust == 'true'

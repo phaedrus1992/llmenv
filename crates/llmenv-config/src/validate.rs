@@ -71,8 +71,8 @@ pub enum ValidateError {
     )]
     CodebaseMemoryBudgetInvalid(u32),
     #[error(
-        "features.codebase_memory allowed_roots entry '{0}' is not an absolute path. Use a path \
-         that starts with /, ~, or a $VARIABLE"
+        "features.codebase_memory allowed_roots entry '{0}' is not valid. Use a path that starts \
+         with /, ~, or a $VARIABLE, and write each variable as $NAME or ${{NAME}}"
     )]
     CodebaseMemoryRootInvalid(String),
     #[error(
@@ -468,6 +468,23 @@ fn is_safe_cache_dir(dir: &str) -> bool {
     !dir.contains('\0') && !has_parent_component(dir)
 }
 
+/// Whether `root` has a shape that the codebase-memory root expansion accepts: an absolute path,
+/// `~` alone or `~/...` (`~user` is not supported), or a path whose variables are well formed.
+/// The variable grammar is the one the expansion uses, so a malformed entry fails here rather
+/// than being dropped at session start.
+fn allowed_root_shape_is_valid(root: &str) -> bool {
+    let root = root.trim();
+    let rest = match root.strip_prefix('~') {
+        Some(after) if after.is_empty() || after.starts_with('/') => after,
+        Some(_) => return false,
+        None => root,
+    };
+    if !(root.starts_with('/') || root.starts_with('~') || root.starts_with('$')) {
+        return false;
+    }
+    llmenv_util::expand_env_refs(rest, &|_| Some("x".to_string())).is_some()
+}
+
 impl Config {
     pub fn validate(&self) -> Result<(), ValidateError> {
         if !is_safe_cache_dir(&self.cache.cache_dir) {
@@ -837,12 +854,11 @@ impl Config {
                     return Err(ValidateError::CodebaseMemoryBudgetInvalid(budget));
                 }
                 // The shape only: a variable may expand to an absolute path at session start.
-                if let Some(bad) = cm.allowed_roots.iter().find(|r| {
-                    let r = r.trim();
-                    // `~user` is not supported: only `~` alone or `~/...`.
-                    let tilde = r == "~" || r.starts_with("~/");
-                    !(r.starts_with('/') || tilde || r.starts_with('$'))
-                }) {
+                if let Some(bad) = cm
+                    .allowed_roots
+                    .iter()
+                    .find(|r| !allowed_root_shape_is_valid(r))
+                {
                     return Err(ValidateError::CodebaseMemoryRootInvalid(bad.clone()));
                 }
             }
@@ -2251,6 +2267,11 @@ mod tests {
             ("relative/dir", false),
             ("~other/x", false),
             ("~", true),
+            ("$", false),
+            ("$WORK/a$", false),
+            ("${WORK/a", false),
+            ("${}/a", false),
+            ("/srv/$", false),
             ("./here", false),
             ("", false),
             ("  ", false),
