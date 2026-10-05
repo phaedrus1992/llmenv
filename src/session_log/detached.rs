@@ -87,7 +87,7 @@ fn spawn_record_in(
     ev: &SessionLogEvent,
 ) -> Option<Child> {
     let Ok(exe) = std::env::current_exe() else {
-        tracing::debug!("session_log: cannot resolve current_exe for detached record");
+        tracing::error!("session_log: cannot resolve current_exe for detached record");
         return None;
     };
     let payload = RecordPayload {
@@ -96,7 +96,7 @@ fn spawn_record_in(
         request_id: record_request_id(session_id, ev, &checkpoint::run_tag()),
     };
     let Ok(payload_json) = serde_json::to_string(&payload) else {
-        tracing::debug!("session_log: cannot serialize event for detached record");
+        tracing::error!("session_log: cannot serialize event for detached record");
         return None;
     };
     let checkpoint = checkpoint::begin(
@@ -109,7 +109,7 @@ fn spawn_record_in(
     crate::hook_run::redirect_stderr_to_detached_log(&mut cmd);
     crate::mcp::proxy::detach_process_group(&mut cmd);
     let Ok(mut child) = cmd.spawn() else {
-        tracing::debug!("session_log: failed to spawn detached record child");
+        tracing::error!("session_log: failed to spawn detached record child");
         return None;
     };
     if let Some(mut stdin) = child.stdin.take()
@@ -117,7 +117,7 @@ fn spawn_record_in(
         // and completes without the child having read anything yet.
         && let Err(e) = stdin.write_all(payload_json.as_bytes())
     {
-        tracing::debug!("session_log: failed to pipe event to detached child: {e}");
+        tracing::error!("session_log: failed to pipe event to detached child: {e}");
     }
     // Not waited on by the caller: the child is process-group-detached and
     // outlives us.
@@ -170,7 +170,8 @@ fn run_record_with(
     checkpoint: Option<&std::path::Path>,
     record: impl FnOnce(RecordPayload) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
-    let parsed = serde_json::from_str::<RecordPayload>(payload_json).map_err(anyhow::Error::from);
+    // The parent can fail to pipe all of the payload, so the checkpoint backs it up.
+    let parsed = checkpoint::inputs_or_checkpoint::<RecordPayload>(payload_json, checkpoint);
     let unparseable = parsed.is_err();
     let result = parsed.and_then(record);
     match &result {

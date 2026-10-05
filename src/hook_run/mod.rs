@@ -2684,11 +2684,11 @@ fn handle_web_fetch_in(
 ) -> Option<std::process::Child> {
     let args = web_fetch_store_args(payload)?;
     let Ok(payload_json) = serde_json::to_string(&args) else {
-        tracing::debug!("icm-store: failed to serialize store args");
+        tracing::error!("icm-store: failed to serialize store args");
         return None;
     };
     let Ok(exe) = std::env::current_exe() else {
-        tracing::debug!("icm-store: cannot resolve current_exe for detached store");
+        tracing::error!("icm-store: cannot resolve current_exe for detached store");
         return None;
     };
     let checkpoint = checkpoint::begin(
@@ -2701,13 +2701,13 @@ fn handle_web_fetch_in(
     redirect_stderr_to_detached_log(&mut cmd);
     crate::mcp::proxy::detach_process_group(&mut cmd);
     let Ok(mut child) = cmd.spawn() else {
-        tracing::debug!("icm-store: failed to spawn detached store child");
+        tracing::error!("icm-store: failed to spawn detached store child");
         return None;
     };
     if let Some(mut stdin) = child.stdin.take()
         && let Err(e) = stdin.write_all(payload_json.as_bytes())
     {
-        tracing::debug!("icm-store: failed to pipe args to detached child: {e}");
+        tracing::error!("icm-store: failed to pipe args to detached child: {e}");
     }
     // Not waited on by the caller: the child is process-group-detached and
     // outlives us.
@@ -2989,7 +2989,7 @@ fn trigger_codebase_memory_index(
     direct_index_stdout(&mut cmd, wrapped, &result_path);
     crate::mcp::proxy::detach_process_group(&mut cmd);
     if let Err(e) = cmd.spawn() {
-        tracing::debug!("codebase-memory-mcp index_repository: failed to spawn: {e}");
+        tracing::error!("codebase-memory-mcp index_repository: failed to spawn: {e}");
     }
 }
 

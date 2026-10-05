@@ -64,7 +64,7 @@ impl Outcome {
             Ok(text) => self.texts.push(text),
             Err(e) => {
                 self.failed += 1;
-                tracing::warn!("adaptive recall call failed, its records are skipped: {e}");
+                tracing::error!("adaptive recall call failed, its records are skipped: {e}");
             }
         }
     }
