@@ -181,7 +181,12 @@ fn print_roots(
     (pass, warn, info): (&str, &str, &str),
 ) {
     use llmenv_mcp::cbm_roots;
-    let check = cbm_roots::RootBases::from_config(config, project_root)
+    let bases = cbm_roots::RootBases::from_config(config, project_root);
+    let problems = bases
+        .as_ref()
+        .map(|bases| cbm_roots::root_problems(entry, bases))
+        .unwrap_or_default();
+    let check = bases
         .and_then(|bases| {
             let wanted = cbm_roots::resolve_allowed_roots(entry, &bases);
             cbm_roots::check_roots(entry, &wanted, bases.home.as_deref())
@@ -204,6 +209,9 @@ fn print_roots(
             )
         });
     super::print_check(check, pass, warn, info);
+    for problem in problems {
+        super::print_check((CheckLevel::Warn, problem), pass, warn, info);
+    }
 }
 
 #[cfg(test)]

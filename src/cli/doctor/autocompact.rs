@@ -100,9 +100,9 @@ pub(super) fn autocompact_check(
         .map(|w| format!(" of autoCompactWindow {w}"))
         .unwrap_or_default();
     match override_value.map(|v| v.parse::<u32>().map_err(|_| v)) {
-        Some(Ok(0)) => (
+        Some(Ok(pct)) if !(1..=100).contains(&pct) => (
             CheckLevel::Warn,
-            format!("{OVERRIDE_VAR}=0 is outside the 1-100 range Claude Code accepts"),
+            format!("{OVERRIDE_VAR}={pct} is outside the 1-100 range Claude Code accepts"),
         ),
         Some(Ok(pct)) if pct <= PCT_MAX_RECOMMENDED => {
             (CheckLevel::Pass, format!("{OVERRIDE_VAR}={pct}{of_window}"))
@@ -229,6 +229,18 @@ mod tests {
         let yaml = "autoCompactWindow: 300000\nmodelSettings:\n  m:\n    autoCompactWindow: 400000";
         let (_, text) = check(Some(yaml), Some("50"));
         assert!(text.contains("autoCompactWindow 300000"), "{text}");
+    }
+
+    #[test]
+    fn an_override_above_100_warns_about_the_range() {
+        for raw in ["101", "250", "4294967295"] {
+            let (level, text) = check(Some("{}"), Some(raw));
+            assert_eq!(level, CheckLevel::Warn, "{raw}");
+            assert!(text.contains("outside the 1-100 range"), "{raw}: {text}");
+        }
+        let (level, text) = check(Some("{}"), Some("100"));
+        assert_eq!(level, CheckLevel::Warn);
+        assert!(!text.contains("outside"), "{text}");
     }
 
     #[test]

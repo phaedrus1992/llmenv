@@ -86,7 +86,7 @@ target and a `CodexAdapter` would need to reject or down-map it.
 A `CodexAdapter` would:
 
 - **Render `[mcp_servers.*]` into `config.toml`**, not a separate file. The
-  existing `write_mcp_json` logic (`src/adapter/claude_code.rs:93`) is
+  existing `write_mcp_json` logic (`src/adapter/claude_code/mod.rs:93`) is
   Claude-shaped and not reusable; Codex needs a TOML serializer that nests MCP
   tables alongside everything else.
 - **Map the memory backend** the same way as Claude Code — ICM desugars to an

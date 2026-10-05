@@ -91,6 +91,7 @@ jobs:
       - name: Decide whether this language changed
         id: gate
         env:
+          EVENT: ${{ github.event_name }}
           LANGUAGE: ${{ matrix.language }}
           PYTHON: ${{ needs.changes.outputs.python }}
           JAVASCRIPT: ${{ needs.changes.outputs.javascript }}
@@ -104,6 +105,12 @@ jobs:
             actions) changed="$ACTIONS" ;;
             *) echo "ERROR: unknown CodeQL language '$LANGUAGE'" >&2; exit 1 ;;
           esac
+          # Only a pull request may skip a language. On a push or a scheduled run an empty
+          # result would close the open alerts of that language, and a scheduled run has no
+          # base to compare against.
+          if [ "$EVENT" != "pull_request" ]; then
+            changed=true
+          fi
           echo "run=$changed" >> "$GITHUB_OUTPUT"
 
       - name: Initialize CodeQL

@@ -36,18 +36,18 @@ pub(crate) fn lock_state_file(dir: &Path, key: &str, label: &str) -> Option<File
             Ok(()) => {
                 // The orphan prune goes by age, so a held lock must look new.
                 if let Err(e) = file.set_modified(std::time::SystemTime::now()) {
-                    tracing::warn!("cannot refresh {label} lock age: {e}");
+                    tracing::error!("cannot refresh {label} lock age: {e}");
                 }
                 return Some(file);
             }
             Err(std::fs::TryLockError::WouldBlock) => std::thread::sleep(LOCK_POLL),
             Err(e) => {
-                tracing::warn!("{label} lock failed, access skipped: {e}");
+                tracing::error!("{label} lock failed, access skipped: {e}");
                 return None;
             }
         }
     }
-    tracing::warn!("{label} busy, access skipped");
+    tracing::error!("{label} busy, access skipped");
     None
 }
 
@@ -130,7 +130,7 @@ pub(crate) fn reset_read_state(state_dir: &Path, session_id: &str) {
         super::repeat_detect::session_state_path(state_dir, session_id),
     ] {
         if let Err(e) = remove_if_present(&path) {
-            tracing::warn!("reset_read_state: cannot remove {}: {e}", path.display());
+            tracing::error!("reset_read_state: cannot remove {}: {e}", path.display());
         }
     }
 }

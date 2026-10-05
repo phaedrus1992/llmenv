@@ -206,8 +206,8 @@ fn swap_in(
         let note = match restored {
             Ok(()) => "the old clone is back in place".to_string(),
             Err(r) => {
-                tracing::error!(
-                    "cannot restore the old clone to {}: {r}; it is at {}",
+                eprintln!(
+                    "error: cannot restore the old clone to {}: {r}; it is at {}",
                     dest.display(),
                     backup.display()
                 );
@@ -229,7 +229,7 @@ fn remove_dir_logged(path: &Path) {
     match std::fs::remove_dir_all(path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => tracing::warn!("cannot remove the folder {}: {e}", path.display()),
+        Err(e) => eprintln!("warning: cannot remove the folder {}: {e}", path.display()),
     }
 }
 
@@ -750,15 +750,23 @@ fn plugin_manifest(root: &Path) -> Option<PathBuf> {
 
 /// Warn when the plugin at `root` has no manifest. Returns whether it warned (#2448).
 fn warn_if_no_manifest(root: &Path, plugin: &str) -> bool {
-    let missing = plugin_manifest(root).is_none();
-    if missing {
-        tracing::warn!(
-            "plugin '{plugin}' has no .claude-plugin/plugin.json or plugin.json under {}; it may not \
-             load correctly unless the marketplace entry carries the manifest",
-            root.display()
-        );
+    let warning = no_manifest_warning(root, plugin);
+    if let Some(text) = &warning {
+        // `tracing` warnings are off at the default log level, and the user must see this one.
+        eprintln!("warning: {text}");
     }
-    missing
+    warning.is_some()
+}
+
+/// The warning for a plugin at `root` that has no manifest, or `None` when it has one.
+fn no_manifest_warning(root: &Path, plugin: &str) -> Option<String> {
+    plugin_manifest(root).is_none().then(|| {
+        format!(
+            "plugin '{plugin}' has no .claude-plugin/plugin.json or plugin.json under {}; it may \
+             not load correctly unless the marketplace entry carries the manifest",
+            root.display()
+        )
+    })
 }
 
 /// The directory `subdir` of the clone at `clone`, checked to exist and to stay inside the clone.
@@ -889,7 +897,10 @@ fn git_clone_commit(url: &str, sha: &str, dest: &Path, source: &str) -> Result<(
     if result.is_err()
         && let Err(e) = std::fs::remove_dir_all(dest)
     {
-        tracing::warn!("cannot remove the partial clone at {}: {e}", dest.display());
+        eprintln!(
+            "warning: cannot remove the partial clone at {}: {e}",
+            dest.display()
+        );
     }
     result
 }
@@ -1487,6 +1498,16 @@ mod tests {
             .to_string();
         assert!(err.contains("busy") && err.contains("aside"), "{err}");
         assert!(dest.exists() && !staging.exists());
+    }
+
+    #[test]
+    fn the_missing_manifest_warning_names_the_plugin_and_the_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = no_manifest_warning(dir.path(), "my-plugin").unwrap();
+        assert!(text.contains("'my-plugin'"), "{text}");
+        assert!(text.contains(&dir.path().display().to_string()), "{text}");
+        std::fs::write(dir.path().join("plugin.json"), "{}").unwrap();
+        assert_eq!(no_manifest_warning(dir.path(), "my-plugin"), None);
     }
 
     #[test]

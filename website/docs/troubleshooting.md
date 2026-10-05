@@ -20,8 +20,8 @@ llmenv context      # show resolved scopes/tags/bundles for the current dir
 ## A scope never activates
 
 ```bash
-llmenv scope-ls     # marks active scopes
-llmenv tag-ls       # marks active tags
+llmenv status scopes   # marks active scopes
+llmenv status tags     # marks active tags
 ```
 
 - **Network scopes** match on `gateway_mac` only today (`ssid`/`cidr` are parsed
@@ -47,7 +47,7 @@ llmenv tag-ls       # marks active tags
 These all select by tag intersection. If a contributor's tags aren't in the
 active set, it stays dormant.
 
-- Check the active tags with `llmenv tag-ls`.
+- Check the active tags with `llmenv status tags`.
 - `llmenv doctor` flags **orphans**: a contributor whose tags no scope emits, and
   a scope whose tags no contributor consumes.
 - To force a bundle on inside a project regardless of tags, add it to the
@@ -118,8 +118,11 @@ of those holds it.
 The check only warns: it never changes the exit status, and `llmenv validate` does not report it.
 If a rendered file is not valid JSON, doctor names the file and skips it.
 
-Three token-efficiency recommendations also changed in v3.12.0:
+Four token-efficiency checks also changed in v3.12.0:
 
+- `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` must be a whole number from 1 to 100.
+  Doctor warns about a value outside that range,
+  and about a value above 70, because PreCompact hooks then have too little room to run.
 - When `native.claude_code.autoCompactEnabled` is `false`, doctor reports info and recommends no
   `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, because automatic compaction is off. When `autoCompactWindow` is set, at top
   level or under `modelSettings`, the message names the window the percentage applies to. The unset warning says
@@ -150,14 +153,61 @@ After the third attempt the file stays, so doctor keeps showing it.
 To abandon a job, delete its file under `checkpoints/`.
 llmenv deletes checkpoints that are older than 7 days.
 
+## settings.json.corrupt appears in the config folder
+
+(added in v3.12.0)
+
+llmenv found a `settings.json` that is not valid JSON, for example after a half-written save.
+It moved the file to `settings.json.corrupt` and wrote a new one, and it printed a warning with the parse error.
+Compare the two files, copy any key that you need back into your llmenv config, and delete the `.corrupt` file.
+If llmenv cannot move the file, the render stops and names the file. Fix or remove it, and run `llmenv regenerate`.
+
+## A task command refuses
+
+(added in v3.12.0)
+
+The task tracker refuses some commands, to keep the task list true.
+Each refusal names the fix.
+
+- `task start` says a task is queued behind another task.
+  Top-level tasks run one at a time, in the order you added them.
+  Finish the task ahead with `llmenv task done <slug>`, or park it with `llmenv task wait <slug> "<reason>"`.
+  Pass `--force`, or add the task with `--parallel`, when it can run beside the other task.
+- `task done` says a task was never started.
+  Run `llmenv task start <slug>` first, or pass `--force` when the work is done without tracking.
+- `task done` on a parent lists sub-tasks that are not done.
+  Finish them, or pass `--force`.
+- `task session finish` lists the tasks that are `open`, `wip`, or `waiting`.
+  Finish them, clear one with `llmenv task clear <slug>`, or pass `--abandon-open`.
+- `git commit` or `gh pr create` is denied once with no task in progress.
+  Run the commands in the message, then run the same command again.
+  Set `features.task_tracker.enforce_commit: false` to turn the deny off.
+- An agent follows an instruction that says the task tools are blocked.
+  Run `llmenv doctor` and read the `Task tracker instructions:` section.
+  It names the bundle file that holds the text.
+  Reword it in the source bundle, then run `llmenv regenerate`.
+
+See [`task`](commands.md#task) for the rules.
+
+## Memory commands list too much
+
+(added in v3.12.0)
+
+`llmenv memory list` and `llmenv memory diff` ask ICM for the memories of the project that the current folder belongs to.
+When llmenv cannot tell the project, it warns `cannot tell the project of this folder, so memories of all projects are used`.
+Run the command from inside the project folder.
+`llmenv memory prune` reads only the project of the current folder, and it refuses to run when it cannot tell the project.
+It also refuses to run while the active `features.memory` entry sets `retention`.
+See [`memory`](commands.md#memory).
+
 ## Memory backend issues
 
 - **Server not activating** — it renders only when one of `memory.tags` is
-  active. Check `llmenv tag-ls`.
+  active. Check `llmenv status tags`.
 - **Client can't reach the server** — confirm the `host:` address resolves and
   the port is open: `nc -vz <addr> <port>`.
 - **A managed MCP server is down or stuck** (added in v3.12.0) — the session start output
-  starts with `MCP health check failed` and names each server that did not answer an MCP
+  starts with `llmenv: MCP health check failed at session start.` and names each server that did not answer an MCP
   `initialize` within 5 seconds, with the reason and the fix. `llmenv doctor` prints the same
   result under `MCP servers:`. A stopped ICM proxy on the server host restarts by itself. For a
   proxy that holds its port but does not answer, run `llmenv doctor --restart-memory-proxy`
