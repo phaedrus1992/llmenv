@@ -35,6 +35,16 @@ pub(crate) fn handle_roots(
     stdin_payload: &serde_json::Value,
     config: &crate::config::Config,
 ) -> String {
+    // The hook runs in the project folder, as the SessionStart index does.
+    handle_roots_in(stdin_payload, config, std::env::current_dir())
+}
+
+/// [`handle_roots`] with the session folder given, so a test needs no change of the process folder.
+fn handle_roots_in(
+    stdin_payload: &serde_json::Value,
+    config: &crate::config::Config,
+    session_folder: std::io::Result<std::path::PathBuf>,
+) -> String {
     if stdin_payload.get("tool_name").and_then(|v| v.as_str()) != Some(INDEX_REPOSITORY_TOOL) {
         return String::new();
     }
@@ -46,8 +56,7 @@ pub(crate) fn handle_roots(
     else {
         return String::new();
     };
-    // The hook runs in the project folder, as the SessionStart index does.
-    let project_root = match std::env::current_dir() {
+    let project_root = match session_folder {
         Ok(dir) => dir,
         // The guard denies a call outside the allowed roots, so a folder that cannot be read
         // denies too. An allow here would open the guard on the one input it cannot check.
@@ -285,20 +294,16 @@ mod tests {
         assert_eq!(handle_roots(&other, &config), "");
     }
 
-    // Changes the working folder of the process, so it needs a process of its own: nextest runs
-    // each test in one.
     #[test]
     fn the_roots_guard_denies_when_the_session_folder_cannot_be_read() {
         let cache = tempfile::tempdir().unwrap();
         let config = config_with_entry(cache.path());
-        let gone = tempfile::tempdir().unwrap();
-        std::env::set_current_dir(gone.path()).unwrap();
-        std::fs::remove_dir(gone.path()).unwrap();
         let call = payload(
             INDEX_REPOSITORY_TOOL,
             serde_json::json!({ "repo_path": "/usr" }),
         );
-        let out = handle_roots(&call, &config);
+        let unreadable = Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        let out = handle_roots_in(&call, &config, unreadable);
         assert!(out.starts_with("__DENY__:"), "{out:?}");
         assert!(out.contains("cannot be read"), "{out:?}");
     }
