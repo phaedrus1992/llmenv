@@ -226,7 +226,7 @@ enum Command {
     },
     /// Warn if the booted agent config has drifted from the current config.
     ///
-    /// Invoked by the Claude Code SessionStart hook: compares the basename of
+    /// Runs from the SessionStart hook (`hook-run session_start`): compares the basename of
     /// `CLAUDE_CONFIG_DIR` (the content hash the agent booted with) against the
     /// folder llmenv would materialize now. On drift it prints a restart hint.
     CheckStale {
@@ -290,9 +290,12 @@ enum Command {
     /// Run an agent lifecycle hook (injects ICM memory context over MCP).
     ///
     /// Invoked by the agent runtime, not by users directly. `event` is an
-    /// engine-neutral name: session_start | turn_start | session_end.
+    /// engine-neutral name: session_start | turn_start | session_end |
+    /// user_prompt_submit | post_session | pre_tool_use | post_tool_use |
+    /// notification | stop | subagent_stop | pre_compact | post_tool_batch |
+    /// post_tool_use_failure | subagent_start | subagent_task | post_model_switch.
     HookRun {
-        /// Lifecycle event: session_start, turn_start, or session_end
+        /// Lifecycle event, for example session_start, turn_start, or pre_tool_use
         event: String,
         /// Engine that invoked this hook (e.g. "claude_code"). Accepted for
         /// forward-compatibility; the value is stored for future dispatch use.
@@ -756,7 +759,10 @@ enum MemoryCommand {
     List,
     /// Show what changed since the last session.
     Diff,
-    /// Preview or apply TTL-based forgetting. Currently a placeholder.
+    /// Forget low- and medium-importance memories of the current project.
+    ///
+    /// Keeps high and critical records. Reads at most 100 records. Refuses to run when the
+    /// active memory entry sets `retention`, or when the project cannot be told.
     Prune {
         /// Preview without applying
         #[arg(long)]
@@ -5167,6 +5173,20 @@ fn run_prune(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    #[test]
+    fn the_hook_run_help_lists_every_event_the_parser_accepts() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let hook_run = cmd.find_subcommand("hook-run").unwrap();
+        let help = hook_run
+            .get_long_about()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        for name in crate::hook_run::HOOK_EVENT_NAMES {
+            assert!(help.contains(name), "{name} missing from the help: {help}");
+        }
+    }
+
     use super::*;
     use crate::config::HashingMode;
     use crate::materialize::manifest::{CacheManifest, MANIFEST_FILE};

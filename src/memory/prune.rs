@@ -191,6 +191,25 @@ fn parse_recall_output(text: &str) -> Vec<MemoryRecord> {
     records
 }
 
+/// The recall arguments for the records to prune: the project's own, at most [`RECALL_LIMIT`].
+/// Prune forgets what it reads, so a folder with no known project is an error: without a project
+/// filter ICM would answer with the records of its own working folder.
+///
+/// # Errors
+/// `project` is `None`.
+fn recall_args(project: Option<&str>) -> anyhow::Result<serde_json::Value> {
+    let project = project.ok_or_else(|| {
+        anyhow::anyhow!(
+            "memory prune cannot tell the project of this folder, and it forgets what it reads. \
+             Run it inside a git repository or a project folder. Nothing was forgotten."
+        )
+    })?;
+    Ok(serde_json::json!({ "query": "", "limit": RECALL_LIMIT, "project": project }))
+}
+
+/// The most records one prune pass reads.
+const RECALL_LIMIT: u32 = 100;
+
 /// Run the prune pass: query ICM, evaluate candidates, forget if not dry-run.
 ///
 /// `dry_run` when true prints what would be pruned without making forget
@@ -204,10 +223,12 @@ pub(crate) fn run(dry_run: bool) -> anyhow::Result<PruneResult> {
     let merged = crate::hook_run::merged_memory(&config, config_dir, &active)?;
     ensure_retention_unset(&merged.memory, &active.tags)?;
     let client = connect(&config_path, &config)?;
+    let cwd = std::env::current_dir().ok();
+    let project = cwd.as_deref().and_then(super::project::session_project);
     let output = call_tool_blocking(
         client.clone(),
         "icm_memory_recall",
-        serde_json::json!({ "query": "", "limit": 100 }),
+        recall_args(project.as_deref())?,
     )?;
 
     let records = parse_recall_output(&output);
@@ -340,6 +361,15 @@ mod tests {
 
     fn tags(names: &[&str]) -> std::collections::BTreeSet<String> {
         names.iter().map(|n| (*n).to_string()).collect()
+    }
+
+    #[test]
+    fn prune_reads_one_project_and_refuses_when_it_cannot_tell_which() {
+        let args = recall_args(Some("llmenv")).unwrap();
+        assert_eq!(args["project"], "llmenv");
+        assert_eq!(args["limit"], 100);
+        let err = recall_args(None).unwrap_err().to_string();
+        assert!(err.contains("Nothing was forgotten"), "{err}");
     }
 
     #[test]

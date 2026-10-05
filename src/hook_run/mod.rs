@@ -195,6 +195,27 @@ pub enum HookEvent {
     PostModelSwitch,
 }
 
+/// Every event name that `hook-run` accepts. A test keeps this list in step with the parser, and
+/// the `hook-run` help text lists the same names.
+pub(crate) const HOOK_EVENT_NAMES: [&str; 16] = [
+    "session_start",
+    "turn_start",
+    "session_end",
+    "user_prompt_submit",
+    "post_session",
+    "pre_tool_use",
+    "post_tool_use",
+    "notification",
+    "stop",
+    "subagent_stop",
+    "pre_compact",
+    "post_tool_batch",
+    "post_tool_use_failure",
+    "subagent_start",
+    "subagent_task",
+    "post_model_switch",
+];
+
 impl FromStr for HookEvent {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -216,10 +237,8 @@ impl FromStr for HookEvent {
             "subagent_task" => Ok(HookEvent::SubagentTask),
             "post_model_switch" => Ok(HookEvent::PostModelSwitch),
             other => Err(anyhow::anyhow!(
-                "unknown hook event '{other}' (expected session_start|turn_start|session_end|\
-                 user_prompt_submit|pre_tool_use|post_tool_use|notification|stop|\
-                 subagent_stop|pre_compact|post_tool_batch|post_tool_use_failure|\
-                 subagent_start|subagent_task|post_model_switch)"
+                "unknown hook event '{other}' (expected {})",
+                HOOK_EVENT_NAMES.join("|")
             )),
         }
     }
@@ -3173,6 +3192,18 @@ fn post_session_consolidation_in(state_dir: Option<&std::path::Path>) {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    #[test]
+    fn every_listed_hook_event_name_parses_and_round_trips() {
+        for name in HOOK_EVENT_NAMES {
+            let event: HookEvent = name.parse().unwrap();
+            assert_eq!(event.to_string(), name);
+        }
+        let err = "nope".parse::<HookEvent>().unwrap_err().to_string();
+        for name in HOOK_EVENT_NAMES {
+            assert!(err.contains(name), "{name} missing from: {err}");
+        }
+    }
+
     use super::*;
 
     /// Every event `from_str` accepts. Kept as strings so a new variant that
