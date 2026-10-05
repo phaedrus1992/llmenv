@@ -49,10 +49,10 @@ llmenv must therefore merge into `modelSettings` and must not overwrite entries 
 | `SlippageControl.effort_level: Option<String>` | same file near line 1146 |
 | Slippage value propagates when no higher-precedence `effort_level` is set | `src/merge/mod.rs` near line 138 |
 | `effort_level` is a known bundle key | `BUNDLE_YAML_KNOWN_KEYS`, `src/merge/mod.rs` near line 241 |
-| Renders `settings.insert("effortLevel", …)` | `src/adapter/claude_code.rs`, render function near the `advisorSize` insert |
-| `effortLevel` is in `LLMENV_OWNED_SETTINGS_KEYS` | `src/adapter/claude_code.rs` |
-| Pattern for tracking what llmenv wrote into a shared file | `.claude.json.llmenv-owned`, `CLAUDE_JSON_OWNED_SERVERS_FILE`, `src/adapter/claude_code.rs` near line 606 |
-| Per-key map merge with equal-precedence conflict as a hard error | `resolve_default_models`, `src/merge/capabilities.rs` near line 468 |
+| Renders `settings.insert("effortLevel", …)` | `src/adapter/claude_code/mod.rs`, render function near the `advisorModel` insert |
+| `effortLevel` is in `LLMENV_OWNED_SETTINGS_KEYS` | `src/adapter/claude_code/mod.rs` |
+| Pattern for tracking what llmenv wrote into a shared file | `.claude.json.llmenv-owned`, `CLAUDE_JSON_OWNED_SERVERS_FILE`, `src/adapter/claude_code/mod.rs` near line 606 |
+| Per-key map merge with equal-precedence conflict as a hard error | `resolve_per_key` (used for `default_models` and `model_effort`), `src/merge/capabilities.rs` |
 
 ## Config
 
@@ -105,10 +105,12 @@ That is intended; the changelog entry says so.
 
 ### Merge
 
-`model_effort` merges per model ID, like `resolve_default_models`: the highest-precedence contributor wins for a model ID; two contributors at the same precedence that disagree on the same model ID are a hard error with both names.
+`model_effort` merges per model ID, like `default_models` through `resolve_per_key`: the highest-precedence contributor wins for a model ID; two contributors at the same precedence that disagree on the same model ID are a hard error with both names.
 Inside one model ID the two fields are not merged separately: the winning contributor's whole `ModelEffort` value wins.
 
 ## Rendering (Claude Code adapter)
+
+Implemented as: the rendering code lives in `src/adapter/model_settings.rs` (`ModelSettingsMerge` with `prepare`, `apply` and `persist`), and the constant below is there too.
 
 ### Constant
 

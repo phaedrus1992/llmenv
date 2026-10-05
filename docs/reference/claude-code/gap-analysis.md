@@ -1,7 +1,7 @@
 # Consolidated gap analysis: llmenv vs Claude Code config surfaces
 
 Captured 2026-05-27 from <https://code.claude.com/docs/en/> against the current
-`ClaudeCodeAdapter` (`src/adapter/claude_code.rs`) and config schema
+`ClaudeCodeAdapter` (`src/adapter/claude_code/mod.rs`) and config schema
 (`src/config/schema.rs`).
 
 This is the synthesis page. Per-surface detail lives in the sibling docs.
@@ -30,7 +30,7 @@ This is the synthesis page. Per-surface detail lives in the sibling docs.
 
 ## The critical defect
 
-`generate_settings_json` (`src/adapter/claude_code.rs:183`) emits:
+`generate_settings_json` (`src/adapter/claude_code/mod.rs:183`) emits:
 
 ```json
 { "hooks": [], "permissions": [], "mcp": [] }

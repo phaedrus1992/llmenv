@@ -54,10 +54,10 @@ The existing table doc comment already justifies a tier from source for `manage_
 
 | Fact | Location |
 | --- | --- |
-| `CBM_READ_ONLY`, `CBM_MUTATION`, `CBM_DESTRUCTIVE` | `src/adapter/claude_code.rs` lines 216 to 232, doc comment above them |
-| Tiers become rules through `apply_mcp_tier_permissions` (ReadOnly and Mutation allow, Destructive ask) | `src/adapter/claude_code.rs` near line 1704; tests near lines 3773 to 3948 |
+| `CBM_READ_ONLY`, `CBM_MUTATION`, `CBM_DESTRUCTIVE` | `src/adapter/claude_code/mod.rs` lines 216 to 232, doc comment above them |
+| Tiers become rules through `apply_mcp_tier_permissions` (ReadOnly and Mutation allow, Destructive ask) | `src/adapter/claude_code/mod.rs` near line 1704; tests near lines 3773 to 3948 |
 | Guard: `handle_pre_tool_use` denies `index_repository` with a non-empty `name` using a `__DENY__:` reason | `src/hook_run/cbm_index_guard.rs` line 35 |
-| Guard is wired as a `PreToolUse` hook with matcher `^mcp__codebase-memory-mcp__index_repository$` for Claude Code, and through the opencode shim | `src/adapter/claude_code.rs`, `src/adapter/opencode.rs` (`index_repository_guard_hook_*` tests) |
+| Guard is wired as a `PreToolUse` hook with matcher `^mcp__codebase-memory-mcp__index_repository$` for Claude Code, and through the opencode shim | `src/adapter/claude_code/mod.rs`, `src/adapter/opencode.rs` (`index_repository_guard_hook_*` tests) |
 | llmenv's own auto-index passes only `repo_path` | `build_index_repository_command`, `src/hook_run/mod.rs` |
 
 ## Changes
@@ -83,7 +83,7 @@ Update the module doc comment to name both checks.
 ### Drift test
 
 Add a test constant with the 17 tool names from cbm `v0.11.0`, and a test that asserts `CBM_READ_ONLY ∪ CBM_MUTATION ∪ CBM_DESTRUCTIVE` equals that set exactly, with no tool in two tiers.
-The failure message says: `codebase-memory-mcp tool list changed: update the tier table in src/adapter/claude_code.rs and this list; see docs/design/issue-2151-cbm-011-tool-tiers.md`.
+The failure message says: `codebase-memory-mcp tool list changed: update the tier table in src/adapter/claude_code/mod.rs and this list; see docs/design/issue-2151-cbm-011-tool-tiers.md`.
 
 ## Tests
 

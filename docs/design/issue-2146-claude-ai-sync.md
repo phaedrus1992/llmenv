@@ -40,13 +40,13 @@ This issue does not change the connector default, because some users rely on cla
 
 | Fact | Location |
 | --- | --- |
-| `autoMemoryEnabled` default inserted before native overlays | `src/adapter/claude_code.rs` near line 1754, the `#227/#123` block |
-| `LLMENV_OWNED_SETTINGS_KEYS` array (size in the type) | `src/adapter/claude_code.rs` line 1931 (`[&str; 10]` today) |
+| `autoMemoryEnabled` default inserted before native overlays | `src/adapter/claude_code/mod.rs` near line 1754, the `#227/#123` block |
+| `LLMENV_OWNED_SETTINGS_KEYS` array (size in the type) | `src/adapter/claude_code/mod.rs` (the array length changes as keys are added) |
 | Native overlay is applied after modeled keys | same render function, the `native` merge step |
 
 ## Design
 
-In the settings render function in `src/adapter/claude_code.rs`, next to the `autoMemoryEnabled` block and before the native overlay:
+In the settings render function in `src/adapter/claude_code/mod.rs`, next to the `autoMemoryEnabled` block and before the native overlay:
 
 ```rust
 // Account sync loads skills and plugins outside llmenv's scope rules

@@ -96,6 +96,16 @@ The value is ignored with no message, so a user who sets it gets nothing.
 - `website/docs/troubleshooting.md`, retired settings: the `advisorSize` warning and the fix (`llmenv regenerate`).
 - Changelog: `Changed`: `capabilities.advisor_size` is now `capabilities.advisor_model` and renders Claude Code's `advisorModel`. `Removed`: `advisor_size` (it rendered a key Claude Code never read); a config that still sets it fails validation with the fix.
 
+## Implemented as
+
+- The check is `validate_advisor(context, &Capabilities)` in `crates/llmenv-config/src/advisor.rs`.
+  It rejects a set `advisor_size` first, then accepts an alias or a canonical model id.
+  It reuses `is_canonical_model_id` from `effort.rs`, so there is no separate shape regex.
+- `ValidateError::AdvisorSizeRemoved` and `AdvisorModelInvalid` both carry a `context` string that names the source (for example `config.yaml: capabilities`).
+- A bundle that sets `advisor_size` also fails, in the bundle validation path, and `advisor_size` stays in the bundle known-keys list so that error is the one users see.
+- The retired-table row for `advisorSize` has `since` empty, because it is an llmenv mistake and not a Claude Code version.
+- The adapter removes a stale `advisorSize` from `settings.json` on render and logs it at info level, in addition to the doctor warning.
+
 ## Tests
 
 1. Validation table: `fable`, `opus`, `sonnet`, `claude-opus-5-5`, `claude-sonnet-5-5` accepted; `small`, `Opus`, `claude-`, `claude-opus-5-5` followed by a trailing space, `gpt-5`, empty string rejected with the value in the message.

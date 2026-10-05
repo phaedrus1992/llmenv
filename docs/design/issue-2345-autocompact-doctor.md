@@ -62,7 +62,11 @@ Re-check the variable name against the binary whenever Claude Code is bumped; if
 
 ## Design
 
-### `src/cli/doctor.rs`
+### `src/cli/doctor/autocompact.rs`
+
+Implemented as: the check lives in the new module `src/cli/doctor/autocompact.rs`, and the constants are named `OVERRIDE_VAR`, `PCT_MAX_RECOMMENDED` and `PCT_RECOMMENDED`.
+The code also warns when `autoCompactEnabled` is not a boolean, when `autoCompactWindow` is neither a number nor a string, and when the override is outside 1-100.
+The unset warning carries the `only matters in sessions that compact before the model's limit` clause only when no window is set.
 
 ```rust
 const AUTOCOMPACT_OVERRIDE_VAR: &str = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE";
@@ -74,7 +78,7 @@ fn autocompact_window(settings: Option<&Value>) -> Option<String>  // top-level 
 fn autocompact_check(settings: Option<&Value>, override_value: Option<String>) -> (CheckLevel, String)
 ```
 
-`run_doctor_token_efficiency` replaces the inline `match` with
+`run_doctor_token_efficiency` in `src/cli/doctor.rs` replaces the inline `match` with
 `print_check(autocompact_check(native_claude_settings, get(AUTOCOMPACT_OVERRIDE_VAR)), pass, warn, info)`.
 If that function is near the 100-line limit, move the whole autocompact block into a sibling helper.
 

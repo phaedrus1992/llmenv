@@ -83,7 +83,7 @@ prompt.
 ## `status`
 
 ```text
-llmenv status [bundles|tags|scopes|mcps|marketplaces|plugins]
+llmenv status [bundles|tags|scopes|mcps|marketplaces|plugins|read-once|all]
 ```
 
 Show the current environment status: active scopes and tags, and whether the
@@ -102,6 +102,8 @@ config parses. With a subcommand, show a detailed listing for that category:
   referenced by selected plugins.
 - `status plugins` — list configured plugins, marking those selected by the
   active scope and showing their source collection.
+- `status read-once` — show the read-once file dedup cache entries.
+- `status all` — show every section above.
 
 ## `statusline`
 
@@ -147,7 +149,7 @@ config was broken.
 ## `context`
 
 ```text
-llmenv context [--bundle NAME] [--why] [--json]
+llmenv context [--bundle NAME] [--why]
 ```
 
 Show the resolved environment and active scopes in detail — the fuller view
@@ -157,7 +159,6 @@ behind `status`, including which contributors fired.
   vars, hooks (with event, matcher, type, and handler), MCPs, plugins, and skills.
 - `--why` shows activation tracing: which scope triggered each active tag, and
   which tags caused each bundle to fire.
-- `--json` emits the full context as machine-readable JSON.
 
 ## `validate`
 
@@ -165,8 +166,10 @@ behind `status`, including which contributors fired.
 llmenv validate
 ```
 
-Check the config for structural issues. Reports duplicate bundle names. Exits
-non-zero if any issues are found.
+Check the config for structural issues. Reports duplicate bundle names, a
+project marker whose `enable_bundles` or `disable_bundles` names an unknown
+bundle, an unknown engine id in `disabled_engines`, and a `native_*` key that
+names an unknown engine. Exits non-zero if any of these is found.
 
 ## `edit`
 
@@ -183,7 +186,7 @@ Open `config.yaml` (or, if `BUNDLE-NAME` is given, the matching
 llmenv completions [SHELL] [--install] [--dir DIR] [--force]
 ```
 
-Generate shell completion scripts for `bash`, `zsh`, or `fish`. With no flags,
+Generate shell completion scripts for `bash`, `zsh`, `fish`, `elvish`, or `powershell`. With no flags,
 prints the script to stdout — pipe it to a file your shell loads at startup:
 
 ```sh
@@ -224,6 +227,13 @@ Sync plugin marketplaces into the cache — clone git sources that are missing,
 fast-forward those already present. Local-path marketplaces are used in place and
 need no sync.
 
+(changed in v3.12.0) A plugin whose marketplace entry pins a `ref` or a `sha` is cloned again on each sync, so a changed
+pin takes effect.
+Before v3.12.0 the sync kept the old checkout and reported success.
+A plugin with no pin is pulled.
+The sync also reads the `github` and `git-subdir` plugin sources, and skips a malformed entry with a warning.
+See [Plugins](plugins.md#plugin-sources-in-a-marketplace-manifest).
+
 ## `sync`
 
 ```text
@@ -243,7 +253,8 @@ llmenv check-stale [--auto-fix]
 ```
 
 Warn if the running agent's config has drifted from what llmenv would
-materialize now. Invoked automatically by the Claude Code `SessionStart` hook: it
+materialize now. Run automatically at Claude Code session start by
+`llmenv hook-run session_start` (a separate `SessionStart` hook before v3.11.0): it
 compares the content hash in the booted `CLAUDE_CONFIG_DIR` against the
 freshly-computed one and prints a restart hint on drift. Safe to run manually.
 
@@ -260,7 +271,7 @@ Engine-neutral lifecycle hooks that inject ICM memory context over MCP and
 drive [`session_log:`](configuration.md#session_log). Invoked by the agent
 runtime (not by users directly).
 
-Lifecycle/memory events (`session_start` and `session_end` are always registered
+Lifecycle/memory events (`session_start`, `session_end`, and `post_model_switch` are always registered
 by the Claude Code adapter; `turn_start` needs a memory backend, and the adaptive
 recall events also need `adaptive_recall` on):
 
@@ -296,6 +307,26 @@ recall events also need `adaptive_recall` on):
 - `session_end` — best-effort store of the active scope context
   (`icm_memory_store`); also emits the baseline `lifecycle_end` session-log event
 
+`session_start` also does this work (added in v3.12.0):
+
+- It checks that each managed MCP server answers an MCP `initialize` within 5 seconds, restarts a stopped ICM proxy on
+  the host that serves memory, and puts a `MCP health check failed` notice in the session context for each server that
+  stays down.
+  See [Session-start health check](mcp.md#session-start-health-check-added-in-v3120).
+- It runs the background jobs that left a checkpoint file, up to 3 attempts each.
+  See [Background work](troubleshooting.md#background-work-that-did-not-finish).
+- It writes the session's [agent-config document](#agent-config).
+
+Other events:
+
+- `pre_tool_use` — runs the read-once dedup on `Read`.
+  With the task tracker on, it also redirects the engine task tools to `llmenv task` and denies the first `git commit`
+  or `gh pr create` with no task in progress (see [Task nudges](#task-nudges-added-in-v3120)).
+  With `codebase-memory-mcp` wired, it denies an `index_repository` call that sets a project name, sets `persistence:
+  true`, or reaches outside the allowed roots.
+- `stop` — registered when session logging, `features.task_tracker`, or slippage `self_critique` is on.
+  It prints the task reminders and the slippage self-critique.
+
 Verbose events (auto-registered only when `session_log.verbose: true`):
 `user_prompt_submit`, `pre_tool_use`, `post_tool_use`, `notification`, `stop`,
 `subagent_stop`, `pre_compact` — each captures the corresponding Claude Code
@@ -320,11 +351,26 @@ Inspect ICM memory state for the active scope.
 
 - `memory stats` — record counts by tag/bundle/type, last-written.
 - `memory list` — list stored memories for the active scope.
+  (changed in v3.12.0) It asks ICM for the memories of the project that the current folder belongs to.
+  llmenv names the project like ICM does: the `origin` remote's repository name, else the main repository's folder name,
+  else the folder name.
+  When llmenv cannot tell the project, it warns `cannot tell the project of this folder, so memories of all projects are
+  used` and lists every project.
+  Before v3.12.0 ICM filtered by the working directory of the ICM server, which is unrelated to your project when ICM
+  runs on another host.
 - `memory diff` — show what changed since the last session.
+  (changed in v3.12.0) It compares the same project-scoped recall as `memory list` and gives the same warning.
 - `memory prune [--dry-run]` — preview or apply forgetting by memory importance.
-  (changed in v3.12.0) The command refuses to run, and forgets nothing, while `memory.retention` is set.
+  It forgets `low` and `medium` importance memories and keeps `high` and `critical` ones.
+  It reads at most 100 memories for each run.
+  (changed in v3.12.0) It reads only the memories of the project that the current folder belongs to.
+  When llmenv cannot tell the project, the command refuses to run and forgets nothing.
+  Before v3.12.0 the command had no project filter, so ICM answered with the records of its own working folder.
+  `--dry-run` prints the counts and forgets nothing.
+  (changed in v3.12.0) The command refuses to run, and forgets nothing, while the active `features.memory` entry sets `retention`.
   ICM's recall output has no record age or type, so llmenv cannot apply the per-type durations.
-  Remove `retention` from the config to use the importance-based prune.
+  Remove `retention` from that entry to use the importance-based prune.
+  A `retention` on an entry that is not active does not block the prune.
 
 ## `prune`
 
@@ -389,7 +435,8 @@ state, backed by one JSON file per task. `<id>` accepts an exact slug or any
 unambiguous prefix of one.
 
 - `task add <title> [--child-of SLUG | --parallel] [--after SLUG] [--parent SLUG] [--session <id>]` — create
-  a task (`open` state). (changed in v3.12.0) A new task joins the **queue** of its session: it cannot start
+  a task (`open` state). (changed in v3.12.0) A new task joins the **queue** of its session (tasks run in creation
+  order): it cannot start
   until the task ahead of it is `done` or `waiting`, and until no other queued task is in progress.
   `--child-of SLUG` makes it a **sub-task** instead. Sub-tasks run in parallel, starting one puts every `open`
   ancestor in progress (a queued ancestor must be allowed to start, and a `done` parent refuses). The parent
@@ -409,7 +456,7 @@ unambiguous prefix of one.
   `--detail-file <path>` (added in v3.12.0) stores what a cold reader needs to do
   the task: files, acceptance criteria, and gotchas. The two flags conflict.
   An unreadable `--detail-file` fails before llmenv adds the task.
-- `task start <id> [--force]` — claim a task, moving it to `wip`. Also the
+- `task start <id> [--force] [--reopen]` — claim a task, moving it to `wip`. Also the
   resume action for a `waiting` task — it accepts any non-`done` state as its
   starting point. An undone **`blocked_on`** reference (`task block`,
   below) refuses to start, since that's an explicit dependency. (changed in v3.12.0) An `open`
@@ -549,6 +596,8 @@ project's hook.
   or a compaction — so `--resume` is the safe choice instead of `--new`.
   Outside an engine (no such variables) nothing is recorded, and resolution
   works as before.
+  (changed in v3.12.0) A session id must be a plain name.
+  A `--resume`, `finish`, `edit`, or `--id` value with a path part, such as `../x`, is rejected.
 - `task session finish [<id>] [--abandon-open]` — close out a session;
   auto-resolves when exactly one is open for the current project, or to the one
   this conversation owns, otherwise pass an id. (changed in v3.12.0) Refuses
@@ -646,8 +695,9 @@ instruction that says they are blocked. `features.task_tracker.nudges: false` re
 
 The tracker reminds the agent while work happens, and not only at the start and the end of a session.
 Each reminder names the exact `llmenv task` commands to run.
-`features.task_tracker.nudges: false` turns off the reminders in the first four items,
+`features.task_tracker.nudges: false` turns off the reminders in the first, second, and fourth items,
 and `enforce_commit: false` turns off the fifth.
+Nothing turns off the third item.
 
 - After a workflow skill starts (`dev-sprint`, `ship-issue`, and the others in `workflow_skills`), a project with no
   session or no unfinished task gets one reminder for each session to start a session with its first tasks.
@@ -659,7 +709,14 @@ and `enforce_commit: false` turns off the fifth.
   in progress, the reminder tells it to run `llmenv task wait <slug> "<reason>"`, and `llmenv task start <slug>` after
   the answer. A waiting task is reported as "waiting on the user".
 - The first `git commit` or `gh pr create` of a session with no task in progress is denied once, with the commands to
-  run. The same command runs on the next try. The deny comes back when a later gap leaves no task in progress.
+  run. The same command runs on the next try.
+  The deny marker clears the next time a commit or pull request runs while a task is in progress, so a later gap with no
+  task denies once more.
+  A task that is only `open` or `waiting` does not count as in progress.
+
+Two more reminders do not depend on `nudges`.
+A reminder for a parent task in progress shows how many of its sub-tasks are done, in progress, waiting, and not started.
+The Stop reminder names the next sub-task to start when a parent is in progress and its sub-tasks are all `open` or `done`.
 
 The tracker looks at the whole project: a task in progress in any open session of the project counts as tracked work.
 The deny is once for each session, not once for each commit, and a failed state write lets the command through.
@@ -797,6 +854,18 @@ whether the target path is inside the llmenv cache and prints a redirection hint
 pointing at the source config. Always exits 0 (fail-soft — the write is not
 blocked). Invoked automatically — not normally run by users.
 
+## `throttle`
+
+```text
+llmenv throttle <pre-tool|prompt>
+```
+
+Poll the usage backend and sleep an adaptive delay, to stay under rate limits.
+The auto-registered `PreToolUse` (`pre-tool`) and `UserPromptSubmit` (`prompt`) hooks run it when a `features.throttle`
+block is set.
+Invoked automatically — not normally run by users.
+See [`features.throttle:`](configuration.md#featuresthrottle).
+
 ## `upgrade`
 
 ```text
@@ -825,11 +894,14 @@ Supported platforms: macOS (aarch64, x86_64), Linux (aarch64, x86_64).
 ## `doctor`
 
 ```text
-llmenv doctor [--gc] [--all] [--probe-mcp] [--restart-memory-proxy] [--verbose]
+llmenv doctor [--gc] [--all] [--probe-mcp] [--restart-memory-proxy]
 ```
 
 (added in v3.12.0) `--restart-memory-proxy` skips the checks. It stops the local memory proxy that the
 pidfile names and starts it again; see [Troubleshooting](troubleshooting.md#memory-backend-issues).
+It signals the pid in the pidfile only when that process is an `mcp-proxy`, and it exits non-zero when the proxy does
+not stop within 5 seconds, when the pid belongs to another program, or when the new proxy does not start.
+On a host that does not serve memory it prints an info line and does nothing.
 
 Validate adapter wiring and configuration. By default runs checks only for the
 active context (active bundles, active MCP servers, etc.). Checks:
@@ -922,14 +994,49 @@ active context (active bundles, active MCP servers, etc.). Checks:
   so such a matcher silently never fires. Use a `scope.content` glob to gate
   the hook's bundle by file type instead.
 - token-efficiency settings — warns when `BASH_MAX_OUTPUT_LENGTH`,
-  `MAX_MCP_OUTPUT_TOKENS`, `ENABLE_PROMPT_CACHING_1H`, and
-  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` are not set. The autocompact check reads
-  `native.claude_code` `autoCompactEnabled` and `autoCompactWindow` too
+  `MAX_MCP_OUTPUT_TOKENS`, and `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` are not set.
+  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` must be a whole number from 1 to 100, and doctor warns
+  above 70 because PreCompact hooks then have too little room to run (changed in v3.12.0).
+  The autocompact check reads `native.claude_code` `autoCompactEnabled` and `autoCompactWindow` too
   (changed in v3.12.0): with `autoCompactEnabled: false` it reports info and
   recommends nothing, and with a window set it names the window the percentage
-  applies to. It reports (info) whether
+  applies to. A `bashOutputMaxChars` setting replaces the `BASH_MAX_OUTPUT_LENGTH` check, because
+  Claude Code ignores the variable while the setting is set. The prompt-cache check reads
+  `CLAUDE_CODE_PROMPT_CACHE_TTL` first, then `ENABLE_PROMPT_CACHING_1H`, and prints info, not a
+  warning, when neither is set, because subscription plans get the 1-hour TTL without a variable
+  (changed in v3.12.0; details in
+  [Troubleshooting](troubleshooting.md#doctor-warns-about-retired-claude-code-settings)). It reports (info) whether
   `CLAUDE_CODE_SUBAGENT_MODEL` is set; and checks whether a context-mode MCP
   server is registered
+- retired Claude Code settings (added in v3.12.0) — reads the rendered `settings.json` and `.claude.json`
+  in the folder that `CLAUDE_CONFIG_DIR` names, and prints a `Retired Claude Code settings:` section for
+  each retired settings key, environment variable, permission tool, or MCP server type.
+  It skips the check, and says so, when `CLAUDE_CONFIG_DIR` is not an llmenv folder.
+  It only warns. See
+  [Troubleshooting](troubleshooting.md#doctor-warns-about-retired-claude-code-settings).
+- task tracker instructions (added in v3.12.0) — with `features.task_tracker.enabled`, prints a
+  `Task tracker instructions:` section. It warns about each paragraph of `CLAUDE.md` or of a rule
+  that says the engine task tools are blocked, or that forbids `llmenv task`, and names the bundle or rule file.
+  A paragraph that says the tools are redirected is not a hit. The check is a word match, so it can miss
+  an unusual wording. See [Core task rules](#core-task-rules-added-in-v3120).
+- MCP servers (added in v3.12.0) — sends each managed server (the memory server and
+  `codebase-memory-mcp`) an MCP `initialize` with a 5 second limit, and prints one line for each.
+  A server that is down gets the reason and the fix. Nothing prints when the scope has no managed server.
+  See [Session-start health check](mcp.md#session-start-health-check-added-in-v3120).
+- ICM server version (added in v3.12.0) — on the host that serves memory, reads the version of the local
+  `icm` binary and warns below 0.10.60 and below 0.10.64. On a memory client the version is unknown, and
+  doctor says to run `icm --version` on the server host. See
+  [Troubleshooting](troubleshooting.md#memory-backend-issues).
+- codebase-memory index (added in v3.12.0) — with one active `features.codebase_memory` entry, reports the
+  result of the last index of this project: the finish time, a warning with the log path when the index
+  failed, and a warning with the numbers and the `mem_budget_mb` to set when it stopped at the memory
+  budget. It then lists the roots that `codebase-memory-mcp` may index, and warns about a root that
+  llmenv wants and the server lacks, or about an `allowed_roots` entry that cannot expand or is not a folder.
+  With two or more active entries it says that no index runs. See
+  [MCP & Memory](mcp.md#codebase-memory-codebase_memory).
+- background work (added in v3.12.0) — prints a `Background work:` section with one line for each
+  checkpoint of a detached job that did not finish. A stale checkpoint is a warning. See
+  [Troubleshooting](troubleshooting.md#background-work-that-did-not-finish).
 - cached OAuth credential (added in v3.8.0) — reports whether a token is cached
   in the durable state dir, and warns when the cached token has expired. See
   [Inherited Claude Code state](configuration.md#oauth-credential-inheritance).
@@ -940,7 +1047,9 @@ active context (active bundles, active MCP servers, etc.). Checks:
   drops the keychain credential item belonging to each cache folder it deletes
   (added in v3.8.0); matched by folder path, so your default `~/.claude` login is
   never affected.
-- `--verbose` prints detailed per-check reasoning alongside each pass/fail result.
+- `--probe-mcp` (added in v3.12.0) also starts the stdio MCP servers, to measure their text for the
+  MCP text limits check. Starting a server can have side effects, so doctor does it only on request.
+- `--restart-memory-proxy` (added in v3.12.0) replaces the checks; see above.
 
 ## Deprecated commands
 

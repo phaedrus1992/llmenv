@@ -28,8 +28,8 @@ Claude Code 2.1.277 also fixed the one known defect: a session continued after `
 | --- | --- |
 | `dispatch(SessionStart, …)` returns `vec![Action::WakeUp(wakeup_max_tokens)]` | `src/hook_run/mod.rs` near line 235 |
 | Shared emitter returns `""` for `SessionStart` and `SessionEnd` | `emit_hook_context`, `src/adapter/mod.rs` near line 537 |
-| Claude Code, Crush and opencode adapters all call the shared emitter | `src/adapter/claude_code.rs` near line 544, `crush.rs` near line 483, `opencode.rs` near line 1221 |
-| `llmenv config-context` emits SessionStart `additionalContext` and works | `Command::ConfigContext`, `src/cli/mod.rs` near line 256; hook registered in `src/adapter/claude_code.rs` near line 1297 |
+| Claude Code, Crush and opencode adapters all call the shared emitter | `src/adapter/claude_code/mod.rs` near line 544, `crush.rs` near line 483, `opencode.rs` near line 1221 |
+| `llmenv config-context` emits SessionStart `additionalContext` and works | `Command::ConfigContext`, `src/cli/mod.rs` near line 256; hook registered in `src/adapter/claude_code/mod.rs` near line 1297 |
 | `run()` writes whatever the adapter emitter returns to stdout | `src/hook_run/mod.rs` near line 523 |
 | 3.x has no Codex adapter | `src/adapter/` |
 
@@ -38,6 +38,8 @@ Claude Code 2.1.277 also fixed the one known defect: a session continued after `
 1. **Claude Code only.** Only the Claude Code adapter emits `SessionStart` context.
    Crush and opencode keep today's behavior (no output on `SessionStart`), because nothing shows their hook schemas accept it.
    Opening them up needs its own issue with evidence.
+   Implemented as: Claude Code and opencode emit `SessionStart` context (`SessionStartContext::Accepted`), because the generated opencode shim adds `additionalContext` to the first message.
+   Crush stays `Rejected`.
 2. **`SessionEnd` stays suppressed for every adapter.** That is the #558 fix and it is correct.
 3. **Header.** The wrapper line for `SessionStart` is `[ICM MEMORY CONTEXT (session start)]`.
    `TurnStart` keeps `[ICM MEMORY CONTEXT (auto-injected)]`.
@@ -81,7 +83,8 @@ Rules, in order:
 
 The trait method `AgentAdapter::emit_hook_context(&self, hook_event_name, text)` keeps its signature.
 `ClaudeCodeAdapter` passes `Accepted`.
-`CrushAdapter` and `OpenCodeAdapter` pass `Rejected`.
+`CrushAdapter` passes `Rejected`.
+`OpenCodeAdapter` passes `Accepted`, as `ClaudeCodeAdapter` does.
 Update the comment on the shared function: remove the claim that all adapters reject `SessionStart` context, and cite this issue.
 
 ### Dispatch
@@ -89,6 +92,8 @@ Update the comment on the shared function: remove the claim that all adapters re
 `dispatch` gains a `bool` argument named `continued`, true when `source` is `resume` or `fork`.
 `SessionStart` with `continued == true` returns `vec![]`.
 Read `source` from `stdin_payload["source"]` in `run_inner`.
+Implemented as: `dispatch` has no `continued` argument.
+`run_inner` calls `continues_session(stdin_payload)` and passes `wake: Option<&WakeUpArgs>`, which is `None` for a continued session, so `SessionStart` returns no action.
 `dispatch` has 4 positional parameters today; adding one makes 5, which is the project limit, so do not add more.
 
 ### Budget
@@ -100,7 +105,7 @@ Reuse the same function #2159 adds; do not write a second budget loop.
 
 1. Emitter table test: every combination of event (`SessionStart`, `SessionEnd`, `UserPromptSubmit`) and `SessionStartContext` gives the expected output or `""`.
 2. Claude Code adapter test: `emit_hook_context("SessionStart", "x")` returns JSON whose `hookSpecificOutput.hookEventName` is `SessionStart` and whose `additionalContext` starts with `[ICM MEMORY CONTEXT (session start)]`.
-3. Crush and opencode adapter tests: `SessionStart` returns `""`.
+3. Crush adapter test: `SessionStart` returns `""`.
 4. `dispatch` test: `SessionStart` with `continued == true` returns no actions; with `false` returns `WakeUp`.
 5. `source` parsing test: `"resume"` and `"fork"` set `continued`; `"startup"`, `"clear"`, `"compact"`, missing and non-string all do not.
 6. Budget test: a wake-up text larger than the budget is cut at whole records with the omission line.

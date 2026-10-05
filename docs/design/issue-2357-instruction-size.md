@@ -26,6 +26,7 @@ Nothing in llmenv says how close a setup is to either limit, and Claude Code's n
 The combined threshold must be pinned before the warning is written.
 Read it from the installed binary (`rg -a` around the per-file constant and the notice text; the binary is at `~/.local/share/claude/versions/<version>`) and record the value, the version, and the search used in this table.
 If no constant is found, see decision 4.
+Implemented as: no combined constant exists in the 2.1.288 binary, so the code uses the `2 × 40_000` estimate and the warning says it is estimated.
 
 ## Verified facts (release/3.x)
 
@@ -48,6 +49,7 @@ If no constant is found, see decision 4.
    Count characters (`chars().count()`), because Claude Code's threshold is in characters.
 2. **A rule is always loaded unless its frontmatter has a non-empty `paths:` list.**
    Parse only that key, with `serde_yaml` into a small struct that ignores unknown fields.
+   Implemented as: `paths:` may be one glob or a list of globs, and `RuleFile::load_mode` returns `LoadMode::{Always, PathFiltered, UnparsedFrontmatter}` instead of a bool.
    A frontmatter that fails to parse counts as always loaded (the safe direction) and is reported once at `{info}`.
 3. **Report per scope, which for Claude Code is one `CLAUDE_CONFIG_DIR`.**
    The section prints the combined total, the `CLAUDE.md` size, and the five largest always-loaded contributors grouped by bundle (`CLAUDE.md` chunks by their `from bundle` separator, rules by `RuleFile.bundle`).
@@ -79,29 +81,34 @@ impl RuleFile {
 ```
 
 `always_loaded` returns true when there is no frontmatter, when `paths` is empty, or when the YAML does not parse.
+Implemented as: `RuleFile::load_mode` replaces `always_loaded`.
+It returns `LoadMode::Always` for no frontmatter or an empty `paths`, `LoadMode::PathFiltered` for a non-empty `paths`, and `LoadMode::UnparsedFrontmatter` when the YAML does not parse.
+Doctor counts `UnparsedFrontmatter` as always loaded and lists those rules at `{info}`.
 
-### Measurement (`src/cli/doctor_instruction_size.rs`, a new module so `doctor.rs` does not grow)
+### Measurement (`src/cli/doctor/instruction_size.rs`, a new module so `doctor.rs` does not grow)
 
 ```rust
-pub(crate) struct InstructionSizeReport {
+pub(super) struct InstructionSizeReport {
     pub total_chars: usize,
     pub claude_md_chars: usize,
     pub always_loaded: Vec<Contributor>,   // sorted by chars desc
     pub path_filtered_rules: usize,
-    pub unparsed_frontmatter: usize,
+    pub unparsed_frontmatter: Vec<String>,  // bundle/rel of each rule counted as always loaded
 }
-pub(crate) struct Contributor { pub bundle: String, pub file: String, pub chars: usize }
+pub(super) struct Contributor { pub bundle: String, pub file: String, pub chars: usize }
 
-pub(crate) fn measure(manifest: &MergedManifest, claude_md: &str) -> InstructionSizeReport;
-pub(crate) fn checks(report: &InstructionSizeReport) -> Vec<(CheckLevel, String)>;
+fn measure(manifest: &MergedManifest) -> InstructionSizeReport;
+fn checks(report: &InstructionSizeReport) -> Vec<(CheckLevel, String)>;
 ```
 
-`claude_md` is the same text the adapter writes (agents_md plus the slippage fragment); expose the adapter's composer as a function if it is inline today, so doctor and materialize agree.
+`measure` takes no `claude_md` argument.
+Implemented as: it calls `crate::adapter::claude_code::claude_md_content(manifest)`, the same composer that `materialize` uses, so doctor and materialize agree.
 
 ### Doctor (`src/cli/doctor.rs`)
 
 `run_doctor_instruction_size(use_color, manifest)` prints the header `Instruction size (Claude Code):` and the checks, then the top-five list as `{info}` lines: `<bundle>  <file>  <n> chars`.
 Call it after the lifecycle-hooks section, since both describe what Claude Code loads.
+Implemented as: doctor calls it only when Claude Code is installed and a merged manifest exists.
 
 ### Docs
 

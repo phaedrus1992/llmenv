@@ -41,7 +41,7 @@ caps.
 ## Gaps vs llmenv
 
 - llmenv sets exactly one env var: `CLAUDE_CONFIG_DIR` (via
-  `ClaudeCodeAdapter::env_vars`, `src/adapter/claude_code.rs:28`), pointing Claude
+  `ClaudeCodeAdapter::env_vars`, `src/adapter/claude_code/mod.rs:28`), pointing Claude
   Code at the materialized config dir. Correct and necessary.
 - The **`env` settings key** (apply env vars to every session) is unmodeled — and
   it is the more durable way to set things like `ANTHROPIC_MODEL`, timeouts, or

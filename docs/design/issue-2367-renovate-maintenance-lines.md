@@ -8,6 +8,10 @@
 
 This is a spec, not a plan.
 
+Branch note: the fix exists on `main` only, because Renovate reads its config from the default branch.
+On `release/3.x`, `.github/renovate.json5` still holds the earlier rule that disables everything on the maintenance lines, without the lock-maintenance override described here.
+The "Verified facts" and "Problem" sections describe `main` before the fix.
+
 ## Problem
 
 `.github/renovate.json5` has a rule "Maintenance release lines get security fixes only" that sets `enabled: false` for `matchBaseBranches: ["release/1.x", "release/2.x"]`.
