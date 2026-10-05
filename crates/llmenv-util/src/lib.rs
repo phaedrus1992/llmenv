@@ -187,6 +187,38 @@ fn normalize_json(value: &mut serde_json::Value) {
     }
 }
 
+/// Replace each `$VAR` and `${VAR}` in `text` with the value that `env` returns. A variable name
+/// is ASCII letters, digits, and `_`. `None` when a `$` is bare, a `${` does not close after a
+/// plain name, or `env` has no non-empty value for a name.
+#[must_use]
+pub fn expand_env_refs(text: &str, env: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '$' {
+            out.push(c);
+            continue;
+        }
+        let braced = chars.peek() == Some(&'{');
+        if braced {
+            chars.next();
+        }
+        let mut name = String::new();
+        while let Some(&n) = chars.peek() {
+            if !(n.is_ascii_alphanumeric() || n == '_') {
+                break;
+            }
+            name.push(n);
+            chars.next();
+        }
+        if name.is_empty() || (braced && chars.next() != Some('}')) {
+            return None;
+        }
+        out.push_str(&env(&name).filter(|v| !v.is_empty())?);
+    }
+    Some(out)
+}
+
 /// Replace every control character and every bidirectional or zero-width format character in
 /// `s` with its Rust-literal escape (a newline becomes the two characters `\n`) and leave every
 /// other character, including non-ASCII text, as it is.
@@ -381,6 +413,33 @@ mod tests {
             escape_control("a\u{202E}b\u{200B}c"),
             "a\\u{202e}b\\u{200b}c"
         );
+    }
+
+    #[test]
+    fn expand_env_refs_expands_plain_and_braced_names() {
+        let env = |name: &str| (name == "A_1").then(|| "x".to_string());
+        assert_eq!(
+            super::expand_env_refs("$A_1/b", &env).as_deref(),
+            Some("x/b")
+        );
+        assert_eq!(
+            super::expand_env_refs("${A_1}b", &env).as_deref(),
+            Some("xb")
+        );
+        assert_eq!(
+            super::expand_env_refs("no vars", &env).as_deref(),
+            Some("no vars")
+        );
+    }
+
+    #[test]
+    fn expand_env_refs_rejects_a_bare_dollar_an_unclosed_brace_and_an_unset_name() {
+        let env = |_: &str| Some("x".to_string());
+        for bad in ["$", "a$/b", "${A", "${A b}", "${}", "$-"] {
+            assert_eq!(super::expand_env_refs(bad, &env), None, "{bad}");
+        }
+        assert_eq!(super::expand_env_refs("$A", &|_| None), None);
+        assert_eq!(super::expand_env_refs("$A", &|_| Some(String::new())), None);
     }
 
     mod escape_control_props {

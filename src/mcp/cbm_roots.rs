@@ -61,31 +61,7 @@ fn expand_root(
     } else {
         entry
     };
-    let mut chars = rest.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '$' {
-            out.push(c);
-            continue;
-        }
-        let braced = chars.peek() == Some(&'{');
-        if braced {
-            chars.next();
-        }
-        let mut name = String::new();
-        while let Some(&n) = chars.peek() {
-            if !(n.is_ascii_alphanumeric() || n == '_') {
-                break;
-            }
-            name.push(n);
-            chars.next();
-        }
-        // A bare `$`, a `${` that does not close after a plain name, and `${bad name}` are not
-        // variables.
-        if name.is_empty() || (braced && chars.next() != Some('}')) {
-            return None;
-        }
-        out.push_str(&env(&name).filter(|v| !v.is_empty())?);
-    }
+    out.push_str(&crate::util::expand_env_refs(rest, env)?);
     Some(PathBuf::from(out))
 }
 
