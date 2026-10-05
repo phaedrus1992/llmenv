@@ -398,7 +398,11 @@ pub(crate) fn handle_pre_tool_use(
     if !runs_commit_or_pr(command) {
         return String::new();
     }
-    let Some(path) = session_id.and_then(|id| state_path(state_dir, id)) else {
+    let Some(id) = session_id else {
+        return String::new();
+    };
+    let Some(path) = state_path(state_dir, id) else {
+        tracing::error!("task commit gate off: the session id is not a plain name");
         return String::new();
     };
     let tracking = crate::task::tracking(state_dir);
@@ -406,11 +410,19 @@ pub(crate) fn handle_pre_tool_use(
         return String::new();
     };
     match tracking {
-        Tracking::Unknown => String::new(),
+        Tracking::Unknown => {
+            tracing::error!("task commit gate off: the task store cannot be read");
+            String::new()
+        }
         Tracking::Tracked { wip: Some(_), .. } => {
             if state.commit_denied {
                 state.commit_denied = false;
-                save(&path, &state);
+                if !save(&path, &state) {
+                    tracing::error!(
+                        "task commit gate: cannot clear the deny marker, so the next commit \
+                         passes without a task check"
+                    );
+                }
             }
             String::new()
         }

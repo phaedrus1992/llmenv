@@ -197,18 +197,23 @@ pub(super) async fn session_start(
         _ => None,
     };
     // One locked update, so a busy lock can never leave a pre-reset sent set in use.
-    let sent = ctx
-        .store
-        .update(ctx.session_id, |l| {
-            if reset {
-                l.reset();
-            }
-            if project.is_some() {
-                l.project = project;
-            }
-            l.sent_for(MAIN_AGENT)
-        })
-        .unwrap_or_default();
+    let updated = ctx.store.update(ctx.session_id, |l| {
+        if reset {
+            l.reset();
+        }
+        if project.is_some() {
+            l.project = project;
+        }
+        l.sent_for(MAIN_AGENT)
+    });
+    if updated.is_none() && reset {
+        // Records that the model saw before the context loss would stay filtered from recall.
+        tracing::error!(
+            "recall ledger not reset after {}: the lock or the file failed",
+            ctx.payload["source"].as_str().unwrap_or("a context reset")
+        );
+    }
+    let sent = updated.unwrap_or_default();
     let wake = if super::continues_session(ctx.payload) {
         Ok(String::new())
     } else {
