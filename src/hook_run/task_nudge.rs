@@ -801,6 +801,18 @@ mod tests {
 
     proptest! {
         #[test]
+        fn nudge_state_survives_a_json_roundtrip(
+            calls in any::<u32>(),
+            last_nudge in any::<u32>(),
+            skill_reminded in any::<bool>(),
+            commit_denied in any::<bool>(),
+        ) {
+            let state = NudgeState { calls, last_nudge, skill_reminded, commit_denied };
+            let json = serde_json::to_string(&state).unwrap();
+            prop_assert_eq!(serde_json::from_str::<NudgeState>(&json).unwrap(), state);
+        }
+
+        #[test]
         fn a_command_without_commit_or_pr_create_is_never_matched(command in "[a-z0-9 -;|&\n]{0,60}") {
             prop_assume!(!command.contains("commit") && !command.contains("pr create"));
             prop_assert!(!runs_commit_or_pr(&command));

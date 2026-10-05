@@ -414,4 +414,32 @@ mod tests {
         let records = parse_recall_output(text);
         assert_eq!(records.len(), 0);
     }
+
+    mod props {
+        use super::super::parse_recall_output;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn parsing_arbitrary_text_never_panics_and_yields_ids_from_the_text(
+                text in "[ -~\n]{0,300}",
+            ) {
+                let records = parse_recall_output(&text);
+                let starts = text.lines().filter(|l| l.trim().starts_with("--- ")).count();
+                prop_assert!(records.len() <= starts);
+                for record in &records {
+                    prop_assert!(text.contains(&record.id));
+                }
+            }
+
+            #[test]
+            fn a_record_without_a_numeric_weight_is_dropped(
+                id in "[a-z0-9]{1,12}",
+                weight in "[a-z]{1,6}",
+            ) {
+                let text = format!("--- {id} ---\nimportance: high\nweight: {weight}\n");
+                prop_assert!(parse_recall_output(&text).is_empty());
+            }
+        }
+    }
 }

@@ -525,6 +525,33 @@ mod tests {
         use serde_json::Value;
 
         proptest! {
+            // dedup is idempotent, keeps first-seen order, and leaves no duplicates.
+            #[test]
+            fn dedup_is_idempotent_and_order_preserving(items in prop::collection::vec(0i32..6, 0..12)) {
+                let mut once = items.clone();
+                dedup(&mut once);
+                let mut twice = once.clone();
+                dedup(&mut twice);
+                prop_assert_eq!(&once, &twice);
+                let mut expected: Vec<i32> = Vec::new();
+                for item in &items {
+                    if !expected.contains(item) {
+                        expected.push(*item);
+                    }
+                }
+                prop_assert_eq!(once, expected);
+            }
+
+            // normalize_json is idempotent.
+            #[test]
+            fn normalize_json_is_idempotent(v in arb_json()) {
+                let mut once = v;
+                super::super::normalize_json(&mut once);
+                let mut twice = once.clone();
+                super::super::normalize_json(&mut twice);
+                prop_assert_eq!(once, twice);
+            }
+
             // merge_json never panics on arbitrary input pairs.
             #[test]
             fn merge_json_total(mut dst in arb_json(), src in arb_json()) {

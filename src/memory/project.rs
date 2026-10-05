@@ -116,4 +116,33 @@ mod tests {
         assert_eq!(session_project(&plain).as_deref(), Some("plain-dir"));
         assert_eq!(session_project(Path::new("/")), None);
     }
+
+    mod props {
+        use super::super::repo_name_from_url;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn the_name_is_one_non_empty_path_segment(url in "\\PC{0,60}") {
+                if let Some(name) = repo_name_from_url(&url) {
+                    prop_assert!(!name.is_empty());
+                    prop_assert!(!name.contains('/') && !name.contains(':'));
+                }
+            }
+
+            #[test]
+            fn a_well_formed_url_yields_its_repo_name(
+                owner in "[a-z][a-z0-9-]{0,12}",
+                repo in "[a-z][a-z0-9_-]{0,20}",
+                form in 0usize..3,
+            ) {
+                let url = match form {
+                    0 => format!("https://github.com/{owner}/{repo}.git"),
+                    1 => format!("git@github.com:{owner}/{repo}.git"),
+                    _ => format!("alias:{owner}/{repo}/"),
+                };
+                prop_assert_eq!(repo_name_from_url(&url), Some(repo));
+            }
+        }
+    }
 }
