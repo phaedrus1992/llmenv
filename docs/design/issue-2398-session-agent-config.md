@@ -153,3 +153,11 @@ Serialization of the document is the only file format; keep it stable, since a h
 - Writing the document for Crush or opencode (no `model` in their payloads is confirmed).
 - Using `PreModelSwitch` to block a switch.
 - Routing engine or model from config (v4.1.0, #2394).
+
+## As built
+
+- Effort comes from the hook payload only (`effort.level`).
+  Decision 5 named a config fallback, but the config has no resolved effort for the running model at hook time, so the field reads `unset` when the payload has none.
+- Timestamps are `i64` Unix seconds, to match `session_state::unix_now`.
+- The resume line uses the document that `SessionStart` has just written, not the stored copy, so it shows the current model and scope.
+- `AgentConfig::running_as` renders the `task session summary` line.

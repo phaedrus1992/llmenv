@@ -653,6 +653,9 @@ recall events also need `adaptive_recall` on):
   subagent's task, which `subagent_task` records
 - `subagent_task` (added in v3.12.0) — a `PreToolUse` hook on the `Agent` tool
   that queues the subagent's task text; no output
+- `post_model_switch` (added in v3.12.0) — a Claude Code `PostModelSwitch` hook. It records the new
+  model and the switch in the session's agent-config document (see
+  [Agent config](#agent-config)); no output
 - `session_end` — best-effort store of the active scope context
   (`icm_memory_store`); also emits the baseline `lifecycle_end` session-log event
 
@@ -719,7 +722,7 @@ re-ingestion on the next turn.
 ## `task`
 
 ```text
-llmenv task add <title> [--parent SLUG | --no-parent] [--session <id>]
+llmenv task add <title> [--child-of SLUG | --parallel] [--after SLUG] [--parent SLUG] [--session <id>]
   [--detail <text> | --detail-file <path>]
 llmenv task start <id> [--force] [--reopen]
 llmenv task done <id> [--force]
@@ -733,6 +736,7 @@ llmenv task edit <id> [--title <t>] [--parent SLUG | --no-parent]
   [--detail <text> | --detail-file <path>]
 llmenv task clear <id>... | --session <id>
 llmenv task session start [name] [--description <text>] [--resume <id> | --replace | --new]
+  [--task <title>]...
   [--context <text> | --context-file <path>] [--issue <n>]... [--branch <b>] [--base <b>]
   [--memory-topic <t>]... [--doc <path>]...
 llmenv task session edit [<id>] [same flags as session start]
@@ -747,17 +751,20 @@ In-engine task tracker (#231): durable, cross-session "what am I working on"
 state, backed by one JSON file per task. `<id>` accepts an exact slug or any
 unambiguous prefix of one.
 
-- `task add <title> [--parent SLUG | --no-parent] [--session <id>]` — create
-  a task (`open` state). (added in v3.10.0) Omitting `--parent` no longer
-  means "no parent": it defaults to the most recently *created* task in the
-  same session, so a run of plain `task add`s forms an ordered chain by
-  default — the order agents add tasks in is usually the order they intend
-  to execute them. Pass `--parent SLUG` to nest under a specific task
-  instead (bypassing the chain), or `--no-parent` to force a deliberate
-  top-level task (the two flags conflict with each other). The chain never
-  crosses sessions — a new session's first task always starts with no
-  parent, regardless of what was last added in a different session. **A
-  task must belong to a session** (see below): with exactly one session open
+- `task add <title> [--child-of SLUG | --parallel] [--after SLUG] [--parent SLUG] [--session <id>]` — create
+  a task (`open` state). (changed in v3.12.0) A new task joins the **queue** of its session: it cannot start
+  until the task ahead of it is `done` or `waiting`, and until no other queued task is in progress.
+  `--child-of SLUG` makes it a **sub-task** instead. Sub-tasks run in parallel, starting one puts every `open`
+  ancestor in progress (a queued ancestor must be allowed to start, and a `done` parent refuses). The parent
+  cannot be marked `done` before every sub-task is. A sub-task needs an
+  unfinished parent in its own session. `--parallel` takes a top-level task out of the queue, so it runs beside the
+  head. `--after SLUG` records that another task must be done first, which `task start` enforces like
+  `task block`. `--parent SLUG` only links the task for display. The two flags `--child-of` and `--parallel` conflict,
+  and `--child-of` conflicts with `--parent`. Before v3.12.0 a plain `task add` chained onto the previous
+  task, and `--no-parent` opted out. A task no longer chains, and `--no-parent` is accepted, warns, and does
+  nothing. Tasks stored before v3.12.0 keep their parent
+  as a display link and count as top-level tasks.
+  **A task must belong to a session** (see below): with exactly one session open
   for the current project it auto-resolves; with two or more open it picks
   the one this conversation started or resumed (changed in v3.12.0; see
   "Session ownership" below), else asks for `--session <id>`; errors with
@@ -767,18 +774,18 @@ unambiguous prefix of one.
   An unreadable `--detail-file` fails before llmenv adds the task.
 - `task start <id> [--force]` — claim a task, moving it to `wip`. Also the
   resume action for a `waiting` task — it accepts any non-`done` state as its
-  starting point. `parent` and `blocked_on` (added in v3.8.0) are enforced
-  differently: an undone **parent** only warns — organizational grouping,
-  not an ordering guarantee, so starting a child while the parent is still
-  open is often fine. An undone **`blocked_on`** reference (`task block`,
-  below) hard-blocks — refuses to start — since that's an explicit
-  dependency the user configured on purpose; pass `--force` to override. A
+  starting point. An undone **`blocked_on`** reference (`task block`,
+  below) refuses to start, since that's an explicit dependency. (changed in v3.12.0) An `open`
+  queued task also refuses to start while the task ahead of it is not `done` or `waiting`, or while
+  another queued task is in progress; the error names that task. Sub-tasks and `--parallel` tasks are not
+  in the queue. Pass `--force` to override. A
   `blocked_on` reference resolves as done only once the target task *and
   every one of its descendants* are done, so blocking on a parent task alone
   covers its whole child set (see `task block`, below). `--reopen` (added
   in v3.12.0) moves a `done` task back to `open` with a note, then starts
   it; without it, `start` refuses a `done` task.
-- `task done <id> [--force]` — mark a task complete. (changed in v3.12.0)
+- `task done <id> [--force]` — mark a task complete. (changed in v3.12.0) Refuses a parent whose sub-tasks are
+  not all `done`, and lists them; `--force` closes it anyway and prints a note.
   Refuses a task that was never started (`open` straight to `done`) and exits
   non-zero, because that jump means no work was tracked. Run `task start`
   first. Pass `--force` when the work is done without tracking; it prints a
@@ -837,9 +844,7 @@ unambiguous prefix of one.
   on the **parent** rather than hand-wiring a `block` edge to each sibling —
   a `blocked_on` reference isn't satisfied until the target task *and every
   one of its descendants* are done. (changed in v3.12.0) The blocked task's
-  own subtree doesn't count: `task add` parents each new task under the
-  previous one, so a task blocked on its predecessor is usually that
-  predecessor's child, and it can start once the predecessor is done.
+  own subtree doesn't count, so a sub-task blocked on a sibling can start once the sibling is done.
 - `task edit <id> [--title <t>] [--parent SLUG | --no-parent] [--block-on
   <id>]... [--unblock <id>]... [--add-note <text>] [--delete-note
   <index-or-timestamp>]` — mutate an existing task. (added in v3.10.0) Every
@@ -873,7 +878,9 @@ task from a different project sharing this store never nags the wrong
 project's hook.
 
 - `task session start [name] [--description <text>] [--resume <id> |
-  --replace | --new]` — start a session for the current project. Pass
+  --replace | --new] [--task <title>]...` — start a session for the current project. `--task`
+  (added in v3.12.0) adds a task as the session starts and can repeat; the tasks join the queue in the
+  order given, so a session never exists with no tasks. Pass
   `--description` to attach free-text context (e.g. "dev-sprint issue 493"),
   shown in `session ls` and the checkpoint; it's separate from `name` and
   never feeds id generation. **Name the session after the high-level work**
@@ -989,6 +996,39 @@ genuinely uses them for multi-agent teammate coordination rather than solo step
 tracking. See [`features.task_tracker:`](configuration.md#featurestask_tracker)
 for the full field reference. (#980)
 
+### Core task rules (added in v3.12.0)
+
+While the tracker is on, SessionStart injects a short statement of the tracking rules with the exact commands: open a
+session when the work has more than one part, give a session its tasks, do one queued task at a time, and park a task that
+waits for the user. The text lives in llmenv itself, so it needs no bundle or personal instruction. It also says that the
+engine task tools are redirected to `llmenv task` while `block_engine_task_tools` is on, and that it overrides an
+instruction that says they are blocked. `features.task_tracker.nudges: false` removes the text.
+`llmenv doctor` warns about an instruction line that says the task tools are blocked or forbids `llmenv task`.
+
+### Task nudges (added in v3.12.0)
+
+The tracker reminds the agent while work happens, and not only at the start and the end of a session.
+Each reminder names the exact `llmenv task` commands to run.
+`features.task_tracker.nudges: false` turns off the reminders in the first four items,
+and `enforce_commit: false` turns off the fifth.
+
+- After a workflow skill starts (`dev-sprint`, `ship-issue`, and the others in `workflow_skills`), a project with no
+  session or no unfinished task gets one reminder for each session to start a session with its first tasks.
+- After `nudge_after` (default 8) edits, writes, or shell commands with no unfinished task, the agent gets a nudge.
+  Later nudges come every `nudge_every` (default 20) calls. The count resets once a task exists.
+- An open session with no task at all is named in the Stop and SessionStart reminders.
+  It is an error state: add a task, or finish the session.
+- When the agent asks the user a question (the `AskUserQuestion` tool, or a turn that ends with `?`) while a task is
+  in progress, the reminder tells it to run `llmenv task wait <slug> "<reason>"`, and `llmenv task start <slug>` after
+  the answer. A waiting task is reported as "waiting on the user".
+- The first `git commit` or `gh pr create` of a session with no task in progress is denied once, with the commands to
+  run. The same command runs on the next try. The deny comes back when a later gap leaves no task in progress.
+
+The tracker looks at the whole project: a task in progress in any open session of the project counts as tracked work.
+The deny is once for each session, not once for each commit, and a failed state write lets the command through.
+The hooks register on Claude Code. When session logging already routes every tool call to `hook-run`, the tracker adds no
+second entry. See [`features.task_tracker:`](configuration.md#featurestask_tracker) for the fields. (#2456)
+
 ### Resume context (added in v3.12.0)
 
 A session can record what a fresh agent needs to pick the work up after `/clear`.
@@ -1037,6 +1077,26 @@ A branch alone does not count, because it does not say what the work is.
 
 llmenv removes control characters from this text before it prints the text.
 A state file from before v3.12.0 loads without these fields.
+
+### Agent config
+
+(added in v3.12.0)
+
+Every Claude Code `SessionStart` writes a small JSON document at `<state dir>/agent_config/<session id>.json`.
+It records what the session runs as: the engine, the model, the effort level, the working directory,
+the project, the active tags and bundles, the booted config hash, and the llmenv and engine versions.
+Only the owner can read it.
+llmenv removes documents older than seven days.
+
+- A `PostModelSwitch` hook (Claude Code 2.1.251 and later) updates `model`.
+  It also adds an entry to `model_history`, which keeps the newest 20 switches.
+- On `resume` and `compact`, the SessionStart context starts with one line:
+  `[llmenv session] engine claude_code, model claude-opus-5, effort high, project llmenv, tags a, b, config 0123456789ab`.
+  A `startup`, `clear`, or `fork` session gets no line, because it has no earlier context to lose.
+- `effort` comes from the hook payload, so it reads `unset` when Claude Code sends none.
+- When the session's owner has a document, `task session summary` prints
+  `running as <engine> <model>, effort <level>` under the title.
+  The JSON form carries an `agent` object.
 
 ## `login`
 
@@ -1165,8 +1225,11 @@ Supported platforms: macOS (aarch64, x86_64), Linux (aarch64, x86_64).
 ## `doctor`
 
 ```text
-llmenv doctor [--gc] [--all] [--verbose]
+llmenv doctor [--gc] [--all] [--probe-mcp] [--restart-memory-proxy] [--verbose]
 ```
+
+(added in v3.12.0) `--restart-memory-proxy` skips the checks. It stops the local memory proxy that the
+pidfile names and starts it again; see [Troubleshooting](troubleshooting.md#memory-backend-issues).
 
 Validate adapter wiring and configuration. By default runs checks only for the
 active context (active bundles, active MCP servers, etc.). Checks:
@@ -1179,16 +1242,36 @@ active context (active bundles, active MCP servers, etc.). Checks:
   network scope whose `match` has no `gateway_mac` (added in v3.8.0) — only
   `gateway_mac` is evaluated today, so `ssid`/`cidr` alone can never match
 - lifecycle hooks (added in v3.11.0) — lists which lifecycle events
-  (`session_start`, `session_end`, `turn_start`, `post_tool_batch`,
+  (`session_start`, `session_end`, `post_model_switch`, `turn_start`, `post_tool_batch`,
   `post_tool_use_failure`, `subagent_start`, `stop`) are wired for
   `claude_code` in the active scope, and for any that aren't, what would enable
-  them. `session_start`/`session_end` are always registered; `turn_start` needs
+  them. `session_start`/`session_end`/`post_model_switch` are always registered; `turn_start` needs
   a memory backend, and the three adaptive recall events (added in v3.12.0)
   also need `adaptive_recall` on;
   `stop` needs session logging or `features.task_tracker`.
   `turn_start`'s gate is read straight from the generator; the others are
   derived separately and held in step by a test that renders `settings.json`
   for each combination and fails if the report disagrees.
+- instruction size (added in v3.12.0) — measures the text Claude Code loads into
+  every session: `CLAUDE.md` plus every rule file without a `paths:` filter.
+  Doctor prints the total, the `CLAUDE.md` size, and the five largest
+  contributors by bundle. It warns when one file is over 40,000 characters or
+  the total is over 80,000. The 40,000 figure is the floor of Claude Code's
+  per-file notice. Claude Code does not document the combined limit, so 80,000
+  is an estimate and the warning says so. Rules with a `paths:` list load only
+  on matching files and are counted by number, not size. Doctor measures the
+  merged config, which is what the next `llmenv regenerate` writes. Fix a large
+  file in its source bundle, not in the generated copy.
+- MCP text limits (added in v3.12.0) — Claude Code cuts each MCP tool description and each
+  server's `initialize` instructions to 2,048 characters, and the cut is silent.
+  Doctor asks each HTTP server for its instructions and tool list (`initialize` and `tools/list`
+  only, never a tool call) and warns for each item over the limit.
+  `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH` changes the limit; doctor reads it from the
+  environment or `native.claude_code.env`.
+  A server that does not answer in 5 seconds is reported as "not measured", not as a warning.
+  Doctor does not start stdio servers unless you pass `--probe-mcp`, because starting one can
+  have side effects. SSE servers are not probed.
+  The fix belongs to the server's owner, because llmenv does not change a server's text.
 - dependent-tool versions (added in v3.11.0) — reports the installed version of
   the external tools llmenv wires in but doesn't ship (`icm`,
   `codebase-memory-mcp`) and how to update each. `icm upgrade --apply` installs

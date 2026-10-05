@@ -3,6 +3,10 @@ source: tests/claude_code_adapter.rs
 expression: stable_parsed
 ---
 hooks:
+  PostModelSwitch:
+    - hooks:
+        - command: llmenv hook-run --engine claude_code post_model_switch
+          type: command
   PreToolUse:
     - hooks:
         - command: "<CACHE_DIR>/hooks/guard.sh"

@@ -116,10 +116,29 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- `mcp[].always_load` and `features.memory[].always_load` render Claude Code's per-server `alwaysLoad`, which keeps a server's tools out of tool-search deferral. Unset renders nothing. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#mcp) (#2356)
+- Claude Code sessions write an agent-config document (engine, model, effort, project, tags, config hash) to the state dir, and a `PostModelSwitch` hook keeps the model current. A resumed or compacted session starts with a one-line `[llmenv session]` summary of it, and `llmenv task session summary` shows a `running as` line. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#agent-config) (#2398)
+- `llmenv doctor` reports the size of the always-loaded instruction text (`CLAUDE.md` and rules without a `paths:` filter), names the largest bundles, and warns over Claude Code's large-file limit. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#doctor) (#2357)
+- `llmenv doctor` measures the instructions and tool descriptions of each MCP server and warns when Claude Code would cut them at its 2,048-character limit. `llmenv doctor --probe-mcp` also measures stdio servers. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#doctor) (#2148)
+- Marketplace plugin entries with a `git-subdir` source install the plugin from the named folder of the repo, and a `sha` pins the exact commit for `github`, `url`, and `git-subdir` sources. `archive` and `command` sources are skipped with a warning that names the kind. See [Plugins](https://phaedrus1992.github.io/llmenv/docs/plugins#plugin-sources-in-a-marketplace-manifest) (#2441)
+- `features.codebase_memory[].mem_budget_mb` sets `CBM_MEM_BUDGET_MB` for the server and the SessionStart index. `llmenv doctor` reports the result of the last codebase-memory index, including the budget to set after an over-budget stop. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp#codebase-memory-codebase_memory) (#2154)
+- `features.codebase_memory[].allowed_roots` adds folders that codebase-memory-mcp may index. llmenv records the project root, its own folders, the code-explorer cache, and these entries at SessionStart, warns about a root the server refuses, and denies an `index_repository` call outside them. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp#codebase-memory-codebase_memory) (#2406)
+- `llmenv doctor --restart-memory-proxy` stops the local memory proxy that the pidfile names and starts it again. Each proxy start writes a line to `mcp-proxy.log` with the spawner (`export`, `session-start`, or `restart`). See [Troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#memory-backend-issues) (#2417)
+- `llmenv task add --child-of` makes a sub-task: sub-tasks run in parallel and the parent cannot be marked done before they are. `--parallel` takes a task out of the queue, `--after` records a task that must finish first, and `task session start --task` adds the first tasks with the session. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#task) (#2455)
+- The task tracker nudges while work happens: a reminder after a workflow skill starts, a nudge after several tool calls with no task, a reminder to park a task when the agent asks the user a question, and a one-time deny of the first `git commit` or `gh pr create` with no task in progress. An open session with no tasks is now reported. Switches: `features.task_tracker.nudges` and `enforce_commit`. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#task-nudges-added-in-v3120) (#2456)
+- While the task tracker is on, SessionStart injects a fixed statement of the tracking rules with the exact `llmenv task` commands, so an empty personal config gets them. `llmenv doctor` warns about instruction text that says the task tools are blocked or forbids `llmenv task`. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#core-task-rules-added-in-v3120) (#2457)
+
 ### Changed
 
+- A new task no longer chains onto the previous one. Top-level tasks form a queue: `llmenv task start` refuses a task while the task ahead of it is not done or waiting, and `--force` overrides. The warning for an undone parent is gone, and `task add --no-parent` now does nothing. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#task) (#2455)
+- The session-start notice for a memory proxy that does not answer names `llmenv doctor --restart-memory-proxy` instead of `pkill`, which stopped the proxy of every session (#2417)
+- The ICM tools now load with the prompt in Claude Code, so the model no longer calls tool search before a recall or a store. Set `features.memory[].always_load: false` to defer them again (#2356)
 - `llmenv task done` refuses a task that was never started, and `llmenv task session finish` refuses while a task is `open`, `wip`, or `waiting`. Both exit non-zero with the fix. `task done --force` and `task session finish --abandon-open` override them, and the native-tool redirect never forces. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#task) (#2416)
 - `capabilities.advisor_size` is now `capabilities.advisor_model` and renders Claude Code's `advisorModel`. Use `fable`, `opus`, `sonnet`, or a model ID. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#advisor_model-claude-code) (#2409)
+- The consolidation `claude -p` call no longer waits for MCP servers to connect (`CLAUDE_CODE_MCP_STARTUP_WAIT_MS=0`), so it starts faster (#2148)
+- Plugin and marketplace sources that use `git://` or a `<helper>::` remote helper are rejected, like `ext::` and `http://` before. A pin (`sha` or `ref`) that is not a string is an error, not an unpinned clone (#2441)
 
 ### Removed
 
@@ -127,6 +146,9 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 
 ### Fixed
 
+- `llmenv plugin-sync` re-clones a pinned plugin payload, so a changed `ref` in the marketplace manifest takes effect. Before, it kept the old checkout and reported success (#2442)
+- A `ref` on a `url` plugin source is honored. Before, it was ignored (#2441)
+- A marketplace plugin whose `source` is `{"source": "github", "repo": "owner/name"}` with no `url` now syncs, and its `ref` selects the branch or tag. Before, llmenv skipped it as "not found in marketplace manifest". See [Plugins](https://phaedrus1992.github.io/llmenv/docs/plugins#plugin-sources-in-a-marketplace-manifest) (#2440)
 - Background work is no longer lost when a child dies or ICM is down. Consolidation, the memory store of a web fetch, the transcript records, and the codebase-memory index write a checkpoint, and the next session start runs unfinished jobs again. `llmenv doctor` lists what is left. A request id keeps a resumed or retried store from writing the same memory twice. See [Troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#background-work-that-did-not-finish) (#2396, #2397)
 - `llmenv doctor` no longer recommends `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` when `autoCompactEnabled` is `false`, and it names the `autoCompactWindow` that the percentage applies to (#2345)
 - `llmenv task session finish` and the session resume commands no longer report a corrupt or unreadable session file as "no session found". They name the file and the cause (#2424)

@@ -548,10 +548,10 @@ fn three_level_nesting_chain_via_cli() {
     assert_eq!(by_slug("child-subtask")["parent"], "parent-story");
 }
 
-// --- Implicit parent chaining (#929) ---
+// --- No implicit parent chain (#2455) ---
 
 #[test]
-fn bare_add_chains_onto_the_previously_added_task() {
+fn bare_add_no_longer_chains_onto_the_previous_task() {
     let dir = TempDir::new().unwrap();
     start_session(dir.path(), "sprint");
     for title in ["First", "Second", "Third"] {
@@ -575,8 +575,8 @@ fn bare_add_chains_onto_the_previously_added_task() {
             .expect("task must be present")
     };
     assert_eq!(by_slug("first")["parent"], serde_json::Value::Null);
-    assert_eq!(by_slug("second")["parent"], "first");
-    assert_eq!(by_slug("third")["parent"], "second");
+    assert_eq!(by_slug("second")["parent"], serde_json::Value::Null);
+    assert_eq!(by_slug("third")["parent"], serde_json::Value::Null);
 }
 
 #[test]
@@ -724,7 +724,7 @@ fn multiple_children_under_one_parent_via_cli() {
 }
 
 #[test]
-fn completing_child_does_not_change_parent_state_via_cli() {
+fn completing_a_child_leaves_the_parent_in_progress_via_cli() {
     let dir = TempDir::new().unwrap();
     start_session(dir.path(), "sprint");
     llmenv(dir.path())
@@ -732,7 +732,7 @@ fn completing_child_does_not_change_parent_state_via_cli() {
         .assert()
         .success();
     llmenv(dir.path())
-        .args(["task", "add", "Child task", "--parent", "parent-task"])
+        .args(["task", "add", "Child task", "--child-of", "parent-task"])
         .assert()
         .success();
     llmenv(dir.path())
@@ -749,76 +749,10 @@ fn completing_child_does_not_change_parent_state_via_cli() {
         .output()
         .unwrap();
     let task: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
-    assert_eq!(task["state"], "open");
+    assert_eq!(task["state"], "wip");
 }
 
 // --- New-project guard (Phase 3 CLI-side check) ---
-
-#[test]
-fn new_top_level_task_while_wip_exists_prints_guard_message() {
-    let dir = TempDir::new().unwrap();
-    start_session(dir.path(), "sprint");
-    llmenv(dir.path())
-        .args(["task", "add", "In progress work"])
-        .assert()
-        .success();
-    llmenv(dir.path())
-        .args(["task", "start", "in-progress-work"])
-        .assert()
-        .success();
-
-    // #929: a bare `task add` (no --parent) now defaults to chaining onto
-    // the previous task, so it's no longer "unrelated" — only an explicit
-    // `--no-parent` is still the deliberate top-level case the guard warns
-    // about.
-    llmenv(dir.path())
-        .args(["task", "add", "Unrelated new thing", "--no-parent"])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("already in progress"));
-}
-
-#[test]
-fn implicit_chain_while_wip_exists_prints_no_guard_message() {
-    let dir = TempDir::new().unwrap();
-    start_session(dir.path(), "sprint");
-    llmenv(dir.path())
-        .args(["task", "add", "In progress work"])
-        .assert()
-        .success();
-    llmenv(dir.path())
-        .args(["task", "start", "in-progress-work"])
-        .assert()
-        .success();
-
-    // A bare `task add` chains onto "In progress work" by default (#929) —
-    // no longer the guard's "unrelated top-level task" case.
-    llmenv(dir.path())
-        .args(["task", "add", "Chained follow-up"])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("already in progress").not());
-}
-
-#[test]
-fn new_subtask_while_wip_exists_prints_no_guard_message() {
-    let dir = TempDir::new().unwrap();
-    start_session(dir.path(), "sprint");
-    llmenv(dir.path())
-        .args(["task", "add", "In progress work"])
-        .assert()
-        .success();
-    llmenv(dir.path())
-        .args(["task", "start", "in-progress-work"])
-        .assert()
-        .success();
-
-    llmenv(dir.path())
-        .args(["task", "add", "Sub piece", "--parent", "in-progress-work"])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("already in progress").not());
-}
 
 // --- Mandatory sessions (2026-07-21 rework) ---
 
@@ -1382,41 +1316,6 @@ fn wait_marks_task_waiting_and_notes_reason() {
 }
 
 #[test]
-fn add_guard_warns_for_wip_but_not_waiting_tasks() {
-    let dir = TempDir::new().unwrap();
-    start_session(dir.path(), "sprint");
-    llmenv(dir.path())
-        .args(["task", "add", "First task"])
-        .assert()
-        .success();
-    llmenv(dir.path())
-        .args(["task", "start", "first-task"])
-        .assert()
-        .success();
-
-    // A `wip` task should trip the "already in progress" guard — only for
-    // an explicit --no-parent (#929): a bare `add` now chains onto "First
-    // task" by default, which is no longer the guard's "unrelated" case.
-    llmenv(dir.path())
-        .args(["task", "add", "Second task", "--no-parent"])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("already in progress"));
-
-    // Park it as `waiting` — the agent may legitimately start new work while
-    // it's paused on something external, so the guard must stay silent (#933).
-    llmenv(dir.path())
-        .args(["task", "wait", "first-task", "blocked on review"])
-        .assert()
-        .success();
-    llmenv(dir.path())
-        .args(["task", "add", "Third task", "--no-parent"])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("already in progress").not());
-}
-
-#[test]
 fn wait_on_done_task_fails() {
     let dir = TempDir::new().unwrap();
     start_session(dir.path(), "sprint");
@@ -1512,57 +1411,6 @@ fn start_on_blocked_task_with_force_succeeds() {
         .assert()
         .success()
         .stdout(predicates::str::contains("Started"));
-}
-
-#[test]
-fn start_on_child_with_undone_parent_warns_but_starts() {
-    let dir = TempDir::new().unwrap();
-    start_session(dir.path(), "sprint");
-    llmenv(dir.path())
-        .args(["task", "add", "Parent step"])
-        .assert()
-        .success();
-    llmenv(dir.path())
-        .args(["task", "add", "Child step", "--parent", "parent-step"])
-        .assert()
-        .success();
-
-    llmenv(dir.path())
-        .args(["task", "start", "child-step"])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains(
-            "Note: parent task 'parent-step' isn't done yet",
-        ))
-        .stdout(predicates::str::contains("Started"));
-}
-
-#[test]
-fn start_on_child_with_done_parent_has_no_warning() {
-    let dir = TempDir::new().unwrap();
-    start_session(dir.path(), "sprint");
-    llmenv(dir.path())
-        .args(["task", "add", "Parent step"])
-        .assert()
-        .success();
-    llmenv(dir.path())
-        .args(["task", "add", "Child step", "--parent", "parent-step"])
-        .assert()
-        .success();
-    llmenv(dir.path())
-        .args(["task", "start", "parent-step"])
-        .assert()
-        .success();
-    llmenv(dir.path())
-        .args(["task", "done", "parent-step"])
-        .assert()
-        .success();
-
-    llmenv(dir.path())
-        .args(["task", "start", "child-step"])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("isn't done yet").not());
 }
 
 #[test]
@@ -1739,7 +1587,7 @@ fn ls_state_filter_is_repeatable() {
         .assert()
         .success();
     llmenv(dir.path())
-        .args(["task", "add", "A wip one"])
+        .args(["task", "add", "A wip one", "--parallel"])
         .assert()
         .success();
     llmenv(dir.path())
@@ -1840,7 +1688,7 @@ fn ls_json_applies_filters_only_when_passed() {
         .assert()
         .success();
     llmenv(dir.path())
-        .args(["task", "add", "Wip one"])
+        .args(["task", "add", "Wip one", "--parallel"])
         .assert()
         .success();
     llmenv(dir.path())
@@ -2229,7 +2077,7 @@ fn show_next_skips_a_waiting_task() {
         .assert()
         .success();
     llmenv(dir.path())
-        .args(["task", "add", "Task 2 waiting"])
+        .args(["task", "add", "Task 2 waiting", "--parallel"])
         .assert()
         .success();
     llmenv(dir.path())
@@ -3007,4 +2855,189 @@ fn task_add_with_an_empty_detail_warns_and_stores_none() {
             .get("detail")
             .is_none()
     );
+}
+
+// --- Sub-tasks and the queue (#2455) ---
+
+fn show_json(dir: &std::path::Path, slug: &str) -> serde_json::Value {
+    let out = llmenv(dir).args(["task", "show", slug]).output().unwrap();
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+fn run_ok(dir: &std::path::Path, args: &[&str]) {
+    llmenv(dir).args(args).assert().success();
+}
+
+#[test]
+fn sub_tasks_run_in_parallel_and_the_parent_waits_for_them() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    run_ok(dir.path(), &["task", "add", "Review"]);
+    for title in ["Scan", "Audit", "Hunt"] {
+        run_ok(dir.path(), &["task", "add", title, "--child-of", "review"]);
+    }
+    for slug in ["scan", "audit", "hunt"] {
+        run_ok(dir.path(), &["task", "start", slug]);
+    }
+    for slug in ["review", "scan", "audit", "hunt"] {
+        assert_eq!(show_json(dir.path(), slug)["state"], "wip", "{slug}");
+    }
+    run_ok(dir.path(), &["task", "done", "scan"]);
+    run_ok(dir.path(), &["task", "done", "audit"]);
+    llmenv(dir.path())
+        .args(["task", "done", "review"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("sub-tasks that are not done"))
+        .stderr(predicates::str::contains("'hunt' (wip)"));
+    run_ok(dir.path(), &["task", "done", "hunt"]);
+    run_ok(dir.path(), &["task", "done", "review"]);
+    assert_eq!(show_json(dir.path(), "review")["state"], "done");
+}
+
+#[test]
+fn force_closes_a_parent_and_names_the_open_sub_tasks() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    run_ok(dir.path(), &["task", "add", "Review"]);
+    run_ok(dir.path(), &["task", "add", "Scan", "--child-of", "review"]);
+    run_ok(dir.path(), &["task", "start", "review"]);
+    llmenv(dir.path())
+        .args(["task", "done", "review", "--force"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("sub-tasks were not done (scan)"));
+}
+
+#[test]
+fn a_queued_task_waits_for_the_task_ahead_of_it() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    run_ok(dir.path(), &["task", "add", "First"]);
+    run_ok(dir.path(), &["task", "add", "Second"]);
+    llmenv(dir.path())
+        .args(["task", "start", "second"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("queued behind 'first' (open)"));
+    run_ok(dir.path(), &["task", "start", "first"]);
+    llmenv(dir.path())
+        .args(["task", "start", "second"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "queued behind 'first' (in progress)",
+        ));
+    run_ok(dir.path(), &["task", "wait", "first", "needs a review"]);
+    run_ok(dir.path(), &["task", "start", "second"]);
+    assert_eq!(show_json(dir.path(), "second")["state"], "wip");
+}
+
+#[test]
+fn force_and_parallel_skip_the_queue() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    run_ok(dir.path(), &["task", "add", "First"]);
+    run_ok(dir.path(), &["task", "add", "Second"]);
+    run_ok(dir.path(), &["task", "add", "Beside", "--parallel"]);
+    run_ok(dir.path(), &["task", "start", "first"]);
+    run_ok(dir.path(), &["task", "start", "beside"]);
+    run_ok(dir.path(), &["task", "start", "second", "--force"]);
+    assert_eq!(show_json(dir.path(), "beside")["state"], "wip");
+    assert_eq!(show_json(dir.path(), "second")["state"], "wip");
+}
+
+#[test]
+fn a_task_after_the_parent_waits_for_the_parent_and_not_its_children() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    run_ok(dir.path(), &["task", "add", "Review"]);
+    run_ok(dir.path(), &["task", "add", "Scan", "--child-of", "review"]);
+    run_ok(dir.path(), &["task", "add", "Summary"]);
+    run_ok(dir.path(), &["task", "start", "scan"]);
+    llmenv(dir.path())
+        .args(["task", "start", "summary"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("queued behind 'review'"));
+    run_ok(dir.path(), &["task", "done", "scan"]);
+    run_ok(dir.path(), &["task", "done", "review"]);
+    run_ok(dir.path(), &["task", "start", "summary"]);
+}
+
+#[test]
+fn a_sub_task_can_wait_for_a_sibling() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    run_ok(dir.path(), &["task", "add", "Review"]);
+    run_ok(dir.path(), &["task", "add", "Scan", "--child-of", "review"]);
+    run_ok(
+        dir.path(),
+        &[
+            "task",
+            "add",
+            "Report",
+            "--child-of",
+            "review",
+            "--after",
+            "scan",
+        ],
+    );
+    llmenv(dir.path())
+        .args(["task", "start", "report"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "blocked on not-done task(s): scan",
+        ));
+}
+
+#[test]
+fn child_of_rejects_a_done_parent_and_conflicting_flags() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    run_ok(dir.path(), &["task", "add", "Review"]);
+    llmenv(dir.path())
+        .args(["task", "add", "Scan", "--child-of", "review", "--parallel"])
+        .assert()
+        .failure();
+    llmenv(dir.path())
+        .args([
+            "task",
+            "add",
+            "Scan",
+            "--child-of",
+            "review",
+            "--parent",
+            "review",
+        ])
+        .assert()
+        .failure();
+    run_ok(dir.path(), &["task", "done", "review", "--force"]);
+    llmenv(dir.path())
+        .args(["task", "add", "Scan", "--child-of", "review"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "is done, so it cannot take a sub-task",
+        ));
+}
+
+#[test]
+fn session_start_adds_the_first_tasks() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .args([
+            "task", "session", "start", "sprint", "--task", "One", "--task", "Two",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Added task 'one'"))
+        .stdout(predicates::str::contains("Added task 'two'"));
+    let out = llmenv(dir.path())
+        .args(["task", "ls", "--format", "json", "--all"])
+        .output()
+        .unwrap();
+    let tasks: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(tasks.as_array().unwrap().len(), 2);
 }

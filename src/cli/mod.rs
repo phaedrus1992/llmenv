@@ -16,6 +16,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 pub(crate) mod doctor;
+mod proxy_restart;
 mod setup;
 mod status;
 pub(crate) mod statusline;
@@ -94,6 +95,12 @@ enum Command {
         /// Check all scopes and bundles for orphans, not just the active context
         #[arg(long)]
         all: bool,
+        /// Also start stdio MCP servers to measure their instructions and tool descriptions
+        #[arg(long)]
+        probe_mcp: bool,
+        /// Stop the local memory proxy that the pidfile names, then start it again
+        #[arg(long)]
+        restart_memory_proxy: bool,
     },
     /// Export environment variables for a scope
     Export {
@@ -386,7 +393,7 @@ enum Command {
     /// Manage the in-engine task tracker (#231).
     Task {
         #[command(subcommand)]
-        command: TaskCommand,
+        command: Box<TaskCommand>,
     },
 }
 
@@ -404,15 +411,24 @@ enum TaskCommand {
     /// the current project (auto-resolved), or an explicit `--session`.
     Add {
         title: String,
-        /// Slug of the parent task, if this is a sub-task. Omit to default
-        /// to the previously-added task in the same session (#929) — pass
-        /// `--no-parent` for a deliberate top-level task instead.
-        #[arg(long, conflicts_with = "no_parent")]
+        /// Slug of a task to link as the display parent of this top-level task. A sub-task
+        /// uses `--child-of` instead.
+        #[arg(long, conflicts_with_all = ["no_parent", "child_of"])]
         parent: Option<String>,
-        /// Force this task to have no parent, overriding the implicit
-        /// previously-added-task default (#929).
-        #[arg(long)]
+        /// Accepted for older scripts. A task no longer chains onto the previous one, so this
+        /// changes nothing (#2455).
+        #[arg(long, hide = true, conflicts_with = "child_of")]
         no_parent: bool,
+        /// Make this a sub-task of the given task. Sub-tasks run in parallel, and the parent
+        /// cannot be marked done before they are (#2455).
+        #[arg(long, value_name = "PARENT", conflicts_with = "parallel")]
+        child_of: Option<String>,
+        /// Run this top-level task beside the head of the queue, not behind it (#2455).
+        #[arg(long)]
+        parallel: bool,
+        /// A task that must be done before this one can start (a `blocked_on` edge).
+        #[arg(long, value_name = "TASK")]
+        after: Option<String>,
         /// Session id to tag this task with. Omit to auto-resolve when
         /// exactly one session is open for the current project.
         #[arg(long)]
@@ -420,9 +436,9 @@ enum TaskCommand {
         #[command(flatten)]
         detail: DetailArgs,
     },
-    /// Claim a task, transitioning it to `wip`. An undone `parent` only
-    /// warns (soft-block, starts anyway); an undone `blocked_on` reference
-    /// refuses to start (hard-block) unless `--force` is passed.
+    /// Claim a task, transitioning it to `wip`. An undone `blocked_on` reference, or a queued
+    /// task ahead of this one that is not done or waiting, refuses to start unless `--force` is
+    /// passed.
     Start {
         id: String,
         #[arg(long)]
@@ -562,6 +578,10 @@ enum TaskSessionCommand {
         /// this project untouched — true concurrency.
         #[arg(long, conflicts_with_all = ["resume", "replace"])]
         new: bool,
+        /// Add a task to the session as it starts. Repeat for more tasks. They join the queue
+        /// in the order given, so the session never exists with no tasks (#2455).
+        #[arg(long = "task", value_name = "TITLE")]
+        tasks: Vec<String>,
         #[command(flatten)]
         resume_context: ResumeArgs,
     },
@@ -761,8 +781,14 @@ pub fn run() -> anyhow::Result<()> {
     let use_color = should_use_color(Some(cli.color.to_mode()), std::io::stdout().is_terminal());
 
     match cli.command {
-        Some(Command::Doctor { gc, all }) => {
-            doctor::run_doctor(gc, all, use_color)?;
+        Some(Command::Doctor {
+            restart_memory_proxy: true,
+            ..
+        }) => proxy_restart::run(use_color)?,
+        Some(Command::Doctor {
+            gc, all, probe_mcp, ..
+        }) => {
+            doctor::run_doctor(gc, all, probe_mcp, use_color)?;
         }
         Some(Command::Export {
             scope,
@@ -947,7 +973,7 @@ pub fn run() -> anyhow::Result<()> {
         Some(Command::Upgrade { check, track }) => {
             upgrade::run_upgrade(track, check)?;
         }
-        Some(Command::Task { command }) => run_task_command(command, cli.color.to_mode())?,
+        Some(Command::Task { command }) => run_task_command(*command, cli.color.to_mode())?,
         Some(Command::Prune {
             all,
             older_than,
@@ -1241,6 +1267,7 @@ pub(crate) fn ensure_local_memory_proxy(
     config: &Config,
     config_dir: &Path,
     active: &ActiveScopes,
+    source: llmenv_mcp::proxy_ops::SpawnSource,
 ) -> ProxyStart {
     let Some(mem) = export_local_memory_entry(config, config_dir, active) else {
         return ProxyStart::NotLocal;
@@ -1251,7 +1278,7 @@ pub(crate) fn ensure_local_memory_proxy(
     match crate::mcp::proxy::default_pid_path() {
         Ok(pid_path) => {
             match crate::mcp::proxy::ensure_running(&bind, &pid_path, |bind| {
-                crate::mcp::proxy::spawn_mcp_proxy(bind, &pid_path)
+                crate::mcp::proxy::spawn_mcp_proxy(bind, &pid_path, source)
             }) {
                 Ok(outcome) => {
                     let spawned = outcome == crate::mcp::proxy::EnsureOutcome::Spawned;
@@ -1324,7 +1351,12 @@ pub(crate) fn resolve_env(
     // When the memory backend designates *this* host as its server, ensure the
     // local `mcp-proxy` is alive before agents try to reach it. A failure is logged but
     // not fatal: the export must still emit env vars so the shell hook stays usable.
-    ensure_local_memory_proxy(&config, &config_dir, &active);
+    ensure_local_memory_proxy(
+        &config,
+        &config_dir,
+        &active,
+        llmenv_mcp::proxy_ops::SpawnSource::Export,
+    );
 
     // Throttled pull: check sync interval and fetch+pull if enough time has elapsed.
     // Skipped entirely when remote_sync is disabled (e.g. 1Password locked).
@@ -2706,11 +2738,19 @@ fn run_config_context() {
     // since #2251).
     match Config::load(&config_path) {
         Ok(config) => {
-            let task_tracker_enabled = config
+            let tracker = config
                 .features
                 .as_ref()
                 .and_then(|f| f.task_tracker.as_ref())
-                .is_some_and(|tt| tt.enabled);
+                .filter(|tt| tt.enabled);
+            let task_tracker_enabled = tracker.is_some();
+            // #2457: the rules come from llmenv itself, so an empty personal config gets them.
+            if let Some(tt) = tracker.filter(|tt| tt.nudges) {
+                text.push_str("\n\n");
+                text.push_str(&crate::task::core_text::core_instruction_text(
+                    tt.block_engine_task_tools,
+                ));
+            }
             if task_tracker_enabled {
                 match paths::state_dir() {
                     Ok(state_dir) => {
@@ -2720,9 +2760,15 @@ fn run_config_context() {
                             text.push_str(&reminder);
                         }
                     }
-                    Err(e) => eprintln!(
-                        "llmenv config-context: failed to resolve state dir for task-tracker reminder: {e}"
-                    ),
+                    Err(e) => {
+                        eprintln!(
+                            "llmenv config-context: failed to resolve state dir for task-tracker reminder: {e}"
+                        );
+                        text.push_str(&format!(
+                            "\n\nllmenv: the task tracker reminders could not be loaded ({e}). Run \
+                             `llmenv doctor`."
+                        ));
+                    }
                 }
             }
         }
@@ -3256,6 +3302,16 @@ fn render_task_session_summary_human(
         out.push_str(&style::sanitize_for_terminal(desc));
     }
     out.push_str(&format!(" ({}/{} done)\n", summary.done, summary.total));
+    if let Some(agent) = summary
+        .agent
+        .clone()
+        .and_then(|v| serde_json::from_value::<crate::hook_run::agent_config::AgentConfig>(v).ok())
+    {
+        out.push_str(&format!(
+            "running as {}\n",
+            style::sanitize_for_terminal(&agent.running_as())
+        ));
+    }
     let resume = summary.resume.render();
     if !resume.is_empty() {
         out.push_str(&resume);
@@ -3305,42 +3361,26 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             title,
             parent,
             no_parent,
+            child_of,
+            parallel,
+            after,
             session,
             detail,
         } => {
             let detail = detail.resolve()?;
-            // New-project guard: warn before starting a deliberately
-            // top-level task while another is still in progress. Only fires
-            // on `--no-parent` now (#929) — omitting `--parent` no longer
-            // means "no parent", it means "chain onto the previous task in
-            // this session", so the guard's original concern (an unrelated
-            // task silently landing with no nesting) only still applies to
-            // an explicit, deliberate detach. CLI-side check beats a
-            // transcript heuristic — this is a plain fact about current
-            // task state, not something to infer. Only `wip` counts: a
-            // `waiting` task is correctly paused on something external, so
-            // starting new work alongside it is legitimate, not a mistake to
-            // warn about.
             if no_parent {
-                let wip: Vec<String> = crate::task::list_tasks(&state_dir)
-                    .into_iter()
-                    .filter(|t| t.state == crate::task::TaskState::Wip)
-                    .map(|t| t.title)
-                    .collect();
-                if !wip.is_empty() {
-                    println!(
-                        "Note: you have {} task(s) already in progress ({}). \
-                         Consider `--parent <slug>` to make this a sub-task, \
-                         or finish the current work first.",
-                        wip.len(),
-                        wip.join(", ")
-                    );
-                }
+                eprintln!(
+                    "llmenv: --no-parent has no effect since v3.12.0; a new task no longer chains"
+                );
             }
-            let parent_spec = match (parent.as_deref(), no_parent) {
-                (Some(p), _) => crate::task::ParentSpec::Explicit(p),
-                (None, true) => crate::task::ParentSpec::Detached,
-                (None, false) => crate::task::ParentSpec::Auto,
+            let parent_spec = match parent.as_deref() {
+                Some(p) => crate::task::ParentSpec::Explicit(p),
+                None => crate::task::ParentSpec::Detached,
+            };
+            let placement = match (child_of.as_deref(), parallel) {
+                (Some(p), _) => crate::task::Placement::Child(p),
+                (None, true) => crate::task::Placement::Parallel,
+                (None, false) => crate::task::Placement::Queue,
             };
             let project = current_project_tag()?;
             let owner = crate::task::session::EngineIdentity::from_env();
@@ -3354,6 +3394,8 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             let new = crate::task::NewTask {
                 title: &title,
                 detail: detail.as_deref(),
+                placement,
+                after: after.as_deref(),
             };
             let task = crate::task::add_task_with(&state_dir, &new, parent_spec, choice, &project)?;
             println!("Added task '{}' ({})", task.slug, task.title);
@@ -3371,19 +3413,15 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                     e
                 }
             })?;
-            // Parent is a soft-block (#1164): unlike an unmet blocked_on
-            // (hard-blocked inside start_task itself), an undone parent
-            // only warns here, mirroring Add's own wip-in-progress warning
-            // above -- the agent may have a legitimate reason to proceed.
-            if let Some(warning) = crate::task::parent_soft_block_warning(&state_dir, &task) {
-                println!("{warning}");
-            }
             println!("Started '{}' — now {:?}", task.slug, task.state);
         }
         TaskCommand::Done { id, force } => {
             let completed = crate::task::complete_task(&state_dir, &id, force)?;
             println!("Completed '{}'", completed.task.slug);
             if let Some(note) = completed.skipped_start_note() {
+                println!("{note}");
+            }
+            if let Some(note) = completed.undone_children_note() {
                 println!("{note}");
             }
         }
@@ -3636,6 +3674,7 @@ fn run_task_session_command(
             resume,
             replace,
             new,
+            tasks,
             resume_context,
         } => {
             let explicit = resume_context.into_context()?;
@@ -3662,6 +3701,10 @@ fn run_task_session_command(
             };
             let outcome = session::start_session_as(state_dir, &request, decision)?;
             let nudge = start_outcome_lacks_context(&outcome);
+            let session_id = match &outcome {
+                StartOutcome::Created(s) | StartOutcome::Resumed(s) => s.id.clone(),
+                StartOutcome::Replaced { session, .. } => session.id.clone(),
+            };
             match outcome {
                 StartOutcome::Created(s) => println!(
                     "Started session '{}'{}",
@@ -3684,6 +3727,23 @@ fn run_task_session_command(
             }
             if nudge {
                 println!("{}", crate::task::resume::MISSING_CONTEXT_NUDGE);
+            }
+            for title in &tasks {
+                let new = crate::task::NewTask {
+                    title,
+                    ..crate::task::NewTask::default()
+                };
+                let task = crate::task::add_task_with(
+                    state_dir,
+                    &new,
+                    crate::task::ParentSpec::Detached,
+                    crate::task::SessionChoice::Named(&session_id),
+                    &project,
+                )
+                .with_context(|| {
+                    format!("session '{session_id}' started, but task '{title}' was not added")
+                })?;
+                println!("Added task '{}' ({})", task.slug, task.title);
             }
         }
         TaskSessionCommand::Edit { id, resume_context } => {
@@ -3758,7 +3818,10 @@ fn run_task_session_command(
         }
         TaskSessionCommand::Summary { id, format } => {
             let id = resolve_session_id(state_dir, &project, id)?;
-            let summary = session::session_summary(state_dir, &id)?;
+            let summary = session::session_summary_with_agent(state_dir, &id, |dir, owner| {
+                crate::hook_run::agent_config::load(dir, owner)
+                    .and_then(|agent| serde_json::to_value(agent).ok())
+            })?;
             match format {
                 Some(TaskListFormat::Json) => {
                     println!("{}", serde_json::to_string_pretty(&summary)?);
@@ -4343,7 +4406,8 @@ fn run_plugin_sync() -> anyhow::Result<()> {
         let Some(entry) = plugins.iter().find(|p| p.name == *plugin_name) else {
             eprintln!(
                 "✗ {plugin_name}@{mkt_name}: not found in marketplace manifest after sync — \
-                 check that the plugin name matches an entry in {mkt_name}"
+                 check that the plugin name matches an entry in {mkt_name}, and look for an \
+                 earlier warning that skipped the entry"
             );
             missing_plugins.push(format!("{plugin_name}@{mkt_name}"));
             continue;
@@ -4351,14 +4415,8 @@ fn run_plugin_sync() -> anyhow::Result<()> {
         if !crate::plugins::cache::is_external_plugin_source(&entry.source) {
             continue;
         }
-        let state = crate::plugins::cache::sync_external_plugin(
-            &cache_root,
-            mkt_name,
-            plugin_name,
-            &entry.source,
-            true,
-        )
-        .with_context(|| format!("syncing external plugin '{plugin_name}@{mkt_name}'"))?;
+        let state = crate::plugins::cache::sync_plugin_entry(&cache_root, mkt_name, entry, true)
+            .with_context(|| format!("syncing external plugin '{plugin_name}@{mkt_name}'"))?;
         let head = state.head.as_deref().unwrap_or("(unknown)");
         println!(
             "✓ {}@{} (external) → {} [{}]",
@@ -5900,6 +5958,7 @@ mod tests {
         Config {
             features: Some(Features {
                 memory: vec![Memory {
+                    always_load: None,
                     server_host: "srv".to_string(),
                     port,
                     listen_host: listen_host.to_string(),
@@ -5935,8 +5994,12 @@ mod tests {
     #[test]
     fn ensure_local_memory_proxy_is_not_local_without_a_memory_entry() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let outcome =
-            ensure_local_memory_proxy(&Config::default(), dir.path(), &active_as_server());
+        let outcome = ensure_local_memory_proxy(
+            &Config::default(),
+            dir.path(),
+            &active_as_server(),
+            llmenv_mcp::proxy_ops::SpawnSource::Export,
+        );
         assert_eq!(outcome, ProxyStart::NotLocal);
     }
 
