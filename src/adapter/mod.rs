@@ -1,5 +1,6 @@
 pub mod claude_code;
 pub mod crush;
+pub(crate) mod hook_command;
 pub(crate) mod llmenv_skill;
 pub(crate) mod model_settings;
 pub(crate) mod native_keys;
@@ -415,9 +416,16 @@ pub(crate) fn binary_on_path(name: &str) -> bool {
         .is_ok_and(|o| o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty())
 }
 
+/// A character that can appear in a bundle-relative script path. A token with any other
+/// character is shell syntax (`2>/dev/null`, `$(...)`, a quote) and is never a path.
+fn is_bundle_path_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "._-+@/".contains(c)
+}
+
 /// Resolve bundle-relative paths in a hook command string.
 /// Scans whitespace-separated tokens and resolves those containing '/' (but not
-/// starting with '/', '~', '$', or '-') to absolute paths relative to `bundle_dir`.
+/// starting with '/', '~', '$', or '-', and made of path characters only) to absolute
+/// paths relative to `bundle_dir`.
 ///
 /// Shared across adapters: any engine that renders a hook `command` string must
 /// resolve bundle-relative script paths the same way, since a bundle is authored
@@ -434,6 +442,7 @@ pub(crate) fn resolve_bundle_relative_paths(command: &str, bundle_dir: &Path) ->
             && !token.starts_with('~')
             && !token.starts_with('$')
             && !token.starts_with('-')
+            && token.chars().all(is_bundle_path_char)
             && !crate::paths::is_unsafe_join_target(token)
         {
             let abs_path = bundle_dir.join(token);
@@ -1016,6 +1025,26 @@ mod tests {
         assert!(resolve_bundle_relative_paths("bash ${HOME}/x.sh", dir).is_none());
         assert!(resolve_bundle_relative_paths("bash ~/x.sh", dir).is_none());
         assert!(resolve_bundle_relative_paths("echo hello", dir).is_none());
+    }
+
+    #[test]
+    fn resolve_bundle_relative_paths_leaves_shell_syntax_alone() {
+        let dir = std::path::Path::new("/bundles/foo");
+        for command in [
+            "cargo test 2>/dev/null",
+            "echo hi >out/log.txt",
+            "jq -r '.a // empty'",
+            "echo $(dirname x)/y",
+        ] {
+            assert!(
+                resolve_bundle_relative_paths(command, dir).is_none(),
+                "{command}"
+            );
+        }
+        assert_eq!(
+            resolve_bundle_relative_paths("bash hooks/guard.sh 2>/dev/null", dir),
+            Some("bash /bundles/foo/hooks/guard.sh 2>/dev/null".to_string())
+        );
     }
 
     #[test]
