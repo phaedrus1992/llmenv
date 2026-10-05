@@ -5,7 +5,7 @@
 - **Base branch:** `release/3.x` (forward-merges to `release/4.x`)
 - **Type:** bug fix (lost work) with new state files and a doctor section
 - **Pairs with:** #2397 (idempotency); a resumed job can double-store without it. Implement #2397 first or in the same branch.
-- **Report:** `docs/reference/pi-durable-evaluation.md` §4 (durability row), §9 item 4
+- **Report:** the pi-durable evaluation report (`docs/reference/pi-durable-evaluation.md` on `main` only; it is not on `release/3.x`) §4 (durability row), §9 item 4
 
 This is a spec, not a plan.
 
@@ -65,6 +65,7 @@ Common traits:
 4. **Phases are for consolidation only.**
    The other three jobs are one call each.
    Consolidation writes `phase` as it goes: `recalled`, `summarized`, `stored`.
+   Implemented as: the phases in use are `started` (the initial value) and `summarized`; the code never writes `recalled` or `stored`.
    A resume starts at the recorded phase.
    The LLM summary is kept in the checkpoint after `summarized`, so a resume after an LLM success never pays the LLM again.
 5. **Resume runs on `SessionStart`**, as a side effect next to the cbm index trigger, after `session_start_notice` so the proxy is up.
@@ -117,6 +118,9 @@ Functions:
 - `resume_pending(state_dir, now, spawn: impl FnMut(&Checkpoint, &Path) -> Result<()>)` which bumps `attempts`, rewrites, and calls `spawn` for each stale checkpoint under `MAX_ATTEMPTS`.
 
 Keep this module free of spawn logic; the spawners stay where they are and call into it.
+Implemented as: `Checkpoint` also has `cwd: Option<String>`, and `key`, `session_id` are private.
+The helpers are named `update(path, change)` (not `update_phase`), `load`, `begin`, `finish`, `validated_path`, `run_tag` and `is_stale` (a method, with the deadline in `JobKind::deadline_secs`).
+`resume_pending` returns the number of jobs it started, prunes at 7 days, and takes a lock.
 
 ### Spawner changes
 
@@ -133,9 +137,12 @@ A function `resume_checkpoints(state_dir, now)` called from the SessionStart bra
 Its `spawn` closure matches on `kind` and calls the same command builders the spawners use (`consolidation_run_command`, the store and record command builders, the cbm wrapper).
 Fail-soft: any error logs at debug and the session continues.
 
-### Doctor (`src/cli/doctor.rs`)
+### Doctor (`src/cli/doctor/background.rs`)
 
-`run_doctor_checkpoints(use_color, state_dir, now)`:
+Implemented as: the section lives in `src/cli/doctor/background.rs`, and `doctor.rs` calls it.
+`run_doctor_checkpoints(use_color, state_dir)` takes no `now` argument.
+
+The section prints these lines:
 
 - Empty or missing dir: `{pass} no unfinished background work`.
 - Each file: `{warn} <kind> started <age> ago, <attempts>/3 attempts, phase <phase>; log: <path>`; `{info}` when the file is fresh (child may still run); `{warn} unreadable checkpoint <path>` for a corrupt file.
@@ -163,7 +170,6 @@ Fail-soft: any error logs at debug and the session continues.
 
 - The cbm index is checkpointed through `llmenv cbm-index-run`, but it is not resumed: `SessionStart` already starts the indexer and rewrites the same checkpoint, so a resume would run it twice.
 - The deadlines are 150 s plus the 60 s margin for consolidation (120 s model call and 30 s ICM calls), 5 s plus the margin for the store and the record, and 1800 s plus the margin for the index.
-- The consolidation checkpoint stores the working directory, and a resume starts the child there.
 - A payload that does not parse deletes its checkpoint. Any other failure keeps it, and the attempt cap bounds the retries.
 - A checkpoint stores the working directory of the first run, and a resume starts the child there. A checkpoint whose directory is gone is not resumed, because the child would pick the memory backend and project of the resuming session.
 - A resume starts at most 20 jobs, under a lock, and restores the file when the start fails, so a failed start does not use up an attempt.

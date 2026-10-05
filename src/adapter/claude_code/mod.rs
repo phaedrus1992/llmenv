@@ -1015,11 +1015,13 @@ fn merge_mcp_into_claude_json(
 
     // Write companion file with current owned server names.
     if current_names.is_empty() {
-        if let Err(e) = std::fs::remove_file(&owned_path) {
-            tracing::warn!(
-                "failed to remove stale owned MCP server tracking file {}: {e}",
+        match std::fs::remove_file(&owned_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => eprintln!(
+                "warning: cannot remove the stale owned MCP server tracking file {}: {e}",
                 owned_path.display(),
-            );
+            ),
         }
     } else {
         crate::paths::write_owner_only_atomic(
@@ -1042,9 +1044,11 @@ fn read_owned_servers(path: &Path) -> std::collections::BTreeSet<String> {
             return std::collections::BTreeSet::new();
         }
         Err(e) => {
-            tracing::warn!(
-                "failed to read owned MCP server tracking file {} \
-                 (treated as empty): {e}",
+            // `tracing` warnings are off at the default log level. Stale servers stay in
+            // `.claude.json` until the file is readable, so the user must see this.
+            eprintln!(
+                "warning: cannot read the owned MCP server tracking file {} \
+                 (treated as empty, so servers that llmenv removed stay in .claude.json): {e}",
                 path.display(),
             );
             return std::collections::BTreeSet::new();
@@ -1053,9 +1057,9 @@ fn read_owned_servers(path: &Path) -> std::collections::BTreeSet<String> {
     match serde_json::from_str::<Vec<String>>(&s) {
         Ok(names) => names.into_iter().collect(),
         Err(e) => {
-            tracing::warn!(
-                "failed to parse owned MCP server tracking file {} \
-                 (treated as empty): {e}",
+            eprintln!(
+                "warning: cannot parse the owned MCP server tracking file {} \
+                 (treated as empty, so servers that llmenv removed stay in .claude.json): {e}",
                 path.display(),
             );
             std::collections::BTreeSet::new()
@@ -1218,11 +1222,14 @@ fn copy_dir_owner_only_inner(
             }
             // Any other symlinked entry (reference file, helper script) is
             // skipped, not fatal — no TOCTOU-safe way to follow it into a
-            // bounded dir. Raised from debug to warn (#1341): silently
-            // dropping a referenced file previously left no trace at any
-            // default log level, and the skill still validated as if the
-            // reference existed.
-            tracing::warn!(path = %src_path.display(), "copy_dir_owner_only: skipping symlink");
+            // bounded dir. The skip prints to stderr (#1341): `tracing` warnings are off at
+            // the default log level, and the skill still validates as if the reference
+            // existed.
+            eprintln!(
+                "warning: skipping the symlink {} inside a skill; a skill folder copies real \
+                 files only",
+                src_path.display()
+            );
             continue;
         }
         let dest_path = dest.join(&file_name);
@@ -1501,9 +1508,10 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
                 let resolved = resolve_bundle_relative_paths(cmd, out)
                     .or_else(|| resolve_command_paths_against_files(cmd, out, &manifest.files));
                 if resolved.is_none() && cmd.contains('/') {
-                    tracing::debug!(
-                        command = %cmd,
-                        "bundle hook path could not be re-anchored to cache directory"
+                    eprintln!(
+                        "warning: the path in the bundle hook command `{cmd}` is not in the \
+                         bundle files, so it is not moved to the cache folder. The hook may fail \
+                         to find its script."
                     );
                 }
                 resolved.or_else(|| Some(cmd.clone()))
@@ -2238,7 +2246,11 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         && let Ok(bytes) = serde_json::to_vec(&hooks)
         && let Err(e) = crate::paths::write_owner_only_atomic(&hooks_sidecar, &bytes)
     {
-        tracing::debug!(error = %e, path = %hooks_sidecar.display(), "failed to write hooks sidecar");
+        eprintln!(
+            "warning: cannot write the hooks record {}: {e}. Stale llmenv hooks may stay in \
+             settings.json.",
+            hooks_sidecar.display()
+        );
     }
 
     // Same best-effort contract as the hooks sidecar above: a failed write just
@@ -2247,10 +2259,10 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     if let Ok(bytes) = serde_json::to_vec(&rendered_plugin_paths)
         && let Err(e) = crate::paths::write_owner_only_atomic(&plugin_paths_sidecar, &bytes)
     {
-        tracing::debug!(
-            error = %e,
-            path = %plugin_paths_sidecar.display(),
-            "failed to write plugin install-paths sidecar"
+        eprintln!(
+            "warning: cannot write the plugin install-path record {}: {e}. The hooks of a \
+             disabled plugin may stay in settings.json.",
+            plugin_paths_sidecar.display()
         );
     }
 
@@ -2342,11 +2354,12 @@ pub(crate) fn apply_seeded_settings(
     // Read whatever materialize wrote; no-op if file absent (materialize
     // failed or skipped — don't create a seeded-only file in that case).
     let existing: serde_json::Value = match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .inspect_err(|e| {
-                tracing::warn!(path = %path.display(), error = %e, "failed to parse settings.json")
-            })
-            .unwrap_or_default(),
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
+            anyhow::anyhow!(
+                "{} is not valid JSON ({e}), so the seeded settings were not applied",
+                path.display()
+            )
+        })?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => {
             return Err(anyhow::anyhow!(
@@ -2356,7 +2369,10 @@ pub(crate) fn apply_seeded_settings(
         }
     };
     let serde_json::Value::Object(mut obj) = existing else {
-        return Ok(());
+        anyhow::bail!(
+            "{} is not a JSON object, so the seeded settings were not applied",
+            path.display()
+        );
     };
     let mut changed = false;
     for (k, v) in seeded {
@@ -2517,6 +2533,32 @@ fn dedup_hooks_doc(hooks: &mut serde_json::Value) {
     }
 }
 
+/// Move a `settings.json` that is not valid JSON aside, so the render that replaces it does not
+/// destroy the keys that Claude Code or a plugin wrote there. The file is renamed to
+/// `settings.json.corrupt`; a rename that fails stops the render rather than overwrite the file.
+fn quarantine_unparseable_settings(
+    path: &Path,
+    parse_error: &serde_json::Error,
+) -> anyhow::Result<()> {
+    let mut backup = path.as_os_str().to_owned();
+    backup.push(".corrupt");
+    let backup = std::path::PathBuf::from(backup);
+    std::fs::rename(path, &backup).map_err(|e| {
+        anyhow::anyhow!(
+            "{} is not valid JSON ({parse_error}) and cannot be moved aside to {}: {e}. Fix or \
+             remove the file.",
+            path.display(),
+            backup.display()
+        )
+    })?;
+    eprintln!(
+        "warning: {} is not valid JSON ({parse_error}). It was moved to {} and replaced.",
+        path.display(),
+        backup.display()
+    );
+    Ok(())
+}
+
 /// Merge llmenv's freshly-rendered settings (`fresh`) onto whatever already
 /// exists at `path`, preserving foreign in-session state (#175, #196).
 ///
@@ -2542,9 +2584,13 @@ fn reconcile_settings(
     prev_plugin_paths: Option<&serde_json::Value>,
 ) -> anyhow::Result<serde_json::Value> {
     let existing = match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
-            .inspect_err(|e| tracing::warn!("failed to parse {}: {e:#}", path.display()))
-            .ok(),
+        Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(value) => Some(value),
+            Err(e) => {
+                quarantine_unparseable_settings(path, &e)?;
+                None
+            }
+        },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => {
             return Err(anyhow::anyhow!(
@@ -5721,13 +5767,44 @@ mod tests {
     #[test]
     fn reconcile_corrupt_file_falls_back_to_fresh() {
         // A hand-corrupted settings.json must not abort the render or strand
-        // llmenv config — llmenv's render wins outright.
+        // llmenv config — llmenv's render wins, and the old file is kept as a backup.
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("settings.json");
         std::fs::write(&path, b"{ not valid json").unwrap();
         let fresh = serde_json::json!({ "permissions": { "deny": ["X"] } });
         let out = reconcile_settings(&path, fresh.clone(), None, None).unwrap();
         assert_eq!(out, fresh);
+    }
+
+    #[test]
+    fn reconcile_keeps_a_corrupt_file_as_a_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        std::fs::write(&path, b"{ \"installMethod\": \"native\", ").unwrap();
+        reconcile_settings(&path, serde_json::json!({}), None, None).unwrap();
+        let backup = tmp.path().join("settings.json.corrupt");
+        assert_eq!(
+            std::fs::read(&backup).unwrap(),
+            b"{ \"installMethod\": \"native\", "
+        );
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn seeding_a_settings_file_that_is_not_valid_json_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("settings.json"), b"{ nope").unwrap();
+        let mut seeded = serde_json::Map::new();
+        seeded.insert("installMethod".into(), "native".into());
+        let err = crate::adapter::claude_code::apply_seeded_settings(tmp.path(), &seeded)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not valid JSON"), "{err}");
+        std::fs::write(tmp.path().join("settings.json"), b"[1]").unwrap();
+        let err = crate::adapter::claude_code::apply_seeded_settings(tmp.path(), &seeded)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not a JSON object"), "{err}");
     }
 
     #[test]

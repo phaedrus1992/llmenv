@@ -1,10 +1,11 @@
 # Issue #2160 — replace the hand-written MCP HTTP client with rmcp
 
 - **Issue:** https://github.com/phaedrus1992/llmenv/issues/2160
-- **Milestone:** `v3.12.0`
+- **Milestone:** `v3.13.0` (moved from `v3.12.0`; this design is not implemented on `release/3.x`)
 - **Base branch:** `release/3.x` (forward-merges to `release/4.x`)
 - **Type:** refactor with one behavior fix
 - **Blocks:** #2148 (needs `tools/list` and server instructions), #2161 (uses the same crate)
+- **Implemented as:** #2148 shipped in v3.12.0 without this change; it extends the hand-written `McpHttpClient` with `initialize_info` and `list_tools`.
 
 This is a spec, not a plan.
 

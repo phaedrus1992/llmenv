@@ -6,7 +6,7 @@
 `crates/`) unless explicitly told otherwise.** Built-in capabilities (hooks,
 env injection, MCP wiring) are implemented in core and ship with the binary —
 see ICM (`src/icm.rs`) and the adapter-injected hooks in
-`src/adapter/claude_code.rs` for the reference pattern.
+`src/adapter/claude_code/mod.rs` for the reference pattern.
 
 `examples/` (notably `examples/config-llmenv-dir/`) is **illustrative configuration
 only — never a target for new feature development.** It demonstrates how a user

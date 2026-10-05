@@ -8,6 +8,7 @@
 
 This is a spec, not a plan.
 Re-verified against `release/3.x` on 2026-10-02 after PR #2410: the functions named below still exist with the same roles, and no `mem_budget_mb` field exists yet.
+Implemented as: `mem_budget_mb` now exists on `CodebaseMemory`, validated in `crates/llmenv-config/src/validate.rs`.
 
 ## Problem
 
@@ -83,7 +84,16 @@ In `trigger_codebase_memory_index`:
 
 `build_index_repository_command` keeps returning a command with null stdout; the trigger function replaces stdout, the same way it replaces stderr today.
 
+Implemented as: the #2396 wrapper `llmenv cbm-index-run` (`src/hook_run/detached_cbm.rs`) owns the result file.
+It writes the indexer's stdout to a pending file `<result>.<pid>.pending` and renames it over the last result when the indexer exits, so a run that is killed or cannot start keeps the last result.
+The checkpoint inputs carry `result_path`.
+The result file is owner-only and replaces a symlink instead of following it.
+`index_result_path(cache_dir, project_root)` is in `src/hook_run/mod.rs`, and `trigger_codebase_memory_index` no longer replaces stdout itself.
+
 ### Doctor
+
+Implemented as: the section is `run_doctor_cbm_index` in `src/cli/doctor/cbm_index.rs`, with a pure `classify(text, finished, log)`.
+Text from the server loses control characters before doctor prints it.
 
 When `features.codebase_memory` has entries, in the codebase-memory section:
 

@@ -227,7 +227,11 @@ It also:
   if you want connectors off too;
 - registers a `SessionStart` hook running `llmenv hook-run session_start`, which
   performs the drift check alongside memory wake-up (folded into one process in
-  v3.11.0 — it was a separate `llmenv check-stale` hook before).
+  v3.11.0 — it was a separate `llmenv check-stale` hook before);
+- registers `SessionEnd`, and (added in v3.12.0) `PostModelSwitch` running
+  `llmenv hook-run post_model_switch` — see [Hook events](#hook-events-claude-code);
+- renders `alwaysLoad` for an MCP server that sets `always_load` (added in v3.12.0; opencode and
+  Crush have no such key and ignore the field).
 
 ### Skipping CLAUDE.md in a subagent (Claude Code)
 
@@ -237,6 +241,41 @@ It also:
 Under llmenv the user `CLAUDE.md` is the rendered file with every bundle rule, so such a subagent runs without llmenv's rules.
 Use it only for narrow agents that get everything they need from the delegation prompt, such as report-only analyzers.
 Other engines ignore the field; opencode prints a warning and drops it.
+
+### Hook events (Claude Code)
+
+(added in v3.12.0)
+
+The Claude Code adapter registers these `hook-run` events by itself.
+`SessionStart`, `SessionEnd`, and `PostModelSwitch` are always on.
+The memory events need the ICM memory server: `UserPromptSubmit` (`turn_start`), and, with `adaptive_recall` on, `PostToolBatch`, `PostToolUseFailure`, and `SubagentStart`.
+
+`PostModelSwitch` fires when you change the model in a session (Claude Code 2.1.251 and later).
+It runs `llmenv hook-run post_model_switch`, which updates the `model` field of the session's agent-config document.
+At `SessionStart`, llmenv writes that document to the state dir (engine, model, effort, project, tags, and config hash).
+A resumed or compacted session starts with a one-line `[llmenv session]` summary of it.
+See [Agent config](commands.md#agent-config).
+No other engine has this event, so only Claude Code sessions keep an agent-config document.
+
+See [Which hooks each engine supports](#which-hooks-each-engine-supports) for the other events.
+
+## Which hooks each engine supports
+
+(added in v3.12.0)
+
+| Event | Claude Code | opencode | Crush |
+| --- | --- | --- | --- |
+| `SessionStart`, `SessionEnd` | yes | yes | no |
+| `UserPromptSubmit` | yes | yes | no |
+| `PreToolUse` | yes | yes | yes |
+| `PostToolUse` | yes | yes | no |
+| `Stop` | yes | yes | no |
+| `Notification`, `SubagentStop`, `PreCompact` | yes | no | no |
+| `PostToolBatch`, `PostToolUseFailure`, `SubagentStart` | yes | no | no |
+| `PostModelSwitch` | yes | no | no |
+
+An event that an engine does not support is dropped with a warning on opencode and is a hard error on Crush.
+Crush runs only `command`-kind `PreToolUse` handlers.
 
 ## Where capabilities are declared
 

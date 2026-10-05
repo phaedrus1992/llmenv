@@ -4,7 +4,7 @@ Releases are **tag-triggered**. Pushing a `v*` tag to GitHub fires
 [`.github/workflows/release.yml`](.github/workflows/release.yml), which does all
 the publishing work:
 
-- builds the cross-platform binaries (Linux x86_64, macOS x86_64, macOS arm64)
+- builds the cross-platform binaries (Linux x86_64, Linux arm64, macOS x86_64, macOS arm64)
   with SHA-256 checksums and SLSA provenance,
 - publishes the crate to [crates.io](https://crates.io/crates/llmenv)
   (`publish-crate` job),
@@ -47,8 +47,14 @@ the cross-listing rule below takes over.
 
 **Do not manually cherry-pick or re-apply the fix to newer branches.** The
 `forward-merge-release` workflow does this automatically after every push to a
-release branch. If it fails (conflict, skipped branch), resolve the conflict
-in the merge PR it opens — don't work around it by applying the change twice.
+release branch. It merges each branch into the next one up to `main`, and it
+resolves the conflicts that every forward-merge produces (the generated
+`website/docs/changelog.md`, the lockfiles, and the version in the `Cargo.toml`
+files). If it pushes to a target and the push is rejected, or if the
+`FORWARD_MERGE_PAT` secret is set, it opens a `forward-merge/<source>-to-<target>`
+pull request instead. If a merge hits any other conflict, the run fails and the
+chain stops: merge the source into the target by hand, as the error says. Don't
+work around it by applying the change twice.
 
 **Docs, changelog, and forward-merge commits don't need a branch or PR — on a
 `release/X.x` branch _or_ `main`.** The feature-branch + PR rule exists to gate
@@ -145,7 +151,7 @@ only when cutting a release), first reconcile against what has forward-merged in
 # What landed since this branch's last tag, and from where?
 git log --no-merges <last-tag>..HEAD
 # What user-facing entries exist on the older line that aren't here yet?
-git show origin/release/<older-major>.x:CHANGELOG.md
+git show origin/release/<older-major>.x:CHANGELOG-<older-major>.md
 ```
 
 Add any missing user-facing fix to the appropriate section with its
@@ -221,8 +227,10 @@ cargo install cargo-release@1.1.2
 
 Repo prerequisites (already in place, listed so they are not forgotten):
 
-- **`CARGO_REGISTRY_TOKEN`** secret in the repo settings — the `publish-crate`
-  job reads it. Without it, the tag build fails at publish.
+- **A crates.io trusted publisher** for each published crate (`llmenv`,
+  `llmenv-util`, `llmenv-paths`, `llmenv-git`, `llmenv-config`), naming this
+  repo and `release.yml`. The `publish-crate` job gets a short-lived token from
+  crates.io. Without a trusted publisher, the tag build fails at publish.
 - **`HOMEBREW_TAP_TOKEN`** secret — used by the `update-homebrew` job.
 - The crate name **`llmenv`** must be owned by the publishing account on
   crates.io. The first publish claims it; confirm it is available beforehand.
@@ -413,17 +421,18 @@ switched to `tag = true` / `push = true` for a single-command release.
 
 ## Security of the release trigger
 
-The release is fired by the `v*` tag, and `release.yml` hands `CARGO_REGISTRY_TOKEN`
-and `HOMEBREW_TAP_TOKEN` to whatever commit that tag points at. Two protections
+The release is fired by the `v*` tag, and `release.yml` gives the crates.io trusted-publishing
+identity and `HOMEBREW_TAP_TOKEN` to whatever commit that tag points at. Two protections
 keep an attacker from pushing a malicious tag straight to a publish:
 
 - **`main` is branch-protected** so release content lands through review.
 - **Add a tag protection rule for `v*`** (repo Settings → Tags) so only
   maintainers can create release tags.
 
-If either protection is ever lifted, **rotate both secrets** — a contributor who
-can push a `v*` tag or an arbitrary `main` commit can otherwise publish under the
-project's crates.io and Homebrew credentials.
+If either protection is ever lifted, **rotate `HOMEBREW_TAP_TOKEN` and review the
+crates.io trusted-publisher settings** — a contributor who can push a `v*` tag or
+an arbitrary `main` commit can otherwise publish under the project's crates.io
+identity and Homebrew credentials.
 
 ## The 1.0.0 release
 

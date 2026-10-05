@@ -251,7 +251,17 @@ fn session_path(state_dir: &Path, id: &str) -> PathBuf {
     sessions_dir(state_dir).join(format!("{id}.json"))
 }
 
+/// A session id goes into a file path, so it must be a plain name. An id such as `../../x` from
+/// `--resume` or `session edit` would otherwise read or write a file outside the session folder.
+fn ensure_plain_name(id: &str) -> anyhow::Result<()> {
+    if !llmenv_paths::is_valid_short_name(id) {
+        anyhow::bail!("'{id}' is not a valid session id");
+    }
+    Ok(())
+}
+
 fn save_session(state_dir: &Path, session: &Session) -> anyhow::Result<()> {
+    ensure_plain_name(&session.id)?;
     llmenv_paths::create_dir_owner_only(&sessions_dir(state_dir))?;
     let json = serde_json::to_string_pretty(session)?;
     llmenv_paths::write_owner_only_atomic(&session_path(state_dir, &session.id), json.as_bytes())?;
@@ -259,6 +269,7 @@ fn save_session(state_dir: &Path, session: &Session) -> anyhow::Result<()> {
 }
 
 fn load_session(state_dir: &Path, id: &str) -> anyhow::Result<Session> {
+    ensure_plain_name(id)?;
     let content = std::fs::read_to_string(session_path(state_dir, id))?;
     Ok(serde_json::from_str(&content)?)
 }
@@ -267,6 +278,7 @@ fn load_session(state_dir: &Path, id: &str) -> anyhow::Result<Session> {
 /// found"; a read or parse failure names the file and the cause, so a corrupt or unreadable
 /// session is not reported as a typo'd id (#2424).
 fn load_existing_session(state_dir: &Path, id: &str) -> anyhow::Result<Session> {
+    ensure_plain_name(id)?;
     let path = session_path(state_dir, id);
     let content = match std::fs::read_to_string(&path) {
         Ok(content) => content,
@@ -2255,6 +2267,25 @@ mod tests {
                 .agent
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_session_id_with_a_path_component_is_rejected_everywhere() {
+        let dir = TempDir::new().expect("test");
+        for bad in ["../x", "a/b", "..", "", "x\\y"] {
+            assert!(
+                load_session(dir.path(), bad).is_err(),
+                "load_session {bad:?}"
+            );
+            let err = load_existing_session(dir.path(), bad)
+                .expect_err("rejected")
+                .to_string();
+            assert!(err.contains("not a valid session id"), "{bad:?}: {err}");
+            assert!(
+                update_resume(dir.path(), bad, |_| {}).is_err(),
+                "update_resume {bad:?}"
+            );
+        }
     }
 
     #[test]

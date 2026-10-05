@@ -73,7 +73,8 @@ A rule matches this row when its tool name, the part before any `(`, equals `Tas
 
 ### Table
 
-New file `src/adapter/claude_code/retired.rs`, declared from `src/adapter/claude_code.rs` with `mod retired;` (a file module next to `claude_code.rs`).
+New file `src/adapter/claude_code/retired.rs`, declared from `src/adapter/claude_code/mod.rs` with `mod retired;`.
+Implemented as: `claude_code.rs` became the directory module `src/adapter/claude_code/` in this change, so `retired.rs` sits beside `mod.rs`.
 
 ```rust
 pub(crate) enum RetiredKind {

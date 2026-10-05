@@ -5,7 +5,7 @@
 - **Base branch:** `release/3.x` (forward-merges to `release/4.x`)
 - **Type:** feature (correctness guard for the detached stores)
 - **Pairs with:** #2396 (checkpoint and resume), which needs this to resume safely
-- **Report:** `docs/reference/pi-durable-evaluation.md` §4 (deterministic levers row), §9 item 5
+- **Report:** the pi-durable evaluation report (`docs/reference/pi-durable-evaluation.md` on `main` only; it is not on `release/3.x`) §4 (deterministic levers row), §9 item 5
 
 This is a spec, not a plan.
 
@@ -40,16 +40,23 @@ ICM has no way to tell the copies apart.
    - transcript record: (Claude `session_id`, `"session-log-record"`, event `ts`, event `kind`, `content`).
    - consolidation rule: (project, `"consolidation"`, rule text).
    When `tool_use_id` is missing, fall back to the epoch seconds already in the content.
+   Implemented as: the tuples differ.
+   Web-fetch store: (`session_id`, `"icm-store"`, `tool_use_id` or epoch seconds, source value, the truncated response preview).
+   Transcript record: (`"session-log-record"`, `session_id`, event `ts`, event `kind`, `content`, a per-event run tag), so two identical events in one second stay two records.
+   Consolidation rule: (project, `"consolidation"`, run id, rule text), so a rule the user forgot later is not skipped as already stored.
+   Each part is length-prefixed before hashing.
 2. **The parent computes the id and puts it in the payload.**
    The child never derives it, so a resumed checkpoint (#2396) sends the same id.
 3. **The child checks a seen-set before the call and records after success.**
    `state_dir/idempotency/{session_id}.json`, a `BTreeSet<String>` of ids, with the `LedgerStore` lock pattern.
+   Implemented as: the ids are kept in insertion order, so the oldest id goes first (a `BTreeSet` with `pop_first` would drop the smallest id).
+   A key that is not a valid short name is hashed before it becomes a file name.
    Consolidation uses `{project}` as the file key, since it has no engine session.
-   Cap each set at 1000 ids (`pop_first`), prune files at 7 days.
+   Cap each set at 1000 ids, prune files at 7 days.
    Recording only after success means a failed call can be retried; recording before would lose the record on a crash between write and call.
 4. **The id also goes to ICM.**
    Transcript record: inside `metadata`, as a `request_id` field alongside the event fields.
-   Memory store: as a tag `request:<id>` so a future recall or an upstream dedup can see it.
+   Memory store: as a keyword `request:<id>` (the `keywords` argument of `icm_memory_store`; there is no `tags` argument) so a future recall or an upstream dedup can see it.
    This costs nothing now and makes server-side dedup possible once rtk-ai/icm accepts an id.
    File an upstream issue on rtk-ai/icm asking for a `request_id` parameter on `icm_memory_store` and `icm_transcript_record`, and link it from the code comment.
 5. **The stale-session retry is still allowed.**
@@ -64,6 +71,7 @@ ICM has no way to tell the copies apart.
 
 - `pub(crate) fn request_id(parts: &[&str]) -> String` (SHA-256, 16 hex chars; reuse the ledger's hashing helper if it is already a function, do not write a second one).
 - `pub(crate) struct SeenSet { path, ids: BTreeSet<String> }` with `load(state_dir, key)`, `contains(&id)`, `record(&id)` (inserts, caps, writes atomically under the lock).
+  Implemented as: `SeenStore` (`contains(key, id)`, `record(key, id)`) and `Guard` (`new`, `already_done`, `done`), which the three callers use.
 - `MAX_IDS = 1000`, `STALE_DAYS = 7`.
 
 ### Parent changes
@@ -81,7 +89,7 @@ ICM has no way to tell the copies apart.
 ### Wire changes
 
 - `record_args` adds `request_id` to the metadata fields.
-- `store_rule` and the web-fetch store add `tags: ["request:<id>"]` (check that `icm_memory_store` accepts `tags`; if not, put it in `metadata` the same way).
+- `store_rule` and the web-fetch store add `keywords: ["request:<id>"]` (the name `icm_memory_store` accepts).
 
 ### Docs
 
@@ -95,7 +103,7 @@ ICM has no way to tell the copies apart.
 3. Store child with a stub server (`wiremock`): the first run calls the tool once and records; a second run with the same payload makes no call; a run whose call fails records nothing and a third run calls again.
 4. Record child: same three cases.
 5. Consolidation: two rules with the same text in one batch store once; a resumed run with the same batch stores nothing new.
-6. Wire shape: `record_args` metadata contains `request_id`; the store args carry the tag.
+6. Wire shape: `record_args` metadata contains `request_id`; the store args carry the `request:<id>` keyword.
 7. Property test: for any two distinct part lists, ids differ with overwhelming probability (test on a few thousand random lists for no collision), and `SeenSet` size never exceeds `MAX_IDS`.
 
 ## Acceptance criteria

@@ -1,7 +1,7 @@
 # Issue #2161 — built-in rmcp bridge for `icm serve`, replacing `mcp-proxy`
 
 - **Issue:** https://github.com/phaedrus1992/llmenv/issues/2161
-- **Milestone:** `v3.12.0`
+- **Milestone:** `v3.13.0` (moved from `v3.12.0`; this design is not implemented on `release/3.x`)
 - **Base branch:** `release/3.x` (forward-merges to `release/4.x`)
 - **Type:** feature (removes an external dependency)
 - **Depends on:** #2160 (adds `rmcp` 3.4.1); see `issue-2160-rmcp-client.md`

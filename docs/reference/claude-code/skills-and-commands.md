@@ -63,7 +63,7 @@ Single-file prompts in `commands/`, same loading mechanism as skills. Invoked
 ## Gaps vs llmenv
 
 - llmenv **validates** skills but does not **generate** them. `validate_skills`
-  (`src/adapter/claude_code.rs:115`) checks each `skills/*/` has a `SKILL.md` with
+  (`src/adapter/claude_code/mod.rs:115`) checks each `skills/*/` has a `SKILL.md` with
   `name` + `description` frontmatter, then errors otherwise. Skills arrive only as
   copied bundle files.
 - Validation is shallow vs the real schema: it requires `name` (the docs make

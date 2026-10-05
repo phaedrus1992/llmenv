@@ -112,7 +112,7 @@ status alone — must return 2xx + decision JSON.
 llmenv handles hook **files** but not hook **wiring**:
 
 - `materialize` copies `hooks/*.json` and substitutes `{{ICM_MCP}}`
-  (`src/adapter/claude_code.rs:59`), so bundles can ship hook scripts/templates.
+  (`src/adapter/claude_code/mod.rs:59`), so bundles can ship hook scripts/templates.
 - But `generate_settings_json` emits `"hooks": []` — an **empty array of the wrong
   shape**. Nothing populates the `hooks` object that actually registers those
   files at `PreToolUse`/`Stop`/etc. The copied files are inert.
