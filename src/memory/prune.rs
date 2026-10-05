@@ -86,13 +86,17 @@ fn load_config() -> anyhow::Result<(std::path::PathBuf, crate::config::Config)> 
     Ok((config_path, config))
 }
 
-/// Refuse to prune when `memory.retention` is set: its per-type durations need
-/// each record's age and type, which the ICM recall output does not carry.
-fn ensure_retention_unset(config: &crate::config::Config) -> anyhow::Result<()> {
-    let configured = config
-        .features
-        .as_ref()
-        .is_some_and(|f| f.memory.iter().any(|m| m.retention.is_some()));
+/// Refuse to prune when the active memory entry sets `retention`: its per-type durations need
+/// each record's age and type, which the ICM recall output does not carry. `memory` is the
+/// merged list of top-level and bundle-declared entries, the list that picks the server.
+fn ensure_retention_unset(
+    memory: &[crate::config::Memory],
+    active_tags: &std::collections::BTreeSet<String>,
+) -> anyhow::Result<()> {
+    let configured = memory
+        .iter()
+        .find(|m| crate::mcp::resolve::memory_is_tag_active(m, active_tags))
+        .is_some_and(|m| m.retention.is_some());
     if configured {
         anyhow::bail!(
             "memory prune cannot apply `memory.retention`: ICM's recall output has no \
@@ -193,7 +197,12 @@ fn parse_recall_output(text: &str) -> Vec<MemoryRecord> {
 /// calls. Returns a [`PruneResult`] with counts.
 pub(crate) fn run(dry_run: bool) -> anyhow::Result<PruneResult> {
     let (config_path, config) = load_config()?;
-    ensure_retention_unset(&config)?;
+    let config_dir = config_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
+    let active = crate::scope::evaluate(&config, &crate::scope::matcher::Env::detect());
+    let merged = crate::hook_run::merged_memory(&config, config_dir, &active)?;
+    ensure_retention_unset(&merged.memory, &active.tags)?;
     let client = connect(&config_path, &config)?;
     let output = call_tool_blocking(
         client.clone(),
@@ -314,9 +323,9 @@ pub(crate) fn auto_prune_if_enabled(config: &crate::config::Config) {
                 result.total
             );
         }
-        Err(e) => {
-            tracing::warn!("auto_prune: prune pass failed (fail-soft): {e}");
-        }
+        // `tracing` warnings are off at the default log level, and the user must learn that
+        // the configured prune did not run.
+        Err(e) => eprintln!("warning: auto_prune did not run: {e:#}"),
     }
 }
 
@@ -329,18 +338,33 @@ mod tests {
         serde_yaml::from_str(&format!("features:\n  memory:\n    - {memory_yaml}\n")).unwrap()
     }
 
+    fn tags(names: &[&str]) -> std::collections::BTreeSet<String> {
+        names.iter().map(|n| (*n).to_string()).collect()
+    }
+
     #[test]
     fn configured_retention_blocks_prune() {
-        let config = config_with("{server_host: h, port: 1, retention: {episodic: 1d}}");
-        let err = ensure_retention_unset(&config).unwrap_err().to_string();
+        let config = config_with("{server_host: h, port: 1, when: [t], retention: {episodic: 1d}}");
+        let memory = &config.features.as_ref().unwrap().memory;
+        let err = ensure_retention_unset(memory, &tags(&["t"]))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("Nothing was forgotten"), "{err}");
     }
 
     #[test]
+    fn retention_on_an_inactive_entry_does_not_block_prune() {
+        let config = config_with("{server_host: h, port: 1, when: [t], retention: {episodic: 1d}}");
+        let memory = &config.features.as_ref().unwrap().memory;
+        ensure_retention_unset(memory, &tags(&["other"])).unwrap();
+    }
+
+    #[test]
     fn absent_retention_allows_prune() {
-        let config = config_with("{server_host: h, port: 1}");
-        ensure_retention_unset(&config).unwrap();
-        ensure_retention_unset(&crate::config::Config::default()).unwrap();
+        let config = config_with("{server_host: h, port: 1, when: [t]}");
+        let memory = &config.features.as_ref().unwrap().memory;
+        ensure_retention_unset(memory, &tags(&["t"])).unwrap();
+        ensure_retention_unset(&[], &tags(&["t"])).unwrap();
     }
 
     #[test]
