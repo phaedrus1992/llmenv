@@ -77,6 +77,17 @@ llmenv prune --all                # nuke everything (re-materializes on next exp
 llmenv doctor --gc                # diagnostics + GC in one pass
 ```
 
+## Claude Code says CLAUDE.md is large
+
+(added in v3.12.0)
+
+Claude Code warns at startup when the instruction files it loads are large, and the warning names files under `~/.cache/llmenv/`.
+Do not edit those files, because `llmenv regenerate` overwrites them.
+Run `llmenv doctor` and read the `Instruction size (Claude Code):` section.
+It prints the total and the largest contributors with their bundle names.
+Trim the named bundle's `CLAUDE.md` text or rule, or add a `paths:` list to a rule that only matters for some files.
+Then run `llmenv regenerate`.
+
 ## Doctor warns about retired Claude Code settings
 
 (added in v3.12.0)
@@ -149,9 +160,13 @@ llmenv deletes checkpoints that are older than 7 days.
   starts with `MCP health check failed` and names each server that did not answer an MCP
   `initialize` within 5 seconds, with the reason and the fix. `llmenv doctor` prints the same
   result under `MCP servers:`. A stopped ICM proxy on the server host restarts by itself. For a
-  proxy that holds its port but does not answer, stop it with
-  `pkill -f 'mcp-proxy .*-- icm serve'`, then run `llmenv export > /dev/null`. The pattern matches
-  the proxy by its command line, so it cannot hit a reused process id. For a stuck
+  proxy that holds its port but does not answer, run `llmenv doctor --restart-memory-proxy`
+  (added in v3.12.0). It sends SIGTERM to the one proxy that the pidfile names, only when that
+  process runs `mcp-proxy ... -- icm serve`, then starts the proxy again. Do not use `pkill`: it
+  stops the proxy that other sessions use. Each proxy start writes one line to `mcp-proxy.log`
+  next to the pidfile: `llmenv: started mcp-proxy pid=... source=export|session-start|restart`
+  with the pid, session, and process group of the spawner. After an unexplained shutdown, compare
+  the time of `Shutting down` with the last such line. For a stuck
   `codebase-memory-mcp` daemon, run `pkill -f cbm-daemon-internal`, then `/mcp` to reconnect.
   See [Session-start health check](mcp.md#session-start-health-check-added-in-v3120).
 - **Old ICM server** (added in v3.12.0) — on the host that serves memory, `llmenv doctor`

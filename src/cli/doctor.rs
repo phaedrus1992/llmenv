@@ -8,6 +8,10 @@ use std::path::{Path, PathBuf};
 
 mod autocompact;
 mod background;
+mod cbm_index;
+mod instruction_size;
+mod mcp_text;
+mod task_text;
 
 /// Effective value of a token-efficiency env var: the process environment
 /// wins if set (matches what Claude Code will actually see if it inherited
@@ -1444,7 +1448,12 @@ fn report_retired_claude_settings(adapter_root: &Path, warn: &str, info: &str) {
     }
 }
 
-pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result<()> {
+pub(super) fn run_doctor(
+    gc: bool,
+    all: bool,
+    probe_mcp: bool,
+    use_color: bool,
+) -> anyhow::Result<()> {
     let pass = super::doctor_pass(use_color);
     let warn = super::doctor_warning(use_color);
     let info = super::doctor_info(use_color);
@@ -1630,6 +1639,18 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
         }
     }
 
+    // #2357: the always-loaded instruction text is what Claude Code's large-file notice counts.
+    if let Some((manifest, _)) = &doctor_manifest
+        && claude_installed
+    {
+        instruction_size::run_doctor_instruction_size(use_color, manifest);
+    }
+
+    // #2457: instruction text that says the task tools are blocked contradicts the tracker.
+    if let Some((manifest, _)) = &doctor_manifest {
+        task_text::run_doctor_task_text(use_color, manifest);
+    }
+
     if let Some((manifest, _)) = &doctor_manifest {
         for adapter in &installed {
             let supported = adapter.supported_hook_events();
@@ -1664,6 +1685,17 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     let native_claude_settings = doctor_manifest
         .as_ref()
         .and_then(|(manifest, _)| manifest.native.get("claude_code"));
+
+    // #2148: MCP text that Claude Code cuts at its limit.
+    if let Some((manifest, _)) = &doctor_manifest
+        && claude_installed
+    {
+        let limit_env = effective_token_efficiency_var(
+            native_claude_env,
+            "CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH",
+        );
+        mcp_text::run_doctor_mcp_text(use_color, &manifest.mcps, limit_env.as_deref(), probe_mcp);
+    }
 
     if all {
         // Orphan detection
@@ -1980,6 +2012,7 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
     run_doctor_sandbox(use_color, &config);
     run_doctor_icm_server(use_color, &config, &config_dir, &active);
     run_doctor_mcp_servers(use_color, &config, &config_dir, &active);
+    cbm_index::run_doctor_cbm_index(use_color, &config, &active);
     if let Ok(state_dir) = crate::paths::state_dir() {
         background::run_doctor_checkpoints(use_color, &state_dir);
     }
@@ -2101,13 +2134,15 @@ pub(super) fn run_doctor(gc: bool, all: bool, use_color: bool) -> anyhow::Result
 }
 
 /// The lifecycle hooks `doctor` reports for `engine`: the engine-neutral set, plus
-/// the adaptive recall hooks that only Claude Code registers (#2249).
+/// the model-switch hook (#2398) and the adaptive recall hooks (#2249) that only Claude Code
+/// registers.
 fn engine_lifecycle_hooks(
     engine: &str,
     manifest: &crate::merge::MergedManifest,
 ) -> Vec<(&'static str, bool, &'static str)> {
     let mut hooks = crate::adapter::lifecycle_hook_registrations(manifest);
     if engine == "claude_code" {
+        hooks.extend(crate::adapter::model_switch_hook_registrations());
         hooks.extend(crate::adapter::adaptive_recall_hook_registrations(manifest));
     }
     hooks
@@ -2486,6 +2521,7 @@ mod tests {
         let (root, mut config, active) = disabled_memory_bundle_fixture();
         config.features = Some(Features {
             memory: vec![Memory {
+                always_load: None,
                 server_host: "still".into(),
                 port: 7878,
                 listen_host: "127.0.0.1".into(),
@@ -2524,6 +2560,7 @@ mod tests {
         let (root, mut config, active) = disabled_memory_bundle_fixture();
         config.features = Some(Features {
             memory: vec![Memory {
+                always_load: None,
                 server_host: "elsewhere".into(),
                 port: 7878,
                 listen_host: "127.0.0.1".into(),
@@ -2829,6 +2866,8 @@ mod tests {
         let config = Config {
             features: Some(crate::config::Features {
                 codebase_memory: vec![crate::config::CodebaseMemory {
+                    allowed_roots: vec![],
+                    mem_budget_mb: None,
                     when: vec!["proj".to_string()],
                     index_path: None,
                     mcp_permissions: None,
@@ -2848,6 +2887,8 @@ mod tests {
         let config = Config {
             features: Some(crate::config::Features {
                 codebase_memory: vec![crate::config::CodebaseMemory {
+                    allowed_roots: vec![],
+                    mem_budget_mb: None,
                     when: vec!["never-emitted".to_string()],
                     index_path: None,
                     mcp_permissions: None,
@@ -2867,6 +2908,8 @@ mod tests {
         let bundle_caps = Capabilities {
             features: Some(crate::config::Features {
                 codebase_memory: vec![crate::config::CodebaseMemory {
+                    allowed_roots: vec![],
+                    mem_budget_mb: None,
                     when: vec!["bundle-tag".to_string()],
                     index_path: None,
                     mcp_permissions: None,
@@ -3445,6 +3488,7 @@ mod tests {
         let config = Config {
             features: Some(Features {
                 memory: vec![Memory {
+                    always_load: None,
                     server_host: "local".into(),
                     port: 4343,
                     listen_host: "127.0.0.1".into(),
@@ -3478,6 +3522,7 @@ mod tests {
         let config = Config {
             features: Some(Features {
                 memory: vec![Memory {
+                    always_load: None,
                     server_host: "remote".into(),
                     port: 4343,
                     listen_host: "0.0.0.0".into(),

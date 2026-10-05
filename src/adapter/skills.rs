@@ -524,6 +524,7 @@ pub(crate) fn arb_distinct_resolved_mcps()
         .prop_map(|map| {
             map.into_iter()
                 .map(|(name, (kind, headers, timeout))| ResolvedMcp {
+                    always_load: None,
                     name,
                     kind,
                     headers,

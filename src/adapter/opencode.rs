@@ -2191,11 +2191,38 @@ mod tests {
         );
     }
 
+    // #2356: opencode has no `alwaysLoad`, so the setting changes nothing in its output.
+    #[test]
+    fn always_load_does_not_change_the_opencode_output() {
+        let render = |always_load: Option<bool>| {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut manifest = MergedManifest::default();
+            manifest.mcps.push(ResolvedMcp {
+                always_load,
+                name: "srv".into(),
+                kind: super::ResolvedKind::Stdio {
+                    command: "npx".into(),
+                    args: vec![],
+                    env: std::collections::BTreeMap::new(),
+                },
+                headers: std::collections::BTreeMap::new(),
+                timeout: None,
+                disabled_tools: vec![],
+                mcp_permissions: None,
+                memory_hook: None,
+            });
+            OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+            std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap()
+        };
+        assert_eq!(render(Some(true)), render(None));
+    }
+
     #[test]
     fn materialize_mcp_local_server_written() {
         let tmp = tempfile::tempdir().unwrap();
         let mut manifest = MergedManifest::default();
         manifest.mcps.push(ResolvedMcp {
+            always_load: None,
             name: "local-srv".into(),
             kind: super::ResolvedKind::Stdio {
                 command: "npx".into(),
@@ -2225,6 +2252,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut manifest = MergedManifest::default();
         manifest.mcps.push(ResolvedMcp {
+            always_load: None,
             name: "remote-srv".into(),
             kind: super::ResolvedKind::Remote {
                 url: "http://localhost:3000/mcp".into(),
@@ -2256,6 +2284,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut manifest = MergedManifest::default();
         manifest.mcps.push(ResolvedMcp {
+            always_load: None,
             name: "minimal".into(),
             kind: super::ResolvedKind::Remote {
                 url: "http://example.com".into(),
@@ -4015,6 +4044,7 @@ mod tests {
             ..Default::default()
         };
         manifest.mcps.push(ResolvedMcp {
+            always_load: None,
             name: "shared".into(),
             kind: super::ResolvedKind::Remote {
                 url: "http://example.com".into(),
@@ -4462,6 +4492,7 @@ mod tests {
     fn manifest_with_memory_mcp() -> crate::merge::MergedManifest {
         crate::merge::MergedManifest {
             mcps: vec![crate::mcp::resolve::ResolvedMcp {
+                always_load: None,
                 name: crate::mcp::resolve::MEMORY_MCP_NAME.to_string(),
                 kind: crate::mcp::resolve::ResolvedKind::Remote {
                     url: "http://localhost:9999".into(),
@@ -4607,6 +4638,7 @@ mod tests {
             }
             if cbm {
                 manifest.mcps.push(crate::mcp::resolve::ResolvedMcp {
+                    always_load: None,
                     name: crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME.to_string(),
                     kind: crate::mcp::resolve::ResolvedKind::Stdio {
                         command: "codebase-memory-mcp".into(),
@@ -4624,6 +4656,7 @@ mod tests {
                 task_tracker: Some(crate::config::TaskTracker {
                     enabled: task_tools,
                     block_engine_task_tools: task_tools,
+                    ..Default::default()
                 }),
                 ..Default::default()
             });
@@ -4715,6 +4748,7 @@ mod tests {
                 task_tracker: Some(crate::config::TaskTracker {
                     enabled,
                     block_engine_task_tools: block,
+                    ..Default::default()
                 }),
                 ..Default::default()
             });
@@ -4742,6 +4776,7 @@ mod tests {
     fn index_repository_guard_hook_tracks_the_codebase_memory_mcp() {
         let mut cbm = manifest_without_session_log();
         cbm.mcps.push(crate::mcp::resolve::ResolvedMcp {
+            always_load: None,
             name: crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME.to_string(),
             kind: crate::mcp::resolve::ResolvedKind::Stdio {
                 command: "codebase-memory-mcp".into(),

@@ -38,7 +38,7 @@ pub struct ResumeContext {
 impl ResumeContext {
     /// True when nothing is recorded.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         *self == Self::default()
     }
 

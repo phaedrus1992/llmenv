@@ -966,6 +966,7 @@ mod tests {
 
     fn stdio_mcp(name: &str) -> ResolvedMcp {
         ResolvedMcp {
+            always_load: None,
             name: name.into(),
             kind: ResolvedKind::Stdio {
                 command: "npx".into(),
@@ -982,6 +983,7 @@ mod tests {
 
     fn remote_mcp(name: &str, transport: McpTransport) -> ResolvedMcp {
         ResolvedMcp {
+            always_load: None,
             name: name.into(),
             kind: ResolvedKind::Remote {
                 url: "https://example.test/mcp".into(),
@@ -1413,6 +1415,7 @@ mod tests {
     fn manifest_with_memory_mcp() -> MergedManifest {
         MergedManifest {
             mcps: vec![crate::mcp::resolve::ResolvedMcp {
+                always_load: None,
                 name: crate::mcp::resolve::MEMORY_MCP_NAME.to_string(),
                 kind: crate::mcp::resolve::ResolvedKind::Remote {
                     url: "http://localhost:9999".into(),

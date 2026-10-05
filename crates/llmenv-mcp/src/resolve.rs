@@ -45,6 +45,10 @@ pub struct ResolvedMcp {
     /// MCP (#1216, #2249). `None` for every other server. Consumed by
     /// `hook_run`'s live dispatch pipeline, not by static materialization.
     pub memory_hook: Option<MemoryHookSettings>,
+    /// Claude Code `alwaysLoad` (#2356): `Some(true)` keeps the server's tools out of tool-search
+    /// deferral, `Some(false)` defers them all, `None` leaves Claude Code's default. Rendered by
+    /// the Claude Code adapter only.
+    pub always_load: Option<bool>,
 }
 
 /// Settings that `hook_run` reads from the active `features.memory` entry.
@@ -240,6 +244,7 @@ fn resolve_static(m: &McpServer) -> Result<ResolvedMcp, ResolveError> {
         disabled_tools: m.disabled_tools.clone(),
         mcp_permissions: None,
         memory_hook: None,
+        always_load: m.always_load,
     })
 }
 
@@ -275,6 +280,8 @@ fn resolve_memory(
             default_type: mem.default_type,
             default_importance: mem.default_importance,
         }),
+        // #2356: the ICM tools are used on most prompts, so they load up front by default.
+        always_load: Some(mem.always_load.unwrap_or(true)),
     })
 }
 
@@ -298,8 +305,8 @@ pub fn codebase_memory_paths() -> anyhow::Result<(std::path::PathBuf, std::path:
 /// process per project. `CBM_CACHE_DIR` is only set when the user explicitly
 /// configures `index_path` (#1493); otherwise `codebase-memory-mcp` falls
 /// back to its own default cache location. `CBM_ALLOWED_ROOT` is never set
-/// (#1495) — restricting the tool's scope is the end user's call via
-/// `codebase-memory-mcp`'s own config, not llmenv's to impose.
+/// (#1495). llmenv records the roots the server may index through `allow-root` at SessionStart
+/// instead (#2406); see `mcp::cbm_roots`.
 fn resolve_codebase_memory(
     cm: &CodebaseMemory,
     _project_root: &Path,
@@ -308,6 +315,11 @@ fn resolve_codebase_memory(
     let mut env = BTreeMap::new();
     if let Some(index_path) = &cm.index_path {
         env.insert("CBM_CACHE_DIR".to_string(), index_path.clone());
+    }
+    // The SessionStart auto-index sets the same variable (`index_command`), so the server and the
+    // indexer agree on the budget (#2154).
+    if let Some(budget) = cm.mem_budget_mb {
+        env.insert("CBM_MEM_BUDGET_MB".to_string(), budget.to_string());
     }
     ResolvedMcp {
         name: CODEBASE_MEMORY_MCP_NAME.to_string(),
@@ -321,6 +333,8 @@ fn resolve_codebase_memory(
         disabled_tools: vec![],
         mcp_permissions: cm.mcp_permissions.clone(),
         memory_hook: None,
+        // Its tools are used on demand, so tool search fits them (#2356).
+        always_load: None,
     }
 }
 
@@ -449,6 +463,7 @@ mod tests {
 
     fn memory() -> Memory {
         Memory {
+            always_load: None,
             server_host: "still".into(),
             port: 7878,
             listen_host: "127.0.0.1".into(), // mirrors schema::default_listen_host()
@@ -491,6 +506,41 @@ mod tests {
             Some("Bearer tok")
         );
         assert_eq!(resolved[0].timeout, Some(30));
+    }
+
+    // #2356: always_load survives resolution on both transports, and unset stays unset.
+    #[test]
+    fn always_load_flows_through_resolution() {
+        let mut stdio = stdio_server("a", &["t"], "bin");
+        stdio.always_load = Some(false);
+        let mut remote = stdio_server("b", &["t"], "bin");
+        remote.transport = McpTransport::Http;
+        remote.command = None;
+        remote.url = Some("https://b.example/mcp".to_string());
+        remote.always_load = Some(true);
+        let unset = stdio_server("c", &["t"], "bin");
+        let resolved =
+            resolve_mcps(&[stdio, remote, unset], &[], &base_host(), &tags(&["t"])).unwrap();
+        let by_name = |n: &str| resolved.iter().find(|r| r.name == n).unwrap().always_load;
+        assert_eq!(by_name("a"), Some(false));
+        assert_eq!(by_name("b"), Some(true));
+        assert_eq!(by_name("c"), None);
+    }
+
+    // #2356: the built-in ICM entry loads its tools up front unless the config says otherwise.
+    #[test]
+    fn the_memory_entry_defaults_to_always_load_and_honors_the_setting() {
+        let mut mem = memory();
+        mem.when = vec!["t".to_string()];
+        let load = |setting: Option<bool>| {
+            let mut m = mem.clone();
+            m.always_load = setting;
+            let resolved = resolve_mcps(&[], &[m], &base_host(), &tags(&["t"])).unwrap();
+            resolved[0].always_load
+        };
+        assert_eq!(load(None), Some(true));
+        assert_eq!(load(Some(true)), Some(true));
+        assert_eq!(load(Some(false)), Some(false));
     }
 
     #[test]
@@ -589,6 +639,7 @@ mod tests {
     #[test]
     fn memory_ambiguous_errors() {
         let home = Memory {
+            always_load: None,
             server_host: "still".into(),
             port: 9092,
             listen_host: "127.0.0.1".into(),
@@ -605,6 +656,7 @@ mod tests {
             adaptive_recall: true,
         };
         let work = Memory {
+            always_load: None,
             server_host: "hesitation-marks".into(),
             port: 9092,
             listen_host: "127.0.0.1".into(),
@@ -638,6 +690,7 @@ mod tests {
     fn memory_scoped_selects_matching_entry() {
         // Two daemons with different tags: only the one matching active tags resolves.
         let home = Memory {
+            always_load: None,
             server_host: "still".into(),
             port: 9092,
             listen_host: "127.0.0.1".into(),
@@ -654,6 +707,7 @@ mod tests {
             adaptive_recall: true,
         };
         let work = Memory {
+            always_load: None,
             server_host: "hesitation-marks".into(),
             port: 9092,
             listen_host: "127.0.0.1".into(),
@@ -696,12 +750,18 @@ mod tests {
     #[test]
     fn codebase_memory_resolves_to_local_stdio() {
         let cm = CodebaseMemory {
+            allowed_roots: vec![],
+            mem_budget_mb: None,
             when: vec!["proj".to_string()],
             index_path: None,
             mcp_permissions: None,
         };
         let resolved = resolve_codebase_memory(&cm, Path::new("/repos/proj"), Path::new("/state"));
         assert_eq!(resolved.name, CODEBASE_MEMORY_MCP_NAME);
+        assert_eq!(
+            resolved.always_load, None,
+            "its tools suit tool search (#2356)"
+        );
         match resolved.kind {
             ResolvedKind::Stdio { command, args, env } => {
                 assert_eq!(command, "codebase-memory-mcp");
@@ -726,6 +786,8 @@ mod tests {
     #[test]
     fn codebase_memory_index_path_override_wins() {
         let cm = CodebaseMemory {
+            allowed_roots: vec![],
+            mem_budget_mb: None,
             when: vec!["proj".to_string()],
             index_path: Some("/custom/path".to_string()),
             mcp_permissions: None,
@@ -745,6 +807,8 @@ mod tests {
     #[test]
     fn codebase_memory_not_selected_when_tags_inactive() {
         let entries = vec![CodebaseMemory {
+            allowed_roots: vec![],
+            mem_budget_mb: None,
             when: vec!["other-tag".to_string()],
             index_path: None,
             mcp_permissions: None,
@@ -767,11 +831,15 @@ mod tests {
         // enforced here rather than left to crash later on a name collision.
         let entries = vec![
             CodebaseMemory {
+                allowed_roots: vec![],
+                mem_budget_mb: None,
                 when: vec!["proj-a".to_string()],
                 index_path: None,
                 mcp_permissions: None,
             },
             CodebaseMemory {
+                allowed_roots: vec![],
+                mem_budget_mb: None,
                 when: vec!["proj-b".to_string()],
                 index_path: None,
                 mcp_permissions: None,
@@ -833,7 +901,7 @@ mod tests {
             fn resolve_codebase_memory_never_sets_allowed_root(
                 path_str in arb_path_component()
             ) {
-                let cm = CodebaseMemory { when: vec!["proj".to_string()], index_path: None, mcp_permissions: None };
+                let cm = CodebaseMemory { allowed_roots: vec![], mem_budget_mb: None, when: vec!["proj".to_string()], index_path: None, mcp_permissions: None };
                 let project_root = std::path::PathBuf::from(&path_str);
                 let resolved = resolve_codebase_memory(&cm, &project_root, Path::new("/state"));
                 match resolved.kind {
@@ -853,7 +921,7 @@ mod tests {
                 project_root_str in arb_path_component(),
                 state_dir_str in arb_path_component(),
             ) {
-                let cm = CodebaseMemory { when: vec!["proj".to_string()], index_path: None, mcp_permissions: None };
+                let cm = CodebaseMemory { allowed_roots: vec![], mem_budget_mb: None, when: vec!["proj".to_string()], index_path: None, mcp_permissions: None };
                 let project_root = std::path::PathBuf::from(&project_root_str);
                 let state_dir = std::path::PathBuf::from(&state_dir_str);
                 let resolved = resolve_codebase_memory(&cm, &project_root, &state_dir);
@@ -869,7 +937,7 @@ mod tests {
             fn resolve_codebase_memory_index_path_override_always_wins(
                 index_path in arb_path_component()
             ) {
-                let cm = CodebaseMemory {
+                let cm = CodebaseMemory { allowed_roots: vec![], mem_budget_mb: None,
                     when: vec!["proj".to_string()],
                     index_path: Some(index_path.clone()),
                     mcp_permissions: None,
@@ -888,11 +956,36 @@ mod tests {
             }
         }
 
+        // #2154: the memory budget reaches the MCP server's environment only when it is set.
+        #[test]
+        fn resolve_codebase_memory_sets_the_budget_only_when_configured() {
+            let env_of = |budget: Option<u32>| {
+                let cm = CodebaseMemory {
+                    when: vec!["proj".to_string()],
+                    mem_budget_mb: budget,
+                    ..Default::default()
+                };
+                match resolve_codebase_memory(&cm, Path::new("/r"), Path::new("/s")).kind {
+                    ResolvedKind::Stdio { env, .. } => env,
+                    ResolvedKind::Remote { .. } => BTreeMap::new(),
+                }
+            };
+            assert_eq!(
+                env_of(Some(8192))
+                    .get("CBM_MEM_BUDGET_MB")
+                    .map(String::as_str),
+                Some("8192")
+            );
+            assert!(!env_of(None).contains_key("CBM_MEM_BUDGET_MB"));
+        }
+
         // #365: tag-intersection filtering in resolve_codebase_memory_entries
         // — every resolved entry's tags must intersect active_tags, and an
         // empty active set never resolves anything, for arbitrary tag sets.
         fn arb_codebase_memory_entry(idx: usize) -> impl Strategy<Value = CodebaseMemory> {
             prop::collection::vec("[a-z]{1,4}", 0..4).prop_map(move |when| CodebaseMemory {
+                allowed_roots: vec![],
+                mem_budget_mb: None,
                 when: if when.is_empty() {
                     vec![format!("only-tag-{idx}")]
                 } else {

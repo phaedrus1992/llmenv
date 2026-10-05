@@ -116,6 +116,15 @@ features:
     default_topics: ["context-{project}", preferences]
 ```
 
+### Tool search and the ICM tools (added in v3.12.0)
+
+Claude Code defers the tools of an MCP server behind tool search:
+before the model can call a deferred tool, it must call `ToolSearch`.
+The instructions tell the model to use the `icm_*` tools on most prompts,
+so llmenv renders `alwaysLoad: true` for the ICM server by default, and its tools arrive with the prompt.
+Set `always_load: false` on the `features.memory` entry to defer them again.
+A server in `mcp:` takes the same field; see [`mcp:`](configuration.md#mcp).
+
 ### How the topology is resolved
 
 1. Scopes are evaluated against the current environment; the active host-scope
@@ -245,6 +254,62 @@ server only when there's something explicit to set:
   through `codebase-memory-mcp`'s own config, not llmenv's default. See
   [Configuration reference](./configuration.md#featurescodebase_memory) for
   the full detail on this change.
+
+(added in v3.12.0) `mem_budget_mb` sets `CBM_MEM_BUDGET_MB` for both the server and the
+SessionStart index, so the two agree:
+
+```yaml
+features:
+  codebase_memory:
+    - when: [my-project]
+      mem_budget_mb: 4096
+```
+
+codebase-memory-mcp stops an index that goes over its budget, keeps the previous index, and
+reports the numbers.
+llmenv saves that result for each project next to `index.log`, in `index-result-<key>.json`.
+`llmenv doctor` reads it and prints one line:
+
+- `last index finished <time>` when the index worked
+- a warning with the budget, the peak, and the `mem_budget_mb` to set, when the index stopped at the
+  budget
+- a warning with the status, the reason, and the log path, when it failed another way
+- `no index result for this project yet` before the first run
+
+The time is in UTC.
+(added in v3.12.0) codebase-memory-mcp 0.11.0 indexes only the roots in its `allowed_roots` file, once any root is recorded.
+At each SessionStart llmenv records its roots through `codebase-memory-mcp allow-root <path>`,
+with the same `CBM_CACHE_DIR` as the server.
+The roots are:
+
+- the project root
+- the llmenv config, cache, and state folders
+- `${NBL_DIAG_CACHE:-~/.cache/nbl-diag}/repos`, the code-explorer cache
+- the entries of `allowed_roots`
+
+```yaml
+features:
+  codebase_memory:
+    - when: [my-project]
+      allowed_roots:
+        - ~/git
+        - $WORK_DIR/repos
+```
+
+`~` and `$VAR` expand at session start.
+An entry with an unset variable is dropped.
+A relative entry or a `~user` entry is rejected by `llmenv validate`.
+llmenv skips a default root that does not exist yet, and warns about a configured entry that is not a folder.
+The SessionStart notice and `llmenv doctor` list the roots, and warn about a root that the server did not accept.
+A `PreToolUse` guard denies an `index_repository` call whose `repo_path` is outside the configured roots
+and the roots the server lists.
+The deny text names the config fix.
+A root stays recorded after you remove it from the config, because codebase-memory-mcp has no command to remove one.
+To revoke a root, delete its line from `<cache dir>/allowed_roots`.
+Do not run `allow-root` by hand: the config is the source of the roots.
+
+The background watcher is a setting of codebase-memory-mcp itself, not of llmenv.
+Turn it off with `codebase-memory-mcp config set watcher_enabled false`.
 
 Multiple `codebase_memory` entries may be active simultaneously — each is an
 independent local process, not a shared resource like the memory backend, so
@@ -432,12 +497,11 @@ fails at import time. Pinning the install sidesteps it:
 uv tool install mcp-proxy --with "mcp<2"
 ```
 
-To reproduce a cold start deliberately, stop the proxy and let the next export
-bring it back:
+To reproduce a cold start deliberately, restart the proxy through llmenv
+(added in v3.12.0):
 
 ```bash
-pkill -f 'mcp-proxy --host'
-llmenv export >/dev/null
+llmenv doctor --restart-memory-proxy
 ```
 
 ## Tag-scoped memory and the env var contract
