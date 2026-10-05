@@ -405,11 +405,19 @@ impl McpHttpClient {
         let body = self
             .post_rpc("tools/call", &params, &format!("tool {name}"))
             .await?;
-        extract_text(&body).ok_or_else(|| {
+        let text = extract_text(&body).ok_or_else(|| {
             CallToolError::Fatal(anyhow!(
                 "tool {name} response missing result.content[].text"
             ))
-        })
+        })?;
+        // MCP reports a tool-level failure as a successful reply with `isError: true`. Treating
+        // it as success would mark a failed store as stored in the idempotency set.
+        if body["result"]["isError"].as_bool() == Some(true) {
+            return Err(CallToolError::Fatal(anyhow!(
+                "tool {name} reported an error: {text}"
+            )));
+        }
+        Ok(text)
     }
 
     /// Send one JSON-RPC request on the session and return the decoded reply. `label` names the
@@ -756,6 +764,55 @@ mod tests {
     #[test]
     fn emit_mcp_call_trace_never_panics_without_env_var() {
         emit_mcp_call_trace("icm_memory_recall", Duration::from_micros(2340));
+    }
+
+    #[tokio::test]
+    async fn call_tool_returns_an_error_when_the_tool_reports_is_error() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "isError": true,
+                "content": [{ "type": "text", "text": "database is locked" }]
+            }
+        });
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        let client =
+            McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("valid URL");
+        let err = client
+            .call_tool("icm_memory_store", serde_json::json!({}))
+            .await
+            .expect_err("a tool error must not look like success")
+            .to_string();
+        assert!(err.contains("database is locked"), "{err}");
+        assert!(err.contains("icm_memory_store"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn call_tool_treats_is_error_false_as_success() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": { "isError": false, "content": [{ "type": "text", "text": "ok" }] }
+        });
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        let client =
+            McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("valid URL");
+        let text = client
+            .call_tool("icm_memory_store", serde_json::json!({}))
+            .await
+            .expect("isError false is success");
+        assert_eq!(text, "ok");
     }
 
     #[tokio::test]
