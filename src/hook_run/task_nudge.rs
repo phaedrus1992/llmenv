@@ -687,14 +687,20 @@ mod tests {
                 .contains("llmenv task start")
         );
         start_task(dir.path(), &slug, false).unwrap();
-        assert_eq!(
-            handle_pre_tool_use(&tracker, &bash("git commit"), Some("s1"), dir.path()),
-            ""
-        );
+        let logs = crate::test_log_capture::capture_logs(|| {
+            assert_eq!(
+                handle_pre_tool_use(&tracker, &bash("git commit"), Some("s1"), dir.path()),
+                ""
+            );
+        });
         assert!(
             !load(&state_path(dir.path(), "s1").unwrap())
                 .unwrap()
                 .commit_denied
+        );
+        assert!(
+            !logs.contains("deny marker"),
+            "a saved marker logs nothing: {logs}"
         );
     }
 

@@ -164,6 +164,12 @@ fn resets_ledger(source: Option<&str>) -> bool {
     super::session_state::context_was_lost(source)
 }
 
+/// Whether a context reset left the recall ledger as it was: the ledger update failed (a busy
+/// lock or an unreadable file) while the session asked for a reset.
+fn reset_left_undone(updated: bool, reset: bool) -> bool {
+    reset && !updated
+}
+
 /// Run the scope recalls into `budget`, one after another, until it is full.
 async fn run_scope(
     ctx: &AdaptiveCtx<'_>,
@@ -206,7 +212,7 @@ pub(super) async fn session_start(
         }
         l.sent_for(MAIN_AGENT)
     });
-    if updated.is_none() && reset {
+    if reset_left_undone(updated.is_some(), reset) {
         // Records that the model saw before the context loss would stay filtered from recall.
         tracing::error!(
             "recall ledger not reset after {}: the lock or the file failed",
@@ -435,6 +441,14 @@ pub(super) fn record_local(
 #[cfg(test)]
 #[expect(clippy::unwrap_used, clippy::expect_used, reason = "test code")]
 mod tests {
+    #[test]
+    fn a_reset_is_undone_only_when_the_update_failed() {
+        assert!(reset_left_undone(false, true));
+        assert!(!reset_left_undone(true, true));
+        assert!(!reset_left_undone(false, false));
+        assert!(!reset_left_undone(true, false));
+    }
+
     use std::time::Duration;
 
     use serde_json::json;

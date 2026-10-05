@@ -510,13 +510,49 @@ mod tests {
         let folder = dir.path().join("checkpoints");
         std::fs::create_dir(&folder).unwrap();
         std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // A user that ignores permissions (root) can read the folder, so the case cannot arise.
+        let readable = std::fs::read_dir(&folder).is_ok();
         let entries = list(dir.path());
         std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
-        if std::fs::read_dir(&folder).is_ok() && entries.is_empty() {
-            return; // running as a user that ignores permissions
+        if readable {
+            return;
         }
         assert!(
-            matches!(entries.as_slice(), [Entry::Unreadable(_, why)] if why.contains("cannot read"))
+            matches!(entries.as_slice(), [Entry::Unreadable(_, why)] if why.contains("cannot read")),
+            "{entries:?}"
+        );
+    }
+
+    #[test]
+    fn a_missing_checkpoint_folder_lists_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(list(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn the_index_job_counts_attempts_and_logs_an_unreadable_earlier_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let inputs = serde_json::json!({ "root": "/r" });
+        let begin_index = || begin(Some(dir.path()), JobKind::CbmIndex, &inputs, None).unwrap();
+
+        // No earlier file: attempt 1, and nothing is logged.
+        let mut path = PathBuf::new();
+        let logs = crate::test_log_capture::capture_logs(|| path = begin_index());
+        assert_eq!(load(&path).unwrap().attempts, 1);
+        assert!(!logs.contains("unreadable"), "{logs}");
+
+        // A readable earlier file: the count goes up by one.
+        let logs = crate::test_log_capture::capture_logs(|| path = begin_index());
+        assert_eq!(load(&path).unwrap().attempts, 2);
+        assert!(!logs.contains("unreadable"), "{logs}");
+
+        // An unreadable earlier file: the count restarts, and the loss is logged.
+        std::fs::write(&path, "not a checkpoint").unwrap();
+        let logs = crate::test_log_capture::capture_logs(|| path = begin_index());
+        assert_eq!(load(&path).unwrap().attempts, 1);
+        assert!(
+            logs.contains("earlier index checkpoint unreadable"),
+            "{logs}"
         );
     }
 
