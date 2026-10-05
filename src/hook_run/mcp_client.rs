@@ -153,16 +153,14 @@ impl McpHttpClient {
             value.set_sensitive(true);
             map.insert(name, value);
         }
-        let mut builder = reqwest::Client::builder()
+        // A redirect could reach a host that the address pin above does not cover, such as a
+        // cloud metadata address, and could carry configured headers with it. An MCP endpoint
+        // has no reason to redirect, so no redirect is followed.
+        let client = reqwest::Client::builder()
             .timeout(timeout)
             .default_headers(map)
-            .resolve_to_addrs(&host, &addrs);
-        // Configured headers can hold credentials. A redirect could send them to another host,
-        // which the address pin above does not cover.
-        if !headers.is_empty() {
-            builder = builder.redirect(reqwest::redirect::Policy::none());
-        }
-        let client = builder
+            .resolve_to_addrs(&host, &addrs)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .context("failed to build HTTP client (TLS backend unavailable)")?;
         Ok(Self {
@@ -1088,6 +1086,23 @@ mod tests {
         let client =
             McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("valid URL");
         assert_eq!(client.list_tools().await.unwrap()[0].name, "s");
+    }
+
+    #[tokio::test]
+    async fn a_client_without_headers_does_not_follow_a_redirect() {
+        let target = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(init_ok("s", None))
+            .expect(0)
+            .mount(&target)
+            .await;
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(307).insert_header("location", target.uri()))
+            .mount(&server)
+            .await;
+        let client = McpHttpClient::new(server.uri(), Duration::from_secs(2)).expect("client");
+        assert!(client.probe().await.is_err());
     }
 
     #[tokio::test]
