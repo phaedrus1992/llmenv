@@ -247,12 +247,12 @@ pub fn handle_stop(
     } else if consecutive >= threshold {
         format!(
             "{reminder}\n\nThis exact reminder has repeated {consecutive} times in a row with no \
-             progress. If one of the listed tasks is your own and you're genuinely blocked on \
-             something outside your control, run `llmenv task wait <slug> \"<reason>\"` — that \
-             silences this nag until the blocker clears, instead of being told to \"keep \
-             working\" every single turn. If none of the listed tasks are yours (a different, \
-             possibly still-active session owns them), this repeat is expected and needs no \
-             action from you — it clears on its own once that session updates or closes them."
+             progress. If a listed task is your own, run `llmenv task start <slug>` to work on \
+             it, or `llmenv task wait <slug> \"<reason>\"` if you are blocked on something \
+             outside your control — that silences this nag until the blocker clears. If none \
+             of the listed tasks are yours (a different, possibly still-active session owns \
+             them), this repeat is expected and needs no action from you — it clears on its \
+             own once that session updates or closes them."
         )
     } else {
         reminder.to_string()
