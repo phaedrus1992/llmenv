@@ -23,7 +23,7 @@ The full-sweep job has the same problem, and when it is skipped its name shows t
 | The sweep job has a literal `shard: [0, 1, 2, 3, 4, 5, 6, 7]`, name `mutants (full sweep, shard ${{ matrix.shard }}/8)`, and runs `--shard ${{ matrix.shard }}/8` | `.github/workflows/mutants.yml` |
 | A comment in the workflow already explains why the list is zero-indexed (shard `8/8` failed once) | `.github/workflows/mutants.yml` |
 | Workflow tests live in `.github/workflows/__tests__/` (one shell test file for the forward-merge guards); the plan script has no test today | `.github/workflows/__tests__/` |
-| `actionlint` and `zizmor` are the repo's workflow linters (CLAUDE.md) | tooling |
+| `actionlint` and `zizmor` are the repo's workflow linters (the maintainer tool standards; this repo has no CLAUDE.md) | tooling |
 
 ## Decisions
 

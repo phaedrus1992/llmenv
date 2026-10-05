@@ -1,5 +1,7 @@
 pub(crate) use llmenv_util::normalize_yaml;
-pub use llmenv_util::{dedup, escape_control, merge_json, merge_yaml, strip_unsafe_chars};
+pub use llmenv_util::{
+    dedup, escape_control, expand_env_refs, merge_json, merge_yaml, strip_unsafe_chars,
+};
 
 /// Escape every C0/C1 control character in `s` (`char::is_control`) so it's
 /// safe to print verbatim to a terminal (#1076). Config-derived strings

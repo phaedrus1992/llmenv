@@ -5,7 +5,7 @@
 - **Base branch:** `release/3.x` (forward-merges to `release/4.x`)
 - **Type:** feature (hook-run side effect, one new hook event, one new section in `task session summary`)
 - **Related:** #2339 (resume context on sessions and tasks, shipped), #2142 (SessionStart context, shipped)
-- **Report:** `docs/reference/pi-durable-evaluation.md` §4 (multi-project row), §9 item 6
+- **Report:** the pi-durable evaluation report (`docs/reference/pi-durable-evaluation.md` on `main` only; it is not on `release/3.x`) §4 (multi-project row), §9 item 6
 
 This is a spec, not a plan.
 
@@ -161,3 +161,9 @@ Serialization of the document is the only file format; keep it stable, since a h
 - Timestamps are `i64` Unix seconds, to match `session_state::unix_now`.
 - The resume line uses the document that `SessionStart` has just written, not the stored copy, so it shows the current model and scope.
 - `AgentConfig::running_as` renders the `task session summary` line.
+- A `SessionStart` write replaces the file but keeps `created_at` and `model_history`.
+- The functions are `record_for_event` (writes for `SessionStart` and returns the resume line), `record_model_switch`, `write_session_start`, `load`, and `from_scope_context(ctx, &StartFacts)`.
+  `StartFacts` carries engine, model, effort, config hash, source, and time.
+- A model switch that carries `effort` replaces the stored level, because the old level belongs to the old model.
+- Model and effort strings from the hook input lose control and invisible characters and stop at 200 characters before they reach the file or the agent context.
+- `Session.owner_session` is read by `session_summary`, which fills `SessionSummary.agent` from the owner's file.

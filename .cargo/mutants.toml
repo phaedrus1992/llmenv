@@ -30,6 +30,8 @@ exclude_re = [
   # Reads the user's config and calls ICM, so a unit test cannot run it. Its pieces
   # (store_once, the checkpoint settling in run_icm_store_with) are tested (#2396).
   "replace run_icm_store_inner -> anyhow::Result<\\(\\)> with Ok\\(\\(\\)\\)",
+  # An empty list and a list of several entries differ only in a debug log line.
+  "delete match arm \\[\\] in run_inner",
   # Returns no state dir under `cfg!(test)` on purpose, so that a unit test that spawns a
   # detached child never writes into the user's state dir. The production branch is one call.
   "replace spawner_state_dir",

@@ -1,3 +1,5 @@
+<!-- markdownlint-disable MD013 -->
+
 # Concepts
 
 llmenv resolves your environment through one fixed pipeline:
@@ -125,7 +127,7 @@ The Claude Code adapter writes `CLAUDE.md` (rules) and `settings.json`
 resolved MCP servers into the `mcpServers` object of `.claude.json` (preserving
 any foreign keys the user or plugins wrote there). It then returns the env vars
 that point the agent at the directory (`CLAUDE_CONFIG_DIR`). It also registers a `SessionStart` hook running
-`llmenv check-stale`, which compares the content hash recorded in the booted
+`llmenv hook-run session_start`. Its drift check (the same one `llmenv check-stale` runs; folded into this hook in v3.11.0) compares the content hash recorded in the booted
 folder's `.llmenv-manifest.json` against the hash llmenv would render now and
 warns you to restart when they differ. This is what surfaces an in-place
 re-render in `version` mode, where the folder name alone never changes.

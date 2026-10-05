@@ -86,13 +86,17 @@ fn load_config() -> anyhow::Result<(std::path::PathBuf, crate::config::Config)> 
     Ok((config_path, config))
 }
 
-/// Refuse to prune when `memory.retention` is set: its per-type durations need
-/// each record's age and type, which the ICM recall output does not carry.
-fn ensure_retention_unset(config: &crate::config::Config) -> anyhow::Result<()> {
-    let configured = config
-        .features
-        .as_ref()
-        .is_some_and(|f| f.memory.iter().any(|m| m.retention.is_some()));
+/// Refuse to prune when the active memory entry sets `retention`: its per-type durations need
+/// each record's age and type, which the ICM recall output does not carry. `memory` is the
+/// merged list of top-level and bundle-declared entries, the list that picks the server.
+fn ensure_retention_unset(
+    memory: &[crate::config::Memory],
+    active_tags: &std::collections::BTreeSet<String>,
+) -> anyhow::Result<()> {
+    let configured = memory
+        .iter()
+        .find(|m| crate::mcp::resolve::memory_is_tag_active(m, active_tags))
+        .is_some_and(|m| m.retention.is_some());
     if configured {
         anyhow::bail!(
             "memory prune cannot apply `memory.retention`: ICM's recall output has no \
@@ -155,10 +159,15 @@ fn parse_recall_output(text: &str) -> Vec<MemoryRecord> {
     // `has_weight` guards against partial records: we only finalize a record
     // once both importance and weight have been seen.
     let mut has_weight = false;
+    let mut weight_seen = false;
 
+    // A record header starts at column 0, and the fields of a record are indented. Memory
+    // content is free text, so a line inside it must not forge a header: only an unindented
+    // header counts. The first `importance` and `weight` of a record win, so a later line in
+    // the summary cannot change them.
     for line in text.lines() {
         let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("--- ") {
+        if let Some(rest) = line.strip_prefix("--- ") {
             // new record start: "--- <id> ---"
             if let Some(id) = rest.strip_suffix(" ---") {
                 // Finalize previous record
@@ -168,11 +177,17 @@ fn parse_recall_output(text: &str) -> Vec<MemoryRecord> {
                     records.push(MemoryRecord { id, importance });
                 }
                 has_weight = false;
+                weight_seen = false;
                 current_id = Some(id.to_string());
             }
         } else if let Some(rest) = trimmed.strip_prefix("importance:") {
-            current_importance = Some(Importance::from_str(rest));
-        } else if let Some(rest) = trimmed.strip_prefix("weight:") {
+            if current_importance.is_none() {
+                current_importance = Some(Importance::from_str(rest));
+            }
+        } else if let Some(rest) = trimmed.strip_prefix("weight:")
+            && !weight_seen
+        {
+            weight_seen = true;
             has_weight = rest.trim().parse::<f64>().is_ok();
         }
     }
@@ -187,18 +202,44 @@ fn parse_recall_output(text: &str) -> Vec<MemoryRecord> {
     records
 }
 
+/// The recall arguments for the records to prune: the project's own, at most [`RECALL_LIMIT`].
+/// Prune forgets what it reads, so a folder with no known project is an error: without a project
+/// filter ICM would answer with the records of its own working folder.
+///
+/// # Errors
+/// `project` is `None`.
+fn recall_args(project: Option<&str>) -> anyhow::Result<serde_json::Value> {
+    let project = project.ok_or_else(|| {
+        anyhow::anyhow!(
+            "memory prune cannot tell the project of this folder, and it forgets what it reads. \
+             Run it inside a git repository or a project folder. Nothing was forgotten."
+        )
+    })?;
+    Ok(serde_json::json!({ "query": "", "limit": RECALL_LIMIT, "project": project }))
+}
+
+/// The most records one prune pass reads.
+const RECALL_LIMIT: u32 = 100;
+
 /// Run the prune pass: query ICM, evaluate candidates, forget if not dry-run.
 ///
 /// `dry_run` when true prints what would be pruned without making forget
 /// calls. Returns a [`PruneResult`] with counts.
 pub(crate) fn run(dry_run: bool) -> anyhow::Result<PruneResult> {
     let (config_path, config) = load_config()?;
-    ensure_retention_unset(&config)?;
+    let config_dir = config_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
+    let active = crate::scope::evaluate(&config, &crate::scope::matcher::Env::detect());
+    let merged = crate::memory::merged_memory(&config, config_dir, &active)?;
+    ensure_retention_unset(&merged.memory, &active.tags)?;
     let client = connect(&config_path, &config)?;
+    let cwd = std::env::current_dir().ok();
+    let project = cwd.as_deref().and_then(super::project::session_project);
     let output = call_tool_blocking(
         client.clone(),
         "icm_memory_recall",
-        serde_json::json!({ "query": "", "limit": 100 }),
+        recall_args(project.as_deref())?,
     )?;
 
     let records = parse_recall_output(&output);
@@ -314,9 +355,9 @@ pub(crate) fn auto_prune_if_enabled(config: &crate::config::Config) {
                 result.total
             );
         }
-        Err(e) => {
-            tracing::warn!("auto_prune: prune pass failed (fail-soft): {e}");
-        }
+        // `tracing` warnings are off at the default log level, and the user must learn that
+        // the configured prune did not run.
+        Err(e) => eprintln!("warning: auto_prune did not run: {e:#}"),
     }
 }
 
@@ -329,18 +370,42 @@ mod tests {
         serde_yaml::from_str(&format!("features:\n  memory:\n    - {memory_yaml}\n")).unwrap()
     }
 
+    fn tags(names: &[&str]) -> std::collections::BTreeSet<String> {
+        names.iter().map(|n| (*n).to_string()).collect()
+    }
+
     #[test]
-    fn configured_retention_blocks_prune() {
-        let config = config_with("{server_host: h, port: 1, retention: {episodic: 1d}}");
-        let err = ensure_retention_unset(&config).unwrap_err().to_string();
+    fn prune_reads_one_project_and_refuses_when_it_cannot_tell_which() {
+        let args = recall_args(Some("llmenv")).unwrap();
+        assert_eq!(args["project"], "llmenv");
+        assert_eq!(args["limit"], 100);
+        let err = recall_args(None).unwrap_err().to_string();
         assert!(err.contains("Nothing was forgotten"), "{err}");
     }
 
     #[test]
+    fn configured_retention_blocks_prune() {
+        let config = config_with("{server_host: h, port: 1, when: [t], retention: {episodic: 1d}}");
+        let memory = &config.features.as_ref().unwrap().memory;
+        let err = ensure_retention_unset(memory, &tags(&["t"]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Nothing was forgotten"), "{err}");
+    }
+
+    #[test]
+    fn retention_on_an_inactive_entry_does_not_block_prune() {
+        let config = config_with("{server_host: h, port: 1, when: [t], retention: {episodic: 1d}}");
+        let memory = &config.features.as_ref().unwrap().memory;
+        ensure_retention_unset(memory, &tags(&["other"])).unwrap();
+    }
+
+    #[test]
     fn absent_retention_allows_prune() {
-        let config = config_with("{server_host: h, port: 1}");
-        ensure_retention_unset(&config).unwrap();
-        ensure_retention_unset(&crate::config::Config::default()).unwrap();
+        let config = config_with("{server_host: h, port: 1, when: [t]}");
+        let memory = &config.features.as_ref().unwrap().memory;
+        ensure_retention_unset(memory, &tags(&["t"])).unwrap();
+        ensure_retention_unset(&[], &tags(&["t"])).unwrap();
     }
 
     #[test]
@@ -389,5 +454,50 @@ mod tests {
         let text = "--- id-1 ---\n  importance: low\n  weight: not-a-number\n  topic: test\n";
         let records = parse_recall_output(text);
         assert_eq!(records.len(), 0);
+    }
+
+    #[test]
+    fn a_line_in_the_summary_cannot_forge_a_record() {
+        let text = "--- real ---\n  importance: high\n  weight: 0.9\n  summary: x\n  --- victim ---\n  importance: low\n  weight: 0.1\n";
+        let records = parse_recall_output(text);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, "real");
+        assert_eq!(records[0].importance, Importance::High);
+    }
+
+    #[test]
+    fn the_first_importance_and_weight_of_a_record_win() {
+        let text = "--- r ---\n  importance: critical\n  weight: 0.9\n  summary: s\n  importance: low\n  weight: nope\n";
+        let records = parse_recall_output(text);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].importance, Importance::Critical);
+    }
+
+    mod props {
+        use super::super::parse_recall_output;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn parsing_arbitrary_text_never_panics_and_yields_ids_from_the_text(
+                text in "[ -~\n]{0,300}",
+            ) {
+                let records = parse_recall_output(&text);
+                let starts = text.lines().filter(|l| l.trim().starts_with("--- ")).count();
+                prop_assert!(records.len() <= starts);
+                for record in &records {
+                    prop_assert!(text.contains(&record.id));
+                }
+            }
+
+            #[test]
+            fn a_record_without_a_numeric_weight_is_dropped(
+                id in "[a-z0-9]{1,12}",
+                weight in "[a-z]{1,6}",
+            ) {
+                let text = format!("--- {id} ---\nimportance: high\nweight: {weight}\n");
+                prop_assert!(parse_recall_output(&text).is_empty());
+            }
+        }
     }
 }

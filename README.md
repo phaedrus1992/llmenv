@@ -122,7 +122,9 @@ and plugins activate automatically.
 | `llmenv memory stats\|list\|diff\|prune` | Inspect ICM memory state |
 | `llmenv check-stale [--auto-fix]` | Warn if the running agent's config has drifted |
 | `llmenv prune [--all] [--older-than DUR] [--dry-run]` | Clean stale cache folders |
-| `llmenv doctor [--gc] [--all]` | Validate wiring; optionally garbage-collect the cache |
+| `llmenv doctor [--gc] [--all] [--probe-mcp] [--restart-memory-proxy]` | Validate wiring (and more) |
+| `llmenv task <subcommand>` | Track tasks in a session that survives `/clear` and `/compact` |
+| `llmenv sync` | Sync the config with GitHub (git add, commit, push) |
 
 Every command accepts `--color <auto\|always\|never>`. Run `llmenv <command> --help`
 for full flag details. Per-command reference: [Commands](https://phaedrus1992.github.io/llmenv/docs/commands).
@@ -145,9 +147,10 @@ See [MCP & Memory](https://phaedrus1992.github.io/llmenv/docs/mcp) for the `LLME
 
 ## Supported agents
 
-llmenv emits agent-native config through pluggable adapters. The current adapter
-surface targets **Claude Code** (`CLAUDE.md`, `settings.json`, `.claude.json`
-`mcpServers`, hooks, permissions, plugins). The capability model is engine-neutral, with a
+llmenv emits agent-native config through pluggable adapters. Three adapters ship:
+**Claude Code** (`CLAUDE.md`, `settings.json`, `.claude.json`
+`mcpServers`, hooks, permissions, plugins), **opencode**, and **Crush**. Each
+adapter runs only when its binary is on `PATH`. The capability model is engine-neutral, with a
 per-engine `native` escape hatch for keys that have no portable equivalent — see
 [Engines](https://phaedrus1992.github.io/llmenv/docs/engines).
 
@@ -209,7 +212,7 @@ Agent instructions for this repo are in AGENTS.md; Claude Code 2.1.277 or later 
 
 llmenv follows [Semantic Versioning](https://semver.org/) and a
 [Keep a Changelog](https://keepachangelog.com/) changelog. A version exists only
-once it is git-tagged — see [CHANGELOG.md](CHANGELOG.md) and the
+once it is git-tagged — see the [changelog](https://phaedrus1992.github.io/llmenv/docs/changelog) and the
 [releases page](https://github.com/phaedrus1992/llmenv/releases) for what has
 shipped.
 

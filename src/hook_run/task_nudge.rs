@@ -398,7 +398,11 @@ pub(crate) fn handle_pre_tool_use(
     if !runs_commit_or_pr(command) {
         return String::new();
     }
-    let Some(path) = session_id.and_then(|id| state_path(state_dir, id)) else {
+    let Some(id) = session_id else {
+        return String::new();
+    };
+    let Some(path) = state_path(state_dir, id) else {
+        tracing::error!("task commit gate off: the session id is not a plain name");
         return String::new();
     };
     let tracking = crate::task::tracking(state_dir);
@@ -406,11 +410,19 @@ pub(crate) fn handle_pre_tool_use(
         return String::new();
     };
     match tracking {
-        Tracking::Unknown => String::new(),
+        Tracking::Unknown => {
+            tracing::error!("task commit gate off: the task store cannot be read");
+            String::new()
+        }
         Tracking::Tracked { wip: Some(_), .. } => {
             if state.commit_denied {
                 state.commit_denied = false;
-                save(&path, &state);
+                if !save(&path, &state) {
+                    tracing::error!(
+                        "task commit gate: cannot clear the deny marker, so the next commit \
+                         passes without a task check"
+                    );
+                }
             }
             String::new()
         }
@@ -675,14 +687,20 @@ mod tests {
                 .contains("llmenv task start")
         );
         start_task(dir.path(), &slug, false).unwrap();
-        assert_eq!(
-            handle_pre_tool_use(&tracker, &bash("git commit"), Some("s1"), dir.path()),
-            ""
-        );
+        let logs = crate::test_log_capture::capture_logs(|| {
+            assert_eq!(
+                handle_pre_tool_use(&tracker, &bash("git commit"), Some("s1"), dir.path()),
+                ""
+            );
+        });
         assert!(
             !load(&state_path(dir.path(), "s1").unwrap())
                 .unwrap()
                 .commit_denied
+        );
+        assert!(
+            !logs.contains("deny marker"),
+            "a saved marker logs nothing: {logs}"
         );
     }
 
@@ -800,6 +818,18 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn nudge_state_survives_a_json_roundtrip(
+            calls in any::<u32>(),
+            last_nudge in any::<u32>(),
+            skill_reminded in any::<bool>(),
+            commit_denied in any::<bool>(),
+        ) {
+            let state = NudgeState { calls, last_nudge, skill_reminded, commit_denied };
+            let json = serde_json::to_string(&state).unwrap();
+            prop_assert_eq!(serde_json::from_str::<NudgeState>(&json).unwrap(), state);
+        }
+
         #[test]
         fn a_command_without_commit_or_pr_create_is_never_matched(command in "[a-z0-9 -;|&\n]{0,60}") {
             prop_assume!(!command.contains("commit") && !command.contains("pr create"));

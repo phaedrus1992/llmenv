@@ -21,7 +21,7 @@ Codex also takes `-c`/`--config key=value` for one-off TOML overrides
 ## Gaps vs llmenv
 
 The key adapter decision is the **`CODEX_HOME` analog of
-`CLAUDE_CONFIG_DIR`**. `ClaudeCodeAdapter::env_vars` (`src/adapter/claude_code.rs:28`)
+`CLAUDE_CONFIG_DIR`**. `ClaudeCodeAdapter::env_vars` (`src/adapter/claude_code/mod.rs:28`)
 sets `CLAUDE_CONFIG_DIR` to the managed dir it materializes into. A `CodexAdapter`
 would do the equivalent: set `CODEX_HOME` to its managed directory and write
 `config.toml` + `AGENTS.md` there.

@@ -88,7 +88,7 @@ walk it test by test and port or explicitly skip each with a reason).
 
 Wire `llmenv hook-run --engine codex <event>` dispatch: add the engine's
 event-name mapping alongside the claude_code table
-(`src/adapter/claude_code.rs:45–90` pattern), map Codex's equivalents of
+(`src/adapter/claude_code/mod.rs:45–90` pattern), map Codex's equivalents of
 session-start/prompt-submit to the existing `HookEvent`s, and register
 the hooks in Codex's config. The `hook_run` handlers themselves are
 engine-agnostic already — this phase is mapping + registration only.

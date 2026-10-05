@@ -1,7 +1,7 @@
 # Issue #2155 — opt-in codebase-memory search-augment hooks for Claude Code
 
 - **Issue:** https://github.com/phaedrus1992/llmenv/issues/2155
-- **Milestone:** `v3.12.0`
+- **Milestone:** `v3.13.0` (moved from `v3.12.0`; this design is not implemented on `release/3.x`)
 - **Base branch:** `release/3.x` (forward-merges to `release/4.x`)
 - **Type:** feature
 
@@ -29,9 +29,9 @@ llmenv did not render either, and a later `llmenv regenerate` can drop or duplic
 | Fact | Location |
 | --- | --- |
 | `CodebaseMemory { when, index_path, mcp_permissions }` (plus `mem_budget_mb` from #2154) | `crates/llmenv-config/src/schema.rs` line 1407 |
-| Claude hook rendering builds `hooks_by_event` and appends llmenv's own hooks | `src/adapter/claude_code.rs` near lines 1221 to 1310 |
-| The cbm entry is found in the manifest with `m.name == CODEBASE_MEMORY_MCP_NAME` | `src/adapter/claude_code.rs` near line 1695 |
-| `hooks` is reconciled so plugin-registered hooks survive a render | `reconcile_settings`, `src/adapter/claude_code.rs` near line 2168 |
+| Claude hook rendering builds `hooks_by_event` and appends llmenv's own hooks | `src/adapter/claude_code/mod.rs` near lines 1221 to 1310 |
+| The cbm entry is found in the manifest with `m.name == CODEBASE_MEMORY_MCP_NAME` | `src/adapter/claude_code/mod.rs` near line 1695 |
+| `hooks` is reconciled so plugin-registered hooks survive a render | `reconcile_settings`, `src/adapter/claude_code/mod.rs` near line 2168 |
 
 ## Decisions
 

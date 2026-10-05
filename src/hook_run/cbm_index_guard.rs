@@ -37,6 +37,16 @@ pub(crate) fn handle_roots(
     stdin_payload: &serde_json::Value,
     config: &crate::config::Config,
 ) -> String {
+    // The hook runs in the project folder, as the SessionStart index does.
+    handle_roots_in(stdin_payload, config, std::env::current_dir())
+}
+
+/// [`handle_roots`] with the session folder given, so a test needs no change of the process folder.
+fn handle_roots_in(
+    stdin_payload: &serde_json::Value,
+    config: &crate::config::Config,
+    session_folder: std::io::Result<std::path::PathBuf>,
+) -> String {
     if stdin_payload.get("tool_name").and_then(|v| v.as_str()) != Some(INDEX_REPOSITORY_TOOL) {
         return String::new();
     }
@@ -48,12 +58,15 @@ pub(crate) fn handle_roots(
     else {
         return String::new();
     };
-    // The hook runs in the project folder, as the SessionStart index does.
-    let project_root = match std::env::current_dir() {
+    let project_root = match session_folder {
         Ok(dir) => dir,
+        // The guard denies a call outside the allowed roots, so a folder that cannot be read
+        // denies too. An allow here would open the guard on the one input it cannot check.
         Err(e) => {
-            tracing::warn!("codebase-memory root guard skipped: cannot read the folder: {e}");
-            return String::new();
+            return format!(
+                "__DENY__:cannot check {repo_path} against the codebase-memory allowed roots: \
+                 the session folder cannot be read: {e}"
+            );
         }
     };
     llmenv_mcp::cbm_roots::guard_decision(repo_path, config, &project_root)
@@ -277,6 +290,20 @@ mod tests {
         // Another tool is never guarded.
         let other = payload("Bash", serde_json::json!({ "repo_path": "/usr" }));
         assert_eq!(handle_roots(&other, &config), "");
+    }
+
+    #[test]
+    fn the_roots_guard_denies_when_the_session_folder_cannot_be_read() {
+        let cache = tempfile::tempdir().unwrap();
+        let config = config_with_entry(cache.path());
+        let call = payload(
+            INDEX_REPOSITORY_TOOL,
+            serde_json::json!({ "repo_path": "/usr" }),
+        );
+        let unreadable = Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        let out = handle_roots_in(&call, &config, unreadable);
+        assert!(out.starts_with("__DENY__:"), "{out:?}");
+        assert!(out.contains("cannot be read"), "{out:?}");
     }
 
     #[test]

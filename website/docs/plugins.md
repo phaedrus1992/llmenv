@@ -1,3 +1,5 @@
+<!-- markdownlint-disable MD013 -->
+
 # Plugins & Marketplaces
 
 llmenv can wire agent plugins into the materialized config. Plugins are sourced
@@ -22,9 +24,22 @@ The `source` is classified automatically:
 
 | Source form | Classified as | Behavior |
 | ------------- | -------------- | ---------- |
-| `https://`, `http://`, `ssh://`, `git://`, `git+ssh://` | git | Cloned into the cache |
+| `https://`, `ssh://`, `git+ssh://` | git | Cloned into the cache |
+| `http://`, `git://`, `file:`, `<helper>::<address>`, `ext::...` | git | Rejected when the clone starts (see below) |
 | `git@host:owner/repo` (scp-style) | git | Cloned into the cache |
 | `/abs`, `~/path`, `./rel`, `../rel`, bare relative | path | Used in place |
+
+`http://` and `git://` are plaintext and unauthenticated.
+A `<helper>::` source runs a `git-remote-<helper>` program.
+llmenv rejects all of these, and a source that starts with `-`, with an error that names the source.
+(changed in v3.12.0) `git://` and the `<helper>::` form are now rejected for plugin sources in a marketplace manifest, as `ext::` and `http://` were before.
+
+A git marketplace `source` can end in `#<ref>` to pin a branch, tag, or commit.
+A pinned source is never pulled.
+`plugin-sync` re-clones it, so a changed `#<ref>` takes effect on the next sync.
+(changed in v3.12.0) The re-clone goes into a staging folder first.
+llmenv swaps it into place only after the clone succeeds, and it puts the old clone back if the swap fails.
+A failed sync leaves the working clone as it was.
 
 Git marketplaces are cloned once into `<cache_dir>/marketplaces/<name>/`, shared
 across every scope, and refreshed by [`plugin-sync`](#syncing). The resolved git
@@ -50,7 +65,8 @@ llmenv reads these forms:
 
 `url`, `github`, and `git-subdir` sources accept a `ref` and a `sha`.
 A `git-subdir` `url` is a clone URL or `owner/name`.
-A `sha` must be a full commit id (40 hex digits).
+A `sha` must be a full commit id (40 hex digits, or 64 in a SHA-256 repo).
+A `sha` or `ref` that is not a string is an error, not an unpinned clone.
 llmenv fetches that one commit, so the plugin does not move when the branch does.
 When an object has a `sha` and a `ref`, the `sha` wins.
 A `ref` selects a branch or tag, and no pin uses the default branch.
@@ -99,14 +115,15 @@ llmenv plugin-sync
 ```
 
 Clones any missing git marketplaces and fast-forwards those already present.
+A marketplace or plugin source with a pin (`#<ref>`, `ref`, or `sha`) is re-cloned instead of pulled.
 Run it after adding a marketplace or to pull upstream plugin updates. Local-path
 marketplaces are skipped (they're read in place).
 
 ## Inspecting
 
 ```bash
-llmenv marketplace-ls    # marketplaces, marking those referenced by selected plugins
-llmenv plugin-ls         # plugins, marking those the active scope selects
+llmenv status marketplaces    # marketplaces, marking those referenced by selected plugins
+llmenv status plugins         # plugins, marking those the active scope selects
 ```
 
 `llmenv doctor` flags plugin orphans: a collection no scope can select, a

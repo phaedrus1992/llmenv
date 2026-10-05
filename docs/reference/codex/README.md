@@ -12,7 +12,7 @@ much detail. Each page ends with a **Gaps vs llmenv** section.
 ## The greenfield framing
 
 **llmenv has no Codex adapter today.** The only adapter is
-`ClaudeCodeAdapter` (`src/adapter/claude_code.rs`). So unlike the Claude Code
+`ClaudeCodeAdapter` (`src/adapter/claude_code/mod.rs`). So unlike the Claude Code
 reference — where "gaps" means "what the existing adapter stubs or skips" — the
 Codex gaps describe **what a future `CodexAdapter` would have to generate from
 scratch**.
