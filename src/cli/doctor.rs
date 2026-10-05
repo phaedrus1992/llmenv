@@ -1746,8 +1746,9 @@ pub(super) fn run_doctor(
     run_doctor_icm_server(use_color, &config, &config_dir, &active);
     run_doctor_mcp_servers(use_color, &config, &config_dir, &active);
     cbm_index::run_doctor_cbm_index(use_color, &config, &active);
-    if let Ok(state_dir) = crate::paths::state_dir() {
-        background::run_doctor_checkpoints(use_color, &state_dir);
+    match crate::paths::state_dir() {
+        Ok(state_dir) => background::run_doctor_checkpoints(use_color, &state_dir),
+        Err(e) => eprintln!("{warn} background work: cannot resolve the state folder: {e:#}"),
     }
 
     // When context-mode is enabled, verify the marketplace clone exists so
