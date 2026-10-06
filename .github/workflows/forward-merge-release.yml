@@ -109,6 +109,10 @@ jobs:
             echo "ref=$source_branch" >> "$GITHUB_OUTPUT"
           fi
 
+      # The ref is validated above to release/X.x or main, so this step never checks out
+      # code from a pull request. The cascade needs the credential for fetch and push, so
+      # persist-credentials stays true. CodeQL alert actions/untrusted-checkout (#2475)
+      # is dismissed on that basis.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
