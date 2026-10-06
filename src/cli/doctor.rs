@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 mod autocompact;
 mod background;
 mod cbm_index;
+mod cleartext;
 mod instruction_size;
 mod mcp_text;
 mod task_text;
@@ -1745,6 +1746,15 @@ pub(super) fn run_doctor(
     run_doctor_dependent_tools(use_color);
     run_doctor_icm_server(use_color, &config, &config_dir, &active);
     run_doctor_mcp_servers(use_color, &config, &config_dir, &active);
+    cleartext::run_doctor_cleartext(
+        use_color,
+        &config,
+        &config_dir,
+        &active,
+        doctor_manifest
+            .as_ref()
+            .map_or(&[][..], |(m, _)| m.capabilities.mcp.as_slice()),
+    );
     cbm_index::run_doctor_cbm_index(use_color, &config, &active);
     match crate::paths::state_dir() {
         Ok(state_dir) => background::run_doctor_checkpoints(use_color, &state_dir),

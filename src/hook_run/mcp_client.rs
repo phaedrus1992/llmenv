@@ -10,6 +10,8 @@ use anyhow::{Context, anyhow};
 use serde_json::{Value, json};
 use url::{Host, Url};
 
+use crate::mcp::cleartext::{embedded_ipv4, is_cleartext_safe, is_unique_local_v6};
+
 /// Which address ranges [`validate_url_production`] allows past the SSRF gate.
 ///
 /// The gate is shared by two callers with different trust models: llmenv's own
@@ -612,33 +614,6 @@ fn blocked_reason(ip: &IpAddr, policy: SsrfPolicy) -> Option<&'static str> {
     }
 }
 
-/// The IPv4 address that an IPv6 address wraps, if any: IPv4-mapped (`::ffff:a.b.c.d`),
-/// IPv4-compatible (`::a.b.c.d`), NAT64 (`64:ff9b::/96`), and 6to4 (`2002::/16`).
-///
-/// A NAT64 gateway or a 6to4 relay forwards such an address to the wrapped IPv4 host, so
-/// the SSRF gate must judge the wrapped address, not the IPv6 wrapper (#2476).
-fn embedded_ipv4(v6: &std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
-    let seg = v6.segments();
-    let low = |hi: u16, lo: u16| {
-        std::net::Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8)
-    };
-    if let Some(mapped) = v6.to_ipv4_mapped() {
-        return Some(mapped);
-    }
-    // `::` and `::1` have an all-zero prefix too, but they are the unspecified and loopback
-    // addresses, not wrapped IPv4 addresses.
-    if seg[..6].iter().all(|&s| s == 0) && !v6.is_unspecified() && !v6.is_loopback() {
-        return Some(low(seg[6], seg[7]));
-    }
-    if seg[0] == 0x0064 && seg[1] == 0xff9b && seg[2..6].iter().all(|&s| s == 0) {
-        return Some(low(seg[6], seg[7]));
-    }
-    if seg[0] == 0x2002 {
-        return Some(low(seg[1], seg[2]));
-    }
-    None
-}
-
 /// Resolve `(host, port)` to socket addresses, bounded by `timeout`.
 ///
 /// `ToSocketAddrs::to_socket_addrs()` is a blocking syscall with no timeout of
@@ -649,7 +624,7 @@ fn embedded_ipv4(v6: &std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
 /// dedicated thread; on timeout the thread is abandoned rather than joined —
 /// it dies with the process (these are short-lived CLI invocations), and
 /// there is no portable way to cancel a blocked `getaddrinfo()` call.
-fn resolve_with_timeout(
+pub(crate) fn resolve_with_timeout(
     host: &str,
     port: u16,
     timeout: Duration,
@@ -696,12 +671,6 @@ where
 
 /// Whether an IPv6 address falls in the Unique Local Address range `fc00::/7`.
 ///
-/// `Ipv6Addr::is_unique_local` is unstable, so test the prefix directly: the
-/// top seven bits are `1111110`, i.e. the first byte is `0xfc` or `0xfd` (#191).
-fn is_unique_local_v6(v6: &std::net::Ipv6Addr) -> bool {
-    (v6.octets()[0] & 0xfe) == 0xfc
-}
-
 /// The URL without credentials, query string, or fragment, for error text that reaches a
 /// terminal.
 fn redact_url(url: &str) -> String {
@@ -715,23 +684,6 @@ fn redact_url(url: &str) -> String {
             u.to_string()
         },
     )
-}
-
-/// Whether a bearer token or memory payload may cross the network in clear text to `ip`.
-///
-/// Loopback, private, unique-local, and CGNAT (100.64.0.0/10, used by Tailscale) addresses
-/// count as the operator's own network. Everything else is public.
-fn is_cleartext_safe(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            let cgnat = v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 0x40;
-            v4.is_loopback() || v4.is_private() || cgnat
-        }
-        IpAddr::V6(v6) => match embedded_ipv4(v6) {
-            Some(wrapped) => is_cleartext_safe(&IpAddr::V4(wrapped)),
-            None => v6.is_loopback() || is_unique_local_v6(v6),
-        },
-    }
 }
 
 /// Refuse `http://` when any vetted address is outside the operator's own network. The
