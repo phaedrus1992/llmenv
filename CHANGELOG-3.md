@@ -97,6 +97,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The MCP HTTP client follows no redirect. Before, it did when no header was set, and a redirect could reach an address that the SSRF check had not approved.
 - A session id that is not a plain name is rejected by the `llmenv task session` commands, so `../x` cannot reach a file outside the session folder.
 - Bidirectional-override and zero-width characters in text from files or the network are escaped before they reach the terminal.
+- The MCP HTTP client refuses a plain `http://` URL that resolves to a public address, so a memory payload or a header token never crosses the internet in clear text. Loopback, private, and Tailscale addresses still work over `http://`. See [MCP security](https://phaedrus1992.github.io/llmenv/docs/mcp#security-considerations) (#2476)
 
 ## [3.11.2] - 2026-09-27
 

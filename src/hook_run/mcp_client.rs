@@ -144,6 +144,7 @@ impl McpHttpClient {
         // send() time, so the connection can only target an address we already approved.
         let (host, addrs) =
             validate_url_production(&url, SsrfPolicy::AllowPrivateNetwork, timeout)?;
+        require_https_for_public(&url, &addrs)?;
         let mut map = reqwest::header::HeaderMap::new();
         for (name, value) in headers {
             let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
@@ -189,16 +190,7 @@ impl McpHttpClient {
     /// The server URL without credentials or a query string, for error text that reaches a
     /// terminal.
     fn display_url(&self) -> String {
-        url::Url::parse(&self.url).map_or_else(
-            |_| "(invalid URL)".to_string(),
-            |mut u| {
-                let _ = u.set_username("");
-                let _ = u.set_password(None);
-                u.set_query(None);
-                u.set_fragment(None);
-                u.to_string()
-            },
-        )
+        redact_url(&self.url)
     }
 
     /// Negotiate an MCP session if one hasn't already been established on this
@@ -681,6 +673,52 @@ where
 /// top seven bits are `1111110`, i.e. the first byte is `0xfc` or `0xfd` (#191).
 fn is_unique_local_v6(v6: &std::net::Ipv6Addr) -> bool {
     (v6.octets()[0] & 0xfe) == 0xfc
+}
+
+/// The URL without credentials, query string, or fragment, for error text that reaches a
+/// terminal.
+fn redact_url(url: &str) -> String {
+    Url::parse(url).map_or_else(
+        |_| "(invalid URL)".to_string(),
+        |mut u| {
+            let _ = u.set_username("");
+            let _ = u.set_password(None);
+            u.set_query(None);
+            u.set_fragment(None);
+            u.to_string()
+        },
+    )
+}
+
+/// Whether a bearer token or memory payload may cross the network in clear text to `ip`.
+///
+/// Loopback, private, unique-local, and CGNAT (100.64.0.0/10, used by Tailscale) addresses
+/// count as the operator's own network. Everything else is public.
+fn is_cleartext_safe(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let cgnat = v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 0x40;
+            v4.is_loopback() || v4.is_private() || cgnat
+        }
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(mapped) => is_cleartext_safe(&IpAddr::V4(mapped)),
+            None => v6.is_loopback() || is_unique_local_v6(v6),
+        },
+    }
+}
+
+/// Refuse `http://` when any vetted address is public. The remote `icm serve` topology
+/// runs on loopback or the operator's LAN, so cleartext stays allowed there (#2476).
+fn require_https_for_public(url: &str, addrs: &[SocketAddr]) -> anyhow::Result<()> {
+    let is_http = Url::parse(url).is_ok_and(|u| u.scheme() == "http");
+    if is_http && let Some(addr) = addrs.iter().find(|a| !is_cleartext_safe(&a.ip())) {
+        return Err(anyhow!(
+            "refusing cleartext http:// to public address {} for {}: use https://",
+            addr.ip(),
+            redact_url(url)
+        ));
+    }
+    Ok(())
 }
 
 /// Validate ICM backend URL to prevent SSRF attacks and return the host string
@@ -1432,10 +1470,76 @@ mod tests {
     #[tokio::test]
     async fn call_tool_errors_on_unreachable() {
         // Valid public IP that should reject (no listening service)
-        let client = McpHttpClient::new("http://8.8.8.8:0".to_string(), Duration::from_millis(200))
-            .expect("valid URL");
+        let client =
+            McpHttpClient::new("https://8.8.8.8:0".to_string(), Duration::from_millis(200))
+                .expect("valid URL");
         let result = client.call_tool("icm_wake_up", serde_json::json!({})).await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn new_rejects_plain_http_to_a_public_address() {
+        let err = McpHttpClient::new("http://8.8.8.8:9092/mcp".into(), Duration::from_secs(2))
+            .expect_err("cleartext to a public address must be refused")
+            .to_string();
+        assert!(err.contains("http://8.8.8.8:9092/mcp"), "{err}");
+        assert!(err.contains("https://"), "{err}");
+    }
+
+    #[test]
+    fn new_error_for_plain_http_hides_credentials_and_query() {
+        let err = McpHttpClient::new(
+            "http://user:pw@8.8.8.8:9/mcp?token=secret".into(),
+            Duration::from_secs(2),
+        )
+        .expect_err("public http")
+        .to_string();
+        assert!(!err.contains("pw") && !err.contains("secret"), "{err}");
+    }
+
+    #[test]
+    fn new_allows_plain_http_to_loopback_and_private_addresses() {
+        for url in [
+            "http://127.0.0.1:9092",
+            "http://[::1]:9092",
+            "http://10.1.2.3:9092",
+            "http://192.168.1.5:9092",
+            "http://172.16.0.9:9092",
+            "http://[fd00::1]:9092",
+            "http://100.64.0.7:9092",
+            "http://localhost:9092",
+        ] {
+            McpHttpClient::new(url.into(), Duration::from_secs(2))
+                .unwrap_or_else(|e| panic!("{url} must be allowed: {e}"));
+        }
+    }
+
+    #[test]
+    fn new_allows_https_to_a_public_address() {
+        McpHttpClient::new("https://8.8.8.8:443/mcp".into(), Duration::from_secs(2))
+            .expect("https to a public address is allowed");
+    }
+
+    #[test]
+    fn new_rejects_a_malformed_url() {
+        assert!(McpHttpClient::new("http//not a url".into(), Duration::from_secs(2)).is_err());
+    }
+
+    #[test]
+    fn cleartext_ok_rejects_cgnat_edges_and_public_ranges() {
+        use std::net::{IpAddr, Ipv4Addr};
+        for ok in [
+            Ipv4Addr::new(100, 64, 0, 1),
+            Ipv4Addr::new(100, 127, 255, 254),
+        ] {
+            assert!(is_cleartext_safe(&IpAddr::V4(ok)), "{ok}");
+        }
+        for bad in [
+            Ipv4Addr::new(100, 63, 255, 255),
+            Ipv4Addr::new(100, 128, 0, 1),
+        ] {
+            assert!(!is_cleartext_safe(&IpAddr::V4(bad)), "{bad}");
+        }
     }
 
     /// Test convenience: `SsrfPolicy::PublicOnly` with a generous timeout,
