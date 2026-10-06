@@ -196,8 +196,12 @@ pub(crate) fn save_task(state_dir: &Path, task: &Task) -> anyhow::Result<()> {
 
 /// Load a single task by its exact slug.
 pub(crate) fn load_task(state_dir: &Path, slug: &str) -> anyhow::Result<Task> {
-    let content = std::fs::read_to_string(task_path(state_dir, slug))?;
-    Ok(serde_json::from_str(&content)?)
+    use anyhow::Context as _;
+    let path = task_path(state_dir, slug);
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("cannot read task '{slug}' at {}", path.display()))?;
+    serde_json::from_str(&content)
+        .with_context(|| format!("task '{slug}' at {} is not valid task JSON", path.display()))
 }
 
 /// List all tasks in the store, tolerating a missing or unreadable store by

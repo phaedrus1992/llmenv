@@ -464,7 +464,7 @@ enum TaskCommand {
     /// `done`. For a single task, `llmenv task start --reopen <id>` reopens and starts it.
     Reopen {
         /// Slugs (or unambiguous slug prefixes) of the done tasks to reopen.
-        #[arg(required = true, num_args = 1..)]
+        #[arg(required = true)]
         ids: Vec<String>,
     },
     /// List tasks. Requires `--session <id>` or `--all` (#1124) — no silent
