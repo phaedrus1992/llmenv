@@ -162,6 +162,22 @@ It moved the file to `settings.json.corrupt` and wrote a new one, and it printed
 Compare the two files, copy any key that you need back into your llmenv config, and delete the `.corrupt` file.
 If llmenv cannot move the file, the render stops and names the file. Fix or remove it, and run `llmenv regenerate`.
 
+## A bundle hook warns that a path is not in the bundle files
+
+(changed in v3.12.0)
+
+A bundle hook command can name a script.
+llmenv copies a script from the bundle to the cache folder and points the command at the copy.
+The warning says the command names a script path that is not in the bundle files, so llmenv did not copy it.
+It names the bundle and the path, and it prints once for each bundle and path.
+
+1. Put the script in the bundle, in a folder such as `hooks/`.
+2. Use a path inside the bundle, such as `bash hooks/guard.sh`.
+
+The warning does not fire for an inline shell command.
+A `/` that is part of shell syntax, such as the jq `//` operator, `2>/dev/null`, or a URL, is not a script path.
+A path in a system folder, such as `/usr/bin/env`, is not a script path either.
+
 ## A task command refuses
 
 (added in v3.12.0)

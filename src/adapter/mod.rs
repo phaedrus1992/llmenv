@@ -1,6 +1,7 @@
 pub mod claude_code;
 pub mod codex;
 pub mod crush;
+pub(crate) mod hook_command;
 pub(crate) mod llmenv_skill;
 pub(crate) mod model_settings;
 pub(crate) mod native_keys;
@@ -8,6 +9,8 @@ pub mod opencode;
 pub(crate) mod output_styles;
 pub(crate) mod skills;
 pub(crate) mod tools;
+
+pub(crate) use hook_command::resolve_bundle_relative_paths;
 
 use std::path::{Path, PathBuf};
 
@@ -669,110 +672,6 @@ pub(crate) fn known_engine_ids() -> Vec<String> {
         .collect()
 }
 
-/// Resolve bundle-relative paths in a hook command string.
-/// Scans whitespace-separated tokens and resolves those containing '/' (but not
-/// starting with '/', '~', '$', or '-') to absolute paths relative to `bundle_dir`.
-///
-/// Shared across adapters: any engine that renders a hook `command` string must
-/// resolve bundle-relative script paths the same way, since a bundle is authored
-/// once and materialized for every engine.
-pub(crate) fn resolve_bundle_relative_paths(command: &str, bundle_dir: &Path) -> Option<String> {
-    let mut resolved = false;
-    let mut result = String::new();
-    for (i, token) in command.split_whitespace().enumerate() {
-        if i > 0 {
-            result.push(' ');
-        }
-        if token.contains('/')
-            && !token.starts_with('/')
-            && !token.starts_with('~')
-            && !token.starts_with('$')
-            && !token.starts_with('-')
-            && !crate::paths::is_unsafe_join_target(token)
-        {
-            let abs_path = bundle_dir.join(token);
-            result.push_str(&abs_path.to_string_lossy());
-            resolved = true;
-        } else {
-            result.push_str(token);
-        }
-    }
-    if resolved { Some(result) } else { None }
-}
-
-/// Rewrite bundle-authored hook commands that reference files copied into the
-/// cache directory, even when the command uses shell variables or absolute
-/// paths that `resolve_bundle_relative_paths` cannot match.
-///
-/// For each whitespace-delimited token that contains `/`, checks whether the
-/// token **ends with** any relative path in `known_files` at a path-component
-/// boundary. When it does, the matched suffix is replaced with
-/// `cache_dir.join(rel)`, re-anchoring the reference to the materialized copy.
-/// When multiple known files match the same token, the **longest** suffix wins.
-/// Tokens that don't match any known file are left untouched.
-///
-/// This handles cases like:
-/// ```text
-/// bash ${HOME}/git/my-llmenv/bundles/base/hooks/guard.sh
-/// ```
-/// where the token `${HOME}/git/my-llmenv/bundles/base/hooks/guard.sh` ends
-/// with `hooks/guard.sh` — a file that was copied into the cache.
-pub(crate) fn resolve_command_paths_against_files(
-    command: &str,
-    cache_dir: &Path,
-    known_files: &std::collections::BTreeMap<PathBuf, PathBuf>,
-) -> Option<String> {
-    // Pre-compute string representations once so the inner loop stays O(1)
-    // per candidate rather than O(files) allocations.
-    // Sort by key length descending so the first filter+max_by_key pass
-    // naturally prefers the longest (most specific) suffix.
-    let mut candidates: Vec<(&Path, String)> = known_files
-        .keys()
-        .map(|k| {
-            let s = k.to_string_lossy().into_owned();
-            (k.as_path(), s)
-        })
-        .collect();
-    candidates.sort_by_key(|(_, b)| std::cmp::Reverse(b.len()));
-
-    let mut resolved = false;
-    let mut result = String::new();
-    for (i, token) in command.split_whitespace().enumerate() {
-        if i > 0 {
-            result.push(' ');
-        }
-        // Unlike resolve_bundle_relative_paths, we never join the token
-        // itself — the join operand is `rel`, a trusted key from known_files.
-        // So is_unsafe_join_target on the token is not needed here; absolute
-        // paths and even `../`-prefixed paths can be safely suffix-matched.
-        if token.contains('/')
-            && let Some((rel, _suffix)) = candidates.iter().find(|(_, s)| {
-                // Require a path-component boundary before the suffix:
-                // the suffix starts at position 0 in the token, or the
-                // character immediately before it is '/'.
-                let prefix_len = token.len().saturating_sub(s.len());
-                token.ends_with(s.as_str())
-                    && (prefix_len == 0 || token.as_bytes().get(prefix_len - 1) == Some(&b'/'))
-            })
-        {
-            // Defense in depth: rel is trusted (it came from a filesystem
-            // walk + strip_prefix), but guard against future changes that add
-            // user-supplied paths to known_files.
-            debug_assert!(
-                !crate::paths::is_unsafe_join_target(rel.to_string_lossy().as_ref()),
-                "known_files key contains traversal: {}",
-                rel.display()
-            );
-            let abs_path = cache_dir.join(rel);
-            result.push_str(&abs_path.to_string_lossy());
-            resolved = true;
-            continue;
-        }
-        result.push_str(token);
-    }
-    if resolved { Some(result) } else { None }
-}
-
 /// The first line of every injected ICM memory block.
 const MEMORY_CONTEXT_HEADER: &str = "[ICM MEMORY CONTEXT (auto-injected)]";
 
@@ -895,8 +794,9 @@ mod tests {
         adapter_for_launch_target, emit_hook_context, engine_id, known_engine_ids,
         lifecycle_event_registered, lifecycle_hook_registrations, modeled_key_redirect,
         overlay_native_json, registered_adapters, remote_transport_type_str,
-        resolve_bundle_relative_paths, resolve_command_paths_against_files, strip_json_nulls,
+        resolve_bundle_relative_paths, strip_json_nulls,
     };
+    use crate::adapter::hook_command::resolve_command_paths_against_files;
     use crate::merge::MergedManifest;
 
     /// Minimal `AgentAdapter` stand-in for testing dispatch logic
@@ -1449,6 +1349,26 @@ mod tests {
         assert!(resolve_bundle_relative_paths("bash ${HOME}/x.sh", dir).is_none());
         assert!(resolve_bundle_relative_paths("bash ~/x.sh", dir).is_none());
         assert!(resolve_bundle_relative_paths("echo hello", dir).is_none());
+    }
+
+    #[test]
+    fn resolve_bundle_relative_paths_leaves_shell_syntax_alone() {
+        let dir = std::path::Path::new("/bundles/foo");
+        for command in [
+            "cargo test 2>/dev/null",
+            "echo hi >out/log.txt",
+            "jq -r '.a // empty'",
+            "echo $(dirname x)/y",
+        ] {
+            assert!(
+                resolve_bundle_relative_paths(command, dir).is_none(),
+                "{command}"
+            );
+        }
+        assert_eq!(
+            resolve_bundle_relative_paths("bash hooks/guard.sh 2>/dev/null", dir),
+            Some("bash /bundles/foo/hooks/guard.sh 2>/dev/null".to_string())
+        );
     }
 
     #[test]
