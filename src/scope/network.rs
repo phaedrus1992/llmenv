@@ -77,7 +77,7 @@ fn gateway_mac_matches(want: &str, env: &Env) -> bool {
 /// Whether any of `addrs` lies inside the CIDR block `cidr`. A block that does not parse
 /// matches nothing; config validation reports it at load time.
 #[must_use]
-pub(crate) fn cidr_matches(cidr: &str, addrs: &[IpAddr]) -> bool {
+fn cidr_matches(cidr: &str, addrs: &[IpAddr]) -> bool {
     cidr.parse::<ipnet::IpNet>()
         .is_ok_and(|net| addrs.iter().any(|a| net.contains(a)))
 }
