@@ -1313,9 +1313,10 @@ fn idle_reminder_lines(state_dir: &Path, project: &str) -> String {
             format!(
                 "Session '{label}' ({id}) has {count} open task(s) and none in progress. If \
                  you recognize this as your own session, run `llmenv task start {next}` \
-                 ({title}) before you work on that step. The session cannot be closed while \
-                 any task is open. If you don't recognize it, it belongs to a different \
-                 session — leave it alone.",
+                 ({title}) before you work on that step. If that step needs the user or an \
+                 outside event first, run `llmenv task wait {next} \"<reason>\"` instead. \
+                 The session cannot be closed while any task is open. If you don't \
+                 recognize it, it belongs to a different session — leave it alone.",
                 count = idle.open_count,
                 next = idle.next.slug,
                 title = idle.next.title,
@@ -2923,6 +2924,23 @@ mod tests {
         assert!(
             reminder.contains("recognize"),
             "must not presume ownership: {reminder}"
+        );
+    }
+
+    // #2468: the first idle reminder must already offer `wait`, for a step that needs the user.
+    #[test]
+    fn first_idle_reminder_offers_start_and_wait() {
+        let dir = TempDir::new().expect("test");
+        let (_, first, _) = idle_session_in_project(dir.path(), &current_project());
+
+        let reminder = stop_hook_reminder(dir.path());
+        let start = format!("llmenv task start {}", first.slug);
+        let wait = format!("llmenv task wait {} \"<reason>\"", first.slug);
+        assert!(reminder.contains(&start), "{reminder}");
+        assert!(reminder.contains(&wait), "{reminder}");
+        assert!(
+            reminder.contains("needs the user"),
+            "must say when `wait` applies: {reminder}"
         );
     }
 
