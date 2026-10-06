@@ -1066,6 +1066,9 @@ Nothing turns off the third item.
   session or no unfinished task gets one reminder for each session to start a session with its first tasks.
 - After `nudge_after` (default 8) edits, writes, or shell commands with no unfinished task, the agent gets a nudge.
   Later nudges come every `nudge_every` (default 20) calls. The count resets once a task exists.
+- When a session has open tasks and none is in progress, the Stop reminder names the next task.
+  It offers `llmenv task start <slug>` to begin the step, and `llmenv task wait <slug> "<reason>"` for a step that needs
+  the user or an outside event first. The first reminder carries both commands.
 - An open session with no task at all is named in the Stop and SessionStart reminders.
   It is an error state: add a task, or finish the session.
 - When the agent asks the user a question (the `AskUserQuestion` tool, or a turn that ends with `?`) while a task is

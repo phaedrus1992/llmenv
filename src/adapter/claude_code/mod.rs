@@ -5,8 +5,6 @@ use serde_json::json;
 
 use super::AgentAdapter;
 use super::model_settings;
-use super::resolve_bundle_relative_paths;
-use super::resolve_command_paths_against_files;
 use super::skills::{create_dir_owner_only, reject_hardcoded_config_path};
 use crate::mcp::resolve::MEMORY_MCP_NAME;
 use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
@@ -1491,6 +1489,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     let mut hooks_by_event: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
         std::collections::BTreeMap::new();
 
+    let mut warned_hook_paths = std::collections::BTreeSet::new();
     for hook in &manifest.capabilities.hooks {
         // Resolve bundle-relative paths against the cache directory so hook
         // commands reference the materialized files, not the source bundle
@@ -1503,24 +1502,15 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         // 2. Shell-var / absolute prefixes (e.g.
         //    `bash ${HOME}/.../hooks/guard.sh`) — suffix-match against the
         //    files we already copied into `out`.
-        let resolved_command = if let Some(cmd) = &hook.handler.command {
-            if hook.bundle_origin.is_some() {
-                let resolved = resolve_bundle_relative_paths(cmd, out)
-                    .or_else(|| resolve_command_paths_against_files(cmd, out, &manifest.files));
-                if resolved.is_none() && cmd.contains('/') {
-                    eprintln!(
-                        "warning: the path in the bundle hook command `{cmd}` is not in the \
-                         bundle files, so it is not moved to the cache folder. The hook may fail \
-                         to find its script."
-                    );
-                }
-                resolved.or_else(|| Some(cmd.clone()))
-            } else {
-                Some(cmd.clone())
-            }
-        } else {
-            None
-        };
+        let resolved_command = hook.handler.command.as_deref().map(|cmd| {
+            crate::adapter::hook_command::resolve_hook_command(
+                cmd,
+                hook.bundle_origin.as_deref(),
+                out,
+                &manifest.files,
+                &mut warned_hook_paths,
+            )
+        });
 
         // Build handler as a Map so null-valued keys (e.g. "tool": null for
         // command-type hooks) are omitted rather than serialized. The json!
