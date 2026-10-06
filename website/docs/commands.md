@@ -481,6 +481,7 @@ unambiguous prefix of one.
 - `task reopen <id>...` — undo `task done`. (added in v3.12.0) Moves each named `done` task back to `open`.
   The task keeps its notes, parent, and `blocked_on` links, and gets a note that records the reopen.
   The call changes nothing and exits non-zero if any named task is not `done`, and the error names each such task.
+  It also refuses a sub-task whose parent is `done`, unless you name the parent in the same call.
   To reopen one task and start it in one step, use `task start <id> --reopen`.
 - `task wait <id> [reason]` — mark a task `waiting` on something outside the
   agent's control (a human review, a decision, external system access)
