@@ -963,7 +963,6 @@ SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [lazy_static 1.5.0](https://github.com/rust-lang-nursery/lazy-static.rs)
 - [rayon-core 1.13.0](https://github.com/rayon-rs/rayon)
 - [rayon 1.12.0](https://github.com/rayon-rs/rayon)
 
@@ -2289,7 +2288,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [tokio-rustls 0.26.5](https://github.com/rustls/tokio-rustls)
+- [tokio-rustls 0.26.6](https://github.com/rustls/tokio-rustls)
 
 ```
 Copyright (c) 2017 quininer kel
@@ -3243,7 +3242,7 @@ THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [llmenv 3.11.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv 3.11.2](https://github.com/phaedrus1992/llmenv)
 
 ```
 Copyright (c) 2026 The llmenv Authors
@@ -3448,6 +3447,23 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+
+```
+
+## MIT License (MIT)
+
+Used by:
+- [if-addrs 0.15.0](https://github.com/messense/if-addrs)
+
+```
+Copyright 2018 MaidSafe.net limited.
+Copyright 2020 messense
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ```
 
@@ -3676,10 +3692,10 @@ SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [llmenv-config 3.11.1](https://github.com/phaedrus1992/llmenv)
-- [llmenv-git 3.11.1](https://github.com/phaedrus1992/llmenv)
-- [llmenv-paths 3.11.1](https://github.com/phaedrus1992/llmenv)
-- [llmenv-util 3.11.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv-config 3.11.2](https://github.com/phaedrus1992/llmenv)
+- [llmenv-git 3.11.2](https://github.com/phaedrus1992/llmenv)
+- [llmenv-paths 3.11.2](https://github.com/phaedrus1992/llmenv)
+- [llmenv-util 3.11.2](https://github.com/phaedrus1992/llmenv)
 - [anes 0.1.6](https://github.com/zrzka/anes-rs)
 - [difflib 0.4.0](https://github.com/DimaKudosh/difflib)
 - [jni-macros 0.22.4](https://github.com/jni-rs/jni-rs)
@@ -3844,6 +3860,7 @@ Used by:
 - [fastrand 2.5.0](https://github.com/smol-rs/fastrand)
 - [hermit-abi 0.5.3](https://github.com/hermit-os/hermit-rs)
 - [itoa 1.0.18](https://github.com/dtolnay/itoa)
+- [lazy_static 1.5.1](https://github.com/rust-lang-nursery/lazy-static.rs)
 - [linux-raw-sys 0.12.1](https://github.com/sunfishcode/linux-raw-sys)
 - [once_cell 1.21.4](https://github.com/matklad/once_cell)
 - [pin-project-lite 0.2.17](https://github.com/taiki-e/pin-project-lite)
@@ -3864,8 +3881,8 @@ Used by:
 - [simd_cesu8 1.2.0](https://github.com/seancroach/simd_cesu8)
 - [syn 2.0.119](https://github.com/dtolnay/syn)
 - [syn 3.0.6](https://github.com/dtolnay/syn)
-- [thiserror-impl 2.0.20](https://github.com/dtolnay/thiserror)
-- [thiserror 2.0.20](https://github.com/dtolnay/thiserror)
+- [thiserror-impl 2.0.21](https://github.com/dtolnay/thiserror)
+- [thiserror 2.0.21](https://github.com/dtolnay/thiserror)
 - [unicode-ident 1.0.26](https://github.com/dtolnay/unicode-ident)
 - [unsafe-libyaml 0.2.11](https://github.com/dtolnay/unsafe-libyaml)
 - [wasi 0.11.1+wasi-snapshot-preview1](https://github.com/bytecodealliance/wasi)
@@ -4576,7 +4593,7 @@ Used by:
 - [potential_utf 0.1.6](https://github.com/unicode-org/icu4x)
 - [tinystr 0.8.4](https://github.com/unicode-org/icu4x)
 - [writeable 0.6.4](https://github.com/unicode-org/icu4x)
-- [yoke-derive 0.8.3](https://github.com/unicode-org/icu4x)
+- [yoke-derive 0.8.4](https://github.com/unicode-org/icu4x)
 - [yoke 0.8.3](https://github.com/unicode-org/icu4x)
 - [zerofrom-derive 0.1.8](https://github.com/unicode-org/icu4x)
 - [zerofrom 0.1.8](https://github.com/unicode-org/icu4x)

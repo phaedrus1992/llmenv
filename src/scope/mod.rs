@@ -1,5 +1,6 @@
 pub mod matcher;
 pub mod network;
+pub mod ssid;
 
 pub use matcher::Env;
 
@@ -113,7 +114,7 @@ impl ActiveScopes {
 pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
     let mut scopes = Vec::new();
     for s in &cfg.scope.network {
-        if matcher::matches_network(s, env) {
+        if network::matches_network(s, env) {
             scopes.push(ActiveScope {
                 id: s.id.clone(),
                 kind: "network",

@@ -210,7 +210,7 @@ The command fails with the fix when the old proxy does not exit, when the pid is
 
 ### Placing a host on a network manually
 
-Network auto-detection (by gateway MAC; `ssid` and `cidr` are not evaluated) doesn't always work — a VPN, a
+Network auto-detection (by gateway MAC, CIDR, or SSID) doesn't always work — a VPN, a
 captive network, or an unrecognized gateway can all leave the network scope
 unmatched, so the memory tag never activates and clients can't find the server.
 

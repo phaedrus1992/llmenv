@@ -306,6 +306,142 @@ fn network_matcher_normalizes_a_configured_mac_with_dropped_zeros() {
     assert!(evaluate(&cfg, &env).tags.contains("home"));
 }
 
+fn network_cfg(gateway_mac: Option<&str>, ssid: Option<&str>, cidr: Option<&str>) -> Config {
+    Config {
+        scope: Scopes {
+            network: vec![NetworkScope {
+                id: "home".into(),
+                r#match: NetworkMatch {
+                    gateway_mac: gateway_mac.map(Into::into),
+                    ssid: ssid.map(Into::into),
+                    cidr: cidr.map(Into::into),
+                },
+                tags: vec!["home".into()],
+            }],
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+fn addrs(list: &[&str]) -> Vec<std::net::IpAddr> {
+    list.iter().map(|s| s.parse().unwrap()).collect()
+}
+
+fn fires(cfg: &Config, env: &Env) -> bool {
+    evaluate(cfg, env).tags.contains("home")
+}
+
+#[test]
+fn cidr_matches_when_any_local_address_is_inside_the_block() {
+    let cfg = network_cfg(None, None, Some("192.168.1.0/24"));
+    let env = Env {
+        local_addrs: addrs(&["10.8.0.2", "192.168.1.77", "fe80::1"]),
+        ..Env::empty()
+    };
+    assert!(fires(&cfg, &env));
+}
+
+#[test]
+fn cidr_does_not_match_an_address_outside_the_block() {
+    let cfg = network_cfg(None, None, Some("192.168.1.0/24"));
+    let env = Env {
+        local_addrs: addrs(&["192.168.2.1", "10.0.0.5"]),
+        ..Env::empty()
+    };
+    assert!(!fires(&cfg, &env));
+}
+
+#[test]
+fn cidr_block_edges_are_inclusive_and_exact() {
+    let cfg = network_cfg(None, None, Some("10.0.4.0/30"));
+    for (addr, want) in [
+        ("10.0.4.0", true),
+        ("10.0.4.3", true),
+        ("10.0.4.4", false),
+        ("10.0.3.255", false),
+    ] {
+        let env = Env {
+            local_addrs: addrs(&[addr]),
+            ..Env::empty()
+        };
+        assert_eq!(fires(&cfg, &env), want, "{addr}");
+    }
+}
+
+#[test]
+fn cidr_matches_an_ipv6_block() {
+    let cfg = network_cfg(None, None, Some("fd00:abcd::/32"));
+    let env = Env {
+        local_addrs: addrs(&["fd00:abcd:1::5"]),
+        ..Env::empty()
+    };
+    assert!(fires(&cfg, &env));
+}
+
+#[test]
+fn cidr_with_no_local_addresses_does_not_match() {
+    let cfg = network_cfg(None, None, Some("0.0.0.0/0"));
+    assert!(!fires(&cfg, &Env::empty()));
+}
+
+#[test]
+fn ssid_matches_exactly_and_is_case_sensitive() {
+    let cfg = network_cfg(None, Some("HomeWifi"), None);
+    let on = |ssid: &str| Env {
+        ssid: Some(ssid.into()),
+        ..Env::empty()
+    };
+    assert!(fires(&cfg, &on("HomeWifi")));
+    assert!(!fires(&cfg, &on("homewifi")));
+    assert!(!fires(&cfg, &on("HomeWifi 5G")));
+    assert!(!fires(&cfg, &Env::empty()));
+}
+
+#[test]
+fn every_field_a_scope_sets_must_match() {
+    let cfg = network_cfg(
+        Some("aa:bb:cc:dd:ee:ff"),
+        Some("HomeWifi"),
+        Some("10.0.0.0/8"),
+    );
+    let full = Env {
+        gateway_mac: Some("aa:bb:cc:dd:ee:ff".into()),
+        ssid: Some("HomeWifi".into()),
+        local_addrs: addrs(&["10.1.2.3"]),
+        ..Env::empty()
+    };
+    assert!(fires(&cfg, &full));
+    for broken in [
+        Env {
+            gateway_mac: Some("11:22:33:44:55:66".into()),
+            ..full.clone()
+        },
+        Env {
+            ssid: Some("Other".into()),
+            ..full.clone()
+        },
+        Env {
+            local_addrs: addrs(&["192.168.0.1"]),
+            ..full.clone()
+        },
+    ] {
+        assert!(!fires(&cfg, &broken));
+    }
+}
+
+#[test]
+fn a_scope_that_sets_no_field_never_matches() {
+    let cfg = network_cfg(None, None, None);
+    let env = Env {
+        gateway_mac: Some("aa:bb:cc:dd:ee:ff".into()),
+        ssid: Some("x".into()),
+        local_addrs: addrs(&["10.0.0.1"]),
+        ..Env::empty()
+    };
+    assert!(!fires(&cfg, &env));
+}
+
 #[test]
 fn project_marker_walks_upward() {
     let tmp = tempfile::tempdir().expect("tempdir");

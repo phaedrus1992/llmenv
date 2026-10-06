@@ -2,9 +2,9 @@
 #
 # Fires on the `home` tag, which is emitted by the `home` network scope
 # in config.yaml (match: { gateway_mac: "aa:bb:cc:dd:ee:ff" }) when the
-# machine is connected to the home LAN. Only `gateway_mac` is evaluated by the
-# matcher today -- `ssid`/`cidr` are accepted by the schema but silently
-# ignored (#1051), so a scope keyed only on those never fires.
+# machine is connected to the home LAN. The scope can match on `gateway_mac`,
+# `cidr`, or `ssid`. macOS 15 hides the SSID from command-line tools, so an
+# `ssid` scope never fires there; `llmenv doctor` reports it.
 #
 # WHY NETWORK-SCOPED:
 #   The media-server skill (in skills/media-server/) talks to a local Plex or

@@ -272,23 +272,19 @@ fn is_safe_state_subdir(subdir: &str) -> bool {
         && !subdir.contains('\0')
 }
 
+/// Whether `cidr` is an IPv4 or IPv6 network in `address/prefix` form. Uses the `ipnet`
+/// parser that the scope matcher uses, so validation and matching cannot disagree (#1051).
 fn is_valid_cidr(cidr: &str) -> bool {
-    let parts: Vec<&str> = cidr.split('/').collect();
-    if parts.len() != 2 {
+    let Some((addr, _prefix)) = cidr.split_once('/') else {
         return false;
-    }
-    let octets: Vec<&str> = parts[0].split('.').collect();
-    if octets.len() != 4 {
-        return false;
-    }
-    for octet in octets {
-        // Reject leading zeros ("01") which u8::parse would otherwise accept;
-        // RFC 4632 dotted-decimal forbids them and they invite octal confusion.
-        if (octet.len() > 1 && octet.starts_with('0')) || octet.parse::<u8>().is_err() {
-            return false;
-        }
-    }
-    matches!(parts[1].parse::<u8>(), Ok(n) if n <= 32)
+    };
+    // `ipnet` accepts a leading zero in a dotted-quad octet. RFC 4632 forbids it, and it
+    // invites octal confusion, so reject it here.
+    let ipv4_leading_zero = !addr.contains(':')
+        && addr
+            .split('.')
+            .any(|octet| octet.len() > 1 && octet.starts_with('0'));
+    !ipv4_leading_zero && cidr.parse::<ipnet::IpNet>().is_ok()
 }
 
 fn is_valid_mac_address(mac: &str) -> bool {
@@ -3249,6 +3245,23 @@ mod tests {
         prop::collection::vec(rfc1123_label(), 1..4)
             .prop_map(|labels| labels.join("."))
             .prop_filter("total length <= 253", |h| h.len() <= 253)
+    }
+
+    #[test]
+    fn test_ipv6_cidr_is_accepted_and_a_zero_group_is_not_a_leading_zero_octet() {
+        for ok in ["fd00:abcd::/32", "::1/128", "0::/8", "2001:db8::/48"] {
+            assert!(is_valid_cidr(ok), "{ok}");
+        }
+        for bad in [
+            "fd00::/129",
+            "fd00::",
+            "10.0.0.5",
+            "10.0.0.0/",
+            "/24",
+            "10.0.0.0/24/8",
+        ] {
+            assert!(!is_valid_cidr(bad), "{bad}");
+        }
     }
 
     fn valid_cidr() -> impl Strategy<Value = String> {
