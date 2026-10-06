@@ -131,9 +131,10 @@ pub fn parse_macos_wifi_devices(s: &str) -> Vec<String> {
 /// which is "cannot determine", not a network named `<redacted>`.
 #[must_use]
 pub fn parse_macos_ipconfig_ssid(s: &str) -> SsidReading {
+    // An SSID can start or end with a space, so only the ` : ` separator is removed.
     let Some(value) = s.lines().find_map(|l| {
-        let (key, value) = l.split_once(':')?;
-        (key.trim() == "SSID").then(|| value.trim())
+        let (key, value) = l.split_once(" : ")?;
+        (key.trim() == "SSID").then_some(value)
     }) else {
         return SsidReading::NotAssociated;
     };
@@ -186,7 +187,7 @@ fn unescape_nmcli(s: &str) -> String {
 #[must_use]
 pub fn parse_iw_ssid(s: &str) -> Option<String> {
     s.lines().find_map(|l| {
-        let name = l.trim().strip_prefix("ssid ")?;
+        let name = l.trim_start().strip_prefix("ssid ")?;
         (!name.is_empty()).then(|| name.to_string())
     })
 }
@@ -197,8 +198,7 @@ pub fn parse_iw_ssid(s: &str) -> Option<String> {
 #[must_use]
 pub fn parse_netsh_ssid(s: &str) -> Option<String> {
     s.lines().find_map(|l| {
-        let (key, value) = l.split_once(" : ").or_else(|| l.split_once(':'))?;
-        let value = value.trim();
+        let (key, value) = l.split_once(" : ")?;
         (key.trim() == "SSID" && !value.is_empty()).then(|| value.to_string())
     })
 }

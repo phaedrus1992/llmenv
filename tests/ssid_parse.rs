@@ -15,6 +15,37 @@ Hardware Port: Thunderbolt Bridge
 Device: bridge0
 ";
 
+proptest::proptest! {
+    #[test]
+    fn no_ssid_parser_panics_on_any_text(s in "\\PC{0,300}") {
+        let _ = parse_iw_ssid(&s);
+        let _ = parse_netsh_ssid(&s);
+        let _ = parse_nmcli_active_wifi_connection(&s);
+        let _ = parse_nmcli_ssid_value(&s);
+        let _ = parse_macos_ipconfig_ssid(&s);
+        let _ = parse_macos_wifi_devices(&s);
+    }
+
+    #[test]
+    fn an_ssid_that_the_parsers_return_is_never_empty(s in "\\PC{0,300}") {
+        for got in [
+            parse_iw_ssid(&s),
+            parse_netsh_ssid(&s),
+            parse_nmcli_active_wifi_connection(&s),
+            parse_nmcli_ssid_value(&s),
+        ] {
+            proptest::prop_assert!(got.is_none_or(|name| !name.is_empty()));
+        }
+    }
+
+    #[test]
+    fn iw_returns_the_name_after_the_ssid_keyword(name in "[A-Za-z0-9 _-]{1,32}") {
+        let out = format!("phy#0\n\tInterface wlan0\n\t\tssid {name}\n");
+        // Spaces inside an SSID are part of the name, so nothing is trimmed.
+        proptest::prop_assert_eq!(parse_iw_ssid(&out), Some(name));
+    }
+}
+
 #[test]
 fn macos_wifi_devices_are_read_by_port_name() {
     assert_eq!(
@@ -42,6 +73,18 @@ fn macos_redacted_ssid_is_undetermined_not_a_network_name() {
     assert!(
         matches!(reading, SsidReading::Undetermined(_)),
         "{reading:?}"
+    );
+}
+
+#[test]
+fn macos_ssid_keeps_leading_and_trailing_spaces() {
+    assert_eq!(
+        parse_macos_ipconfig_ssid("  SSID :  Home \n"),
+        SsidReading::Ssid(" Home ".into())
+    );
+    assert_eq!(
+        parse_netsh_ssid("    SSID : Home \r\n").as_deref(),
+        Some("Home ")
     );
 }
 
