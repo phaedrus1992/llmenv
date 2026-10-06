@@ -45,6 +45,8 @@ TODOs.
   full listing to this project's tasks.
 - Start a task before you finish it: `llmenv task done <slug>` refuses a task
   that is still `open`. `--force` is for work that is done without tracking.
+- Undo a `done` by mistake: `llmenv task reopen <slug>...` moves each named `done` task back to
+  `open`. It refuses the whole call if any task is not `done`.
 - `llmenv task session finish [<id>]` / `session show [<id>]` to close out —
   `finish` auto-resolves if exactly one session is open. It refuses while any
   task is `open`, `wip`, or `waiting`; finish them, or pass `--abandon-open` to
