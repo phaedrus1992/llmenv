@@ -457,6 +457,14 @@ enum TaskCommand {
         #[arg(long)]
         force: bool,
     },
+    /// Move one or more `done` tasks back to `open`, keeping their notes, parent, and
+    /// `blocked_on` links. Refuses the whole call, and changes nothing, if any named task is not
+    /// `done`. For a single task, `llmenv task start --reopen <id>` reopens and starts it.
+    Reopen {
+        /// Slugs (or unambiguous slug prefixes) of the done tasks to reopen.
+        #[arg(required = true)]
+        ids: Vec<String>,
+    },
     /// List tasks. Requires `--session <id>` or `--all` (#1124) — no silent
     /// default to every session's tasks. `--state`/`--hide-done` filter by
     /// lifecycle state; `--current-project` further narrows to the current
@@ -3429,6 +3437,11 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             }
             if let Some(note) = completed.undone_children_note() {
                 println!("{note}");
+            }
+        }
+        TaskCommand::Reopen { ids } => {
+            for task in crate::task::reopen_tasks(&state_dir, &ids)? {
+                println!("Reopened '{}' — now {:?}", task.slug, task.state);
             }
         }
         TaskCommand::Ls {
