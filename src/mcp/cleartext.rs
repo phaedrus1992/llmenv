@@ -46,14 +46,18 @@ pub(crate) fn is_unique_local_v6(v6: &std::net::Ipv6Addr) -> bool {
 ///
 /// Loopback, private, unique-local, and CGNAT (100.64.0.0/10, used by Tailscale) addresses
 /// count as the operator's own network. Everything else is public.
+///
+/// Only an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) is judged by the IPv4 address it wraps.
+/// A 6to4 or NAT64 address leaves the host through a public relay, so a private IPv4 address
+/// inside one is still public for a cleartext decision (RFC 3056, RFC 6052).
 pub(crate) fn is_cleartext_safe(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             let cgnat = v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 0x40;
             v4.is_loopback() || v4.is_private() || cgnat
         }
-        IpAddr::V6(v6) => match embedded_ipv4(v6) {
-            Some(wrapped) => is_cleartext_safe(&IpAddr::V4(wrapped)),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(mapped) => is_cleartext_safe(&IpAddr::V4(mapped)),
             None => v6.is_loopback() || is_unique_local_v6(v6),
         },
     }
@@ -114,6 +118,46 @@ mod tests {
             "not a url",
         ] {
             assert_eq!(public_cleartext_literal(url), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn a_private_ipv4_inside_a_relay_prefix_is_still_public() {
+        // 6to4 (2002::/16), NAT64 (64:ff9b::/96), and IPv4-compatible forms cross a public relay.
+        for url in [
+            "http://[2002:c0a8:105::1]/mcp",
+            "http://[64:ff9b::a00:4]/mcp",
+            "http://[::10.0.0.4]/mcp",
+        ] {
+            assert!(public_cleartext_literal(url).is_some(), "{url}");
+        }
+        // An IPv4-mapped address stays on the host's own IPv4 stack.
+        assert_eq!(
+            public_cleartext_literal("http://[::ffff:10.0.0.4]/mcp"),
+            None
+        );
+        assert!(public_cleartext_literal("http://[::ffff:8.8.8.8]/mcp").is_some());
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn an_http_ip_literal_is_flagged_iff_it_is_not_cleartext_safe(octets in proptest::prelude::any::<[u8; 16]>(), v4 in proptest::prelude::any::<u32>(), use_v6 in proptest::prelude::any::<bool>()) {
+            let (ip, host) = if use_v6 {
+                let ip = IpAddr::V6(std::net::Ipv6Addr::from(octets));
+                (ip, format!("[{ip}]"))
+            } else {
+                let ip = IpAddr::V4(std::net::Ipv4Addr::from(v4));
+                (ip, ip.to_string())
+            };
+            let flagged = public_cleartext_literal(&format!("http://{host}:8080/mcp"));
+            proptest::prop_assert_eq!(flagged, (!is_cleartext_safe(&ip)).then_some(ip));
+            // TLS protects the payload, so https is never flagged.
+            proptest::prop_assert_eq!(public_cleartext_literal(&format!("https://{host}/mcp")), None);
+        }
+
+        #[test]
+        fn the_url_check_never_panics(url in "\\PC{0,200}") {
+            let _ = public_cleartext_literal(&url);
         }
     }
 

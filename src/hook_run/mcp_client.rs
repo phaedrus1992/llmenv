@@ -669,8 +669,6 @@ where
     rx.recv_timeout(timeout)
 }
 
-/// Whether an IPv6 address falls in the Unique Local Address range `fc00::/7`.
-///
 /// The URL without credentials, query string, or fragment, for error text that reaches a
 /// terminal.
 fn redact_url(url: &str) -> String {
