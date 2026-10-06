@@ -14,8 +14,10 @@
 pub(crate) mod core_text;
 pub(crate) mod project;
 pub(crate) mod relation;
+pub(crate) mod reopen;
 pub(crate) mod resume;
 pub mod session;
+pub(crate) use reopen::{reopen_task, reopen_tasks};
 
 pub(crate) use relation::Placement;
 use relation::Relation;
@@ -912,33 +914,6 @@ pub(crate) fn complete_task(
     })?;
     touch_task_session(state_dir, &completed.task);
     Ok(completed)
-}
-
-/// Move a `done` task back to `open`, with a note that records the reopen. A
-/// task in any other state is returned unchanged, so `task start --reopen`
-/// works on a task that is not done.
-///
-/// # Errors
-/// Errors if `input` does not resolve to a task, or the save fails.
-pub(crate) fn reopen_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
-    let task = with_store_lock(state_dir, || {
-        let slug = resolve_identifier(state_dir, input)?;
-        let mut task = load_task(state_dir, &slug)?;
-        if task.state != TaskState::Done {
-            return Ok(task);
-        }
-        let now = now_rfc3339();
-        task.state = TaskState::Open;
-        task.notes.push(TaskNote {
-            at: now.clone(),
-            text: "Reopened (`task start --reopen`) after it was marked done.".to_string(),
-        });
-        task.updated_at = now;
-        save_task(state_dir, &task)?;
-        Ok(task)
-    })?;
-    touch_task_session(state_dir, &task);
-    Ok(task)
 }
 
 /// Append a timestamped progress note to a task.
