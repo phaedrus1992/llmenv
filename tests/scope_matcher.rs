@@ -282,6 +282,31 @@ fn network_matcher_is_case_insensitive() {
 }
 
 #[test]
+fn network_matcher_normalizes_a_configured_mac_with_dropped_zeros() {
+    // Either spelling in config must match the zero-padded detected MAC (#2487).
+    let cfg = Config {
+        scope: Scopes {
+            network: vec![NetworkScope {
+                id: "home".into(),
+                r#match: NetworkMatch {
+                    gateway_mac: Some("1C:B:8B:E4:5F:94".into()),
+                    ssid: None,
+                    cidr: None,
+                },
+                tags: vec!["home".into()],
+            }],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let env = Env {
+        gateway_mac: Some("1c:0b:8b:e4:5f:94".into()),
+        ..Env::empty()
+    };
+    assert!(evaluate(&cfg, &env).tags.contains("home"));
+}
+
+#[test]
 fn project_marker_walks_upward() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let nested = tmp.path().join("a/b/c");

@@ -54,7 +54,8 @@ pub fn parse_macos_gateway_ip(s: &str) -> Option<String> {
 #[must_use]
 pub fn parse_macos_arp_mac(s: &str) -> Option<String> {
     // Format: `? (192.168.1.1) at aa:bb:cc:dd:ee:ff on en0 ifscope [ethernet]`
-    s.split_whitespace().find(|t| is_mac(t)).map(String::from)
+    // (macOS may print an octet without its leading zero).
+    s.split_whitespace().find_map(normalize_mac)
 }
 
 #[must_use]
@@ -75,31 +76,25 @@ pub fn parse_linux_neigh_mac(s: &str) -> Option<String> {
     let mut tokens = s.split_whitespace();
     while let Some(t) = tokens.next() {
         if t == "lladdr" {
-            return tokens.next().filter(|m| is_mac(m)).map(String::from);
+            return tokens.next().and_then(normalize_mac);
         }
     }
     None
 }
 
-fn is_mac(s: &str) -> bool {
-    // Canonical lowercase hex MAC: xx:xx:xx:xx:xx:xx (17 chars).
-    if s.len() != 17 {
-        return false;
-    }
-    let bytes = s.as_bytes();
-    for (i, b) in bytes.iter().enumerate() {
-        match i % 3 {
-            2 => {
-                if *b != b':' {
-                    return false;
-                }
-            }
-            _ => {
-                if !b.is_ascii_hexdigit() {
-                    return false;
-                }
-            }
+/// Normalize a MAC to canonical lowercase `xx:xx:xx:xx:xx:xx`.
+///
+/// macOS `arp -n` drops the leading zero of each octet (`1c:b:8b:e4:5f:94`),
+/// so each of the six octets may carry one or two hex digits (#2487).
+/// Returns `None` when the text is not a MAC.
+#[must_use]
+pub(crate) fn normalize_mac(s: &str) -> Option<String> {
+    let mut octets = Vec::with_capacity(6);
+    for part in s.split(':') {
+        if !(1..=2).contains(&part.len()) || !part.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
         }
+        octets.push(format!("{:0>2}", part.to_ascii_lowercase()));
     }
-    true
+    (octets.len() == 6).then(|| octets.join(":"))
 }

@@ -288,9 +288,18 @@ pub(crate) fn matches_network(s: &NetworkScope, env: &Env) -> bool {
         // ssid/cidr are not yet supported for matching; without gateway_mac we cannot match.
         return false;
     };
-    env.gateway_mac
-        .as_deref()
-        .is_some_and(|got| got.eq_ignore_ascii_case(want))
+    let Some(got) = env.gateway_mac.as_deref() else {
+        return false;
+    };
+    // Normalize both sides so either spelling in config matches (#2487). A
+    // value that is not a MAC falls back to a case-insensitive compare.
+    match (
+        super::network::normalize_mac(want),
+        super::network::normalize_mac(got),
+    ) {
+        (Some(w), Some(g)) => w == g,
+        _ => got.eq_ignore_ascii_case(want),
+    }
 }
 
 pub(crate) fn glob_matches(pattern: &str, text: &str) -> bool {
