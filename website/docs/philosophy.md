@@ -35,7 +35,7 @@ flowchart LR
 
 | Scope kind | Matches on |
 | --- | --- |
-| `network` | gateway MAC address |
+| `network` | gateway MAC, interface CIDR, or Wi-Fi SSID |
 | `host` | hostname |
 | `user` | `$USER` |
 | `project` | a `.llmenv.yaml` marker file |

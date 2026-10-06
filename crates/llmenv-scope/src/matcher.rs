@@ -1,4 +1,5 @@
-use llmenv_config::{ContentScope, HostScope, NetworkScope, UserScope};
+use super::network::NetworkNeeds;
+use llmenv_config::{ContentScope, HostScope, UserScope};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
@@ -53,6 +54,12 @@ pub struct Env {
     pub user: String,
     pub cwd: String,
     pub gateway_mac: Option<String>,
+    /// Addresses of the local network interfaces (not loopback or link-local), for `match.cidr`
+    /// (#1051).
+    pub local_addrs: Vec<std::net::IpAddr>,
+    /// SSID of the associated Wi-Fi network, for `match.ssid`. `None` when there is none or
+    /// the platform cannot say (`llmenv doctor` reports which).
+    pub ssid: Option<String>,
     /// User's home directory. The `.llmenv.yaml` discovery walk stops at
     /// this boundary so a marker file dropped above $HOME (e.g. `/tmp` on a
     /// shared host) cannot be picked up.
@@ -73,6 +80,7 @@ pub struct Env {
 /// harmless.
 struct CachedEnv {
     detected: Instant,
+    needs: NetworkNeeds,
     env: Env,
 }
 
@@ -85,48 +93,52 @@ impl Env {
     }
 
     /// Detect environment, returning a cached result if fresher than 30 s.
-    /// Detects the gateway MAC (route+arp subprocess forks); prefer
-    /// [`Env::detect_for_config`] on the hook path, which skips those forks when
-    /// no network scope can match.
+    /// Detects every network fact (gateway MAC, interface addresses, SSID); prefer
+    /// [`Env::detect_for_config`] on the hook path, which skips the probes that no
+    /// network scope needs.
     #[must_use]
     pub fn detect() -> Self {
+        Self::detect_cached(NetworkNeeds::ALL)
+    }
+
+    fn detect_cached(needs: NetworkNeeds) -> Self {
         if let Ok(lock) = ENV_CACHE.lock()
             && let Some(cached) = lock.as_ref()
             && cached.detected.elapsed() < Duration::from_secs(30)
+            && cached.needs.covers(needs)
         {
             return cached.env.clone();
         }
-        let env = Self::detect_fresh(true);
+        let env = Self::detect_fresh(needs);
         if let Ok(mut lock) = ENV_CACHE.lock() {
             *lock = Some(CachedEnv {
                 detected: Instant::now(),
+                needs,
                 env: env.clone(),
             });
         }
         env
     }
 
-    /// Detect environment for a specific config. Gateway-MAC detection shells out
-    /// to `route`+`arp` (macOS) / `ip route`+`ip neigh` (Linux) — two subprocess
-    /// forks on every call. Nothing can match on the gateway MAC unless a network
-    /// scope is declared, so when there are none this skips those forks entirely.
-    /// Each hook-run is a fresh process (the 30s cache never warms on that path),
-    /// so on the common no-network-scope config this removes the dominant
-    /// remaining hook-run subprocess cost. Not cached: without the forks the
-    /// detection is cheap, and caching a MAC-less env could shadow a later
-    /// [`detect`] that needs it within the same process.
+    /// Detect environment for a specific config. The gateway MAC, interface address, and SSID
+    /// probes each shell out or call the OS, and nothing can match on them unless a network
+    /// scope uses that field. This runs only the probes that the declared network scopes need,
+    /// and none on the common config with no network scope. Each hook-run is a fresh process
+    /// (the 30s cache never warms on that path), so this removes the dominant remaining
+    /// hook-run subprocess cost for such a config.
     #[must_use]
     pub fn detect_for_config(config: &llmenv_config::Config) -> Self {
-        if config.scope.network.is_empty() {
-            Self::detect_fresh(false)
+        let needs = NetworkNeeds::from_scopes(&config.scope.network);
+        if needs == NetworkNeeds::default() {
+            Self::detect_fresh(needs)
         } else {
-            Self::detect()
+            Self::detect_cached(needs)
         }
     }
 
-    /// Fresh env detection. `need_gateway_mac` gates the route+arp forks; the
-    /// hostname (uname syscall), user, and cwd probes always run.
-    fn detect_fresh(need_gateway_mac: bool) -> Self {
+    /// Fresh env detection. `needs` gates the network probes; the hostname (uname syscall),
+    /// user, and cwd probes always run.
+    fn detect_fresh(needs: NetworkNeeds) -> Self {
         let hostname = detect_hostname().unwrap_or_else(|| {
             tracing::warn!("hostname detection failed; host-scope matching disabled");
             String::new()
@@ -151,9 +163,16 @@ impl Env {
             hostname: hostname.to_ascii_lowercase(),
             user,
             cwd,
-            gateway_mac: need_gateway_mac
+            gateway_mac: needs
+                .gateway_mac
                 .then(super::network::detect_gateway_mac)
                 .flatten(),
+            local_addrs: if needs.local_addrs {
+                super::network::detect_local_addrs()
+            } else {
+                Vec::new()
+            },
+            ssid: needs.ssid.then(super::ssid::detect_ssid_name).flatten(),
             home,
             os: std::env::consts::OS.to_string(),
             extra_tags: extra_tags_from_env(),
@@ -294,17 +313,6 @@ fn detect_hostname() -> Option<String> {
         return None;
     }
     Some(trimmed.to_string())
-}
-
-#[must_use]
-pub(crate) fn matches_network(s: &NetworkScope, env: &Env) -> bool {
-    let Some(want) = s.r#match.gateway_mac.as_deref() else {
-        // ssid/cidr are not yet supported for matching; without gateway_mac we cannot match.
-        return false;
-    };
-    env.gateway_mac
-        .as_deref()
-        .is_some_and(|got| got.eq_ignore_ascii_case(want))
 }
 
 pub(crate) fn glob_matches(pattern: &str, text: &str) -> bool {

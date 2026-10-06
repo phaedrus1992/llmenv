@@ -12,6 +12,8 @@ workspace = true
 
 [dependencies]
 llmenv-config = { path = "../llmenv-config", version = "4.0.0-alpha.1" }
+if-addrs = { workspace = true }
+ipnet = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 globset = { workspace = true }

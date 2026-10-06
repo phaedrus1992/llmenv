@@ -1314,8 +1314,13 @@ active context (active bundles, active MCP servers, etc.). Checks:
 - git connectivity
 - orphans — scopes/tags/bundles/MCP/plugins that can never activate, a memory
   `server_host` missing from `host:`, unknown fields in project markers, and a
-  network scope whose `match` has no `gateway_mac` (added in v3.8.0) — only
-  `gateway_mac` is evaluated today, so `ssid`/`cidr` alone can never match
+  network scope whose `match` sets none of `gateway_mac`, `ssid`, or `cidr` (added in v3.8.0;
+  before v3.12.0 it also flagged a scope with only `ssid` or `cidr`, which were not evaluated)
+- network scopes (added in v3.12.0) — when a scope matches on `ssid`, doctor reads the Wi-Fi
+  SSID and warns when the platform hides it (macOS 15 prints `<redacted>`), because such a
+  scope never matches there. See [Network match fields](configuration.md#network-match-fields)
+- cleartext MCP URLs (added in v3.12.0) — warns when the hostname of an `http://` MCP URL
+  resolves to a public address. See [MCP](mcp.md)
 - lifecycle hooks (added in v3.11.0) — lists which lifecycle events
   (`session_start`, `session_end`, `post_model_switch`, `turn_start`, `post_tool_batch`,
   `post_tool_use_failure`, `subagent_start`, `stop`) are wired for
