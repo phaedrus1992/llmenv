@@ -100,6 +100,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `llmenv memory prune` no longer takes a line inside a memory's text for a record header, so stored text cannot choose which other memory is forgotten.
 - `llmenv doctor` warns when `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` is above 100, and reports a state folder that it cannot resolve.
 - Failures of the hooks that run in the background (state folder, recall ledger, agent-config document, spawn and pipe errors) log at error level, so they show at the default log level.
+- Network scopes now match on `match.cidr` (any local interface address inside the IPv4 or IPv6 block) and `match.ssid` (the Wi-Fi name). Before, both fields were accepted and silently ignored, so a scope that used only them never fired. A scope that sets several fields needs all of them to match. `llmenv doctor` warns when the platform hides the SSID, as macOS 15 does. See [Network match fields](https://phaedrus1992.github.io/llmenv/docs/configuration#network-match-fields) (#1051)
+- Network scopes now match on macOS, where `arp` prints a MAC with the leading zero of an octet dropped (`1c:b:8b:e4:5f:94`). llmenv pads both the detected and the configured `gateway_mac` before it compares them (#2487)
 
 ### Security
 
@@ -108,6 +110,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Bidirectional-override and zero-width characters in text from files or the network are escaped before they reach the terminal.
 - The MCP HTTP client refuses a plain `http://` URL that resolves to a public address, so a memory payload or a header token never crosses the internet in clear text. Loopback, private, and Tailscale addresses still work over `http://`. See [MCP security](https://phaedrus1992.github.io/llmenv/docs/mcp#security-considerations) (#2476)
 - The MCP client's address check now sees an IPv4 address wrapped in NAT64 (`64:ff9b::/96`), 6to4 (`2002::/16`), or IPv4-compatible IPv6 form, so a link-local or metadata address behind one is blocked. Its URL errors no longer print credentials or a token from the query string (#2476)
+- `llmenv export`, `regenerate`, and `doctor` now refuse an `http://` MCP URL or memory `host:` address that is a public IP, and say to use `https://`. Before, the agent connected in clear text, with its bearer headers, to an address that llmenv's own client refused. `doctor` also warns when an `http://` hostname resolves to a public address. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp) (#2483)
 
 ## [3.11.2] - 2026-09-27
 

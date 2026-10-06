@@ -24,10 +24,10 @@ llmenv status scopes   # marks active scopes
 llmenv status tags     # marks active tags
 ```
 
-- **Network scopes** match on `gateway_mac` only today (`ssid`/`cidr` are parsed
-  but ignored). A VPN or captive network can change or hide the gateway, leaving
-  the scope unmatched. Fall back to a **host scope** (matches by hostname, always
-  reliable) that emits the same tag.
+- **Network scopes** match on `gateway_mac`, `cidr`, or `ssid`. A VPN or captive network can
+  change or hide the gateway, leaving the scope unmatched. An `ssid` scope never matches when
+  the platform hides the SSID (macOS 15 prints `<redacted>`), and `llmenv doctor` says so.
+  Fall back to a **host scope** (matches by hostname, always reliable) that emits the same tag.
 - **Host scopes** match case-insensitively against the local hostname. Run
   `hostname` and compare.
 - **User scopes** match `$USER` exactly.

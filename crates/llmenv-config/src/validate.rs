@@ -272,23 +272,19 @@ fn is_safe_state_subdir(subdir: &str) -> bool {
         && !subdir.contains('\0')
 }
 
+/// Whether `cidr` is an IPv4 or IPv6 network in `address/prefix` form. Uses the `ipnet`
+/// parser that the scope matcher uses, so validation and matching cannot disagree (#1051).
 fn is_valid_cidr(cidr: &str) -> bool {
-    let parts: Vec<&str> = cidr.split('/').collect();
-    if parts.len() != 2 {
+    let Some((addr, _prefix)) = cidr.split_once('/') else {
         return false;
-    }
-    let octets: Vec<&str> = parts[0].split('.').collect();
-    if octets.len() != 4 {
-        return false;
-    }
-    for octet in octets {
-        // Reject leading zeros ("01") which u8::parse would otherwise accept;
-        // RFC 4632 dotted-decimal forbids them and they invite octal confusion.
-        if (octet.len() > 1 && octet.starts_with('0')) || octet.parse::<u8>().is_err() {
-            return false;
-        }
-    }
-    matches!(parts[1].parse::<u8>(), Ok(n) if n <= 32)
+    };
+    // `ipnet` accepts a leading zero in a dotted-quad octet. RFC 4632 forbids it, and it
+    // invites octal confusion, so reject it here.
+    let ipv4_leading_zero = !addr.contains(':')
+        && addr
+            .split('.')
+            .any(|octet| octet.len() > 1 && octet.starts_with('0'));
+    !ipv4_leading_zero && cidr.parse::<ipnet::IpNet>().is_ok()
 }
 
 fn is_valid_mac_address(mac: &str) -> bool {
@@ -298,7 +294,9 @@ fn is_valid_mac_address(mac: &str) -> bool {
     }
     parts
         .iter()
-        .all(|part| part.len() == 2 && u8::from_str_radix(part, 16).is_ok())
+        // macOS `arp` drops the leading zero of an octet (`1c:b:8b:e4:5f:94`), and the
+        // matcher accepts that form, so the validator must too (#2487).
+        .all(|part| (1..=2).contains(&part.len()) && u8::from_str_radix(part, 16).is_ok())
 }
 
 fn is_valid_hostname(hostname: &str) -> bool {
@@ -3251,6 +3249,23 @@ mod tests {
             .prop_filter("total length <= 253", |h| h.len() <= 253)
     }
 
+    #[test]
+    fn test_ipv6_cidr_is_accepted_and_a_zero_group_is_not_a_leading_zero_octet() {
+        for ok in ["fd00:abcd::/32", "::1/128", "0::/8", "2001:db8::/48"] {
+            assert!(is_valid_cidr(ok), "{ok}");
+        }
+        for bad in [
+            "fd00::/129",
+            "fd00::",
+            "10.0.0.5",
+            "10.0.0.0/",
+            "/24",
+            "10.0.0.0/24/8",
+        ] {
+            assert!(!is_valid_cidr(bad), "{bad}");
+        }
+    }
+
     fn valid_cidr() -> impl Strategy<Value = String> {
         (0u8..=255, 0u8..=255, 0u8..=255, 0u8..=255, 0u8..=32)
             .prop_map(|(a, b, c, d, m)| format!("{a}.{b}.{c}.{d}/{m}"))
@@ -3352,6 +3367,28 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(":");
             prop_assert!(is_valid_mac_address(&mac), "valid MAC rejected: {mac}");
+        }
+
+        #[test]
+        fn prop_mac_with_dropped_leading_zeros_accepted(octets in prop::array::uniform6(0u8..=255)) {
+            // macOS `arp` prints each octet without a leading zero (#2487).
+            let mac = octets
+                .iter()
+                .map(|o| format!("{o:x}"))
+                .collect::<Vec<_>>()
+                .join(":");
+            prop_assert!(is_valid_mac_address(&mac), "valid MAC rejected: {mac}");
+        }
+
+        #[test]
+        fn prop_mac_with_an_empty_or_three_digit_octet_rejected(
+            pos in 0usize..6,
+            bad in prop_oneof![Just(String::new()), "[0-9a-f]{3}"],
+        ) {
+            let mut octets = vec!["aa".to_string(); 6];
+            octets[pos] = bad;
+            let mac = octets.join(":");
+            prop_assert!(!is_valid_mac_address(&mac), "bad octet accepted: {mac}");
         }
 
         #[test]

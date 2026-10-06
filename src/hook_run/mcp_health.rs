@@ -320,7 +320,9 @@ pub(crate) fn managed_servers(
 ) -> anyhow::Result<Vec<ResolvedMcp>> {
     let merged = super::merged_memory(config, config_dir, active)?;
     let mut servers: Vec<ResolvedMcp> =
-        resolve_mcps(&config.mcp, &merged.memory, &merged.host, &active.tags)
+        // Only the memory server is kept, so a plain `mcp:` entry must not decide whether it
+        // resolves: an unrelated entry that fails resolution would hide the memory check.
+        resolve_mcps(&[], &merged.memory, &merged.host, &active.tags)
             .context("cannot resolve the memory MCP server")?
             .into_iter()
             .filter(|m| m.name == MEMORY_MCP_NAME)
@@ -509,6 +511,39 @@ mod tests {
 
     fn answers(reply: &str) -> ResolvedMcp {
         sh(&format!("read line; printf '%s\\n' '{reply}'"))
+    }
+
+    #[test]
+    fn an_unrelated_mcp_entry_does_not_hide_the_memory_server() {
+        // A public-IP `http://` entry fails resolution (#2483), and it must not stop the
+        // health check from seeing the memory server.
+        let config: crate::config::Config = serde_yaml::from_str(
+            r#"
+host:
+  still: { addr: "10.0.0.4" }
+features:
+  memory:
+    - server_host: still
+      port: 7878
+      when: [t]
+mcp:
+  - name: ctx7
+    when: [t]
+    type: http
+    url: http://93.184.216.34/mcp
+"#,
+        )
+        .unwrap();
+        let active = crate::scope::ActiveScopes {
+            tags: ["t".to_string()].into(),
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let servers = managed_servers(&config, dir.path(), &active).unwrap();
+        assert!(
+            servers.iter().any(|s| s.name == MEMORY_MCP_NAME),
+            "{servers:?}"
+        );
     }
 
     #[tokio::test]
