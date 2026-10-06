@@ -1608,6 +1608,33 @@ mod tests {
     }
 
     #[test]
+    fn embedded_ipv4_extracts_the_exact_wrapped_address() {
+        use std::net::{Ipv4Addr, Ipv6Addr};
+        let got = |s: &str| embedded_ipv4(&s.parse::<Ipv6Addr>().unwrap());
+        let want = Some(Ipv4Addr::new(1, 2, 3, 4));
+        assert_eq!(got("::ffff:1.2.3.4"), want);
+        assert_eq!(got("::1.2.3.4"), want);
+        assert_eq!(got("64:ff9b::102:304"), want);
+        assert_eq!(got("2002:102:304::"), want);
+    }
+
+    #[test]
+    fn embedded_ipv4_ignores_addresses_that_only_look_wrapped() {
+        use std::net::Ipv6Addr;
+        let got = |s: &str| embedded_ipv4(&s.parse::<Ipv6Addr>().unwrap());
+        for s in [
+            "::",
+            "::1",
+            "64:1::1",
+            "1:ff9b::1",
+            "64:ff9b:0:0:1::1",
+            "2001:db8::1",
+        ] {
+            assert_eq!(got(s), None, "{s}");
+        }
+    }
+
+    #[test]
     fn blocked_reason_sees_metadata_address_behind_nat64_6to4_and_compat() {
         use std::net::{IpAddr, Ipv6Addr};
         for s in [
