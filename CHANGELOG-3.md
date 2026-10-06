@@ -11,6 +11,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+3.12.0 makes the agent's working state durable and the background plumbing honest.
+The task tracker, ICM memory, and MCP servers now report failures, survive a dead child process, and stop trusting input they cannot check.
+It also adds a few Claude Code settings and `doctor` checks for the 2.1.28x line.
+
+**Task tracker.**
+Tasks gain sub-tasks and a queue: top-level tasks run in order, sub-tasks run in parallel, and a parent closes only after its children (#2455).
+`task reopen` undoes a `done` by mistake (#2471), and `task done` and `session finish` refuse to close work that never started or is still open (#2416).
+Sessions record resume context (notes, issue, branch, plan docs), so a fresh agent can pick up cold (#2339).
+SessionStart now injects a fixed statement of the tracking rules, and nudges fire while work happens, including a deny on the first commit with no task (#2456, #2457).
+
+**Memory (ICM).**
+Recall is adaptive: each memory goes out once per context, and prompts, failed tool calls, and subagents pull what matches them (#2249).
+The session wake-up pack now reaches the model, and recall calls name the session's project, so a remote ICM server no longer answers from an unrelated project (#2251, #2253, #2313).
+Post-session consolidation runs on `SessionEnd`, reads only the current project, and skips rules it already stored (#2355, #2387).
+Background work writes a checkpoint and resumes at the next session start, and a request id keeps a retried store from writing twice (#2396, #2397).
+`memory prune` is safer: it refuses when it cannot apply `retention`, reads one project only, and ignores forged record headers (#2386).
+
+**MCP and codebase-memory.**
+Session start probes the memory server and `codebase-memory-mcp` with a real `initialize`, restarts a stopped ICM proxy, and names any server that stays down (#2358).
+`features.codebase_memory[]` adds `allowed_roots` and `mem_budget_mb`, and `index_repository` calls outside the allowed roots are denied (#2406, #2154).
+The MCP client now fails on an `isError` reply, follows no redirect, and refuses plain `http://` to a public address, at run time and at config render (#2476, #2483).
+
+**Claude Code adapter and config.**
+`capabilities.model_effort` sets effort per model, and `effort_level` now reaches Opus 5.5 (#2144).
+`capabilities.advisor_size` becomes `advisor_model` (#2409), and `always_load` keeps chosen MCP tools out of tool-search deferral (#2356).
+claude.ai account skill and plugin sync is off by default, so llmenv's scope rules apply (#2146).
+Each session writes an agent-config document that a `PostModelSwitch` hook keeps current (#2398).
+A corrupt `settings.json` is kept as `settings.json.corrupt`, and a stale rendered MCP key no longer survives a re-render (#2376).
+
+**Plugins and scopes.**
+Marketplace plugins can use `git-subdir` sources and `sha` pins, and the `github` source form with no `url` now syncs (#2441, #2440).
+Network scopes match on `match.cidr` and `match.ssid`, which were accepted before but ignored, and macOS `arp` MAC addresses now match (#1051, #2487).
+
+**`llmenv doctor`.**
+New checks cover retired Claude Code settings, the ICM server version, the size of always-loaded instructions, MCP text that Claude Code cuts at 2,048 characters, the codebase-memory index result, and unfinished background work.
+`doctor --restart-memory-proxy` replaces the `pkill` advice, which stopped every session's proxy (#2417).
+
+**Breaking changes.**
+`advisor_size` is removed, `effort_level` rejects values Claude Code does not accept, and `task add --no-parent` does nothing now.
+`task done` and `task session finish` refuse without `--force` or `--abandon-open`, and `git://` and `<helper>::` plugin sources are rejected.
+Each one carries a `**BREAKING:**` prefix below.
+
 ### Added
 
 - ICM recall now adapts to the session instead of sending the same memory block on every prompt. Each memory goes out once per context (again after a compaction or `/clear`), and each prompt pulls memories that match what you're asking and what the session just touched, plus related topics; a failed tool call gets memories about that error, and a new subagent gets memories for its task. On by default; set `features.memory[].adaptive_recall: false` to get the old behavior. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#featuresmemory) (#2249) [feat:hook-run]
@@ -39,24 +81,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The Claude Code adapter now disables claude.ai account skill and plugin sync by default (`syncClaudeAiSkills`/`syncClaudeAiPlugins: false`). Since Claude Code 2.1.275, a signed-in session downloads the skills and plugins enabled on that account and loads them into every scope, going around llmenv's own scope rules. Set `native.claude_code.syncClaudeAiSkills: true` (and the plugins equivalent) to opt back in; on the first render after upgrade, Claude Code moves already-synced items into `skills/.trash/`/`plugins/.trash/` rather than deleting them. See [What the Claude Code adapter emits](https://phaedrus1992.github.io/llmenv/docs/engines#what-the-claude-code-adapter-emits) (#2146) [feat:adapter]
 - With `adaptive_recall: false`, the per-prompt natural-language recall now names the session's project. It used to be filtered by whatever directory the `icm serve` process happened to run in, which on a remote ICM server meant memories from an unrelated project (#2253) [fix:hooks]
 - The session-start memory block in Claude Code and opencode now starts with `[ICM MEMORY CONTEXT (session start)]`, so the model can tell it apart from per-prompt recall. A resumed or forked session no longer fetches and injects a second wake-up pack, since its conversation already holds the first one. opencode also receives the block now, in its first message; llmenv used to drop it. See [`hook-run`](https://phaedrus1992.github.io/llmenv/docs/commands#hook-run) (#2142) [fix:adapter]
-- `effort_level` (in `capabilities` and `features.slippage`) now fails validation unless it is `low`, `medium`, `high`, or `xhigh`, the values Claude Code accepts in settings. It used to take any string. For `max` or `ultracode`, the error names the setting to use instead. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#effort_level-and-model_effort-claude-code) (#2144) [feat:config]
+- **BREAKING:** `effort_level` (in `capabilities` and `features.slippage`) now fails validation unless it is `low`, `medium`, `high`, or `xhigh`, the values Claude Code accepts in settings. It used to take any string. For `max` or `ultracode`, the error names the setting to use instead. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#effort_level-and-model_effort-claude-code) (#2144) [feat:config]
 - `llmenv doctor` no longer recommends `BASH_MAX_OUTPUT_LENGTH` when `bashOutputMaxChars` is set, since Claude Code ignores the variable then, and no longer warns about an unset prompt-cache TTL, since subscription plans get 1 hour automatically. `CLAUDE_CODE_PROMPT_CACHE_TTL=1h` now passes the check. See [Troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#doctor-warns-about-retired-claude-code-settings) (#2145) [feat:doctor]
 - The opencode adapter now warns for each agent frontmatter field it drops, such as Claude Code's `omitClaudeMd`, the same way it already does for command frontmatter. See [Engines](https://phaedrus1992.github.io/llmenv/docs/engines#skipping-claudemd-in-a-subagent-claude-code) (#2150) [feat:adapter]
 - The consolidation `claude -p` call no longer waits for MCP servers to connect (`CLAUDE_CODE_MCP_STARTUP_WAIT_MS=0`), so it starts faster (#2148) [perf:consolidation]
 - `llmenv task show --current` prints each session's resume context on stderr. Its JSON on stdout does not change (#2339) [feat:task]
 - `capabilities.advisor_size` is now `capabilities.advisor_model` and renders Claude Code's `advisorModel`. Use `fable`, `opus`, `sonnet`, or a model ID. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#advisor_model-claude-code) (#2409) [fix:config]
-- `llmenv task done` refuses a task that was never started, and `llmenv task session finish` refuses while a task is `open`, `wip`, or `waiting`. Both exit non-zero with the fix. `task done --force` and `task session finish --abandon-open` override them, and the native-tool redirect never forces. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#task) (#2416) [fix:task]
+- **BREAKING:** `llmenv task done` refuses a task that was never started, and `llmenv task session finish` refuses while a task is `open`, `wip`, or `waiting`. Both exit non-zero with the fix. `task done --force` and `task session finish --abandon-open` override them, and the native-tool redirect never forces. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#task) (#2416) [fix:task]
 - The ICM tools now load with the prompt in Claude Code, so the model no longer calls tool search before a recall or a store. Set `features.memory[].always_load: false` to defer them again (#2356) [feat:adapter]
-- Plugin and marketplace sources that use `git://` or a `<helper>::` remote helper are rejected, like `ext::` and `http://` before. A pin (`sha` or `ref`) that is not a string is an error, not an unpinned clone (#2441) [fix:plugins]
+- **BREAKING:** Plugin and marketplace sources that use `git://` or a `<helper>::` remote helper are rejected, like `ext::` and `http://` before. A pin (`sha` or `ref`) that is not a string is an error, not an unpinned clone (#2441) [fix:plugins]
 - The session-start notice for a memory proxy that does not answer names `llmenv doctor --restart-memory-proxy` instead of `pkill`, which stopped the proxy of every session (#2417) [fix:mcp]
-- A new task no longer chains onto the previous one. Top-level tasks form a queue: `llmenv task start` refuses a task while the task ahead of it is not done or waiting, and `--force` overrides. The warning for an undone parent is gone, and `task add --no-parent` now does nothing. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#task) (#2455) [feat:task]
+- **BREAKING:** A new task no longer chains onto the previous one. Top-level tasks form a queue: `llmenv task start` refuses a task while the task ahead of it is not done or waiting, and `--force` overrides. The warning for an undone parent is gone, and `task add --no-parent` now does nothing. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#task) (#2455) [feat:task]
 - A session started in `$HOME`, in a parent of `$HOME`, or in `/` is no longer recorded as an allowed codebase-memory root, because the server keeps a root for good. `llmenv doctor` and the SessionStart notice say so. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#featurescodebase_memory) [fix:mcp]
 - `llmenv memory prune` reads only the memories of the current project and refuses to run when it cannot tell the project, where it used to read whatever ICM's own working folder held. The `memory prune`, `hook-run`, and `check-stale` help text now matches what the commands do. See [`memory`](https://phaedrus1992.github.io/llmenv/docs/commands#memory) [fix:cli]
 - The first Stop-hook idle reminder now offers `llmenv task wait <slug> "<reason>"` next to `llmenv task start <slug>`, so an agent whose next step needs the user is not told to start work that cannot start. See [Task nudges](https://phaedrus1992.github.io/llmenv/docs/commands#task-nudges-added-in-v3120) (#2468) [feat:task]
 
 ### Removed
 
-- `capabilities.advisor_size`. It rendered an `advisorSize` key that Claude Code never read. A config that still sets it fails validation and names `advisor_model`, and `llmenv doctor` warns about a stale `advisorSize` in a rendered `settings.json` (#2409) [fix:config]
+- **BREAKING:** `capabilities.advisor_size`. It rendered an `advisorSize` key that Claude Code never read. A config that still sets it fails validation and names `advisor_model`, and `llmenv doctor` warns about a stale `advisorSize` in a rendered `settings.json` (#2409) [fix:config]
 
 ### Fixed
 
