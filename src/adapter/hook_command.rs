@@ -348,6 +348,14 @@ mod tests {
     }
 
     #[test]
+    fn a_suffix_match_needs_a_path_component_boundary() {
+        let mut warned = BTreeSet::new();
+        let cmd = "bash /x/myhooks/guard.sh";
+        assert_eq!(resolve(cmd, &["hooks/guard.sh"], &mut warned), cmd);
+        assert_eq!(warned.len(), 1, "the path stays unresolved: {warned:?}");
+    }
+
+    #[test]
     fn an_unresolved_rooted_path_warns_beside_a_resolved_one() {
         let mut warned = BTreeSet::new();
         resolve("bash hooks/a.sh /home/u/b/other.sh", &[], &mut warned);

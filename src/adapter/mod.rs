@@ -9,7 +9,7 @@ pub(crate) mod output_styles;
 pub(crate) mod skills;
 pub(crate) mod tools;
 
-pub(crate) use hook_command::{resolve_bundle_relative_paths, resolve_command_paths_against_files};
+pub(crate) use hook_command::resolve_bundle_relative_paths;
 
 use std::path::{Path, PathBuf};
 
@@ -539,8 +539,9 @@ mod tests {
         AgentAdapter, SessionStartContext, active_adapter_from, binary_on_path, emit_hook_context,
         engine_id, known_engine_ids, modeled_key_redirect, overlay_native_json,
         registered_adapters, remote_transport_type_str, resolve_bundle_relative_paths,
-        resolve_command_paths_against_files, strip_json_nulls,
+        strip_json_nulls,
     };
+    use crate::adapter::hook_command::resolve_command_paths_against_files;
     use crate::merge::MergedManifest;
 
     /// Minimal `AgentAdapter` stand-in for testing dispatch logic
