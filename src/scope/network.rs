@@ -82,12 +82,25 @@ fn cidr_matches(cidr: &str, addrs: &[IpAddr]) -> bool {
         .is_ok_and(|net| addrs.iter().any(|a| net.contains(a)))
 }
 
-/// Addresses of the local network interfaces. An enumeration failure gives an empty list,
-/// so a `cidr` scope does not match.
+/// Whether `ip` says something about which network the machine is on. Loopback and
+/// link-local addresses exist on every machine, so a `cidr` scope never matches them.
+fn identifies_a_network(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => !(v4.is_loopback() || v4.is_link_local() || v4.is_unspecified()),
+        IpAddr::V6(v6) => !(v6.is_loopback() || v6.is_unspecified() || v6.is_unicast_link_local()),
+    }
+}
+
+/// Addresses of the local network interfaces, without loopback and link-local addresses.
+/// An enumeration failure gives an empty list, so a `cidr` scope does not match.
 #[must_use]
 pub(crate) fn detect_local_addrs() -> Vec<IpAddr> {
     match if_addrs::get_if_addrs() {
-        Ok(ifaces) => ifaces.iter().map(if_addrs::Interface::ip).collect(),
+        Ok(ifaces) => ifaces
+            .iter()
+            .map(if_addrs::Interface::ip)
+            .filter(identifies_a_network)
+            .collect(),
         Err(e) => {
             tracing::debug!("interface enumeration failed: {e}");
             Vec::new()
@@ -196,8 +209,62 @@ mod tests {
     use super::*;
 
     #[test]
-    fn local_addresses_include_the_loopback_interface() {
-        assert!(detect_local_addrs().iter().any(IpAddr::is_loopback));
+    fn local_addresses_exclude_loopback_and_link_local() {
+        assert!(detect_local_addrs().iter().all(identifies_a_network));
+    }
+
+    #[test]
+    fn only_an_address_that_names_a_network_identifies_one() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        for no in [
+            "127.0.0.1",
+            "169.254.1.1",
+            "0.0.0.0",
+            "::1",
+            "::",
+            "fe80::1",
+        ] {
+            assert!(!identifies_a_network(&ip(no)), "{no}");
+        }
+        for yes in [
+            "192.168.1.7",
+            "10.0.0.1",
+            "100.64.0.9",
+            "fd00::1",
+            "2001:db8::1",
+        ] {
+            assert!(identifies_a_network(&ip(yes)), "{yes}");
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn normalize_mac_pads_any_octet_spelling_to_the_canonical_form(
+            octets in proptest::prelude::any::<[u8; 6]>(),
+            drop_zero in proptest::prelude::any::<[bool; 6]>(),
+            upper in proptest::prelude::any::<bool>(),
+        ) {
+            let spelled: Vec<String> = octets
+                .iter()
+                .zip(drop_zero)
+                .map(|(o, drop)| {
+                    let s = if drop { format!("{o:x}") } else { format!("{o:02x}") };
+                    if upper { s.to_ascii_uppercase() } else { s }
+                })
+                .collect();
+            let canonical = octets.iter().map(|o| format!("{o:02x}")).collect::<Vec<_>>().join(":");
+            let got = normalize_mac(&spelled.join(":"));
+            proptest::prop_assert_eq!(got.as_deref(), Some(canonical.as_str()));
+            // Normalizing a canonical MAC changes nothing.
+            proptest::prop_assert_eq!(normalize_mac(&canonical), Some(canonical));
+        }
+
+        #[test]
+        fn normalize_mac_and_the_arp_parsers_never_panic(s in "\\PC{0,120}") {
+            let _ = normalize_mac(&s);
+            let _ = parse_macos_arp_mac(&s);
+            let _ = parse_linux_neigh_mac(&s);
+        }
     }
 
     #[test]

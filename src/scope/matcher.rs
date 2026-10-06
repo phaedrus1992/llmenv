@@ -51,7 +51,8 @@ pub struct Env {
     pub user: String,
     pub cwd: String,
     pub gateway_mac: Option<String>,
-    /// Addresses of the local network interfaces, for `match.cidr` (#1051).
+    /// Addresses of the local network interfaces (not loopback or link-local), for `match.cidr`
+    /// (#1051).
     pub local_addrs: Vec<std::net::IpAddr>,
     /// SSID of the associated Wi-Fi network, for `match.ssid`. `None` when there is none or
     /// the platform cannot say (`llmenv doctor` reports which).
