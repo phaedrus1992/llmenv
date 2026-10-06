@@ -91,6 +91,7 @@ pub(super) fn run_doctor_network(use_color: bool, config: &Config) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
