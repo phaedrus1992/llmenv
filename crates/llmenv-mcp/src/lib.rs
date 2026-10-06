@@ -1,4 +1,5 @@
 pub mod cbm_roots;
+pub mod cleartext;
 pub mod mcp_client;
 pub mod probe;
 pub mod proxy;

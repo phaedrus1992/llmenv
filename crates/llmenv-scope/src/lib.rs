@@ -1,5 +1,6 @@
 pub mod matcher;
 pub mod network;
+pub mod ssid;
 
 pub use matcher::Env;
 
@@ -177,7 +178,13 @@ fn capture_stdout(label: &str, program: &str, args: &[&str]) -> Option<String> {
         );
         return None;
     }
-    String::from_utf8(out.stdout).ok()
+    match String::from_utf8(out.stdout) {
+        Ok(text) => Some(text),
+        Err(e) => {
+            tracing::debug!("{label}: {program} printed non-UTF-8 output: {e}");
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -259,7 +266,7 @@ impl ActiveScopes {
 pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
     let mut scopes = Vec::new();
     for s in &cfg.scope.network {
-        if matcher::matches_network(s, env) {
+        if network::matches_network(s, env) {
             scopes.push(ActiveScope {
                 id: s.id.clone(),
                 kind: "network",
