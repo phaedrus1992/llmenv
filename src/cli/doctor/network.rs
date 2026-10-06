@@ -1,7 +1,9 @@
-//! Doctor check: can this machine read the Wi-Fi SSID that `match.ssid` scopes need (#1051).
+//! Doctor check: can this machine read the network facts that `network` scopes match on (#1051).
 //!
-//! A scope with `match.ssid` never fires when the platform hides the SSID. Doctor says so,
-//! because a silent no-match is the failure that #1051 reports.
+//! A scope never fires when its probe fails, for example when macOS hides the SSID. Doctor
+//! says so, because a silent no-match is the failure that #1051 reports.
+
+use std::net::IpAddr;
 
 use crate::config::Config;
 use crate::scope::ssid::{SsidReading, detect_ssid};
@@ -26,18 +28,48 @@ fn ssid_check(reading: &SsidReading) -> (CheckLevel, String) {
     }
 }
 
-fn has_ssid_scope(config: &Config) -> bool {
-    config
-        .scope
-        .network
-        .iter()
-        .any(|s| s.r#match.ssid.is_some())
+/// Doctor's verdict on the gateway MAC probe, for a config that has `gateway_mac` scopes.
+fn gateway_check(mac: Option<&str>) -> (CheckLevel, String) {
+    match mac {
+        Some(mac) => (CheckLevel::Pass, format!("gateway MAC is {mac}")),
+        None => (
+            CheckLevel::Warn,
+            "cannot read the gateway MAC (no default route, or `arp`/`ip neigh` failed). Every \
+             `match.gateway_mac` scope stays inactive until it can"
+                .into(),
+        ),
+    }
 }
 
-/// Report the SSID reading when a network scope matches on `ssid`. Prints nothing otherwise,
-/// so a config with no `ssid` scope pays no subprocess.
+/// Doctor's verdict on the interface address probe, for a config that has `cidr` scopes.
+fn cidr_check(addrs: &[IpAddr]) -> (CheckLevel, String) {
+    if addrs.is_empty() {
+        (
+            CheckLevel::Warn,
+            "found no local interface address (loopback and link-local do not count). Every \
+             `match.cidr` scope stays inactive until the machine has one"
+                .into(),
+        )
+    } else {
+        let list: Vec<String> = addrs.iter().map(IpAddr::to_string).collect();
+        (
+            CheckLevel::Pass,
+            format!("local addresses for `match.cidr`: {}", list.join(", ")),
+        )
+    }
+}
+
+fn uses(config: &Config, field: impl Fn(&crate::config::NetworkMatch) -> bool) -> bool {
+    config.scope.network.iter().any(|s| field(&s.r#match))
+}
+
+/// Report what this machine can read for each field that a network scope matches on. Prints
+/// nothing for a field that no scope uses, so a config pays only for the probes it needs.
 pub(super) fn run_doctor_network(use_color: bool, config: &Config) {
-    if !has_ssid_scope(config) {
+    let gateway = uses(config, |m| m.gateway_mac.is_some());
+    let cidr = uses(config, |m| m.cidr.is_some());
+    let ssid = uses(config, |m| m.ssid.is_some());
+    if !(gateway || cidr || ssid) {
         return;
     }
     let pass = super::super::doctor_pass(use_color);
@@ -45,7 +77,17 @@ pub(super) fn run_doctor_network(use_color: bool, config: &Config) {
     let info = super::super::doctor_info(use_color);
     eprintln!();
     eprintln!("Network scopes:");
-    super::print_check(ssid_check(&detect_ssid()), &pass, &warn, &info);
+    if gateway {
+        let mac = crate::scope::network::detect_gateway_mac();
+        super::print_check(gateway_check(mac.as_deref()), &pass, &warn, &info);
+    }
+    if cidr {
+        let addrs = crate::scope::network::detect_local_addrs();
+        super::print_check(cidr_check(&addrs), &pass, &warn, &info);
+    }
+    if ssid {
+        super::print_check(ssid_check(&detect_ssid()), &pass, &warn, &info);
+    }
 }
 
 #[cfg(test)]
@@ -72,6 +114,30 @@ mod tests {
         assert!(text.contains("<redacted>"), "{text}");
         assert!(
             text.contains("gateway_mac") && text.contains("cidr"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_gateway_mac_warns() {
+        let (level, text) = gateway_check(None);
+        assert!(matches!(level, CheckLevel::Warn));
+        assert!(text.contains("gateway_mac"), "{text}");
+        let (level, text) = gateway_check(Some("aa:bb:cc:dd:ee:ff"));
+        assert!(matches!(level, CheckLevel::Pass));
+        assert!(text.contains("aa:bb:cc:dd:ee:ff"), "{text}");
+    }
+
+    #[test]
+    fn no_local_address_warns_and_addresses_are_listed() {
+        let (level, text) = cidr_check(&[]);
+        assert!(matches!(level, CheckLevel::Warn));
+        assert!(text.contains("match.cidr"), "{text}");
+        let addrs: Vec<IpAddr> = vec!["192.168.1.7".parse().unwrap(), "fd00::1".parse().unwrap()];
+        let (level, text) = cidr_check(&addrs);
+        assert!(matches!(level, CheckLevel::Pass));
+        assert!(
+            text.contains("192.168.1.7") && text.contains("fd00::1"),
             "{text}"
         );
     }

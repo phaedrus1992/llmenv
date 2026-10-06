@@ -16,15 +16,25 @@ use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
 /// Bound on one DNS lookup, so a dead resolver cannot stall `llmenv doctor`.
 const DNS_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// One warning for each `http://` server whose hostname resolves outside the operator's network.
+/// What the hostname check found across the cleartext servers.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Report {
+    /// Servers whose hostname resolves outside the operator's network.
+    warnings: Vec<String>,
+    /// Hostnames that did not resolve, so the check could not run for them.
+    unresolved: Vec<String>,
+    /// Count of `http://` hostnames that resolved only inside the operator's network.
+    safe: usize,
+}
+
+/// Check each `http://` server whose hostname may resolve outside the operator's network.
 ///
-/// `lookup` maps `(host, port)` to the addresses of the host. A lookup that fails yields no
-/// warning, because an unresolvable host is a different problem from a public one.
-fn public_hostname_warnings(
+/// `lookup` maps `(host, port)` to the addresses of the host, or `None` when the lookup fails.
+fn check_hostnames(
     servers: &[ResolvedMcp],
-    lookup: impl Fn(&str, u16) -> Vec<IpAddr>,
-) -> Vec<String> {
-    let mut out = Vec::new();
+    lookup: impl Fn(&str, u16) -> Option<Vec<IpAddr>>,
+) -> Report {
+    let mut report = Report::default();
     for server in servers {
         let ResolvedKind::Remote { url, .. } = &server.kind else {
             continue;
@@ -36,29 +46,64 @@ fn public_hostname_warnings(
             continue;
         };
         let port = parsed.port_or_known_default().unwrap_or(80);
-        if let Some(ip) = lookup(host, port)
-            .into_iter()
-            .find(|ip| !is_cleartext_safe(ip))
-        {
-            out.push(format!(
+        let Some(addrs) = lookup(host, port) else {
+            report
+                .unresolved
+                .push(format!("mcp '{}': cannot resolve {host}", server.name));
+            continue;
+        };
+        match addrs.into_iter().find(|ip| !is_cleartext_safe(ip)) {
+            Some(ip) => report.warnings.push(format!(
                 "mcp '{}': cleartext http:// host {host} resolves to public address {ip}. \
                  Use an https:// URL, or move the server onto a loopback, private, or \
                  Tailscale address",
                 server.name
-            ));
+            )),
+            None => report.safe += 1,
         }
     }
-    out
+    report
 }
 
-fn dns_lookup(host: &str, port: u16) -> Vec<IpAddr> {
+fn dns_lookup(host: &str, port: u16) -> Option<Vec<IpAddr>> {
     crate::hook_run::mcp_client::resolve_with_timeout(host, port, DNS_TIMEOUT)
+        .ok()
         .map(|addrs| addrs.into_iter().map(|a| a.ip()).collect())
-        .unwrap_or_default()
+}
+
+/// Collect the resolved servers from each source. A source that fails to resolve adds one
+/// message, so one broken source does not hide the others.
+fn collect_servers(
+    config: &Config,
+    config_dir: &Path,
+    active: &crate::scope::ActiveScopes,
+    bundle_mcp: &[McpServer],
+) -> (Vec<ResolvedMcp>, Vec<String>) {
+    let mut servers = Vec::new();
+    let mut errors = Vec::new();
+    let mut take = |source: &str, result: anyhow::Result<Vec<ResolvedMcp>>| match result {
+        Ok(found) => servers.extend(found),
+        Err(e) => errors.push(format!("cannot check the {source} MCP servers: {e:#}")),
+    };
+    take(
+        "memory",
+        crate::hook_run::mcp_health::managed_servers(config, config_dir, active),
+    );
+    take(
+        "configured",
+        crate::mcp::resolve::resolve_mcps(&config.mcp, &[], &config.host, &active.tags)
+            .map_err(anyhow::Error::from),
+    );
+    take(
+        "bundle",
+        crate::mcp::resolve::resolve_bundle_mcps(bundle_mcp, &active.tags)
+            .map_err(anyhow::Error::from),
+    );
+    (servers, errors)
 }
 
 /// Warn about each cleartext MCP URL whose hostname resolves to a public address.
-/// Prints nothing when every URL is safe.
+/// Prints nothing when no MCP server uses an `http://` hostname.
 pub(super) fn run_doctor_cleartext(
     use_color: bool,
     config: &Config,
@@ -66,25 +111,34 @@ pub(super) fn run_doctor_cleartext(
     active: &crate::scope::ActiveScopes,
     bundle_mcp: &[McpServer],
 ) {
-    let mut servers = crate::hook_run::mcp_health::managed_servers(config, config_dir, active)
-        .unwrap_or_default();
-    // A resolve error is already fatal in `build_manifest`, so a failure here adds nothing.
-    servers.extend(
-        crate::mcp::resolve::resolve_mcps(&config.mcp, &[], &config.host, &active.tags)
-            .unwrap_or_default(),
-    );
-    servers.extend(
-        crate::mcp::resolve::resolve_bundle_mcps(bundle_mcp, &active.tags).unwrap_or_default(),
-    );
-    let warnings = public_hostname_warnings(&servers, dns_lookup);
-    if warnings.is_empty() {
+    let (servers, errors) = collect_servers(config, config_dir, active, bundle_mcp);
+    let report = check_hostnames(&servers, dns_lookup);
+    if errors.is_empty()
+        && report.warnings.is_empty()
+        && report.unresolved.is_empty()
+        && report.safe == 0
+    {
         return;
     }
+    let pass = super::super::doctor_pass(use_color);
     let warn = super::super::doctor_warning(use_color);
+    let info = super::super::doctor_info(use_color);
     eprintln!();
     eprintln!("MCP cleartext:");
-    for w in warnings {
+    for e in &errors {
+        eprintln!("{warn} {e}");
+    }
+    for w in &report.warnings {
         eprintln!("{warn} {w}");
+    }
+    for u in &report.unresolved {
+        eprintln!("{info} {u}, so the public-address check did not run");
+    }
+    if report.safe > 0 && report.warnings.is_empty() {
+        eprintln!(
+            "{pass} {} http:// hostname(s) resolve inside the operator's network",
+            report.safe
+        );
     }
 }
 
@@ -118,49 +172,59 @@ mod tests {
     #[test]
     fn warns_when_an_http_hostname_resolves_public() {
         let servers = [remote("ctx7", "http://ctx7.example:8080/mcp")];
-        let got = public_hostname_warnings(&servers, |host, port| {
+        let got = check_hostnames(&servers, |host, port| {
             assert_eq!((host, port), ("ctx7.example", 8080));
-            ips(&["93.184.216.34"])
+            Some(ips(&["93.184.216.34"]))
         });
-        assert_eq!(got.len(), 1);
-        assert!(
-            got[0].contains("ctx7") && got[0].contains("93.184.216.34"),
-            "{got:?}"
-        );
-        assert!(got[0].contains("https://"), "{got:?}");
+        assert_eq!(got.warnings.len(), 1);
+        let w = &got.warnings[0];
+        assert!(w.contains("ctx7") && w.contains("93.184.216.34"), "{w}");
+        assert!(w.contains("https://"), "{w}");
     }
 
     #[test]
     fn warns_when_any_one_address_is_public() {
         let servers = [remote("a", "http://mixed.example/mcp")];
-        let got = public_hostname_warnings(&servers, |_, _| ips(&["10.0.0.4", "8.8.8.8"]));
-        assert_eq!(got.len(), 1);
+        let got = check_hostnames(&servers, |_, _| Some(ips(&["10.0.0.4", "8.8.8.8"])));
+        assert_eq!(got.warnings.len(), 1);
+        assert_eq!(got.safe, 0);
     }
 
     #[test]
-    fn stays_quiet_for_private_https_literal_and_unresolved_hosts() {
-        let servers = [
-            remote("lan", "http://still.local:7878/mcp"),
-            remote("tls", "https://ctx7.example/mcp"),
-            remote("lit", "http://10.0.0.4/mcp"),
-            remote("dead", "http://gone.example/mcp"),
-        ];
-        let got = public_hostname_warnings(&servers, |host, _| match host {
-            "still.local" => ips(&["192.168.1.5"]),
-            "ctx7.example" => ips(&["93.184.216.34"]),
-            _ => vec![],
-        });
-        assert!(got.is_empty(), "{got:?}");
-    }
-
-    #[test]
-    fn skips_a_stdio_server() {
-        let mut s = remote("local", "http://x.example/");
-        s.kind = ResolvedKind::Stdio {
+    fn counts_private_hosts_and_skips_https_literals_and_stdio() {
+        let mut stdio = remote("local", "http://x.example/");
+        stdio.kind = ResolvedKind::Stdio {
             command: "echo".into(),
             args: vec![],
             env: BTreeMap::new(),
         };
-        assert!(public_hostname_warnings(&[s], |_, _| ips(&["8.8.8.8"])).is_empty());
+        let servers = [
+            remote("lan", "http://still.local:7878/mcp"),
+            remote("tls", "https://ctx7.example/mcp"),
+            remote("lit", "http://10.0.0.4/mcp"),
+            stdio,
+        ];
+        let got = check_hostnames(&servers, |host, _| {
+            assert_eq!(host, "still.local", "only an http:// hostname is looked up");
+            Some(ips(&["192.168.1.5"]))
+        });
+        assert_eq!(
+            got,
+            Report {
+                warnings: vec![],
+                unresolved: vec![],
+                safe: 1
+            }
+        );
+    }
+
+    #[test]
+    fn a_failed_lookup_is_reported_not_treated_as_safe() {
+        let servers = [remote("dead", "http://gone.example/mcp")];
+        let got = check_hostnames(&servers, |_, _| None);
+        assert!(got.warnings.is_empty());
+        assert_eq!(got.safe, 0);
+        assert_eq!(got.unresolved.len(), 1);
+        assert!(got.unresolved[0].contains("gone.example"), "{got:?}");
     }
 }
