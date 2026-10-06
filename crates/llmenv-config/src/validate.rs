@@ -294,7 +294,9 @@ fn is_valid_mac_address(mac: &str) -> bool {
     }
     parts
         .iter()
-        .all(|part| part.len() == 2 && u8::from_str_radix(part, 16).is_ok())
+        // macOS `arp` drops the leading zero of an octet (`1c:b:8b:e4:5f:94`), and the
+        // matcher accepts that form, so the validator must too (#2487).
+        .all(|part| (1..=2).contains(&part.len()) && u8::from_str_radix(part, 16).is_ok())
 }
 
 fn is_valid_hostname(hostname: &str) -> bool {
@@ -3365,6 +3367,28 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(":");
             prop_assert!(is_valid_mac_address(&mac), "valid MAC rejected: {mac}");
+        }
+
+        #[test]
+        fn prop_mac_with_dropped_leading_zeros_accepted(octets in prop::array::uniform6(0u8..=255)) {
+            // macOS `arp` prints each octet without a leading zero (#2487).
+            let mac = octets
+                .iter()
+                .map(|o| format!("{o:x}"))
+                .collect::<Vec<_>>()
+                .join(":");
+            prop_assert!(is_valid_mac_address(&mac), "valid MAC rejected: {mac}");
+        }
+
+        #[test]
+        fn prop_mac_with_an_empty_or_three_digit_octet_rejected(
+            pos in 0usize..6,
+            bad in prop_oneof![Just(String::new()), "[0-9a-f]{3}"],
+        ) {
+            let mut octets = vec!["aa".to_string(); 6];
+            octets[pos] = bad;
+            let mac = octets.join(":");
+            prop_assert!(!is_valid_mac_address(&mac), "bad octet accepted: {mac}");
         }
 
         #[test]
