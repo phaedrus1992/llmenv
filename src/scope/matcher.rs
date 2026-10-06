@@ -169,13 +169,7 @@ impl Env {
             } else {
                 Vec::new()
             },
-            ssid: needs
-                .ssid
-                .then(|| match super::ssid::detect_ssid() {
-                    super::ssid::SsidReading::Ssid(name) => Some(name),
-                    _ => None,
-                })
-                .flatten(),
+            ssid: needs.ssid.then(super::ssid::detect_ssid_name).flatten(),
             home,
             os: std::env::consts::OS.to_string(),
             extra_tags: match std::env::var("LLMENV_EXTRA_TAGS") {

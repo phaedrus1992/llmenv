@@ -32,7 +32,13 @@ fn capture_stdout(label: &str, program: &str, args: &[&str]) -> Option<String> {
         );
         return None;
     }
-    String::from_utf8(out.stdout).ok()
+    match String::from_utf8(out.stdout) {
+        Ok(text) => Some(text),
+        Err(e) => {
+            tracing::debug!("{label}: {program} printed non-UTF-8 output: {e}");
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]

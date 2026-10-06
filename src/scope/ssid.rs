@@ -35,6 +35,19 @@ pub(crate) fn detect_ssid() -> SsidReading {
     }
 }
 
+/// The SSID for scope matching. A platform that cannot say gives `None`, and the reason is
+/// logged at debug level: hooks run on every prompt, so `llmenv doctor` is the loud place.
+pub(crate) fn detect_ssid_name() -> Option<String> {
+    match detect_ssid() {
+        SsidReading::Ssid(name) => Some(name),
+        SsidReading::NotAssociated => None,
+        SsidReading::Undetermined(reason) => {
+            tracing::debug!("ssid scopes cannot match: {reason}");
+            None
+        }
+    }
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 fn run(program: &str, args: &[&str]) -> Option<String> {
     super::capture_stdout("ssid detection", program, args)
