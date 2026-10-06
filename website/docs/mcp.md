@@ -408,6 +408,10 @@ llmenv checks the address of an MCP endpoint against its private-network and SSR
 Before v3.12.0 a client with no configured headers followed up to 10 redirects, and a redirect could reach an address that the check had not approved.
 A tool call that the server answers with `isError: true` fails in llmenv, so a failed store is not recorded as stored (changed in v3.12.0).
 
+The client refuses a plain `http://` URL when any address that it resolves to is public (added in v3.12.0).
+Plain `http://` stays allowed for loopback, private (RFC 1918), unique-local (ULA), and CGNAT (100.64.0.0/10, used by Tailscale) addresses.
+For a remote `icm serve` on a public address, put it behind `https://`.
+
 Deploy it only on a network you trust (home LAN, a private VPN, a firewalled
 subnet). Do not expose the port to the public internet, and do not point the
 `host:` `addr` at a publicly routable address. If you need to bridge hosts
