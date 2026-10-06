@@ -14,8 +14,10 @@
 pub mod core_text;
 pub mod project;
 pub mod relation;
+pub mod reopen;
 pub mod resume;
 pub mod session;
+pub use reopen::{reopen_task, reopen_tasks};
 
 pub use relation::Placement;
 use relation::Relation;
@@ -214,11 +216,15 @@ pub(crate) fn save_task(state_dir: &Path, task: &Task) -> anyhow::Result<()> {
 /// Returns an error when `slug` fails validation, the file can't be read, or
 /// its contents aren't a valid `Task`.
 pub fn load_task(state_dir: &Path, slug: &str) -> anyhow::Result<Task> {
+    use anyhow::Context as _;
     if !llmenv_paths::is_valid_short_name(slug) {
         anyhow::bail!("'{slug}' is not a valid task slug");
     }
-    let content = std::fs::read_to_string(task_path(state_dir, slug))?;
-    Ok(serde_json::from_str(&content)?)
+    let path = task_path(state_dir, slug);
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("cannot read task '{slug}' at {}", path.display()))?;
+    serde_json::from_str(&content)
+        .with_context(|| format!("task '{slug}' at {} is not valid task JSON", path.display()))
 }
 
 /// List all tasks in the store, tolerating a missing or unreadable store by
@@ -930,33 +936,6 @@ pub fn complete_task(state_dir: &Path, input: &str, force: bool) -> anyhow::Resu
     })?;
     touch_task_session(state_dir, &completed.task);
     Ok(completed)
-}
-
-/// Move a `done` task back to `open`, with a note that records the reopen. A
-/// task in any other state is returned unchanged, so `task start --reopen`
-/// works on a task that is not done.
-///
-/// # Errors
-/// Errors if `input` does not resolve to a task, or the save fails.
-pub fn reopen_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
-    let task = with_store_lock(state_dir, || {
-        let slug = resolve_identifier(state_dir, input)?;
-        let mut task = load_task(state_dir, &slug)?;
-        if task.state != TaskState::Done {
-            return Ok(task);
-        }
-        let now = now_rfc3339();
-        task.state = TaskState::Open;
-        task.notes.push(TaskNote {
-            at: now.clone(),
-            text: "Reopened (`task start --reopen`) after it was marked done.".to_string(),
-        });
-        task.updated_at = now;
-        save_task(state_dir, &task)?;
-        Ok(task)
-    })?;
-    touch_task_session(state_dir, &task);
-    Ok(task)
 }
 
 /// Append a timestamped progress note to a task.
