@@ -144,6 +144,7 @@ impl McpHttpClient {
         // send() time, so the connection can only target an address we already approved.
         let (host, addrs) =
             validate_url_production(&url, SsrfPolicy::AllowPrivateNetwork, timeout)?;
+        require_https_for_public(&url, &addrs)?;
         let mut map = reqwest::header::HeaderMap::new();
         for (name, value) in headers {
             let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
@@ -189,16 +190,7 @@ impl McpHttpClient {
     /// The server URL without credentials or a query string, for error text that reaches a
     /// terminal.
     fn display_url(&self) -> String {
-        url::Url::parse(&self.url).map_or_else(
-            |_| "(invalid URL)".to_string(),
-            |mut u| {
-                let _ = u.set_username("");
-                let _ = u.set_password(None);
-                u.set_query(None);
-                u.set_fragment(None);
-                u.to_string()
-            },
-        )
+        redact_url(&self.url)
     }
 
     /// Negotiate an MCP session if one hasn't already been established on this
@@ -602,8 +594,8 @@ fn blocked_reason(ip: &IpAddr, policy: SsrfPolicy) -> Option<&'static str> {
             }
         }
         IpAddr::V6(v6) => {
-            if let Some(mapped) = v6.to_ipv4_mapped() {
-                return blocked_reason(&IpAddr::V4(mapped), policy);
+            if let Some(embedded) = embedded_ipv4(v6) {
+                return blocked_reason(&IpAddr::V4(embedded), policy);
             }
             if v6.is_loopback() {
                 block_private.then_some("loopback IPv6")
@@ -618,6 +610,33 @@ fn blocked_reason(ip: &IpAddr, policy: SsrfPolicy) -> Option<&'static str> {
             }
         }
     }
+}
+
+/// The IPv4 address that an IPv6 address wraps, if any: IPv4-mapped (`::ffff:a.b.c.d`),
+/// IPv4-compatible (`::a.b.c.d`), NAT64 (`64:ff9b::/96`), and 6to4 (`2002::/16`).
+///
+/// A NAT64 gateway or a 6to4 relay forwards such an address to the wrapped IPv4 host, so
+/// the SSRF gate must judge the wrapped address, not the IPv6 wrapper (#2476).
+fn embedded_ipv4(v6: &std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
+    let seg = v6.segments();
+    let low = |hi: u16, lo: u16| {
+        std::net::Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8)
+    };
+    if let Some(mapped) = v6.to_ipv4_mapped() {
+        return Some(mapped);
+    }
+    // `::` and `::1` have an all-zero prefix too, but they are the unspecified and loopback
+    // addresses, not wrapped IPv4 addresses.
+    if seg[..6].iter().all(|&s| s == 0) && !v6.is_unspecified() && !v6.is_loopback() {
+        return Some(low(seg[6], seg[7]));
+    }
+    if seg[0] == 0x0064 && seg[1] == 0xff9b && seg[2..6].iter().all(|&s| s == 0) {
+        return Some(low(seg[6], seg[7]));
+    }
+    if seg[0] == 0x2002 {
+        return Some(low(seg[1], seg[2]));
+    }
+    None
 }
 
 /// Resolve `(host, port)` to socket addresses, bounded by `timeout`.
@@ -683,6 +702,58 @@ fn is_unique_local_v6(v6: &std::net::Ipv6Addr) -> bool {
     (v6.octets()[0] & 0xfe) == 0xfc
 }
 
+/// The URL without credentials, query string, or fragment, for error text that reaches a
+/// terminal.
+fn redact_url(url: &str) -> String {
+    Url::parse(url).map_or_else(
+        |_| "(invalid URL)".to_string(),
+        |mut u| {
+            let _ = u.set_username("");
+            let _ = u.set_password(None);
+            u.set_query(None);
+            u.set_fragment(None);
+            u.to_string()
+        },
+    )
+}
+
+/// Whether a bearer token or memory payload may cross the network in clear text to `ip`.
+///
+/// Loopback, private, unique-local, and CGNAT (100.64.0.0/10, used by Tailscale) addresses
+/// count as the operator's own network. Everything else is public.
+fn is_cleartext_safe(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let cgnat = v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 0x40;
+            v4.is_loopback() || v4.is_private() || cgnat
+        }
+        IpAddr::V6(v6) => match embedded_ipv4(v6) {
+            Some(wrapped) => is_cleartext_safe(&IpAddr::V4(wrapped)),
+            None => v6.is_loopback() || is_unique_local_v6(v6),
+        },
+    }
+}
+
+/// Refuse `http://` when any vetted address is outside the operator's own network. The
+/// remote `icm serve` topology runs on loopback or the operator's LAN, so cleartext stays
+/// allowed there (#2476).
+fn require_https_for_public(url: &str, addrs: &[SocketAddr]) -> anyhow::Result<()> {
+    let parsed = Url::parse(url).context("invalid URL")?;
+    if parsed.scheme() != "http" {
+        return Ok(());
+    }
+    match addrs.iter().find(|a| !is_cleartext_safe(&a.ip())) {
+        Some(addr) => Err(anyhow!(
+            "refusing cleartext http:// to {} ({}) for {}: use https://, or move the server \
+             onto a loopback, private, or Tailscale address",
+            addr.ip(),
+            parsed.host_str().unwrap_or("?"),
+            redact_url(url)
+        )),
+        None => Ok(()),
+    }
+}
+
 /// Validate ICM backend URL to prevent SSRF attacks and return the host string
 /// together with the vetted set of socket addresses the connection may target.
 ///
@@ -707,7 +778,8 @@ pub(crate) fn validate_url_production(
     policy: SsrfPolicy,
     timeout: Duration,
 ) -> anyhow::Result<(String, Vec<SocketAddr>)> {
-    let parsed = Url::parse(url).with_context(|| format!("invalid URL: {url}"))?;
+    // The URL can carry credentials or a token in its query, so no error below prints it raw.
+    let parsed = Url::parse(url).context("invalid URL")?;
 
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(anyhow!(
@@ -718,7 +790,7 @@ pub(crate) fn validate_url_production(
 
     let host = parsed
         .host()
-        .ok_or_else(|| anyhow!("URL {url} has no host"))?;
+        .ok_or_else(|| anyhow!("URL {} has no host", redact_url(url)))?;
     // reqwest's resolve_to_addrs keys on the unbracketed host string; Host's
     // Display matches host_str without the IPv6 brackets, which is what we pin.
     let host_key = match host {
@@ -728,7 +800,7 @@ pub(crate) fn validate_url_production(
     };
     let port = parsed
         .port_or_known_default()
-        .ok_or_else(|| anyhow!("URL {url} has no port and an unknown default"))?;
+        .ok_or_else(|| anyhow!("URL {} has no port and an unknown default", redact_url(url)))?;
 
     let addrs: Vec<SocketAddr> = match host {
         Host::Ipv4(v4) => vec![SocketAddr::new(IpAddr::V4(v4), port)],
@@ -737,7 +809,10 @@ pub(crate) fn validate_url_production(
     };
 
     if addrs.is_empty() {
-        return Err(anyhow!("host of URL {url} resolved to no addresses"));
+        return Err(anyhow!(
+            "host of URL {} resolved to no addresses",
+            redact_url(url)
+        ));
     }
 
     // Reject if ANY resolved address is blocked. A permissive "some address is
@@ -1432,10 +1507,188 @@ mod tests {
     #[tokio::test]
     async fn call_tool_errors_on_unreachable() {
         // Valid public IP that should reject (no listening service)
-        let client = McpHttpClient::new("http://8.8.8.8:0".to_string(), Duration::from_millis(200))
-            .expect("valid URL");
+        let client =
+            McpHttpClient::new("https://8.8.8.8:0".to_string(), Duration::from_millis(200))
+                .expect("valid URL");
         let result = client.call_tool("icm_wake_up", serde_json::json!({})).await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn new_rejects_plain_http_to_a_public_address() {
+        let err = McpHttpClient::new("http://8.8.8.8:9092/mcp".into(), Duration::from_secs(2))
+            .expect_err("cleartext to a public address must be refused")
+            .to_string();
+        assert!(err.contains("http://8.8.8.8:9092/mcp"), "{err}");
+        assert!(err.contains("https://"), "{err}");
+    }
+
+    #[test]
+    fn new_error_for_plain_http_hides_credentials_and_query() {
+        let err = McpHttpClient::new(
+            "http://user:pw@8.8.8.8:9/mcp?token=secret".into(),
+            Duration::from_secs(2),
+        )
+        .expect_err("public http")
+        .to_string();
+        assert!(!err.contains("pw") && !err.contains("secret"), "{err}");
+    }
+
+    #[test]
+    fn new_allows_plain_http_to_loopback_and_private_addresses() {
+        for url in [
+            "http://127.0.0.1:9092",
+            "http://[::1]:9092",
+            "http://10.1.2.3:9092",
+            "http://192.168.1.5:9092",
+            "http://172.16.0.9:9092",
+            "http://[fd00::1]:9092",
+            "http://100.64.0.7:9092",
+            "http://localhost:9092",
+        ] {
+            McpHttpClient::new(url.into(), Duration::from_secs(2))
+                .unwrap_or_else(|e| panic!("{url} must be allowed: {e}"));
+        }
+    }
+
+    #[test]
+    fn new_allows_https_to_a_public_address() {
+        McpHttpClient::new("https://8.8.8.8:443/mcp".into(), Duration::from_secs(2))
+            .expect("https to a public address is allowed");
+    }
+
+    #[test]
+    fn new_rejects_a_malformed_url() {
+        assert!(McpHttpClient::new("http//not a url".into(), Duration::from_secs(2)).is_err());
+    }
+
+    #[test]
+    fn invalid_url_errors_do_not_echo_credentials_or_query() {
+        for url in [
+            "http://user:pw@:9/mcp?token=secret",
+            "ftp://user:pw@host/?token=secret",
+        ] {
+            let err = format!(
+                "{:#}",
+                McpHttpClient::new(url.into(), Duration::from_secs(2)).expect_err(url)
+            );
+            assert!(!err.contains("pw") && !err.contains("secret"), "{err}");
+        }
+    }
+
+    #[test]
+    fn plain_http_error_names_the_host() {
+        let err = McpHttpClient::new("http://8.8.8.8:9/mcp".into(), Duration::from_secs(2))
+            .expect_err("public http")
+            .to_string();
+        assert!(err.contains("8.8.8.8"), "{err}");
+    }
+
+    #[test]
+    fn redact_url_strips_userinfo_query_and_fragment() {
+        assert_eq!(redact_url("http://u:p@h:1/x?q=1#f"), "http://h:1/x");
+        assert_eq!(redact_url("not a url"), "(invalid URL)");
+    }
+
+    #[test]
+    fn require_https_fails_closed_on_an_unparseable_url() {
+        let addr: SocketAddr = "8.8.8.8:80".parse().unwrap();
+        assert!(require_https_for_public("not a url", &[addr]).is_err());
+    }
+
+    #[test]
+    fn cleartext_check_judges_wrapped_ipv4_in_ipv6() {
+        use std::net::{IpAddr, Ipv6Addr};
+        let ip = |s: &str| IpAddr::V6(s.parse::<Ipv6Addr>().unwrap());
+        assert!(!is_cleartext_safe(&ip("::ffff:8.8.8.8")));
+        assert!(is_cleartext_safe(&ip("::ffff:10.0.0.1")));
+        assert!(!is_cleartext_safe(&ip("64:ff9b::808:808")));
+        assert!(!is_cleartext_safe(&ip("2002:808:808::1")));
+        assert!(!is_cleartext_safe(&ip("fe80::1")));
+    }
+
+    #[test]
+    fn embedded_ipv4_extracts_the_exact_wrapped_address() {
+        use std::net::{Ipv4Addr, Ipv6Addr};
+        let got = |s: &str| embedded_ipv4(&s.parse::<Ipv6Addr>().unwrap());
+        let want = Some(Ipv4Addr::new(1, 2, 3, 4));
+        assert_eq!(got("::ffff:1.2.3.4"), want);
+        assert_eq!(got("::1.2.3.4"), want);
+        assert_eq!(got("64:ff9b::102:304"), want);
+        assert_eq!(got("2002:102:304::"), want);
+    }
+
+    #[test]
+    fn embedded_ipv4_ignores_addresses_that_only_look_wrapped() {
+        use std::net::Ipv6Addr;
+        let got = |s: &str| embedded_ipv4(&s.parse::<Ipv6Addr>().unwrap());
+        for s in [
+            "::",
+            "::1",
+            "64:1::1",
+            "1:ff9b::1",
+            "64:ff9b:0:0:1::1",
+            "2001:db8::1",
+        ] {
+            assert_eq!(got(s), None, "{s}");
+        }
+    }
+
+    #[test]
+    fn blocked_reason_sees_metadata_address_behind_nat64_6to4_and_compat() {
+        use std::net::{IpAddr, Ipv6Addr};
+        for s in [
+            "64:ff9b::a9fe:a9fe",
+            "2002:a9fe:a9fe::",
+            "::169.254.169.254",
+        ] {
+            let ip = IpAddr::V6(s.parse::<Ipv6Addr>().unwrap());
+            assert!(
+                blocked_reason(&ip, SsrfPolicy::AllowPrivateNetwork).is_some(),
+                "{s}"
+            );
+        }
+        let public = IpAddr::V6("64:ff9b::808:808".parse::<Ipv6Addr>().unwrap());
+        assert!(blocked_reason(&public, SsrfPolicy::AllowPrivateNetwork).is_none());
+        let unspecified = IpAddr::V6(Ipv6Addr::UNSPECIFIED);
+        assert!(blocked_reason(&unspecified, SsrfPolicy::AllowPrivateNetwork).is_some());
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn prop_cleartext_safe_matches_std_classification_for_ipv4(octets in proptest::array::uniform4(0u8..)) {
+            let ip = std::net::Ipv4Addr::from(octets);
+            let cgnat = octets[0] == 100 && (64..=127).contains(&octets[1]);
+            let expected = ip.is_loopback() || ip.is_private() || cgnat;
+            proptest::prop_assert_eq!(is_cleartext_safe(&IpAddr::V4(ip)), expected);
+        }
+
+        #[test]
+        fn prop_redact_url_is_idempotent_and_hides_secrets(
+            user in "[a-z]{1,8}", pw in "[A-Z]{6,10}", q in "[0-9]{6,10}",
+        ) {
+            let url = format!("http://{user}:{pw}@example.com/mcp?token={q}#frag");
+            let once = redact_url(&url);
+            proptest::prop_assert!(!once.contains(&pw) && !once.contains(&q));
+            proptest::prop_assert_eq!(redact_url(&once), once);
+        }
+    }
+
+    #[test]
+    fn cleartext_safe_edges_for_cgnat() {
+        use std::net::{IpAddr, Ipv4Addr};
+        for ok in [
+            Ipv4Addr::new(100, 64, 0, 1),
+            Ipv4Addr::new(100, 127, 255, 254),
+        ] {
+            assert!(is_cleartext_safe(&IpAddr::V4(ok)), "{ok}");
+        }
+        for bad in [
+            Ipv4Addr::new(100, 63, 255, 255),
+            Ipv4Addr::new(100, 128, 0, 1),
+        ] {
+            assert!(!is_cleartext_safe(&IpAddr::V4(bad)), "{bad}");
+        }
     }
 
     /// Test convenience: `SsrfPolicy::PublicOnly` with a generous timeout,
