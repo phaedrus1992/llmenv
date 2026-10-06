@@ -409,6 +409,7 @@ llmenv task add <title> [--child-of SLUG | --parallel] [--after SLUG] [--parent 
   [--detail <text> | --detail-file <path>]
 llmenv task start <id> [--force] [--reopen]
 llmenv task done <id> [--force]
+llmenv task reopen <id>...
 llmenv task wait <id> [reason]
 llmenv task ls [--format json] (--session <id> | --all) [--current-project]
 llmenv task show <id> | --current | --next
@@ -477,6 +478,11 @@ unambiguous prefix of one.
   as before, and `done` on a `done` task stays a no-op. The native-tool
   redirect (`TaskUpdate`, `TodoWrite`) never forces: it returns the refusal as
   the tool result.
+- `task reopen <id>...` — undo `task done`. (added in v3.12.0) Moves each named `done` task back to `open`.
+  The task keeps its notes, parent, and `blocked_on` links, and gets a note that records the reopen.
+  The call changes nothing and exits non-zero if any named task is not `done`, and the error names each such task.
+  It also refuses a sub-task whose parent is `done`, unless you name the parent in the same call.
+  To reopen one task and start it in one step, use `task start <id> --reopen`.
 - `task wait <id> [reason]` — mark a task `waiting` on something outside the
   agent's control (a human review, a decision, external system access)
   instead of `wip`. `reason` is recorded as a note; reads from stdin if
