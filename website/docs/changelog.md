@@ -152,6 +152,7 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 - Plugin and marketplace sources that use `git://` or a `<helper>::` remote helper are rejected, like `ext::` and `http://` before. A pin (`sha` or `ref`) that is not a string is an error, not an unpinned clone (#2441)
 - `llmenv memory prune` reads only the memories of the current project and refuses to run when it cannot tell the project, where it used to read whatever ICM's own working folder held. The `memory prune`, `hook-run`, and `check-stale` help text now matches what the commands do. See [`memory`](https://phaedrus1992.github.io/llmenv/docs/commands#memory)
 - A session started in `$HOME`, in a parent of `$HOME`, or in `/` is no longer recorded as an allowed codebase-memory root, because the server keeps a root for good. `llmenv doctor` and the SessionStart notice say so. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#featurescodebase_memory)
+- The first Stop-hook idle reminder now offers `llmenv task wait <slug> "<reason>"` next to `llmenv task start <slug>`, so an agent whose next step needs the user is not told to start work that cannot start. See [Task nudges](https://phaedrus1992.github.io/llmenv/docs/commands#task-nudges-added-in-v3120) (#2468)
 
 ### Removed
 
@@ -159,6 +160,7 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 
 ### Fixed
 
+- A bundle hook with an inline shell command no longer triggers the "path ... is not in the bundle files" warning because of a `/` in jq `//`, `2>/dev/null`, or a URL. The warning now fires for script paths only, names the bundle and the path, and prints once for each bundle and path. A token such as `2>/dev/null` is also no longer rewritten into a cache path. See [Troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#a-bundle-hook-warns-that-a-path-is-not-in-the-bundle-files) (#2466)
 - `llmenv doctor` shows the `Lifecycle hooks (claude_code):` section again. Since v3.11.0 it compared the adapter's display name `claude-code` to `claude_code`, so the section never printed.
 - The session-start wake-up pack now reaches the model in Claude Code. llmenv fetched it from ICM at every session start and then threw it away, because the output for `SessionStart` was suppressed along with `SessionEnd`. The wake-up call now also names the session's project, so a remote ICM server returns this project's context instead of whichever project its own working directory points at (#2251)
 - `llmenv task start` no longer refuses a task that's blocked on the task added right before it once that blocker is done. `task add` parents each new task under the previous one, so the block check was waiting on the blocked task itself and could never pass without `--force` (#2300)
