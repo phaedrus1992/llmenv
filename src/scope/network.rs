@@ -77,7 +77,7 @@ fn gateway_mac_matches(want: &str, env: &Env) -> bool {
 /// Whether any of `addrs` lies inside the CIDR block `cidr`. A block that does not parse
 /// matches nothing; config validation reports it at load time.
 #[must_use]
-pub fn cidr_matches(cidr: &str, addrs: &[IpAddr]) -> bool {
+pub(crate) fn cidr_matches(cidr: &str, addrs: &[IpAddr]) -> bool {
     cidr.parse::<ipnet::IpNet>()
         .is_ok_and(|net| addrs.iter().any(|a| net.contains(a)))
 }
@@ -180,7 +180,7 @@ pub fn parse_linux_neigh_mac(s: &str) -> Option<String> {
 /// so each of the six octets may carry one or two hex digits (#2487).
 /// Returns `None` when the text is not a MAC.
 #[must_use]
-pub(crate) fn normalize_mac(s: &str) -> Option<String> {
+fn normalize_mac(s: &str) -> Option<String> {
     let mut octets = Vec::with_capacity(6);
     for part in s.split(':') {
         if !(1..=2).contains(&part.len()) || !part.bytes().all(|b| b.is_ascii_hexdigit()) {

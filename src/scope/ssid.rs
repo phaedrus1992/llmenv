@@ -16,7 +16,7 @@ pub enum SsidReading {
 
 /// Read the SSID that this machine is associated with.
 #[must_use]
-pub fn detect_ssid() -> SsidReading {
+pub(crate) fn detect_ssid() -> SsidReading {
     #[cfg(target_os = "macos")]
     {
         detect_macos()
