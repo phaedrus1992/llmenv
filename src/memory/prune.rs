@@ -115,7 +115,7 @@ fn connect(
     let config_dir = config_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
-    let env = crate::scope::matcher::Env::detect();
+    let env = crate::scope::matcher::Env::detect_for_config(config);
     let active = crate::scope::evaluate(config, &env);
     let url = crate::memory::memory_url(config, config_dir, &active)?.into_url()?;
     McpHttpClient::new(url, CLI_TIMEOUT)
@@ -230,7 +230,10 @@ pub(crate) fn run(dry_run: bool) -> anyhow::Result<PruneResult> {
     let config_dir = config_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
-    let active = crate::scope::evaluate(&config, &crate::scope::matcher::Env::detect());
+    let active = crate::scope::evaluate(
+        &config,
+        &crate::scope::matcher::Env::detect_for_config(&config),
+    );
     let merged = crate::memory::merged_memory(&config, config_dir, &active)?;
     ensure_retention_unset(&merged.memory, &active.tags)?;
     let client = connect(&config_path, &config)?;

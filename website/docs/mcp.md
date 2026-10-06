@@ -210,7 +210,7 @@ The command fails with the fix when the old proxy does not exit, when the pid is
 
 ### Placing a host on a network manually
 
-Network auto-detection (by gateway MAC; `ssid` and `cidr` are not evaluated) doesn't always work — a VPN, a
+Network auto-detection (by gateway MAC, CIDR, or SSID) doesn't always work — a VPN, a
 captive network, or an unrecognized gateway can all leave the network scope
 unmatched, so the memory tag never activates and clients can't find the server.
 
@@ -411,6 +411,13 @@ A tool call that the server answers with `isError: true` fails in llmenv, so a f
 The client refuses a plain `http://` URL when any address that it resolves to is public (added in v3.12.0).
 Plain `http://` stays allowed for loopback, private (RFC 1918), unique-local (ULA), and CGNAT (100.64.0.0/10, used by Tailscale) addresses.
 For a remote `icm serve` on a public address, put it behind `https://`.
+
+llmenv applies the same rule when it renders the MCP config for the agent (added in v3.12.0).
+A `host:` `addr` for the memory server, or an `mcp:` entry with an `http://` URL, that is a public IP literal fails `llmenv export`, `llmenv regenerate`, and `llmenv doctor`.
+The error names the server and says to use `https://`.
+Before v3.12.0, only llmenv's own client refused cleartext to a public address, and the agent still connected in clear text with its bearer headers.
+`llmenv doctor` also warns when the hostname of an `http://` URL resolves to a public address.
+llmenv does not look up hostnames at render time, so only `doctor` can find this case.
 
 Deploy it only on a network you trust (home LAN, a private VPN, a firewalled
 subnet). Do not expose the port to the public internet, and do not point the

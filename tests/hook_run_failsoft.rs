@@ -298,18 +298,18 @@ fn private_network_url_is_allowed_not_ssrf_rejected() {
 }
 
 #[test]
-fn unreachable_public_backend_exits_zero_with_warning() {
-    // A syntactically valid, SSRF-allowed public URL that nothing is listening
-    // on. The HTTP round-trip fails; the dispatcher must still exit 0. Uses the
-    // TEST-NET-1 documentation range (192.0.2.0/24, RFC 5737) on the discard
-    // port so it fails fast within the 2s hook timeout without touching a real
-    // host.
+fn public_http_backend_is_refused_and_fails_soft() {
+    // The memory backend is always rendered as `http://`, so a public IP literal is refused at
+    // resolve time (#2483). The hook still exits 0, and the agent sees why. Uses the TEST-NET-1
+    // documentation range (192.0.2.0/24, RFC 5737), so nothing reaches a real host.
     let (dir, config_path) = setup_config(&config_with_memory_addr("192.0.2.1", 9));
-
-    assert_fail_soft_with_health_notice(
-        hook_cmd(dir.path(), &config_path, "session_start"),
-        "session_start skipped",
-    );
+    let mut cmd = hook_cmd(dir.path(), &config_path, "session_start");
+    cmd.timeout(Duration::from_secs(25))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("refusing cleartext http://"))
+        .stdout(predicate::str::contains("https://"))
+        .stderr(predicate::str::contains("session_start skipped"));
 }
 
 #[test]

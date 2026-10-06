@@ -17,7 +17,7 @@ pub(super) fn run(use_color: bool) -> anyhow::Result<()> {
     let info = super::doctor_info(use_color);
     let config = crate::hook_run::load_cached_config(&paths::config_path()?)?;
     let config_dir = paths::config_dir()?;
-    let active = scope::evaluate(&config, &scope::matcher::Env::detect());
+    let active = scope::evaluate(&config, &scope::matcher::Env::detect_for_config(&config));
     let pid_path = crate::mcp::proxy::default_pid_path()?;
     emit(
         report_stop(stop_proxy(&pid_path, STOP_WAIT)?, &pid_path)?,

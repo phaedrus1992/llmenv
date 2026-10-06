@@ -68,3 +68,34 @@ fn arp_handles_incomplete_entry() {
         None
     );
 }
+
+#[test]
+fn macos_arp_zero_pads_dropped_leading_zeros() {
+    // macOS `arp -n` prints `1c:b:8b:e4:5f:94` for 1c:0b:8b:e4:5f:94 (#2487).
+    assert_eq!(
+        parse_macos_arp_mac("? (10.0.0.1) at 1c:b:8b:e4:5f:94 on en0 ifscope [ethernet]\n")
+            .as_deref(),
+        Some("1c:0b:8b:e4:5f:94")
+    );
+}
+
+#[test]
+fn macos_arp_lowercases_the_mac() {
+    assert_eq!(
+        parse_macos_arp_mac("? (10.0.0.1) at AA:B:CC:D:EE:F on en0\n").as_deref(),
+        Some("aa:0b:cc:0d:ee:0f")
+    );
+}
+
+#[test]
+fn arp_rejects_a_mac_with_too_few_octets() {
+    assert_eq!(
+        parse_macos_arp_mac("? (10.0.0.1) at 1c:b:8b:e4:5f on en0\n"),
+        None
+    );
+}
+
+#[test]
+fn arp_rejects_a_three_digit_octet() {
+    assert_eq!(parse_macos_arp_mac("at 1c:0bb:8b:e4:5f:94 on en0\n"), None);
+}

@@ -141,8 +141,9 @@ scope:
 Each scope has an `id` (used in diagnostics and `LLMENV_ACTIVE_SCOPES`), a
 `match` block, and a `tags` list.
 
-- **Network** `match` fields: `gateway_mac`, `ssid`, `cidr`. Only `gateway_mac`
-  is evaluated today; `ssid`/`cidr` parse but are ignored.
+- **Network** `match` fields: `gateway_mac`, `ssid`, `cidr`. A scope that sets more than one
+  field is active only when every field matches. A scope that sets none never matches.
+  See [Network match fields](#network-match-fields).
 - **Host** `match` field: `hostname` (compared case-insensitively).
 - **User** `match` field: `user` (exact match against `$USER`).
 - **Content** *(added in v3.3.0)* `match` fields: `glob` (matched against paths relative to the
@@ -178,6 +179,38 @@ project config beats an incidental glob match (#845; before v3.10.0, a bundle
 firing only via a `content` scope always landed at the lowest rank,
 unconditionally losing every scalar conflict regardless of how specific its
 match was).
+
+### Network match fields
+
+(`cidr` and `ssid` matching added in v3.12.0; before v3.12.0 only `gateway_mac` was evaluated and the other two were ignored)
+
+- `gateway_mac` — the MAC address of the default gateway. Case-insensitive. Either `1c:0b:8b:e4:5f:94` or the form that macOS `arp` prints, `1c:b:8b:e4:5f:94`, matches (fixed in v3.12.0).
+- `cidr` — an IPv4 or IPv6 block such as `192.168.1.0/24`. The scope matches when any address of a local network interface lies inside the block. Loopback and link-local addresses do not count. The check needs no external tool. A block that is common on other networks, or that a container runtime or VPN also uses (`172.17.0.0/16` for Docker), matches there too.
+- `ssid` — the name of the Wi-Fi network that the machine is associated with. The match is exact and case-sensitive.
+
+llmenv reads the SSID with a platform tool: `ipconfig getsummary` on macOS, `nmcli` or `iw` on Linux, and `netsh wlan` on Windows.
+When no tool is available, or the platform hides the SSID, the scope does not match, and `llmenv doctor` says why.
+macOS 15 and later print `<redacted>` to a command-line tool that has no Location Services grant, so an `ssid` scope never matches there.
+Use `gateway_mac` or `cidr` on such a Mac.
+On macOS, llmenv reads the SSID of each Wi-Fi hardware port, not of the default-route interface.
+On Linux, llmenv reads the active NetworkManager Wi-Fi connection, and falls back to `iw dev`.
+A network scan list is not used, because a nearby access point controls the SSIDs in it.
+
+`cidr` and `ssid` are hints, not proof of location.
+Any network can hand out the same private block, and any access point can broadcast the same SSID.
+`gateway_mac` is harder to copy.
+A scope whose tags enable permissions, or a cleartext MCP server, should also set `gateway_mac`.
+
+```yaml
+scope:
+  network:
+    - id: home
+      match: { gateway_mac: "aa:bb:cc:dd:ee:ff", cidr: "192.168.1.0/24" }   # both must match
+      tags: [home]
+    - id: office
+      match: { ssid: "Office-5G", cidr: "10.20.0.0/16" }
+      tags: [office]
+```
 
 ## `capabilities:`
 

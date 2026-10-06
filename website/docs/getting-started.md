@@ -178,10 +178,12 @@ Full per-command reference: [commands.md](commands.md).
 - **YAML parse error** — usually an unquoted value containing a colon. Quote
   addresses, MACs, SSIDs, and URLs. See
   [Configuration → YAML gotchas](configuration.md#yaml-gotchas).
-- **Network scope never matches** — only `gateway_mac` is evaluated today;
-  `ssid`/`cidr` are ignored. `llmenv doctor --all` flags a network scope whose
-  `match` has no `gateway_mac` as an orphan that can never activate (added in
-  v3.8.0). Use a host scope as a reliable fallback.
+- **Network scope never matches** — `gateway_mac`, `cidr`, and `ssid` are all evaluated
+  (`cidr` and `ssid` since v3.12.0). When a scope sets more than one, all must match.
+  `llmenv doctor` warns when the platform hides the Wi-Fi SSID, as macOS 15 does, and
+  `llmenv doctor --all` flags a scope whose `match` sets no field (added in v3.8.0). See
+  [Network match fields](configuration.md#network-match-fields). A host scope is a
+  reliable fallback.
 
 ## Recommended external tools
 
