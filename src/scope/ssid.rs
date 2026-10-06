@@ -63,8 +63,8 @@ fn detect_macos() -> SsidReading {
 
 #[cfg(target_os = "linux")]
 fn detect_linux() -> SsidReading {
-    if let Some(out) = run("nmcli", &["-t", "-f", "active,ssid", "dev", "wifi"]) {
-        return parse_nmcli_ssid(&out).map_or(SsidReading::NotAssociated, SsidReading::Ssid);
+    if let Some(reading) = detect_via_nmcli() {
+        return reading;
     }
     match run("iw", &["dev"]) {
         Some(out) => parse_iw_ssid(&out).map_or(SsidReading::NotAssociated, SsidReading::Ssid),
@@ -72,6 +72,32 @@ fn detect_linux() -> SsidReading {
             SsidReading::Undetermined("neither `nmcli` nor `iw` could report Wi-Fi state".into())
         }
     }
+}
+
+/// Read the SSID of the active Wi-Fi connection profile. The scan list
+/// (`nmcli dev wifi`) carries SSIDs that a nearby attacker chooses, and an SSID can hold a
+/// newline, so that list can forge a line. The active profile comes from saved settings.
+#[cfg(target_os = "linux")]
+fn detect_via_nmcli() -> Option<SsidReading> {
+    let active = run(
+        "nmcli",
+        &["-t", "-f", "TYPE,NAME", "connection", "show", "--active"],
+    )?;
+    let Some(name) = parse_nmcli_active_wifi_connection(&active) else {
+        return Some(SsidReading::NotAssociated);
+    };
+    let value = run(
+        "nmcli",
+        &[
+            "-g",
+            "802-11-wireless.ssid",
+            "connection",
+            "show",
+            "id",
+            &name,
+        ],
+    )?;
+    Some(parse_nmcli_ssid_value(&value).map_or(SsidReading::NotAssociated, SsidReading::Ssid))
 }
 
 #[cfg(windows)]
@@ -122,16 +148,25 @@ pub fn parse_macos_ipconfig_ssid(s: &str) -> SsidReading {
     }
 }
 
-/// The active SSID from `nmcli -t -f active,ssid dev wifi`, lines of the form `yes:MyNet`.
+/// The name of the active Wi-Fi connection from `nmcli -t -f TYPE,NAME connection show
+/// --active`, lines of the form `802-11-wireless:Home`.
 ///
 /// Terse mode escapes `:` and `\` in a value with a backslash.
 #[must_use]
-pub fn parse_nmcli_ssid(s: &str) -> Option<String> {
+pub fn parse_nmcli_active_wifi_connection(s: &str) -> Option<String> {
     s.lines().find_map(|l| {
-        let rest = l.strip_prefix("yes:")?;
-        let name = unescape_nmcli(rest);
-        (!name.is_empty()).then_some(name)
+        let (kind, name) = l.split_once(':')?;
+        let is_wifi = matches!(kind, "802-11-wireless" | "wifi");
+        let name = unescape_nmcli(name);
+        (is_wifi && !name.is_empty()).then_some(name)
     })
+}
+
+/// The SSID from `nmcli -g 802-11-wireless.ssid connection show id <name>`: one line.
+#[must_use]
+pub fn parse_nmcli_ssid_value(s: &str) -> Option<String> {
+    let name = unescape_nmcli(s.lines().next()?);
+    (!name.is_empty()).then_some(name)
 }
 
 fn unescape_nmcli(s: &str) -> String {

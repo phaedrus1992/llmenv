@@ -1,6 +1,6 @@
 use llmenv::scope::ssid::{
     SsidReading, parse_iw_ssid, parse_macos_ipconfig_ssid, parse_macos_wifi_devices,
-    parse_netsh_ssid, parse_nmcli_ssid,
+    parse_netsh_ssid, parse_nmcli_active_wifi_connection, parse_nmcli_ssid_value,
 };
 
 const MACOS_PORTS: &str = "Hardware Port: Ethernet Adapter (en14)
@@ -54,17 +54,41 @@ fn macos_without_an_ssid_line_is_not_associated() {
 }
 
 #[test]
-fn nmcli_reads_the_active_ssid_and_unescapes_colons() {
+fn nmcli_reads_the_active_wifi_connection_name() {
+    let out = "ethernet:Wired connection 1\n802-11-wireless:Home\\: 5G\nvpn:Work\n";
     assert_eq!(
-        parse_nmcli_ssid("no:Other\nyes:Home\n").as_deref(),
-        Some("Home")
+        parse_nmcli_active_wifi_connection(out).as_deref(),
+        Some("Home: 5G")
     );
     assert_eq!(
-        parse_nmcli_ssid("yes:Cafe\\: 5G\n").as_deref(),
+        parse_nmcli_active_wifi_connection("wifi:Cafe\n").as_deref(),
+        Some("Cafe")
+    );
+    assert_eq!(parse_nmcli_active_wifi_connection("ethernet:Wired\n"), None);
+    assert_eq!(
+        parse_nmcli_active_wifi_connection("802-11-wireless:\n"),
+        None
+    );
+    assert_eq!(parse_nmcli_active_wifi_connection(""), None);
+}
+
+#[test]
+fn nmcli_ssid_value_is_one_unescaped_line() {
+    assert_eq!(
+        parse_nmcli_ssid_value("Home Wifi\n").as_deref(),
+        Some("Home Wifi")
+    );
+    assert_eq!(
+        parse_nmcli_ssid_value("Cafe\\: 5G\n").as_deref(),
         Some("Cafe: 5G")
     );
-    assert_eq!(parse_nmcli_ssid("no:Other\n"), None);
-    assert_eq!(parse_nmcli_ssid("yes:\n"), None);
+    // Only the first line counts, so trailing output cannot add a name.
+    assert_eq!(
+        parse_nmcli_ssid_value("Home\nOther\n").as_deref(),
+        Some("Home")
+    );
+    assert_eq!(parse_nmcli_ssid_value("\n"), None);
+    assert_eq!(parse_nmcli_ssid_value(""), None);
 }
 
 #[test]
