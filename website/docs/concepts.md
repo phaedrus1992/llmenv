@@ -20,7 +20,7 @@ A **scope** answers "where am I?". There are four kinds:
 
 | Kind | Matches on | Declared in |
 | ------ | ----------- | ------------- |
-| `network` | gateway MAC address | `config.yaml` under `scope.network` |
+| `network` | gateway MAC, local interface CIDR, or Wi-Fi SSID | `config.yaml` under `scope.network` |
 | `host` | hostname (case-insensitive) | `config.yaml` under `scope.host` |
 | `user` | `$USER` | `config.yaml` under `scope.user` |
 | `project` | a `.llmenv.yaml` marker file | the project tree itself (not `config.yaml`) |
@@ -34,8 +34,8 @@ This keeps per-project configuration with the project, not in a central file. Se
 Each scope carries a list of `tags`. A scope is *active* when its match
 condition holds; all active scopes contribute their tags to the active set.
 
-> Note: `network` matching currently uses `gateway_mac` only. The `ssid` and
-> `cidr` match fields parse but are not yet evaluated.
+A `network` scope can match on `gateway_mac`, `cidr`, or `ssid` (`cidr` and `ssid` since
+v3.12.0). See [Network match fields](configuration.md#network-match-fields).
 
 ## Tags
 

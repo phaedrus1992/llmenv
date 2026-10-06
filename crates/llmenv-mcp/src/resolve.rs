@@ -120,6 +120,14 @@ pub enum ResolveError {
         .0.join(" | ")
     )]
     AmbiguousCodebaseMemory(Vec<String>),
+    #[error(
+        "mcp '{name}': refusing cleartext http:// to public address {addr}: use an https:// \
+         URL, or move the server onto a loopback, private, or Tailscale address"
+    )]
+    CleartextPublicAddress {
+        name: String,
+        addr: std::net::IpAddr,
+    },
     #[error("bundle mcp '{0}': name is reserved for the memory backend")]
     BundleMcpReservedName(String),
     #[error(
@@ -248,6 +256,27 @@ fn resolve_static(m: &McpServer) -> Result<ResolvedMcp, ResolveError> {
     })
 }
 
+/// The memory server URL. An IPv6 literal needs brackets to form a valid authority.
+fn memory_url(addr: &str, port: u16) -> String {
+    if addr.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("http://[{addr}]:{port}/mcp")
+    } else {
+        format!("http://{addr}:{port}/mcp")
+    }
+}
+
+/// Refuse a cleartext URL to a public IP literal, so the agent never sends bearer
+/// headers or memory payloads in the clear (#2483). Same policy as the MCP client.
+fn reject_public_cleartext(name: &str, url: &str) -> Result<(), ResolveError> {
+    match super::cleartext::public_cleartext_literal(url) {
+        Some(addr) => Err(ResolveError::CleartextPublicAddress {
+            name: name.to_string(),
+            addr,
+        }),
+        None => Ok(()),
+    }
+}
+
 /// Resolve the memory backend to a network HTTP client at the server host's
 /// address. Every agent connects this way, including the one on the host that
 /// runs the daemon — the local proxy (launched by the CLI) is what bridges the
@@ -259,10 +288,12 @@ fn resolve_memory(
     let entry = hosts
         .get(&mem.server_host)
         .ok_or_else(|| ResolveError::MemoryUnknownServerHost(mem.server_host.clone()))?;
+    let url = memory_url(&entry.addr, mem.port);
+    reject_public_cleartext(MEMORY_MCP_NAME, &url)?;
     Ok(ResolvedMcp {
         name: MEMORY_MCP_NAME.to_string(),
         kind: ResolvedKind::Remote {
-            url: format!("http://{}:{}/mcp", entry.addr, mem.port),
+            url,
             transport: McpTransport::Http,
         },
         // Memory backend is an llmenv-internal server; no user-supplied headers/timeout.
@@ -402,6 +433,7 @@ fn remote_kind(m: &McpServer, transport: McpTransport) -> Result<ResolvedKind, R
             name: m.name.clone(),
             transport: format!("{transport:?}").to_lowercase(),
         })?;
+    reject_public_cleartext(&m.name, &url)?;
     Ok(ResolvedKind::Remote { url, transport })
 }
 
@@ -882,6 +914,95 @@ mod tests {
             }
             other => panic!("expected remote, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn memory_on_a_public_ip_literal_is_refused() {
+        let hosts = BTreeMap::from([(
+            "still".to_string(),
+            HostEntry {
+                addr: "8.8.8.8".to_string(),
+            },
+        )]);
+        let err = resolve_mcps(&[], &[memory()], &hosts, &tags(&["network-home"])).unwrap_err();
+        assert_eq!(
+            err,
+            ResolveError::CleartextPublicAddress {
+                name: MEMORY_MCP_NAME.into(),
+                addr: "8.8.8.8".parse().unwrap(),
+            }
+        );
+        assert!(err.to_string().contains("https://"), "{err}");
+    }
+
+    #[test]
+    fn memory_on_private_loopback_and_cgnat_literals_still_resolves() {
+        for addr in ["10.0.0.4", "127.0.0.1", "100.64.1.2", "fd00::1"] {
+            let hosts = BTreeMap::from([("still".to_string(), HostEntry { addr: addr.into() })]);
+            resolve_mcps(&[], &[memory()], &hosts, &tags(&["network-home"]))
+                .unwrap_or_else(|e| panic!("{addr}: {e}"));
+        }
+    }
+
+    #[test]
+    fn memory_url_brackets_an_ipv6_literal() {
+        let hosts = BTreeMap::from([(
+            "still".to_string(),
+            HostEntry {
+                addr: "fd00::1".into(),
+            },
+        )]);
+        let resolved = resolve_mcps(&[], &[memory()], &hosts, &tags(&["network-home"])).unwrap();
+        match &resolved[0].kind {
+            ResolvedKind::Remote { url, .. } => assert_eq!(url, "http://[fd00::1]:7878/mcp"),
+            other => panic!("expected remote, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remote_http_url_on_a_public_ip_is_refused() {
+        let mut s = stdio_server("ctx7", &["t"], "x");
+        s.transport = McpTransport::Http;
+        s.command = None;
+        s.url = Some("http://93.184.216.34/mcp".into());
+        let err = resolve_mcps(&[s], &[], &base_host(), &tags(&["t"])).unwrap_err();
+        assert!(
+            matches!(err, ResolveError::CleartextPublicAddress { .. }),
+            "{err}"
+        );
+        assert!(err.to_string().contains("ctx7"), "{err}");
+    }
+
+    #[test]
+    fn remote_https_url_on_a_public_ip_is_allowed() {
+        let mut s = stdio_server("ctx7", &["t"], "x");
+        s.transport = McpTransport::Http;
+        s.command = None;
+        s.url = Some("https://93.184.216.34/mcp".into());
+        resolve_mcps(&[s], &[], &base_host(), &tags(&["t"])).unwrap();
+    }
+
+    #[test]
+    fn remote_http_url_on_a_hostname_is_not_refused_at_resolve_time() {
+        // Hostnames resolve through DNS, which `llmenv doctor` checks.
+        let mut s = stdio_server("ctx7", &["t"], "x");
+        s.transport = McpTransport::Sse;
+        s.command = None;
+        s.url = Some("http://ctx7.example/sse".into());
+        resolve_mcps(&[s], &[], &base_host(), &tags(&["t"])).unwrap();
+    }
+
+    #[test]
+    fn bundle_remote_http_url_on_a_public_ip_is_refused() {
+        let mut s = stdio_server("ctx7", &[], "x");
+        s.transport = McpTransport::Http;
+        s.command = None;
+        s.url = Some("http://8.8.4.4/mcp".into());
+        let err = resolve_bundle_mcps(&[s], &tags(&[])).unwrap_err();
+        assert!(
+            matches!(err, ResolveError::CleartextPublicAddress { .. }),
+            "{err}"
+        );
     }
 
     mod codebase_memory_props {
