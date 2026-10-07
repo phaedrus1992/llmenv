@@ -188,7 +188,8 @@ fn parse_recall_output(text: &str) -> Vec<MemoryRecord> {
             && !weight_seen
         {
             weight_seen = true;
-            has_weight = rest.trim().parse::<f64>().is_ok();
+            // `f64::from_str` also accepts `nan` and `inf`, which are not weights.
+            has_weight = rest.trim().parse::<f64>().is_ok_and(f64::is_finite);
         }
     }
 
@@ -450,6 +451,14 @@ mod tests {
         let text = "--- id-1 ---\n  importance: low\n  topic: test\n";
         let records = parse_recall_output(text);
         assert_eq!(records.len(), 0);
+    }
+
+    #[test]
+    fn parse_recall_output_non_finite_weight_omitted() {
+        for weight in ["nan", "inf", "-inf", "infinity"] {
+            let text = format!("--- id-1 ---\n  importance: low\n  weight: {weight}\n");
+            assert!(parse_recall_output(&text).is_empty(), "{weight}");
+        }
     }
 
     #[test]
