@@ -4628,8 +4628,17 @@ fn run_plugin_sync() -> anyhow::Result<()> {
     }
 
     for m in &config.marketplace {
-        let state = crate::plugins::cache::sync_marketplace(&cache_root, m, true)
-            .with_context(|| format!("syncing marketplace '{}'", m.name))?;
+        let state = match crate::plugins::cache::sync_marketplace(&cache_root, m, true) {
+            Ok(state) => state,
+            // A path source only exists on the host that has the checkout. Export never
+            // syncs a marketplace that no active scope references, so plugin-sync skips
+            // it too and keeps going (#2513).
+            Err(e @ crate::plugins::cache::SyncError::PathMissing { .. }) => {
+                eprintln!("warning: skipping marketplace '{}': {e}", m.name);
+                continue;
+            }
+            Err(e) => return Err(e).with_context(|| format!("syncing marketplace '{}'", m.name)),
+        };
         let head = state.head.as_deref().unwrap_or("(local path)");
         println!(
             "✓ {} → {} [{}]",

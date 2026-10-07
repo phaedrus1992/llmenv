@@ -227,6 +227,10 @@ Sync plugin marketplaces into the cache — clone git sources that are missing,
 fast-forward those already present. Local-path marketplaces are used in place and
 need no sync.
 
+(changed in v3.12.1) A local-path marketplace whose directory is missing on this host is skipped with a warning.
+The sync goes on to the marketplaces declared after it.
+Before v3.12.1 the sync stopped at the first missing path.
+
 (changed in v3.12.0) A plugin whose marketplace entry pins a `ref` or a `sha` is cloned again on each sync, so a changed
 pin takes effect.
 Before v3.12.0 the sync kept the old checkout and reported success.
