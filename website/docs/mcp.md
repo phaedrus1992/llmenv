@@ -121,6 +121,10 @@ features:
       default_topics: ["context-{project}", preferences]
 ```
 
+(changed in v3.12.1) A server host that resolves to several addresses, such as a `.local` mDNS name that also advertises `fe80::` link-local addresses, is accepted.
+llmenv drops the link-local addresses, connects only to the others, and fails only when no other address is left.
+Before v3.12.1 any link-local address made the SessionStart health check report memory as dead.
+
 ### Tool search and the ICM tools (added in v3.12.0)
 
 Claude Code defers the tools of an MCP server behind tool search:
