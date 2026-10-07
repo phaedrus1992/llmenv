@@ -3486,6 +3486,20 @@ test_2504_cascade_only_stale_branch_with_no_pr_is_reset() {
   return 1
 }
 
+# The old tip must outlive the run log: the new PR names it and the commits
+# the reset dropped, and the restore command in the log really restores it.
+test_2504_reset_pr_body_names_the_old_tip_and_dropped_commits() {
+  local out before
+  out=$(run_reset_case bot-conflict "[]")
+  before=$(reset_case_sha "$out" BEFORE_SHA)
+  [[ "$out" == *"(forced update)"* ]] \
+    && [[ "$out" == *"GH_CALL:pr create"*"reset this branch"*"Old tip: $before"*"cascade resolution on the stale branch"* ]] \
+    && [[ "$out" == *"Restore it with: git push --force-with-lease=forward-merge/rel-to-target:"*" origin $before:refs/heads/forward-merge/rel-to-target"* ]] \
+    && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
 test_2504_stale_branch_with_an_open_pr_is_not_reset() {
   local out before after
   out=$(run_reset_case bot-conflict)
@@ -3839,6 +3853,8 @@ run_test "Issue #2299: the harness runs outside the repo with no GitHub credenti
 
 run_test "Issue #2504: a cascade-only stale branch with no PR is reset to a fresh merge" \
   test_2504_cascade_only_stale_branch_with_no_pr_is_reset
+run_test "Issue #2504: the PR for a reset branch names the old tip and the dropped commits" \
+  test_2504_reset_pr_body_names_the_old_tip_and_dropped_commits
 run_test "Issue #2504: a stale branch with an open PR is not reset" \
   test_2504_stale_branch_with_an_open_pr_is_not_reset
 run_test "Issue #2504: a stale branch with a human commit is not reset" \

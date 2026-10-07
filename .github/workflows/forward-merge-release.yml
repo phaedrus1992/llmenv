@@ -1031,6 +1031,8 @@ jobs:
                 # A reset (#2504) needs it after the checkout below moves HEAD.
                 FRESH_SHA=$(git rev-parse HEAD)
                 RESET_LEASE=""
+                OLD_SHA=""
+                DROPPED=""
                 if ! git fetch origin "$MERGE_BRANCH"; then
                   echo "::error::Failed to fetch existing $MERGE_BRANCH"
                   echo "::endgroup::"
@@ -1124,7 +1126,9 @@ jobs:
                       fi
                       if [[ "$RESET_OK" -eq 1 ]]; then
                         OLD_SHA=$(git rev-parse HEAD)
-                        echo "::warning::Resetting stale $MERGE_BRANCH (old tip $OLD_SHA): no open PR, and only the cascade wrote its commits. Restore it with: git push origin $OLD_SHA:refs/heads/$MERGE_BRANCH"
+                        DROPPED=$(git log --format='- %h %s' "$FRESH_SHA..HEAD") \
+                          || DROPPED="- (the cascade could not list them)"
+                        echo "::warning::Resetting stale $MERGE_BRANCH (old tip $OLD_SHA): no open PR, and only the cascade wrote its commits. Restore it with: git push --force-with-lease=$MERGE_BRANCH:$FRESH_SHA origin $OLD_SHA:refs/heads/$MERGE_BRANCH"
                         if ! git checkout -B "$MERGE_BRANCH" "$FRESH_SHA"; then
                           echo "::error::Failed to reset $MERGE_BRANCH to the fresh merge"
                           echo "::endgroup::"
@@ -1163,6 +1167,9 @@ jobs:
                   BRANCH_OWN=$(git log --no-merges --format='- %h %s' "$SOURCE_REF..HEAD" "^origin/$TARGET") \
                     || BRANCH_OWN="- (the cascade could not list them)"
                   PR_BODY="No open PR existed for $MERGE_BRANCH, so the cascade updated the existing branch and opened this PR."
+                  if [[ -n "$RESET_LEASE" ]]; then
+                    PR_BODY+=$'\n\n'"The cascade could not merge $SOURCE_DESC into the old branch, so it reset this branch to a fresh merge. Only the cascade had written the old commits. Old tip: $OLD_SHA"$'\n'"Dropped commits:"$'\n'"$DROPPED"
+                  fi
                   if [[ -n "$BRANCH_OWN" ]]; then
                     PR_BODY+=$'\n\n'"The branch also holds these commits, which are not on $SOURCE_DESC or $TARGET. An earlier PR for this branch may have carried them. Review them before you merge:"$'\n'"$BRANCH_OWN"
                   fi
