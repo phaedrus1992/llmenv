@@ -6,6 +6,7 @@
 //! by tag intersection (same model as memory).
 
 mod backend;
+mod umans_fetch;
 pub(crate) use backend::{UsageSnapshot, backend_for};
 
 use std::collections::BTreeSet;
@@ -168,7 +169,8 @@ pub(crate) fn run_throttle_hook(event: &str) {
     };
 
     if let Err(e) = run_throttle_inner(event, &hook_event_name) {
-        eprintln!("llmenv throttle: {e}");
+        // `{e:#}` keeps the cause chain. The plain form prints only the outer context.
+        eprintln!("llmenv throttle: {e:#}");
     }
 }
 
