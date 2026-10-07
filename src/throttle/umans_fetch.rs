@@ -30,13 +30,28 @@ pub(super) fn fetch_usage_body(
         !addrs.is_empty(),
         "no vetted addresses for umans host {host}; refusing to send the token"
     );
-    std::thread::scope(|scope| {
-        let worker = scope.spawn(|| fetch_on_new_runtime(url, token, host, addrs));
-        match worker.join() {
-            Ok(fetched) => fetched,
-            Err(_) => anyhow::bail!("umans usage fetch thread panicked"),
-        }
+    std::thread::scope(|scope| -> anyhow::Result<Vec<u8>> {
+        let worker = std::thread::Builder::new()
+            .name("umans-usage-fetch".to_owned())
+            .spawn_scoped(scope, || fetch_on_new_runtime(url, token, host, addrs))
+            .context("spawning the umans usage fetch thread")?;
+        worker_result(worker.join())
     })
+}
+
+/// Map the joined worker to its result. A panic keeps its message, so the error names the cause.
+fn worker_result(joined: std::thread::Result<anyhow::Result<Vec<u8>>>) -> anyhow::Result<Vec<u8>> {
+    match joined {
+        Ok(fetched) => fetched,
+        Err(payload) => {
+            let cause = payload
+                .downcast_ref::<&str>()
+                .map(|msg| (*msg).to_owned())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "non-string panic payload".to_owned());
+            anyhow::bail!("umans usage fetch thread panicked: {cause}")
+        }
+    }
 }
 
 /// Run the request on a single-threaded tokio runtime. Must not run inside another runtime.
@@ -174,6 +189,17 @@ mod tests {
         let body = fetch_usage_body(&url, "token", "127.0.0.1", &[addr])
             .expect("a caller inside a runtime must still get the body");
         assert_eq!(body, b"{}");
+    }
+
+    #[test]
+    fn a_panicking_worker_is_an_error_that_names_the_panic() {
+        let joined = std::thread::scope(|scope| {
+            scope
+                .spawn(|| -> anyhow::Result<Vec<u8>> { panic!("boom in the fetch") })
+                .join()
+        });
+        let err = worker_result(joined).expect_err("a panic must be an error");
+        assert!(err.to_string().contains("boom in the fetch"), "{err:#}");
     }
 
     #[test]
