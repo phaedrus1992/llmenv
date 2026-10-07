@@ -4627,15 +4627,34 @@ fn run_plugin_sync() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let mut skipped: Vec<&str> = Vec::new();
     for m in &config.marketplace {
-        let state = crate::plugins::cache::sync_marketplace(&cache_root, m, true)
-            .with_context(|| format!("syncing marketplace '{}'", m.name))?;
+        let state = match crate::plugins::cache::sync_marketplace(&cache_root, m, true) {
+            Ok(state) => state,
+            // A path source only exists on the host that has the checkout, so a missing one
+            // is skipped and the sync goes on (#2513).
+            Err(e @ crate::plugins::cache::SyncError::PathMissing { .. }) => {
+                eprintln!("warning: skipping marketplace '{}': {e}", m.name);
+                skipped.push(&m.name);
+                continue;
+            }
+            Err(e) => return Err(e).with_context(|| format!("syncing marketplace '{}'", m.name)),
+        };
         let head = state.head.as_deref().unwrap_or("(local path)");
         println!(
             "✓ {} → {} [{}]",
             m.name,
             state.install_location.display(),
             head
+        );
+    }
+
+    if !skipped.is_empty() {
+        eprintln!(
+            "{} marketplace(s) skipped, path missing on this host: {}. Create the path or \
+             remove the entry if this host needs it.",
+            skipped.len(),
+            skipped.join(", ")
         );
     }
 
