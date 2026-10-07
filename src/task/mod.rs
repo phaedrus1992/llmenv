@@ -1126,8 +1126,8 @@ pub(crate) fn session_start_reminder(state_dir: &Path) -> String {
              different, possibly still-active session owns it — leave it alone.",
         ),
         waiting_reminder(&tasks),
-        session_finish_reminders(state_dir),
-        for_current_project(|project| empty_session_lines(state_dir, project).join("\n\n")),
+        session_finish_reminders(state_dir, None),
+        for_current_project(|project| empty_session_lines(state_dir, project, None).join("\n\n")),
     ])
 }
 
@@ -1142,18 +1142,17 @@ pub(crate) fn session_start_reminder(state_dir: &Path) -> String {
 /// every turn nags about a state that is meant to be quiet (they still show at
 /// session start via [`session_start_reminder`]).
 ///
-/// Fires on every Stop while a `wip` task remains (advisory-only, never
-/// blocks) — a session-scoped mtime filter (only fire if *this* session
-/// touched the store) was considered and rejected: it would still need to
-/// fire at least once per Stop to check, so it buys no frequency reduction
-/// for real tracking complexity (threading session_id through task state).
+/// `caller` is the conversation id of the agent that stops. With an id, the reminder names only
+/// the sessions that conversation owns, because a reminder about another agent's session is not
+/// something this agent can act on (#2511). Without an id every session of the project is named.
+/// Repeat suppression is not done here: see `hook_run::stop_dedupe`.
 ///
 /// Scoped to the current project (#949) via [`tasks_for_current_project`] — a
 /// `wip` task from a different project sharing this task store must never
 /// surface here. See [`wip_reminder`] for why, within the project, the
 /// footer never presumes a listed task belongs to this conversation (#1028).
-pub(crate) fn stop_hook_reminder(state_dir: &Path) -> String {
-    let tasks = tasks_for_current_project(state_dir, list_tasks(state_dir));
+pub(crate) fn stop_hook_reminder(state_dir: &Path, caller: Option<&str>) -> String {
+    let tasks = tasks_visible_to(state_dir, caller);
     combine_reminders([
         wip_reminder(
             &tasks,
@@ -1168,9 +1167,11 @@ pub(crate) fn stop_hook_reminder(state_dir: &Path) -> String {
              only then ask the user once with a specific actionable question, and \
              `llmenv task note <slug> \"...\"` the blocker instead of repeating status.",
         ),
-        session_finish_reminders(state_dir),
-        idle_session_reminders(state_dir),
-        for_current_project(|project| session::missing_context_reminders(state_dir, project)),
+        session_finish_reminders(state_dir, caller),
+        idle_session_reminders(state_dir, caller),
+        for_current_project(|project| {
+            session::missing_context_reminders(state_dir, project, caller)
+        }),
     ])
 }
 
@@ -1190,10 +1191,10 @@ struct IdleSession {
 /// (#2339). A `waiting` task makes a session quiet on purpose, so such a
 /// session is not idle.
 #[must_use]
-fn idle_sessions(state_dir: &Path, project: &str) -> Vec<IdleSession> {
+fn idle_sessions(state_dir: &Path, project: &str, caller: Option<&str>) -> Vec<IdleSession> {
     let all_tasks = list_tasks(state_dir);
     let by_slug: HashMap<&str, &Task> = all_tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
-    session::open_sessions_for_project(state_dir, project)
+    session::open_sessions_visible_to(state_dir, project, caller)
         .into_iter()
         .filter_map(|session| {
             let tasks: Vec<Task> = all_tasks
@@ -1228,16 +1229,16 @@ fn idle_sessions(state_dir: &Path, project: &str) -> Vec<IdleSession> {
 /// The Stop reminder for each [`IdleSession`] in the current project. Like
 /// [`session_finish_reminders`], it cannot tell whose session it names
 /// (#1028), so the nudge is conditioned on the agent recognizing it.
-fn idle_session_reminders(state_dir: &Path) -> String {
-    for_current_project(|project| idle_reminder_lines(state_dir, project))
+fn idle_session_reminders(state_dir: &Path, caller: Option<&str>) -> String {
+    for_current_project(|project| idle_reminder_lines(state_dir, project, caller))
 }
 
-fn idle_reminder_lines(state_dir: &Path, project: &str) -> String {
+fn idle_reminder_lines(state_dir: &Path, project: &str, caller: Option<&str>) -> String {
     let stalled = relation::stalled_parent_lines(
         &list_tasks(state_dir),
-        &open_session_ids(state_dir, project),
+        &open_session_ids(state_dir, project, caller),
     );
-    let idle = idle_sessions(state_dir, project)
+    let idle = idle_sessions(state_dir, project, caller)
         .iter()
         .map(|idle| {
             let id = &idle.session.id;
@@ -1255,7 +1256,7 @@ fn idle_reminder_lines(state_dir: &Path, project: &str) -> String {
             )
         })
         .collect::<Vec<_>>();
-    empty_session_lines(state_dir, project)
+    empty_session_lines(state_dir, project, caller)
         .into_iter()
         .chain(stalled)
         .chain(idle)
@@ -1328,9 +1329,9 @@ pub(crate) fn tracking(state_dir: &Path) -> Tracking {
 
 /// A line for each open session of `project` that holds no task at all (#2456). An empty session
 /// is an error state: the work goes on with nothing recorded.
-fn empty_session_lines(state_dir: &Path, project: &str) -> Vec<String> {
+fn empty_session_lines(state_dir: &Path, project: &str, caller: Option<&str>) -> Vec<String> {
     let tasks = list_tasks(state_dir);
-    session::open_sessions_for_project(state_dir, project)
+    session::open_sessions_visible_to(state_dir, project, caller)
         .into_iter()
         .filter(|s| {
             !tasks
@@ -1350,9 +1351,9 @@ fn empty_session_lines(state_dir: &Path, project: &str) -> Vec<String> {
         .collect()
 }
 
-/// The ids of the open sessions of `project`.
-fn open_session_ids(state_dir: &Path, project: &str) -> Vec<String> {
-    session::open_sessions_for_project(state_dir, project)
+/// The ids of the open sessions of `project` that `caller` may be told about.
+fn open_session_ids(state_dir: &Path, project: &str, caller: Option<&str>) -> Vec<String> {
+    session::open_sessions_visible_to(state_dir, project, caller)
         .into_iter()
         .map(|s| s.id)
         .collect()
@@ -1374,6 +1375,18 @@ fn tasks_for_current_project(state_dir: &Path, tasks: Vec<Task>) -> Vec<Task> {
         }
     };
     filter_tasks_for_project(state_dir, &project, tasks)
+}
+
+/// The tasks of the current project that `caller` may be told about: all of them without a
+/// conversation id, else those of sessions that conversation owns (#2511).
+fn tasks_visible_to(state_dir: &Path, caller: Option<&str>) -> Vec<Task> {
+    let mut tasks = tasks_for_current_project(state_dir, list_tasks(state_dir));
+    // An unresolved project tag already left `tasks` empty, so `ok()` loses nothing here.
+    if let Some(project) = project::current_tag().ok().filter(|_| caller.is_some()) {
+        let visible = session::session_ids_visible_to(state_dir, &project, caller);
+        tasks.retain(|t| t.session.as_ref().is_some_and(|id| visible.contains(id)));
+    }
+    tasks
 }
 
 /// Keep only tasks whose session is tagged to `project` — any session ever
@@ -1527,13 +1540,13 @@ fn execution_order(tasks: &[Task]) -> Vec<Task> {
 /// one (#1028) — closing out someone else's session is a real mutation of
 /// their bookkeeping, so the nudge is conditioned on recognizing the session
 /// rather than issued as a bare command.
-fn session_finish_reminders(state_dir: &Path) -> String {
-    for_current_project(|project| finish_reminder_lines(state_dir, project))
+fn session_finish_reminders(state_dir: &Path, caller: Option<&str>) -> String {
+    for_current_project(|project| finish_reminder_lines(state_dir, project, caller))
 }
 
-fn finish_reminder_lines(state_dir: &Path, project: &str) -> String {
+fn finish_reminder_lines(state_dir: &Path, project: &str, caller: Option<&str>) -> String {
     let mut lines = Vec::new();
-    for session in session::open_sessions_for_project(state_dir, project) {
+    for session in session::open_sessions_visible_to(state_dir, project, caller) {
         let (done, total) = session::session_progress(state_dir, &session.id);
         if total == 0 || done < total {
             continue;
@@ -2750,7 +2763,7 @@ mod tests {
         let dir = TempDir::new().expect("test");
         let created = start_session_here(dir.path(), &resume::ResumeContext::default());
         add_task_for_session(dir.path(), "Step", ParentSpec::Detached, &created.id).expect("add");
-        let reminder = stop_hook_reminder(dir.path());
+        let reminder = stop_hook_reminder(dir.path(), None);
         assert!(reminder.contains("no resume context"), "{reminder}");
         assert!(reminder.contains("task session edit"), "{reminder}");
         assert!(
@@ -2774,18 +2787,18 @@ mod tests {
             &created.id,
         )
         .expect("add");
-        assert!(!stop_hook_reminder(with_context.path()).contains("no resume context"));
+        assert!(!stop_hook_reminder(with_context.path(), None).contains("no resume context"));
 
         let no_tasks = TempDir::new().expect("test");
         start_session_here(no_tasks.path(), &resume::ResumeContext::default());
-        assert!(!stop_hook_reminder(no_tasks.path()).contains("no resume context"));
+        assert!(!stop_hook_reminder(no_tasks.path(), None).contains("no resume context"));
 
         let all_done = TempDir::new().expect("test");
         let created = start_session_here(all_done.path(), &resume::ResumeContext::default());
         let task = add_task_for_session(all_done.path(), "Step", ParentSpec::Detached, &created.id)
             .expect("add");
         complete_task(all_done.path(), &task.slug, true).expect("done");
-        assert!(!stop_hook_reminder(all_done.path()).contains("no resume context"));
+        assert!(!stop_hook_reminder(all_done.path(), None).contains("no resume context"));
     }
 
     #[test]
@@ -2798,7 +2811,7 @@ mod tests {
     #[test]
     fn stop_hook_reminder_empty_when_store_is_empty() {
         let dir = TempDir::new().expect("test");
-        assert!(stop_hook_reminder(dir.path()).is_empty());
+        assert!(stop_hook_reminder(dir.path(), None).is_empty());
     }
 
     // --- open tasks, nothing started (#2338) ---
@@ -2819,7 +2832,7 @@ mod tests {
         let dir = TempDir::new().expect("test");
         let (session_id, first, second) = idle_session_in_project(dir.path(), &current_project());
 
-        let reminder = stop_hook_reminder(dir.path());
+        let reminder = stop_hook_reminder(dir.path(), None);
         assert!(
             reminder.contains(&session_id),
             "must name the session: {reminder}"
@@ -2849,7 +2862,7 @@ mod tests {
         let dir = TempDir::new().expect("test");
         let (_, first, _) = idle_session_in_project(dir.path(), &current_project());
 
-        let reminder = stop_hook_reminder(dir.path());
+        let reminder = stop_hook_reminder(dir.path(), None);
         let start = format!("llmenv task start {}", first.slug);
         let wait = format!("llmenv task wait {} \"<reason>\"", first.slug);
         assert!(reminder.contains(&start), "{reminder}");
@@ -2866,7 +2879,7 @@ mod tests {
         let (session_id, first, second) = idle_session_in_project(dir.path(), &current_project());
         start_task(dir.path(), &first.slug, false).expect("test");
 
-        let reminder = stop_hook_reminder(dir.path());
+        let reminder = stop_hook_reminder(dir.path(), None);
         assert!(
             reminder.contains(&first.slug),
             "wip reminder still fires: {reminder}"
@@ -2884,7 +2897,7 @@ mod tests {
         wait_task(dir.path(), &first.slug, "spec review").expect("test");
 
         // A `waiting` task means the session is paused on purpose; stay quiet.
-        let reminder = stop_hook_reminder(dir.path());
+        let reminder = stop_hook_reminder(dir.path(), None);
         assert!(!reminder.contains(&second.slug), "{reminder}");
     }
 
@@ -2892,7 +2905,7 @@ mod tests {
     fn stop_hook_reminder_skips_idle_session_from_other_project() {
         let dir = TempDir::new().expect("test");
         let (_, first, _) = idle_session_in_project(dir.path(), "other-project-0000000000");
-        assert!(!stop_hook_reminder(dir.path()).contains(&first.slug));
+        assert!(!stop_hook_reminder(dir.path(), None).contains(&first.slug));
     }
 
     #[test]
@@ -2902,7 +2915,7 @@ mod tests {
         let (session_id, first, second) = idle_session_in_project(dir.path(), &project);
         block_task(dir.path(), &first.slug, &second.slug).expect("test");
 
-        let idle = idle_sessions(dir.path(), &project);
+        let idle = idle_sessions(dir.path(), &project, None);
         assert_eq!(idle.len(), 1);
         assert_eq!(idle[0].session.id, session_id);
         assert_eq!(idle[0].next.slug, second.slug);
@@ -2940,7 +2953,7 @@ mod tests {
         start_task(dir.path(), &scan.slug, false).expect("test");
         complete_task(dir.path(), &scan.slug, false).expect("test");
 
-        let reminder = stop_hook_reminder(dir.path());
+        let reminder = stop_hook_reminder(dir.path(), None);
         assert!(reminder.contains("1 of 2 sub-tasks done"), "{reminder}");
         assert!(
             reminder.contains(&format!("llmenv task start {}", audit.slug)),
@@ -2963,7 +2976,7 @@ mod tests {
         .expect("test");
         start_task(dir.path(), &scan.slug, false).expect("test");
 
-        let reminder = stop_hook_reminder(dir.path());
+        let reminder = stop_hook_reminder(dir.path(), None);
         assert!(
             reminder.contains("0 of 1 sub-tasks done, 1 in progress"),
             "{reminder}"
@@ -3159,7 +3172,7 @@ mod tests {
                     expected.insert(sid, open);
                 }
             }
-            let idle = idle_sessions(dir.path(), PROJECT);
+            let idle = idle_sessions(dir.path(), PROJECT, None);
             let got: std::collections::BTreeMap<String, usize> = idle
                 .iter()
                 .map(|i| (i.session.id.clone(), i.open_count))
@@ -3264,7 +3277,7 @@ mod tests {
     fn stop_hook_reminder_flags_wip_tasks() {
         let dir = TempDir::new().expect("test");
         let task = wip_task_in_project(dir.path(), "Left in progress", &current_project());
-        let reminder = stop_hook_reminder(dir.path());
+        let reminder = stop_hook_reminder(dir.path(), None);
         assert!(reminder.contains(&task.slug));
     }
 
@@ -3274,7 +3287,7 @@ mod tests {
         let task = mk(dir.path(), "Blocked on review", None).expect("test");
         wait_task(dir.path(), &task.slug, "spec review").expect("test");
         // `waiting` is meant to be quiet — Stop must not re-inject its FYI.
-        assert!(stop_hook_reminder(dir.path()).is_empty());
+        assert!(stop_hook_reminder(dir.path(), None).is_empty());
     }
 
     #[test]
@@ -3285,7 +3298,7 @@ mod tests {
         let waiting =
             waiting_task_in_project(dir.path(), "Blocked on review", &project, "spec review");
 
-        let reminder = stop_hook_reminder(dir.path());
+        let reminder = stop_hook_reminder(dir.path(), None);
         assert!(reminder.contains(&wip.slug));
         assert!(reminder.contains("exhaust safe autonomous remediation"));
         // The waiting task and its FYI must stay silent on Stop.
@@ -3305,7 +3318,7 @@ mod tests {
         let dir = TempDir::new().expect("test");
         let task = wip_task_in_project(dir.path(), "Someone's task", &current_project());
 
-        let reminder = stop_hook_reminder(dir.path());
+        let reminder = stop_hook_reminder(dir.path(), None);
         assert!(
             reminder.contains(task.session.as_deref().expect("test")),
             "reminder must name the owning session so the agent can tell whether it's its \
@@ -3397,7 +3410,7 @@ mod tests {
         let leaked = wip_task_in_project(dir.path(), "Other project's task", other_project);
         // No session/task tagged to the real current project at all — a
         // `wip` task belonging to a different project must not surface.
-        let reminder = stop_hook_reminder(dir.path());
+        let reminder = stop_hook_reminder(dir.path(), None);
         assert!(!reminder.contains(&leaked.slug));
         assert!(reminder.is_empty());
     }
@@ -3420,7 +3433,7 @@ mod tests {
         let mine = wip_task_in_project(dir.path(), "My task", &project);
         let leaked = wip_task_in_project(dir.path(), "Other project's task", "other-project-999");
 
-        let reminder = stop_hook_reminder(dir.path());
+        let reminder = stop_hook_reminder(dir.path(), None);
         assert!(reminder.contains(&mine.slug), "own-project task must show");
         assert!(
             !reminder.contains(&leaked.slug),
@@ -3439,7 +3452,7 @@ mod tests {
         legacy.state = TaskState::Wip;
         save_task(dir.path(), &legacy).expect("test");
 
-        assert!(!stop_hook_reminder(dir.path()).contains(&legacy.slug));
+        assert!(!stop_hook_reminder(dir.path(), None).contains(&legacy.slug));
         assert!(!session_start_reminder(dir.path()).contains(&legacy.slug));
     }
 

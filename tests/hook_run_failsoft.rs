@@ -1165,16 +1165,19 @@ fn stop_with_task_tracker_and_file_session_log_writes_log_and_reminder() {
 
     support::isolated_llmenv_cmd(dir.path())
         .env("LLMENV_CONFIG", &config_path)
+        .env("CLAUDE_CODE_SESSION_ID", "test-stop-with-log")
         .args(["task", "session", "start", "sprint"])
         .assert()
         .success();
     support::isolated_llmenv_cmd(dir.path())
         .env("LLMENV_CONFIG", &config_path)
+        .env("CLAUDE_CODE_SESSION_ID", "test-stop-with-log")
         .args(["task", "add", "Wrap up the release notes"])
         .assert()
         .success();
     support::isolated_llmenv_cmd(dir.path())
         .env("LLMENV_CONFIG", &config_path)
+        .env("CLAUDE_CODE_SESSION_ID", "test-stop-with-log")
         .args(["task", "start", "wrap-up-the-release"])
         .assert()
         .success();

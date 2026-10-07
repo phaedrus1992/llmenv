@@ -26,6 +26,7 @@ pub(crate) mod repeat_detect;
 mod session_ledger;
 mod session_state;
 pub(crate) mod slippage;
+pub(crate) mod stop_dedupe;
 pub(crate) mod task_nudge;
 pub(crate) mod task_tools;
 pub(crate) mod transcript;
@@ -1033,7 +1034,11 @@ fn resolve_stop_reminder(
     config: &crate::config::Config,
     stop_payload: &serde_json::Value,
 ) -> String {
-    let mut reminder = crate::task::stop_hook_reminder(state_dir);
+    // #2511: a stop that a Stop hook caused gets no reminder, so the hook cannot loop the agent.
+    if stop_dedupe::is_hook_continuation(stop_payload) {
+        return String::new();
+    }
+    let mut reminder = crate::task::stop_hook_reminder(state_dir, claude_session_id);
     // #2456: a turn that ends with a question to the user parks the task that waits for it.
     if let Some(tracker) = config
         .features
@@ -1060,6 +1065,8 @@ fn resolve_stop_reminder(
         }
         reminder.push_str(&critique);
     }
+    // #2511: runs before repeat-detect, which counts only the reminders that are emitted.
+    let reminder = stop_dedupe::emit_once(state_dir, claude_session_id, &reminder);
     let repeat_detect_cfg = config
         .features
         .as_ref()
@@ -1271,6 +1278,14 @@ fn run_inner(
     } else {
         None
     };
+
+    // #2511: a new user prompt makes an unchanged Stop reminder due again.
+    if event == HookEvent::UserPromptSubmit
+        && task_tracker_enabled
+        && let Some(state_dir) = state_dir_or_log("stop reminder guard not re-armed")
+    {
+        stop_dedupe::forget(&state_dir, claude_session_id);
+    }
 
     // #2456: the nudges after a tool call. They need no scope or memory work. They are not
     // returned early, because a PostToolUse also feeds the WebFetch auto-store below.
@@ -3737,6 +3752,25 @@ mod tests {
     // an empty-tracker fixture can't tell a correct join from a missing or
     // misplaced one. Seed a task first, then require both parts and a blank
     // line between them.
+    /// Start a session that the conversation `conversation` owns, as `llmenv task session start`
+    /// does inside an engine.
+    fn start_owned_session(state_dir: &std::path::Path, project: &str, conversation: &str) {
+        let owner = crate::task::session::EngineIdentity::from_session_id(Some(conversation));
+        let request = crate::task::session::StartRequest {
+            name: None,
+            description: None,
+            project,
+            owner: &owner,
+            resume: &crate::task::resume::ResumeContext::default(),
+        };
+        crate::task::session::start_session_as(
+            state_dir,
+            &request,
+            crate::task::session::StartDecision::Auto,
+        )
+        .expect("test");
+    }
+
     #[test]
     fn stop_reminder_separates_tracker_text_from_the_critique() {
         let state_dir = tempfile::tempdir().expect("test");
@@ -3744,14 +3778,7 @@ mod tests {
         // project, resolved from cwd — a fixture project string would be
         // filtered straight back out.
         let project = crate::task::project::current_tag().expect("test");
-        crate::task::session::start_session(
-            state_dir.path(),
-            None,
-            None,
-            &project,
-            crate::task::session::StartDecision::Auto,
-        )
-        .expect("test");
+        start_owned_session(state_dir.path(), &project, "s1");
         let task = crate::task::add_task(
             state_dir.path(),
             "finish the parser",
@@ -3783,7 +3810,7 @@ mod tests {
             &config,
             &serde_json::Value::Null,
         );
-        let tracker_only = crate::task::stop_hook_reminder(state_dir.path());
+        let tracker_only = crate::task::stop_hook_reminder(state_dir.path(), None);
         assert!(
             !tracker_only.is_empty(),
             "fixture must produce tracker text, or this proves nothing"
@@ -3827,14 +3854,7 @@ mod tests {
         // No task: nothing to say, and no stray separator.
         let empty = resolve_stop_reminder(state_dir.path(), Some("s1"), &config, &question);
         assert_eq!(empty, "");
-        crate::task::session::start_session(
-            state_dir.path(),
-            None,
-            None,
-            &project,
-            crate::task::session::StartDecision::Auto,
-        )
-        .expect("test");
+        start_owned_session(state_dir.path(), &project, "s1");
         let task = crate::task::add_task(
             state_dir.path(),
             "finish the parser",
@@ -3845,7 +3865,7 @@ mod tests {
         .expect("test");
         crate::task::start_task(state_dir.path(), &task.slug, false).expect("test");
         let text = resolve_stop_reminder(state_dir.path(), Some("s1"), &config, &question);
-        let tracker_only = crate::task::stop_hook_reminder(state_dir.path());
+        let tracker_only = crate::task::stop_hook_reminder(state_dir.path(), None);
         assert!(
             !tracker_only.is_empty(),
             "the fixture must produce tracker text"

@@ -214,6 +214,14 @@ impl Session {
     pub(crate) fn is_open(&self) -> bool {
         self.finished_at.is_none() && self.abandoned_at.is_none()
     }
+
+    /// Whether an end-of-turn reminder for `caller` may name this session. A caller with a
+    /// conversation id sees only the sessions that conversation started or resumed (#2511). No
+    /// id means no way to tell, so every session is visible, as before ownership existed.
+    #[must_use]
+    pub(crate) fn visible_to(&self, caller: Option<&str>) -> bool {
+        caller.is_none_or(|id| self.owner_session.as_deref() == Some(id))
+    }
 }
 
 /// How `session start` should resolve an existing same-project session.
@@ -409,6 +417,33 @@ pub(crate) fn session_ids_for_project(
     list_sessions(state_dir)
         .into_iter()
         .filter(|s| s.project == project)
+        .map(|s| s.id)
+        .collect()
+}
+
+/// [`open_sessions_for_project`], cut to the sessions that [`Session::visible_to`] `caller`.
+#[must_use]
+pub(crate) fn open_sessions_visible_to(
+    state_dir: &Path,
+    project: &str,
+    caller: Option<&str>,
+) -> Vec<Session> {
+    let mut sessions = open_sessions_for_project(state_dir, project);
+    sessions.retain(|s| s.visible_to(caller));
+    sessions
+}
+
+/// [`session_ids_for_project`], cut to the sessions that [`Session::visible_to`] `caller`.
+/// Open and closed sessions both count, because a task of a closed session can still be `wip`.
+#[must_use]
+pub(crate) fn session_ids_visible_to(
+    state_dir: &Path,
+    project: &str,
+    caller: Option<&str>,
+) -> std::collections::HashSet<String> {
+    list_sessions(state_dir)
+        .into_iter()
+        .filter(|s| s.project == project && s.visible_to(caller))
         .map(|s| s.id)
         .collect()
 }
@@ -899,8 +934,12 @@ pub(crate) fn session_summary(
 /// that tells a fresh agent what the work is (#2339). Does not presume the session is the
 /// reader's own (#1028).
 #[must_use]
-pub(crate) fn missing_context_reminders(state_dir: &Path, project: &str) -> String {
-    open_sessions_for_project(state_dir, project)
+pub(crate) fn missing_context_reminders(
+    state_dir: &Path,
+    project: &str,
+    caller: Option<&str>,
+) -> String {
+    open_sessions_visible_to(state_dir, project, caller)
         .iter()
         .filter(|session| session.resume.needs_nudge())
         .filter(|session| {
