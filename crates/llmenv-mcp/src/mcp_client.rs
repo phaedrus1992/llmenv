@@ -707,11 +707,58 @@ fn require_https_for_public(url: &str, addrs: &[SocketAddr]) -> anyhow::Result<(
     }
 }
 
+/// Drop link-local addresses from a resolved domain under `AllowPrivateNetwork`.
+///
+/// mDNS names (`host.local`) resolve to a reachable address plus `fe80::` addresses for
+/// every interface. The caller pins reqwest to the returned list, so a dropped address is
+/// never connected to and the metadata-endpoint protection holds (#2512). `PublicOnly`
+/// keeps every address, so the caller rejects on the first blocked one.
+///
+/// # Errors
+/// The host resolved to no addresses, or only to link-local addresses.
+fn drop_link_local_for_domain(
+    resolved: Vec<SocketAddr>,
+    policy: SsrfPolicy,
+    url: &str,
+) -> anyhow::Result<Vec<SocketAddr>> {
+    if resolved.is_empty() {
+        return Err(anyhow!(
+            "host of URL {} resolved to no addresses",
+            redact_url(url)
+        ));
+    }
+    if policy != SsrfPolicy::AllowPrivateNetwork {
+        return Ok(resolved);
+    }
+    let (dropped, kept): (Vec<SocketAddr>, Vec<SocketAddr>) =
+        resolved.into_iter().partition(|a| is_link_local(&a.ip()));
+    match (kept.is_empty(), dropped.first()) {
+        (true, Some(first)) => Err(anyhow!(
+            "host of URL {} resolved only to link-local address {} (SSRF); \
+             no routable address is left",
+            redact_url(url),
+            first.ip()
+        )),
+        _ => Ok(kept),
+    }
+}
+
+/// True for a link-local address, including an IPv4 one wrapped in an IPv6 form.
+fn is_link_local(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_link_local(),
+        IpAddr::V6(v6) => {
+            embedded_ipv4(v6).map_or_else(|| v6.is_unicast_link_local(), |v4| v4.is_link_local())
+        }
+    }
+}
+
 /// Validate ICM backend URL to prevent SSRF attacks and return the host string
 /// together with the vetted set of socket addresses the connection may target.
 ///
 /// Rejects unsupported schemes, blocked literal IPs, and — for hostnames —
-/// resolves DNS and rejects the URL if *any* resolved address is blocked. The
+/// resolves DNS and rejects the URL if *any* resolved address is blocked, except that
+/// `AllowPrivateNetwork` first drops link-local addresses of a domain host (#2512). The
 /// caller pins reqwest to the returned host→addrs mapping so reqwest cannot
 /// re-resolve to an unvetted address at send() time (DNS-rebinding TOCTOU
 /// mitigation, #191). The host is returned from the same parse that produced the
@@ -758,17 +805,13 @@ pub fn validate_url_production(
     let addrs: Vec<SocketAddr> = match host {
         Host::Ipv4(v4) => vec![SocketAddr::new(IpAddr::V4(v4), port)],
         Host::Ipv6(v6) => vec![SocketAddr::new(IpAddr::V6(v6), port)],
-        Host::Domain(name) => resolve_with_timeout(name, port, timeout)?,
+        Host::Domain(name) => {
+            let resolved = resolve_with_timeout(name, port, timeout)?;
+            drop_link_local_for_domain(resolved, policy, url)?
+        }
     };
 
-    if addrs.is_empty() {
-        return Err(anyhow!(
-            "host of URL {} resolved to no addresses",
-            redact_url(url)
-        ));
-    }
-
-    // Reject if ANY resolved address is blocked. A permissive "some address is
+    // Reject if ANY remaining address is blocked. A permissive "some address is
     // public" rule would let an attacker pair one public A record with a private
     // one and gamble on connection ordering.
     for addr in &addrs {
@@ -1779,6 +1822,82 @@ mod tests {
         }
     }
 
+    fn sock(ip: &str) -> SocketAddr {
+        SocketAddr::new(ip.parse().unwrap(), 9092)
+    }
+
+    #[test]
+    fn domain_allow_private_drops_link_local_and_keeps_routable() {
+        let resolved = vec![
+            sock("fe80::c0:d5a8:4dfd:30bd"),
+            sock("192.168.211.42"),
+            sock("169.254.169.254"),
+            sock("fe80::1"),
+        ];
+        let kept = drop_link_local_for_domain(
+            resolved,
+            SsrfPolicy::AllowPrivateNetwork,
+            "http://still.local:9092/mcp",
+        )
+        .unwrap();
+        assert_eq!(kept, vec![sock("192.168.211.42")]);
+    }
+
+    #[test]
+    fn domain_allow_private_rejects_when_only_link_local_remains() {
+        let err = drop_link_local_for_domain(
+            vec![sock("fe80::1"), sock("169.254.169.254")],
+            SsrfPolicy::AllowPrivateNetwork,
+            "http://still.local:9092/mcp",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("only to link-local"), "{err}");
+    }
+
+    #[test]
+    fn domain_public_only_keeps_link_local_so_the_caller_rejects() {
+        let resolved = vec![sock("93.184.216.34"), sock("fe80::1")];
+        let kept =
+            drop_link_local_for_domain(resolved.clone(), SsrfPolicy::PublicOnly, "http://x.test/")
+                .unwrap();
+        assert_eq!(kept, resolved);
+    }
+
+    #[test]
+    fn domain_allow_private_still_rejects_unspecified_alongside_routable() {
+        let kept = drop_link_local_for_domain(
+            vec![sock("0.0.0.0"), sock("192.168.1.5")],
+            SsrfPolicy::AllowPrivateNetwork,
+            "http://x.test/",
+        )
+        .unwrap();
+        // Not link-local, so it survives the drop and the caller's strict check rejects it.
+        assert!(
+            kept.iter()
+                .any(|a| blocked_reason(&a.ip(), SsrfPolicy::AllowPrivateNetwork).is_some())
+        );
+    }
+
+    #[test]
+    fn domain_allow_private_drops_ipv4_mapped_metadata_address() {
+        let kept = drop_link_local_for_domain(
+            vec![sock("::ffff:169.254.169.254"), sock("10.0.0.7")],
+            SsrfPolicy::AllowPrivateNetwork,
+            "http://x.test/",
+        )
+        .unwrap();
+        assert_eq!(kept, vec![sock("10.0.0.7")]);
+    }
+
+    #[test]
+    fn domain_with_no_addresses_is_an_error() {
+        assert!(
+            drop_link_local_for_domain(vec![], SsrfPolicy::AllowPrivateNetwork, "http://x.test/")
+                .is_err()
+        );
+    }
+
     #[test]
     fn blocked_reason_flags_private_and_special_ranges() {
         use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -2015,6 +2134,29 @@ mod tests {
             let v6 = std::net::Ipv6Addr::from(octets);
             let expected = matches!(octets[0], 0xfc | 0xfd);
             prop_assert_eq!(is_unique_local_v6(&v6), expected);
+        }
+
+        #[test]
+        fn prop_drop_link_local_keeps_exactly_the_non_link_local_addresses(
+            raw in proptest::collection::vec(any::<[u8; 16]>(), 1..8),
+            v4s in proptest::collection::vec(any::<[u8; 4]>(), 0..4),
+        ) {
+            let mut addrs: Vec<SocketAddr> = raw
+                .into_iter()
+                .map(|o| SocketAddr::new(IpAddr::V6(std::net::Ipv6Addr::from(o)), 9092))
+                .collect();
+            addrs.extend(v4s.into_iter().map(|o| SocketAddr::new(IpAddr::from(o), 9092)));
+            let expected: Vec<SocketAddr> =
+                addrs.iter().copied().filter(|a| !is_link_local(&a.ip())).collect();
+            let result = drop_link_local_for_domain(
+                addrs,
+                SsrfPolicy::AllowPrivateNetwork,
+                "http://x.test/",
+            );
+            match result {
+                Ok(kept) => prop_assert_eq!(kept, expected),
+                Err(_) => prop_assert!(expected.is_empty()),
+            }
         }
 
         #[test]
