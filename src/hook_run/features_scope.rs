@@ -17,10 +17,10 @@ const TOP_LEVEL_PRECEDENCE: u8 = u8::MAX;
 
 /// Return `config` with the hook-read features resolved from the active bundles.
 ///
-/// A feature set in the root `features` block is final. When the root block sets every one of
-/// them, or no bundle is configured, this reads no bundle file and runs no scope detection.
+/// A feature set in the root `features` block is final. With no bundle configured, this reads no
+/// bundle file and runs no scope detection.
 pub(crate) fn resolve(config: Config, config_path: &Path) -> Config {
-    if config.bundle.is_empty() || config.features.as_ref().is_some_and(all_set) {
+    if config.bundle.is_empty() {
         return config;
     }
     let Some(config_dir) = config_path.parent() else {
@@ -48,14 +48,6 @@ fn resolve_with(mut config: Config, config_dir: &Path, active: &ActiveScopes) ->
         ),
     }
     config
-}
-
-fn all_set(f: &Features) -> bool {
-    f.read_once.is_some()
-        && f.repeat_detect.is_some()
-        && f.slippage.is_some()
-        && f.task_tracker.is_some()
-        && f.cd_guard.is_some()
 }
 
 /// Fill each unset feature of `root` from `bundles`. The root value wins.
@@ -265,17 +257,15 @@ mod tests {
     }
 
     #[test]
-    fn a_complete_root_block_reads_no_bundle() {
+    fn config_with_no_bundles_is_returned_unchanged() {
         let dir = tempfile::tempdir().unwrap();
-        let mut config = config_with_bundles(&["missing"], "rust");
-        config.features = Some(Features {
-            read_once: Some(serde_yaml::from_str("enabled: false").unwrap()),
-            repeat_detect: Some(serde_yaml::from_str("enabled: false").unwrap()),
-            slippage: Some(serde_yaml::from_str("enabled: false").unwrap()),
-            task_tracker: Some(serde_yaml::from_str("enabled: false").unwrap()),
-            cd_guard: Some(serde_yaml::from_str("enabled: false").unwrap()),
-            ..Features::default()
-        });
+        let config = Config {
+            features: Some(Features {
+                task_tracker: Some(serde_yaml::from_str("enabled: false").unwrap()),
+                ..Features::default()
+            }),
+            ..Config::default()
+        };
         let out = resolve(config.clone(), &dir.path().join("config.yaml"));
         assert_eq!(out.features, config.features);
     }
