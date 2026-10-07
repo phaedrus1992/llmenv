@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.12.0] - 2026-10-06
+
 3.12.0 makes the agent's working state durable and the background plumbing honest.
 The task tracker, ICM memory, and MCP servers now report failures, survive a dead child process, and stop trusting input they cannot check.
 It also adds a few Claude Code settings and `doctor` checks for the 2.1.28x line.

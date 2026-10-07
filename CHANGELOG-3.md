@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.12.0] - 2026-10-06
+
 3.12.0 makes the agent's working state durable and the background plumbing honest.
 The task tracker, ICM memory, and MCP servers now report failures, survive a dead child process, and stop trusting input they cannot check.
 It also adds a few Claude Code settings and `doctor` checks for the 2.1.28x line.
@@ -1035,7 +1037,8 @@ the rc.1 and rc.2 sections below.
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.11.2...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.12.0...HEAD
+[3.12.0]: https://github.com/phaedrus1992/llmenv/compare/v3.11.2...v3.12.0
 [3.11.2]: https://github.com/phaedrus1992/llmenv/compare/v3.11.1...v3.11.2
 [3.11.1]: https://github.com/phaedrus1992/llmenv/compare/v3.11.0...v3.11.1
 [3.11.0]: https://github.com/phaedrus1992/llmenv/compare/v3.10.0...v3.11.0

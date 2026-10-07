@@ -1,6 +1,6 @@
 [package]
 name = "llmenv-config"
-version = "3.11.2"
+version = "3.12.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
@@ -13,8 +13,8 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true }
 ipnet = { workspace = true }
-llmenv-paths = { path = "../llmenv-paths", version = "3.11.2" }
-llmenv-util = { path = "../llmenv-util", version = "3.11.2" }
+llmenv-paths = { path = "../llmenv-paths", version = "3.12.0" }
+llmenv-util = { path = "../llmenv-util", version = "3.12.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
@@ -24,4 +24,4 @@ thiserror = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 # Shared proptest generators (#1281) — see llmenv-util's `testkit` module.
-llmenv-util = { path = "../llmenv-util", version = "3.11.2", features = ["test-util"] }
+llmenv-util = { path = "../llmenv-util", version = "3.12.0", features = ["test-util"] }
