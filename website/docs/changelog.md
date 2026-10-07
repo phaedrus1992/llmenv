@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- The SessionStart memory health check no longer reports memory as dead when the memory host is a `.local` name that also resolves to link-local IPv6 addresses. llmenv drops the link-local addresses and connects to the rest. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp). (#2512) [fix:mcp]
+- `llmenv plugin-sync` no longer stops at a path marketplace whose directory is missing on this host. It warns, skips that marketplace, and syncs the rest. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#plugin-sync). (#2513) [fix:plugins]
 - Memory prune no longer treats a record with a `nan` or `inf` weight as a valid record.
 - The Stop hook no longer repeats the same task reminder every turn until Claude Code ends the loop. A Stop that a Stop hook caused gets no reminder, an unchanged reminder is shown once, and the reminder names only the sessions of the conversation that stops. See [Stop reminder rules](https://phaedrus1992.github.io/llmenv/docs/commands#stop-reminder-rules). (#2511)
 - A feature that only a bundle's `bundle.yaml` sets now works in the hooks. The hooks and `llmenv config-context` read the root `features:` block only, so `task_tracker`, `read_once`, `repeat_detect`, `slippage`, and `cd_guard` registered their hooks and then ran them switched off. They now resolve each one the way the adapter does (#2460) [fix:hook-run]
