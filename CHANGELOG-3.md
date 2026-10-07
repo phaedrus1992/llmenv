@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Security
 
-- The umans usage request connects only to the addresses that passed the private-network check, and it no longer follows redirects. A DNS rebind or a redirect can no longer send the Bearer token to a private or metadata address (#2518) [fix:throttle]
+- The umans usage request connects only to the addresses that passed the private-network check. It no longer follows redirects or uses proxy settings, so a DNS rebind, a redirect, or a proxy can no longer send the Bearer token to a private or metadata address (#2518) [fix:throttle]
 
 ## [3.12.1] - 2026-10-07
 
