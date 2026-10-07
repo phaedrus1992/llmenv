@@ -214,6 +214,19 @@ impl Session {
     pub(crate) fn is_open(&self) -> bool {
         self.finished_at.is_none() && self.abandoned_at.is_none()
     }
+
+    /// Whether an end-of-turn reminder for `caller` may name this session. A caller with a
+    /// conversation id does not see a session that another conversation owns (#2511). A session
+    /// with no recorded owner stays visible: it was started outside an engine or before
+    /// ownership existed, and hiding it would drop the reminder for work that nobody else owns.
+    /// No caller id means no way to tell, so every session is visible.
+    #[must_use]
+    fn visible_to(&self, caller: Option<&str>) -> bool {
+        match (caller, self.owner_session.as_deref()) {
+            (Some(caller), Some(owner)) => caller == owner,
+            _ => true,
+        }
+    }
 }
 
 /// How `session start` should resolve an existing same-project session.
@@ -409,6 +422,33 @@ pub(crate) fn session_ids_for_project(
     list_sessions(state_dir)
         .into_iter()
         .filter(|s| s.project == project)
+        .map(|s| s.id)
+        .collect()
+}
+
+/// [`open_sessions_for_project`], cut to the sessions that [`Session::visible_to`] `caller`.
+#[must_use]
+pub(crate) fn open_sessions_visible_to(
+    state_dir: &Path,
+    project: &str,
+    caller: Option<&str>,
+) -> Vec<Session> {
+    let mut sessions = open_sessions_for_project(state_dir, project);
+    sessions.retain(|s| s.visible_to(caller));
+    sessions
+}
+
+/// [`session_ids_for_project`], cut to the sessions that [`Session::visible_to`] `caller`.
+/// Open and closed sessions both count, because a task of a closed session can still be `wip`.
+#[must_use]
+pub(crate) fn session_ids_visible_to(
+    state_dir: &Path,
+    project: &str,
+    caller: Option<&str>,
+) -> std::collections::HashSet<String> {
+    list_sessions(state_dir)
+        .into_iter()
+        .filter(|s| s.project == project && s.visible_to(caller))
         .map(|s| s.id)
         .collect()
 }
@@ -899,8 +939,12 @@ pub(crate) fn session_summary(
 /// that tells a fresh agent what the work is (#2339). Does not presume the session is the
 /// reader's own (#1028).
 #[must_use]
-pub(crate) fn missing_context_reminders(state_dir: &Path, project: &str) -> String {
-    open_sessions_for_project(state_dir, project)
+pub(crate) fn missing_context_reminders(
+    state_dir: &Path,
+    project: &str,
+    caller: Option<&str>,
+) -> String {
+    open_sessions_visible_to(state_dir, project, caller)
         .iter()
         .filter(|session| session.resume.needs_nudge())
         .filter(|session| {
@@ -1411,6 +1455,16 @@ mod tests {
             load_session(dir.path(), &session.id).expect("test"),
             session
         );
+    }
+
+    #[test]
+    fn visible_to_hides_only_a_session_that_another_conversation_owns() {
+        let owned = |owner: Option<&str>| bare_session(0, owner.map(str::to_string), None);
+        assert!(owned(Some("a")).visible_to(Some("a")));
+        assert!(!owned(Some("a")).visible_to(Some("b")));
+        assert!(owned(None).visible_to(Some("b")));
+        assert!(owned(Some("a")).visible_to(None));
+        assert!(owned(None).visible_to(None));
     }
 
     #[test]

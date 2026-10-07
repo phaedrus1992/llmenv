@@ -188,7 +188,8 @@ fn parse_recall_output(text: &str) -> Vec<MemoryRecord> {
             && !weight_seen
         {
             weight_seen = true;
-            has_weight = rest.trim().parse::<f64>().is_ok();
+            // `f64::from_str` also accepts `nan` and `inf`, which are not weights.
+            has_weight = rest.trim().parse::<f64>().is_ok_and(f64::is_finite);
         }
     }
 
@@ -453,6 +454,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_recall_output_non_finite_weight_omitted() {
+        for weight in ["nan", "inf", "-inf", "infinity"] {
+            let text = format!("--- id-1 ---\n  importance: low\n  weight: {weight}\n");
+            assert!(parse_recall_output(&text).is_empty(), "{weight}");
+        }
+    }
+
+    #[test]
     fn parse_recall_output_unparseable_weight_omitted() {
         let text = "--- id-1 ---\n  importance: low\n  weight: not-a-number\n  topic: test\n";
         let records = parse_recall_output(text);
@@ -491,6 +500,24 @@ mod tests {
                 for record in &records {
                     prop_assert!(text.contains(&record.id));
                 }
+            }
+
+            #[test]
+            fn a_record_with_a_non_finite_weight_is_dropped(
+                id in "[a-z0-9]{1,12}",
+                weight in prop_oneof!["nan", "NaN", "inf", "-inf", "infinity", "-Infinity"],
+            ) {
+                let text = format!("--- {id} ---\nimportance: high\nweight: {weight}\n");
+                prop_assert!(parse_recall_output(&text).is_empty());
+            }
+
+            #[test]
+            fn a_record_with_a_finite_weight_is_kept(
+                id in "[a-z0-9]{1,12}",
+                weight in -1.0e6f64..1.0e6,
+            ) {
+                let text = format!("--- {id} ---\nimportance: high\nweight: {weight}\n");
+                prop_assert_eq!(parse_recall_output(&text).len(), 1);
             }
 
             #[test]
