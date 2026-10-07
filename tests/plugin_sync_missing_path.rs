@@ -45,4 +45,8 @@ marketplace:
         stderr.contains("skipping marketplace 'elsewhere'"),
         "no skip warning: {stderr}"
     );
+    assert!(
+        stderr.contains("1 marketplace(s) skipped") && stderr.contains("elsewhere"),
+        "no skip summary: {stderr}"
+    );
 }
