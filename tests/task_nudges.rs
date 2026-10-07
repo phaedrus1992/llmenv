@@ -72,8 +72,31 @@ fn pre_bash(command: &str) -> serde_json::Value {
     })
 }
 
+/// Run `llmenv task` as the conversation `sess-1`, the id the Stop payloads below carry.
 fn task(dir: &TempDir, args: &[&str]) {
-    llmenv(dir.path()).arg("task").args(args).assert().success();
+    task_as(dir, "sess-1", args);
+}
+
+fn task_as(dir: &TempDir, conversation: &str, args: &[&str]) {
+    llmenv(dir.path())
+        .env("CLAUDE_CODE_SESSION_ID", conversation)
+        .arg("task")
+        .args(args)
+        .assert()
+        .success();
+}
+
+fn stop_payload(conversation: &str, stop_hook_active: bool) -> serde_json::Value {
+    serde_json::json!({
+        "hook_event_name": "Stop",
+        "session_id": conversation,
+        "stop_hook_active": stop_hook_active,
+    })
+}
+
+fn stop_output(dir: &TempDir, payload: &serde_json::Value) -> String {
+    let out = hook(dir, "stop", payload).get_output().stdout.clone();
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 // Behavior 1: open a session as soon as the work has more than one part.
@@ -183,4 +206,56 @@ fn a_question_to_the_user_asks_the_agent_to_park_the_task() {
         }),
     )
     .stdout(predicates::str::contains("llmenv task wait ship-it"));
+}
+
+// #2511: a stop that a Stop hook caused gets no reminder, for every reminder source.
+#[test]
+fn a_stop_caused_by_a_stop_hook_gets_no_reminder() {
+    let dir = setup("");
+    task(&dir, &["session", "start", "sprint"]);
+    let first = stop_output(&dir, &stop_payload("sess-1", false));
+    assert!(first.contains("is open and has no tasks"), "{first}");
+    assert_eq!(stop_output(&dir, &stop_payload("sess-1", true)), "");
+}
+
+// #2511: an unchanged reminder is emitted once, a changed one is emitted again.
+#[test]
+fn an_unchanged_stop_reminder_is_emitted_once_and_a_changed_one_again() {
+    let dir = setup("");
+    task(&dir, &["session", "start", "sprint"]);
+    let stop = stop_payload("sess-1", false);
+    assert!(stop_output(&dir, &stop).contains("is open and has no tasks"));
+    assert_eq!(stop_output(&dir, &stop), "");
+    assert_eq!(stop_output(&dir, &stop), "");
+    task(&dir, &["add", "write the parser"]);
+    let changed = stop_output(&dir, &stop);
+    assert!(changed.contains("none in progress"), "{changed}");
+    assert_eq!(stop_output(&dir, &stop), "");
+}
+
+// #2511: a new user prompt makes an unchanged reminder due again.
+#[test]
+fn a_user_prompt_re_arms_the_stop_reminder() {
+    let dir = setup("");
+    task(&dir, &["session", "start", "sprint"]);
+    let stop = stop_payload("sess-1", false);
+    assert!(stop_output(&dir, &stop).contains("is open and has no tasks"));
+    assert_eq!(stop_output(&dir, &stop), "");
+    let prompt = serde_json::json!({
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "sess-1",
+        "prompt": "continue",
+    });
+    hook(&dir, "user_prompt_submit", &prompt);
+    assert!(stop_output(&dir, &stop).contains("is open and has no tasks"));
+}
+
+// #2511: a reminder about a session that another conversation owns is not for this agent.
+#[test]
+fn a_stop_does_not_name_a_session_another_conversation_owns() {
+    let dir = setup("");
+    task_as(&dir, "sess-other", &["session", "start", "theirs"]);
+    assert_eq!(stop_output(&dir, &stop_payload("sess-1", false)), "");
+    let theirs = stop_output(&dir, &stop_payload("sess-other", false));
+    assert!(theirs.contains("is open and has no tasks"), "{theirs}");
 }

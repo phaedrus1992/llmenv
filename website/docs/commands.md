@@ -1007,7 +1007,9 @@ reminder is tagged with the session that started it; since a hook has no
 reliable way to tell whether that session is *this* conversation's own (two
 terminals in the same project is a normal pattern), the reminder never
 presumes ownership — it conditions resuming/finishing a task on the agent
-recognizing it as its own earlier work. Separately, once every task in an
+recognizing it as its own earlier work. The Stop hook is the exception when
+the agent has a conversation id (see
+[Stop reminder rules](#stop-reminder-rules)). Separately, once every task in an
 open session is done, the reminder nudges to close out that session or add
 more work to it (see above), likewise conditioned on recognizing it. (added
 in v3.12.0) On Stop, an open session that holds `open` tasks but no `wip` or
@@ -1062,6 +1064,33 @@ waits for the user. The text lives in llmenv itself, so it needs no bundle or pe
 engine task tools are redirected to `llmenv task` while `block_engine_task_tools` is on, and that it overrides an
 instruction that says they are blocked. `features.task_tracker.nudges: false` removes the text.
 `llmenv doctor` warns about an instruction line that says the task tools are blocked or forbids `llmenv task`.
+
+### Stop reminder rules
+
+(added in v3.13.0)
+
+The Stop reminder ends the turn with the state of the task tracker.
+A reminder that returns the same text on every Stop makes the agent answer it again and again.
+Three rules prevent that loop.
+
+- **A Stop that a Stop hook caused gets no reminder.**
+  Claude Code sets `stop_hook_active: true` in the Stop payload for such a stop.
+  llmenv then returns no text for every Stop reminder source, including the slippage self-critique.
+- **An unchanged reminder is shown once.**
+  llmenv keeps a hash of the last reminder it emitted for the conversation, under `<state dir>/stop_dedupe/`.
+  An identical reminder is not emitted again.
+  A different reminder, an empty reminder, or a new user prompt makes the next reminder due.
+  A damaged state file costs at most one extra reminder.
+- **A reminder names only the sessions of the agent that stops.**
+  When the Stop payload has a conversation id, the reminder covers only the sessions that this conversation
+  started or resumed with `llmenv task session start`.
+  A session that another conversation owns is not named.
+  A session with no recorded owner is still named.
+  After `/clear` the conversation id changes, so run `llmenv task session start --resume <id>` to take the session back.
+  When the payload has no conversation id, the reminder covers every session of the project, as before.
+
+The SessionStart reminder is not narrowed.
+It still lists every open session of the project, because a new conversation finds its own earlier work there.
 
 ### Task nudges (added in v3.12.0)
 
