@@ -26,7 +26,7 @@ pub(crate) fn resolve_identifier(state_dir: &Path, input: &str) -> anyhow::Resul
 ///
 /// # Errors
 /// The same errors as [`resolve_identifier`], plus an unreadable session or task store.
-pub(crate) fn resolve_identifier_for(
+fn resolve_identifier_for(
     state_dir: &Path,
     input: &str,
     owner: &EngineIdentity,
