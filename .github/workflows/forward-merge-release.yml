@@ -1027,6 +1027,12 @@ jobs:
                 # branch updates that PR in place; no second `gh pr create`
                 # needed.
                 echo "$MERGE_BRANCH already exists; merging $SOURCE_DESC into it instead of halting"
+                # HEAD is still the fresh merge of $SOURCE_DESC into $TARGET.
+                # A reset (#2504) needs it after the checkout below moves HEAD.
+                FRESH_SHA=$(git rev-parse HEAD)
+                RESET_LEASE=""
+                OLD_SHA=""
+                DROPPED=""
                 if ! git fetch origin "$MERGE_BRANCH"; then
                   echo "::error::Failed to fetch existing $MERGE_BRANCH"
                   echo "::endgroup::"
@@ -1098,14 +1104,48 @@ jobs:
                         HALTED="merge abort failed updating $MERGE_BRANCH"
                         break
                       fi
-                      bail_on_conflict "$SOURCE_DESC" "$MERGE_BRANCH" || true
-                      echo "::endgroup::"
-                      HALTED="conflict updating existing $MERGE_BRANCH"
-                      break
+                      # #2504: a branch with no open PR, whose own commits all
+                      # have the cascade as author and committer, holds no work
+                      # to protect. Amending a commit changes its committer, so a
+                      # person's edit still halts here.
+                      CASCADE_EMAIL='41898282+github-actions[bot]@users.noreply.github.com'
+                      RESET_OK=0
+                      if [[ "$OPEN_PRS" -eq 0 ]]; then
+                        LOG_ERR_FILE=$(mktemp)
+                        if BRANCH_IDS=$(git log --format='%ae %ce' "$SOURCE_REF..HEAD" "^origin/$TARGET" 2>"$LOG_ERR_FILE"); then
+                          RESET_OK=1
+                          while IFS= read -r ids; do
+                            [[ -z "$ids" || "$ids" == "$CASCADE_EMAIL $CASCADE_EMAIL" ]] || RESET_OK=0
+                          done <<< "$BRANCH_IDS"
+                        else
+                          LOG_ERR="$(<"$LOG_ERR_FILE")"
+                          LOG_ERR="${LOG_ERR//$'\n'/ }"
+                          echo "::warning::Cannot list the commits only on $MERGE_BRANCH, so it is not reset: ${LOG_ERR//::/  }"
+                        fi
+                        rm -f "$LOG_ERR_FILE"
+                      fi
+                      if [[ "$RESET_OK" -eq 1 ]]; then
+                        OLD_SHA=$(git rev-parse HEAD)
+                        DROPPED=$(git log --format='- %h %s' "$FRESH_SHA..HEAD") \
+                          || DROPPED="- (the cascade could not list them)"
+                        echo "::warning::Resetting stale $MERGE_BRANCH (old tip $OLD_SHA): no open PR, and only the cascade wrote its commits. Restore it with: git push --force-with-lease=$MERGE_BRANCH:$FRESH_SHA origin $OLD_SHA:refs/heads/$MERGE_BRANCH"
+                        if ! git checkout -B "$MERGE_BRANCH" "$FRESH_SHA"; then
+                          echo "::error::Failed to reset $MERGE_BRANCH to the fresh merge"
+                          echo "::endgroup::"
+                          HALTED="reset of stale merge branch failed for $TARGET"
+                          break
+                        fi
+                        RESET_LEASE="--force-with-lease=$MERGE_BRANCH:$OLD_SHA"
+                      else
+                        bail_on_conflict "$SOURCE_DESC" "$MERGE_BRANCH" || true
+                        echo "::endgroup::"
+                        HALTED="conflict updating existing $MERGE_BRANCH"
+                        break
+                      fi
                     fi
                   fi
                   MERGE_SHA=$(git rev-parse HEAD)
-                  if ! push_with_pat origin "$MERGE_BRANCH"; then
+                  if ! push_with_pat origin "$MERGE_BRANCH" ${RESET_LEASE:+"$RESET_LEASE"}; then
                     echo "::error::Push to update existing merge branch $MERGE_BRANCH failed"
                     if [[ -z "${_forward_merge_pat:-}" ]] \
                         && ! git diff --quiet "origin/$TARGET" HEAD -- .github/workflows/; then
@@ -1127,6 +1167,9 @@ jobs:
                   BRANCH_OWN=$(git log --no-merges --format='- %h %s' "$SOURCE_REF..HEAD" "^origin/$TARGET") \
                     || BRANCH_OWN="- (the cascade could not list them)"
                   PR_BODY="No open PR existed for $MERGE_BRANCH, so the cascade updated the existing branch and opened this PR."
+                  if [[ -n "$RESET_LEASE" ]]; then
+                    PR_BODY+=$'\n\n'"The cascade could not merge $SOURCE_DESC into the old branch, so it reset this branch to a fresh merge. Only the cascade had written the old commits. Old tip: $OLD_SHA"$'\n'"Dropped commits:"$'\n'"$DROPPED"
+                  fi
                   if [[ -n "$BRANCH_OWN" ]]; then
                     PR_BODY+=$'\n\n'"The branch also holds these commits, which are not on $SOURCE_DESC or $TARGET. An earlier PR for this branch may have carried them. Review them before you merge:"$'\n'"$BRANCH_OWN"
                   fi
@@ -1169,6 +1212,8 @@ jobs:
                 break
               fi
               MERGE_SHA=$(git rev-parse HEAD)
+              # ls-remote found no such branch, so the lease only fails if a
+              # person created it since then.
               if ! push_with_pat origin "$MERGE_BRANCH" --force-with-lease; then
                 echo "::error::Push to merge branch $MERGE_BRANCH failed; cannot open PR"
                 if [[ -z "${_forward_merge_pat:-}" ]] \

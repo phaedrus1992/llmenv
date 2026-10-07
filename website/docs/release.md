@@ -230,6 +230,9 @@ Each link of the chain merges the previous link, so `main` also receives the com
   It keeps the target's own version in the `Cargo.toml` files, when the source changed nothing else there.
 - Any other conflict stops the chain and fails the run with the `git merge` command to run by hand.
   Resolve it on the target branch, then push.
+- A `forward-merge/<source>-to-<target>` branch that is left behind is updated with each new source commit.
+  If that update conflicts, the branch has no open pull request, and only the workflow wrote its commits, the workflow resets the branch to a fresh merge and logs the old tip.
+  A branch with a commit from a person, or with an open pull request, is never reset: the run stops as above.
 
 ## Troubleshooting
 
