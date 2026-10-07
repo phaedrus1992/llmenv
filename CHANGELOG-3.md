@@ -11,14 +11,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.12.1] - 2026-10-07
+
+3.12.1 fixes six bugs in the 3.12.0 release.
+
+**Hooks and task tracker.**
+The Stop hook no longer repeats the same task reminder every turn (#2511).
+Features that only a bundle sets now work in the hooks (#2460).
+A bare task slug resolves in the caller's open session first (#2501).
+
+**Memory and MCP.**
+Memory prune rejects a record with a `nan` or `inf` weight.
+The SessionStart memory health check works with a `.local` memory host that has link-local addresses (#2512).
+
+**Plugins.**
+`llmenv plugin-sync` skips a path marketplace that is missing on this host and syncs the rest (#2513).
+
 ### Fixed
 
+- A feature that only a bundle's `bundle.yaml` sets now works in the hooks. The hooks and `llmenv config-context` read the root `features:` block only, so `task_tracker`, `read_once`, `repeat_detect`, `slippage`, and `cd_guard` registered their hooks and then ran them switched off. They now resolve each one the way the adapter does (#2460) [fix:hook]
+- A bare task slug now resolves in the caller's open session first. Before, a done task from a finished session kept its slug, and `llmenv task start` or `done` on that slug hit the old task with no warning. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#task) (#2501) [fix:task]
+- Memory prune no longer treats a record with a `nan` or `inf` weight as a valid record. [fix:memory]
+- The Stop hook no longer repeats the same task reminder every turn until Claude Code ends the loop. A Stop that a Stop hook caused gets no reminder, an unchanged reminder is shown once, and the reminder names only the sessions of the conversation that stops. See [Stop reminder rules](https://phaedrus1992.github.io/llmenv/docs/commands#stop-reminder-rules). (#2511) [fix:hook]
 - The SessionStart memory health check no longer reports memory as dead when the memory host is a `.local` name that also resolves to link-local IPv6 addresses. llmenv drops the link-local addresses and connects to the rest. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp). (#2512) [fix:mcp]
 - `llmenv plugin-sync` no longer stops at a path marketplace whose directory is missing on this host. It warns, skips that marketplace, and syncs the rest. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#plugin-sync). (#2513) [fix:plugins]
-- Memory prune no longer treats a record with a `nan` or `inf` weight as a valid record.
-- The Stop hook no longer repeats the same task reminder every turn until Claude Code ends the loop. A Stop that a Stop hook caused gets no reminder, an unchanged reminder is shown once, and the reminder names only the sessions of the conversation that stops. See [Stop reminder rules](https://phaedrus1992.github.io/llmenv/docs/commands#stop-reminder-rules). (#2511)
-- A feature that only a bundle's `bundle.yaml` sets now works in the hooks. The hooks and `llmenv config-context` read the root `features:` block only, so `task_tracker`, `read_once`, `repeat_detect`, `slippage`, and `cd_guard` registered their hooks and then ran them switched off. They now resolve each one the way the adapter does (#2460) [fix:hook-run]
-- A bare task slug now resolves in the caller's open session first. Before, a done task from a finished session kept its slug, and `llmenv task start` or `done` on that slug hit the old task with no warning. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#task) (#2501) [fix:task]
 
 ## [3.12.0] - 2026-10-06
 
@@ -1046,7 +1062,8 @@ the rc.1 and rc.2 sections below.
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.12.0...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.12.1...HEAD
+[3.12.1]: https://github.com/phaedrus1992/llmenv/compare/v3.12.0...v3.12.1
 [3.12.0]: https://github.com/phaedrus1992/llmenv/compare/v3.11.2...v3.12.0
 [3.11.2]: https://github.com/phaedrus1992/llmenv/compare/v3.11.1...v3.11.2
 [3.11.1]: https://github.com/phaedrus1992/llmenv/compare/v3.11.0...v3.11.1
