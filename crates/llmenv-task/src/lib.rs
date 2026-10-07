@@ -15,9 +15,11 @@ pub mod core_text;
 pub mod project;
 pub mod relation;
 pub mod reopen;
+mod resolve;
 pub mod resume;
 pub mod session;
 pub use reopen::{reopen_task, reopen_tasks};
+pub use resolve::resolve_identifier;
 
 pub use relation::Placement;
 use relation::Relation;
@@ -663,41 +665,6 @@ fn resolve_session_for_add(
             e.ambiguity_message("pass --session <id>, or see `llmenv task session ls`")
                 .unwrap_or_default()
         ),
-    }
-}
-
-/// Resolve a user-supplied identifier (exact slug or unambiguous prefix) to
-/// the exact slug of an existing task.
-///
-/// # Errors
-/// Returns an error if `input` isn't a safe single path component (rejects
-/// path traversal / absolute-path attempts before any path is constructed —
-/// a task slug is always a single component), if no task matches, or if the
-/// prefix matches more than one task (the error lists every candidate slug).
-pub fn resolve_identifier(state_dir: &Path, input: &str) -> anyhow::Result<String> {
-    if !llmenv_paths::is_valid_short_name(input) {
-        anyhow::bail!("'{input}' is not a valid task identifier");
-    }
-    if task_path(state_dir, input).exists() {
-        return Ok(input.to_string());
-    }
-    // Fallible `try_list_tasks` rather than the tolerant `list_tasks`: an
-    // unreadable store must error out here rather than be misread as "no task
-    // found" (#1112) — this is the resolution step every mutating task command
-    // (and `TaskUpdate`'s hook redirect) runs through.
-    let matches: Vec<String> = try_list_tasks(state_dir)?
-        .into_iter()
-        .filter(|t| t.slug.starts_with(input))
-        .map(|t| t.slug)
-        .collect();
-    match matches.len() {
-        0 => anyhow::bail!("no task found matching '{input}'"),
-        1 => Ok(matches[0].clone()),
-        _ => {
-            let mut sorted = matches;
-            sorted.sort();
-            anyhow::bail!("'{input}' matches multiple tasks: {}", sorted.join(", "))
-        }
     }
 }
 
