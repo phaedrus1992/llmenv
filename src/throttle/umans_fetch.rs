@@ -18,7 +18,7 @@ const ERROR_PREVIEW_CHARS: usize = 512;
 /// GET `url` with a Bearer token and return the raw body bytes.
 ///
 /// `addrs` must be the addresses that `validate_url_production` returned for `host`.
-/// Uses a single-threaded tokio runtime, so this must not run inside another runtime.
+/// The caller may already run inside a tokio runtime, so the fetch runs on a thread of its own.
 pub(super) fn fetch_usage_body(
     url: &str,
     token: &str,
@@ -30,6 +30,22 @@ pub(super) fn fetch_usage_body(
         !addrs.is_empty(),
         "no vetted addresses for umans host {host}; refusing to send the token"
     );
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(|| fetch_on_new_runtime(url, token, host, addrs));
+        match worker.join() {
+            Ok(fetched) => fetched,
+            Err(_) => anyhow::bail!("umans usage fetch thread panicked"),
+        }
+    })
+}
+
+/// Run the request on a single-threaded tokio runtime. Must not run inside another runtime.
+fn fetch_on_new_runtime(
+    url: &str,
+    token: &str,
+    host: &str,
+    addrs: &[SocketAddr],
+) -> anyhow::Result<Vec<u8>> {
     let url = url.to_owned();
     let host = host.to_owned();
     let addrs = addrs.to_vec();
@@ -147,6 +163,16 @@ mod tests {
         let url = format!("http://pinned.invalid:{}/v1/usage", addr.port());
         let body = fetch_usage_body(&url, "token", "pinned.invalid", &[addr])
             .expect("the pinned address must serve the request");
+        assert_eq!(body, b"{}");
+    }
+
+    #[tokio::test]
+    async fn fetch_inside_a_runtime_does_not_panic() {
+        // This test runs in a runtime. A `block_on` on this thread would panic.
+        let addr = serve_response(http_response("200 OK", "Content-Length: 2\r\n", b"{}"));
+        let url = format!("http://{addr}/v1/usage");
+        let body = fetch_usage_body(&url, "token", "127.0.0.1", &[addr])
+            .expect("a caller inside a runtime must still get the body");
         assert_eq!(body, b"{}");
     }
 
