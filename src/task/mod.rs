@@ -1334,7 +1334,7 @@ pub(crate) fn tracking(state_dir: &Path) -> Tracking {
 
 /// The queue order of two tasks: creation time, then slug for a tie. The tree listing and the
 /// next-task lookup both use it, so they cannot disagree about which task is next.
-pub(crate) fn queue_order(a: &Task, b: &Task) -> std::cmp::Ordering {
+fn queue_order(a: &Task, b: &Task) -> std::cmp::Ordering {
     a.created_at
         .cmp(&b.created_at)
         .then_with(|| a.slug.cmp(&b.slug))
