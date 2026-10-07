@@ -195,4 +195,36 @@ mod tests {
         let err = resolve_identifier_for(dir.path(), "nope", &NOBODY).unwrap_err();
         assert!(err.to_string().contains("no task found"), "{err}");
     }
+
+    proptest::proptest! {
+        // Each case writes session and task files, so the case count stays low.
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(24))]
+
+        // Whatever the titles, a bare slug never resolves to a task of the finished session
+        // while the open session has tasks, and each open-session slug resolves to itself.
+        #[test]
+        fn open_session_tasks_win_over_finished_session_tasks(
+            titles in proptest::collection::btree_set("[a-z]{1,6}", 1..6),
+        ) {
+            let dir = TempDir::new().unwrap();
+            let old = open_session(dir.path(), StartDecision::Auto);
+            for t in &titles {
+                add(dir.path(), t, &old);
+            }
+            let new = open_session(dir.path(), StartDecision::Replace);
+            let mine: Vec<String> = titles.iter().map(|t| add(dir.path(), t, &new)).collect();
+            for t in &titles {
+                let bare = crate::task::slugify(t);
+                if let Ok(slug) = resolve_identifier_for(dir.path(), &bare, &NOBODY) {
+                    proptest::prop_assert!(mine.contains(&slug), "{bare} -> {slug}");
+                }
+            }
+            for slug in &mine {
+                proptest::prop_assert_eq!(
+                    &resolve_identifier_for(dir.path(), slug, &NOBODY).unwrap(),
+                    slug
+                );
+            }
+        }
+    }
 }
