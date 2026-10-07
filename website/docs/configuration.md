@@ -1112,6 +1112,10 @@ the agent recognizing that session as its own — a hook can't tell whether a
 listed task belongs to this conversation or a different, concurrently running
 one.
 
+The tracker can be set in the root `features:` block or in the `features:` block of a firing bundle's `bundle.yaml`.
+The root block wins, then the bundle from the highest-precedence scope.
+The hooks and `llmenv config-context` resolve it the same way the adapter does.
+
 ```yaml
 features:
   task_tracker:
