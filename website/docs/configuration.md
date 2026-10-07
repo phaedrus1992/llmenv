@@ -904,9 +904,11 @@ features:
 
 The delay is always capped at `max_wait`; the throttle never blocks for a
 backend-reported penalty window that could be hours long. The `umans` backend
-reads `~/.umans/config.json` for its endpoint and token. Throttling is
-fail-soft: any error (missing config, network failure) skips the delay rather
-than blocking the session.
+reads `~/.umans/config.json` for its endpoint and token. The request connects
+only to public addresses that pass the SSRF check, and it does not follow
+redirects, so the token is never sent to a private or metadata address.
+Throttling is fail-soft: any error (missing config, network failure) skips the
+delay rather than blocking the session.
 
 ### `features.upgrade:`
 
