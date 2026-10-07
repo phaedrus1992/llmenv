@@ -1212,6 +1212,8 @@ jobs:
                 break
               fi
               MERGE_SHA=$(git rev-parse HEAD)
+              # ls-remote found no such branch, so the lease only fails if a
+              # person created it since then.
               if ! push_with_pat origin "$MERGE_BRANCH" --force-with-lease; then
                 echo "::error::Push to merge branch $MERGE_BRANCH failed; cannot open PR"
                 if [[ -z "${_forward_merge_pat:-}" ]] \
