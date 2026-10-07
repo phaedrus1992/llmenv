@@ -15,6 +15,7 @@ pub(crate) mod checkpoint;
 pub(crate) mod detached_cbm;
 pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
+pub(crate) mod features_scope;
 pub(crate) mod idempotency;
 mod launch_client;
 pub(crate) mod mcp_health;
@@ -1168,6 +1169,8 @@ fn run_inner(
     let t0 = std::time::Instant::now();
     let config_path = crate::paths::config_path()?;
     let config = load_cached_config(&config_path)?;
+    // #2460: a feature that only a bundle sets must read as set here, as it does in the adapter.
+    let config = features_scope::resolve(config, &config_path);
     let t_config = std::time::Instant::now();
     let log_cfg = config.session_log_resolved();
 
