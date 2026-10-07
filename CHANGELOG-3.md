@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Security
+
+- The umans usage request connects only to the addresses that passed the private-network check. It no longer follows redirects or uses proxy settings, so a DNS rebind, a redirect, or a proxy can no longer send the Bearer token to a private or metadata address (#2518) [fix:throttle]
+
 ## [3.12.1] - 2026-10-07
 
 3.12.1 fixes six bugs in the 3.12.0 release.

@@ -203,63 +203,22 @@ impl ThrottleBackend for UmansBackend {
                 umans_cfg.api_endpoint
             );
         }
-        let _ = crate::hook_run::mcp_client::validate_url_production(
+        let (host, addrs) = crate::hook_run::mcp_client::validate_url_production(
             &url,
             crate::hook_run::mcp_client::SsrfPolicy::PublicOnly,
             Duration::from_secs(10),
         )
         .context("umans api_endpoint SSRF check")?;
-        let body = fetch_json_blocking(&url, &umans_cfg.api_token)?;
+        let raw = crate::throttle::umans_fetch::fetch_usage_body(
+            &url,
+            &umans_cfg.api_token,
+            &host,
+            &addrs,
+        )?;
+        let body: UmansUsageBody =
+            serde_json::from_slice(&raw).context("parsing umans usage response")?;
         map_umans_body(body)
     }
-}
-
-/// Blocking HTTP GET returning parsed JSON. Uses tokio block_on + reqwest async.
-fn fetch_json_blocking(url: &str, token: &str) -> anyhow::Result<UmansUsageBody> {
-    let url = url.to_owned();
-    let auth = format!("Bearer {token}");
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("building tokio runtime")?;
-    rt.block_on(async move {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .context("building reqwest client")?;
-        let resp = client
-            .get(&url)
-            .header("Authorization", auth)
-            .send()
-            .await
-            .with_context(|| format!("GET {url}"))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp
-                .bytes()
-                .await
-                .inspect_err(
-                    |e| tracing::warn!(error = %e, url = %url, "failed to read throttle error response body"),
-                )
-                .unwrap_or_default();
-            let preview: String = String::from_utf8_lossy(&body).chars().take(512).collect();
-            anyhow::bail!("umans usage API returned {status}: {preview}");
-        }
-        const MAX_BODY: u64 = 65_536;
-        if let Some(len) = resp.content_length()
-            && len > MAX_BODY
-        {
-            anyhow::bail!("umans usage response too large: {len} bytes (limit {MAX_BODY})");
-        }
-        let bytes = resp.bytes().await.context("reading umans usage response")?;
-        if bytes.len() as u64 > MAX_BODY {
-            anyhow::bail!(
-                "umans usage response too large: {} bytes (limit {MAX_BODY})",
-                bytes.len()
-            );
-        }
-        serde_json::from_slice::<UmansUsageBody>(&bytes).context("parsing umans usage response")
-    })
 }
 
 /// Map the raw umans body to a normalized `UsageSnapshot`.
