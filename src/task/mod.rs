@@ -1234,10 +1234,11 @@ fn idle_session_reminders(state_dir: &Path, caller: Option<&str>) -> String {
 }
 
 fn idle_reminder_lines(state_dir: &Path, project: &str, caller: Option<&str>) -> String {
-    let stalled = relation::stalled_parent_lines(
-        &list_tasks(state_dir),
-        &open_session_ids(state_dir, project, caller),
-    );
+    let open_ids: Vec<String> = session::open_sessions_visible_to(state_dir, project, caller)
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    let stalled = relation::stalled_parent_lines(&list_tasks(state_dir), &open_ids);
     let idle = idle_sessions(state_dir, project, caller)
         .iter()
         .map(|idle| {
@@ -1351,14 +1352,6 @@ fn empty_session_lines(state_dir: &Path, project: &str, caller: Option<&str>) ->
         .collect()
 }
 
-/// The ids of the open sessions of `project` that `caller` may be told about.
-fn open_session_ids(state_dir: &Path, project: &str, caller: Option<&str>) -> Vec<String> {
-    session::open_sessions_visible_to(state_dir, project, caller)
-        .into_iter()
-        .map(|s| s.id)
-        .collect()
-}
-
 /// Filter `tasks` down to those attributable to the current project
 /// (resolved from the process's actual cwd — hooks run with cwd set to the
 /// project directory — via [`project::current_tag`]): kept only if tagged to
@@ -1378,11 +1371,18 @@ fn tasks_for_current_project(state_dir: &Path, tasks: Vec<Task>) -> Vec<Task> {
 }
 
 /// The tasks of the current project that `caller` may be told about: all of them without a
-/// conversation id, else those of sessions that conversation owns (#2511).
+/// conversation id, else those of sessions that [`session::Session`] does not hide from it
+/// (#2511).
 fn tasks_visible_to(state_dir: &Path, caller: Option<&str>) -> Vec<Task> {
-    let mut tasks = tasks_for_current_project(state_dir, list_tasks(state_dir));
-    // An unresolved project tag already left `tasks` empty, so `ok()` loses nothing here.
-    if let Some(project) = project::current_tag().ok().filter(|_| caller.is_some()) {
+    let project = match project::current_tag() {
+        Ok(project) => project,
+        Err(e) => {
+            tracing::error!("project::current_tag failed, so the task reminder is skipped: {e:#}");
+            return Vec::new();
+        }
+    };
+    let mut tasks = filter_tasks_for_project(state_dir, &project, list_tasks(state_dir));
+    if caller.is_some() {
         let visible = session::session_ids_visible_to(state_dir, &project, caller);
         tasks.retain(|t| t.session.as_ref().is_some_and(|id| visible.contains(id)));
     }

@@ -11,7 +11,9 @@
 //!
 //! The last reminder is kept as a hash in `state_dir/stop_dedupe/<session>.json`. A missing,
 //! unreadable, or malformed file reads as "nothing emitted yet", so a damaged file can only
-//! cause one extra reminder.
+//! cause one extra reminder. A state dir that cannot be written, or a session id that is not a
+//! safe file name, disables rule 2 and logs a warning. Rule 1 still applies. The task store
+//! lives in the same dir, so the tracker is already broken in that case.
 
 use std::path::{Path, PathBuf};
 
@@ -45,11 +47,11 @@ pub(crate) fn emit_once(state_dir: &Path, session_id: Option<&str>, reminder: &s
         return reminder.to_string();
     };
     if reminder.is_empty() {
-        remove(&path);
+        clear_last(&path);
         return String::new();
     }
     let hash = hash_prefix(reminder.as_bytes());
-    if load(&path).is_some_and(|last| last.hash == hash) {
+    if load_last(&path).is_some_and(|last| last.hash == hash) {
         return String::new();
     }
     save(&path, &LastReminder { hash });
@@ -61,7 +63,7 @@ pub(crate) fn emit_once(state_dir: &Path, session_id: Option<&str>, reminder: &s
 /// due again on the next turn.
 pub(crate) fn forget(state_dir: &Path, session_id: Option<&str>) {
     if let Some(path) = state_path(state_dir, session_id) {
-        remove(&path);
+        clear_last(&path);
     }
 }
 
@@ -76,7 +78,7 @@ fn state_path(state_dir: &Path, session_id: Option<&str>) -> Option<PathBuf> {
     Some(state_dir.join("stop_dedupe").join(format!("{id}.json")))
 }
 
-fn load(path: &Path) -> Option<LastReminder> {
+fn load_last(path: &Path) -> Option<LastReminder> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
@@ -102,7 +104,7 @@ fn save(path: &Path, last: &LastReminder) {
     }
 }
 
-fn remove(path: &Path) {
+fn clear_last(path: &Path) {
     match std::fs::remove_file(path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

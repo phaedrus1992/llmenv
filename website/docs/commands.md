@@ -721,7 +721,8 @@ Three rules prevent that loop.
 - **A reminder names only the sessions of the agent that stops.**
   When the Stop payload has a conversation id, the reminder covers only the sessions that this conversation
   started or resumed with `llmenv task session start`.
-  A session of another terminal is not named.
+  A session that another conversation owns is not named.
+  A session with no recorded owner is still named.
   After `/clear` the conversation id changes, so run `llmenv task session start --resume <id>` to take the session back.
   When the payload has no conversation id, the reminder covers every session of the project, as before.
 

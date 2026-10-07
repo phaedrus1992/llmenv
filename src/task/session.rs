@@ -216,11 +216,16 @@ impl Session {
     }
 
     /// Whether an end-of-turn reminder for `caller` may name this session. A caller with a
-    /// conversation id sees only the sessions that conversation started or resumed (#2511). No
-    /// id means no way to tell, so every session is visible, as before ownership existed.
+    /// conversation id does not see a session that another conversation owns (#2511). A session
+    /// with no recorded owner stays visible: it was started outside an engine or before
+    /// ownership existed, and hiding it would drop the reminder for work that nobody else owns.
+    /// No caller id means no way to tell, so every session is visible.
     #[must_use]
     fn visible_to(&self, caller: Option<&str>) -> bool {
-        caller.is_none_or(|id| self.owner_session.as_deref() == Some(id))
+        match (caller, self.owner_session.as_deref()) {
+            (Some(caller), Some(owner)) => caller == owner,
+            _ => true,
+        }
     }
 }
 
@@ -1450,6 +1455,16 @@ mod tests {
             load_session(dir.path(), &session.id).expect("test"),
             session
         );
+    }
+
+    #[test]
+    fn visible_to_hides_only_a_session_that_another_conversation_owns() {
+        let owned = |owner: Option<&str>| bare_session(0, owner.map(str::to_string), None);
+        assert!(owned(Some("a")).visible_to(Some("a")));
+        assert!(!owned(Some("a")).visible_to(Some("b")));
+        assert!(owned(None).visible_to(Some("b")));
+        assert!(owned(Some("a")).visible_to(None));
+        assert!(owned(None).visible_to(None));
     }
 
     #[test]
