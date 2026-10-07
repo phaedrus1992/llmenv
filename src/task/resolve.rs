@@ -6,18 +6,22 @@
 
 use std::path::Path;
 
+use anyhow::Context as _;
+
 use super::session::{self, EngineIdentity};
 use super::{task_path, try_list_tasks};
 
 /// Resolve a user-supplied identifier (exact slug or unambiguous prefix) to the exact slug of
 /// an existing task. The caller's open session is searched first, so a bare slug does not
-/// land on a task that a finished session left behind.
+/// land on a task that a finished session left behind. That search also matches by prefix, so a
+/// bare `foo` reaches the open session's `foo-2` even when a finished session holds `foo`.
 ///
 /// # Errors
 /// Returns an error if `input` isn't a safe single path component (rejects
 /// path traversal / absolute-path attempts before any path is constructed —
-/// a task slug is always a single component), if no task matches, or if the
-/// prefix matches more than one task (the error lists every candidate slug).
+/// a task slug is always a single component), if no task matches, if the
+/// prefix matches more than one task (the error lists every candidate slug), or if the session
+/// or task store cannot be read.
 pub(crate) fn resolve_identifier(state_dir: &Path, input: &str) -> anyhow::Result<String> {
     resolve_identifier_for(state_dir, input, &EngineIdentity::from_env())
 }
@@ -39,10 +43,12 @@ fn resolve_identifier_for(
     // resolution step every mutating task command (and `TaskUpdate`'s hook redirect) runs
     // through.
     let tasks = try_list_tasks(state_dir)?;
-    if let Some(session_id) = caller_session(state_dir, owner)? {
+    let preferred = preferred_sessions(state_dir, owner)
+        .with_context(|| format!("listing sessions to resolve task '{input}'"))?;
+    if !preferred.is_empty() {
         let mine: Vec<&str> = tasks
             .iter()
-            .filter(|t| t.session.as_deref() == Some(session_id.as_str()))
+            .filter(|t| t.session.as_ref().is_some_and(|id| preferred.contains(id)))
             .map(|t| t.slug.as_str())
             .collect();
         if let Some(slug) = pick(&mine, input)? {
@@ -56,14 +62,19 @@ fn resolve_identifier_for(
     pick(&all, input)?.ok_or_else(|| anyhow::anyhow!("no task found matching '{input}'"))
 }
 
-/// The open session that `owner` means, or `None` when no single one is meant. An unclear
-/// choice is not an error here: the project-wide search below still answers.
-fn caller_session(state_dir: &Path, owner: &EngineIdentity) -> anyhow::Result<Option<String>> {
-    let open = session::try_list_sessions(state_dir)?
+/// The ids of the sessions a bare slug is searched in first: the one open session that `owner`
+/// means, else every open session when the choice is unclear. A task of a finished session never
+/// outranks a task of an open one.
+fn preferred_sessions(state_dir: &Path, owner: &EngineIdentity) -> anyhow::Result<Vec<String>> {
+    let open: Vec<_> = session::try_list_sessions(state_dir)?
         .into_iter()
         .filter(session::Session::is_open)
         .collect();
-    Ok(session::pick_open_session(open, owner).ok().map(|s| s.id))
+    let ids = open.iter().map(|s| s.id.clone()).collect();
+    Ok(match session::pick_open_session(open, owner) {
+        Ok(picked) => vec![picked.id],
+        Err(_) => ids,
+    })
 }
 
 /// An exact match wins, else the one slug that starts with `input`.
@@ -196,6 +207,33 @@ mod tests {
         assert!(err.to_string().contains("no task found"), "{err}");
     }
 
+    #[test]
+    fn with_several_open_sessions_and_no_owner_an_open_session_task_still_wins() {
+        let dir = TempDir::new().unwrap();
+        let old = open_session(dir.path(), StartDecision::Auto);
+        let finished = add(dir.path(), "Shared", &old);
+        let first = open_session(dir.path(), StartDecision::Replace);
+        let second = open_session(dir.path(), StartDecision::New);
+        assert_ne!(first, second);
+        let live = add(dir.path(), "Shared", &second);
+        assert_eq!((finished.as_str(), live.as_str()), ("shared", "shared-2"));
+        assert_eq!(
+            resolve_identifier_for(dir.path(), "shared", &NOBODY).unwrap(),
+            "shared-2"
+        );
+    }
+
+    #[test]
+    fn pick_prefers_an_exact_match_and_rejects_an_ambiguous_prefix() {
+        assert_eq!(pick(&["ab", "abc"], "ab").unwrap().as_deref(), Some("ab"));
+        assert_eq!(
+            pick(&["abc", "abd"], "abc").unwrap().as_deref(),
+            Some("abc")
+        );
+        assert!(pick(&["abc", "abd"], "ab").is_err());
+        assert_eq!(pick(&["abc"], "x").unwrap(), None);
+    }
+
     proptest::proptest! {
         // Each case writes session and task files, so the case count stays low.
         #![proptest_config(proptest::prelude::ProptestConfig::with_cases(24))]
@@ -224,6 +262,22 @@ mod tests {
                     &resolve_identifier_for(dir.path(), slug, &NOBODY).unwrap(),
                     slug
                 );
+            }
+        }
+        // `pick` gives the same answer for any order of the slugs.
+        #[test]
+        fn pick_ignores_the_order_of_the_slugs(
+            slugs in proptest::collection::btree_set("[a-c]{1,4}", 0..8),
+            input in "[a-c]{1,3}",
+        ) {
+            let forward: Vec<&str> = slugs.iter().map(String::as_str).collect();
+            let mut backward = forward.clone();
+            backward.reverse();
+            let a = pick(&forward, &input).map_err(|e| e.to_string());
+            let b = pick(&backward, &input).map_err(|e| e.to_string());
+            proptest::prop_assert_eq!(a, b);
+            if slugs.contains(&input) {
+                proptest::prop_assert_eq!(pick(&forward, &input).unwrap(), Some(input));
             }
         }
     }
