@@ -203,20 +203,30 @@ impl ThrottleBackend for UmansBackend {
                 umans_cfg.api_endpoint
             );
         }
-        let _ = crate::hook_run::mcp_client::validate_url_production(
+        let (host, addrs) = crate::hook_run::mcp_client::validate_url_production(
             &url,
             crate::hook_run::mcp_client::SsrfPolicy::PublicOnly,
             Duration::from_secs(10),
         )
         .context("umans api_endpoint SSRF check")?;
-        let body = fetch_json_blocking(&url, &umans_cfg.api_token)?;
+        let body = fetch_json_blocking(&url, &umans_cfg.api_token, &host, &addrs)?;
         map_umans_body(body)
     }
 }
 
 /// Blocking HTTP GET returning parsed JSON. Uses tokio block_on + reqwest async.
-fn fetch_json_blocking(url: &str, token: &str) -> anyhow::Result<UmansUsageBody> {
+///
+/// The request connects only to `addrs`, the addresses that passed the SSRF check.
+/// Redirects are not followed, because a redirect target would skip that check and get the token.
+fn fetch_json_blocking(
+    url: &str,
+    token: &str,
+    host: &str,
+    addrs: &[std::net::SocketAddr],
+) -> anyhow::Result<UmansUsageBody> {
     let url = url.to_owned();
+    let host = host.to_owned();
+    let addrs = addrs.to_vec();
     let auth = format!("Bearer {token}");
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -225,6 +235,8 @@ fn fetch_json_blocking(url: &str, token: &str) -> anyhow::Result<UmansUsageBody>
     rt.block_on(async move {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
+            .resolve_to_addrs(&host, &addrs)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .context("building reqwest client")?;
         let resp = client
@@ -336,6 +348,69 @@ mod tests {
             }
         }
     }"#;
+
+    /// Serve one canned HTTP response per accepted connection, in order.
+    fn serve_responses(responses: Vec<String>) -> std::net::SocketAddr {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for response in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match std::io::Read::read(&mut stream, &mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => request.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+            }
+        });
+        addr
+    }
+
+    fn json_response() -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{}",
+            SAMPLE_BODY.len(),
+            SAMPLE_BODY
+        )
+    }
+
+    fn redirect_response() -> String {
+        "HTTP/1.1 302 Found\r\nLocation: /elsewhere\r\nContent-Length: 0\r\n\
+         Connection: close\r\n\r\n"
+            .to_owned()
+    }
+
+    #[test]
+    fn fetch_does_not_follow_a_redirect() {
+        // The second canned response would succeed if the client followed the redirect.
+        let addr = serve_responses(vec![redirect_response(), json_response()]);
+        let url = format!("http://{addr}/v1/usage");
+        let err = match fetch_json_blocking(&url, "token", "127.0.0.1", &[addr]) {
+            Ok(_) => panic!("a 302 redirect must not be followed"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("302"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn fetch_connects_only_to_the_vetted_addresses() {
+        // The host does not resolve, so the request succeeds only through the pinned address.
+        let addr = serve_responses(vec![json_response()]);
+        let url = format!("http://pinned.invalid:{}/v1/usage", addr.port());
+        let result = fetch_json_blocking(&url, "token", "pinned.invalid", &[addr]);
+        assert!(
+            result.is_ok(),
+            "pinned address was not used: {:?}",
+            result.err()
+        );
+    }
 
     #[test]
     fn sample_body_maps_to_snapshot() {
