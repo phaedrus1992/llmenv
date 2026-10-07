@@ -503,6 +503,24 @@ mod tests {
             }
 
             #[test]
+            fn a_record_with_a_non_finite_weight_is_dropped(
+                id in "[a-z0-9]{1,12}",
+                weight in prop_oneof!["nan", "NaN", "inf", "-inf", "infinity", "-Infinity"],
+            ) {
+                let text = format!("--- {id} ---\nimportance: high\nweight: {weight}\n");
+                prop_assert!(parse_recall_output(&text).is_empty());
+            }
+
+            #[test]
+            fn a_record_with_a_finite_weight_is_kept(
+                id in "[a-z0-9]{1,12}",
+                weight in -1.0e6f64..1.0e6,
+            ) {
+                let text = format!("--- {id} ---\nimportance: high\nweight: {weight}\n");
+                prop_assert_eq!(parse_recall_output(&text).len(), 1);
+            }
+
+            #[test]
             fn a_record_without_a_numeric_weight_is_dropped(
                 id in "[a-z0-9]{1,12}",
                 weight in "[a-z]{1,6}",
