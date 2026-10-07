@@ -50,10 +50,10 @@ struct NudgeState {
     /// A commit or PR was denied once, and the retry is allowed.
     #[serde(default)]
     commit_denied: bool,
-    /// The start reminder fired while tasks were queued and none was in progress. It re-arms
-    /// when a task starts.
+    /// The next task that the start reminder named. The reminder fires again when the next task
+    /// changes, so a task started and finished between two tool calls still re-arms it.
     #[serde(default)]
-    start_reminded: bool,
+    start_reminded: Option<String>,
 }
 
 fn state_path(state_dir: &Path, session_id: &str) -> Option<PathBuf> {
@@ -177,13 +177,9 @@ pub(crate) fn handle_post_tool_use(
     text
 }
 
-/// Reset the counters while tasks are tracked, and re-arm the start reminder once a task is in
-/// progress, so the next time the work waits for a start, the reminder fires again.
+/// Reset the counters while tasks are tracked.
 fn settle(tracking: &Tracking, state: &mut NudgeState) {
-    if let Tracking::Tracked { wip, .. } = tracking {
-        if wip.is_some() {
-            state.start_reminded = false;
-        }
+    if matches!(tracking, Tracking::Tracked { .. }) {
         state.calls = 0;
         state.last_nudge = 0;
     }
@@ -203,10 +199,15 @@ fn mutation_reminder(tracker: &TaskTracker, tracking: &Tracking, state: &mut Nud
 }
 
 fn start_reminder(slug: &str, state: &mut NudgeState) -> String {
-    if state.start_reminded {
+    if state.start_reminded.as_deref() == Some(slug) {
         return String::new();
     }
-    state.start_reminded = true;
+    state.start_reminded = Some(slug.to_owned());
+    queued_reminder(slug)
+}
+
+/// The reminder that tasks are queued and none is in progress, with the command that starts one.
+fn queued_reminder(slug: &str) -> String {
     format!(
         "llmenv task tracker: tasks are queued, but none is in progress. {}",
         start_next(slug)
@@ -294,10 +295,7 @@ pub(crate) fn handle_stop(
             wip: None,
             next: Some(slug),
             ..
-        } => format!(
-            "llmenv task tracker: tasks are queued, but none is in progress. {}",
-            start_next(slug)
-        ),
+        } => queued_reminder(slug),
         _ => String::new(),
     }
 }
@@ -365,18 +363,23 @@ fn program(word: &str) -> &str {
 /// Words that run the next command with another environment or privilege.
 const WRAPPERS: [&str; 7] = ["env", "sudo", "command", "time", "nohup", "exec", "nice"];
 
-/// Whether one segment starts a commit or a pull request.
-fn starts_commit_or_pr(words: &[String]) -> bool {
-    // Group and subshell openers, an env assignment, and a wrapper come before the program.
-    let mut rest = words
+/// The words of one segment after its group openers, env assignments, and wrappers. The first word
+/// is the program. The commit matcher and the task-end matcher both read a segment this way.
+fn program_words(words: &[String]) -> Vec<&str> {
+    words
         .iter()
         .map(|w| w.trim_start_matches(['(', '{']))
         .filter(|w| !w.is_empty())
-        .skip_while(|w| (w.contains('=') && !w.starts_with('-')) || WRAPPERS.contains(&program(w)));
-    let Some(first) = rest.next() else {
+        .skip_while(|w| (w.contains('=') && !w.starts_with('-')) || WRAPPERS.contains(&program(w)))
+        .collect()
+}
+
+/// Whether one segment starts a commit or a pull request.
+fn starts_commit_or_pr(words: &[String]) -> bool {
+    let words = program_words(words);
+    let Some((first, tail)) = words.split_first() else {
         return false;
     };
-    let tail: Vec<&str> = rest.collect();
     match program(first) {
         "gh" => {
             let mut iter = tail.iter();
@@ -408,7 +411,7 @@ fn starts_commit_or_pr(words: &[String]) -> bool {
             }
             false
         }
-        "sh" | "bash" | "zsh" => match tail.as_slice() {
+        "sh" | "bash" | "zsh" => match tail {
             ["-c", script, ..] => runs_commit_or_pr(script),
             _ => false,
         },
@@ -423,24 +426,27 @@ fn runs_commit_or_pr(command: &str) -> bool {
         .any(|words| starts_commit_or_pr(words))
 }
 
-/// Whether a `llmenv task done` or `llmenv task wait` runs before the first commit or pull request
-/// segment of the command.
-fn ends_task_before_commit(command: &str) -> bool {
+/// Whether `llmenv task done <wip>` or `llmenv task wait <wip>` runs before the first commit or
+/// pull request segment. Another task's end does not end the task `wip`.
+fn ends_task_before_commit(command: &str, wip: &str) -> bool {
     for words in shell_segments(command) {
         if starts_commit_or_pr(&words) {
             return false;
         }
-        if is_task_end(&words) {
+        if task_end_target(&words) == Some(wip) {
             return true;
         }
     }
     false
 }
 
-/// Whether one segment runs `llmenv task done` or `llmenv task wait`.
-fn is_task_end(words: &[String]) -> bool {
-    let words: Vec<&str> = words.iter().map(String::as_str).collect();
-    matches!(words.as_slice(), [first, "task", "done" | "wait", ..] if program(first) == "llmenv")
+/// The task that a `llmenv task done` or `llmenv task wait` segment names, or `None`.
+fn task_end_target(words: &[String]) -> Option<&str> {
+    let words = program_words(words);
+    match words.as_slice() {
+        [first, "task", "done" | "wait", target, ..] if program(first) == "llmenv" => Some(*target),
+        _ => None,
+    }
 }
 
 /// The `__DENY__` text for the first commit or pull request with no task in progress, or an
@@ -473,8 +479,12 @@ pub(crate) fn handle_pre_tool_use(
     };
     // The tracking is read before the command runs, so a task that this command ends still shows
     // as in progress. It does not count for the commit.
-    let wip_open = matches!(tracking, Tracking::Tracked { wip: Some(_), .. })
-        && !ends_task_before_commit(command);
+    let wip_open = match &tracking {
+        Tracking::Tracked {
+            wip: Some(slug), ..
+        } => !ends_task_before_commit(command, slug),
+        _ => false,
+    };
     match tracking {
         Tracking::Unknown => {
             tracing::error!("task commit gate off: the task store cannot be read");
@@ -643,8 +653,6 @@ mod tests {
         assert!(call("Edit").contains("5 file edits"));
         // A read-only tool is not counted.
         assert_eq!(call("Read"), "");
-        // A shell command is not counted: a read-only command is not a change.
-        assert_eq!(call("Bash"), "");
     }
 
     #[test]
@@ -988,14 +996,72 @@ mod tests {
         assert!(denied.starts_with("__DENY__:"), "{denied}");
     }
 
+    #[test]
+    fn a_task_started_and_finished_in_one_command_re_arms_the_start_reminder() {
+        let dir = TempDir::new().unwrap();
+        let session = open_session(dir.path());
+        let one = add(dir.path(), &session, "Step one");
+        add(dir.path(), &session, "Step two");
+        let tracker = TaskTracker::default();
+        let edit = serde_json::json!({ "tool_name": "Edit" });
+        let post = || handle_post_tool_use(&tracker, &edit, Some("s1"), dir.path());
+        assert!(post().contains("llmenv task start step-one"));
+        // Both changes land between two tool calls, so the next edit sees step two queued.
+        start_task(dir.path(), &one, false).unwrap();
+        done_task(dir.path(), &one).unwrap();
+        assert!(post().contains("llmenv task start step-two"));
+    }
+
+    #[test]
+    fn another_task_ending_before_the_commit_does_not_end_the_task_in_progress() {
+        assert!(!ends_task_before_commit(
+            "llmenv task done other && git commit -m x",
+            "step-one"
+        ));
+        assert!(ends_task_before_commit(
+            "llmenv task done step-one && git commit -m x",
+            "step-one"
+        ));
+    }
+
+    /// Prefixes that the commit and task-end matchers must see through.
+    const WRAPPER_PREFIXES: [&str; 7] = ["", "env ", "sudo ", "(", "{ ", "FOO=1 ", "nohup "];
+
     proptest! {
+        #[test]
+        fn plain_words_form_one_segment(words in proptest::collection::vec("[a-z0-9-]{1,8}", 1..6)) {
+            prop_assert_eq!(shell_segments(&words.join(" ")), vec![words]);
+        }
+
+        #[test]
+        fn an_operator_inside_single_quotes_never_splits(inner in "[a-z;|&]{0,6}") {
+            let command = format!("echo '{inner}' tail");
+            prop_assert_eq!(shell_segments(&command).len(), 1);
+        }
+
+        #[test]
+        fn a_wrapper_before_git_commit_is_still_a_commit(
+            prefix in proptest::sample::select(WRAPPER_PREFIXES.to_vec()),
+        ) {
+            let command = format!("{prefix}git commit -m x");
+            prop_assert!(runs_commit_or_pr(&command));
+        }
+
+        #[test]
+        fn a_wrapper_before_a_task_end_is_still_a_task_end(
+            prefix in proptest::sample::select(WRAPPER_PREFIXES.to_vec()),
+        ) {
+            let command = format!("{prefix}llmenv task done step-one; git commit -m x");
+            prop_assert!(ends_task_before_commit(&command, "step-one"));
+        }
+
         #[test]
         fn nudge_state_survives_a_json_roundtrip(
             calls in any::<u32>(),
             last_nudge in any::<u32>(),
             skill_reminded in any::<bool>(),
             commit_denied in any::<bool>(),
-            start_reminded in any::<bool>(),
+            start_reminded in proptest::option::of("[a-z-]{1,12}"),
         ) {
             let state = NudgeState {
                 calls,

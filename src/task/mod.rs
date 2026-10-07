@@ -357,11 +357,7 @@ fn append_forest(group: &[&Task], rows: &mut Vec<DisplayRow>) {
     // created_at ties are rare but possible (legacy second-precision data,
     // or a genuine same-instant race); fall back to slug for a deterministic,
     // stable order (readdir order from `list_tasks` is otherwise arbitrary).
-    let order = |a: &&Task, b: &&Task| {
-        a.created_at
-            .cmp(&b.created_at)
-            .then_with(|| a.slug.cmp(&b.slug))
-    };
+    let order = |a: &&Task, b: &&Task| queue_order(a, b);
     roots.sort_by(order);
     for kids in children.values_mut() {
         kids.sort_by(order);
@@ -1331,13 +1327,17 @@ pub(crate) fn tracking(state_dir: &Path) -> Tracking {
     let next = unfinished
         .iter()
         .filter(|t| t.state == TaskState::Open)
-        .min_by(|a, b| {
-            a.created_at
-                .cmp(&b.created_at)
-                .then_with(|| a.slug.cmp(&b.slug))
-        })
+        .min_by(|a, b| queue_order(a, b))
         .map(|t| t.slug.clone());
     Tracking::Tracked { wip, waiting, next }
+}
+
+/// The queue order of two tasks: creation time, then slug for a tie. The tree listing and the
+/// next-task lookup both use it, so they cannot disagree about which task is next.
+pub(crate) fn queue_order(a: &Task, b: &Task) -> std::cmp::Ordering {
+    a.created_at
+        .cmp(&b.created_at)
+        .then_with(|| a.slug.cmp(&b.slug))
 }
 
 /// A line for each open session of `project` that holds no task at all (#2456). An empty session
