@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- A task tracker that only a bundle's `bundle.yaml` enables now works in the hooks. The hooks and `llmenv config-context` read the root `features:` block only, so the tracker registered its hooks and then ran them switched off. They now resolve it the way the adapter does (#2460) [fix:hook-run]
+- A feature that only a bundle's `bundle.yaml` sets now works in the hooks. The hooks and `llmenv config-context` read the root `features:` block only, so `task_tracker`, `read_once`, `repeat_detect`, `slippage`, and `cd_guard` registered their hooks and then ran them switched off. They now resolve each one the way the adapter does (#2460) [fix:hook-run]
 - A bare task slug now resolves in the caller's open session first. Before, a done task from a finished session kept its slug, and `llmenv task start` or `done` on that slug hit the old task with no warning. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#task) (#2501) [fix:task]
 
 ## [3.12.0] - 2026-10-06

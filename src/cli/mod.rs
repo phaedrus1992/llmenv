@@ -2715,10 +2715,7 @@ fn run_config_context() {
     match Config::load(&config_path) {
         Ok(config) => {
             // #2460: resolve the tracker from the active bundles, as the adapter does.
-            let config = match config_path.parent() {
-                Some(dir) => crate::hook_run::task_tracker_scope::resolve(config, dir),
-                None => config,
-            };
+            let config = crate::hook_run::features_scope::resolve(config, &config_path);
             let tracker = config
                 .features
                 .as_ref()
