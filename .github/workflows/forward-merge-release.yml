@@ -1102,14 +1102,27 @@ jobs:
                         HALTED="merge abort failed updating $MERGE_BRANCH"
                         break
                       fi
-                      # #2504: a branch that only the cascade wrote, with no open
-                      # PR, holds no work to protect. A person's commit has a
-                      # different author, so it still halts here.
-                      if ! BRANCH_AUTHORS=$(git log --format='%an' "$SOURCE_REF..HEAD" "^origin/$TARGET" 2>&1); then
-                        BRANCH_AUTHORS="unreadable"
+                      # #2504: a branch with no open PR, whose own commits all
+                      # have the cascade as author and committer, holds no work
+                      # to protect. Amending a commit changes its committer, so a
+                      # person's edit still halts here.
+                      CASCADE_EMAIL='41898282+github-actions[bot]@users.noreply.github.com'
+                      RESET_OK=0
+                      if [[ "$OPEN_PRS" -eq 0 ]]; then
+                        LOG_ERR_FILE=$(mktemp)
+                        if BRANCH_IDS=$(git log --format='%ae %ce' "$SOURCE_REF..HEAD" "^origin/$TARGET" 2>"$LOG_ERR_FILE"); then
+                          RESET_OK=1
+                          while IFS= read -r ids; do
+                            [[ -z "$ids" || "$ids" == "$CASCADE_EMAIL $CASCADE_EMAIL" ]] || RESET_OK=0
+                          done <<< "$BRANCH_IDS"
+                        else
+                          LOG_ERR="$(<"$LOG_ERR_FILE")"
+                          LOG_ERR="${LOG_ERR//$'\n'/ }"
+                          echo "::warning::Cannot list the commits only on $MERGE_BRANCH, so it is not reset: ${LOG_ERR//::/  }"
+                        fi
+                        rm -f "$LOG_ERR_FILE"
                       fi
-                      if [[ "$OPEN_PRS" -eq 0 ]] \
-                          && ! grep -qvx 'github-actions\[bot\]' <<< "${BRANCH_AUTHORS:-github-actions[bot]}"; then
+                      if [[ "$RESET_OK" -eq 1 ]]; then
                         OLD_SHA=$(git rev-parse HEAD)
                         echo "::warning::Resetting stale $MERGE_BRANCH (old tip $OLD_SHA): no open PR, and only the cascade wrote its commits. Restore it with: git push origin $OLD_SHA:refs/heads/$MERGE_BRANCH"
                         if ! git checkout -B "$MERGE_BRANCH" "$FRESH_SHA"; then

@@ -3306,7 +3306,15 @@ make_stale_merge_branch_repo() {
       git commit -q -am "human hand-resolution on the stale branch"
     elif [[ "$mode" == bot-conflict ]]; then
       echo "cascade's own stale resolution" > shared.txt
-      git -c user.name="github-actions[bot]" commit -q -am "cascade resolution on the stale branch"
+      git -c user.name="github-actions[bot]" \
+        -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+        commit -q -am "cascade resolution on the stale branch"
+    elif [[ "$mode" == bot-author-human-committer ]]; then
+      # A person amended a cascade commit: the author stays the bot, the committer changes.
+      echo "human fix on a cascade commit" > shared.txt
+      GIT_AUTHOR_NAME="github-actions[bot]" \
+        GIT_AUTHOR_EMAIL="41898282+github-actions[bot]@users.noreply.github.com" \
+        git commit -q -am "cascade resolution, amended by a person"
     fi
     git push -q origin "forward-merge/rel-to-target"
 
@@ -3453,7 +3461,8 @@ run_reset_case() {
   (cd "$work_dir" && git switch -q --detach origin/target \
     && git merge -q --no-edit origin/source) || return 1
   if [[ -n "$prs" ]]; then export GH_PRS_JSON="$prs"; else unset GH_PRS_JSON; fi
-  out=$(cd "$work_dir" && SOURCE_REF=origin/source TARGET=target SOURCE_DESC=release/x \
+  out=$(cd "$work_dir" && PATH="${RESET_CASE_PATH_PREFIX:+$RESET_CASE_PATH_PREFIX:}$PATH" \
+    SOURCE_REF=origin/source TARGET=target SOURCE_DESC=release/x \
     MERGE_BRANCH="forward-merge/rel-to-target" ls_rc=0 \
     bash -c "$(existing_branch_update_block)" 2>&1 || true)
   after=$(git -C "$origin_dir" rev-parse "forward-merge/rel-to-target")
@@ -3495,6 +3504,42 @@ test_2504_stale_branch_with_a_human_commit_is_not_reset() {
   after=$(reset_case_sha "$out" AFTER_SHA)
   [[ "$before" == "$after" ]] && [[ "$out" == *"Merge conflict"* ]] \
     && [[ "$out" != *"Resetting"* ]] && [[ "$out" != *"GH_CALL:pr create"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2504_stale_branch_amended_by_a_person_is_not_reset() {
+  local out before after
+  out=$(run_reset_case bot-author-human-committer "[]")
+  before=$(reset_case_sha "$out" BEFORE_SHA)
+  after=$(reset_case_sha "$out" AFTER_SHA)
+  [[ "$before" == "$after" ]] && [[ "$out" == *"Merge conflict"* ]] \
+    && [[ "$out" != *"Resetting"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# When git cannot list the branch's own commits, the run must say why and halt
+# without a reset, instead of guessing that the branch is safe to discard.
+test_2504_unreadable_branch_history_halts_and_names_the_error() {
+  local stubs out before after
+  stubs=$(mktemp -d)
+  cat > "$stubs/git" <<STUB
+#!/usr/bin/env bash
+if [[ "\$1" == log && "\$*" == *"--format=%ae %ce"* ]]; then
+  echo "fatal: bad object deadbeef" >&2
+  exit 128
+fi
+exec "$(command -v git)" "\$@"
+STUB
+  chmod +x "$stubs/git"
+  out=$(RESET_CASE_PATH_PREFIX="$stubs" run_reset_case bot-conflict "[]")
+  trash "$stubs" 2>/dev/null || true
+  before=$(reset_case_sha "$out" BEFORE_SHA)
+  after=$(reset_case_sha "$out" AFTER_SHA)
+  [[ "$before" == "$after" ]] && [[ "$out" != *"Resetting"* ]] \
+    && [[ "$out" == *"fatal: bad object deadbeef"* ]] && [[ "$out" == *"Merge conflict"* ]] \
+    && return 0
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
   return 1
 }
@@ -3798,6 +3843,10 @@ run_test "Issue #2504: a stale branch with an open PR is not reset" \
   test_2504_stale_branch_with_an_open_pr_is_not_reset
 run_test "Issue #2504: a stale branch with a human commit is not reset" \
   test_2504_stale_branch_with_a_human_commit_is_not_reset
+run_test "Issue #2504: a cascade commit amended by a person is not reset" \
+  test_2504_stale_branch_amended_by_a_person_is_not_reset
+run_test "Issue #2504: an unreadable branch history halts and names the git error" \
+  test_2504_unreadable_branch_history_halts_and_names_the_error
 run_test "Issue #2504: a stale branch that merges cleanly is updated, not reset" \
   test_2504_stale_branch_that_merges_cleanly_is_not_reset
 
