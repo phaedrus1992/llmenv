@@ -1027,6 +1027,10 @@ jobs:
                 # branch updates that PR in place; no second `gh pr create`
                 # needed.
                 echo "$MERGE_BRANCH already exists; merging $SOURCE_DESC into it instead of halting"
+                # HEAD is still the fresh merge of $SOURCE_DESC into $TARGET.
+                # A reset (#2504) needs it after the checkout below moves HEAD.
+                FRESH_SHA=$(git rev-parse HEAD)
+                RESET_LEASE=""
                 if ! git fetch origin "$MERGE_BRANCH"; then
                   echo "::error::Failed to fetch existing $MERGE_BRANCH"
                   echo "::endgroup::"
@@ -1098,14 +1102,33 @@ jobs:
                         HALTED="merge abort failed updating $MERGE_BRANCH"
                         break
                       fi
-                      bail_on_conflict "$SOURCE_DESC" "$MERGE_BRANCH" || true
-                      echo "::endgroup::"
-                      HALTED="conflict updating existing $MERGE_BRANCH"
-                      break
+                      # #2504: a branch that only the cascade wrote, with no open
+                      # PR, holds no work to protect. A person's commit has a
+                      # different author, so it still halts here.
+                      if ! BRANCH_AUTHORS=$(git log --format='%an' "$SOURCE_REF..HEAD" "^origin/$TARGET" 2>&1); then
+                        BRANCH_AUTHORS="unreadable"
+                      fi
+                      if [[ "$OPEN_PRS" -eq 0 ]] \
+                          && ! grep -qvx 'github-actions\[bot\]' <<< "${BRANCH_AUTHORS:-github-actions[bot]}"; then
+                        OLD_SHA=$(git rev-parse HEAD)
+                        echo "::warning::Resetting stale $MERGE_BRANCH (old tip $OLD_SHA): no open PR, and only the cascade wrote its commits. Restore it with: git push origin $OLD_SHA:refs/heads/$MERGE_BRANCH"
+                        if ! git checkout -B "$MERGE_BRANCH" "$FRESH_SHA"; then
+                          echo "::error::Failed to reset $MERGE_BRANCH to the fresh merge"
+                          echo "::endgroup::"
+                          HALTED="reset of stale merge branch failed for $TARGET"
+                          break
+                        fi
+                        RESET_LEASE="--force-with-lease=$MERGE_BRANCH:$OLD_SHA"
+                      else
+                        bail_on_conflict "$SOURCE_DESC" "$MERGE_BRANCH" || true
+                        echo "::endgroup::"
+                        HALTED="conflict updating existing $MERGE_BRANCH"
+                        break
+                      fi
                     fi
                   fi
                   MERGE_SHA=$(git rev-parse HEAD)
-                  if ! push_with_pat origin "$MERGE_BRANCH"; then
+                  if ! push_with_pat origin "$MERGE_BRANCH" ${RESET_LEASE:+"$RESET_LEASE"}; then
                     echo "::error::Push to update existing merge branch $MERGE_BRANCH failed"
                     if [[ -z "${_forward_merge_pat:-}" ]] \
                         && ! git diff --quiet "origin/$TARGET" HEAD -- .github/workflows/; then

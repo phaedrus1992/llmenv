@@ -54,7 +54,9 @@ files). If it pushes to a target and the push is rejected, or if the
 `FORWARD_MERGE_PAT` secret is set, it opens a `forward-merge/<source>-to-<target>`
 pull request instead. If a merge hits any other conflict, the run fails and the
 chain stops: merge the source into the target by hand, as the error says. Don't
-work around it by applying the change twice.
+work around it by applying the change twice. An old `forward-merge/` branch that
+has no open PR and holds only workflow-written commits is reset to a fresh merge
+instead, and the run log names the old tip.
 
 **Docs, changelog, and forward-merge commits don't need a branch or PR — on a
 `release/X.x` branch _or_ `main`.** The feature-branch + PR rule exists to gate

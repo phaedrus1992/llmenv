@@ -3304,6 +3304,9 @@ make_stale_merge_branch_repo() {
     if [[ "$mode" == conflict ]]; then
       echo "human's own hand resolution" > shared.txt
       git commit -q -am "human hand-resolution on the stale branch"
+    elif [[ "$mode" == bot-conflict ]]; then
+      echo "cascade's own stale resolution" > shared.txt
+      git -c user.name="github-actions[bot]" commit -q -am "cascade resolution on the stale branch"
     fi
     git push -q origin "forward-merge/rel-to-target"
 
@@ -3432,6 +3435,81 @@ STUB
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# Issue #2504: a stale merge branch that only the cascade wrote, with no open
+# PR, is reset to a fresh merge instead of halting every later run.
+# ---------------------------------------------------------------------------
+
+# Run the stale-branch block the way the cascade reaches it: HEAD holds the
+# fresh merge of the source into the target. Args: fixture mode, PR list JSON
+# (default: one open PR). Prints the block output, then BEFORE_SHA, AFTER_SHA
+# and REMOTE_SHARED (the branch's shared.txt, lines joined with "|").
+run_reset_case() {
+  local mode="$1" prs="${2-}" dirs work_dir origin_dir before after shared out
+  dirs=$(make_stale_merge_branch_repo "$mode")
+  work_dir="${dirs% *}"
+  origin_dir="${dirs#* }"
+  before=$(git -C "$origin_dir" rev-parse "forward-merge/rel-to-target")
+  (cd "$work_dir" && git switch -q --detach origin/target \
+    && git merge -q --no-edit origin/source) || return 1
+  if [[ -n "$prs" ]]; then export GH_PRS_JSON="$prs"; else unset GH_PRS_JSON; fi
+  out=$(cd "$work_dir" && SOURCE_REF=origin/source TARGET=target SOURCE_DESC=release/x \
+    MERGE_BRANCH="forward-merge/rel-to-target" ls_rc=0 \
+    bash -c "$(existing_branch_update_block)" 2>&1 || true)
+  after=$(git -C "$origin_dir" rev-parse "forward-merge/rel-to-target")
+  shared=$(git -C "$origin_dir" show "forward-merge/rel-to-target:shared.txt" | paste -sd '|' -)
+  rm -rf "$work_dir" "$origin_dir"
+  printf '%s\nBEFORE_SHA=%s\nAFTER_SHA=%s\nREMOTE_SHARED=%s\n' "$out" "$before" "$after" "$shared"
+}
+
+reset_case_sha() { sed -n "s/^$2=//p" <<< "$1"; }
+
+test_2504_cascade_only_stale_branch_with_no_pr_is_reset() {
+  local out before after
+  out=$(run_reset_case bot-conflict "[]")
+  before=$(reset_case_sha "$out" BEFORE_SHA)
+  after=$(reset_case_sha "$out" AFTER_SHA)
+  [[ -n "$before" && "$before" != "$after" ]] \
+    && [[ "$out" == *"Resetting stale forward-merge/rel-to-target (old tip $before)"* ]] \
+    && [[ "$out" == *"REMOTE_SHARED=base|source: older change|source: newer change"* ]] \
+    && [[ "$out" == *"GH_CALL:pr create --base target"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2504_stale_branch_with_an_open_pr_is_not_reset() {
+  local out before after
+  out=$(run_reset_case bot-conflict)
+  before=$(reset_case_sha "$out" BEFORE_SHA)
+  after=$(reset_case_sha "$out" AFTER_SHA)
+  [[ "$before" == "$after" ]] && [[ "$out" == *"Merge conflict"* ]] \
+    && [[ "$out" != *"Resetting"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2504_stale_branch_with_a_human_commit_is_not_reset() {
+  local out before after
+  out=$(run_reset_case conflict "[]")
+  before=$(reset_case_sha "$out" BEFORE_SHA)
+  after=$(reset_case_sha "$out" AFTER_SHA)
+  [[ "$before" == "$after" ]] && [[ "$out" == *"Merge conflict"* ]] \
+    && [[ "$out" != *"Resetting"* ]] && [[ "$out" != *"GH_CALL:pr create"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+test_2504_stale_branch_that_merges_cleanly_is_not_reset() {
+  local out before after
+  out=$(run_reset_case clean "[]")
+  before=$(reset_case_sha "$out" BEFORE_SHA)
+  after=$(reset_case_sha "$out" AFTER_SHA)
+  [[ "$before" != "$after" ]] && [[ "$out" != *"Resetting"* ]] \
+    && [[ "$out" == *"REMOTE_SHARED=base|source: older change|source: newer change"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
 # Drift guard: existing_branch_update_block extracts real production lines
 # (not a hand copy) -- assert they're still shaped the way the sed ranges
 # above expect, so a future edit there fails loudly here instead of quietly
@@ -3442,7 +3520,9 @@ test_2220_test_mirror_matches_production_stale_branch_update() {
       && grep -qF 'elif [[ $ls_rc -ne 2 ]]; then' "$WORKFLOW" \
       && grep -qF 'if ! git fetch origin "$MERGE_BRANCH"; then' "$WORKFLOW" \
       && grep -qF 'if ! git checkout -B "$MERGE_BRANCH" "origin/$MERGE_BRANCH"; then' "$WORKFLOW" \
-      && grep -qF 'if ! push_with_pat origin "$MERGE_BRANCH"; then' "$WORKFLOW"; then
+      && grep -qF 'if ! push_with_pat origin "$MERGE_BRANCH" ${RESET_LEASE:+"$RESET_LEASE"}; then' "$WORKFLOW" \
+      && grep -qF 'FRESH_SHA=$(git rev-parse HEAD)' "$WORKFLOW" \
+      && grep -qF 'RESET_LEASE="--force-with-lease=$MERGE_BRANCH:$OLD_SHA"' "$WORKFLOW"; then
     return 0
   fi
   echo "  production's stale-branch-update block no longer matches the lines this file mirrors -- update existing_branch_update_block above" >&2
@@ -3711,6 +3791,15 @@ run_test "Issue #2285: an up-to-date target advances the chain to the next targe
 
 run_test "Issue #2299: the harness runs outside the repo with no GitHub credentials" \
   test_2299_harness_is_isolated
+
+run_test "Issue #2504: a cascade-only stale branch with no PR is reset to a fresh merge" \
+  test_2504_cascade_only_stale_branch_with_no_pr_is_reset
+run_test "Issue #2504: a stale branch with an open PR is not reset" \
+  test_2504_stale_branch_with_an_open_pr_is_not_reset
+run_test "Issue #2504: a stale branch with a human commit is not reset" \
+  test_2504_stale_branch_with_a_human_commit_is_not_reset
+run_test "Issue #2504: a stale branch that merges cleanly is updated, not reset" \
+  test_2504_stale_branch_that_merges_cleanly_is_not_reset
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
