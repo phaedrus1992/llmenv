@@ -1274,11 +1274,13 @@ pub(crate) enum Tracking {
     NoSession,
     /// A session is open, but none of its tasks is unfinished.
     NoTasks,
-    /// A session has unfinished tasks. `wip` is the slug of one task in progress, if any, and
-    /// `waiting` lists the slugs of the tasks that wait on the user.
+    /// A session has unfinished tasks. `wip` is the slug of one task in progress, if any,
+    /// `waiting` lists the slugs of the tasks that wait on the user, and `next` is the first
+    /// task still `open`, the one to start next.
     Tracked {
         wip: Option<String>,
         waiting: Vec<String>,
+        next: Option<String>,
     },
 }
 
@@ -1325,7 +1327,17 @@ pub(crate) fn tracking(state_dir: &Path) -> Tracking {
         .filter(|t| t.state == TaskState::Waiting)
         .map(|t| t.slug.clone())
         .collect();
-    Tracking::Tracked { wip, waiting }
+    // The queue runs in creation order, so the next task is the earliest open one.
+    let next = unfinished
+        .iter()
+        .filter(|t| t.state == TaskState::Open)
+        .min_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.slug.cmp(&b.slug))
+        })
+        .map(|t| t.slug.clone());
+    Tracking::Tracked { wip, waiting, next }
 }
 
 /// A line for each open session of `project` that holds no task at all (#2456). An empty session

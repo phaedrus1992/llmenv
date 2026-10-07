@@ -32,10 +32,11 @@ const DEFAULT_WORKFLOW_SKILLS: [&str; 5] = [
 const DEFAULT_NUDGE_AFTER: u32 = 8;
 /// Calls between later nudges, so a long untracked run is reminded without nagging.
 const DEFAULT_NUDGE_EVERY: u32 = 20;
-/// Tools that change the project. `Bash` counts because it commits, builds, and edits.
-const MUTATING_TOOLS: [&str; 4] = ["Bash", "Edit", "Write", "MultiEdit"];
+/// Tools that change project files. `Bash` is left out: a read-only shell command is not a change,
+/// and the commit gate covers commits.
+const MUTATING_TOOLS: [&str; 3] = ["Edit", "Write", "MultiEdit"];
 
-#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct NudgeState {
     /// Mutating calls seen while the work was untracked.
     #[serde(default)]
@@ -49,6 +50,10 @@ struct NudgeState {
     /// A commit or PR was denied once, and the retry is allowed.
     #[serde(default)]
     commit_denied: bool,
+    /// The start reminder fired while tasks were queued and none was in progress. It re-arms
+    /// when a task starts.
+    #[serde(default)]
+    start_reminded: bool,
 }
 
 fn state_path(state_dir: &Path, session_id: &str) -> Option<PathBuf> {
@@ -103,10 +108,18 @@ fn how_to_track(tracking: &Tracking) -> String {
              <name> --task \"<step 1>\" --task \"<step 2>\"`. Then run `llmenv task start <slug>` \
              for the step you do first."
             .to_string(),
+        Tracking::Tracked {
+            next: Some(slug), ..
+        } => start_next(slug),
         _ => "Add a task for each step: `llmenv task add \"<step>\"`. Then run `llmenv task start \
              <slug>` for the step you do first. Use `--child-of <slug>` for the parts of a step."
             .to_string(),
     }
+}
+
+/// The command that starts a task that is queued and not yet in progress.
+fn start_next(slug: &str) -> String {
+    format!("Run `llmenv task start {slug}` for the next open step.")
 }
 
 /// The skill name without its plugin prefix: `nbl-dev:ship-issue` is `ship-issue`.
@@ -149,33 +162,55 @@ pub(crate) fn handle_post_tool_use(
     let Some(mut state) = load(&path) else {
         return String::new();
     };
-    let before = (
-        state.calls,
-        state.last_nudge,
-        state.skill_reminded,
-        state.commit_denied,
-    );
+    let before = state.clone();
     let text = if tool == "Skill" {
         skill_reminder(tracker, payload, &tracking, &mut state)
     } else if MUTATING_TOOLS.contains(&tool) {
-        work_nudge(tracker, &tracking, &mut state)
+        mutation_reminder(tracker, &tracking, &mut state)
     } else {
         String::new()
     };
-    if matches!(tracking, Tracking::Tracked { .. }) {
-        state.calls = 0;
-        state.last_nudge = 0;
-    }
-    if (
-        state.calls,
-        state.last_nudge,
-        state.skill_reminded,
-        state.commit_denied,
-    ) != before
-    {
+    settle(&tracking, &mut state);
+    if state != before {
         save(&path, &state);
     }
     text
+}
+
+/// Reset the counters while tasks are tracked, and re-arm the start reminder once a task is in
+/// progress, so the next time the work waits for a start, the reminder fires again.
+fn settle(tracking: &Tracking, state: &mut NudgeState) {
+    if let Tracking::Tracked { wip, .. } = tracking {
+        if wip.is_some() {
+            state.start_reminded = false;
+        }
+        state.calls = 0;
+        state.last_nudge = 0;
+    }
+}
+
+/// The reminder after a file edit. Queued tasks with none in progress get the start reminder,
+/// once until a task starts. Otherwise the edit counts toward the work nudge.
+fn mutation_reminder(tracker: &TaskTracker, tracking: &Tracking, state: &mut NudgeState) -> String {
+    match tracking {
+        Tracking::Tracked {
+            wip: None,
+            next: Some(slug),
+            ..
+        } => start_reminder(slug, state),
+        _ => work_nudge(tracker, tracking, state),
+    }
+}
+
+fn start_reminder(slug: &str, state: &mut NudgeState) -> String {
+    if state.start_reminded {
+        return String::new();
+    }
+    state.start_reminded = true;
+    format!(
+        "llmenv task tracker: tasks are queued, but none is in progress. {}",
+        start_next(slug)
+    )
 }
 
 fn skill_reminder(
@@ -213,8 +248,8 @@ fn work_nudge(tracker: &TaskTracker, tracking: &Tracking, state: &mut NudgeState
     }
     state.last_nudge = state.calls;
     format!(
-        "llmenv task tracker: {} tool calls changed the project, and no task is open. If the work \
-         has more than one part, track it. {}",
+        "llmenv task tracker: {} file edits ran with no task open. If the work has more than one \
+         part, track it. {}",
         state.calls,
         how_to_track(tracking)
     )
@@ -234,7 +269,8 @@ fn waiting_reminder(tracking: &Tracking) -> String {
     }
 }
 
-/// The addition to the Stop reminder when the turn ends with a question to the user.
+/// The addition to the Stop reminder. A question to the user parks the task in progress, and
+/// queued tasks with none in progress name the next start.
 pub(crate) fn handle_stop(
     tracker: &TaskTracker,
     payload: &serde_json::Value,
@@ -246,15 +282,21 @@ pub(crate) fn handle_stop(
     let asks = payload["last_assistant_message"]
         .as_str()
         .is_some_and(|m| m.trim_end().ends_with('?'));
-    if !asks {
-        return String::new();
-    }
-    match crate::task::tracking(state_dir) {
-        tracking @ Tracking::Tracked { wip: Some(_), .. } => waiting_reminder(&tracking),
-        Tracking::Tracked { waiting, .. } if !waiting.is_empty() => format!(
+    let tracking = crate::task::tracking(state_dir);
+    match &tracking {
+        Tracking::Tracked { wip: Some(_), .. } if asks => waiting_reminder(&tracking),
+        Tracking::Tracked { waiting, .. } if asks && !waiting.is_empty() => format!(
             "llmenv task tracker: waiting on the user: {}. After the user answers, run `llmenv \
              task start <slug>`.",
             waiting.join(", ")
+        ),
+        Tracking::Tracked {
+            wip: None,
+            next: Some(slug),
+            ..
+        } => format!(
+            "llmenv task tracker: tasks are queued, but none is in progress. {}",
+            start_next(slug)
         ),
         _ => String::new(),
     }
@@ -381,6 +423,26 @@ fn runs_commit_or_pr(command: &str) -> bool {
         .any(|words| starts_commit_or_pr(words))
 }
 
+/// Whether a `llmenv task done` or `llmenv task wait` runs before the first commit or pull request
+/// segment of the command.
+fn ends_task_before_commit(command: &str) -> bool {
+    for words in shell_segments(command) {
+        if starts_commit_or_pr(&words) {
+            return false;
+        }
+        if is_task_end(&words) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether one segment runs `llmenv task done` or `llmenv task wait`.
+fn is_task_end(words: &[String]) -> bool {
+    let words: Vec<&str> = words.iter().map(String::as_str).collect();
+    matches!(words.as_slice(), [first, "task", "done" | "wait", ..] if program(first) == "llmenv")
+}
+
 /// The `__DENY__` text for the first commit or pull request with no task in progress, or an
 /// empty string. The retry passes, and the marker clears when a task is in progress.
 pub(crate) fn handle_pre_tool_use(
@@ -409,12 +471,16 @@ pub(crate) fn handle_pre_tool_use(
     let Some(mut state) = load(&path) else {
         return String::new();
     };
+    // The tracking is read before the command runs, so a task that this command ends still shows
+    // as in progress. It does not count for the commit.
+    let wip_open = matches!(tracking, Tracking::Tracked { wip: Some(_), .. })
+        && !ends_task_before_commit(command);
     match tracking {
         Tracking::Unknown => {
             tracing::error!("task commit gate off: the task store cannot be read");
             String::new()
         }
-        Tracking::Tracked { wip: Some(_), .. } => {
+        _ if wip_open => {
             if state.commit_denied {
                 state.commit_denied = false;
                 if !save(&path, &state) {
@@ -448,7 +514,7 @@ pub(crate) fn handle_pre_tool_use(
 mod tests {
     use super::*;
     use crate::task::session::{StartDecision, StartOutcome, start_session};
-    use crate::task::{NewTask, ParentSpec, SessionChoice, add_task_with, start_task};
+    use crate::task::{NewTask, ParentSpec, SessionChoice, add_task_with, done_task, start_task};
     use proptest::prelude::*;
     use tempfile::TempDir;
 
@@ -568,15 +634,36 @@ mod tests {
         // No session yet: the project is untracked.
         assert_eq!(call("Edit"), "");
         assert_eq!(call("Write"), "");
-        let third = call("Bash");
+        let third = call("Edit");
         assert!(
-            third.contains("3 tool calls") && third.contains("llmenv task session start"),
+            third.contains("3 file edits") && third.contains("llmenv task session start"),
             "{third}"
         );
         assert_eq!(call("Edit"), "");
-        assert!(call("Edit").contains("5 tool calls"));
+        assert!(call("Edit").contains("5 file edits"));
         // A read-only tool is not counted.
         assert_eq!(call("Read"), "");
+        // A shell command is not counted: a read-only command is not a change.
+        assert_eq!(call("Bash"), "");
+    }
+
+    #[test]
+    fn a_read_only_shell_command_is_never_counted_as_a_change() {
+        let dir = TempDir::new().unwrap();
+        let tracker = TaskTracker {
+            nudge_after: Some(1),
+            ..TaskTracker::default()
+        };
+        for _ in 0..3 {
+            let text = handle_post_tool_use(
+                &tracker,
+                &bash("sed -n 1,5p README.md"),
+                Some("s1"),
+                dir.path(),
+            );
+            assert_eq!(text, "");
+        }
+        assert!(!dir.path().join("task_nudge").exists());
     }
 
     #[test]
@@ -602,6 +689,8 @@ mod tests {
             "an empty session gets the add command: {text}"
         );
         add(dir.path(), &session, "Step one");
+        // Queued and not started: the first edit asks for the start, then the nudges stay quiet.
+        assert!(post("Edit").contains("llmenv task start step-one"));
         for _ in 0..5 {
             assert_eq!(post("Edit"), "");
         }
@@ -784,7 +873,7 @@ mod tests {
         std::fs::remove_dir(&path).unwrap();
         std::fs::write(&path, "not json").unwrap();
         let text = handle_post_tool_use(&tracker, &edit, Some("s1"), dir.path());
-        assert!(text.contains("1 tool calls"), "{text}");
+        assert!(text.contains("1 file edits"), "{text}");
     }
 
     #[test]
@@ -809,12 +898,94 @@ mod tests {
     }
 
     #[test]
-    fn a_question_with_only_unstarted_tasks_says_nothing() {
+    fn a_stop_with_queued_tasks_and_none_started_names_the_next_one() {
         let dir = TempDir::new().unwrap();
         let session = open_session(dir.path());
         add(dir.path(), &session, "Step one");
-        let stop = serde_json::json!({ "last_assistant_message": "Ready?" });
-        assert_eq!(handle_stop(&TaskTracker::default(), &stop, dir.path()), "");
+        for message in ["Ready?", "Done."] {
+            let stop = serde_json::json!({ "last_assistant_message": message });
+            let text = handle_stop(&TaskTracker::default(), &stop, dir.path());
+            assert!(
+                text.contains("llmenv task start step-one"),
+                "{message}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_commit_deny_names_the_next_open_task_when_tasks_are_queued() {
+        let dir = TempDir::new().unwrap();
+        let session = open_session(dir.path());
+        add(dir.path(), &session, "Step one");
+        add(dir.path(), &session, "Step two");
+        let denied = handle_pre_tool_use(
+            &TaskTracker::default(),
+            &bash("git commit -m x"),
+            Some("s1"),
+            dir.path(),
+        );
+        assert!(denied.contains("llmenv task start step-one"), "{denied}");
+        assert!(!denied.contains("llmenv task add"), "{denied}");
+    }
+
+    #[test]
+    fn a_file_edit_with_queued_tasks_and_none_started_nudges_once() {
+        let dir = TempDir::new().unwrap();
+        let session = open_session(dir.path());
+        add(dir.path(), &session, "Step one");
+        let tracker = TaskTracker::default();
+        let edit = serde_json::json!({ "tool_name": "Edit" });
+        let post = || handle_post_tool_use(&tracker, &edit, Some("s1"), dir.path());
+        let first = post();
+        assert!(first.contains("llmenv task start step-one"), "{first}");
+        assert_eq!(post(), "", "once until a task starts");
+    }
+
+    #[test]
+    fn the_next_file_edit_after_a_task_is_done_nudges_the_next_start() {
+        let dir = TempDir::new().unwrap();
+        let session = open_session(dir.path());
+        let one = add(dir.path(), &session, "Step one");
+        add(dir.path(), &session, "Step two");
+        start_task(dir.path(), &one, false).unwrap();
+        let tracker = TaskTracker::default();
+        let edit = serde_json::json!({ "tool_name": "Edit" });
+        let post = || handle_post_tool_use(&tracker, &edit, Some("s1"), dir.path());
+        assert_eq!(post(), "", "a task is in progress");
+        done_task(dir.path(), &one).unwrap();
+        let text = post();
+        assert!(text.contains("llmenv task start step-two"), "{text}");
+    }
+
+    #[test]
+    fn a_task_done_earlier_in_the_same_command_does_not_pass_the_commit_gate() {
+        let dir = TempDir::new().unwrap();
+        let session = open_session(dir.path());
+        let slug = add(dir.path(), &session, "Step one");
+        start_task(dir.path(), &slug, false).unwrap();
+        let tracker = TaskTracker::default();
+        let chained = bash(&format!("llmenv task done {slug} && git commit -m x"));
+        let denied = handle_pre_tool_use(&tracker, &chained, Some("s1"), dir.path());
+        assert!(denied.starts_with("__DENY__:"), "{denied}");
+        // The commit ran before the task ended, so the task is still in progress for it.
+        let before = bash(&format!("git commit -m x && llmenv task done {slug}"));
+        assert_eq!(
+            handle_pre_tool_use(&tracker, &before, Some("s1"), dir.path()),
+            ""
+        );
+    }
+
+    #[test]
+    fn a_task_waited_on_earlier_in_the_same_command_does_not_pass_the_commit_gate() {
+        let dir = TempDir::new().unwrap();
+        let session = open_session(dir.path());
+        let slug = add(dir.path(), &session, "Step one");
+        start_task(dir.path(), &slug, false).unwrap();
+        let waited = bash(&format!(
+            "llmenv task wait {slug} \"needs an answer\" && git commit -m x"
+        ));
+        let denied = handle_pre_tool_use(&TaskTracker::default(), &waited, Some("s1"), dir.path());
+        assert!(denied.starts_with("__DENY__:"), "{denied}");
     }
 
     proptest! {
@@ -824,8 +995,15 @@ mod tests {
             last_nudge in any::<u32>(),
             skill_reminded in any::<bool>(),
             commit_denied in any::<bool>(),
+            start_reminded in any::<bool>(),
         ) {
-            let state = NudgeState { calls, last_nudge, skill_reminded, commit_denied };
+            let state = NudgeState {
+                calls,
+                last_nudge,
+                skill_reminded,
+                commit_denied,
+                start_reminded,
+            };
             let json = serde_json::to_string(&state).unwrap();
             prop_assert_eq!(serde_json::from_str::<NudgeState>(&json).unwrap(), state);
         }
