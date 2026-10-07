@@ -27,6 +27,7 @@ mod session_state;
 pub(crate) mod slippage;
 pub(crate) mod task_nudge;
 pub(crate) mod task_tools;
+pub(crate) mod task_tracker_scope;
 pub(crate) mod transcript;
 
 use std::io::Write;
@@ -1150,6 +1151,11 @@ fn run_inner(
     let t0 = std::time::Instant::now();
     let config_path = crate::paths::config_path()?;
     let config = load_cached_config(&config_path)?;
+    // #2460: a tracker that only a bundle enables must read as on here, as it does in the adapter.
+    let config = match config_path.parent() {
+        Some(config_dir) => task_tracker_scope::resolve(config, config_dir),
+        None => config,
+    };
     let t_config = std::time::Instant::now();
     let log_cfg = config.session_log_resolved();
 
