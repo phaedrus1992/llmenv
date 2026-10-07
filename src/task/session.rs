@@ -219,7 +219,7 @@ impl Session {
     /// conversation id sees only the sessions that conversation started or resumed (#2511). No
     /// id means no way to tell, so every session is visible, as before ownership existed.
     #[must_use]
-    pub(crate) fn visible_to(&self, caller: Option<&str>) -> bool {
+    fn visible_to(&self, caller: Option<&str>) -> bool {
         caller.is_none_or(|id| self.owner_session.as_deref() == Some(id))
     }
 }
