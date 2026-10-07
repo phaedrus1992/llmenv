@@ -20,6 +20,8 @@ use crate::paths::expand_tilde;
 pub enum SyncError {
     #[error("marketplace '{name}' not yet cloned (run `llmenv plugin-sync` to fetch)")]
     NotCloned { name: String },
+    #[error("marketplace '{name}': path source does not exist: {}", path.display())]
+    PathMissing { name: String, path: PathBuf },
     #[error("git clone failed for '{name}': {source}")]
     CloneFailed {
         name: String,
@@ -136,11 +138,10 @@ fn sync_path(m: &Marketplace) -> Result<MarketplaceState, SyncError> {
     let expanded = expand_tilde(&m.source);
     let path = PathBuf::from(&expanded);
     if !path.exists() {
-        return Err(SyncError::Other(anyhow::anyhow!(
-            "marketplace '{}': path source does not exist: {}",
-            m.name,
-            path.display()
-        )));
+        return Err(SyncError::PathMissing {
+            name: m.name.clone(),
+            path,
+        });
     }
     // Canonicalize so the content token is stable regardless of how the path was
     // written (symlinks, trailing slashes, `~`). The location is mixed into the
@@ -1064,7 +1065,10 @@ mod tests {
             source: "/nonexistent/path/to/marketplace".into(),
         };
         let cache = tempfile::tempdir().unwrap();
-        assert!(sync_marketplace(cache.path(), &m, false).is_err());
+        match sync_marketplace(cache.path(), &m, false) {
+            Err(SyncError::PathMissing { name, .. }) => assert_eq!(name, "gone"),
+            other => panic!("expected PathMissing, got {other:?}"),
+        }
     }
 
     #[test]
