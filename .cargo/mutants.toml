@@ -35,4 +35,8 @@ exclude_re = [
   # Returns no state dir under `cfg!(test)` on purpose, so that a unit test that spawns a
   # detached child never writes into the user's state dir. The production branch is one call.
   "replace spawner_state_dir",
+  # The NotFound guards in the stop_dedupe load_last and clear_last only choose between a silent return
+  # and a warning log line. The returned value is the same either way.
+  "replace match guard e.kind\\(\\) == std::io::ErrorKind::NotFound with (true|false) in (load_last|clear_last)",
+  "replace == with != in (load_last|clear_last)",
 ]
