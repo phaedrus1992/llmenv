@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Memory prune no longer treats a record with a `nan` or `inf` weight as a valid record.
+- The Stop hook no longer repeats the same task reminder every turn until Claude Code ends the loop. A Stop that a Stop hook caused gets no reminder, an unchanged reminder is shown once, and the reminder names only the sessions of the conversation that stops. See [Stop reminder rules](https://phaedrus1992.github.io/llmenv/docs/commands#stop-reminder-rules). (#2511)
 - A feature that only a bundle's `bundle.yaml` sets now works in the hooks. The hooks and `llmenv config-context` read the root `features:` block only, so `task_tracker`, `read_once`, `repeat_detect`, `slippage`, and `cd_guard` registered their hooks and then ran them switched off. They now resolve each one the way the adapter does (#2460) [fix:hook-run]
 - A bare task slug now resolves in the caller's open session first. Before, a done task from a finished session kept its slug, and `llmenv task start` or `done` on that slug hit the old task with no warning. See [Commands](https://phaedrus1992.github.io/llmenv/docs/commands#task) (#2501) [fix:task]
 
