@@ -476,7 +476,9 @@ Only when the open session has no match does the search cover the whole project.
   covers its whole child set (see `task block`, below). `--reopen` (added
   in v3.12.0) moves a `done` task back to `open` with a note, then starts
   it; without it, `start` refuses a `done` task.
-- `task start`, `task done`, and `task wait` refuse a task that belongs to another session. (added in v3.13.0)
+- `task start`, `done`, `wait`, `note`, `block`, `edit`, `reopen`, and `clear` refuse a task that
+  belongs to another session. (added in v3.13.0) `clear --session <id>` refuses another session's id
+  the same way.
   The refusal names the owning session. Pass `--other-session` to act on the task anyway.
   A bare `--force` does not override this check.
 - `task done <id> [--force]` — mark a task complete. (changed in v3.12.0) Refuses a parent whose sub-tasks are
