@@ -380,11 +380,7 @@ fn append_forest(group: &[&Task], rows: &mut Vec<DisplayRow>) {
     // created_at ties are rare but possible (legacy second-precision data,
     // or a genuine same-instant race); fall back to slug for a deterministic,
     // stable order (readdir order from `list_tasks` is otherwise arbitrary).
-    let order = |a: &&Task, b: &&Task| {
-        a.created_at
-            .cmp(&b.created_at)
-            .then_with(|| a.slug.cmp(&b.slug))
-    };
+    let order = |a: &&Task, b: &&Task| queue_order(a, b);
     roots.sort_by(order);
     for kids in children.values_mut() {
         kids.sort_by(order);
@@ -1288,11 +1284,13 @@ pub enum Tracking {
     NoSession,
     /// A session is open, but none of its tasks is unfinished.
     NoTasks,
-    /// A session has unfinished tasks. `wip` is the slug of one task in progress, if any, and
-    /// `waiting` lists the slugs of the tasks that wait on the user.
+    /// A session has unfinished tasks. `wip` is the slug of one task in progress, if any,
+    /// `waiting` lists the slugs of the tasks that wait on the user, and `next` is the first
+    /// task still `open`, the one to start next.
     Tracked {
         wip: Option<String>,
         waiting: Vec<String>,
+        next: Option<String>,
     },
 }
 
@@ -1339,7 +1337,21 @@ pub fn tracking(state_dir: &Path) -> Tracking {
         .filter(|t| t.state == TaskState::Waiting)
         .map(|t| t.slug.clone())
         .collect();
-    Tracking::Tracked { wip, waiting }
+    // The queue runs in creation order, so the next task is the earliest open one.
+    let next = unfinished
+        .iter()
+        .filter(|t| t.state == TaskState::Open)
+        .min_by(|a, b| queue_order(a, b))
+        .map(|t| t.slug.clone());
+    Tracking::Tracked { wip, waiting, next }
+}
+
+/// The queue order of two tasks: creation time, then slug for a tie. The tree listing and the
+/// next-task lookup both use it, so they cannot disagree about which task is next.
+fn queue_order(a: &Task, b: &Task) -> std::cmp::Ordering {
+    a.created_at
+        .cmp(&b.created_at)
+        .then_with(|| a.slug.cmp(&b.slug))
 }
 
 /// A line for each open session of `project` that holds no task at all (#2456). An empty session
