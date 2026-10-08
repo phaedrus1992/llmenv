@@ -737,8 +737,10 @@ features:
 The `anthropic-api` backend uses the model `claude-sonnet-5`. To use another model, set
 `ANTHROPIC_MODEL` to a full model ID such as `claude-opus-5-5`. Claude Code also reads
 `ANTHROPIC_MODEL` and accepts aliases such as `opus` or `sonnet[1m]`. The Messages API rejects an
-alias, so llmenv ignores any value that does not start with `claude-`, logs a warning, and uses the
-default model. The `claude-cli` backend does not read this setting.
+alias. Since v3.13.0 (changed in the next release), llmenv fails the run when `ANTHROPIC_MODEL` is
+set to a value that does not start with `claude-`, including an empty value. It does not fall back
+to the default model. Unset `ANTHROPIC_MODEL` to use `claude-sonnet-5`. The `claude-cli` backend
+does not read this setting.
 
 See [MCP & Memory](mcp.md) for the topology, security model, and `mcp-proxy`
 requirements.
