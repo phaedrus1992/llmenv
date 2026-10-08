@@ -5,8 +5,6 @@
 //! crash report. This hook exits quietly for that one case. Every other panic is logged, then
 //! handed to the default hook, which prints it and aborts as before.
 
-use std::panic::PanicHookInfo;
-
 /// Exit status for a process that ends on a closed stdout: 128 plus SIGPIPE (13), the status a
 /// shell reports for a process that a closed pipe ended.
 const CLOSED_PIPE_STATUS: i32 = 141;
@@ -15,32 +13,18 @@ const CLOSED_PIPE_STATUS: i32 = 141;
 pub fn install() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let message = payload_text(info);
-        if is_closed_stdout(&message) {
+        // `payload_as_str` covers a `String` and a `&str` payload. Any other payload has no text.
+        let message = info.payload_as_str().unwrap_or("(non-text panic payload)");
+        if is_closed_stdout(message) {
             exit_on_closed_pipe();
         }
-        tracing::error!(location = %location(info), "panic: {message}");
+        let location = info.location().map_or_else(
+            || "unknown".to_string(),
+            |l| format!("{}:{}", l.file(), l.line()),
+        );
+        tracing::error!(location = %location, "panic: {message}");
         default(info);
     }));
-}
-
-/// The panic message. A `panic!` with format arguments carries a `String`. A literal carries a
-/// `&str`. Any other payload has no text to log.
-fn payload_text(info: &PanicHookInfo<'_>) -> String {
-    let payload = info.payload();
-    payload
-        .downcast_ref::<String>()
-        .cloned()
-        .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
-        .unwrap_or_else(|| "(non-text panic payload)".to_string())
-}
-
-/// `file:line` of the panic, or `unknown` when the runtime does not record one.
-fn location(info: &PanicHookInfo<'_>) -> String {
-    info.location().map_or_else(
-        || "unknown".to_string(),
-        |l| format!("{}:{}", l.file(), l.line()),
-    )
 }
 
 /// Whether a panic message is a failed write to stdout caused by a closed pipe.
@@ -64,7 +48,22 @@ fn exit_on_closed_pipe() -> ! {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::is_closed_stdout;
+
+    proptest! {
+        #[test]
+        fn the_stdout_prefix_with_any_error_matches_only_broken_pipe(suffix in ".{0,40}") {
+            let message = format!("failed printing to stdout: {suffix}");
+            prop_assert_eq!(is_closed_stdout(&message), suffix.contains("Broken pipe"));
+        }
+
+        #[test]
+        fn a_message_without_the_stdout_prefix_never_matches(rest in ".{0,60}") {
+            prop_assert!(!is_closed_stdout(&rest) || rest.starts_with("failed printing to stdout"));
+        }
+    }
 
     #[test]
     fn the_std_closed_pipe_message_is_recognised() {

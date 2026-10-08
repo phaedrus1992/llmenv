@@ -17,6 +17,10 @@ const CLOSED_PIPE_STATUS: i32 = 141;
 fn closed_stdout_exits_quietly_without_abort() {
     let dir = TempDir::new().expect("tempdir");
     std::fs::write(dir.path().join("config.yaml"), "{}\n").expect("write config");
+
+    // The read end is closed before llmenv starts, so its first write gets EPIPE with no race.
+    let (reader, writer) = std::io::pipe().expect("pipe");
+    drop(reader);
     let mut child = Command::new(env!("CARGO_BIN_EXE_llmenv"))
         .args(["task", "ls", "--all", "--format", "json"])
         .env("LLMENV_CONFIG_DIR", dir.path())
@@ -25,13 +29,11 @@ fn closed_stdout_exits_quietly_without_abort() {
         .env("XDG_CACHE_HOME", dir.path())
         .env("HOME", dir.path())
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
+        .stdout(Stdio::from(writer))
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn llmenv");
 
-    // Drop the read end before the child writes, so its first write gets EPIPE.
-    drop(child.stdout.take());
     let status = child.wait().expect("wait for llmenv");
     let mut stderr = String::new();
     std::io::Read::read_to_string(&mut child.stderr.take().expect("stderr"), &mut stderr)
