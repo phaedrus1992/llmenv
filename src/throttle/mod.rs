@@ -210,14 +210,24 @@ fn run_throttle_inner(event: &str, hook_event_name: &str) -> anyhow::Result<()> 
         if !note.is_empty() {
             let adapter = crate::adapter::active_adapter();
             let out = adapter.emit_hook_context(hook_event_name, &note);
-            if !out.is_empty() {
-                use std::io::Write;
-                let _ = writeln!(std::io::stdout(), "{out}");
+            if !out.is_empty()
+                && let Err(e) = write_hook_context(&mut std::io::stdout(), &out)
+            {
+                eprintln!("llmenv throttle: failed to write hook output: {e}");
             }
         }
     }
 
     Ok(())
+}
+
+/// Write the hook context line. A closed reader (`BrokenPipe`) is expected, so it is not an error.
+/// Any other write error is returned for the caller to log.
+fn write_hook_context(writer: &mut impl std::io::Write, out: &str) -> std::io::Result<()> {
+    match writeln!(writer, "{out}") {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e),
+        _ => Ok(()),
+    }
 }
 
 /// One-line budget note for the prompt event's `additionalContext`.
@@ -455,5 +465,31 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    /// A sink whose every write fails with the given error kind.
+    struct FailingWriter(std::io::ErrorKind);
+
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from(self.0))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn hook_context_write_ignores_a_closed_reader() {
+        let mut sink = FailingWriter(std::io::ErrorKind::BrokenPipe);
+        assert!(write_hook_context(&mut sink, "ctx").is_ok());
+    }
+
+    #[test]
+    fn hook_context_write_returns_any_other_error() {
+        let mut sink = FailingWriter(std::io::ErrorKind::StorageFull);
+        let err = write_hook_context(&mut sink, "ctx").expect_err("a full disk must surface");
+        assert_eq!(err.kind(), std::io::ErrorKind::StorageFull);
     }
 }
