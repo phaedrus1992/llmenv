@@ -1165,6 +1165,38 @@ mod tests {
     }
 
     #[test]
+    fn split_substitutions_rewrites_only_live_substitutions() {
+        for (input, expected) in [
+            ("echo $(a)", "echo ;a;"),
+            ("echo `a`", "echo ;a;"),
+            ("echo '$(a)'", "echo '$(a)'"),
+            ("echo '`a`'", "echo '`a`'"),
+            ("echo \\$(a)", "echo \\$(a)"),
+            ("echo \\'$(a)", "echo \\';a;"),
+            ("echo \"\\$(a)\"", "echo \"\\$(a)\""),
+            ("echo \"'\" $(a)", "echo \"'\" ;a;"),
+            ("echo '\"' $(a)", "echo '\"' ;a;"),
+            ("echo $HOME", "echo $HOME"),
+        ] {
+            assert_eq!(split_substitutions(input), expected, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn take_until_close_counts_nested_parens() {
+        for (text, inner, rest) in [
+            ("a)b", "a", "b"),
+            ("a(b)c)d", "a(b)c", "d"),
+            ("(x)(y))tail", "(x)(y)", "tail"),
+            ("abc", "abc", ""),
+        ] {
+            let mut chars = text.chars().peekable();
+            assert_eq!(take_until_close(&mut chars), inner, "{text:?}");
+            assert_eq!(chars.collect::<String>(), rest, "{text:?}");
+        }
+    }
+
+    #[test]
     fn a_program_other_than_llmenv_with_the_same_shape_does_not_end_a_task() {
         assert!(!ends_task_before_commit(
             "echo task done step-one && git commit -m x",
