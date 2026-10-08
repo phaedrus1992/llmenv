@@ -312,6 +312,15 @@ fn split_substitutions(command: &str) -> String {
         match c {
             '\'' if !double => single = !single,
             '"' if !single => double = !double,
+            // An escaped character is not a quote, and not a substitution start. This matches
+            // `shell_segments`, so both passes agree on quote state.
+            '\\' if !single => {
+                out.push(c);
+                if let Some(next) = chars.next() {
+                    out.push(next);
+                }
+                continue;
+            }
             '$' if !single && chars.peek() == Some(&'(') => {
                 chars.next();
                 let inner = split_substitutions(&take_until_close(&mut chars));
@@ -478,13 +487,20 @@ fn starts_commit_or_pr(words: &[String]) -> bool {
 }
 
 /// The script that a shell runs with `-c`. The flag may sit in a cluster, as in `bash -lc`.
-/// A long option such as `--noclobber` is not a cluster, and a script file has no `-c`.
+/// An option that takes a value, such as `-o pipefail`, skips its value. A long option such as
+/// `--noclobber` is not a cluster, and a script file has no `-c`.
 fn shell_script<'a>(args: &[&'a str]) -> Option<&'a str> {
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
-        let flags = arg.strip_prefix('-')?;
-        if !flags.starts_with('-') && flags.contains('c') {
+        let flags = arg.strip_prefix(['-', '+'])?;
+        let short = !flags.starts_with('-');
+        if arg.starts_with('-') && short && flags.contains('c') {
             return rest.next().copied();
+        }
+        let takes_value =
+            matches!(*arg, "--rcfile" | "--init-file") || (short && flags.ends_with(['o', 'O']));
+        if takes_value {
+            rest.next();
         }
     }
     None
@@ -683,6 +699,14 @@ mod tests {
             ("echo $(git status)", false),
             ("echo \"it's\" && $(gh pr create)", true),
             ("echo $((1 + 2))", false),
+            ("bash -o pipefail -c \"git commit -m x\"", true),
+            ("bash -euo pipefail -c 'git commit -m x'", true),
+            ("bash -O extglob -c 'git commit -m x'", true),
+            ("bash +x -c 'git commit -m x'", true),
+            ("bash --rcfile f -c 'git commit -m x'", true),
+            ("bash -o pipefail script.sh", false),
+            ("echo \\'$(git commit -m x)", true),
+            ("echo \"\\$(git commit)\"", false),
         ] {
             assert_eq!(runs_commit_or_pr(command), expected, "{command:?}");
         }
@@ -1120,6 +1144,24 @@ mod tests {
             "llmenv task done step-one; echo $(git commit -m x)",
             "step-one"
         ));
+    }
+
+    proptest! {
+        #[test]
+        fn text_without_a_substitution_is_left_unchanged(s in "[a-z ;|&()'\"\\\\]{0,40}") {
+            prop_assert_eq!(split_substitutions(&s), s);
+        }
+
+        #[test]
+        fn take_until_close_stops_at_the_first_unnested_paren(
+            s in "[a ;]{0,20}",
+            tail in "[a )]{0,10}",
+        ) {
+            let text = format!("{s}){tail}");
+            let mut chars = text.chars().peekable();
+            prop_assert_eq!(take_until_close(&mut chars), s);
+            prop_assert_eq!(chars.collect::<String>(), tail);
+        }
     }
 
     #[test]
