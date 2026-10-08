@@ -2775,6 +2775,23 @@ fn run_config_context() {
 ///
 /// Reads the Claude Code hook payload from stdin. If the target path is inside the
 /// llmenv cache directory, prints a redirection hint. Always exits 0 (fail-soft).
+/// Read `CLAUDE_CONFIG_DIR` for the config guard. Unset means the default cache
+/// root is used. A value that is not Unicode is an error, because the guard would
+/// otherwise read a different cache from the one Claude Code started from (#2559).
+fn config_dir_from_var(
+    value: Result<String, std::env::VarError>,
+) -> Result<Option<String>, String> {
+    match value {
+        Ok(dir) => Ok(Some(dir)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(
+            "CLAUDE_CONFIG_DIR is not valid UTF-8, so the guard did not run. Export the \
+             directory again as a plain path."
+                .to_string(),
+        ),
+    }
+}
+
 fn run_config_guard() {
     use std::io::Read;
 
@@ -2793,9 +2810,16 @@ fn run_config_guard() {
     //   Strict  → <root>/claude-code/<VERSION>-<hash>   (2 levels below root)
     // Walking up to find "claude-code" and taking its parent is invariant to depth.
     let default_cache = PathBuf::from(paths::expand_tilde("~/.cache/llmenv"));
-    let cache_root = match std::env::var("CLAUDE_CONFIG_DIR") {
-        Err(_) => default_cache, // expected when not running inside a hook
-        Ok(dir) => {
+    let config_dir = match config_dir_from_var(std::env::var("CLAUDE_CONFIG_DIR")) {
+        Ok(dir) => dir,
+        Err(msg) => {
+            eprintln!("llmenv config-guard: {msg}");
+            return;
+        }
+    };
+    let cache_root = match config_dir {
+        None => default_cache, // expected when not running inside a hook
+        Some(dir) => {
             let path = PathBuf::from(&dir);
             match path
                 .ancestors()
@@ -5262,6 +5286,32 @@ fn run_prune(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use super::config_dir_from_var;
+
+    #[test]
+    fn config_dir_var_unset_selects_the_default_root() {
+        assert_eq!(
+            config_dir_from_var(Err(std::env::VarError::NotPresent)),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn config_dir_var_set_is_used_as_given() {
+        let dir = "/opt/claude-config".to_string();
+        assert_eq!(config_dir_from_var(Ok(dir.clone())), Ok(Some(dir)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_dir_var_non_unicode_names_the_variable() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let raw = std::ffi::OsString::from_vec(vec![0xff]);
+        let msg = config_dir_from_var(Err(std::env::VarError::NotUnicode(raw)))
+            .expect_err("a non-UTF-8 config dir must not select the default root");
+        assert!(msg.contains("CLAUDE_CONFIG_DIR"), "{msg}");
+    }
+
     #[test]
     fn the_hook_run_help_lists_every_event_the_parser_accepts() {
         use clap::CommandFactory;
