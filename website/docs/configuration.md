@@ -436,7 +436,7 @@ capabilities:
           modalities: ["text"]
   default_models:
     large: { provider: ollama, model: "llama3.1:70b" }
-    small: { provider: anthropic, model: "claude-haiku-4-5" }  # built-in provider id, unvalidated
+    small: { provider: anthropic, model: "claude-haiku-5-5" }  # built-in provider id, unvalidated
 ```
 
 - `model_providers[].id` is the stable identifier, used as the map key on
