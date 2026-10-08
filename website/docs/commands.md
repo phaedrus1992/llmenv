@@ -927,6 +927,8 @@ Upgrade llmenv to the latest version from GitHub releases. Downloads the
 platform-appropriate pre-built binary, performs a safe install cycle
 (backup → write temp → sync → rename → verify → remove backup), and
 restores the original binary on failure.
+The binary is downloaded only over HTTPS from `github.com` or `objects.githubusercontent.com`.
+A redirect to any other host fails the upgrade.
 
 - `--check` compares the current version against the latest release and
   prints the result. Exits 1 if an update is available.
