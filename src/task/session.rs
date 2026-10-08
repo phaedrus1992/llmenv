@@ -80,9 +80,25 @@ impl EngineIdentity {
     #[must_use]
     pub(crate) fn from_env() -> Self {
         Self::from_vars(
-            std::env::var("CLAUDE_CODE_SESSION_ID").ok().as_deref(),
+            Self::session_id_from_var(std::env::var("CLAUDE_CODE_SESSION_ID")).as_deref(),
             std::env::var("CLAUDE_PID").ok().as_deref(),
         )
+    }
+
+    /// The `CLAUDE_CODE_SESSION_ID` value. A non-Unicode value is logged, then
+    /// treated as absent, so ownership falls back as if no session existed (#2562).
+    fn session_id_from_var(value: Result<String, std::env::VarError>) -> Option<String> {
+        match value {
+            Ok(id) => Some(id),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                tracing::warn!(
+                    "CLAUDE_CODE_SESSION_ID is not valid UTF-8; session ownership is treated as \
+                     absent. Export the session id again as plain text."
+                );
+                None
+            }
+        }
     }
 
     /// The parse behind [`Self::from_env`], split out so tests need no env.
@@ -1028,6 +1044,27 @@ mod tests {
     const PROJECT_B: &str = "project-b-0000000000";
 
     // --- engine ownership (#2365) ---
+
+    #[test]
+    fn session_id_var_passes_a_plain_value() {
+        let id = EngineIdentity::session_id_from_var(Ok("conv-1".to_string()));
+        assert_eq!(id.as_deref(), Some("conv-1"));
+    }
+
+    #[test]
+    fn session_id_var_unset_is_absent() {
+        let id = EngineIdentity::session_id_from_var(Err(std::env::VarError::NotPresent));
+        assert_eq!(id, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_id_var_non_unicode_is_absent() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let raw = std::ffi::OsString::from_vec(vec![0xff]);
+        let id = EngineIdentity::session_id_from_var(Err(std::env::VarError::NotUnicode(raw)));
+        assert_eq!(id, None, "a non-UTF-8 id must count as absent");
+    }
 
     fn owner(session_id: &str, pid: u32) -> EngineIdentity {
         EngineIdentity {
