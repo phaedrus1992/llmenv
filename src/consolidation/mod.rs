@@ -326,7 +326,12 @@ async fn call_anthropic_api(prompt: &str) -> anyhow::Result<String> {
         tracing::error!("{warning}");
     }
 
-    let client = reqwest::Client::builder().timeout(LLM_TIMEOUT).build()?;
+    // The API key travels in `x-api-key`, which reqwest does not strip on a cross-host redirect.
+    // The endpoint is fixed, so a redirect is never expected and is refused.
+    let client = reqwest::Client::builder()
+        .timeout(LLM_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
 
     let body = serde_json::json!({
         "model": model,
@@ -347,6 +352,19 @@ async fn call_anthropic_api(prompt: &str) -> anyhow::Result<String> {
         .await?;
 
     let status = resp.status();
+    if status.is_redirection() {
+        // Redirects are off, so a 3xx arrives as a response. Name the target so the cause is
+        // visible; the key was never sent to it.
+        let target = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("(no Location header)");
+        anyhow::bail!(
+            "Anthropic API redirected the request to {target}; the redirect was refused so the API \
+             key stays with api.anthropic.com. Check for a proxy or a changed endpoint."
+        );
+    }
     if !status.is_success() {
         let text = resp
             .text()
