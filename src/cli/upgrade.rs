@@ -719,7 +719,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let msg = result.expect_err("a 500 must fail").to_string();
+        let msg = result.err().map(|e| e.to_string()).unwrap_or_default();
         assert!(msg.contains("HTTP 500"), "{msg}");
         assert!(msg.contains(&named_url), "error must name the URL: {msg}");
     }
