@@ -1024,6 +1024,14 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn a_program_other_than_llmenv_with_the_same_shape_does_not_end_a_task() {
+        assert!(!ends_task_before_commit(
+            "echo task done step-one && git commit -m x",
+            "step-one"
+        ));
+    }
+
     /// Prefixes that the commit and task-end matchers must see through.
     const WRAPPER_PREFIXES: [&str; 7] = ["", "env ", "sudo ", "(", "{ ", "FOO=1 ", "nohup "];
 
