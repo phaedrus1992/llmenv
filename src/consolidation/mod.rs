@@ -326,7 +326,12 @@ async fn call_anthropic_api(prompt: &str) -> anyhow::Result<String> {
         tracing::error!("{warning}");
     }
 
-    let client = reqwest::Client::builder().timeout(LLM_TIMEOUT).build()?;
+    // The API key travels in `x-api-key`, which reqwest does not strip on a cross-host redirect.
+    // The endpoint is fixed, so a redirect is never expected and is refused.
+    let client = reqwest::Client::builder()
+        .timeout(LLM_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
 
     let body = serde_json::json!({
         "model": model,

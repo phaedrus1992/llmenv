@@ -128,9 +128,52 @@ fn fetch_beta(client: &reqwest::blocking::Client, base_url: &str) -> Result<GhRe
         .context("no published releases found")
 }
 
+/// Hosts that may serve a release asset. The asset URL comes from a remote JSON response, so its
+/// host is checked before any byte is fetched.
+const ASSET_HOSTS: [&str; 2] = ["github.com", "objects.githubusercontent.com"];
+
+/// Hosts a redirect may reach while the client talks to GitHub.
+const REDIRECT_HOSTS: [&str; 3] = [
+    "api.github.com",
+    "github.com",
+    "objects.githubusercontent.com",
+];
+
+/// Redirect hops allowed before a request fails. Caps a redirect loop.
+const MAX_REDIRECTS: usize = 5;
+
+/// Whether `url` is HTTPS and names one of `hosts`.
+fn is_https_host_in(url: &reqwest::Url, hosts: &[&str]) -> bool {
+    url.scheme() == "https" && url.host_str().is_some_and(|host| hosts.contains(&host))
+}
+
+/// Parse a release asset URL and check that it names an allowed download host.
+fn validate_asset_url(raw: &str) -> Result<reqwest::Url> {
+    let url = reqwest::Url::parse(raw)
+        .with_context(|| format!("release asset URL is malformed: {raw:?}"))?;
+    anyhow::ensure!(
+        is_https_host_in(&url, &ASSET_HOSTS),
+        "refusing to download from {raw:?}: the asset must be HTTPS on one of {ASSET_HOSTS:?}"
+    );
+    Ok(url)
+}
+
+/// Follow a redirect only to a GitHub host, and only up to `MAX_REDIRECTS` hops.
+fn check_redirect(attempt: reqwest::redirect::Attempt) -> reqwest::redirect::Action {
+    if attempt.previous().len() >= MAX_REDIRECTS {
+        attempt.error("too many redirects")
+    } else if is_https_host_in(attempt.url(), &REDIRECT_HOSTS) {
+        attempt.follow()
+    } else {
+        let url = attempt.url().to_string();
+        attempt.error(format!("refusing redirect to {url:?}: not a GitHub host"))
+    }
+}
+
 fn build_http_client() -> Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
         .user_agent(concat!("llmenv-upgrade/", env!("CARGO_PKG_VERSION")))
+        .redirect(reqwest::redirect::Policy::custom(check_redirect))
         .build()
         .context("failed to build HTTP client")
 }
@@ -290,8 +333,9 @@ pub(super) fn run_upgrade(track: Option<String>, check_only: bool) -> Result<()>
     }
 
     let asset = find_asset(&release)?;
+    let asset_url = validate_asset_url(&asset.browser_download_url)?;
     eprint!("Downloading llmenv {}... ", release_version);
-    let binary_data = download_binary(&client, &asset.browser_download_url)?;
+    let binary_data = download_binary(&client, asset_url.as_str())?;
     let mb = binary_data.len() as f64 / 1_048_576.0;
     eprintln!("{:.1} MB", mb);
 
@@ -651,6 +695,54 @@ mod tests {
         .await
         .unwrap();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_asset_url_accepts_an_https_github_asset() {
+        let url =
+            validate_asset_url("https://github.com/o/r/releases/download/v1/llmenv-linux-x86_64")
+                .unwrap();
+        assert_eq!(url.host_str(), Some("github.com"));
+        validate_asset_url("https://objects.githubusercontent.com/a/b").unwrap();
+    }
+
+    #[test]
+    fn validate_asset_url_refuses_another_host() {
+        let err = validate_asset_url("https://evil.example/llmenv").unwrap_err();
+        assert!(err.to_string().contains("evil.example"), "{err}");
+    }
+
+    #[test]
+    fn validate_asset_url_refuses_plain_http_on_a_github_host() {
+        assert!(validate_asset_url("http://github.com/o/r/asset").is_err());
+    }
+
+    #[test]
+    fn validate_asset_url_refuses_a_malformed_url() {
+        let err = validate_asset_url("not a url").unwrap_err();
+        assert!(err.to_string().contains("malformed"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn redirect_to_a_host_outside_github_is_refused() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path("/start"))
+            .respond_with(
+                ResponseTemplate::new(302).insert_header("location", "https://evil.example/bin"),
+            )
+            .mount(&server)
+            .await;
+
+        let uri = server.uri();
+        let result = tokio::task::spawn_blocking(move || {
+            let client = build_http_client()?;
+            download_binary(&client, &format!("{uri}/start"))
+        })
+        .await
+        .unwrap();
+        let err = result.unwrap_err();
+        assert!(format!("{err:#}").contains("not a GitHub host"), "{err:#}");
     }
 
     // -- Config resolution
