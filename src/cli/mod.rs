@@ -451,13 +451,20 @@ enum TaskCommand {
         /// Move a `done` task back to `open` first, then start it.
         #[arg(long)]
         reopen: bool,
+        /// Act on a task that belongs to another session. Without it, `start` refuses.
+        #[arg(long)]
+        other_session: bool,
     },
     /// Mark a task done. Refuses a task that was never started (#2416);
-    /// `--force` completes it anyway.
+    /// `--force` completes it anyway. Refuses a task of another session unless
+    /// `--other-session` is passed (#2584).
     Done {
         id: String,
         #[arg(long)]
         force: bool,
+        /// Act on a task that belongs to another session. Without it, `done` refuses.
+        #[arg(long)]
+        other_session: bool,
     },
     /// Move one or more `done` tasks back to `open`, keeping their notes, parent, and
     /// `blocked_on` links. Refuses the whole call, and changes nothing, if any named task is not
@@ -513,7 +520,13 @@ enum TaskCommand {
     /// than actively `wip` — the Stop-hook reminder won't nag to act on it.
     /// `reason` is recorded as a note; reads from stdin if omitted. Resume
     /// with `llmenv task start <id>` once the blocker clears.
-    Wait { id: String, reason: Option<String> },
+    Wait {
+        id: String,
+        reason: Option<String>,
+        /// Act on a task that belongs to another session. Without it, `wait` refuses.
+        #[arg(long)]
+        other_session: bool,
+    },
     /// Record that `id` is blocked on `on`.
     Block {
         id: String,
@@ -3604,7 +3617,19 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             let task = crate::task::add_task_with(&state_dir, &new, parent_spec, choice, &project)?;
             println!("Added task '{}' ({})", task.slug, task.title);
         }
-        TaskCommand::Start { id, force, reopen } => {
+        TaskCommand::Start {
+            id,
+            force,
+            reopen,
+            other_session,
+        } => {
+            let caller = caller_session_for_task(&state_dir)?;
+            crate::task::ownership::ensure_task_is_ours(
+                &state_dir,
+                &id,
+                caller.as_deref(),
+                other_session,
+            )?;
             if reopen {
                 crate::task::reopen_task(&state_dir, &id)?;
             }
@@ -3619,7 +3644,18 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             })?;
             println!("Started '{}' — now {:?}", task.slug, task.state);
         }
-        TaskCommand::Done { id, force } => {
+        TaskCommand::Done {
+            id,
+            force,
+            other_session,
+        } => {
+            let caller = caller_session_for_task(&state_dir)?;
+            crate::task::ownership::ensure_task_is_ours(
+                &state_dir,
+                &id,
+                caller.as_deref(),
+                other_session,
+            )?;
             let completed = crate::task::complete_task(&state_dir, &id, force)?;
             println!("Completed '{}'", completed.task.slug);
             if let Some(note) = completed.skipped_start_note() {
@@ -3713,7 +3749,18 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             let task = crate::task::note_task(&state_dir, &id, &text)?;
             println!("Noted on '{}'", task.slug);
         }
-        TaskCommand::Wait { id, reason } => {
+        TaskCommand::Wait {
+            id,
+            reason,
+            other_session,
+        } => {
+            let caller = caller_session_for_task(&state_dir)?;
+            crate::task::ownership::ensure_task_is_ours(
+                &state_dir,
+                &id,
+                caller.as_deref(),
+                other_session,
+            )?;
             let reason = match reason {
                 Some(r) => r,
                 None => {
@@ -3795,6 +3842,14 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
 /// task` invocation runs with cwd set to wherever the agent invoked it from.
 fn current_project_tag() -> anyhow::Result<String> {
     Ok(crate::task::project::current_tag()?)
+}
+
+/// The open session this conversation works in, for the current project. The
+/// ownership guard compares it with the session a task belongs to (#2584).
+fn caller_session_for_task(state_dir: &std::path::Path) -> anyhow::Result<Option<String>> {
+    let project = current_project_tag()?;
+    let owner = crate::task::session::EngineIdentity::from_env();
+    crate::task::ownership::caller_session(state_dir, &project, &owner)
 }
 
 /// What `task show --current`/`--next` resolves to (#1117).
