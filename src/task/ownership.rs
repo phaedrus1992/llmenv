@@ -37,7 +37,7 @@ pub(crate) fn caller_session(
             picked.id
         )),
         Err(err) => Caller::Unidentified(
-            err.ambiguity_message("set the session id, or pass --session <id>")
+            err.ambiguity_message("set CLAUDE_CODE_SESSION_ID, or pass --other-session")
                 .unwrap_or_else(|| "no session of yours is open in this project".to_string()),
         ),
     })
