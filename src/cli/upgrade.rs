@@ -316,23 +316,30 @@ fn api_base_from_env(value: Result<String, env::VarError>) -> Result<String> {
     }
 }
 
-/// Refuse an override that is not an https URL with a host.
+/// Refuse an override that is not a bare https base URL, and return the normalized base.
 ///
 /// The base URL picks the release that gets installed. A plain-text or foreign-scheme base would
-/// let a network attacker choose the binary, so only https is accepted.
+/// let a network attacker choose the binary, so only https is accepted. Credentials, a query, and
+/// a fragment are refused, because they would leak into logs or change the request path. The
+/// returned base is the parsed form, so surrounding spaces and a trailing slash are removed.
 fn validate_api_base(base: String) -> Result<String> {
-    let url = reqwest::Url::parse(&base).with_context(|| {
-        format!(
-            "LLMENV_UPGRADE_GITHUB_API is not a valid URL: {base:?}. Set it to an https base URL, \
-             or unset it to use https://api.github.com."
-        )
-    })?;
+    const FIX: &str = "Set it to a bare https base URL, or unset it to use https://api.github.com.";
+    let url = reqwest::Url::parse(&base)
+        .with_context(|| format!("LLMENV_UPGRADE_GITHUB_API is not a valid URL. {FIX}"))?;
     anyhow::ensure!(
-        url.scheme() == "https" && url.host_str().is_some(),
-        "LLMENV_UPGRADE_GITHUB_API must be an https URL with a host, got {base:?}. Set it to an \
-         https base URL, or unset it to use https://api.github.com."
+        url.scheme() == "https",
+        "LLMENV_UPGRADE_GITHUB_API must be an https URL, got scheme {:?}. {FIX}",
+        url.scheme()
     );
-    Ok(base)
+    anyhow::ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "LLMENV_UPGRADE_GITHUB_API must not contain a username or password. {FIX}"
+    );
+    anyhow::ensure!(
+        url.query().is_none() && url.fragment().is_none(),
+        "LLMENV_UPGRADE_GITHUB_API must not contain a query or fragment. {FIX}"
+    );
+    Ok(url.as_str().trim_end_matches('/').to_string())
 }
 
 pub(super) fn run_upgrade(track: Option<String>, check_only: bool) -> Result<()> {
@@ -818,6 +825,56 @@ mod tests {
             msg.contains("LLMENV_UPGRADE_GITHUB_API is not valid UTF-8"),
             "{msg}"
         );
+    }
+
+    #[test]
+    fn api_base_is_returned_normalized() {
+        let base = api_base_from_env(Ok(" https://ghe.example.com/api/v3/ ".into())).unwrap();
+        assert_eq!(base, "https://ghe.example.com/api/v3");
+    }
+
+    #[test]
+    fn api_base_with_credentials_is_refused_without_echoing_them() {
+        let msg = api_base_from_env(Ok("https://user:tok3n@ghe.example.com".into()))
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(
+            msg.contains("must not contain a username or password"),
+            "{msg}"
+        );
+        assert!(!msg.contains("tok3n"), "{msg}");
+    }
+
+    #[test]
+    fn api_base_with_a_query_or_fragment_is_refused() {
+        for raw in [
+            "https://ghe.example.com/api?x=1",
+            "https://ghe.example.com/api#y",
+        ] {
+            let msg = api_base_from_env(Ok(raw.into()))
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default();
+            assert!(
+                msg.contains("must not contain a query or fragment"),
+                "{raw}: {msg}"
+            );
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn an_accepted_api_base_is_a_bare_https_url(raw in ".{0,80}") {
+            if let Ok(base) = validate_api_base(raw) {
+                prop_assert!(reqwest::Url::parse(&base).is_ok(), "must reparse: {base:?}");
+                let url = reqwest::Url::parse(&base).unwrap();
+                prop_assert_eq!(url.scheme(), "https");
+                prop_assert!(url.username().is_empty() && url.password().is_none());
+                prop_assert!(url.query().is_none() && url.fragment().is_none());
+                prop_assert!(!base.ends_with('/'));
+            }
+        }
     }
 
     #[test]
