@@ -72,10 +72,10 @@ pub(crate) fn handle_turn(cfg: Option<&SlippageControl>) -> String {
 /// exists when `features.read_once` is enabled, so sharing it would make this
 /// layer silently depend on an unrelated feature being on.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
-struct SessionStats {
+pub(super) struct SessionStats {
     /// Paths read this session (`read_before_edit`).
     #[serde(default)]
-    paths: std::collections::BTreeSet<String>,
+    pub(super) paths: std::collections::BTreeSet<String>,
     /// Tool-call counts by name (`metrics`). `#[serde(default)]` on both
     /// fields so a log written before either layer existed still loads.
     #[serde(default)]
@@ -99,14 +99,24 @@ pub(super) fn stats_path(state_dir: &std::path::Path, session_id: &str) -> std::
         .join(format!("{session_id}.json"))
 }
 
-fn load_stats(state_dir: &std::path::Path, session_id: &str) -> SessionStats {
-    // Fail-soft throughout: an unreadable or corrupt log means "nothing known
-    // to have been read", which allows the write. The alternative — denying on
-    // a corrupt state file — would wedge the agent over a bookkeeping error.
-    std::fs::read_to_string(stats_path(state_dir, session_id))
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+pub(super) fn load_stats(state_dir: &std::path::Path, session_id: &str) -> SessionStats {
+    // An unreadable or corrupt log means "nothing known to have been read". The
+    // write guard then denies a Write to an existing file until the next Read
+    // rewrites the log. The deny is deliberate: a corrupt log cannot prove a read.
+    // A missing log is the normal first-use case and is not logged.
+    let path = stats_path(state_dir, session_id);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return SessionStats::default(),
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "slippage: read log unreadable");
+            return SessionStats::default();
+        }
+    };
+    serde_json::from_str(&text).unwrap_or_else(|e| {
+        tracing::warn!(path = %path.display(), error = %e, "slippage: read log is corrupt");
+        SessionStats::default()
+    })
 }
 
 /// Record a read, or decide a write. Returns the deny text, or empty to allow.
@@ -178,7 +188,7 @@ pub(crate) fn handle_pre_tool_use(
 /// write to a file that *was* read, which is the false positive most likely to
 /// get the layer switched off. Falls back to the literal path when the file
 /// can't be resolved (it may not exist yet, which is the allowed case anyway).
-fn path_key(path: &str) -> String {
+pub(super) fn path_key(path: &str) -> String {
     std::fs::canonicalize(path)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| path.to_string())
@@ -189,7 +199,7 @@ fn path_key(path: &str) -> String {
 /// Opportunistically drops session files older than a week, the way
 /// `read_once`'s cache does — without it the directory grows one file per
 /// session forever.
-fn save_stats(state_dir: &std::path::Path, session_id: &str, stats: &SessionStats) {
+pub(super) fn save_stats(state_dir: &std::path::Path, session_id: &str, stats: &SessionStats) {
     super::session_state::prune_stale_json_files(&state_dir.join("slippage"), 7);
     let Ok(json) = serde_json::to_string(stats) else {
         return;
@@ -197,7 +207,8 @@ fn save_stats(state_dir: &std::path::Path, session_id: &str, stats: &SessionStat
     if let Err(e) =
         crate::paths::write_owner_only_atomic(&stats_path(state_dir, session_id), json.as_bytes())
     {
-        tracing::debug!("slippage: could not record session stats: {e}");
+        // A lost read record makes the next Write to that file deny, so the failure must be visible.
+        tracing::warn!("slippage: could not record session stats: {e}");
     }
 }
 
@@ -213,7 +224,7 @@ pub(crate) fn handle_post_tool_use(
     state_dir: &std::path::Path,
 ) {
     let Some(cfg) = cfg else { return };
-    if !cfg.enabled || !cfg.metrics {
+    if !cfg.enabled {
         return;
     }
     let (Some(session_id), Some(tool)) = (
@@ -222,6 +233,12 @@ pub(crate) fn handle_post_tool_use(
     ) else {
         return;
     };
+    if cfg.read_before_edit && tool == "Bash" {
+        super::slippage_read::record_bash_read(state_dir, session_id, payload);
+    }
+    if !cfg.metrics {
+        return;
+    }
     let mut stats = load_stats(state_dir, session_id);
     *stats.tools.entry(tool.to_string()).or_default() += 1;
     save_stats(state_dir, session_id, &stats);
