@@ -14,7 +14,8 @@ use crate::hook_run::slippage::{load_stats, path_key, save_stats};
 /// Record the file a Bash `PostToolUse` read, if the command is one plain single-file view.
 ///
 /// A relative path resolves against the payload `cwd`. Without a `cwd`, a relative path is
-/// not recorded, so the gate stays conservative.
+/// not recorded. A view that is not recorded leaves the file unread, so a later Write to it
+/// is denied. The deny is conservative, and its text says the file was not read.
 pub(super) fn record_bash_read(state_dir: &Path, session_id: &str, payload: &Value) {
     let Some(command) = payload
         .get("tool_input")
@@ -26,14 +27,17 @@ pub(super) fn record_bash_read(state_dir: &Path, session_id: &str, payload: &Val
     let Some(file) = single_file_read(command) else {
         return;
     };
-    let path = if Path::new(file).is_absolute() {
-        Path::new(file).to_path_buf()
-    } else {
-        let Some(cwd) = payload.get("cwd").and_then(Value::as_str) else {
-            return;
-        };
-        Path::new(cwd).join(file)
+    // `Path::join` returns the right side unchanged when it is absolute, so one join covers both.
+    let Some(cwd) = payload.get("cwd").and_then(Value::as_str) else {
+        if Path::new(file).is_absolute() {
+            record_path(state_dir, session_id, Path::new(file));
+        }
+        return;
     };
+    record_path(state_dir, session_id, &Path::new(cwd).join(file));
+}
+
+fn record_path(state_dir: &Path, session_id: &str, path: &Path) {
     let mut stats = load_stats(state_dir, session_id);
     stats.paths.insert(path_key(&path.to_string_lossy()));
     save_stats(state_dir, session_id, &stats);
@@ -41,10 +45,13 @@ pub(super) fn record_bash_read(state_dir: &Path, session_id: &str, payload: &Val
 
 /// The file a command views, when the command is one plain single-file view.
 ///
-/// Accepts `cat FILE`, `head [-n N] FILE`, `tail [-n N] FILE`, `sed -n N[,M]p FILE`, and
-/// `grep PATTERN FILE`. Any other shape returns `None`: a pipe, a redirect, a chain, a
-/// substitution, a quote, a glob, or a flag this list does not name. The check is on the
-/// whole command, because a shell feature can hide a second command or a second file.
+/// Accepts `cat FILE`, `head [-n N] FILE`, `tail [-n N] FILE`, and `sed -n N[,M]p FILE`, with
+/// `N` and `M` at least 1. Any other shape returns `None`: a pipe, a redirect, a chain, a
+/// substitution, a quote, a glob, a `~` path, or a flag this list does not name. The check is on
+/// the whole command, because a shell feature can hide a second command or a second file.
+///
+/// `grep PATTERN FILE` is not accepted. It prints only the matching lines, so it does not show
+/// the file. A count of zero also shows no lines, so `head -n 0` is not accepted either.
 fn single_file_read(command: &str) -> Option<&str> {
     const SHELL_SYNTAX: &[char] = &[
         '|', '>', '<', '&', ';', '`', '$', '\n', '\'', '"', '\\', '*', '?', '(', ')',
@@ -57,19 +64,19 @@ fn single_file_read(command: &str) -> Option<&str> {
         ["cat", file] | ["head" | "tail", file] => plain_file(file),
         ["head" | "tail", "-n", count, file] if is_count(count) => plain_file(file),
         ["sed", "-n", script, file] if is_sed_range(script) => plain_file(file),
-        ["grep", pattern, file] if !pattern.starts_with('-') => plain_file(file),
         _ => None,
     }
 }
 
-/// A file argument. A word that starts with `-` is a flag this module does not understand.
+/// A file argument. A word that starts with `-` is a flag this module does not understand. A
+/// word that starts with `~` is a path the shell expands, and this module does not expand it.
 fn plain_file(word: &str) -> Option<&str> {
-    (!word.starts_with('-')).then_some(word)
+    (!word.starts_with(['-', '~'])).then_some(word)
 }
 
-/// A line count or a line number: one or more ASCII digits.
+/// A positive line count or line number: ASCII digits that are not all zero.
 fn is_count(word: &str) -> bool {
-    !word.is_empty() && word.bytes().all(|b| b.is_ascii_digit())
+    !word.is_empty() && word.bytes().all(|b| b.is_ascii_digit()) && word.bytes().any(|b| b != b'0')
 }
 
 /// A `sed` print script such as `10p` or `10,20p`.
@@ -84,7 +91,53 @@ fn is_sed_range(script: &str) -> bool {
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "test code")]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+
+    proptest! {
+        #[test]
+        fn a_count_is_a_positive_digit_run(word in "[0-9a-z+,p-]{0,6}") {
+            let expected = !word.is_empty()
+                && word.bytes().all(|b| b.is_ascii_digit())
+                && word.bytes().any(|b| b != b'0');
+            prop_assert_eq!(is_count(&word), expected);
+        }
+
+        #[test]
+        fn a_sed_print_range_takes_one_or_two_positive_bounds(n in 1_u32..100_000, m in 1_u32..100_000) {
+            let one = format!("{}p", n);
+            let two = format!("{},{}p", n, m);
+            let three = format!("{},{},{}p", n, m, n);
+            let zero = format!("0,{}p", m);
+            prop_assert!(is_sed_range(&one));
+            prop_assert!(is_sed_range(&two));
+            prop_assert!(!is_sed_range(&three));
+            prop_assert!(!is_sed_range(&zero));
+            prop_assert!(!is_sed_range(&n.to_string()));
+        }
+
+        #[test]
+        fn a_shell_metacharacter_is_never_a_read(
+            prefix in "[a-z ]{0,10}",
+            meta in prop::sample::select(vec![
+                '|', '>', '<', '&', ';', '`', '$', '\'', '"', '\\', '*', '?', '(', ')',
+            ]),
+            tail in "[a-z ]{0,10}",
+        ) {
+            let command = format!("cat {prefix}{meta}{tail}");
+            prop_assert_eq!(single_file_read(&command), None);
+        }
+
+        #[test]
+        fn a_returned_file_is_one_plain_word_of_the_command(command in "[a-z0-9 ./~-]{0,30}") {
+            if let Some(file) = single_file_read(&command) {
+                prop_assert!(command.split_whitespace().any(|w| w == file));
+                prop_assert!(!file.is_empty());
+                prop_assert!(!file.starts_with(['-', '~']));
+            }
+        }
+    }
 
     #[test]
     fn accepts_each_single_file_view_shape() {
@@ -94,7 +147,6 @@ mod tests {
             ("tail -n 20 /var/log/x", "/var/log/x"),
             ("sed -n 10,20p src/main.rs", "src/main.rs"),
             ("sed -n 7p src/main.rs", "src/main.rs"),
-            ("grep TODO src/lib.rs", "src/lib.rs"),
         ] {
             assert_eq!(single_file_read(command), Some(file), "{command}");
         }
@@ -122,8 +174,13 @@ mod tests {
             "sed -i 10p a.md",
             "sed -n 10,20,30p a.md",
             "sed -n 10 a.md",
+            "sed -n 0p a.md",
+            "head -n 0 a.md",
+            "tail -n 00 a.md",
+            "cat ~/notes.md",
+            "head ~/notes.md",
+            "grep TODO src/lib.rs",
             "grep -r TODO src",
-            "grep -n TODO src/lib.rs",
             "rg TODO src/lib.rs",
             "less a.md",
             "",

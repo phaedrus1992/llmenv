@@ -100,13 +100,23 @@ pub(super) fn stats_path(state_dir: &std::path::Path, session_id: &str) -> std::
 }
 
 pub(super) fn load_stats(state_dir: &std::path::Path, session_id: &str) -> SessionStats {
-    // Fail-soft throughout: an unreadable or corrupt log means "nothing known
-    // to have been read", which allows the write. The alternative — denying on
-    // a corrupt state file — would wedge the agent over a bookkeeping error.
-    std::fs::read_to_string(stats_path(state_dir, session_id))
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+    // An unreadable or corrupt log means "nothing known to have been read". The
+    // write guard then denies a Write to an existing file until the next Read
+    // rewrites the log. The deny is deliberate: a corrupt log cannot prove a read.
+    // A missing log is the normal first-use case and is not logged.
+    let path = stats_path(state_dir, session_id);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return SessionStats::default(),
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "slippage: read log unreadable");
+            return SessionStats::default();
+        }
+    };
+    serde_json::from_str(&text).unwrap_or_else(|e| {
+        tracing::warn!(path = %path.display(), error = %e, "slippage: read log is corrupt");
+        SessionStats::default()
+    })
 }
 
 /// Record a read, or decide a write. Returns the deny text, or empty to allow.
@@ -197,7 +207,8 @@ pub(super) fn save_stats(state_dir: &std::path::Path, session_id: &str, stats: &
     if let Err(e) =
         crate::paths::write_owner_only_atomic(&stats_path(state_dir, session_id), json.as_bytes())
     {
-        tracing::debug!("slippage: could not record session stats: {e}");
+        // A lost read record makes the next Write to that file deny, so the failure must be visible.
+        tracing::warn!("slippage: could not record session stats: {e}");
     }
 }
 
