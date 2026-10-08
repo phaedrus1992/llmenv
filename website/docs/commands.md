@@ -1098,6 +1098,8 @@ It still lists every open session of the project, because a new conversation fin
 
 ### Task nudges (added in v3.12.0)
 
+Changed in v3.13.0: only file edits and writes count toward the nudge, and a queued task gets a start reminder.
+
 The tracker reminds the agent while work happens, and not only at the start and the end of a session.
 Each reminder names the exact `llmenv task` commands to run.
 `features.task_tracker.nudges: false` turns off the reminders in the first, second, and fourth items,
@@ -1106,9 +1108,12 @@ Nothing turns off the third item.
 
 - After a workflow skill starts (`dev-sprint`, `ship-issue`, and the others in `workflow_skills`), a project with no
   session or no unfinished task gets one reminder for each session to start a session with its first tasks.
-- After `nudge_after` (default 8) edits, writes, or shell commands with no unfinished task, the agent gets a nudge.
-  Later nudges come every `nudge_every` (default 20) calls. The count resets once a task exists.
-- When a session has open tasks and none is in progress, the Stop reminder names the next task.
+- After `nudge_after` (default 8) file edits or writes with no unfinished task, the agent gets a nudge.
+  Later nudges come every `nudge_every` (default 20) edits. Shell commands do not count. The count resets once a task exists.
+- When a file edit runs with tasks queued and none in progress, the agent gets one reminder to run
+  `llmenv task start <slug>` for the next open task. It does not repeat until a task starts.
+- When a session has open tasks and none is in progress, the Stop reminder names the next task,
+  whether or not the turn ends with a question.
   It offers `llmenv task start <slug>` to begin the step, and `llmenv task wait <slug> "<reason>"` for a step that needs
   the user or an outside event first. The first reminder carries both commands.
 - An open session with no task at all is named in the Stop and SessionStart reminders.
@@ -1117,7 +1122,8 @@ Nothing turns off the third item.
   in progress, the reminder tells it to run `llmenv task wait <slug> "<reason>"`, and `llmenv task start <slug>` after
   the answer. A waiting task is reported as "waiting on the user".
 - The first `git commit` or `gh pr create` of a session with no task in progress is denied once, with the commands to
-  run. The same command runs on the next try.
+  run. A `llmenv task done` or `llmenv task wait` earlier in the same command does not count as a task in
+  progress. The same command runs on the next try.
   The deny marker clears the next time a commit or pull request runs while a task is in progress, so a later gap with no
   task denies once more.
   A task that is only `open` or `waiting` does not count as in progress.

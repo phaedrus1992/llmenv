@@ -116,6 +116,12 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 
 - The umans usage request connects only to the addresses that passed the private-network check. It no longer follows redirects or uses proxy settings, so a DNS rebind, a redirect, or a proxy can no longer send the Bearer token to a private or metadata address (#2518) [fix:throttle]
 
+### Fixed
+
+- The task tracker names the next open task when tasks are queued and none is in progress. The first file edit gets that reminder, and a denied `git commit` names the task too (#2530, #2533) [fix:task]
+- A `llmenv task done` or `llmenv task wait` earlier in the same command no longer lets an untracked commit pass the commit gate (#2532) [fix:task]
+- The work nudge counts file edits and writes only. A shell command no longer counts as a project change (#2531) [fix:hook]
+
 ## [3.12.1] - 2026-10-07
 
 3.12.1 fixes six bugs in the 3.12.0 release.
