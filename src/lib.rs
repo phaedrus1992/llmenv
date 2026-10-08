@@ -25,6 +25,7 @@ pub mod materialize;
 pub mod mcp;
 pub mod memory;
 pub mod merge;
+pub mod panic_hook;
 pub mod paths;
 pub mod plugins;
 pub mod scope;

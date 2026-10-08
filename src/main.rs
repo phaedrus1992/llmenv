@@ -32,6 +32,7 @@ fn is_version_only_args(args: impl Iterator<Item = std::ffi::OsString>) -> bool 
 }
 
 fn main() {
+    llmenv::panic_hook::install();
     // Resolved session-logging config (absent block → transcript on, file off).
     // Log config errors so they're visible even though we fall back to defaults
     // (tracing subscriber isn't initialized yet, so use eprintln!).
