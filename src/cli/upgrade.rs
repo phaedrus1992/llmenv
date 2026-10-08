@@ -292,25 +292,27 @@ fn find_asset(release: &GhRelease) -> Result<&GhAsset> {
         .with_context(|| format!("no release asset for platform: {asset_name}"))
 }
 
-fn get_api_base_url() -> String {
+fn get_api_base_url() -> Result<String> {
     api_base_from_env(env::var("LLMENV_UPGRADE_GITHUB_API"))
 }
 
-/// Turn the `LLMENV_UPGRADE_GITHUB_API` lookup into a base URL. A value that is not Unicode is
-/// logged and the GitHub default is used, so the operator sees why the override was ignored.
-fn api_base_from_env(value: Result<String, env::VarError>) -> String {
+/// Turn the `LLMENV_UPGRADE_GITHUB_API` lookup into a base URL.
+///
+/// An override that is set but unusable fails. It does not fall back to GitHub, because the user
+/// set it to choose the host.
+fn api_base_from_env(value: Result<String, env::VarError>) -> Result<String> {
     const GITHUB_API: &str = "https://api.github.com";
     match value {
-        Ok(base) => base,
-        Err(env::VarError::NotPresent) => GITHUB_API.to_string(),
-        Err(env::VarError::NotUnicode(raw)) => {
-            tracing::error!(
-                value = ?raw,
-                "upgrade: ignoring LLMENV_UPGRADE_GITHUB_API: the value is not valid UTF-8. \
-                 Using {GITHUB_API}."
-            );
-            GITHUB_API.to_string()
-        }
+        Ok(base) if base.trim().is_empty() => anyhow::bail!(
+            "LLMENV_UPGRADE_GITHUB_API is set but empty. Set it to a base URL, or unset it to use \
+             {GITHUB_API}."
+        ),
+        Ok(base) => Ok(base),
+        Err(env::VarError::NotPresent) => Ok(GITHUB_API.to_string()),
+        Err(env::VarError::NotUnicode(_)) => anyhow::bail!(
+            "LLMENV_UPGRADE_GITHUB_API is not valid UTF-8. Export it again as plain text, or unset \
+             it to use {GITHUB_API}."
+        ),
     }
 }
 
@@ -319,7 +321,7 @@ pub(super) fn run_upgrade(track: Option<String>, check_only: bool) -> Result<()>
     let current_version = env!("CARGO_PKG_VERSION");
 
     let client = build_http_client()?;
-    let base_url = get_api_base_url();
+    let base_url = get_api_base_url()?;
 
     let release = if is_beta {
         fetch_beta(&client, &base_url)?
@@ -726,28 +728,40 @@ mod tests {
 
     #[test]
     fn api_base_defaults_when_unset() {
-        assert_eq!(
-            api_base_from_env(Err(env::VarError::NotPresent)),
-            "https://api.github.com"
-        );
+        let base = api_base_from_env(Err(env::VarError::NotPresent)).unwrap();
+        assert_eq!(base, "https://api.github.com");
     }
 
     #[test]
     fn api_base_present_is_used() {
-        assert_eq!(
-            api_base_from_env(Ok("http://127.0.0.1:9".into())),
-            "http://127.0.0.1:9"
+        let base = api_base_from_env(Ok("http://127.0.0.1:9".into())).unwrap();
+        assert_eq!(base, "http://127.0.0.1:9");
+    }
+
+    #[test]
+    fn api_base_empty_is_an_error_that_names_the_variable() {
+        let msg = api_base_from_env(Ok("  ".into()))
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(
+            msg.contains("LLMENV_UPGRADE_GITHUB_API is set but empty"),
+            "{msg}"
         );
     }
 
     #[cfg(unix)]
     #[test]
-    fn api_base_not_unicode_falls_back_to_github() {
+    fn api_base_not_unicode_is_an_error_not_a_fallback() {
         use std::os::unix::ffi::OsStringExt;
         let raw = std::ffi::OsString::from_vec(vec![0xff]);
-        assert_eq!(
-            api_base_from_env(Err(env::VarError::NotUnicode(raw))),
-            "https://api.github.com"
+        let msg = api_base_from_env(Err(env::VarError::NotUnicode(raw)))
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(
+            msg.contains("LLMENV_UPGRADE_GITHUB_API is not valid UTF-8"),
+            "{msg}"
         );
     }
 
