@@ -193,10 +193,11 @@ fn download_binary(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<
         .get(url)
         .send()
         .context("failed to download binary")?;
+    let status = resp.status();
     anyhow::ensure!(
-        resp.status().is_success(),
-        "download failed with HTTP {}",
-        resp.status()
+        status.is_success(),
+        "download failed with HTTP {status} from {url}. Check the network or proxy, then run \
+         llmenv upgrade again."
     );
     Ok(resp.bytes().context("failed to read binary")?.to_vec())
 }
@@ -1244,13 +1245,17 @@ d014cffae3326ad537b149d025f0b9c3826a91694b1c8b5717fb1f7cc8c5eea8  llmenv-macos-x
             .await;
 
         let uri = server.uri();
+        let url = format!("{uri}/binary");
+        let named_url = url.clone();
         let result = tokio::task::spawn_blocking(move || {
             let client = test_client();
-            download_binary(&client, &format!("{uri}/binary"))
+            download_binary(&client, &url)
         })
         .await
         .unwrap();
-        assert!(result.is_err());
+        let msg = result.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(msg.contains("HTTP 500"), "{msg}");
+        assert!(msg.contains(&named_url), "error must name the URL: {msg}");
     }
 
     #[test]

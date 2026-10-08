@@ -373,7 +373,7 @@ A `model_effort` key must be the canonical model ID, not an alias such as `opus`
 How llmenv renders these into `settings.json`:
 
 1. `effort_level` goes to the top-level `effortLevel` key. Opus 5, Fable 5.1, and earlier models read that key.
-2. Opus 5.5 and later models ignore the top-level key in the user settings file, and llmenv's rendered `settings.json` is that file. So llmenv also writes `effort_level` to `modelSettings.<id>.effortLevel` for each of those models.
+2. Opus 5.5, Haiku 5.5, and later models ignore the top-level key in the user settings file, and llmenv's rendered `settings.json` is that file. So llmenv also writes `effort_level` to `modelSettings.<id>.effortLevel` for each of those models.
 3. Each `model_effort` entry goes to `modelSettings.<id>` as `effortLevel` and `maxEffortLevel`. For its model, it replaces the value from step 2.
 
 Claude Code's `/effort` command also writes to `modelSettings`.
@@ -436,7 +436,7 @@ capabilities:
           modalities: ["text"]
   default_models:
     large: { provider: ollama, model: "llama3.1:70b" }
-    small: { provider: anthropic, model: "claude-haiku-4-5" }  # built-in provider id, unvalidated
+    small: { provider: anthropic, model: "claude-haiku-5-5" }  # built-in provider id, unvalidated
 ```
 
 - `model_providers[].id` is the stable identifier, used as the map key on
