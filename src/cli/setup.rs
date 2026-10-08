@@ -96,13 +96,25 @@ fn read_project_configs(home: &Path) -> BTreeMap<String, serde_json::Value> {
     projects
 }
 
+/// The user name written into the enumeration. A missing `USER` falls back to
+/// `unknown`, and the warning names the variable and that effect (#2560).
+fn user_name_from_var(value: Result<String, std::env::VarError>) -> String {
+    value.unwrap_or_else(|e| {
+        tracing::warn!(
+            error = %e,
+            "USER is not set; the generated setup names the user 'unknown'"
+        );
+        "unknown".to_string()
+    })
+}
+
 /// Build the full enumeration JSON value.
 fn build_enumeration(available: &[String], config_dir: &Path) -> serde_json::Value {
     let home = std::env::var("HOME")
         .ok()
         .filter(|h| !h.is_empty())
         .map(PathBuf::from);
-    let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
+    let user = user_name_from_var(std::env::var("USER"));
 
     let claude_section = home.as_ref().map(|h| {
         let settings = read_claude_settings(h);
@@ -774,6 +786,19 @@ pub(super) fn run_setup(
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn user_name_uses_the_variable_when_set() {
+        assert_eq!(user_name_from_var(Ok("ada".to_string())), "ada");
+    }
+
+    #[test]
+    fn user_name_falls_back_to_unknown_when_unset() {
+        assert_eq!(
+            user_name_from_var(Err(std::env::VarError::NotPresent)),
+            "unknown"
+        );
+    }
 
     #[test]
     fn test_write_config_creates_valid_yaml() {
