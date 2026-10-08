@@ -132,19 +132,23 @@ fn fetch_beta(client: &reqwest::blocking::Client, base_url: &str) -> Result<GhRe
 /// host is checked before any byte is fetched.
 const ASSET_HOSTS: [&str; 2] = ["github.com", "objects.githubusercontent.com"];
 
-/// Hosts a redirect may reach while the client talks to GitHub.
-const REDIRECT_HOSTS: [&str; 3] = [
+/// Hosts a redirect may reach while the client talks to GitHub. GitHub sends a release
+/// download to `release-assets`, so that host must be here or every upgrade fails.
+const REDIRECT_HOSTS: [&str; 4] = [
     "api.github.com",
     "github.com",
     "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
 ];
 
 /// Redirect hops allowed before a request fails. Caps a redirect loop.
 const MAX_REDIRECTS: usize = 5;
 
-/// Whether `url` is HTTPS and names one of `hosts`.
+/// Whether `url` is HTTPS on the default port and names one of `hosts`.
 fn is_https_host_in(url: &reqwest::Url, hosts: &[&str]) -> bool {
-    url.scheme() == "https" && url.host_str().is_some_and(|host| hosts.contains(&host))
+    url.scheme() == "https"
+        && url.port().is_none()
+        && url.host_str().is_some_and(|host| hosts.contains(&host))
 }
 
 /// Parse a release asset URL and check that it names an allowed download host.
@@ -509,7 +513,7 @@ mod tests {
 
         let uri = server.uri();
         let release = tokio::task::spawn_blocking(move || {
-            let client = reqwest::blocking::Client::new();
+            let client = build_http_client().unwrap();
             fetch_latest(&client, &uri)
         })
         .await
@@ -534,7 +538,7 @@ mod tests {
 
         let uri = server.uri();
         let err = tokio::task::spawn_blocking(move || {
-            let client = reqwest::blocking::Client::new();
+            let client = build_http_client().unwrap();
             fetch_latest(&client, &uri)
         })
         .await
@@ -574,7 +578,7 @@ mod tests {
 
         let uri = server.uri();
         let release = tokio::task::spawn_blocking(move || {
-            let client = reqwest::blocking::Client::new();
+            let client = build_http_client().unwrap();
             fetch_beta(&client, &uri)
         })
         .await
@@ -604,7 +608,7 @@ mod tests {
 
         let uri = server.uri();
         let result = tokio::task::spawn_blocking(move || {
-            let client = reqwest::blocking::Client::new();
+            let client = build_http_client().unwrap();
             fetch_beta(&client, &uri)
         })
         .await
@@ -669,7 +673,7 @@ mod tests {
 
         let uri = server.uri();
         let data = tokio::task::spawn_blocking(move || {
-            let client = reqwest::blocking::Client::new();
+            let client = build_http_client().unwrap();
             download_binary(&client, &format!("{uri}/binary"))
         })
         .await
@@ -689,7 +693,7 @@ mod tests {
 
         let uri = server.uri();
         let result = tokio::task::spawn_blocking(move || {
-            let client = reqwest::blocking::Client::new();
+            let client = build_http_client().unwrap();
             download_binary(&client, &format!("{uri}/binary"))
         })
         .await
@@ -715,6 +719,38 @@ mod tests {
     #[test]
     fn validate_asset_url_refuses_plain_http_on_a_github_host() {
         assert!(validate_asset_url("http://github.com/o/r/asset").is_err());
+    }
+
+    proptest! {
+        #[test]
+        fn validate_asset_url_accepts_only_https_allowlisted_hosts_on_the_default_port(
+            scheme in prop::sample::select(vec!["https", "http"]),
+            host in prop::sample::select(vec![
+                "github.com",
+                "objects.githubusercontent.com",
+                "api.github.com",
+                "github.com.evil.example",
+                "evil.example",
+            ]),
+            port in prop::sample::select(vec!["", ":443", ":8443"]),
+        ) {
+            let raw = format!("{scheme}://{host}{port}/asset");
+            let expected = scheme == "https"
+                && port != ":8443"
+                && (host == "github.com" || host == "objects.githubusercontent.com");
+            prop_assert_eq!(validate_asset_url(&raw).is_ok(), expected, "{}", raw);
+        }
+    }
+
+    #[test]
+    fn the_release_asset_cdn_is_an_allowed_redirect_host() {
+        let url = reqwest::Url::parse("https://release-assets.githubusercontent.com/x").unwrap();
+        assert!(is_https_host_in(&url, &REDIRECT_HOSTS));
+    }
+
+    #[test]
+    fn validate_asset_url_refuses_a_non_default_port() {
+        assert!(validate_asset_url("https://github.com:8443/o/r/asset").is_err());
     }
 
     #[test]
