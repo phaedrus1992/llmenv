@@ -309,6 +309,10 @@ fn resolve_api_model(env_value: Option<&str>) -> anyhow::Result<String> {
     match env_value {
         None => Ok(DEFAULT_MODEL.to_string()),
         Some(value) if value.starts_with("claude-") => Ok(value.to_string()),
+        Some("") => anyhow::bail!(
+            "ANTHROPIC_MODEL is set but empty. Set it to a full model ID such as {DEFAULT_MODEL}, \
+             or unset it to use {DEFAULT_MODEL}."
+        ),
         Some(value) => anyhow::bail!(
             "ANTHROPIC_MODEL=\"{value}\" is not a full model ID. The Messages API needs a full \
              model ID such as {DEFAULT_MODEL}, not a Claude Code alias. Set ANTHROPIC_MODEL to a \
@@ -319,20 +323,25 @@ fn resolve_api_model(env_value: Option<&str>) -> anyhow::Result<String> {
 
 /// Pull the answer text out of a Messages API response.
 ///
-/// A `max_tokens` stop means the answer was cut off. The last bullet can then be a partial rule,
-/// so the answer fails instead of storing it as complete.
-fn answer_text(json: &serde_json::Value) -> anyhow::Result<&str> {
-    if json["stop_reason"].as_str() == Some("max_tokens") {
-        anyhow::bail!(
+/// Only a normal stop is accepted. A `max_tokens` stop means the answer was cut off, and the last
+/// bullet can then be a partial rule. Any other stop, such as `refusal`, does not carry rules.
+/// The text blocks are joined with a newline, so two blocks never merge into one bullet.
+fn answer_text(json: &serde_json::Value) -> anyhow::Result<String> {
+    match json["stop_reason"].as_str() {
+        Some("end_turn" | "stop_sequence") => {}
+        Some("max_tokens") => anyhow::bail!(
             "Anthropic API stopped at max_tokens ({ANSWER_MAX_TOKENS}), so the answer may be cut \
              short. No rules were stored."
-        );
+        ),
+        other => anyhow::bail!(
+            "Anthropic API stopped with {other:?}, not a normal end. No rules were stored."
+        ),
     }
-    json["content"]
+    let blocks = json["content"]
         .as_array()
-        .and_then(|arr| arr.first())
-        .and_then(|block| block["text"].as_str())
-        .ok_or_else(|| anyhow::anyhow!("unexpected Anthropic API response shape"))
+        .ok_or_else(|| anyhow::anyhow!("unexpected Anthropic API response shape"))?;
+    let texts: Vec<&str> = blocks.iter().filter_map(|b| b["text"].as_str()).collect();
+    Ok(texts.join("\n"))
 }
 
 /// Make a non-streaming call to the Anthropic Messages API.
@@ -440,7 +449,7 @@ async fn post_messages(
         .json()
         .await
         .map_err(|e| anyhow::anyhow!("failed to decode the Anthropic API response: {e}"))?;
-    Ok(answer_text(&json)?.to_string())
+    answer_text(&json)
 }
 
 /// Parse bullet-point rules from the model's text output.
@@ -795,16 +804,78 @@ mod tests {
     }
 
     #[test]
-    fn resolve_api_model_refuses_aliases_and_empty_and_names_the_variable() {
-        for value in ["opus", "sonnet[1m]", ""] {
+    fn resolve_api_model_refuses_aliases_and_names_the_variable() {
+        for value in ["opus", "sonnet[1m]"] {
             let msg = resolve_api_model(Some(value))
-                .expect_err("alias or empty must fail, not fall back")
+                .expect_err("alias must fail, not fall back")
                 .to_string();
             assert!(
                 msg.contains(&format!("ANTHROPIC_MODEL=\"{value}\"")),
                 "{msg}"
             );
             assert!(msg.contains(DEFAULT_MODEL), "{msg}");
+        }
+    }
+
+    #[test]
+    fn resolve_api_model_refuses_empty_and_names_the_variable() {
+        let msg = resolve_api_model(Some(""))
+            .expect_err("empty must fail, not fall back")
+            .to_string();
+        assert!(msg.contains("ANTHROPIC_MODEL is set but empty"), "{msg}");
+    }
+
+    proptest! {
+        #[test]
+        fn resolve_api_model_accepts_exactly_the_claude_prefix(value in ".{0,40}") {
+            match resolve_api_model(Some(&value)) {
+                Ok(model) => {
+                    prop_assert!(value.starts_with("claude-"));
+                    prop_assert_eq!(model, value);
+                }
+                Err(e) => {
+                    prop_assert!(!value.starts_with("claude-"));
+                    prop_assert!(e.to_string().contains("ANTHROPIC_MODEL"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn answer_text_refuses_a_refusal_stop() {
+        let json = serde_json::json!({
+            "stop_reason": "refusal",
+            "content": [{ "type": "text", "text": "- not rules" }]
+        });
+        let msg = answer_text(&json)
+            .expect_err("a refusal must fail")
+            .to_string();
+        assert!(msg.contains("refusal"), "{msg}");
+    }
+
+    #[test]
+    fn answer_text_joins_text_blocks_with_a_newline() {
+        let json = serde_json::json!({
+            "stop_reason": "end_turn",
+            "content": [
+                { "type": "text", "text": "- a" },
+                { "type": "text", "text": "- b" }
+            ]
+        });
+        assert_eq!(
+            answer_text(&json).expect("two blocks must pass"),
+            "- a\n- b"
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn answer_text_refuses_every_max_tokens_stop(text in ".{0,60}", extra in 0usize..3) {
+            let content: Vec<serde_json::Value> = (0..=extra)
+                .map(|_| serde_json::json!({ "type": "text", "text": text }))
+                .collect();
+            let json = serde_json::json!({ "stop_reason": "max_tokens", "content": content });
+            prop_assert!(answer_text(&json).is_err());
         }
     }
 
