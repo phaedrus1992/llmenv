@@ -307,13 +307,32 @@ fn api_base_from_env(value: Result<String, env::VarError>) -> Result<String> {
             "LLMENV_UPGRADE_GITHUB_API is set but empty. Set it to a base URL, or unset it to use \
              {GITHUB_API}."
         ),
-        Ok(base) => Ok(base),
+        Ok(base) => validate_api_base(base),
         Err(env::VarError::NotPresent) => Ok(GITHUB_API.to_string()),
         Err(env::VarError::NotUnicode(_)) => anyhow::bail!(
             "LLMENV_UPGRADE_GITHUB_API is not valid UTF-8. Export it again as plain text, or unset \
              it to use {GITHUB_API}."
         ),
     }
+}
+
+/// Refuse an override that is not an https URL with a host.
+///
+/// The base URL picks the release that gets installed. A plain-text or foreign-scheme base would
+/// let a network attacker choose the binary, so only https is accepted.
+fn validate_api_base(base: String) -> Result<String> {
+    let url = reqwest::Url::parse(&base).with_context(|| {
+        format!(
+            "LLMENV_UPGRADE_GITHUB_API is not a valid URL: {base:?}. Set it to an https base URL, \
+             or unset it to use https://api.github.com."
+        )
+    })?;
+    anyhow::ensure!(
+        url.scheme() == "https" && url.host_str().is_some(),
+        "LLMENV_UPGRADE_GITHUB_API must be an https URL with a host, got {base:?}. Set it to an \
+         https base URL, or unset it to use https://api.github.com."
+    );
+    Ok(base)
 }
 
 pub(super) fn run_upgrade(track: Option<String>, check_only: bool) -> Result<()> {
@@ -733,9 +752,45 @@ mod tests {
     }
 
     #[test]
-    fn api_base_present_is_used() {
-        let base = api_base_from_env(Ok("http://127.0.0.1:9".into())).unwrap();
-        assert_eq!(base, "http://127.0.0.1:9");
+    fn api_base_https_override_is_used() {
+        let base = api_base_from_env(Ok("https://ghe.example.com/api/v3".into())).unwrap();
+        assert_eq!(base, "https://ghe.example.com/api/v3");
+    }
+
+    #[test]
+    fn api_base_plain_http_is_refused_and_names_the_variable() {
+        let msg = api_base_from_env(Ok("http://127.0.0.1:9".into()))
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(
+            msg.contains("LLMENV_UPGRADE_GITHUB_API must be an https URL"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn api_base_foreign_scheme_is_refused() {
+        let msg = api_base_from_env(Ok("file:///etc/releases".into()))
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(
+            msg.contains("LLMENV_UPGRADE_GITHUB_API must be an https URL"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn api_base_unparseable_is_refused_and_names_the_variable() {
+        let msg = api_base_from_env(Ok("not a url".into()))
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(
+            msg.contains("LLMENV_UPGRADE_GITHUB_API is not a valid URL"),
+            "{msg}"
+        );
     }
 
     #[test]
