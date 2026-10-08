@@ -123,6 +123,11 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 - A `llmenv task done` or `llmenv task wait` earlier in the same command no longer lets an untracked commit pass the commit gate (#2532) [fix:task]
 - The work nudge counts file edits and writes only. A shell command no longer counts as a project change (#2531) [fix:hook]
 - The task commit gate now denies a commit run as `bash -lc "git commit ..."`, `$(git commit ...)`, or a backtick substitution (#2537) [fix:hook]
+- The task commit gate also denies a commit run inside a process substitution, `<(git commit ...)` or `>(git commit ...)` (#2543) [fix:hook]
+- `effort_level` now reaches Haiku 5.5. It was written only to Opus 5.5 before, so the `haiku` alias ignored it (#2548) [fix:adapter]
+- A Bash `cat`, `head`, `tail`, `sed -n`, or `grep` of one file counts as a read for the read-before-Write guard, so a later Write is no longer denied as unread (#2549) [fix:hook]
+- A command whose output pipe closes early, such as `llmenv task ls | head`, exits with status 141 and no crash report. It used to abort (#2554) [fix:cli]
+- Consolidation and upgrade errors name the variable or URL and the next step. A non-UTF-8 `ANTHROPIC_MODEL` or `LLMENV_UPGRADE_GITHUB_API` is logged before the default is used (#2546) [fix:cli]
 
 ## [3.12.1] - 2026-10-07
 

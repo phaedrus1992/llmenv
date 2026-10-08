@@ -117,7 +117,7 @@ Implemented as: the rendering code lives in `src/adapter/model_settings.rs` (`Mo
 ```rust
 /// Models that ignore a top-level effortLevel in user settings (Claude Code
 /// docs, `effortLevel`). Add each new Claude model here when it ships.
-const PER_MODEL_EFFORT_MODELS: &[&str] = &["claude-opus-5-5"];
+const PER_MODEL_EFFORT_MODELS: &[&str] = &["claude-opus-5-5", "claude-haiku-5-5"];
 ```
 
 ### What llmenv writes
@@ -170,6 +170,7 @@ Crush and opencode do not read `effort_level` today. They ignore `model_effort` 
 6. Render keeps user fields: `/effort` added `effortLevel` to an entry where llmenv manages only `maxEffortLevel`; both survive.
 7. Property test: rendering twice with the same config gives a byte-identical `settings.json` (idempotence).
 8. Slippage: `slippage.effort_level: xhigh` with no `effort_level` gives `modelSettings.claude-opus-5-5.effortLevel: xhigh`.
+9. Haiku 5.5: `effort_level: high` also gives `modelSettings.claude-haiku-5-5.effortLevel: high` (added for #2548; Claude Code 2.1.293 made Haiku 5.5 the default Haiku and it ignores top-level `effortLevel`).
 
 ## Acceptance criteria
 

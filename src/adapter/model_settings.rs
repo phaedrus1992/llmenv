@@ -14,7 +14,7 @@ use crate::util::merge_json;
 
 /// Models that ignore a top-level `effortLevel` in user settings (Claude Code
 /// docs, `effortLevel`). Add each new Claude model here when it ships.
-const PER_MODEL_EFFORT_MODELS: &[&str] = &["claude-opus-5-5"];
+const PER_MODEL_EFFORT_MODELS: &[&str] = &["claude-opus-5-5", "claude-haiku-5-5"];
 
 /// Companion file next to `settings.json`: the `modelSettings` entries llmenv
 /// wrote on the previous render, as one JSON object.
@@ -285,7 +285,10 @@ mod tests {
         };
         assert_eq!(
             Value::Object(managed_entries(&caps)),
-            json!({"claude-opus-5-5": {"effortLevel": "high"}})
+            json!({
+                "claude-opus-5-5": {"effortLevel": "high"},
+                "claude-haiku-5-5": {"effortLevel": "high"},
+            })
         );
     }
 
@@ -306,6 +309,7 @@ mod tests {
             json!({
                 "claude-opus-5-5": {"maxEffortLevel": "xhigh"},
                 "claude-fable-5-1": {"effortLevel": "low"},
+                "claude-haiku-5-5": {"effortLevel": "high"},
             })
         );
     }
