@@ -1165,6 +1165,33 @@ mod tests {
         }
 
         #[test]
+        fn split_substitutions_never_panics_on_substitution_syntax(
+            s in "[a-z $`<>()'\"\\\\;|&\n]{0,40}",
+        ) {
+            let _ = split_substitutions(&s);
+        }
+
+        #[test]
+        fn a_live_process_substitution_becomes_a_part(
+            prefix in "[a-z ]{0,10}",
+            inner in "[a-z ]{0,10}",
+            kind in prop::sample::select(vec!["<", ">"]),
+        ) {
+            let command = format!("{prefix}{kind}({inner})");
+            prop_assert_eq!(split_substitutions(&command), format!("{prefix};{inner};"));
+        }
+
+        #[test]
+        fn a_process_substitution_inside_double_quotes_is_literal(
+            prefix in "[a-z ]{0,10}",
+            inner in "[a-z ]{0,10}",
+            kind in prop::sample::select(vec!["<", ">"]),
+        ) {
+            let command = format!("\"{prefix}{kind}({inner})\"");
+            prop_assert_eq!(split_substitutions(&command), command);
+        }
+
+        #[test]
         fn take_until_close_stops_at_the_first_unnested_paren(
             s in "[a ;]{0,20}",
             tail in "[a )]{0,10}",
