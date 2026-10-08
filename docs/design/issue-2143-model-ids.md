@@ -27,7 +27,7 @@ This is a spec, not a plan.
 | Opus 5.5 | `claude-opus-5-5` |
 | Sonnet 5 | `claude-sonnet-5` |
 | Fable 5.1 | `claude-fable-5-1` |
-| Haiku 4.5 | `claude-haiku-4-5` |
+| Haiku 5.5 | `claude-haiku-5-5` |
 
 ## Verified locations (release/3.x)
 
@@ -39,7 +39,7 @@ This is a spec, not a plan.
 | `src/cli/doctor.rs:83` | `not set (default: claude-sonnet-4-6)` | `not set (Claude Code picks the model per agent)` |
 | `examples/config-llmenv-dir/config.yaml:270` | `CLAUDE_CODE_SUBAGENT_MODEL: "claude-sonnet-4-6"` | `"inherit"` with a one-line comment: `inherit` keeps each agent's own `model:` frontmatter |
 | `website/docs/engines.md:234` | `model: claude-opus-4-5` | `model: claude-opus-5-5` |
-| `website/docs/configuration.md:285` | `claude-haiku-4-5` | no change; Haiku 4.5 is current |
+| `website/docs/configuration.md:439` | `claude-haiku-4-5` | `claude-haiku-5-5`; Haiku 5.5 is current (#2548) |
 
 Do not change test fixtures that use model IDs as plain data:
 `crates/llmenv-config/src/schema.rs` (`default_models_map_yaml_roundtrip`), `validate.rs`, `src/adapter/crush.rs`, `src/adapter/opencode.rs`, `src/merge/capabilities.rs`, `src/cli/statusline/widget.rs`.

@@ -4133,14 +4133,20 @@ mod tests {
         assert_eq!(settings["effortLevel"], serde_json::json!("high"));
         assert_eq!(
             settings["modelSettings"],
-            serde_json::json!({"claude-opus-5-5": {"effortLevel": "high"}})
+            serde_json::json!({
+                "claude-opus-5-5": {"effortLevel": "high"},
+                "claude-haiku-5-5": {"effortLevel": "high"},
+            })
         );
         let owned = tmp
             .path()
             .join(super::model_settings::OWNED_MODEL_SETTINGS_FILE);
         assert_eq!(
             read_json(&owned),
-            serde_json::json!({"claude-opus-5-5": {"effortLevel": "high"}})
+            serde_json::json!({
+                "claude-opus-5-5": {"effortLevel": "high"},
+                "claude-haiku-5-5": {"effortLevel": "high"},
+            })
         );
     }
 
@@ -4171,6 +4177,7 @@ mod tests {
             serde_json::json!({
                 "claude-sonnet-5": {"effortLevel": "low"},
                 "claude-opus-5-5": {"effortLevel": "high"},
+                "claude-haiku-5-5": {"effortLevel": "high"},
             })
         );
 
@@ -4197,7 +4204,10 @@ mod tests {
         let settings = render_settings_for_test(&manifest);
         assert_eq!(
             settings["modelSettings"],
-            serde_json::json!({"claude-opus-5-5": {"effortLevel": "low"}})
+            serde_json::json!({
+                "claude-opus-5-5": {"effortLevel": "low"},
+                "claude-haiku-5-5": {"effortLevel": "high"},
+            })
         );
     }
 
