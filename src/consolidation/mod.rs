@@ -45,6 +45,10 @@ const MAX_RULE_LENGTH: usize = 500;
 /// Default model for the `anthropic-api` backend.
 const DEFAULT_MODEL: &str = "claude-sonnet-5";
 
+/// Output cap sent with each Messages API request. A longer answer is cut off, and
+/// `answer_text` refuses the cut answer.
+const ANSWER_MAX_TOKENS: u64 = 4096;
+
 /// Messages API endpoint for the `anthropic-api` backend.
 const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 
@@ -299,21 +303,36 @@ fn kill_process_group(pid: u32) {
 /// Pick the model for the `anthropic-api` backend from `ANTHROPIC_MODEL`.
 ///
 /// Claude Code also reads `ANTHROPIC_MODEL` and accepts aliases such as `opus`. The Messages
-/// API rejects an alias, so only a value that starts with `claude-` is used. Returns the model
-/// and, when the value was rejected, a warning for the caller to log.
-fn resolve_api_model(env_value: Option<&str>) -> (String, Option<String>) {
+/// API rejects an alias, so only a value that starts with `claude-` is used. Any other value
+/// fails. A silent fallback would run consolidation on a model the user did not choose.
+fn resolve_api_model(env_value: Option<&str>) -> anyhow::Result<String> {
     match env_value {
-        None => (DEFAULT_MODEL.to_string(), None),
-        Some(value) if value.starts_with("claude-") => (value.to_string(), None),
-        Some(value) => (
-            DEFAULT_MODEL.to_string(),
-            Some(format!(
-                "consolidation: ignoring ANTHROPIC_MODEL=\"{value}\": the Messages API needs a \
-                 full model ID such as claude-sonnet-5, not a Claude Code alias. \
-                 Using {DEFAULT_MODEL}."
-            )),
+        None => Ok(DEFAULT_MODEL.to_string()),
+        Some(value) if value.starts_with("claude-") => Ok(value.to_string()),
+        Some(value) => anyhow::bail!(
+            "ANTHROPIC_MODEL=\"{value}\" is not a full model ID. The Messages API needs a full \
+             model ID such as {DEFAULT_MODEL}, not a Claude Code alias. Set ANTHROPIC_MODEL to a \
+             full model ID, or unset it to use {DEFAULT_MODEL}."
         ),
     }
+}
+
+/// Pull the answer text out of a Messages API response.
+///
+/// A `max_tokens` stop means the answer was cut off. The last bullet can then be a partial rule,
+/// so the answer fails instead of storing it as complete.
+fn answer_text(json: &serde_json::Value) -> anyhow::Result<&str> {
+    if json["stop_reason"].as_str() == Some("max_tokens") {
+        anyhow::bail!(
+            "Anthropic API stopped at max_tokens ({ANSWER_MAX_TOKENS}), so the answer may be cut \
+             short. No rules were stored."
+        );
+    }
+    json["content"]
+        .as_array()
+        .and_then(|arr| arr.first())
+        .and_then(|block| block["text"].as_str())
+        .ok_or_else(|| anyhow::anyhow!("unexpected Anthropic API response shape"))
 }
 
 /// Make a non-streaming call to the Anthropic Messages API.
@@ -325,10 +344,7 @@ fn resolve_api_model(env_value: Option<&str>) -> (String, Option<String>) {
 async fn call_anthropic_api(prompt: &str) -> anyhow::Result<String> {
     let api_key = api_key_from_env(std::env::var("ANTHROPIC_API_KEY"))?;
     let model_value = model_value_from_env(std::env::var("ANTHROPIC_MODEL"))?;
-    let (model, warning) = resolve_api_model(model_value.as_deref());
-    if let Some(warning) = warning {
-        tracing::error!("{warning}");
-    }
+    let model = resolve_api_model(model_value.as_deref())?;
     post_messages(ANTHROPIC_MESSAGES_URL, &api_key, &model, prompt).await
 }
 
@@ -382,7 +398,7 @@ async fn post_messages(
 
     let body = serde_json::json!({
         "model": model,
-        "max_tokens": 4096,
+        "max_tokens": ANSWER_MAX_TOKENS,
         "messages": [{
             "role": "user",
             "content": prompt
@@ -424,13 +440,7 @@ async fn post_messages(
         .json()
         .await
         .map_err(|e| anyhow::anyhow!("failed to decode the Anthropic API response: {e}"))?;
-    let text = json["content"]
-        .as_array()
-        .and_then(|arr| arr.first())
-        .and_then(|block| block["text"].as_str())
-        .ok_or_else(|| anyhow::anyhow!("unexpected Anthropic API response shape"))?;
-
-    Ok(text.to_string())
+    Ok(answer_text(&json)?.to_string())
 }
 
 /// Parse bullet-point rules from the model's text output.
@@ -770,29 +780,66 @@ mod tests {
 
     #[test]
     fn resolve_api_model_uses_default_when_unset() {
-        assert_eq!(resolve_api_model(None), (DEFAULT_MODEL.to_string(), None));
+        assert_eq!(
+            resolve_api_model(None).expect("unset must pass"),
+            DEFAULT_MODEL
+        );
     }
 
     #[test]
     fn resolve_api_model_accepts_full_id() {
         assert_eq!(
-            resolve_api_model(Some("claude-opus-5-5")),
-            ("claude-opus-5-5".to_string(), None)
+            resolve_api_model(Some("claude-opus-5-5")).expect("full id must pass"),
+            "claude-opus-5-5"
         );
     }
 
     #[test]
-    fn resolve_api_model_rejects_aliases_and_empty() {
+    fn resolve_api_model_refuses_aliases_and_empty_and_names_the_variable() {
         for value in ["opus", "sonnet[1m]", ""] {
-            let (model, warning) = resolve_api_model(Some(value));
-            assert_eq!(model, DEFAULT_MODEL, "value {value:?}");
-            let warning = warning.expect("alias must warn");
+            let msg = resolve_api_model(Some(value))
+                .expect_err("alias or empty must fail, not fall back")
+                .to_string();
             assert!(
-                warning.contains(&format!("ANTHROPIC_MODEL=\"{value}\"")),
-                "{warning}"
+                msg.contains(&format!("ANTHROPIC_MODEL=\"{value}\"")),
+                "{msg}"
             );
-            assert!(warning.contains(DEFAULT_MODEL), "{warning}");
+            assert!(msg.contains(DEFAULT_MODEL), "{msg}");
         }
+    }
+
+    #[test]
+    fn answer_text_refuses_a_max_tokens_stop() {
+        let json = serde_json::json!({
+            "stop_reason": "max_tokens",
+            "content": [{ "type": "text", "text": "- first rule\n- cut" }]
+        });
+        let msg = answer_text(&json)
+            .expect_err("a cut answer must fail")
+            .to_string();
+        assert!(msg.contains("max_tokens"), "{msg}");
+        assert!(msg.contains("No rules were stored"), "{msg}");
+    }
+
+    #[test]
+    fn answer_text_returns_text_on_a_normal_stop() {
+        let json = serde_json::json!({
+            "stop_reason": "end_turn",
+            "content": [{ "type": "text", "text": "- a rule" }]
+        });
+        assert_eq!(answer_text(&json).expect("end_turn must pass"), "- a rule");
+    }
+
+    #[test]
+    fn answer_text_refuses_a_missing_content_block() {
+        let json = serde_json::json!({ "stop_reason": "end_turn" });
+        let msg = answer_text(&json)
+            .expect_err("no content must fail")
+            .to_string();
+        assert!(
+            msg.contains("unexpected Anthropic API response shape"),
+            "{msg}"
+        );
     }
 
     #[test]
