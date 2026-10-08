@@ -125,7 +125,7 @@ fn untracked_work_gets_a_nudge_after_n_mutating_calls() {
     let edit = post("Edit", serde_json::json!({}));
     hook(&dir, "post_tool_use", &edit).stdout(predicates::str::contains("llmenv task").not());
     hook(&dir, "post_tool_use", &edit).stdout(predicates::str::contains(
-        "2 tool calls changed the project",
+        "2 file edits ran with no task open",
     ));
 }
 
