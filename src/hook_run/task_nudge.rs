@@ -1177,6 +1177,8 @@ mod tests {
             ("echo \"'\" $(a)", "echo \"'\" ;a;"),
             ("echo '\"' $(a)", "echo '\"' ;a;"),
             ("echo $HOME", "echo $HOME"),
+            // In single quotes a backslash is literal, so the quote after it closes the string.
+            ("echo 'a\\' $(a)", "echo 'a\\' ;a;"),
         ] {
             assert_eq!(split_substitutions(input), expected, "{input:?}");
         }
