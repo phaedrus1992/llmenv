@@ -524,7 +524,9 @@ pub(crate) fn handle_pre_tool_use(
 mod tests {
     use super::*;
     use crate::task::session::{StartDecision, StartOutcome, start_session};
-    use crate::task::{NewTask, ParentSpec, SessionChoice, add_task_with, done_task, start_task};
+    use crate::task::{
+        NewTask, ParentSpec, SessionChoice, add_task_with, complete_task, start_task,
+    };
     use proptest::prelude::*;
     use tempfile::TempDir;
 
@@ -960,7 +962,7 @@ mod tests {
         let edit = serde_json::json!({ "tool_name": "Edit" });
         let post = || handle_post_tool_use(&tracker, &edit, Some("s1"), dir.path());
         assert_eq!(post(), "", "a task is in progress");
-        done_task(dir.path(), &one).unwrap();
+        complete_task(dir.path(), &one, false).unwrap();
         let text = post();
         assert!(text.contains("llmenv task start step-two"), "{text}");
     }
@@ -1008,7 +1010,7 @@ mod tests {
         assert!(post().contains("llmenv task start step-one"));
         // Both changes land between two tool calls, so the next edit sees step two queued.
         start_task(dir.path(), &one, false).unwrap();
-        done_task(dir.path(), &one).unwrap();
+        complete_task(dir.path(), &one, false).unwrap();
         assert!(post().contains("llmenv task start step-two"));
     }
 
