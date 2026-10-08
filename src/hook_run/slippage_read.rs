@@ -302,6 +302,39 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_read_log_is_not_reported() {
+        let state = tempfile::tempdir().expect("state dir");
+        let logs = crate::test_log_capture::capture_logs(|| {
+            assert!(load_stats(state.path(), "s1").paths.is_empty());
+        });
+        assert!(!logs.contains("read log"), "{logs}");
+    }
+
+    #[test]
+    fn a_corrupt_read_log_is_reported_and_read_as_empty() {
+        let state = tempfile::tempdir().expect("state dir");
+        let path = crate::hook_run::slippage::stats_path(state.path(), "s1");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&path, b"{not json").expect("write log");
+        let logs = crate::test_log_capture::capture_logs(|| {
+            assert!(load_stats(state.path(), "s1").paths.is_empty());
+        });
+        assert!(logs.contains("read log is corrupt"), "{logs}");
+    }
+
+    #[test]
+    fn an_unreadable_read_log_is_reported_and_read_as_empty() {
+        let state = tempfile::tempdir().expect("state dir");
+        // A directory at the log path fails to read with an error other than NotFound.
+        let path = crate::hook_run::slippage::stats_path(state.path(), "s1");
+        std::fs::create_dir_all(&path).expect("mkdir as the log path");
+        let logs = crate::test_log_capture::capture_logs(|| {
+            assert!(load_stats(state.path(), "s1").paths.is_empty());
+        });
+        assert!(logs.contains("read log unreadable"), "{logs}");
+    }
+
+    #[test]
     fn a_piped_read_is_not_recorded() {
         let state = tempfile::tempdir().expect("state dir");
         let work = tempfile::tempdir().expect("work dir");
