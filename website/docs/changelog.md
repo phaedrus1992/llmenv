@@ -120,6 +120,7 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 
 - The umans usage request connects only to the addresses that passed the private-network check. It no longer follows redirects or uses proxy settings, so a DNS rebind, a redirect, or a proxy can no longer send the Bearer token to a private or metadata address (#2518) [fix:throttle]
 - `llmenv upgrade` downloads a release asset only over HTTPS from `github.com` or `objects.githubusercontent.com`, and it refuses a redirect to any other host. The consolidation client no longer follows redirects, so its API key is not sent to another host (#2525) [fix:upgrade]
+- `LLMENV_UPGRADE_GITHUB_API` must be a bare HTTPS base URL, with no username, password, query, or fragment. Any other value fails `llmenv upgrade` with an error that names the variable, so a plain-HTTP or foreign-scheme override cannot choose the installed release (#2566) [fix:upgrade]
 
 ### Fixed
 
@@ -131,7 +132,11 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 - `effort_level` now reaches Haiku 5.5. It was written only to Opus 5.5 before, so the `haiku` alias ignored it (#2548) [fix:adapter]
 - A Bash `cat`, `head`, `tail`, `sed -n`, or `grep` of one file counts as a read for the read-before-Write guard, so a later Write is no longer denied as unread (#2549) [fix:hook]
 - A command whose output pipe closes early, such as `llmenv task ls | head`, exits with status 141 and no crash report. It used to abort (#2554) [fix:cli]
-- Consolidation and upgrade errors name the variable or URL and the next step. A non-UTF-8 `ANTHROPIC_MODEL` or `LLMENV_UPGRADE_GITHUB_API` is logged before the default is used (#2546) [fix:cli]
+- Consolidation and upgrade errors name the variable or URL and the next step. A non-UTF-8 `ANTHROPIC_MODEL` or `LLMENV_UPGRADE_GITHUB_API` fails the run instead of falling back to the default (#2546) [fix:cli]
+- Consolidation fails when `ANTHROPIC_MODEL` is a Claude Code alias such as `opus`, or is empty. It used to run on `claude-sonnet-5` instead of the model you set (#2564) [fix:cli]
+- Consolidation refuses an answer that did not end normally, such as one cut off at the 4096-token limit. It used to store the cut last rule as complete (#2565) [fix:cli]
+- A hook output write that fails for a reason other than a closed pipe is logged. It used to be dropped without a message (#2563) [fix:throttle]
+- A command whose stderr pipe closes early exits with status 141 and no crash report, as a closed stdout already did. It used to abort (#2561) [fix:cli]
 
 ## [3.12.1] - 2026-10-07
 
