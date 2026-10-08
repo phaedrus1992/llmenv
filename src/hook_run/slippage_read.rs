@@ -45,7 +45,7 @@ pub(super) fn record_bash_read(state_dir: &Path, session_id: &str, payload: &Val
 /// `grep PATTERN FILE`. Any other shape returns `None`: a pipe, a redirect, a chain, a
 /// substitution, a quote, a glob, or a flag this list does not name. The check is on the
 /// whole command, because a shell feature can hide a second command or a second file.
-pub(super) fn single_file_read(command: &str) -> Option<&str> {
+fn single_file_read(command: &str) -> Option<&str> {
     const SHELL_SYNTAX: &[char] = &[
         '|', '>', '<', '&', ';', '`', '$', '\n', '\'', '"', '\\', '*', '?', '(', ')',
     ];

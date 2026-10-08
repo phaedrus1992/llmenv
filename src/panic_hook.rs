@@ -48,7 +48,7 @@ fn location(info: &PanicHookInfo<'_>) -> String {
 /// The standard library builds this text as `failed printing to stdout: <io error>`. Only the
 /// `Broken pipe` error means the reader left. A full disk or another error still aborts, so it
 /// stays visible. The payload is text only, so matching on the message is the only option.
-pub(crate) fn is_closed_stdout(message: &str) -> bool {
+fn is_closed_stdout(message: &str) -> bool {
     message.starts_with("failed printing to stdout") && message.contains("Broken pipe")
 }
 
