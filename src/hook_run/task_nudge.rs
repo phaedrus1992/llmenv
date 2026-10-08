@@ -302,7 +302,7 @@ pub(crate) fn handle_stop(
     }
 }
 
-/// Rewrite each live `$(...)` and backtick substitution as its own `;`-separated part, so the
+/// Rewrite each live `$(...)`, `<(...)`, `>(...)`, and backtick substitution as its own `;`-separated part, so the
 /// inner command reaches the segment splitter. Single quotes keep their text literal.
 fn split_substitutions(command: &str) -> String {
     let mut out = String::with_capacity(command.len());
@@ -330,6 +330,13 @@ fn split_substitutions(command: &str) -> String {
             '`' if !single => {
                 let inner: String = chars.by_ref().take_while(|&c| c != '`').collect();
                 push_part(&mut out, &split_substitutions(&inner), double);
+                continue;
+            }
+            // Process substitution, `<(...)` and `>(...)`. Inside double quotes it is literal.
+            '<' | '>' if !single && !double && chars.peek() == Some(&'(') => {
+                chars.next();
+                let inner = split_substitutions(&take_until_close(&mut chars));
+                push_part(&mut out, &inner, false);
                 continue;
             }
             _ => {}
@@ -371,7 +378,8 @@ fn take_until_close(chars: &mut Peekable<Chars<'_>>) -> String {
 
 /// Split `command` into segments at the shell operators `;`, `|`, `&`, and a newline, and each
 /// segment into words. Quotes group a word and are dropped, so an operator inside quotes does not
-/// split. Each `$(...)` and backtick substitution is split out first, so its command is a segment.
+/// split. Each `$(...)`, `<(...)`, `>(...)`, and backtick substitution is split out first, so its
+/// command is a segment.
 fn shell_segments(command: &str) -> Vec<Vec<String>> {
     let command = split_substitutions(command);
     let mut segments: Vec<Vec<String>> = Vec::new();
@@ -660,6 +668,10 @@ mod tests {
             ("git status\ngit commit", true),
             ("gh pr create --title x", true),
             ("true || gh pr create", true),
+            ("cat <(git commit -m x)", true),
+            ("tee >(git commit -m x)", true),
+            ("echo \"<(git commit -m x)\"", false),
+            ("echo '<(git commit -m x)'", false),
             ("git status", false),
             ("git log --oneline", false),
             ("echo \"git commit\"", false),
@@ -1177,6 +1189,10 @@ mod tests {
             ("echo \"'\" $(a)", "echo \"'\" ;a;"),
             ("echo '\"' $(a)", "echo '\"' ;a;"),
             ("echo $HOME", "echo $HOME"),
+            ("cat <(a)", "cat ;a;"),
+            ("tee >(a)", "tee ;a;"),
+            ("echo \"<(a)\"", "echo \"<(a)\""),
+            ("echo '>(a)'", "echo '>(a)'"),
             // In single quotes a backslash is literal, so the quote after it closes the string.
             ("echo 'a\\' $(a)", "echo 'a\\' ;a;"),
         ] {
