@@ -45,6 +45,9 @@ const MAX_RULE_LENGTH: usize = 500;
 /// Default model for the `anthropic-api` backend.
 const DEFAULT_MODEL: &str = "claude-sonnet-5";
 
+/// Messages API endpoint for the `anthropic-api` backend.
+const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
+
 /// ExpeL-inspired consolidation prompt (spec R5).
 ///
 /// `{max_rules}` is substituted with `max_rules_per_session`.
@@ -320,12 +323,53 @@ fn resolve_api_model(env_value: Option<&str>) -> (String, Option<String>) {
 /// # Errors
 /// Returns `anyhow::Error` on HTTP failure, timeout, or malformed response.
 async fn call_anthropic_api(prompt: &str) -> anyhow::Result<String> {
-    let api_key = std::env::var("ANTHROPIC_API_KEY")?;
-    let (model, warning) = resolve_api_model(std::env::var("ANTHROPIC_MODEL").ok().as_deref());
+    let api_key = api_key_from_env(std::env::var("ANTHROPIC_API_KEY"))?;
+    let model_value = model_value_from_env(std::env::var("ANTHROPIC_MODEL"));
+    let (model, warning) = resolve_api_model(model_value.as_deref());
     if let Some(warning) = warning {
         tracing::error!("{warning}");
     }
+    post_messages(ANTHROPIC_MESSAGES_URL, &api_key, &model, prompt).await
+}
 
+/// Turn the `ANTHROPIC_API_KEY` lookup into a key. An error names the variable and the fix.
+fn api_key_from_env(value: Result<String, std::env::VarError>) -> anyhow::Result<String> {
+    match value {
+        Ok(key) => Ok(key),
+        Err(std::env::VarError::NotPresent) => anyhow::bail!(
+            "ANTHROPIC_API_KEY is not set. Export your Anthropic API key, or set the \
+             consolidation backend to claude-cli, which needs no key."
+        ),
+        Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!(
+            "ANTHROPIC_API_KEY is not valid UTF-8. Export the key again as plain text."
+        ),
+    }
+}
+
+/// Read `ANTHROPIC_MODEL`. A value that is not Unicode is logged and treated as unset, so the
+/// default model is used and the operator sees why.
+fn model_value_from_env(value: Result<String, std::env::VarError>) -> Option<String> {
+    match value {
+        Ok(model) => Some(model),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(raw)) => {
+            tracing::error!(
+                value = ?raw,
+                "consolidation: ignoring ANTHROPIC_MODEL: the value is not valid UTF-8. \
+                 Using {DEFAULT_MODEL}."
+            );
+            None
+        }
+    }
+}
+
+/// Post one Messages API request to `url`. `url` is a parameter so tests can use a mock server.
+async fn post_messages(
+    url: &str,
+    api_key: &str,
+    model: &str,
+    prompt: &str,
+) -> anyhow::Result<String> {
     // The API key travels in `x-api-key`, which reqwest does not strip on a cross-host redirect.
     // The endpoint is fixed, so a redirect is never expected and is refused.
     let client = reqwest::Client::builder()
@@ -343,8 +387,8 @@ async fn call_anthropic_api(prompt: &str) -> anyhow::Result<String> {
     });
 
     let resp = client
-        .post("https://api.anthropic.com/v1/messages")
-        .header("x-api-key", &api_key)
+        .post(url)
+        .header("x-api-key", api_key)
         .header("anthropic-version", "2023-06-01")
         .header("content-type", "application/json")
         .json(&body)
@@ -370,7 +414,7 @@ async fn call_anthropic_api(prompt: &str) -> anyhow::Result<String> {
             .text()
             .await
             .inspect_err(
-                |e| tracing::error!(error = %e, url = "https://api.anthropic.com/v1/messages", "failed to read consolidation error response body"),
+                |e| tracing::error!(error = %e, url, "failed to read consolidation error response body"),
             )
             .unwrap_or_else(|_| "(no body)".into());
         anyhow::bail!("Anthropic API returned {status}: {text}");
@@ -746,6 +790,89 @@ mod tests {
             );
             assert!(warning.contains(DEFAULT_MODEL), "{warning}");
         }
+    }
+
+    #[test]
+    fn api_key_missing_names_the_variable_and_the_fix() {
+        let msg = api_key_from_env(Err(std::env::VarError::NotPresent))
+            .expect_err("a missing key must fail")
+            .to_string();
+        assert!(msg.contains("ANTHROPIC_API_KEY is not set"), "{msg}");
+        assert!(msg.contains("claude-cli"), "{msg}");
+    }
+
+    #[test]
+    fn api_key_present_is_returned() {
+        let key = api_key_from_env(Ok("sk-test".into())).expect("a present key must pass");
+        assert_eq!(key, "sk-test");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn api_key_not_unicode_is_an_error() {
+        use std::os::unix::ffi::OsStringExt;
+        let raw = std::ffi::OsString::from_vec(vec![0xff]);
+        let msg = api_key_from_env(Err(std::env::VarError::NotUnicode(raw)))
+            .expect_err("a non-Unicode key must fail")
+            .to_string();
+        assert!(
+            msg.contains("ANTHROPIC_API_KEY is not valid UTF-8"),
+            "{msg}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn model_not_unicode_is_treated_as_unset() {
+        use std::os::unix::ffi::OsStringExt;
+        let raw = std::ffi::OsString::from_vec(vec![0xff]);
+        assert_eq!(
+            model_value_from_env(Err(std::env::VarError::NotUnicode(raw))),
+            None
+        );
+    }
+
+    #[test]
+    fn model_present_is_kept() {
+        assert_eq!(
+            model_value_from_env(Ok("claude-opus-5-5".into())),
+            Some("claude-opus-5-5".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn post_messages_refuses_a_redirect_and_names_the_target() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(302)
+                    .insert_header("location", "https://evil.example/relay"),
+            )
+            .mount(&server)
+            .await;
+        let url = format!("{}/v1/messages", server.uri());
+        let msg = post_messages(&url, "sk-test", DEFAULT_MODEL, "hi")
+            .await
+            .expect_err("a redirect must be refused")
+            .to_string();
+        assert!(msg.contains("https://evil.example/relay"), "{msg}");
+        assert!(msg.contains("redirect was refused"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn post_messages_error_status_includes_the_body() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(500).set_body_string("overloaded"))
+            .mount(&server)
+            .await;
+        let url = format!("{}/v1/messages", server.uri());
+        let msg = post_messages(&url, "sk-test", DEFAULT_MODEL, "hi")
+            .await
+            .expect_err("a 500 must fail")
+            .to_string();
+        assert!(msg.contains("500"), "{msg}");
+        assert!(msg.contains("overloaded"), "{msg}");
     }
 
     #[test]

@@ -187,10 +187,11 @@ fn download_binary(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<
         .get(url)
         .send()
         .context("failed to download binary")?;
+    let status = resp.status();
     anyhow::ensure!(
-        resp.status().is_success(),
-        "download failed with HTTP {}",
-        resp.status()
+        status.is_success(),
+        "download failed with HTTP {status} from {url}. Check the network or proxy, then run \
+         llmenv upgrade again."
     );
     Ok(resp.bytes().context("failed to read binary")?.to_vec())
 }
@@ -292,7 +293,25 @@ fn find_asset(release: &GhRelease) -> Result<&GhAsset> {
 }
 
 fn get_api_base_url() -> String {
-    env::var("LLMENV_UPGRADE_GITHUB_API").unwrap_or_else(|_| "https://api.github.com".to_string())
+    api_base_from_env(env::var("LLMENV_UPGRADE_GITHUB_API"))
+}
+
+/// Turn the `LLMENV_UPGRADE_GITHUB_API` lookup into a base URL. A value that is not Unicode is
+/// logged and the GitHub default is used, so the operator sees why the override was ignored.
+fn api_base_from_env(value: Result<String, env::VarError>) -> String {
+    const GITHUB_API: &str = "https://api.github.com";
+    match value {
+        Ok(base) => base,
+        Err(env::VarError::NotPresent) => GITHUB_API.to_string(),
+        Err(env::VarError::NotUnicode(raw)) => {
+            tracing::error!(
+                value = ?raw,
+                "upgrade: ignoring LLMENV_UPGRADE_GITHUB_API: the value is not valid UTF-8. \
+                 Using {GITHUB_API}."
+            );
+            GITHUB_API.to_string()
+        }
+    }
 }
 
 pub(super) fn run_upgrade(track: Option<String>, check_only: bool) -> Result<()> {
@@ -692,13 +711,44 @@ mod tests {
             .await;
 
         let uri = server.uri();
+        let url = format!("{uri}/binary");
+        let named_url = url.clone();
         let result = tokio::task::spawn_blocking(move || {
             let client = build_http_client().unwrap();
-            download_binary(&client, &format!("{uri}/binary"))
+            download_binary(&client, &url)
         })
         .await
         .unwrap();
-        assert!(result.is_err());
+        let msg = result.expect_err("a 500 must fail").to_string();
+        assert!(msg.contains("HTTP 500"), "{msg}");
+        assert!(msg.contains(&named_url), "error must name the URL: {msg}");
+    }
+
+    #[test]
+    fn api_base_defaults_when_unset() {
+        assert_eq!(
+            api_base_from_env(Err(env::VarError::NotPresent)),
+            "https://api.github.com"
+        );
+    }
+
+    #[test]
+    fn api_base_present_is_used() {
+        assert_eq!(
+            api_base_from_env(Ok("http://127.0.0.1:9".into())),
+            "http://127.0.0.1:9"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn api_base_not_unicode_falls_back_to_github() {
+        use std::os::unix::ffi::OsStringExt;
+        let raw = std::ffi::OsString::from_vec(vec![0xff]);
+        assert_eq!(
+            api_base_from_env(Err(env::VarError::NotUnicode(raw))),
+            "https://api.github.com"
+        );
     }
 
     #[test]
