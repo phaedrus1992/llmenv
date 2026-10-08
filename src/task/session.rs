@@ -80,21 +80,25 @@ impl EngineIdentity {
     #[must_use]
     pub(crate) fn from_env() -> Self {
         Self::from_vars(
-            Self::session_id_from_var(std::env::var("CLAUDE_CODE_SESSION_ID")).as_deref(),
-            std::env::var("CLAUDE_PID").ok().as_deref(),
+            Self::identity_var(
+                "CLAUDE_CODE_SESSION_ID",
+                std::env::var("CLAUDE_CODE_SESSION_ID"),
+            )
+            .as_deref(),
+            Self::identity_var("CLAUDE_PID", std::env::var("CLAUDE_PID")).as_deref(),
         )
     }
 
-    /// The `CLAUDE_CODE_SESSION_ID` value. A non-Unicode value is logged, then
-    /// treated as absent, so ownership falls back as if no session existed (#2562).
-    fn session_id_from_var(value: Result<String, std::env::VarError>) -> Option<String> {
+    /// Read one identity variable. A non-Unicode value is logged at error level,
+    /// which the default log filter shows, then treated as absent (#2562).
+    fn identity_var(name: &str, value: Result<String, std::env::VarError>) -> Option<String> {
         match value {
-            Ok(id) => Some(id),
+            Ok(v) => Some(v),
             Err(std::env::VarError::NotPresent) => None,
             Err(std::env::VarError::NotUnicode(_)) => {
-                tracing::warn!(
-                    "CLAUDE_CODE_SESSION_ID is not valid UTF-8; session ownership is treated as \
-                     absent. Export the session id again as plain text."
+                tracing::error!(
+                    "{name} is not valid UTF-8, so it is treated as unset. Export it again as \
+                     plain text."
                 );
                 None
             }
@@ -237,7 +241,7 @@ impl Session {
     /// ownership existed, and hiding it would drop the reminder for work that nobody else owns.
     /// No caller id means no way to tell, so every session is visible.
     #[must_use]
-    fn visible_to(&self, caller: Option<&str>) -> bool {
+    pub(crate) fn visible_to(&self, caller: Option<&str>) -> bool {
         match (caller, self.owner_session.as_deref()) {
             (Some(caller), Some(owner)) => caller == owner,
             _ => true,
@@ -1047,13 +1051,16 @@ mod tests {
 
     #[test]
     fn session_id_var_passes_a_plain_value() {
-        let id = EngineIdentity::session_id_from_var(Ok("conv-1".to_string()));
+        let id = EngineIdentity::identity_var("CLAUDE_CODE_SESSION_ID", Ok("conv-1".to_string()));
         assert_eq!(id.as_deref(), Some("conv-1"));
     }
 
     #[test]
     fn session_id_var_unset_is_absent() {
-        let id = EngineIdentity::session_id_from_var(Err(std::env::VarError::NotPresent));
+        let id = EngineIdentity::identity_var(
+            "CLAUDE_CODE_SESSION_ID",
+            Err(std::env::VarError::NotPresent),
+        );
         assert_eq!(id, None);
     }
 
@@ -1062,7 +1069,10 @@ mod tests {
     fn session_id_var_non_unicode_is_absent() {
         use std::os::unix::ffi::OsStringExt as _;
         let raw = std::ffi::OsString::from_vec(vec![0xff]);
-        let id = EngineIdentity::session_id_from_var(Err(std::env::VarError::NotUnicode(raw)));
+        let id = EngineIdentity::identity_var(
+            "CLAUDE_CODE_SESSION_ID",
+            Err(std::env::VarError::NotUnicode(raw)),
+        );
         assert_eq!(id, None, "a non-UTF-8 id must count as absent");
     }
 
