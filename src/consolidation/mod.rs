@@ -352,6 +352,19 @@ async fn call_anthropic_api(prompt: &str) -> anyhow::Result<String> {
         .await?;
 
     let status = resp.status();
+    if status.is_redirection() {
+        // Redirects are off, so a 3xx arrives as a response. Name the target so the cause is
+        // visible; the key was never sent to it.
+        let target = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("(no Location header)");
+        anyhow::bail!(
+            "Anthropic API redirected the request to {target}; the redirect was refused so the API \
+             key stays with api.anthropic.com. Check for a proxy or a changed endpoint."
+        );
+    }
     if !status.is_success() {
         let text = resp
             .text()
