@@ -225,8 +225,12 @@ fn run_throttle_inner(event: &str, hook_event_name: &str) -> anyhow::Result<()> 
 /// Any other write error is returned for the caller to log.
 fn write_hook_context(writer: &mut impl std::io::Write, out: &str) -> std::io::Result<()> {
     match writeln!(writer, "{out}") {
-        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e),
-        _ => Ok(()),
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+            tracing::debug!("throttle: reader closed before the hook context was written");
+            Ok(())
+        }
+        Err(e) => Err(e),
     }
 }
 
