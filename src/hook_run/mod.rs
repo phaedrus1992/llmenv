@@ -26,6 +26,7 @@ pub(crate) mod repeat_detect;
 mod session_ledger;
 mod session_state;
 pub(crate) mod slippage;
+mod slippage_read;
 pub(crate) mod stop_dedupe;
 pub(crate) mod task_nudge;
 pub(crate) mod task_tools;
