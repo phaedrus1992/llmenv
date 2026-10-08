@@ -12,7 +12,9 @@
 //! the project counts as tracked work.
 //! Design: docs/design/issue-2438-task-tracking-nudges.md
 
+use std::iter::Peekable;
 use std::path::{Path, PathBuf};
+use std::str::Chars;
 
 use serde::{Deserialize, Serialize};
 
@@ -300,10 +302,78 @@ pub(crate) fn handle_stop(
     }
 }
 
+/// Rewrite each live `$(...)` and backtick substitution as its own `;`-separated part, so the
+/// inner command reaches the segment splitter. Single quotes keep their text literal.
+fn split_substitutions(command: &str) -> String {
+    let mut out = String::with_capacity(command.len());
+    let mut chars = command.chars().peekable();
+    let (mut single, mut double) = (false, false);
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            // An escaped character is not a quote, and not a substitution start. This matches
+            // `shell_segments`, so both passes agree on quote state.
+            '\\' if !single => {
+                out.push(c);
+                if let Some(next) = chars.next() {
+                    out.push(next);
+                }
+                continue;
+            }
+            '$' if !single && chars.peek() == Some(&'(') => {
+                chars.next();
+                let inner = split_substitutions(&take_until_close(&mut chars));
+                push_part(&mut out, &inner, double);
+                continue;
+            }
+            '`' if !single => {
+                let inner: String = chars.by_ref().take_while(|&c| c != '`').collect();
+                push_part(&mut out, &split_substitutions(&inner), double);
+                continue;
+            }
+            _ => {}
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Append one substitution as `;inner;`. Inside double quotes, the quote closes before the
+/// marker and reopens after it, so the splitter still sees the `;`.
+fn push_part(out: &mut String, inner: &str, double: bool) {
+    if double {
+        out.push('"');
+    }
+    out.push(';');
+    out.push_str(inner);
+    out.push(';');
+    if double {
+        out.push('"');
+    }
+}
+
+/// Take the text up to the `)` that closes a `$(` already read, counting nested parentheses.
+fn take_until_close(chars: &mut Peekable<Chars<'_>>) -> String {
+    let mut depth = 0_usize;
+    let mut inner = String::new();
+    for c in chars.by_ref() {
+        match c {
+            ')' if depth == 0 => break,
+            ')' => depth = depth.saturating_sub(1),
+            '(' => depth = depth.saturating_add(1),
+            _ => {}
+        }
+        inner.push(c);
+    }
+    inner
+}
+
 /// Split `command` into segments at the shell operators `;`, `|`, `&`, and a newline, and each
 /// segment into words. Quotes group a word and are dropped, so an operator inside quotes does not
-/// split.
+/// split. Each `$(...)` and backtick substitution is split out first, so its command is a segment.
 fn shell_segments(command: &str) -> Vec<Vec<String>> {
+    let command = split_substitutions(command);
     let mut segments: Vec<Vec<String>> = Vec::new();
     let mut words: Vec<String> = Vec::new();
     let mut word = String::new();
@@ -411,12 +481,29 @@ fn starts_commit_or_pr(words: &[String]) -> bool {
             }
             false
         }
-        "sh" | "bash" | "zsh" => match tail {
-            ["-c", script, ..] => runs_commit_or_pr(script),
-            _ => false,
-        },
+        "sh" | "bash" | "zsh" => shell_script(tail).is_some_and(runs_commit_or_pr),
         _ => false,
     }
+}
+
+/// The script that a shell runs with `-c`. The flag may sit in a cluster, as in `bash -lc`.
+/// An option that takes a value, such as `-o pipefail`, skips its value. A long option such as
+/// `--noclobber` is not a cluster, and a script file has no `-c`.
+fn shell_script<'a>(args: &[&'a str]) -> Option<&'a str> {
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        let flags = arg.strip_prefix(['-', '+'])?;
+        let short = !flags.starts_with('-');
+        if arg.starts_with('-') && short && flags.contains('c') {
+            return rest.next().copied();
+        }
+        let takes_value =
+            matches!(*arg, "--rcfile" | "--init-file") || (short && flags.ends_with(['o', 'O']));
+        if takes_value {
+            rest.next();
+        }
+    }
+    None
 }
 
 /// Whether the shell command runs `git commit` or `gh pr create` in any of its parts.
@@ -599,6 +686,29 @@ mod tests {
             ("git --no-pager commit -m x", true),
             ("gh --no-pager pr view 1", false),
             ("bash script.sh", false),
+            ("bash -lc \"git commit -m x\"", true),
+            ("bash -ec 'git commit -m x'", true),
+            ("sh -l -c \"git commit\"", true),
+            ("bash --noclobber -c 'echo hi'", false),
+            ("bash -lc 'echo hi'", false),
+            ("bash -c", false),
+            ("echo $(git commit -m x)", true),
+            ("echo `git commit -m x`", true),
+            ("echo \"$(git commit -m x)\"", true),
+            ("echo $(git status) && git commit", true),
+            ("echo $(echo $(git commit))", true),
+            ("echo '$(git commit)'", false),
+            ("echo $(git status)", false),
+            ("echo \"it's\" && $(gh pr create)", true),
+            ("echo $((1 + 2))", false),
+            ("bash -o pipefail -c \"git commit -m x\"", true),
+            ("bash -euo pipefail -c 'git commit -m x'", true),
+            ("bash -O extglob -c 'git commit -m x'", true),
+            ("bash +x -c 'git commit -m x'", true),
+            ("bash --rcfile f -c 'git commit -m x'", true),
+            ("bash -o pipefail script.sh", false),
+            ("echo \\'$(git commit -m x)", true),
+            ("echo \"\\$(git commit)\"", false),
         ] {
             assert_eq!(runs_commit_or_pr(command), expected, "{command:?}");
         }
@@ -1024,6 +1134,70 @@ mod tests {
             "llmenv task done step-one && git commit -m x",
             "step-one"
         ));
+    }
+
+    #[test]
+    fn a_commit_in_a_substitution_before_the_task_end_does_not_pass_the_gate() {
+        assert!(!ends_task_before_commit(
+            "echo $(git commit -m x); llmenv task done step-one",
+            "step-one"
+        ));
+        assert!(ends_task_before_commit(
+            "llmenv task done step-one; echo $(git commit -m x)",
+            "step-one"
+        ));
+    }
+
+    proptest! {
+        #[test]
+        fn text_without_a_substitution_is_left_unchanged(s in "[a-z ;|&()'\"\\\\]{0,40}") {
+            prop_assert_eq!(split_substitutions(&s), s);
+        }
+
+        #[test]
+        fn take_until_close_stops_at_the_first_unnested_paren(
+            s in "[a ;]{0,20}",
+            tail in "[a )]{0,10}",
+        ) {
+            let text = format!("{s}){tail}");
+            let mut chars = text.chars().peekable();
+            prop_assert_eq!(take_until_close(&mut chars), s);
+            prop_assert_eq!(chars.collect::<String>(), tail);
+        }
+    }
+
+    #[test]
+    fn split_substitutions_rewrites_only_live_substitutions() {
+        for (input, expected) in [
+            ("echo $(a)", "echo ;a;"),
+            ("echo `a`", "echo ;a;"),
+            ("echo '$(a)'", "echo '$(a)'"),
+            ("echo '`a`'", "echo '`a`'"),
+            ("echo \\$(a)", "echo \\$(a)"),
+            ("echo \\'$(a)", "echo \\';a;"),
+            ("echo \"\\$(a)\"", "echo \"\\$(a)\""),
+            ("echo \"'\" $(a)", "echo \"'\" ;a;"),
+            ("echo '\"' $(a)", "echo '\"' ;a;"),
+            ("echo $HOME", "echo $HOME"),
+            // In single quotes a backslash is literal, so the quote after it closes the string.
+            ("echo 'a\\' $(a)", "echo 'a\\' ;a;"),
+        ] {
+            assert_eq!(split_substitutions(input), expected, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn take_until_close_counts_nested_parens() {
+        for (text, inner, rest) in [
+            ("a)b", "a", "b"),
+            ("a(b)c)d", "a(b)c", "d"),
+            ("(x)(y))tail", "(x)(y)", "tail"),
+            ("abc", "abc", ""),
+        ] {
+            let mut chars = text.chars().peekable();
+            assert_eq!(take_until_close(&mut chars), inner, "{text:?}");
+            assert_eq!(chars.collect::<String>(), rest, "{text:?}");
+        }
     }
 
     #[test]
