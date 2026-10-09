@@ -18,7 +18,7 @@ pub enum Caller {
 
 impl Caller {
     /// Names the caller for a task note.
-    fn describe(&self) -> String {
+    pub(crate) fn describe(&self) -> String {
         match self {
             Self::Session(id) => format!("session '{id}'"),
             Self::Unidentified(reason) => format!("an unidentified caller ({reason})"),
