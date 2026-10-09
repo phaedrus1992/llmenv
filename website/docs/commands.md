@@ -411,10 +411,10 @@ re-ingestion on the next turn.
 ```text
 llmenv task add <title> [--child-of SLUG | --parallel] [--after SLUG] [--parent SLUG] [--session <id>]
   [--detail <text> | --detail-file <path>]
-llmenv task start <id> [--force] [--reopen]
-llmenv task done <id> [--force]
+llmenv task start <id> [--force] [--reopen] [--other-session]
+llmenv task done <id> [--force] [--other-session]
 llmenv task reopen <id>...
-llmenv task wait <id> [reason]
+llmenv task wait <id> [reason] [--other-session]
 llmenv task ls [--format json] (--session <id> | --all) [--current-project]
 llmenv task show <id> | --current | --next
 llmenv task note <id> [text]
@@ -476,6 +476,11 @@ Only when the open session has no match does the search cover the whole project.
   covers its whole child set (see `task block`, below). `--reopen` (added
   in v3.12.0) moves a `done` task back to `open` with a note, then starts
   it; without it, `start` refuses a `done` task.
+- `task start`, `done`, `wait`, `note`, `block`, `edit`, `reopen`, and `clear` refuse a task that
+  belongs to another session. (added in v3.13.0) `clear --session <id>` refuses another session's id
+  the same way.
+  The refusal names the owning session. Pass `--other-session` to act on the task anyway.
+  A bare `--force` does not override this check.
 - `task done <id> [--force]` — mark a task complete. (changed in v3.12.0) Refuses a parent whose sub-tasks are
   not all `done`, and lists them; `--force` closes it anyway and prints a note.
   Refuses a task that was never started (`open` straight to `done`) and exits

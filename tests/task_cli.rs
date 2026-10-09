@@ -1193,7 +1193,13 @@ fn clear_by_session_deletes_only_that_sessions_tasks() {
         .success();
 
     llmenv(dir.path())
-        .args(["task", "clear", "--session", "doomed-sprint"])
+        .args([
+            "task",
+            "clear",
+            "--session",
+            "doomed-sprint",
+            "--other-session",
+        ])
         .assert()
         .success()
         .stdout(predicates::str::contains("Cleared 1 task(s)"));
@@ -1637,7 +1643,7 @@ fn ls_state_filter_composes_with_session() {
         .assert()
         .success();
     llmenv(dir.path())
-        .args(["task", "start", "beta-wip"])
+        .args(["task", "start", "beta-wip", "--other-session"])
         .assert()
         .success();
 
@@ -2135,7 +2141,7 @@ fn show_current_sanitizes_a_control_character_in_the_session_name() {
         .assert()
         .success();
     llmenv(dir.path())
-        .args(["task", "start", "task-two"])
+        .args(["task", "start", "task-two", "--other-session"])
         .assert()
         .success();
 
@@ -2191,7 +2197,7 @@ fn show_current_shows_a_separate_block_per_open_session_for_the_project() {
         .assert()
         .success();
     llmenv(dir.path())
-        .args(["task", "start", "second"])
+        .args(["task", "start", "second", "--other-session"])
         .assert()
         .success();
 

@@ -12,6 +12,7 @@
 //! ever becomes a real bottleneck — unlikely for a CLI task tracker.
 
 pub(crate) mod core_text;
+pub(crate) mod ownership;
 pub(crate) mod project;
 pub(crate) mod relation;
 pub(crate) mod reopen;
