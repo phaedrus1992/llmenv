@@ -40,7 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A non-UTF-8 `HOME`, `USER`, or `CLAUDE_CONFIG_DIR` gives an error that names the variable. `llmenv doctor`, `llmenv setup`, user-scope matching, the keychain read, and the task project tag no longer treat it as unset (#2589) [fix:cli]
 - A non-UTF-8 `CLAUDE_CONFIG_DIR` no longer selects the default cache root. The config guard prints an error that names the variable and does not run (#2559) [fix:cli]
 - `llmenv setup` warns when `USER` is unset. The generated setup then names the user `unknown` (#2560) [fix:cli]
-- A command nested more than 32 substitutions deep is denied with a message that names the limit and says to split the command. The commit gate and the explain-before-act check used to give the no-task text (#2620) [fix:hook]
+- A command nested more than 32 substitutions deep is denied on every attempt, with a message that names the limit and says to split the command. The commit gate and the explain-before-act check used to give the no-task text (#2620) [fix:hook]
 - The working-directory advisory sees a `cd` inside `$( )`, a subshell `( )`, or a brace group `{ }`. It used to miss those (#2619) [fix:hook]
 - A failed statusline read, cache `chmod`, or cache cleanup is logged with its path. A failed removal of a broken plugin clone no longer reports that the clone was removed (#2573) [fix:cli]
 - `llmenv doctor` warns when `ANTHROPIC_MODEL` is an alias or empty. The session-end consolidation run failed with that value and logged only to its own log (#2576) [fix:cli]
