@@ -692,9 +692,9 @@ fn ownership_note(session: &Session, owner: &EngineIdentity) -> &'static str {
     }
 }
 
-/// Every task currently tagged with `session_id`. `pub(super)` so the queue check of
-/// `start_task` (`task/mod.rs`) can read the session (#2455).
-pub(super) fn tasks_in_session(state_dir: &Path, session_id: &str) -> Vec<Task> {
+/// Every task currently tagged with `session_id`. A task file that cannot be read is skipped.
+/// Use [`try_tasks_in_session`] where a decision depends on the whole session (#2598).
+fn tasks_in_session(state_dir: &Path, session_id: &str) -> Vec<Task> {
     list_tasks(state_dir)
         .into_iter()
         .filter(|t| t.session.as_deref() == Some(session_id))

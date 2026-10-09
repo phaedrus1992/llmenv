@@ -239,7 +239,7 @@ pub(crate) fn try_list_tasks(state_dir: &Path) -> anyhow::Result<Vec<Task>> {
 /// Like [`try_list_tasks`], but an unreadable task file also fails the listing. A guard that
 /// decides from every task in a session must not decide from a view with a hole in it, because
 /// the hidden file may belong to that session (#2598).
-pub(super) fn try_list_tasks_strict(state_dir: &Path) -> anyhow::Result<Vec<Task>> {
+fn try_list_tasks_strict(state_dir: &Path) -> anyhow::Result<Vec<Task>> {
     read_tasks(state_dir, UnreadablePolicy::Fail)
 }
 
