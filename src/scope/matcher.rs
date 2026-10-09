@@ -140,10 +140,17 @@ impl Env {
             tracing::warn!("hostname detection failed; host-scope matching disabled");
             String::new()
         });
-        let user = std::env::var("USER").unwrap_or_else(|_| {
-            tracing::warn!("$USER unset; user-scope matching disabled");
-            String::new()
-        });
+        let user = match crate::env_var::utf8_var("USER") {
+            Ok(Some(user)) => user,
+            Ok(None) => {
+                tracing::warn!("$USER unset; user-scope matching disabled");
+                String::new()
+            }
+            Err(e) => {
+                tracing::warn!("{e:#}; user-scope matching disabled");
+                String::new()
+            }
+        };
         let cwd = std::env::current_dir()
             .ok()
             .and_then(|p| p.to_str().map(String::from))

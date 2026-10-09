@@ -17,7 +17,12 @@ use sha2::{Digest, Sha256};
 pub(crate) fn current_tag() -> std::io::Result<String> {
     let cwd = std::env::current_dir()?;
     let home = crate::env_var::utf8_var("HOME")
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
+        .map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                e.context("cannot compute the task project tag"),
+            )
+        })?
         .filter(|h| !h.is_empty())
         .map(std::path::PathBuf::from);
     Ok(resolve_project_tag(&cwd, home.as_deref()))
