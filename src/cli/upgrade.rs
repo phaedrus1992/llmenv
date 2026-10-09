@@ -164,6 +164,8 @@ fn download_binary(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<
 
 /// Install `data` as the new binary, with backup/restore safety.
 fn install_binary(data: &[u8]) -> Result<()> {
+    // Replace target is this binary's own path. Tracked in #2580.
+    // nosemgrep: rust.lang.security.current-exe.current-exe
     let current_exe = std::env::current_exe().context("failed to get current executable path")?;
     let current_dir = current_exe
         .parent()

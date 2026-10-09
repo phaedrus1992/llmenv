@@ -86,6 +86,8 @@ fn spawn_record_in(
     session_id: &str,
     ev: &SessionLogEvent,
 ) -> Option<Child> {
+    // Spawns this same binary as a detached child. The path is this process's own image, not input.
+    // nosemgrep: rust.lang.security.current-exe.current-exe
     let Ok(exe) = std::env::current_exe() else {
         tracing::error!("session_log: cannot resolve current_exe for detached record");
         return None;
