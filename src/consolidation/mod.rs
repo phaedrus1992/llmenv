@@ -391,15 +391,10 @@ fn model_value_from_env(
     }
 }
 
-/// The problem that `ANTHROPIC_MODEL` causes for the `anthropic-api` backend, or `None` when the
-/// backend accepts it. `llmenv doctor` shows this, because the detached run that hits the
-/// problem writes only to its own log.
-pub(crate) fn anthropic_model_problem() -> Option<String> {
-    model_problem(std::env::var("ANTHROPIC_MODEL"))
-}
-
-/// [`anthropic_model_problem`] for a value already read from the environment.
-fn model_problem(value: Result<String, std::env::VarError>) -> Option<String> {
+/// The problem that an `ANTHROPIC_MODEL` value causes for the `anthropic-api` backend, or `None`
+/// when the backend accepts it. `llmenv doctor` shows this, because the detached run that hits
+/// the problem writes only to its own log.
+pub(crate) fn model_problem(value: Result<String, std::env::VarError>) -> Option<String> {
     model_value_from_env(value)
         .and_then(|model| resolve_api_model(model.as_deref()))
         .err()

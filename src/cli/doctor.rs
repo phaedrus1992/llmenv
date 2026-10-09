@@ -599,6 +599,28 @@ fn run_doctor_icm_server(
 ///
 /// Deliberately offline: no "an update is available" claim is made, because
 /// checking would mean a network round trip per tool on every `doctor` run.
+/// The `ANTHROPIC_MODEL` problem to show. Only an enabled memory entry on the `anthropic-api`
+/// backend reads the variable, so any other config gets no warning.
+fn anthropic_model_warning(
+    config: &Config,
+    model_var: Result<String, std::env::VarError>,
+) -> Option<String> {
+    let uses_api = config
+        .features
+        .iter()
+        .flat_map(|f| f.memory.iter())
+        .filter_map(|m| m.consolidation.as_ref())
+        .any(|c| {
+            c.enabled && matches!(c.backend, crate::config::ConsolidationBackend::AnthropicApi)
+        });
+    if !uses_api {
+        return None;
+    }
+    crate::consolidation::model_problem(model_var).map(|problem| {
+        format!("{problem} This stops consolidation with the anthropic-api backend at every session end.")
+    })
+}
+
 fn run_doctor_dependent_tools(use_color: bool) {
     let pass = super::doctor_pass(use_color);
     let info = super::doctor_info(use_color);
@@ -1217,13 +1239,8 @@ pub(super) fn run_doctor(
         );
     }
 
-    // The session-end consolidation run logs its failure only to its own log, so this line is
-    // the one place the user sees it. It applies only when the anthropic-api backend is used.
-    if let Some(problem) = crate::consolidation::anthropic_model_problem() {
-        eprintln!(
-            "{warn} {problem} This stops consolidation with the anthropic-api backend at every \
-             session end."
-        );
+    if let Some(problem) = anthropic_model_warning(&config, std::env::var("ANTHROPIC_MODEL")) {
+        eprintln!("{warn} {problem}");
     }
 
     for hit in hooks_with_glob_like_matchers(&config) {
@@ -2216,6 +2233,63 @@ mod tests {
     // #1131: memory works in `~/` and silently stops the moment you `cd` into a
     // project that disables the only bundle supplying it — with a green doctor,
     // because every other check builds from the post-disable firing set.
+    fn config_with_consolidation(backend: crate::config::ConsolidationBackend) -> Config {
+        let consolidation = crate::config::ConsolidationConfig {
+            enabled: true,
+            backend,
+            max_rules_per_session: 10,
+        };
+        Config {
+            features: Some(Features {
+                memory: vec![Memory {
+                    always_load: None,
+                    server_host: "still".into(),
+                    port: 7878,
+                    listen_host: "127.0.0.1".into(),
+                    when: vec![],
+                    default_topics: vec![],
+                    default_type: None,
+                    default_importance: None,
+                    type_importance: BTreeMap::new(),
+                    retention: None,
+                    auto_prune: false,
+                    consolidation: Some(consolidation),
+                    mcp_permissions: None,
+                    wakeup_max_tokens: None,
+                    adaptive_recall: true,
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn anthropic_model_warning_is_silent_for_the_claude_cli_backend() {
+        let config = config_with_consolidation(crate::config::ConsolidationBackend::ClaudeCli);
+        let warning = anthropic_model_warning(&config, Ok("opus".to_string()));
+        assert_eq!(warning, None, "claude-cli never reads ANTHROPIC_MODEL");
+    }
+
+    #[test]
+    fn anthropic_model_warning_names_an_alias_for_the_api_backend() {
+        let config = config_with_consolidation(crate::config::ConsolidationBackend::AnthropicApi);
+        let warning = anthropic_model_warning(&config, Ok("opus".to_string()))
+            .expect("an alias fails the anthropic-api backend");
+        assert!(
+            warning.contains("\"opus\" is not a full model ID"),
+            "{warning}"
+        );
+        assert!(warning.contains("anthropic-api backend"), "{warning}");
+    }
+
+    #[test]
+    fn anthropic_model_warning_is_silent_for_a_full_model_id() {
+        let config = config_with_consolidation(crate::config::ConsolidationBackend::AnthropicApi);
+        let warning = anthropic_model_warning(&config, Ok("claude-sonnet-5".to_string()));
+        assert_eq!(warning, None);
+    }
+
     #[test]
     fn doctor_flags_memory_orphaned_by_disable_bundles() {
         let (root, config, active) = disabled_memory_bundle_fixture();
