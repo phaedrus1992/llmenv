@@ -86,6 +86,8 @@ fn spawn_record_in(
     session_id: &str,
     ev: &SessionLogEvent,
 ) -> Option<Child> {
+    // Spawns this same binary as a detached child. The path is this process's own image, not input.
+    // nosemgrep: rust.lang.security.current-exe.current-exe
     let Ok(exe) = std::env::current_exe() else {
         tracing::error!("session_log: cannot resolve current_exe for detached record");
         return None;
@@ -191,7 +193,7 @@ fn run_record_with(
 fn run_record_inner(payload: RecordPayload) -> anyhow::Result<()> {
     let config_path = crate::paths::config_path()?;
     let config = crate::config::Config::load(&config_path)?;
-    let env = crate::scope::matcher::Env::detect_for_config(&config);
+    let env = crate::scope::matcher::Env::detect_for_config(&config)?;
     let active = crate::scope::evaluate(&config, &env);
     let config_dir = config_path
         .parent()

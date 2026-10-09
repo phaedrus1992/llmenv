@@ -154,11 +154,15 @@ fn detect_issue(branch: &str) -> Option<u32> {
 }
 
 /// The checked-out branch in `cwd`. `None` outside a git repo and on a detached HEAD.
+///
+/// `LC_ALL=C` keeps git's stderr in English, because [`branch_failure_is_unexpected`] matches an
+/// English message.
 #[must_use]
 pub fn git_branch(cwd: &Path) -> Option<String> {
     let output = match llmenv_git::secure_git()
         .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
         .current_dir(cwd)
+        .env("LC_ALL", "C")
         .output()
     {
         Ok(output) => output,

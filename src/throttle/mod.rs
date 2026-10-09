@@ -44,12 +44,41 @@ fn store_active_throttle_with_state_dir(
             crate::paths::write_owner_only_atomic(&path, json.as_bytes())
                 .with_context(|| format!("writing throttle state: {}", path.display()))?;
         }
-        None => {
-            // Remove stale file; missing file = throttling off.
-            let _ = std::fs::remove_file(&path);
-        }
+        None => remove_stale_throttle(&path)?,
     }
     Ok(())
+}
+
+/// Remove a stale state file. A missing file already means throttling is off,
+/// so only other errors (for example a permission error) reach the caller.
+fn remove_stale_throttle(path: &Path) -> anyhow::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => {
+            Err(e).with_context(|| format!("removing stale throttle state: {}", path.display()))
+        }
+    }
+}
+
+/// Read the stored throttle config for the hook. A missing file means throttling
+/// is off. Any other read or parse error is returned, so the hook logs it
+/// instead of silently turning throttling off.
+fn read_throttle_config(path: &Path) -> anyhow::Result<Option<Throttle>> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(e).with_context(|| format!("reading throttle state: {}", path.display()));
+        }
+    };
+    let cfg = serde_json::from_slice(&bytes).with_context(|| {
+        format!(
+            "parsing throttle state {}: delete the file, or run `llmenv export` to rewrite it",
+            path.display()
+        )
+    })?;
+    Ok(Some(cfg))
 }
 
 fn throttle_state_path(state_dir: &Path) -> std::path::PathBuf {
@@ -171,6 +200,8 @@ pub(crate) fn run_throttle_hook(event: &str) {
     if let Err(e) = run_throttle_inner(event, &hook_event_name) {
         // `{e:#}` keeps the cause chain. The plain form prints only the outer context.
         eprintln!("llmenv throttle: {e:#}");
+        // The file log is the only record a user can read later, so the error goes there too.
+        tracing::error!("llmenv throttle failed: {e:#}");
     }
 }
 
@@ -178,15 +209,8 @@ fn run_throttle_inner(event: &str, hook_event_name: &str) -> anyhow::Result<()> 
     let state_dir = crate::paths::state_dir()?;
     let path = throttle_state_path(&state_dir);
 
-    let cfg: Throttle = match std::fs::read(&path) {
-        Err(_) => return Ok(()), // No state file = throttling off.
-        Ok(bytes) => match serde_json::from_slice(&bytes) {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                eprintln!("llmenv throttle: failed to parse throttle.json (skipping): {e}");
-                return Ok(());
-            }
-        },
+    let Some(cfg) = read_throttle_config(&path)? else {
+        return Ok(()); // No state file = throttling off.
     };
 
     let Some(backend) = backend_for(&cfg) else {
@@ -469,6 +493,67 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    proptest! {
+        // Any config that the store writes reads back unchanged.
+        #[test]
+        fn stored_throttle_reads_back_unchanged(
+            backend in "[a-z]{1,8}",
+            when in proptest::collection::vec("[a-z]{1,8}", 0..4),
+            cache_ttl in 0u64..100_000,
+            max_wait in 0u64..100_000,
+            soft_threshold in 0u64..=100,
+        ) {
+            let tmp = tempfile::tempdir().unwrap();
+            let cfg = Throttle { backend, when, cache_ttl, max_wait, soft_threshold };
+            store_active_throttle_with_state_dir(Some(&cfg), tmp.path()).unwrap();
+            let back = read_throttle_config(&throttle_state_path(tmp.path())).unwrap();
+            prop_assert_eq!(serde_json::to_value(back.unwrap()).unwrap(), serde_json::to_value(&cfg).unwrap());
+        }
+    }
+
+    #[test]
+    fn store_none_with_no_state_file_is_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        store_active_throttle_with_state_dir(None, tmp.path()).unwrap();
+    }
+
+    #[test]
+    fn store_none_on_directory_at_state_path_returns_error_with_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = throttle_state_path(tmp.path());
+        std::fs::create_dir(&path).unwrap();
+
+        let err = store_active_throttle_with_state_dir(None, tmp.path()).unwrap_err();
+        assert!(format!("{err:#}").contains(&path.display().to_string()));
+    }
+
+    #[test]
+    fn read_throttle_config_missing_file_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let got = read_throttle_config(&throttle_state_path(tmp.path())).unwrap();
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn read_throttle_config_unreadable_path_returns_error_with_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = throttle_state_path(tmp.path());
+        std::fs::create_dir(&path).unwrap();
+
+        let err = read_throttle_config(&path).unwrap_err();
+        assert!(format!("{err:#}").contains(&path.display().to_string()));
+    }
+
+    #[test]
+    fn read_throttle_config_corrupt_file_returns_error_with_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = throttle_state_path(tmp.path());
+        std::fs::write(&path, b"{ not json").unwrap();
+
+        let err = read_throttle_config(&path).unwrap_err();
+        assert!(format!("{err:#}").contains(&path.display().to_string()));
     }
 
     /// A sink whose every write fails with the given error kind.
