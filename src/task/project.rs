@@ -16,8 +16,8 @@ use sha2::{Digest, Sha256};
 /// Propagates a failure to read the current working directory.
 pub(crate) fn current_tag() -> std::io::Result<String> {
     let cwd = std::env::current_dir()?;
-    let home = std::env::var("HOME")
-        .ok()
+    let home = crate::env_var::utf8_var("HOME")
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
         .filter(|h| !h.is_empty())
         .map(std::path::PathBuf::from);
     Ok(resolve_project_tag(&cwd, home.as_deref()))

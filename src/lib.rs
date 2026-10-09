@@ -18,6 +18,7 @@ pub(crate) mod cache_trace;
 pub mod cli;
 pub mod config;
 pub(crate) mod consolidation;
+pub(crate) mod env_var;
 pub mod git;
 pub mod hook_run;
 pub mod icm;
