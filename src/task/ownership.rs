@@ -47,18 +47,40 @@ pub(crate) fn caller_session(
             picked.id
         )),
         Err(err) => Caller::Unidentified(
-            err.ambiguity_message("set CLAUDE_CODE_SESSION_ID, or pass --other-session")
-                .unwrap_or_else(|| "no session of yours is open in this project".to_string()),
+            err.ambiguity_message(
+                "set CLAUDE_CODE_SESSION_ID, or pass --other-session <SESSION_ID>",
+            )
+            .unwrap_or_else(|| "no session of yours is open in this project".to_string()),
         ),
     })
+}
+
+/// The audit note for an `--other-session` override. The caller records it with
+/// [`OverrideNote::record`] after the command succeeds, so a refused or failed
+/// command leaves no note behind.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct OverrideNote {
+    slug: String,
+    text: String,
+}
+
+impl OverrideNote {
+    /// Appends the note to the task.
+    ///
+    /// # Errors
+    /// Errors if the task cannot be read or written.
+    pub(crate) fn record(&self, state_dir: &Path) -> anyhow::Result<()> {
+        super::note_task(state_dir, &self.slug, &self.text)?;
+        Ok(())
+    }
 }
 
 /// Refuse to act on the task `input` when it belongs to a session other than the
 /// caller's. A task with no session is never refused.
 ///
 /// `other_session` is the owning session id named by `--other-session`. The
-/// override applies only when that id is the task's owner. An acted-on task
-/// gets a note that names the caller, so the override leaves a record.
+/// override applies only when that id is the task's owner. It returns the note
+/// that records the override. This function writes nothing itself.
 ///
 /// # Errors
 /// Errors if `input` does not resolve to a task, the store cannot be read, the
@@ -69,33 +91,33 @@ pub(crate) fn ensure_task_is_ours(
     input: &str,
     caller: &Caller,
     other_session: Option<&str>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<OverrideNote>> {
     let slug = resolve_identifier(state_dir, input)?;
     let task = super::load_task(state_dir, &slug)?;
     let Some(owner) = task.session.as_deref() else {
-        return Ok(());
+        return Ok(None);
     };
     if matches!(caller, Caller::Session(id) if id == owner) {
-        return Ok(());
+        return Ok(None);
     }
     match other_session {
         Some(named) if named == owner => {
-            let note = format!(
+            let text = format!(
                 "acted on with --other-session {owner}; caller: {}",
                 caller.describe()
             );
-            super::note_task(state_dir, &slug, &note)?;
-            Ok(())
+            Ok(Some(OverrideNote { slug, text }))
         }
         Some(named) => anyhow::bail!(
-            "task '{slug}' belongs to session '{owner}', not '{named}'; \
-             pass --other-session {owner} to act on it"
+            "task '{slug}' belongs to session '{owner}', not '{named}'. \
+             Pass the owning session's id to --other-session."
         ),
         None => refuse_unless_caller(
             owner,
             caller,
             &format!("task '{slug}' belongs to session '{owner}'"),
-        ),
+        )
+        .map(|()| None),
     }
 }
 
@@ -133,7 +155,10 @@ fn refuse_unless_caller(owner: &str, caller: &Caller, what: &str) -> anyhow::Res
         Caller::Session(id) => format!("your session is '{id}'"),
         Caller::Unidentified(reason) => reason.clone(),
     };
-    anyhow::bail!("{what}, and {why}. Pass --other-session {owner} to act on it anyway.")
+    anyhow::bail!(
+        "{what}, and {why}. To act on it anyway, pass the owning session's id as \
+         --other-session <SESSION_ID>."
+    )
 }
 
 #[cfg(test)]
@@ -252,13 +277,20 @@ mod tests {
     }
 
     #[test]
-    fn other_session_override_leaves_a_note_naming_the_caller() {
+    fn other_session_override_notes_the_caller_only_after_record() {
         let dir = TempDir::new().expect("tempdir");
         let (slug, owner) = open_task_in_session(dir.path());
         let caller = Caller::Session("some-other-session".to_string());
 
-        ensure_task_is_ours(dir.path(), &slug, &caller, Some(&owner))
-            .expect("the named owner must allow the action");
+        let pending = ensure_task_is_ours(dir.path(), &slug, &caller, Some(&owner))
+            .expect("the named owner must allow the action")
+            .expect("an override returns the note to record");
+        assert!(
+            load_task(dir.path(), &slug).expect("load").notes.is_empty(),
+            "the guard alone must not write a note"
+        );
+
+        pending.record(dir.path()).expect("record");
 
         let task = load_task(dir.path(), &slug).expect("load");
         let noted = task

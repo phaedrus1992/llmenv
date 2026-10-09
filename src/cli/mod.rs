@@ -3665,7 +3665,7 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             reopen,
             other_session,
         } => {
-            guard_task(&state_dir, &id, other_session.as_deref())?;
+            let audit = guard_task(&state_dir, &id, other_session.as_deref())?;
             if reopen {
                 crate::task::reopen_task(&state_dir, &id)?;
             }
@@ -3679,13 +3679,14 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 }
             })?;
             println!("Started '{}' — now {:?}", task.slug, task.state);
+            record_override(&state_dir, audit)?;
         }
         TaskCommand::Done {
             id,
             force,
             other_session,
         } => {
-            guard_task(&state_dir, &id, other_session.as_deref())?;
+            let audit = guard_task(&state_dir, &id, other_session.as_deref())?;
             let completed = crate::task::complete_task(&state_dir, &id, force)?;
             println!("Completed '{}'", completed.task.slug);
             if let Some(note) = completed.skipped_start_note() {
@@ -3694,13 +3695,18 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             if let Some(note) = completed.undone_children_note() {
                 println!("{note}");
             }
+            record_override(&state_dir, audit)?;
         }
         TaskCommand::Reopen { ids, other_session } => {
-            for id in &ids {
-                guard_task(&state_dir, id, other_session.as_deref())?;
-            }
+            let audits = ids
+                .iter()
+                .map(|id| guard_task(&state_dir, id, other_session.as_deref()))
+                .collect::<anyhow::Result<Vec<_>>>()?;
             for task in crate::task::reopen_tasks(&state_dir, &ids)? {
                 println!("Reopened '{}' — now {:?}", task.slug, task.state);
+            }
+            for audit in audits {
+                record_override(&state_dir, audit)?;
             }
         }
         TaskCommand::Ls {
@@ -3774,7 +3780,7 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             text,
             other_session,
         } => {
-            guard_task(&state_dir, &id, other_session.as_deref())?;
+            let audit = guard_task(&state_dir, &id, other_session.as_deref())?;
             let text = match text {
                 Some(t) => t,
                 None => {
@@ -3786,13 +3792,14 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             };
             let task = crate::task::note_task(&state_dir, &id, &text)?;
             println!("Noted on '{}'", task.slug);
+            record_override(&state_dir, audit)?;
         }
         TaskCommand::Wait {
             id,
             reason,
             other_session,
         } => {
-            guard_task(&state_dir, &id, other_session.as_deref())?;
+            let audit = guard_task(&state_dir, &id, other_session.as_deref())?;
             let reason = match reason {
                 Some(r) => r,
                 None => {
@@ -3804,19 +3811,21 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             };
             let task = crate::task::wait_task(&state_dir, &id, &reason)?;
             println!("Marked '{}' waiting", task.slug);
+            record_override(&state_dir, audit)?;
         }
         TaskCommand::Block {
             id,
             on,
             other_session,
         } => {
-            guard_task(&state_dir, &id, other_session.as_deref())?;
+            let audit = guard_task(&state_dir, &id, other_session.as_deref())?;
             let task = crate::task::block_task(&state_dir, &id, &on)?;
             println!(
                 "'{}' is now blocked on: {}",
                 task.slug,
                 task.blocked_on.join(", ")
             );
+            record_override(&state_dir, audit)?;
         }
         TaskCommand::Edit {
             id,
@@ -3830,7 +3839,7 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             detail,
             other_session,
         } => {
-            guard_task(&state_dir, &id, other_session.as_deref())?;
+            let audit = guard_task(&state_dir, &id, other_session.as_deref())?;
             let detail = detail.resolve()?;
             let add_note = match add_note.as_deref() {
                 Some("") => {
@@ -3854,6 +3863,7 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             };
             let task = crate::task::edit_task(&state_dir, &id, &edit)?;
             println!("Updated '{}'", task.slug);
+            record_override(&state_dir, audit)?;
         }
         TaskCommand::Clear {
             ids,
@@ -3864,6 +3874,7 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 guard_session(&state_dir, session_id, other_session.as_deref())?;
             }
             for id in &ids {
+                // `clear` deletes the task, so a pending override note has nowhere to live.
                 guard_task(&state_dir, id, other_session.as_deref())?;
             }
             if let Some(session_id) = session {
@@ -3908,7 +3919,7 @@ fn guard_task(
     state_dir: &std::path::Path,
     id: &str,
     other_session: Option<&str>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<crate::task::ownership::OverrideNote>> {
     let caller = caller_session_for_task(state_dir)?;
     crate::task::ownership::ensure_task_is_ours(state_dir, id, &caller, other_session)
 }
@@ -3921,6 +3932,17 @@ fn guard_session(
 ) -> anyhow::Result<()> {
     let caller = caller_session_for_task(state_dir)?;
     crate::task::ownership::ensure_session_is_ours(id, &caller, other_session)
+}
+
+/// Appends the pending `--other-session` note, once the command has succeeded.
+fn record_override(
+    state_dir: &std::path::Path,
+    audit: Option<crate::task::ownership::OverrideNote>,
+) -> anyhow::Result<()> {
+    match audit {
+        Some(note) => note.record(state_dir),
+        None => Ok(()),
+    }
 }
 
 /// What `task show --current`/`--next` resolves to (#1117).
