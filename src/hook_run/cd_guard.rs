@@ -54,13 +54,17 @@ pub fn handle_pre_tool_use(stdin_payload: &serde_json::Value, cfg: &CdGuard) -> 
 ///
 /// The parts come from the shared splitter that the commit gate uses, so a
 /// `cd` inside `$( )` or `( )` is seen (#2619). A command nested too deeply
-/// to split counts as one, because an advisory is cheap to show.
+/// to split gets no advisory. The advisory would claim a `cd` that the parser
+/// never checked, so the parse failure is logged instead.
 fn command_uses_cd(command: &str) -> bool {
     match shell_segments(command) {
         Ok(segments) => segments
             .iter()
             .any(|words| program_words(words).first() == Some(&"cd")),
-        Err(NestingTooDeep) => true,
+        Err(NestingTooDeep) => {
+            tracing::error!("cd guard: command nests too deep to check for cd; no advisory");
+            false
+        }
     }
 }
 
@@ -120,6 +124,12 @@ mod tests {
     #[test]
     fn detects_cd_inside_a_brace_group() {
         assert!(command_uses_cd("{ cd /tmp; ls; }"));
+    }
+
+    #[test]
+    fn a_command_too_deep_to_split_gets_no_cd_advisory() {
+        let nested = format!("{}cd /tmp{}", "$(".repeat(40), ")".repeat(40));
+        assert!(!command_uses_cd(&nested));
     }
 
     #[test]
