@@ -322,10 +322,9 @@ fn sync_git(
     // Clean up on error so the next invocation retries the clone instead of hitting
     // the pull path (fixes #537).
     if head.is_none() && dest.join(".git").exists() {
-        let _ = std::fs::remove_dir_all(&dest);
+        let note = broken_clone_note(&dest);
         return Err(SyncError::Other(anyhow::anyhow!(
-            "marketplace '{}': unable to resolve git HEAD \
-             (corrupted clone removed; run sync again to retry)",
+            "marketplace '{}': unable to resolve git HEAD ({note})",
             m.name
         )));
     }
@@ -703,10 +702,9 @@ fn sync_external_plugin_with(
     // Clean up on error so the next invocation retries the clone instead of hitting
     // the pull path (fixes #537).
     if head.is_none() && dest.join(".git").exists() {
-        let _ = std::fs::remove_dir_all(&dest);
+        let note = broken_clone_note(&dest);
         return Err(SyncError::Other(anyhow::anyhow!(
-            "plugin '{plugin}@{marketplace}': unable to resolve git HEAD \
-             (corrupted clone removed; run sync again to retry)"
+            "plugin '{plugin}@{marketplace}': unable to resolve git HEAD ({note})"
         )));
     }
 
@@ -714,6 +712,20 @@ fn sync_external_plugin_with(
         install_location: dest,
         head,
     })
+}
+
+/// Remove a clone whose git HEAD does not resolve. Returns the note for the error message. The note
+/// claims a removal only when the removal succeeded, so the user is never told a broken clone is
+/// gone when it is still on disk.
+fn broken_clone_note(dest: &std::path::Path) -> String {
+    match std::fs::remove_dir_all(dest) {
+        Ok(()) => "corrupted clone removed; run sync again to retry".to_string(),
+        Err(e) => format!(
+            "corrupted clone at {} could not be removed: {e}; \
+             delete it by hand, then run sync again",
+            dest.display()
+        ),
+    }
 }
 
 /// [`sync_external_plugin`] for a parsed manifest entry. For a `git-subdir` source the install
@@ -1039,6 +1051,26 @@ pub(crate) fn git_peeled_ref(repo: &Path, ref_name: &str) -> Option<String> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn broken_clone_note_claims_removal_only_when_the_clone_is_gone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let clone = tmp.path().join("clone");
+        std::fs::create_dir_all(clone.join(".git")).unwrap();
+        let note = broken_clone_note(&clone);
+        assert!(note.contains("corrupted clone removed"), "{note}");
+        assert!(!clone.exists());
+    }
+
+    #[test]
+    fn broken_clone_note_reports_a_failed_removal_with_the_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("never-created");
+        let note = broken_clone_note(&missing);
+        assert!(!note.contains("corrupted clone removed"), "{note}");
+        assert!(note.contains("could not be removed"), "{note}");
+        assert!(note.contains(&missing.display().to_string()), "{note}");
+    }
 
     #[test]
     fn path_source_resolves_in_place() {

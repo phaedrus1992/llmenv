@@ -391,6 +391,16 @@ fn model_value_from_env(
     }
 }
 
+/// The problem that an `ANTHROPIC_MODEL` value causes for the `anthropic-api` backend, or `None`
+/// when the backend accepts it. `llmenv doctor` shows this, because the detached run that hits
+/// the problem writes only to its own log.
+pub(crate) fn model_problem(value: Result<String, std::env::VarError>) -> Option<String> {
+    model_value_from_env(value)
+        .and_then(|model| resolve_api_model(model.as_deref()))
+        .err()
+        .map(|e| format!("{e:#}"))
+}
+
 /// Post one Messages API request to `url`. `url` is a parameter so tests can use a mock server.
 async fn post_messages(
     url: &str,
@@ -939,6 +949,31 @@ mod tests {
         assert!(
             msg.contains("ANTHROPIC_API_KEY is not valid UTF-8"),
             "{msg}"
+        );
+    }
+
+    #[test]
+    fn model_problem_is_none_when_the_model_is_unset_or_a_full_id() {
+        assert_eq!(model_problem(Err(std::env::VarError::NotPresent)), None);
+        assert_eq!(model_problem(Ok("claude-sonnet-5".to_string())), None);
+    }
+
+    #[test]
+    fn model_problem_names_an_alias_and_the_fix() {
+        let problem = model_problem(Ok("opus".to_string())).expect("an alias is a problem");
+        assert!(
+            problem.contains("\"opus\" is not a full model ID"),
+            "{problem}"
+        );
+        assert!(problem.contains("claude-sonnet-5"), "{problem}");
+    }
+
+    #[test]
+    fn model_problem_names_an_empty_value() {
+        let problem = model_problem(Ok(String::new())).expect("an empty value is a problem");
+        assert!(
+            problem.contains("ANTHROPIC_MODEL is set but empty"),
+            "{problem}"
         );
     }
 
