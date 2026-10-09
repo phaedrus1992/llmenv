@@ -764,7 +764,8 @@ fn ancestors_to_start(state_dir: &Path, child: &Task, force: bool) -> anyhow::Re
             Err(e) if is_not_found(&e) => break,
             Err(e) => {
                 return Err(e.context(format!(
-                    "cannot start '{}': ancestor '{parent_slug}' is unreadable",
+                    "cannot start '{}': ancestor '{parent_slug}' is unreadable. Repair or \
+                     remove its task file, then start again",
                     child.slug
                 )));
             }
