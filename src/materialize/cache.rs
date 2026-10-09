@@ -439,7 +439,7 @@ fn restore_dir_write_bits(dir: &Path) {
             && let Err(e) =
                 std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode | 0o700))
         {
-            tracing::warn!(
+            tracing::error!(
                 "cannot make {} writable for cache cleanup: {e}; cleanup of its contents may fail",
                 dir.display()
             );
@@ -447,7 +447,7 @@ fn restore_dir_write_bits(dir: &Path) {
         let entries = match std::fs::read_dir(dir) {
             Ok(entries) => entries,
             Err(e) => {
-                tracing::warn!("cannot list {} during cache cleanup: {e}", dir.display());
+                tracing::error!("cannot list {} during cache cleanup: {e}", dir.display());
                 return;
             }
         };
