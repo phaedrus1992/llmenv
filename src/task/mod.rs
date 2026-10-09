@@ -1091,18 +1091,19 @@ fn reject_cycle(state_dir: &Path, slug: &str, new_parent: &str) -> anyhow::Resul
         if !visited.insert(current.clone()) {
             return Ok(());
         }
-        match load_task(state_dir, &current) {
-            Ok(task) => match task.parent {
-                Some(p) => current = p,
-                None => return Ok(()),
-            },
+        let task = match load_task(state_dir, &current) {
+            Ok(task) => task,
             Err(e) if is_not_found(&e) => return Ok(()),
             Err(e) => {
                 return Err(e.context(format!(
                     "cannot check parent '{new_parent}' of '{slug}': ancestor '{current}' is unreadable"
                 )));
             }
-        }
+        };
+        let Some(parent) = task.parent else {
+            return Ok(());
+        };
+        current = parent;
     }
 }
 
