@@ -1,7 +1,7 @@
 pub use llmenv_task::{
     Completed, DisplayRow, NewTask, ParentSpec, Placement, SessionChoice, Task, TaskEdit,
     TaskState, Tracking, add_task, add_task_for_session, add_task_with, block_task, complete_task,
-    current_wip_title, delete_task, display_rows, edit_task, filter_by_state,
+    complete_task_by, current_wip_title, delete_task, display_rows, edit_task, filter_by_state,
     filter_tasks_for_project, list_tasks, load_task, note_task, render_task_list, reopen_task,
     reopen_tasks, resolve_current_task, resolve_identifier, resolve_next_task,
     session_start_reminder, start_task, stop_hook_reminder, tasks_dir, tracking, try_list_tasks,
