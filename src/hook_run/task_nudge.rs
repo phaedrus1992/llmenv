@@ -1232,6 +1232,23 @@ mod tests {
     }
 
     #[test]
+    fn process_and_backtick_nesting_are_bounded_too() {
+        let process = |n: usize| format!("{}a{}", "<(".repeat(n), ")".repeat(n));
+        assert!(split_substitutions(&process(MAX_SUBSTITUTION_DEPTH)).is_ok());
+        assert_eq!(
+            split_substitutions(&process(MAX_SUBSTITUTION_DEPTH + 1)),
+            Err(NestingTooDeep)
+        );
+        // A backtick is one level, and the `$(` inside it adds one more per level.
+        let backtick = |n: usize| format!("`{}a{}`", "$(".repeat(n), ")".repeat(n));
+        assert!(split_substitutions(&backtick(MAX_SUBSTITUTION_DEPTH - 1)).is_ok());
+        assert_eq!(
+            split_substitutions(&backtick(MAX_SUBSTITUTION_DEPTH)),
+            Err(NestingTooDeep)
+        );
+    }
+
+    #[test]
     fn a_too_deep_task_end_before_a_commit_is_denied_by_the_gate() {
         let nested = format!(
             "{}a{}",
@@ -1322,6 +1339,10 @@ mod tests {
             ("tee >(a)", "tee ;a;"),
             ("echo \"<(a)\"", "echo \"<(a)\""),
             ("echo '>(a)'", "echo '>(a)'"),
+            // A separator inside quotes is text, not a segment boundary.
+            ("echo 'a;b' $(c)", ";c;echo 'a;b' "),
+            ("echo \"a;b\" $(c)", ";c;echo \"a;b\" "),
+            ("echo \"$(c)\"", ";c;echo \"\""),
             // In single quotes a backslash is literal, so the quote after it closes the string.
             ("echo 'a\\' $(a)", ";a;echo 'a\\' "),
         ] {
@@ -1336,6 +1357,12 @@ mod tests {
             ("a(b)c)d", "a(b)c", "d"),
             ("(x)(y))tail", "(x)(y)", "tail"),
             ("abc", "abc", ""),
+            // A quote hides the closing paren, and a close quote ends the hiding.
+            ("echo 'a)b' c)rest", "echo 'a)b' c", "rest"),
+            ("echo \\) x)rest", "echo \\) x", "rest"),
+            ("echo \"'\" ) rest", "echo \"'\" ", " rest"),
+            ("echo \")\" x)tail", "echo \")\" x", "tail"),
+            ("echo \"(\" ) x)tail", "echo \"(\" ", " x)tail"),
         ] {
             let mut chars = text.chars().peekable();
             assert_eq!(take_until_close(&mut chars), inner, "{text:?}");
