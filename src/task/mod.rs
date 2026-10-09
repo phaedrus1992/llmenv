@@ -896,6 +896,14 @@ pub(crate) fn complete_task(
             anyhow::bail!("{}", relation::undone_children_message(&slug, &undone));
         }
         let undone_children: Vec<String> = undone.iter().map(|t| t.slug.clone()).collect();
+        // A repeat done changes nothing, so `updated_at` keeps the time of the first close (#2585).
+        if prior == TaskState::Done {
+            return Ok(Completed {
+                task,
+                prior,
+                undone_children,
+            });
+        }
         task.state = TaskState::Done;
         task.updated_at = now_rfc3339();
         save_task(state_dir, &task)?;
@@ -907,6 +915,30 @@ pub(crate) fn complete_task(
     })?;
     touch_task_session(state_dir, &completed.task);
     Ok(completed)
+}
+
+/// Keep a record of a `done --force` that closed a task from `open`, `wip`, or `waiting` (#2585).
+/// The state field alone no longer shows the prior state after the close, so the note keeps it,
+/// with the time and the caller. A plain `done`, or a repeat `done`, adds no note.
+///
+/// # Errors
+/// Errors when the note cannot be saved.
+pub(crate) fn record_forced_close(
+    state_dir: &Path,
+    completed: &Completed,
+    force: bool,
+    caller: &ownership::Caller,
+) -> anyhow::Result<()> {
+    if !force || completed.prior == TaskState::Done {
+        return Ok(());
+    }
+    let prior = format!("{:?}", completed.prior).to_lowercase();
+    let text = format!(
+        "Closed by done --force from {prior} (by {}).",
+        caller.describe()
+    );
+    note_task(state_dir, &completed.task.slug, &text)?;
+    Ok(())
 }
 
 /// Append a timestamped progress note to a task.
@@ -3236,6 +3268,61 @@ mod tests {
     }
 
     // --- done without start, reopen (#2338) ---
+
+    #[test]
+    fn forced_close_of_an_open_task_keeps_the_prior_state_in_a_note() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Never started", None).expect("test");
+        let completed = complete_task(dir.path(), &task.slug, true).expect("test");
+        let caller = ownership::Caller::Unidentified("test".into());
+        record_forced_close(dir.path(), &completed, true, &caller).expect("test");
+        let stored = load_task(dir.path(), &task.slug).expect("test");
+        let note = stored.notes.last().expect("forced close leaves a note");
+        assert!(
+            note.text.contains("from open"),
+            "prior state missing: {}",
+            note.text
+        );
+        assert!(
+            note.text.contains("unidentified"),
+            "caller missing: {}",
+            note.text
+        );
+    }
+
+    #[test]
+    fn plain_done_leaves_no_forced_close_note() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Started", None).expect("test");
+        start_task(dir.path(), &task.slug, false).expect("test");
+        let completed = complete_task(dir.path(), &task.slug, false).expect("test");
+        let caller = ownership::Caller::Unidentified("test".into());
+        record_forced_close(dir.path(), &completed, false, &caller).expect("test");
+        assert!(
+            load_task(dir.path(), &task.slug)
+                .expect("test")
+                .notes
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn repeat_done_keeps_updated_at_and_adds_no_note() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Closed once", None).expect("test");
+        done_task(dir.path(), &task.slug).expect("test");
+        // Age the stored time, so a repeat close that rewrites it is visible even within one second.
+        let mut stored = load_task(dir.path(), &task.slug).expect("test");
+        "2000-01-01T00:00:00Z".clone_into(&mut stored.updated_at);
+        save_task(dir.path(), &stored).expect("test");
+        let completed = complete_task(dir.path(), &task.slug, true).expect("test");
+        assert_eq!(completed.task.state, TaskState::Done);
+        let caller = ownership::Caller::Unidentified("test".into());
+        record_forced_close(dir.path(), &completed, true, &caller).expect("test");
+        let after = load_task(dir.path(), &task.slug).expect("test");
+        assert_eq!(after.updated_at, "2000-01-01T00:00:00Z");
+        assert!(after.notes.is_empty(), "repeat done must not add a note");
+    }
 
     #[test]
     fn complete_task_refuses_an_open_task_and_names_the_fix() {

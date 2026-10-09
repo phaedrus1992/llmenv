@@ -3682,6 +3682,8 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
         } => {
             let audit = guard_task(&state_dir, &id, other_session.as_deref())?;
             let completed = crate::task::complete_task(&state_dir, &id, force)?;
+            let caller = caller_session_for_task(&state_dir)?;
+            crate::task::record_forced_close(&state_dir, &completed, force, &caller)?;
             println!("Completed '{}'", completed.task.slug);
             if let Some(note) = completed.skipped_start_note() {
                 println!("{note}");
