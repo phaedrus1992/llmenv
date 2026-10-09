@@ -14,7 +14,7 @@ pub mod core_text {
 
 pub mod ownership {
     pub use llmenv_task::ownership::{
-        Caller, caller_session, ensure_session_is_ours, ensure_task_is_ours,
+        Caller, OverrideNote, caller_session, ensure_session_is_ours, ensure_task_is_ours,
     };
 }
 

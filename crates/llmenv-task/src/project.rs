@@ -16,10 +16,18 @@ use sha2::{Digest, Sha256};
 /// Propagates a failure to read the current working directory.
 pub fn current_tag() -> std::io::Result<String> {
     let cwd = std::env::current_dir()?;
-    let home = std::env::var("HOME")
-        .ok()
-        .filter(|h| !h.is_empty())
-        .map(std::path::PathBuf::from);
+    let home = match std::env::var("HOME") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "cannot compute the task project tag: HOME is not valid UTF-8",
+            ));
+        }
+    }
+    .filter(|h| !h.is_empty())
+    .map(std::path::PathBuf::from);
     Ok(resolve_project_tag(&cwd, home.as_deref()))
 }
 

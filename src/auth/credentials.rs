@@ -416,8 +416,9 @@ const SECURITY_BIN: &str = "/usr/bin/security";
 
 #[cfg(target_os = "macos")]
 fn keychain_account() -> anyhow::Result<String> {
-    std::env::var("USER")
-        .map_err(|_| anyhow::anyhow!("USER is unset; cannot address the keychain credential item"))
+    crate::env_var::utf8_var("USER")?.ok_or_else(|| {
+        anyhow::anyhow!("USER is unset; cannot address the keychain credential item")
+    })
 }
 
 /// `security find-generic-password`'s exit code for "no matching item"
