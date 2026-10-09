@@ -4761,30 +4761,57 @@ fn run_plugin_sync() -> anyhow::Result<()> {
     let config = Config::load(&config_path)?;
     let cache_root = PathBuf::from(paths::expand_tilde(&config.cache.cache_dir));
 
-    let context_mode_enabled = config.context_mode_enabled();
-
-    if config.marketplace.is_empty() && !context_mode_enabled {
+    if config.marketplace.is_empty() && !config.context_mode_enabled() {
         eprintln!("No marketplaces configured.");
         return Ok(());
     }
 
+    // Select with the same host tags and resolver the render path uses, so only
+    // marketplaces and plugins of an active plugin-collection are fetched (#2615).
+    let env = crate::scope::matcher::Env::detect_for_config(&config)?;
+    let active = crate::scope::evaluate(&config, &env);
+    let resolved = crate::plugins::resolve::resolve_plugins(&config, &active.non_project_tags())
+        .context("resolving plugins")?;
+
+    sync_selected_marketplaces(&config, &cache_root, &resolved.marketplaces)?;
+    check_selected_plugins(&cache_root, &resolved.plugins)
+}
+
+/// Sync each selected marketplace into the cache and print its location and HEAD.
+/// A path marketplace whose checkout is missing on this host is skipped (#2513).
+fn sync_selected_marketplaces(
+    config: &Config,
+    cache_root: &Path,
+    selected: &[crate::plugins::resolve::ResolvedMarketplace],
+) -> anyhow::Result<()> {
     let mut skipped: Vec<&str> = Vec::new();
-    for m in &config.marketplace {
-        let state = match crate::plugins::cache::sync_marketplace(&cache_root, m, true) {
+    for rm in selected {
+        // A built-in injected marketplace (context-mode) is not in the config, so
+        // it is synced from the resolved source instead.
+        let transient;
+        let market = match config.marketplace.iter().find(|m| m.name == rm.name) {
+            Some(m) => m,
+            None => {
+                transient = crate::config::Marketplace {
+                    name: rm.name.clone(),
+                    source: rm.source.clone(),
+                };
+                &transient
+            }
+        };
+        let state = match crate::plugins::cache::sync_marketplace(cache_root, market, true) {
             Ok(state) => state,
-            // A path source only exists on the host that has the checkout, so a missing one
-            // is skipped and the sync goes on (#2513).
             Err(e @ crate::plugins::cache::SyncError::PathMissing { .. }) => {
-                eprintln!("warning: skipping marketplace '{}': {e}", m.name);
-                skipped.push(&m.name);
+                eprintln!("warning: skipping marketplace '{}': {e}", rm.name);
+                skipped.push(&rm.name);
                 continue;
             }
-            Err(e) => return Err(e).with_context(|| format!("syncing marketplace '{}'", m.name)),
+            Err(e) => return Err(e).with_context(|| format!("syncing marketplace '{}'", rm.name)),
         };
         let head = state.head.as_deref().unwrap_or("(local path)");
         println!(
             "✓ {} → {} [{}]",
-            m.name,
+            rm.name,
             state.install_location.display(),
             head
         );
@@ -4798,64 +4825,43 @@ fn run_plugin_sync() -> anyhow::Result<()> {
             skipped.join(", ")
         );
     }
+    Ok(())
+}
 
-    // Sync the built-in context-mode marketplace when the feature is enabled
-    // and the user has not already declared a context-mode marketplace entry
-    // (which would have been handled by the loop above).
-    let user_declared_context_mode = config
-        .marketplace
-        .iter()
-        .any(|m| m.name == crate::config::CONTEXT_MODE_MARKETPLACE);
-    if context_mode_enabled && !user_declared_context_mode {
-        let builtin = crate::config::Marketplace {
-            name: crate::config::CONTEXT_MODE_MARKETPLACE.to_string(),
-            source: crate::config::CONTEXT_MODE_SOURCE.to_string(),
-        };
-        let state = crate::plugins::cache::sync_marketplace(&cache_root, &builtin, true)
-            .with_context(|| format!("syncing built-in marketplace '{}'", builtin.name))?;
-        let head = state.head.as_deref().unwrap_or("(local path)");
-        println!(
-            "✓ {} → {} [{}]",
-            builtin.name,
-            state.install_location.display(),
-            head
-        );
-    }
-
-    // Sync external plugin payloads: plugins whose source in marketplace.json is
-    // an external git URL (not a relative path within the marketplace clone).
-    let all_plugin_refs: std::collections::HashSet<(String, String)> = config
-        .plugin_collection
-        .iter()
-        .flat_map(|c| c.plugins.iter())
-        .filter_map(|p| crate::config::split_plugin_ref(p))
-        .map(|(mkt, plugin)| (mkt.to_string(), plugin.to_string()))
-        .collect();
-
+/// Check that each selected plugin exists in its marketplace manifest, and sync the
+/// payload of each external plugin (a git URL source, not a path in the clone).
+fn check_selected_plugins(
+    cache_root: &Path,
+    selected: &[crate::plugins::resolve::ResolvedPlugin],
+) -> anyhow::Result<()> {
     let mut missing_plugins: Vec<String> = Vec::new();
-    for (mkt_name, plugin_name) in &all_plugin_refs {
-        let mkt_path = crate::plugins::cache::marketplace_path(&cache_root, mkt_name);
+    for p in selected {
+        let mkt_path = crate::plugins::cache::marketplace_path(cache_root, &p.marketplace);
         let plugins = crate::plugins::cache::read_marketplace_plugins(&mkt_path)
-            .with_context(|| format!("reading marketplace manifest for '{mkt_name}'"))?;
-        let Some(entry) = plugins.iter().find(|p| p.name == *plugin_name) else {
+            .with_context(|| format!("reading marketplace manifest for '{}'", p.marketplace))?;
+        let Some(entry) = plugins.iter().find(|e| e.name == p.plugin) else {
             eprintln!(
-                "✗ {plugin_name}@{mkt_name}: not found in marketplace manifest after sync — \
-                 check that the plugin name matches an entry in {mkt_name}, and look for an \
-                 earlier warning that skipped the entry"
+                "✗ {}@{}: not found in marketplace manifest after sync — \
+                 check that the plugin name matches an entry in {}, and look for an \
+                 earlier warning that skipped the entry",
+                p.plugin, p.marketplace, p.marketplace
             );
-            missing_plugins.push(format!("{plugin_name}@{mkt_name}"));
+            missing_plugins.push(format!("{}@{}", p.plugin, p.marketplace));
             continue;
         };
         if !crate::plugins::cache::is_external_plugin_source(&entry.source) {
             continue;
         }
-        let state = crate::plugins::cache::sync_plugin_entry(&cache_root, mkt_name, entry, true)
-            .with_context(|| format!("syncing external plugin '{plugin_name}@{mkt_name}'"))?;
+        let state =
+            crate::plugins::cache::sync_plugin_entry(cache_root, &p.marketplace, entry, true)
+                .with_context(|| {
+                    format!("syncing external plugin '{}@{}'", p.plugin, p.marketplace)
+                })?;
         let head = state.head.as_deref().unwrap_or("(unknown)");
         println!(
             "✓ {}@{} (external) → {} [{}]",
-            plugin_name,
-            mkt_name,
+            p.plugin,
+            p.marketplace,
             state.install_location.display(),
             head
         );
