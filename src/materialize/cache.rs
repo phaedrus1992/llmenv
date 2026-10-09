@@ -419,7 +419,7 @@ fn remove_dir_all_forcing_writable(p: &Path) -> std::io::Result<()> {
 ///
 /// Symlinks are never followed and never chmod'd, so a link planted inside the
 /// cache can't be used to widen permissions on a target outside it — the walk
-/// stays within the tree it was handed. Errors are ignored on purpose: this is
+/// stays within the tree it was handed. Errors are logged, not returned: this is
 /// a best-effort assist for the retry in [`remove_dir_all_forcing_writable`],
 /// and the retry reports the failure that actually matters.
 fn restore_dir_write_bits(dir: &Path) {
@@ -435,11 +435,21 @@ fn restore_dir_write_bits(dir: &Path) {
         }
         let mode = meta.permissions().mode();
         // 0o700: traverse + write + read, the minimum needed to unlink children.
-        if mode & 0o700 != 0o700 {
-            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode | 0o700));
+        if mode & 0o700 != 0o700
+            && let Err(e) =
+                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode | 0o700))
+        {
+            tracing::warn!(
+                "cannot make {} writable for cache cleanup: {e}; cleanup of its contents may fail",
+                dir.display()
+            );
         }
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::warn!("cannot list {} during cache cleanup: {e}", dir.display());
+                return;
+            }
         };
         for entry in entries.flatten() {
             // `file_type()` is lstat-equivalent: a symlink reports as a symlink
