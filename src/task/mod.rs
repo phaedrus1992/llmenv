@@ -236,13 +236,6 @@ pub(crate) fn try_list_tasks(state_dir: &Path) -> anyhow::Result<Vec<Task>> {
     read_tasks(state_dir, UnreadablePolicy::Skip)
 }
 
-/// Like [`try_list_tasks`], but an unreadable task file also fails the listing. A guard that
-/// decides from every task in a session must not decide from a view with a hole in it, because
-/// the hidden file may belong to that session (#2598).
-fn try_list_tasks_strict(state_dir: &Path) -> anyhow::Result<Vec<Task>> {
-    read_tasks(state_dir, UnreadablePolicy::Fail)
-}
-
 /// What [`read_tasks`] does with a task file or directory entry that cannot be read.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum UnreadablePolicy {
@@ -295,6 +288,9 @@ fn read_tasks(state_dir: &Path, policy: UnreadablePolicy) -> anyhow::Result<Vec<
                     return Err(e.context(format!("reading task file {}", path.display())));
                 }
                 tracing::warn!(error = %e, path = %path.display(), "skipping unreadable task file");
+            }
+            Err(e) if policy == UnreadablePolicy::Fail => {
+                return Err(e.context(format!("parsing task file {}", path.display())));
             }
             Err(e) => {
                 tracing::warn!(error = %e, path = %path.display(), "skipping corrupt task file");
@@ -698,7 +694,7 @@ pub(crate) fn start_task(state_dir: &Path, input: &str, force: bool) -> anyhow::
             );
         }
         if !force && !task.blocked_on.is_empty() {
-            let all_tasks = list_tasks(state_dir);
+            let all_tasks = read_tasks(state_dir, UnreadablePolicy::Fail)?;
             let by_slug: HashMap<&str, &Task> =
                 all_tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
             let unmet: Vec<String> = task

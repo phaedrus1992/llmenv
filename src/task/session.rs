@@ -708,7 +708,7 @@ pub(super) fn try_tasks_in_session(
     state_dir: &Path,
     session_id: &str,
 ) -> anyhow::Result<Vec<Task>> {
-    Ok(super::try_list_tasks_strict(state_dir)?
+    Ok(super::read_tasks(state_dir, super::UnreadablePolicy::Fail)?
         .into_iter()
         .filter(|t| t.session.as_deref() == Some(session_id))
         .collect())
@@ -2518,6 +2518,37 @@ mod tests {
         assert!(
             load_task(dir.path(), &task.slug).is_ok(),
             "readable task was deleted"
+        );
+    }
+
+    #[test]
+    fn start_task_errors_when_a_session_task_file_is_corrupt() {
+        let dir = TempDir::new().expect("test");
+        let StartOutcome::Created(session) = start_session(
+            dir.path(),
+            Some("sprint 1"),
+            None,
+            PROJECT_A,
+            StartDecision::Auto,
+        )
+        .expect("test") else {
+            panic!("expected Created");
+        };
+        let task = add_task_for_session(
+            dir.path(),
+            "Session task",
+            ParentSpec::Detached,
+            &session.id,
+        )
+        .expect("test");
+        let corrupt = task_path(dir.path(), "corrupt-sibling");
+        std::fs::write(&corrupt, b"{ not json").expect("test");
+
+        let err = crate::task::start_task(dir.path(), &task.slug, false)
+            .expect_err("queue guard passed with a corrupt session task");
+        assert!(
+            format!("{err:#}").contains(&corrupt.display().to_string()),
+            "{err:#}"
         );
     }
 
