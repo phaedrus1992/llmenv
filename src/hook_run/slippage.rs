@@ -11,7 +11,9 @@
 //! enforcement.
 
 use crate::config::SlippageControl;
-use crate::hook_run::task_nudge::{NestingTooDeep, shell_segments};
+use crate::hook_run::task_nudge::{
+    NestingTooDeep, program, program_words, shell_script, shell_segments,
+};
 
 /// The self-critique checklist appended at `Stop` (#317).
 ///
@@ -308,8 +310,6 @@ const MODIFYING_COMMANDS: &[&str] = &[
     "systemctl",
 ];
 
-/// Whether `command` starts a modifying operation, checking each top-level
-/// segment so a read-only head doesn't wave through what follows it.
 /// Whether any part of `command` runs a modifying command. The parts come from the commit gate's
 /// splitter, so a write inside a substitution, a subshell, or a brace group counts (#2558). A
 /// command nested too deeply to split counts as modifying, so the check fails closed.
@@ -320,14 +320,17 @@ fn is_modifying(command: &str) -> bool {
     }
 }
 
-/// Whether one segment runs a modifying command. A group opener such as `(` or `{` is not part
-/// of the program name.
+/// Whether one segment runs a modifying command. A shell with `-c` runs a script that is read
+/// the same way. A wrapper such as `env` or `nohup` does not hide the command.
 fn is_modifying_segment(words: &[String]) -> bool {
-    let mut words = words
-        .iter()
-        .map(|w| w.trim_start_matches(['(', '{']))
-        .filter(|w| !w.is_empty())
-        .skip_while(|w| w.contains('='));
+    let words = program_words(words);
+    if let Some((first, tail)) = words.split_first()
+        && matches!(program(first), "sh" | "bash" | "zsh")
+        && shell_script(tail).is_some_and(is_modifying)
+    {
+        return true;
+    }
+    let mut words = words.into_iter();
     let head = words.next().unwrap_or_default();
     let head = head.rsplit('/').next().unwrap_or(head);
     if head == "sudo" {
@@ -923,6 +926,21 @@ mod tests {
     fn modifying_detection_fails_closed_on_nesting_past_the_bound() {
         let nested = format!("{}ls{}", "$(".repeat(40), ")".repeat(40));
         assert!(is_modifying(&nested));
+    }
+
+    #[test]
+    fn modifying_detection_reads_a_shell_script_passed_with_c() {
+        assert!(is_modifying("bash -c 'cd out && rm -rf build'"));
+        assert!(is_modifying("sh -c 'x; chmod 600 key'"));
+        assert!(
+            is_modifying("env rm x"),
+            "a wrapper does not hide the command"
+        );
+    }
+
+    #[test]
+    fn modifying_detection_sees_through_a_quoted_close_paren() {
+        assert!(is_modifying(r#"echo "$(echo ")"; chmod 600 key)""#));
     }
 
     #[test]
