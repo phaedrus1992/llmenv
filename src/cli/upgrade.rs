@@ -4,6 +4,9 @@ use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
+mod github;
+use github::{fetch_beta, fetch_latest};
+
 /// Map the current platform to a GitHub release asset name.
 fn platform_asset_name() -> Result<&'static str> {
     match (env::consts::OS, env::consts::ARCH) {
@@ -89,43 +92,6 @@ fn resolve_is_beta(track: Option<String>) -> bool {
         return upgrade.track.as_str() == "beta";
     }
     false
-}
-
-/// Fetch the latest non-prerelease GitHub release.
-fn fetch_latest(client: &reqwest::blocking::Client, base_url: &str) -> Result<GhRelease> {
-    let url = format!("{base_url}/repos/phaedrus1992/llmenv/releases/latest");
-    let resp = client
-        .get(&url)
-        .send()
-        .context("failed to query GitHub releases API")?;
-    anyhow::ensure!(
-        resp.status().is_success(),
-        "GitHub API returned {}",
-        resp.status()
-    );
-    resp.json()
-        .context("failed to parse GitHub release response")
-}
-
-/// Fetch releases and return the first non-draft (beta track).
-fn fetch_beta(client: &reqwest::blocking::Client, base_url: &str) -> Result<GhRelease> {
-    let url = format!("{base_url}/repos/phaedrus1992/llmenv/releases?per_page=10");
-    let resp = client
-        .get(&url)
-        .send()
-        .context("failed to query GitHub releases API")?;
-    anyhow::ensure!(
-        resp.status().is_success(),
-        "GitHub API returned {}",
-        resp.status()
-    );
-    let releases: Vec<GhRelease> = resp
-        .json()
-        .context("failed to parse GitHub releases response")?;
-    releases
-        .into_iter()
-        .find(|r| !r.draft)
-        .context("no published releases found")
 }
 
 /// Hosts that may serve a release asset. The asset URL comes from a remote JSON response, so its
@@ -591,6 +557,62 @@ mod tests {
         .await
         .unwrap();
         assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn fetch_latest_http_error_names_url_and_override() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path(
+                "/repos/phaedrus1992/llmenv/releases/latest",
+            ))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let uri = server.uri();
+        let expected_url = format!("{uri}/repos/phaedrus1992/llmenv/releases/latest");
+        let err = tokio::task::spawn_blocking(move || {
+            let client = build_http_client().unwrap();
+            fetch_latest(&client, &uri)
+        })
+        .await
+        .unwrap()
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains(&expected_url), "missing URL in: {msg}");
+        assert!(
+            msg.contains("LLMENV_UPGRADE_GITHUB_API"),
+            "missing hint in: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_latest_non_json_body_names_url_and_excerpt() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path(
+                "/repos/phaedrus1992/llmenv/releases/latest",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<html>captive portal</html>"))
+            .mount(&server)
+            .await;
+
+        let uri = server.uri();
+        let expected_url = format!("{uri}/repos/phaedrus1992/llmenv/releases/latest");
+        let err = tokio::task::spawn_blocking(move || {
+            let client = build_http_client().unwrap();
+            fetch_latest(&client, &uri)
+        })
+        .await
+        .unwrap()
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains(&expected_url), "missing URL in: {msg}");
+        assert!(
+            msg.contains("captive portal"),
+            "missing body excerpt in: {msg}"
+        );
     }
 
     #[tokio::test]
