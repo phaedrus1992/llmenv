@@ -774,10 +774,10 @@ re-ingestion on the next turn.
 ```text
 llmenv task add <title> [--child-of SLUG | --parallel] [--after SLUG] [--parent SLUG] [--session <id>]
   [--detail <text> | --detail-file <path>]
-llmenv task start <id> [--force] [--reopen] [--other-session]
-llmenv task done <id> [--force] [--other-session]
+llmenv task start <id> [--force] [--reopen] [--other-session <owner-id>]
+llmenv task done <id> [--force] [--other-session <owner-id>]
 llmenv task reopen <id>...
-llmenv task wait <id> [reason] [--other-session]
+llmenv task wait <id> [reason] [--other-session <owner-id>]
 llmenv task ls [--format json] (--session <id> | --all) [--current-project]
 llmenv task show <id> | --current | --next
 llmenv task note <id> [text]
@@ -842,7 +842,10 @@ Only when the open session has no match does the search cover the whole project.
 - `task start`, `done`, `wait`, `note`, `block`, `edit`, `reopen`, and `clear` refuse a task that
   belongs to another session. (added in v3.13.0) `clear --session <id>` refuses another session's id
   the same way.
-  The refusal names the owning session. Pass `--other-session` to act on the task anyway.
+  The refusal names the owning session. To act on the task anyway, pass `--other-session <owner-id>`,
+  where `<owner-id>` is that owning session's id. A different id is refused. A bare `--other-session`
+  is a usage error. Each override appends a task note that names the calling session,
+  once the command succeeds. `clear` deletes its tasks, so it writes no note.
   A bare `--force` does not override this check.
 - `task done <id> [--force]` — mark a task complete. (changed in v3.12.0) Refuses a parent whose sub-tasks are
   not all `done`, and lists them; `--force` closes it anyway and prints a note.
