@@ -1,6 +1,6 @@
 //! Refuses task commands that act on another session's tasks (#2584). A bare
-//! `--force` does not override this check; only the explicit `--other-session`
-//! flag does.
+//! `--force` does not override this check. Only `--other-session <owner>` does,
+//! and only when `<owner>` is the session that owns the task (#2591).
 
 use std::path::Path;
 
@@ -14,6 +14,16 @@ pub(crate) enum Caller {
     Session(String),
     /// No session can be named. The text says why, for a refusal.
     Unidentified(String),
+}
+
+impl Caller {
+    /// Names the caller for a task note.
+    fn describe(&self) -> String {
+        match self {
+            Self::Session(id) => format!("session '{id}'"),
+            Self::Unidentified(reason) => format!("an unidentified caller ({reason})"),
+        }
+    }
 }
 
 /// Resolve the caller's session for `project`.
@@ -37,56 +47,104 @@ pub(crate) fn caller_session(
             picked.id
         )),
         Err(err) => Caller::Unidentified(
-            err.ambiguity_message("set CLAUDE_CODE_SESSION_ID, or pass --other-session")
-                .unwrap_or_else(|| "no session of yours is open in this project".to_string()),
+            err.ambiguity_message(
+                "set CLAUDE_CODE_SESSION_ID, or pass --other-session <SESSION_ID>",
+            )
+            .unwrap_or_else(|| "no session of yours is open in this project".to_string()),
         ),
     })
+}
+
+/// The audit note for an `--other-session` override. The caller records it with
+/// [`OverrideNote::record`] after the command succeeds, so a refused or failed
+/// command leaves no note behind.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct OverrideNote {
+    slug: String,
+    text: String,
+}
+
+impl OverrideNote {
+    /// Appends the note to the task.
+    ///
+    /// # Errors
+    /// Errors if the task cannot be read or written.
+    pub(crate) fn record(&self, state_dir: &Path) -> anyhow::Result<()> {
+        super::note_task(state_dir, &self.slug, &self.text)?;
+        Ok(())
+    }
 }
 
 /// Refuse to act on the task `input` when it belongs to a session other than the
 /// caller's. A task with no session is never refused.
 ///
+/// `other_session` is the owning session id named by `--other-session`. The
+/// override applies only when that id is the task's owner. It returns the note
+/// that records the override. This function writes nothing itself.
+///
 /// # Errors
-/// Errors if `input` does not resolve to a task, the store cannot be read, or the
-/// task belongs to another session and `other_session` is `false`.
+/// Errors if `input` does not resolve to a task, the store cannot be read, the
+/// task belongs to another session and no matching `other_session` is given, or
+/// the named `other_session` is not the owner.
 pub(crate) fn ensure_task_is_ours(
     state_dir: &Path,
     input: &str,
     caller: &Caller,
-    other_session: bool,
-) -> anyhow::Result<()> {
-    if other_session {
-        return Ok(());
-    }
+    other_session: Option<&str>,
+) -> anyhow::Result<Option<OverrideNote>> {
     let slug = resolve_identifier(state_dir, input)?;
     let task = super::load_task(state_dir, &slug)?;
     let Some(owner) = task.session.as_deref() else {
-        return Ok(());
+        return Ok(None);
     };
-    refuse_unless_caller(
-        owner,
-        caller,
-        &format!("task '{slug}' belongs to session '{owner}'"),
-    )
+    if matches!(caller, Caller::Session(id) if id == owner) {
+        return Ok(None);
+    }
+    match other_session {
+        Some(named) if named == owner => {
+            let text = format!(
+                "acted on with --other-session {owner}; caller: {}",
+                caller.describe()
+            );
+            Ok(Some(OverrideNote { slug, text }))
+        }
+        Some(named) => anyhow::bail!(
+            "task '{slug}' belongs to session '{owner}', not '{named}'. \
+             Pass the owning session's id to --other-session."
+        ),
+        None => refuse_unless_caller(
+            owner,
+            caller,
+            &format!("task '{slug}' belongs to session '{owner}'"),
+        )
+        .map(|()| None),
+    }
 }
 
 /// Refuse `clear --session <owner>` when the caller is not that session.
 ///
 /// # Errors
-/// Errors if the caller is another session and `other_session` is `false`.
+/// Errors if the caller is another session and `other_session` does not name
+/// `session_id`.
 pub(crate) fn ensure_session_is_ours(
     session_id: &str,
     caller: &Caller,
-    other_session: bool,
+    other_session: Option<&str>,
 ) -> anyhow::Result<()> {
-    if other_session {
+    if matches!(caller, Caller::Session(id) if id == session_id) {
         return Ok(());
     }
-    refuse_unless_caller(
-        session_id,
-        caller,
-        &format!("'--session {session_id}' clears the tasks of session '{session_id}'"),
-    )
+    match other_session {
+        Some(named) if named == session_id => Ok(()),
+        Some(named) => anyhow::bail!(
+            "'--session {session_id}' clears the tasks of session '{session_id}', not '{named}'"
+        ),
+        None => refuse_unless_caller(
+            session_id,
+            caller,
+            &format!("'--session {session_id}' clears the tasks of session '{session_id}'"),
+        ),
+    }
 }
 
 fn refuse_unless_caller(owner: &str, caller: &Caller, what: &str) -> anyhow::Result<()> {
@@ -97,7 +155,10 @@ fn refuse_unless_caller(owner: &str, caller: &Caller, what: &str) -> anyhow::Res
         Caller::Session(id) => format!("your session is '{id}'"),
         Caller::Unidentified(reason) => reason.clone(),
     };
-    anyhow::bail!("{what}, and {why}. Pass --other-session to act on it anyway.")
+    anyhow::bail!(
+        "{what}, and {why}. To act on it anyway, pass the owning session's id as \
+         --other-session <SESSION_ID>."
+    )
 }
 
 #[cfg(test)]
@@ -142,7 +203,7 @@ mod tests {
         let (slug, owner) = open_task_in_session(dir.path());
         let caller = Caller::Session("some-other-session".to_string());
 
-        let err = ensure_task_is_ours(dir.path(), &slug, &caller, false)
+        let err = ensure_task_is_ours(dir.path(), &slug, &caller, None)
             .expect_err("a task of another session must be refused");
 
         let msg = format!("{err:#}");
@@ -168,7 +229,7 @@ mod tests {
         let (slug, _owner) = open_task_in_session(dir.path());
         let caller = Caller::Unidentified("no session of yours is open in this project".into());
 
-        let err = ensure_task_is_ours(dir.path(), &slug, &caller, false)
+        let err = ensure_task_is_ours(dir.path(), &slug, &caller, None)
             .expect_err("an unidentified caller must not act on a session task");
 
         assert!(
@@ -182,18 +243,61 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let (slug, owner) = open_task_in_session(dir.path());
 
-        ensure_task_is_ours(dir.path(), &slug, &Caller::Session(owner), false)
+        ensure_task_is_ours(dir.path(), &slug, &Caller::Session(owner), None)
             .expect("the owning session must pass");
     }
 
     #[test]
-    fn other_session_flag_lifts_the_refusal() {
+    fn other_session_naming_the_owner_lifts_the_refusal() {
         let dir = TempDir::new().expect("tempdir");
-        let (slug, _owner) = open_task_in_session(dir.path());
+        let (slug, owner) = open_task_in_session(dir.path());
         let caller = Caller::Unidentified("no session".into());
 
-        ensure_task_is_ours(dir.path(), &slug, &caller, true)
-            .expect("--other-session must allow the action");
+        ensure_task_is_ours(dir.path(), &slug, &caller, Some(&owner))
+            .expect("--other-session with the owner's id must allow the action");
+    }
+
+    #[test]
+    fn other_session_naming_another_session_is_refused() {
+        let dir = TempDir::new().expect("tempdir");
+        let (slug, owner) = open_task_in_session(dir.path());
+        let caller = Caller::Session("some-other-session".to_string());
+
+        let err = ensure_task_is_ours(dir.path(), &slug, &caller, Some("wrong-owner"))
+            .expect_err("a non-owner id must not lift the refusal");
+
+        let msg = format!("{err:#}");
+        assert!(msg.contains(&owner), "must name the real owner: {msg}");
+        assert!(msg.contains("wrong-owner"), "must name the given id: {msg}");
+        let task = load_task(dir.path(), &slug).expect("load");
+        assert!(
+            task.notes.is_empty(),
+            "a refused override must leave no note"
+        );
+    }
+
+    #[test]
+    fn other_session_override_notes_the_caller_only_after_record() {
+        let dir = TempDir::new().expect("tempdir");
+        let (slug, owner) = open_task_in_session(dir.path());
+        let caller = Caller::Session("some-other-session".to_string());
+
+        let pending = ensure_task_is_ours(dir.path(), &slug, &caller, Some(&owner))
+            .expect("the named owner must allow the action")
+            .expect("an override returns the note to record");
+        assert!(
+            load_task(dir.path(), &slug).expect("load").notes.is_empty(),
+            "the guard alone must not write a note"
+        );
+
+        pending.record(dir.path()).expect("record");
+
+        let task = load_task(dir.path(), &slug).expect("load");
+        let noted = task
+            .notes
+            .iter()
+            .any(|n| n.text.contains("--other-session") && n.text.contains("some-other-session"));
+        assert!(noted, "the override must note the caller: {:?}", task.notes);
     }
 
     #[test]
@@ -209,7 +313,7 @@ mod tests {
             dir.path(),
             &slug,
             &Caller::Unidentified("none".into()),
-            false,
+            None,
         )
         .expect("a session-less task must not be refused");
     }
@@ -250,10 +354,18 @@ mod tests {
     fn clearing_another_sessions_tasks_is_refused() {
         let caller = Caller::Session("mine".to_string());
 
-        let err = ensure_session_is_ours("theirs", &caller, false)
+        let err = ensure_session_is_ours("theirs", &caller, None)
             .expect_err("clear --session of another session must be refused");
 
         assert!(format!("{err:#}").contains("theirs"), "{err:#}");
-        assert!(ensure_session_is_ours("mine", &caller, false).is_ok());
+        assert!(ensure_session_is_ours("mine", &caller, None).is_ok());
+    }
+
+    #[test]
+    fn clearing_another_session_needs_its_own_id_as_the_flag_value() {
+        let caller = Caller::Session("mine".to_string());
+
+        assert!(ensure_session_is_ours("theirs", &caller, Some("theirs")).is_ok());
+        assert!(ensure_session_is_ours("theirs", &caller, Some("mine")).is_err());
     }
 }

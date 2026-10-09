@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The umans usage request connects only to the addresses that passed the private-network check. It no longer follows redirects or uses proxy settings, so a DNS rebind, a redirect, or a proxy can no longer send the Bearer token to a private or metadata address (#2518) [fix:throttle]
 - `llmenv upgrade` downloads a release asset only over HTTPS from `github.com` or `objects.githubusercontent.com`, and it refuses a redirect to any other host. The consolidation client no longer follows redirects, so its API key is not sent to another host (#2525) [fix:upgrade]
 - `LLMENV_UPGRADE_GITHUB_API` must be a bare HTTPS base URL, with no username, password, query, or fragment. Any other value fails `llmenv upgrade` with an error that names the variable, so a plain-HTTP or foreign-scheme override cannot choose the installed release (#2566) [fix:upgrade]
+- The MCP proxy log refuses a symlink, a hard-linked file, or a FIFO with no reader at its path, and it checks the type of the file it opened. A file swapped in after the name check no longer receives the proxy's stderr (#2588) [fix:mcp]
 
 ### Fixed
 
@@ -42,7 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A hook output write that fails for a reason other than a closed pipe is logged. It used to be dropped without a message (#2563) [fix:throttle]
 - A command whose stderr pipe closes early exits with status 141 and no crash report, as a closed stdout already did. It used to abort (#2561) [fix:cli]
 - The MCP proxy fails to start when it cannot record its lock pid, rotate its log, or set the log mode to `0600`. It used to drop each of these errors without a message (#2572) [fix:mcp]
-- `llmenv task start`, `done`, `wait`, `note`, `block`, `edit`, `reopen`, and `clear` refuse a task that belongs to another session. The refusal names the owning session. Pass the new `--other-session` flag to act on it anyway. A bare `--force` no longer closes another session's task (#2584) [fix:task]
+- `llmenv task start`, `done`, `wait`, `note`, `block`, `edit`, `reopen`, and `clear` refuse a task that belongs to another session. The refusal names the owning session. Pass `--other-session <owner-id>` with that session's id to act on it anyway. A bare `--force` no longer closes another session's task (#2584, #2591) [fix:task]
+- The MCP proxy spawn lock is never empty, so a second `llmenv export` cannot reclaim a live proxy's lock while the holder writes its pid (#2587) [fix:mcp]
+- A corrupt or unreadable ancestor task file makes `llmenv task edit` refuse a parent change. The cycle check used to skip the file without a message (#2590) [fix:task]
+- A non-UTF-8 `HOME`, `USER`, or `CLAUDE_CONFIG_DIR` gives an error that names the variable. `llmenv doctor`, `llmenv setup`, user-scope matching, the keychain read, and the task project tag no longer treat it as unset (#2589) [fix:cli]
 - A non-UTF-8 `CLAUDE_CONFIG_DIR` no longer selects the default cache root. The config guard prints an error that names the variable and does not run (#2559) [fix:cli]
 - `llmenv setup` warns when `USER` is unset. The generated setup then names the user `unknown` (#2560) [fix:cli]
 - A non-UTF-8 `CLAUDE_CODE_SESSION_ID` logs a warning that names the variable. Session ownership then falls back as if no session existed (#2562) [fix:task]
