@@ -112,10 +112,13 @@ fn user_from_var(value: Result<String, std::env::VarError>) -> Option<String> {
 
 /// Build the full enumeration JSON value.
 fn build_enumeration(available: &[String], config_dir: &Path) -> serde_json::Value {
-    let home = std::env::var("HOME")
-        .ok()
-        .filter(|h| !h.is_empty())
-        .map(PathBuf::from);
+    let home = match crate::env_var::utf8_var("HOME") {
+        Ok(value) => value.filter(|h| !h.is_empty()).map(PathBuf::from),
+        Err(e) => {
+            eprintln!("warning: {e:#}. Claude Code settings are not enumerated.");
+            None
+        }
+    };
     let user = user_from_var(std::env::var("USER")).unwrap_or_else(|| "unknown".to_string());
 
     let claude_section = home.as_ref().map(|h| {
@@ -504,8 +507,7 @@ fn run_rescan(config_dir: &Path, no_launch: bool) -> Result<()> {
     // --- Phase 1: Scan existing configs ---
     eprintln!();
     eprintln!("🔍 Re-scanning for existing tool configurations...");
-    let home_dir = std::env::var("HOME")
-        .ok()
+    let home_dir = crate::env_var::utf8_var("HOME")?
         .filter(|h| !h.is_empty())
         .map(PathBuf::from);
     if let Some(ref h) = home_dir {
@@ -621,8 +623,7 @@ pub(super) fn run_setup(
     // --- Phase 1: Scan existing configs ---
     eprintln!();
     eprintln!("🔍 Scanning for existing tool configurations...");
-    let home_dir = std::env::var("HOME")
-        .ok()
+    let home_dir = crate::env_var::utf8_var("HOME")?
         .filter(|h| !h.is_empty())
         .map(PathBuf::from);
     if let Some(ref h) = home_dir {

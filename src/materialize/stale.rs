@@ -56,8 +56,7 @@ pub fn stale_status(booted: Option<&str>, current: &str) -> StaleStatus {
 /// specific adapter) stays in `cli::run_check_stale`, which owns the
 /// `adapter` dependency that auto-fix needs — see this module's doc comment.
 pub(crate) fn report_if_stale(use_color: bool) -> anyhow::Result<()> {
-    let booted = std::env::var("CLAUDE_CONFIG_DIR")
-        .ok()
+    let booted = crate::env_var::utf8_var("CLAUDE_CONFIG_DIR")?
         .filter(|d| !d.is_empty())
         .map(std::path::PathBuf::from)
         .and_then(|dir| {

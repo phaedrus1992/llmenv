@@ -1411,8 +1411,14 @@ fn read_rendered_json(path: &Path, warn: &str) -> Option<serde_json::Value> {
 /// Warn about retired Claude Code entries in the rendered `settings.json` and `.claude.json`
 /// (#2145). Prints nothing when there is no hit.
 fn report_retired_claude_settings(adapter_root: &Path, warn: &str, info: &str) {
-    let Some(dir) = rendered_claude_dir(adapter_root, std::env::var("CLAUDE_CONFIG_DIR").ok())
-    else {
+    let config_dir = match crate::env_var::utf8_var("CLAUDE_CONFIG_DIR") {
+        Ok(value) => value,
+        Err(e) => {
+            eprintln!("{warn} Retired-settings check skipped: {e:#}");
+            return;
+        }
+    };
+    let Some(dir) = rendered_claude_dir(adapter_root, config_dir) else {
         eprintln!(
             "{info} Retired-settings check skipped: CLAUDE_CONFIG_DIR does not point to an llmenv \
              folder under {}. Run doctor in a shell that has the llmenv hook.",
