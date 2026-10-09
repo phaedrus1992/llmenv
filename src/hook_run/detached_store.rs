@@ -63,7 +63,7 @@ fn run_icm_store_with(
 fn run_icm_store_inner(args: serde_json::Value) -> anyhow::Result<()> {
     let config_path = crate::paths::config_path()?;
     let config = crate::config::Config::load(&config_path)?;
-    let env = crate::scope::matcher::Env::detect_for_config(&config);
+    let env = crate::scope::matcher::Env::detect_for_config(&config)?;
     let active = crate::scope::evaluate(&config, &env);
     let config_dir = config_path
         .parent()

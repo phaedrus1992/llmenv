@@ -70,7 +70,7 @@ pub(crate) fn report_if_stale(use_color: bool) -> anyhow::Result<()> {
     let config = crate::config::Config::load(&config_path)?;
     let config_dir = crate::paths::config_dir()?;
 
-    let env = crate::scope::matcher::Env::detect();
+    let env = crate::scope::matcher::Env::detect()?;
     let active = crate::scope::evaluate(&config, &env);
 
     let firing = crate::bundle_select::firing_bundles(&config.bundle, &active, None);

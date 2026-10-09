@@ -21,6 +21,8 @@ fn session_log_file_path(configured: Option<&str>) -> PathBuf {
 /// session-log config or any hook, so loading `config.yaml` for it is pure
 /// overhead on an otherwise config-free path.
 fn wants_version_only() -> bool {
+    // Reads argv only to detect a version flag. No argument reaches a shell or a path.
+    // nosemgrep: rust.lang.security.args-os.args-os
     is_version_only_args(std::env::args_os().skip(1))
 }
 

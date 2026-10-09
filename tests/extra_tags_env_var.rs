@@ -81,7 +81,7 @@ fn export_scope_narrowing_still_includes_extra_tags() {
 }
 
 #[test]
-fn export_ignores_non_utf8_llmenv_extra_tags() {
+fn export_fails_on_non_utf8_llmenv_extra_tags() {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
@@ -103,11 +103,16 @@ fn export_ignores_non_utf8_llmenv_extra_tags() {
             .output()
             .expect("run export command");
 
-        // Non-UTF-8 input must degrade gracefully (no extra tags), not crash.
+        // Non-UTF-8 input must fail loudly. Silently dropping the tags hid that they did not apply.
         assert!(
-            export.status.success(),
-            "export should still succeed on non-UTF-8 $LLMENV_EXTRA_TAGS; stderr: {}",
-            String::from_utf8_lossy(&export.stderr)
+            !export.status.success(),
+            "export must fail on non-UTF-8 $LLMENV_EXTRA_TAGS; stdout: {}",
+            String::from_utf8_lossy(&export.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&export.stderr);
+        assert!(
+            stderr.contains("LLMENV_EXTRA_TAGS"),
+            "stderr must name the variable: {stderr}"
         );
     }
 }
