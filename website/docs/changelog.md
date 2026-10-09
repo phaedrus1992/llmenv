@@ -53,8 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A throttle hook failure is written to the session log as well as stderr. It used to reach only stderr, so the file log had no record of it (#2577) [fix:throttle]
 - A throttle state file that cannot be read or removed now reports the path. A stale `throttle.json` that cannot be removed fails the export instead of leaving throttling on, and an unreadable file no longer turns throttling off without a message (#2574) [fix:throttle]
 - `llmenv upgrade` errors name the request URL. A non-JSON response shows the start of its body, and when `LLMENV_UPGRADE_GITHUB_API` is set the error says so (#2578) [fix:upgrade]
-- `llmenv task start` and `clear --session` stop when a task file in the store cannot be read. They used to skip the file, so a session could look empty or finished. Finish and abandon now use the same strict read (#2598) [fix:task]
-- A non-UTF-8 `LLMENV_EXTRA_TAGS` stops the command that reads it, with an error that names the variable. The tags used to be dropped, with only a log line that the default filter hid (#2575) [fix:scope]
+- `llmenv task start` and `clear --session` stop when a task file in the store cannot be read or parsed. They used to skip the file, so a session could look empty or finished. Finish and abandon now use the same strict read (#2598) [fix:task]
+- A non-UTF-8 `LLMENV_EXTRA_TAGS` stops the command that reads it, with an error that names the variable. The tags used to be dropped, with only a log line that the default filter hid. A hook logs the error and skips the bundle features (#2575) [fix:scope]
 
 ## [3.12.1] - 2026-10-07
 

@@ -1830,7 +1830,8 @@ export LLMENV_EXTRA_TAGS="rust,personal"
 ```
 
 A value that is not UTF-8 stops the command that reads it, with an error that names
-`LLMENV_EXTRA_TAGS`. It does not fall back to no extra tags.
+`LLMENV_EXTRA_TAGS`. It does not fall back to no extra tags. A hook logs the error and
+skips the bundle features.
 
 These tags are additive on top of whatever `.llmenv.yaml` already contributes
 (or on top of nothing, if there's no marker file present). See
