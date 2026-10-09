@@ -758,12 +758,15 @@ fn ancestors_to_start(state_dir: &Path, child: &Task, force: bool) -> anyhow::Re
             break;
         }
         // A deleted parent leaves a dangling link, which the rest of the store tolerates. Any
-        // other read error is logged, and the start goes on.
+        // other read error fails the start, so the done and queue checks never run blind.
         let parent = match load_task(state_dir, &parent_slug) {
             Ok(parent) => parent,
+            Err(e) if is_not_found(&e) => break,
             Err(e) => {
-                tracing::warn!("sub-task parent '{parent_slug}' cannot be read: {e:#}");
-                break;
+                return Err(e.context(format!(
+                    "cannot start '{}': ancestor '{parent_slug}' is unreadable",
+                    child.slug
+                )));
             }
         };
         if parent.state == TaskState::Done && !force {
@@ -2348,6 +2351,29 @@ mod tests {
         let b = mk(dir.path(), "Child B", Some(&a.slug)).expect("test");
         block_task(dir.path(), &b.slug, &a.slug).expect("test");
         assert!(start_task(dir.path(), &b.slug, false).is_err());
+    }
+
+    #[test]
+    fn start_task_under_a_deleted_parent_still_starts() {
+        let dir = TempDir::new().expect("test");
+        let a = mk(dir.path(), "Parent A", None).expect("test");
+        let b = mk(dir.path(), "Child B", Some(&a.slug)).expect("test");
+        std::fs::remove_file(task_path(dir.path(), &a.slug)).expect("test");
+        let started = start_task(dir.path(), &b.slug, false).expect("dangling link tolerated");
+        assert_eq!(started.state, TaskState::Wip);
+    }
+
+    #[test]
+    fn start_task_under_a_corrupt_parent_fails_and_names_the_parent() {
+        let dir = TempDir::new().expect("test");
+        let a = mk(dir.path(), "Parent A", None).expect("test");
+        let b = mk(dir.path(), "Child B", Some(&a.slug)).expect("test");
+        std::fs::write(task_path(dir.path(), &a.slug), "{ not json").expect("test");
+        let err = start_task(dir.path(), &b.slug, false).expect_err("corrupt parent refused");
+        let text = format!("{err:#}");
+        assert!(text.contains(&a.slug), "error must name the parent: {text}");
+        let on_disk = load_task(dir.path(), &b.slug).expect("test");
+        assert_eq!(on_disk.state, TaskState::Open, "child must not be started");
     }
 
     #[test]
