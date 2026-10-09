@@ -5,6 +5,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+/// `$LLMENV_EXTRA_TAGS` is set but is not valid UTF-8.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "$LLMENV_EXTRA_TAGS is not valid UTF-8, so its tags were not applied. Set it to plain \
+     comma-separated text, or unset it."
+)]
+pub struct ExtraTagsNotUtf8;
+
 /// Resolved project (discovered from `.llmenv.yaml` walking upward from cwd).
 /// All fields default permissively; malformed YAML is logged as a warning
 /// and yields a minimal project with defaults (cwd folder name for id/name).
@@ -96,20 +104,22 @@ impl Env {
     /// Detects every network fact (gateway MAC, interface addresses, SSID); prefer
     /// [`Env::detect_for_config`] on the hook path, which skips the probes that no
     /// network scope needs.
-    #[must_use]
-    pub fn detect() -> Self {
+    ///
+    /// # Errors
+    /// Returns an error when `$LLMENV_EXTRA_TAGS` is not valid UTF-8.
+    pub fn detect() -> Result<Self, ExtraTagsNotUtf8> {
         Self::detect_cached(NetworkNeeds::ALL)
     }
 
-    fn detect_cached(needs: NetworkNeeds) -> Self {
+    fn detect_cached(needs: NetworkNeeds) -> Result<Self, ExtraTagsNotUtf8> {
         if let Ok(lock) = ENV_CACHE.lock()
             && let Some(cached) = lock.as_ref()
             && cached.detected.elapsed() < Duration::from_secs(30)
             && cached.needs.covers(needs)
         {
-            return cached.env.clone();
+            return Ok(cached.env.clone());
         }
-        let env = Self::detect_fresh(needs);
+        let env = Self::detect_fresh(needs)?;
         if let Ok(mut lock) = ENV_CACHE.lock() {
             *lock = Some(CachedEnv {
                 detected: Instant::now(),
@@ -117,7 +127,7 @@ impl Env {
                 env: env.clone(),
             });
         }
-        env
+        Ok(env)
     }
 
     /// Detect environment for a specific config. The gateway MAC, interface address, and SSID
@@ -126,8 +136,10 @@ impl Env {
     /// and none on the common config with no network scope. Each hook-run is a fresh process
     /// (the 30s cache never warms on that path), so this removes the dominant remaining
     /// hook-run subprocess cost for such a config.
-    #[must_use]
-    pub fn detect_for_config(config: &llmenv_config::Config) -> Self {
+    ///
+    /// # Errors
+    /// Returns an error when `$LLMENV_EXTRA_TAGS` is not valid UTF-8.
+    pub fn detect_for_config(config: &llmenv_config::Config) -> Result<Self, ExtraTagsNotUtf8> {
         let needs = NetworkNeeds::from_scopes(&config.scope.network);
         if needs == NetworkNeeds::default() {
             Self::detect_fresh(needs)
@@ -138,7 +150,7 @@ impl Env {
 
     /// Fresh env detection. `needs` gates the network probes; the hostname (uname syscall),
     /// user, and cwd probes always run.
-    fn detect_fresh(needs: NetworkNeeds) -> Self {
+    fn detect_fresh(needs: NetworkNeeds) -> Result<Self, ExtraTagsNotUtf8> {
         let hostname = detect_hostname().unwrap_or_else(|| {
             tracing::warn!("hostname detection failed; host-scope matching disabled");
             String::new()
@@ -164,7 +176,7 @@ impl Env {
         let home = std::env::var_os("HOME")
             .filter(|h| !h.is_empty())
             .map(std::path::PathBuf::from);
-        Self {
+        Ok(Self {
             // Hostname comparison is case-insensitive — `hostname(1)` and
             // /etc/hostname may differ in case across hosts.
             hostname: hostname.to_ascii_lowercase(),
@@ -182,26 +194,32 @@ impl Env {
             ssid: needs.ssid.then(super::ssid::detect_ssid_name).flatten(),
             home,
             os: std::env::consts::OS.to_string(),
-            extra_tags: extra_tags_from_env(),
-        }
+            extra_tags: extra_tags_from_var(std::env::var("LLMENV_EXTRA_TAGS"))?,
+        })
     }
 }
 
-/// Read and validate `$LLMENV_EXTRA_TAGS` from the process environment.
-/// Pulled out of [`Env::detect_fresh`] so callers that need only this one
-/// env-derived tag source — not a full [`Env::detect`] — can read it without
-/// paying for hostname/cwd/gateway-MAC detection (#1538: the statusline
-/// re-reads this live on every render, and a full `Env::detect` would also
-/// fork `route`/`arp` whenever a network scope is configured).
+/// Read `$LLMENV_EXTRA_TAGS` for a caller that cannot fail. A value that is not UTF-8 gives no
+/// tags and a warning. The statusline re-reads this live on every render and cannot stop there,
+/// and a full `Env::detect` would also fork `route`/`arp` whenever a network scope is
+/// configured (#1538).
 #[must_use]
 pub fn extra_tags_from_env() -> Vec<String> {
-    match std::env::var("LLMENV_EXTRA_TAGS") {
-        Ok(raw) => parse_extra_tags(&raw),
-        Err(std::env::VarError::NotPresent) => Vec::new(),
-        Err(std::env::VarError::NotUnicode(_)) => {
-            tracing::warn!("$LLMENV_EXTRA_TAGS is not valid UTF-8; extra tags disabled");
-            Vec::new()
-        }
+    extra_tags_from_var(std::env::var("LLMENV_EXTRA_TAGS")).unwrap_or_else(|e| {
+        tracing::warn!("{e}");
+        Vec::new()
+    })
+}
+
+/// Map the read of `$LLMENV_EXTRA_TAGS` to its tags. A value that is not UTF-8 is an error.
+/// An empty list would make the user's tags vanish with no visible sign.
+fn extra_tags_from_var(
+    value: Result<String, std::env::VarError>,
+) -> Result<Vec<String>, ExtraTagsNotUtf8> {
+    match value {
+        Ok(raw) => Ok(parse_extra_tags(&raw)),
+        Err(std::env::VarError::NotPresent) => Ok(Vec::new()),
+        Err(std::env::VarError::NotUnicode(_)) => Err(ExtraTagsNotUtf8),
     }
 }
 
@@ -582,6 +600,32 @@ mod tests {
     use proptest::prelude::*;
     use std::collections::BTreeSet;
     use std::path::Path;
+
+    #[test]
+    fn extra_tags_from_env_not_set_is_no_tags() {
+        assert!(
+            super::extra_tags_from_var(Err(std::env::VarError::NotPresent))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn extra_tags_from_env_reads_utf8_value() {
+        assert_eq!(
+            super::extra_tags_from_var(Ok("dev, work".to_string())).unwrap(),
+            vec!["dev", "work"]
+        );
+    }
+
+    #[test]
+    fn extra_tags_from_env_non_utf8_is_an_error_naming_the_variable() {
+        let value = std::env::VarError::NotUnicode(std::ffi::OsString::from("x"));
+        let err = super::extra_tags_from_var(Err(value)).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("LLMENV_EXTRA_TAGS"), "{msg}");
+        assert!(msg.contains("unset it"), "{msg}");
+    }
 
     #[test]
     fn parse_extra_tags_empty_string_yields_no_tags() {
@@ -1054,6 +1098,18 @@ mod tests {
     }
 
     proptest! {
+        // Every tag parse_extra_tags returns obeys the tag rules the rest of scope matching relies on.
+        #[test]
+        fn parse_extra_tags_output_obeys_tag_rules(raw in r"\PC*") {
+            let tags = parse_extra_tags(&raw);
+            prop_assert!(tags.len() <= super::MAX_TAGS_PER_SOURCE);
+            for tag in &tags {
+                prop_assert!(!tag.is_empty());
+                prop_assert!(tag.len() <= super::MAX_TAG_LEN);
+                prop_assert!(is_valid_tag_charset(tag));
+            }
+        }
+
         // parse_extra_tags never panics on arbitrary input.
         #[test]
         fn parse_extra_tags_never_panics(raw in r"\PC*") {
