@@ -12,7 +12,7 @@
 
 use crate::config::SlippageControl;
 use crate::hook_run::task_nudge::{
-    NestingTooDeep, program, program_words, shell_script, shell_segments,
+    NestingTooDeep, nesting_reason, program, program_words, shell_script, shell_segments,
 };
 
 /// The self-critique checklist appended at `Stop` (#317).
@@ -383,12 +383,15 @@ pub(crate) fn handle_transcript_scan(
     }
 
     if cfg.explain_before_act && !state.assistant_spoke_since {
-        let modifying = payload
+        let command = payload
             .get("tool_input")
             .and_then(|v| v.get("command"))
             .and_then(serde_json::Value::as_str)
-            .is_some_and(is_modifying);
-        if modifying {
+            .unwrap_or_default();
+        if shell_segments(command).is_err() {
+            return format!("__DENY__:{}", nesting_reason());
+        }
+        if is_modifying(command) {
             return "__DENY__:this command changes something and you haven't said what you're \
                     doing yet. Explain the change and why in text first, then run it."
                 .to_string();
@@ -1134,5 +1137,17 @@ mod tests {
             "",
             "a disabled explain layer must not deny a modifying command"
         );
+    }
+
+    #[test]
+    fn explain_layer_names_the_nesting_limit_for_a_command_too_deep_to_split() {
+        let file = transcript_with(&[user_line("clean up the build directory")]);
+        let nested = format!("{}ls{}", "$(".repeat(40), ")".repeat(40));
+        let denied =
+            handle_transcript_scan(Some(&scan_cfg(false, true)), &bash_payload(&file, &nested));
+        assert!(denied.starts_with("__DENY__:"), "{denied}");
+        assert!(denied.contains("32 levels deep"), "{denied}");
+        assert!(denied.contains("Split the command"), "{denied}");
+        assert!(!denied.contains("changes something"), "{denied}");
     }
 }
