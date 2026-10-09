@@ -635,6 +635,7 @@ pub(crate) fn handle_pre_tool_use(
     };
     // The tracking is read before the command runs, so a task that this command ends still shows
     // as in progress. It does not count for the commit.
+    let nested = shell_segments(command).is_err();
     let wip_open = match &tracking {
         Tracking::Tracked {
             wip: Some(slug), ..
@@ -658,14 +659,16 @@ pub(crate) fn handle_pre_tool_use(
             }
             String::new()
         }
-        _ if state.commit_denied => String::new(),
+        // A command nested too deeply to split is denied on every attempt. Only a split command
+        // can pass, so the retry that passes the no-task deny does not apply to it.
+        _ if state.commit_denied && !nested => String::new(),
         tracking => {
             state.commit_denied = true;
             // Without the marker the retry would be denied again, so a failed save allows.
             if !save(&path, &state) {
                 return String::new();
             }
-            if shell_segments(command).is_err() {
+            if nested {
                 return format!(
                     "__DENY__:llmenv blocked this commit or pull request once: {}",
                     nesting_reason()
@@ -1200,6 +1203,18 @@ mod tests {
         assert!(denied.contains("32 levels deep"), "{denied}");
         assert!(denied.contains("Split the command"), "{denied}");
         assert!(!denied.contains("no task is in progress"), "{denied}");
+    }
+
+    #[test]
+    fn a_nested_commit_stays_denied_on_retry() {
+        let dir = TempDir::new().unwrap();
+        let _session = open_session(dir.path());
+        let nested = format!("{}git commit -m x{}", "$(".repeat(40), ")".repeat(40));
+        let tracker = TaskTracker::default();
+        let first = handle_pre_tool_use(&tracker, &bash(&nested), Some("s1"), dir.path());
+        let retry = handle_pre_tool_use(&tracker, &bash(&nested), Some("s1"), dir.path());
+        assert!(first.starts_with("__DENY__:"), "{first}");
+        assert!(retry.starts_with("__DENY__:"), "{retry}");
     }
 
     #[test]
