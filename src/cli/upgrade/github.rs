@@ -62,3 +62,23 @@ fn parse_json<T: DeserializeOwned>(url: &str, text: &str) -> Result<T> {
         format!("failed to parse the GitHub response from {url}; body starts with {excerpt:?}")
     })
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        // A parse error quotes a prefix of the body, at most BODY_EXCERPT_CHARS characters long.
+        #[test]
+        fn parse_error_quotes_a_bounded_prefix_of_the_body(body in "\\PC*") {
+            prop_assume!(serde_json::from_str::<serde_json::Value>(&body).is_err());
+            let err = parse_json::<serde_json::Value>("https://example.test/x", &body).unwrap_err();
+            let excerpt: String = body.chars().take(BODY_EXCERPT_CHARS).collect();
+            let msg = format!("{err:#}");
+            let quoted = format!("{excerpt:?}");
+            prop_assert!(msg.contains(&quoted));
+        }
+    }
+}

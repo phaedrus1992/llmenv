@@ -1076,6 +1076,18 @@ mod tests {
     }
 
     proptest! {
+        // Every tag parse_extra_tags returns obeys the tag rules the rest of scope matching relies on.
+        #[test]
+        fn parse_extra_tags_output_obeys_tag_rules(raw in r"\PC*") {
+            let tags = parse_extra_tags(&raw);
+            prop_assert!(tags.len() <= super::MAX_TAGS_PER_SOURCE);
+            for tag in &tags {
+                prop_assert!(!tag.is_empty());
+                prop_assert!(tag.len() <= super::MAX_TAG_LEN);
+                prop_assert!(is_valid_tag_charset(tag));
+            }
+        }
+
         // parse_extra_tags never panics on arbitrary input.
         #[test]
         fn parse_extra_tags_never_panics(raw in r"\PC*") {
