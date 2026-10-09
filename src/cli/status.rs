@@ -50,7 +50,7 @@ fn run_status_overview(use_color: bool) -> anyhow::Result<()> {
     eprintln!("    Network: {}", config.scope.network.len());
     eprintln!("    Host: {}", config.scope.host.len());
     eprintln!("    User: {}", config.scope.user.len());
-    let env = crate::scope::matcher::Env::detect_for_config(&config);
+    let env = crate::scope::matcher::Env::detect_for_config(&config)?;
     let active = crate::scope::evaluate(&config, &env);
     if let Some(proj) = active.scopes.iter().find(|s| s.kind == "project") {
         let label = proj.name.as_deref().unwrap_or(&proj.id);
@@ -69,7 +69,7 @@ fn run_status_overview(use_color: bool) -> anyhow::Result<()> {
 fn run_scope_ls(use_color: bool) -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
-    let env = crate::scope::matcher::Env::detect_for_config(&config);
+    let env = crate::scope::matcher::Env::detect_for_config(&config)?;
     let active = crate::scope::evaluate(&config, &env);
     let consumed = super::all_consumed_tags(&config);
 
@@ -141,7 +141,7 @@ fn run_scope_ls(use_color: bool) -> anyhow::Result<()> {
 fn run_tag_ls(use_color: bool) -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
-    let env = crate::scope::matcher::Env::detect_for_config(&config);
+    let env = crate::scope::matcher::Env::detect_for_config(&config)?;
     let active = crate::scope::evaluate(&config, &env);
 
     let emitted = super::all_emitted_tags(&config);
@@ -181,7 +181,7 @@ fn run_tag_ls(use_color: bool) -> anyhow::Result<()> {
 fn run_bundle_ls(use_color: bool) -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
-    let env = crate::scope::matcher::Env::detect_for_config(&config);
+    let env = crate::scope::matcher::Env::detect_for_config(&config)?;
     let active = crate::scope::evaluate(&config, &env);
 
     let mut emitted = super::all_emitted_tags(&config);
@@ -233,7 +233,7 @@ fn run_mcp_ls(use_color: bool) -> anyhow::Result<()> {
         .parent()
         .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
     let config = Config::load(&config_path)?;
-    let env = crate::scope::matcher::Env::detect_for_config(&config);
+    let env = crate::scope::matcher::Env::detect_for_config(&config)?;
     let active = crate::scope::evaluate(&config, &env);
     let mut emitted = super::all_emitted_tags(&config);
     emitted.extend(active.tags.iter().cloned());
@@ -408,7 +408,7 @@ fn run_marketplace_ls(use_color: bool) -> anyhow::Result<()> {
 
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
-    let env = crate::scope::matcher::Env::detect_for_config(&config);
+    let env = crate::scope::matcher::Env::detect_for_config(&config)?;
     let active = crate::scope::evaluate(&config, &env);
     let mut emitted = super::all_emitted_tags(&config);
     emitted.extend(active.tags.iter().cloned());
@@ -451,7 +451,7 @@ fn run_plugin_ls(use_color: bool) -> anyhow::Result<()> {
 
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
-    let env = crate::scope::matcher::Env::detect_for_config(&config);
+    let env = crate::scope::matcher::Env::detect_for_config(&config)?;
     let active = crate::scope::evaluate(&config, &env);
     let mut emitted = super::all_emitted_tags(&config);
     emitted.extend(active.tags.iter().cloned());

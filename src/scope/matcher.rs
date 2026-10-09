@@ -93,20 +93,22 @@ impl Env {
     /// Detects every network fact (gateway MAC, interface addresses, SSID); prefer
     /// [`Env::detect_for_config`] on the hook path, which skips the probes that no
     /// network scope needs.
-    #[must_use]
-    pub fn detect() -> Self {
+    ///
+    /// # Errors
+    /// Returns an error when `$LLMENV_EXTRA_TAGS` is not valid UTF-8.
+    pub fn detect() -> anyhow::Result<Self> {
         Self::detect_cached(NetworkNeeds::ALL)
     }
 
-    fn detect_cached(needs: NetworkNeeds) -> Self {
+    fn detect_cached(needs: NetworkNeeds) -> anyhow::Result<Self> {
         if let Ok(lock) = ENV_CACHE.lock()
             && let Some(cached) = lock.as_ref()
             && cached.detected.elapsed() < Duration::from_secs(30)
             && cached.needs.covers(needs)
         {
-            return cached.env.clone();
+            return Ok(cached.env.clone());
         }
-        let env = Self::detect_fresh(needs);
+        let env = Self::detect_fresh(needs)?;
         if let Ok(mut lock) = ENV_CACHE.lock() {
             *lock = Some(CachedEnv {
                 detected: Instant::now(),
@@ -114,7 +116,7 @@ impl Env {
                 env: env.clone(),
             });
         }
-        env
+        Ok(env)
     }
 
     /// Detect environment for a specific config. The gateway MAC, interface address, and SSID
@@ -123,8 +125,10 @@ impl Env {
     /// and none on the common config with no network scope. Each hook-run is a fresh process
     /// (the 30s cache never warms on that path), so this removes the dominant remaining
     /// hook-run subprocess cost for such a config.
-    #[must_use]
-    pub(crate) fn detect_for_config(config: &crate::config::Config) -> Self {
+    ///
+    /// # Errors
+    /// Returns an error when `$LLMENV_EXTRA_TAGS` is not valid UTF-8.
+    pub(crate) fn detect_for_config(config: &crate::config::Config) -> anyhow::Result<Self> {
         let needs = NetworkNeeds::from_scopes(&config.scope.network);
         if needs == NetworkNeeds::default() {
             Self::detect_fresh(needs)
@@ -135,7 +139,7 @@ impl Env {
 
     /// Fresh env detection. `needs` gates the network probes; the hostname (uname syscall),
     /// user, and cwd probes always run.
-    fn detect_fresh(needs: NetworkNeeds) -> Self {
+    fn detect_fresh(needs: NetworkNeeds) -> anyhow::Result<Self> {
         let hostname = detect_hostname().unwrap_or_else(|| {
             tracing::warn!("hostname detection failed; host-scope matching disabled");
             String::new()
@@ -161,7 +165,7 @@ impl Env {
         let home = std::env::var_os("HOME")
             .filter(|h| !h.is_empty())
             .map(std::path::PathBuf::from);
-        Self {
+        Ok(Self {
             // Hostname comparison is case-insensitive — `hostname(1)` and
             // /etc/hostname may differ in case across hosts.
             hostname: hostname.to_ascii_lowercase(),
@@ -179,15 +183,21 @@ impl Env {
             ssid: needs.ssid.then(super::ssid::detect_ssid_name).flatten(),
             home,
             os: std::env::consts::OS.to_string(),
-            extra_tags: match std::env::var("LLMENV_EXTRA_TAGS") {
-                Ok(raw) => parse_extra_tags(&raw),
-                Err(std::env::VarError::NotPresent) => Vec::new(),
-                Err(std::env::VarError::NotUnicode(_)) => {
-                    tracing::warn!("$LLMENV_EXTRA_TAGS is not valid UTF-8; extra tags disabled");
-                    Vec::new()
-                }
-            },
-        }
+            extra_tags: extra_tags_from_env(std::env::var("LLMENV_EXTRA_TAGS"))?,
+        })
+    }
+}
+
+/// Map the read of `$LLMENV_EXTRA_TAGS` to its tags. A value that is not UTF-8 is an error.
+/// An empty list would make the user's tags vanish with no visible sign.
+fn extra_tags_from_env(value: Result<String, std::env::VarError>) -> anyhow::Result<Vec<String>> {
+    match value {
+        Ok(raw) => Ok(parse_extra_tags(&raw)),
+        Err(std::env::VarError::NotPresent) => Ok(Vec::new()),
+        Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!(
+            "$LLMENV_EXTRA_TAGS is not valid UTF-8, so its tags were not applied. Set it to plain \
+             comma-separated text, or unset it."
+        ),
     }
 }
 
@@ -568,6 +578,32 @@ mod tests {
     use proptest::prelude::*;
     use std::collections::BTreeSet;
     use std::path::Path;
+
+    #[test]
+    fn extra_tags_from_env_not_set_is_no_tags() {
+        assert!(
+            super::extra_tags_from_env(Err(std::env::VarError::NotPresent))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn extra_tags_from_env_reads_utf8_value() {
+        assert_eq!(
+            super::extra_tags_from_env(Ok("dev, work".to_string())).unwrap(),
+            vec!["dev", "work"]
+        );
+    }
+
+    #[test]
+    fn extra_tags_from_env_non_utf8_is_an_error_naming_the_variable() {
+        let value = std::env::VarError::NotUnicode(std::ffi::OsString::from("x"));
+        let err = super::extra_tags_from_env(Err(value)).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("LLMENV_EXTRA_TAGS"), "{msg}");
+        assert!(msg.contains("unset it"), "{msg}");
+    }
 
     #[test]
     fn parse_extra_tags_empty_string_yields_no_tags() {

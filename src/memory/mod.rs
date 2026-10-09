@@ -27,7 +27,7 @@ fn connect_with_timeout(timeout: Duration) -> anyhow::Result<McpHttpClient> {
     let config_dir = config_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
-    let env = crate::scope::matcher::Env::detect_for_config(&config);
+    let env = crate::scope::matcher::Env::detect_for_config(&config)?;
     let active = crate::scope::evaluate(&config, &env);
     let url = crate::hook_run::memory_url(&config, config_dir, &active)?.into_url()?;
     McpHttpClient::new(url, timeout).map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))

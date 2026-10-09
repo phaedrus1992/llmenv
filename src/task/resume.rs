@@ -155,12 +155,18 @@ fn detect_issue(branch: &str) -> Option<u32> {
 
 /// The checked-out branch in `cwd`. `None` outside a git repo and on a detached HEAD.
 #[must_use]
-pub(crate) fn git_branch(cwd: &Path) -> Option<String> {
-    let output = match llmenv_git::secure_git()
-        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+/// The `git symbolic-ref` call behind [`git_branch`]. `LC_ALL=C` keeps git's stderr in English,
+/// because [`branch_failure_is_unexpected`] matches an English message.
+fn branch_command(cwd: &Path) -> std::process::Command {
+    let mut cmd = llmenv_git::secure_git();
+    cmd.args(["symbolic-ref", "--quiet", "--short", "HEAD"])
         .current_dir(cwd)
-        .output()
-    {
+        .env("LC_ALL", "C");
+    cmd
+}
+
+pub(crate) fn git_branch(cwd: &Path) -> Option<String> {
+    let output = match branch_command(cwd).output() {
         Ok(output) => output,
         Err(e) => {
             eprintln!(
@@ -446,6 +452,15 @@ mod tests {
         ));
         assert!(branch_failure_is_unexpected(None, ""));
         assert!(branch_failure_is_unexpected(Some(2), "usage: git"));
+    }
+
+    #[test]
+    fn branch_command_forces_the_c_locale_for_the_english_stderr_match() {
+        let cmd = branch_command(Path::new("."));
+        let forced = cmd
+            .get_envs()
+            .any(|(k, v)| k == "LC_ALL" && v == Some(std::ffi::OsStr::new("C")));
+        assert!(forced, "LC_ALL=C is not set on the git branch call");
     }
 
     #[test]

@@ -1829,6 +1829,9 @@ don't want to share with collaborators via a checked-in file:
 export LLMENV_EXTRA_TAGS="rust,personal"
 ```
 
+A value that is not UTF-8 stops the command that reads it, with an error that names
+`LLMENV_EXTRA_TAGS`. It does not fall back to no extra tags.
+
 These tags are additive on top of whatever `.llmenv.yaml` already contributes
 (or on top of nothing, if there's no marker file present). See
 [`docs/env-vars.md`](https://github.com/phaedrus1992/llmenv/blob/main/docs/env-vars.md)

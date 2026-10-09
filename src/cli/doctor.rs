@@ -1322,7 +1322,7 @@ pub(super) fn run_doctor(
         eprintln!("{warn} Config directory is not a git repo");
     }
 
-    let env = crate::scope::matcher::Env::detect_for_config(&config);
+    let env = crate::scope::matcher::Env::detect_for_config(&config)?;
     let active = crate::scope::evaluate(&config, &env);
 
     // Cross-engine hook compatibility (#543 follow-up): name any hook that will
