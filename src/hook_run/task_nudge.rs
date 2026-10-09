@@ -1363,6 +1363,8 @@ mod tests {
             ("echo \"'\" ) rest", "echo \"'\" ", " rest"),
             ("echo \")\" x)tail", "echo \")\" x", "tail"),
             ("echo \"(\" ) x)tail", "echo \"(\" ", " x)tail"),
+            // A `)` inside quotes does not close a nested `(`.
+            ("a(\")\"b) rest)tail", "a(\")\"b) rest", "tail"),
         ] {
             let mut chars = text.chars().peekable();
             assert_eq!(take_until_close(&mut chars), inner, "{text:?}");
