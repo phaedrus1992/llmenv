@@ -96,13 +96,27 @@ fn read_project_configs(home: &Path) -> BTreeMap<String, serde_json::Value> {
     projects
 }
 
+/// The user name written into the enumeration. A missing `USER` falls back to
+/// `unknown`, and the warning names the variable and that effect (#2560).
+/// `tracing::warn!` is hidden by the default log filter, so the warning is printed.
+/// Each caller then picks its own placeholder name.
+fn user_from_var(value: Result<String, std::env::VarError>) -> Option<String> {
+    match value {
+        Ok(user) => Some(user),
+        Err(e) => {
+            eprintln!("llmenv setup: USER is not usable ({e}); setup uses a placeholder name");
+            None
+        }
+    }
+}
+
 /// Build the full enumeration JSON value.
 fn build_enumeration(available: &[String], config_dir: &Path) -> serde_json::Value {
     let home = std::env::var("HOME")
         .ok()
         .filter(|h| !h.is_empty())
         .map(PathBuf::from);
-    let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
+    let user = user_from_var(std::env::var("USER")).unwrap_or_else(|| "unknown".to_string());
 
     let claude_section = home.as_ref().map(|h| {
         let settings = read_claude_settings(h);
@@ -678,7 +692,7 @@ pub(super) fn run_setup(
         use dialoguer::Input;
         Input::new()
             .with_prompt("Your username (used for bundle tag matching)")
-            .default(std::env::var("USER").unwrap_or_else(|_| "me".to_string()))
+            .default(user_from_var(std::env::var("USER")).unwrap_or_else(|| "me".to_string()))
             .validate_with(|input: &String| -> Result<(), &str> {
                 if input.contains(char::is_whitespace) {
                     Err("Username must not contain spaces")
@@ -691,7 +705,7 @@ pub(super) fn run_setup(
             .interact_text()
             .context("username prompt failed")?
     } else {
-        std::env::var("USER").unwrap_or_else(|_| "me".to_string())
+        user_from_var(std::env::var("USER")).unwrap_or_else(|| "me".to_string())
     };
 
     // --- Phase 5: Bundle setup ---
@@ -772,6 +786,19 @@ pub(super) fn run_setup(
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn user_uses_the_variable_when_set() {
+        assert_eq!(
+            user_from_var(Ok("ada".to_string())),
+            Some("ada".to_string())
+        );
+    }
+
+    #[test]
+    fn user_is_none_when_unset_so_each_caller_picks_its_placeholder() {
+        assert_eq!(user_from_var(Err(std::env::VarError::NotPresent)), None);
+    }
 
     #[test]
     fn test_write_config_creates_valid_yaml() {

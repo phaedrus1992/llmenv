@@ -449,13 +449,20 @@ enum TaskCommand {
         /// Move a `done` task back to `open` first, then start it.
         #[arg(long)]
         reopen: bool,
+        /// Act on a task that belongs to another session. Without it, `start` refuses.
+        #[arg(long)]
+        other_session: bool,
     },
     /// Mark a task done. Refuses a task that was never started (#2416);
-    /// `--force` completes it anyway.
+    /// `--force` completes it anyway. Refuses a task of another session unless
+    /// `--other-session` is passed (#2584).
     Done {
         id: String,
         #[arg(long)]
         force: bool,
+        /// Act on a task that belongs to another session. Without it, `done` refuses.
+        #[arg(long)]
+        other_session: bool,
     },
     /// Move one or more `done` tasks back to `open`, keeping their notes, parent, and
     /// `blocked_on` links. Refuses the whole call, and changes nothing, if any named task is not
@@ -464,6 +471,9 @@ enum TaskCommand {
         /// Slugs (or unambiguous slug prefixes) of the done tasks to reopen.
         #[arg(required = true)]
         ids: Vec<String>,
+        /// Act on tasks that belong to another session. Without it, `reopen` refuses.
+        #[arg(long)]
+        other_session: bool,
     },
     /// List tasks. Requires `--session <id>` or `--all` (#1124) — no silent
     /// default to every session's tasks. `--state`/`--hide-done` filter by
@@ -506,17 +516,32 @@ enum TaskCommand {
         next: bool,
     },
     /// Append a progress note. Reads from stdin if `text` is omitted.
-    Note { id: String, text: Option<String> },
+    Note {
+        id: String,
+        text: Option<String>,
+        /// Act on a task that belongs to another session. Without it, `note` refuses.
+        #[arg(long)]
+        other_session: bool,
+    },
     /// Mark a task `waiting` on external input (e.g. a human review) rather
     /// than actively `wip` — the Stop-hook reminder won't nag to act on it.
     /// `reason` is recorded as a note; reads from stdin if omitted. Resume
     /// with `llmenv task start <id>` once the blocker clears.
-    Wait { id: String, reason: Option<String> },
+    Wait {
+        id: String,
+        reason: Option<String>,
+        /// Act on a task that belongs to another session. Without it, `wait` refuses.
+        #[arg(long)]
+        other_session: bool,
+    },
     /// Record that `id` is blocked on `on`.
     Block {
         id: String,
         #[arg(long)]
         on: String,
+        /// Act on a task that belongs to another session. Without it, `block` refuses.
+        #[arg(long)]
+        other_session: bool,
     },
     /// Mutate an existing task: retitle it, re-parent it, add/remove
     /// `blocked_on` dependencies, or add/delete a note. Every flag is
@@ -547,6 +572,9 @@ enum TaskCommand {
         delete_note: Option<String>,
         #[command(flatten)]
         detail: DetailArgs,
+        /// Act on a task that belongs to another session. Without it, `edit` refuses.
+        #[arg(long)]
+        other_session: bool,
     },
     /// Delete task(s) outright — for a batch of work that's being
     /// deliberately abandoned, not just reshuffled. Provide explicit ids, or
@@ -555,6 +583,9 @@ enum TaskCommand {
         ids: Vec<String>,
         #[arg(long, conflicts_with = "ids")]
         session: Option<String>,
+        /// Delete tasks that belong to another session. Without it, `clear` refuses.
+        #[arg(long)]
+        other_session: bool,
     },
     /// Manage task sessions (#905): a named span of work whose tasks are
     /// tracked as a group, so progress can be reported as done/total.
@@ -2796,6 +2827,23 @@ fn run_config_context() {
     emit(&text);
 }
 
+/// Read `CLAUDE_CONFIG_DIR` for the config guard. Unset means the default cache
+/// root is used. A value that is not Unicode is an error, because the guard would
+/// otherwise read a different cache from the one Claude Code started from (#2559).
+fn config_dir_from_var(
+    value: Result<String, std::env::VarError>,
+) -> Result<Option<String>, String> {
+    match value {
+        Ok(dir) => Ok(Some(dir)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(
+            "CLAUDE_CONFIG_DIR is not valid UTF-8, so the guard did not run. Export the \
+             directory again as a plain path."
+                .to_string(),
+        ),
+    }
+}
+
 /// `llmenv config-guard`: warn on PreToolUse Write/Edit to managed cache paths (#289).
 ///
 /// Reads the Claude Code hook payload from stdin. If the target path is inside the
@@ -2818,9 +2866,17 @@ fn run_config_guard() {
     //   Strict  → <root>/claude-code/<VERSION>-<hash>   (2 levels below root)
     // Walking up to find "claude-code" and taking its parent is invariant to depth.
     let default_cache = PathBuf::from(paths::expand_tilde("~/.cache/llmenv"));
-    let cache_root = match std::env::var("CLAUDE_CONFIG_DIR") {
-        Err(_) => default_cache, // expected when not running inside a hook
-        Ok(dir) => {
+    let config_dir = match config_dir_from_var(std::env::var("CLAUDE_CONFIG_DIR")) {
+        Ok(dir) => dir,
+        Err(msg) => {
+            // Stdout reaches the agent from a hook. Stderr from an exit-0 hook does not.
+            println!("\u{26a0} llmenv config-guard: {msg}");
+            return;
+        }
+    };
+    let cache_root = match config_dir {
+        None => default_cache, // expected when not running inside a hook
+        Some(dir) => {
             let path = PathBuf::from(&dir);
             match path
                 .ancestors()
@@ -3416,7 +3472,13 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             let task = crate::task::add_task_with(&state_dir, &new, parent_spec, choice, &project)?;
             println!("Added task '{}' ({})", task.slug, task.title);
         }
-        TaskCommand::Start { id, force, reopen } => {
+        TaskCommand::Start {
+            id,
+            force,
+            reopen,
+            other_session,
+        } => {
+            guard_task(&state_dir, &id, other_session)?;
             if reopen {
                 crate::task::reopen_task(&state_dir, &id)?;
             }
@@ -3431,7 +3493,12 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             })?;
             println!("Started '{}' — now {:?}", task.slug, task.state);
         }
-        TaskCommand::Done { id, force } => {
+        TaskCommand::Done {
+            id,
+            force,
+            other_session,
+        } => {
+            guard_task(&state_dir, &id, other_session)?;
             let completed = crate::task::complete_task(&state_dir, &id, force)?;
             println!("Completed '{}'", completed.task.slug);
             if let Some(note) = completed.skipped_start_note() {
@@ -3441,7 +3508,10 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 println!("{note}");
             }
         }
-        TaskCommand::Reopen { ids } => {
+        TaskCommand::Reopen { ids, other_session } => {
+            for id in &ids {
+                guard_task(&state_dir, id, other_session)?;
+            }
             for task in crate::task::reopen_tasks(&state_dir, &ids)? {
                 println!("Reopened '{}' — now {:?}", task.slug, task.state);
             }
@@ -3512,7 +3582,12 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 }
             }
         }
-        TaskCommand::Note { id, text } => {
+        TaskCommand::Note {
+            id,
+            text,
+            other_session,
+        } => {
+            guard_task(&state_dir, &id, other_session)?;
             let text = match text {
                 Some(t) => t,
                 None => {
@@ -3525,7 +3600,12 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             let task = crate::task::note_task(&state_dir, &id, &text)?;
             println!("Noted on '{}'", task.slug);
         }
-        TaskCommand::Wait { id, reason } => {
+        TaskCommand::Wait {
+            id,
+            reason,
+            other_session,
+        } => {
+            guard_task(&state_dir, &id, other_session)?;
             let reason = match reason {
                 Some(r) => r,
                 None => {
@@ -3538,7 +3618,12 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             let task = crate::task::wait_task(&state_dir, &id, &reason)?;
             println!("Marked '{}' waiting", task.slug);
         }
-        TaskCommand::Block { id, on } => {
+        TaskCommand::Block {
+            id,
+            on,
+            other_session,
+        } => {
+            guard_task(&state_dir, &id, other_session)?;
             let task = crate::task::block_task(&state_dir, &id, &on)?;
             println!(
                 "'{}' is now blocked on: {}",
@@ -3556,7 +3641,9 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             add_note,
             delete_note,
             detail,
+            other_session,
         } => {
+            guard_task(&state_dir, &id, other_session)?;
             let detail = detail.resolve()?;
             let add_note = match add_note.as_deref() {
                 Some("") => {
@@ -3581,7 +3668,17 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             let task = crate::task::edit_task(&state_dir, &id, &edit)?;
             println!("Updated '{}'", task.slug);
         }
-        TaskCommand::Clear { ids, session } => {
+        TaskCommand::Clear {
+            ids,
+            session,
+            other_session,
+        } => {
+            if let Some(session_id) = &session {
+                guard_session(&state_dir, session_id, other_session)?;
+            }
+            for id in &ids {
+                guard_task(&state_dir, id, other_session)?;
+            }
             if let Some(session_id) = session {
                 let cleared =
                     crate::task::session::delete_tasks_in_session(&state_dir, &session_id)?;
@@ -3607,6 +3704,28 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
 /// task` invocation runs with cwd set to wherever the agent invoked it from.
 fn current_project_tag() -> anyhow::Result<String> {
     Ok(crate::task::project::current_tag()?)
+}
+
+/// The conversation's session for the current project, read by the ownership
+/// guard (#2584).
+fn caller_session_for_task(
+    state_dir: &std::path::Path,
+) -> anyhow::Result<crate::task::ownership::Caller> {
+    let project = current_project_tag()?;
+    let owner = crate::task::session::EngineIdentity::from_env();
+    crate::task::ownership::caller_session(state_dir, &project, &owner)
+}
+
+/// Refuse a command that acts on task `id` when the task belongs to another session.
+fn guard_task(state_dir: &std::path::Path, id: &str, other_session: bool) -> anyhow::Result<()> {
+    let caller = caller_session_for_task(state_dir)?;
+    crate::task::ownership::ensure_task_is_ours(state_dir, id, &caller, other_session)
+}
+
+/// Refuse `clear --session <id>` when that session is not the caller's.
+fn guard_session(state_dir: &std::path::Path, id: &str, other_session: bool) -> anyhow::Result<()> {
+    let caller = caller_session_for_task(state_dir)?;
+    crate::task::ownership::ensure_session_is_ours(id, &caller, other_session)
 }
 
 /// What `task show --current`/`--next` resolves to (#1117).
@@ -4959,6 +5078,32 @@ fn run_prune(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use super::config_dir_from_var;
+
+    #[test]
+    fn config_dir_var_unset_selects_the_default_root() {
+        assert_eq!(
+            config_dir_from_var(Err(std::env::VarError::NotPresent)),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn config_dir_var_set_is_used_as_given() {
+        let dir = "/opt/claude-config".to_string();
+        assert_eq!(config_dir_from_var(Ok(dir.clone())), Ok(Some(dir)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_dir_var_non_unicode_names_the_variable() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let raw = std::ffi::OsString::from_vec(vec![0xff]);
+        let msg = config_dir_from_var(Err(std::env::VarError::NotUnicode(raw)))
+            .expect_err("a non-UTF-8 config dir must not select the default root");
+        assert!(msg.contains("CLAUDE_CONFIG_DIR"), "{msg}");
+    }
+
     #[test]
     fn the_hook_run_help_lists_every_event_the_parser_accepts() {
         use clap::CommandFactory;

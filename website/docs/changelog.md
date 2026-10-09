@@ -133,6 +133,11 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 - Consolidation refuses an answer that did not end normally, such as one cut off at the 4096-token limit. It used to store the cut last rule as complete (#2565) [fix:cli]
 - A hook output write that fails for a reason other than a closed pipe is logged. It used to be dropped without a message (#2563) [fix:throttle]
 - A command whose stderr pipe closes early exits with status 141 and no crash report, as a closed stdout already did. It used to abort (#2561) [fix:cli]
+- The MCP proxy fails to start when it cannot record its lock pid, rotate its log, or set the log mode to `0600`. It used to drop each of these errors without a message (#2572) [fix:mcp]
+- `llmenv task start`, `done`, `wait`, `note`, `block`, `edit`, `reopen`, and `clear` refuse a task that belongs to another session. The refusal names the owning session. Pass the new `--other-session` flag to act on it anyway. A bare `--force` no longer closes another session's task (#2584) [fix:task]
+- A non-UTF-8 `CLAUDE_CONFIG_DIR` no longer selects the default cache root. The config guard prints an error that names the variable and does not run (#2559) [fix:cli]
+- `llmenv setup` warns when `USER` is unset. The generated setup then names the user `unknown` (#2560) [fix:cli]
+- A non-UTF-8 `CLAUDE_CODE_SESSION_ID` logs a warning that names the variable. Session ownership then falls back as if no session existed (#2562) [fix:task]
 
 ## [3.12.1] - 2026-10-07
 
