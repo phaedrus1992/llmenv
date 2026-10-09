@@ -30,7 +30,7 @@ pub(crate) fn current_hash(config_path: &Path) -> anyhow::Result<Option<String>>
     let config_dir = config_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("config path has no parent directory"))?;
-    let env = crate::scope::matcher::Env::detect();
+    let env = crate::scope::matcher::Env::detect()?;
     let active = crate::scope::evaluate(&config, &env);
     let firing = crate::bundle_select::firing_bundles(&config.bundle, &active, None);
     match crate::cli::build_manifest(&config, config_dir, &active, &firing, false)? {

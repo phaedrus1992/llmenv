@@ -691,20 +691,23 @@ fn ownership_note(session: &Session, owner: &EngineIdentity) -> &'static str {
     }
 }
 
-/// Every task currently tagged with `session_id`. `pub(super)` so the queue check of
-/// `start_task` (`task/mod.rs`) can read the session (#2455).
-pub(super) fn tasks_in_session(state_dir: &Path, session_id: &str) -> Vec<Task> {
+/// Every task currently tagged with `session_id`. A task file that cannot be read is skipped.
+/// Use [`try_tasks_in_session`] where a decision depends on the whole session (#2598).
+fn tasks_in_session(state_dir: &Path, session_id: &str) -> Vec<Task> {
     list_tasks(state_dir)
         .into_iter()
         .filter(|t| t.session.as_deref() == Some(session_id))
         .collect()
 }
 
-/// [`tasks_in_session`], but a read error on the tasks directory is an error instead of an empty
-/// list. Finishing or abandoning a session on a store it cannot read would skip the unfinished
-/// check (#2416).
-fn try_tasks_in_session(state_dir: &Path, session_id: &str) -> anyhow::Result<Vec<Task>> {
-    Ok(super::try_list_tasks(state_dir)?
+/// [`tasks_in_session`], but a read error on the tasks directory or on any task file is an error
+/// instead of an empty list or a skipped file. Finishing, abandoning, or guarding a session on a
+/// store it cannot fully read would skip the unfinished check (#2416, #2598).
+pub(super) fn try_tasks_in_session(
+    state_dir: &Path,
+    session_id: &str,
+) -> anyhow::Result<Vec<Task>> {
+    Ok(super::read_tasks(state_dir, super::UnreadablePolicy::Fail)?
         .into_iter()
         .filter(|t| t.session.as_deref() == Some(session_id))
         .collect())
@@ -1036,7 +1039,7 @@ fn capped_for_reminder(text: &str, session_id: &str) -> String {
 /// tasks. Doesn't touch the session record itself.
 pub fn delete_tasks_in_session(state_dir: &Path, session_id: &str) -> anyhow::Result<Vec<Task>> {
     super::with_store_lock(state_dir, || {
-        let tasks = tasks_in_session(state_dir, session_id);
+        let tasks = try_tasks_in_session(state_dir, session_id)?;
         for t in &tasks {
             std::fs::remove_file(task_path(state_dir, &t.slug))?;
         }
@@ -2434,6 +2437,107 @@ mod tests {
         let summary = session_summary(dir.path(), &session.id).expect("test");
         assert_eq!((summary.done, summary.total), (0, 0));
         assert!(summary.tasks.is_empty());
+    }
+
+    /// Create a session with one task, then make that task's file unreadable and leave it so. Returns
+    /// the session id, the task, and the file path. `None` means the test runs as root, which reads
+    /// any file.
+    #[cfg(unix)]
+    fn session_with_unreadable_sibling(dir: &Path) -> Option<(String, Task, std::path::PathBuf)> {
+        use std::os::unix::fs::PermissionsExt;
+        let StartOutcome::Created(session) =
+            start_session(dir, Some("sprint 1"), None, PROJECT_A, StartDecision::Auto)
+                .expect("test")
+        else {
+            panic!("expected Created");
+        };
+        let sibling =
+            add_task_for_session(dir, "Unreadable sibling", ParentSpec::Detached, &session.id)
+                .expect("test");
+        let file = task_path(dir, &sibling.slug);
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).expect("test");
+        let unreadable = std::fs::read(&file).is_err();
+        unreadable.then_some((session.id, sibling, file))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn start_task_errors_when_a_session_task_file_is_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().expect("test");
+        let Some((session_id, sibling, file)) = session_with_unreadable_sibling(dir.path()) else {
+            return; // root: cannot exercise EACCES
+        };
+        let task = add_task_for_session(
+            dir.path(),
+            "Session task",
+            ParentSpec::Detached,
+            &session_id,
+        )
+        .expect("test");
+        let result = crate::start_task(dir.path(), &task.slug, false);
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).expect("test");
+        let err = result.expect_err("queue guard passed with an unreadable session task");
+        assert!(
+            format!("{err:#}").contains(&file.display().to_string()),
+            "{err:#} lacks {}",
+            sibling.slug
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_tasks_in_session_errors_when_a_session_task_file_is_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().expect("test");
+        let Some((session_id, _sibling, file)) = session_with_unreadable_sibling(dir.path()) else {
+            return; // root: cannot exercise EACCES
+        };
+        let task = add_task_for_session(
+            dir.path(),
+            "Readable task",
+            ParentSpec::Detached,
+            &session_id,
+        )
+        .expect("test");
+        let result = delete_tasks_in_session(dir.path(), &session_id);
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).expect("test");
+        result.expect_err("clear --session reported success with an unreadable session task");
+        assert!(
+            load_task(dir.path(), &task.slug).is_ok(),
+            "readable task was deleted"
+        );
+    }
+
+    #[test]
+    fn start_task_errors_when_a_session_task_file_is_corrupt() {
+        let dir = TempDir::new().expect("test");
+        let StartOutcome::Created(session) = start_session(
+            dir.path(),
+            Some("sprint 1"),
+            None,
+            PROJECT_A,
+            StartDecision::Auto,
+        )
+        .expect("test") else {
+            panic!("expected Created");
+        };
+        let task = add_task_for_session(
+            dir.path(),
+            "Session task",
+            ParentSpec::Detached,
+            &session.id,
+        )
+        .expect("test");
+        let corrupt = task_path(dir.path(), "corrupt-sibling");
+        std::fs::write(&corrupt, b"{ not json").expect("test");
+
+        let err = crate::start_task(dir.path(), &task.slug, false)
+            .expect_err("queue guard passed with a corrupt session task");
+        assert!(
+            format!("{err:#}").contains(&corrupt.display().to_string()),
+            "{err:#}"
+        );
     }
 
     #[test]

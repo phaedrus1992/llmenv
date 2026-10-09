@@ -54,7 +54,7 @@ fn run_consolidation_at(
     checkpoint: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     let config = crate::config::Config::load(config_path)?;
-    let env = crate::scope::matcher::Env::detect_for_config(&config);
+    let env = crate::scope::matcher::Env::detect_for_config(&config)?;
     let active = crate::scope::evaluate(&config, &env);
     let config_dir = config_path
         .parent()

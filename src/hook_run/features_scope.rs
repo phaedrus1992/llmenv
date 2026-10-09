@@ -30,7 +30,16 @@ pub(crate) fn resolve(config: Config, config_path: &Path) -> Config {
         );
         return config;
     };
-    let env = crate::scope::matcher::Env::detect_for_config(&config);
+    let env = match crate::scope::matcher::Env::detect_for_config(&config) {
+        Ok(env) => env,
+        Err(e) => {
+            tracing::error!(
+                "features not resolved from bundles: {e:#}. Fix the environment, or unset the \
+                 variable."
+            );
+            return config;
+        }
+    };
     let active = crate::scope::evaluate(&config, &env);
     resolve_with(config, config_dir, &active)
 }
