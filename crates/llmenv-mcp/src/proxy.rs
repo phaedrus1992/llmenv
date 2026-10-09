@@ -153,7 +153,7 @@ where
 ///
 /// # Errors
 /// Returns an error if the lockfile can't be created for a reason other than
-/// already existing.
+/// already existing, or if its holder pid can't be written.
 fn try_lock(lock_path: &Path) -> anyhow::Result<Option<()>> {
     use std::io::Write as _;
     let mut file = match std::fs::OpenOptions::new()
@@ -168,9 +168,15 @@ fn try_lock(lock_path: &Path) -> anyhow::Result<Option<()>> {
                 .context(format!("creating proxy lockfile {}", lock_path.display())));
         }
     };
-    // Best-effort: an unrecorded holder is treated as stale, which is the safe
-    // direction — it can be reclaimed rather than blocking forever.
-    let _ = file.write_all(std::process::id().to_string().as_bytes());
+    // An empty lock reads as stale, so a live holder must not leave one behind.
+    // Remove it and fail, rather than let a second spawn take over the lock.
+    if let Err(e) = file.write_all(std::process::id().to_string().as_bytes()) {
+        release_lock(lock_path);
+        return Err(anyhow::Error::new(e).context(format!(
+            "recording pid in proxy lockfile {}",
+            lock_path.display()
+        )));
+    }
     Ok(Some(()))
 }
 
@@ -661,10 +667,17 @@ pub fn open_bounded_log(
     match std::fs::metadata(path) {
         Ok(meta) if meta.len() >= max_bytes => {
             // Single generation: enough to keep the previous failure's trace
-            // around without unbounded growth. A failed rotation isn't worth
-            // aborting the spawn over — the append below still succeeds,
-            // though the size bound then depends on the next attempt.
-            let _ = std::fs::rename(path, path.with_extension("log.1"));
+            // around without unbounded growth. NotFound means a peer rotated
+            // first, which leaves the bound intact.
+            match std::fs::rename(path, path.with_extension("log.1")) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(
+                        anyhow::Error::new(e).context(format!("rotating log {}", path.display()))
+                    );
+                }
+            }
         }
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -690,10 +703,12 @@ pub fn open_bounded_log(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        if let Ok(meta) = file.metadata()
-            && meta.permissions().mode() & 0o777 != 0o600
-        {
-            let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+        let meta = file
+            .metadata()
+            .with_context(|| format!("reading mode of log {}", path.display()))?;
+        if meta.permissions().mode() & 0o777 != 0o600 {
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("setting owner-only mode on log {}", path.display()))?;
         }
     }
     Ok(file)
@@ -1727,6 +1742,25 @@ mod tests {
                 .len(),
             PROXY_LOG_MAX_BYTES,
             "the previous generation must be preserved as .log.1"
+        );
+    }
+
+    /// A rotation that cannot run is an error. A directory at `<log>.log.1` blocks
+    /// the rename, and the log must not grow past its cap with no message (#2572).
+    #[test]
+    fn open_proxy_log_fails_when_rotation_is_blocked() {
+        use super::{PROXY_LOG_MAX_BYTES, open_proxy_log};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("mcp-proxy.log");
+        let filler = vec![b'x'; usize::try_from(PROXY_LOG_MAX_BYTES).expect("cap fits usize")];
+        std::fs::write(&log, &filler).expect("fill");
+        std::fs::create_dir(dir.path().join("mcp-proxy.log.1")).expect("mkdir");
+
+        let err = open_proxy_log(&log).expect_err("a blocked rotation must fail the open");
+
+        assert!(
+            format!("{err:#}").contains("rotating log"),
+            "error must name the rotation: {err:#}"
         );
     }
 

@@ -12,6 +12,7 @@
 //! ever becomes a real bottleneck — unlikely for a CLI task tracker.
 
 pub mod core_text;
+pub mod ownership;
 pub mod project;
 pub mod relation;
 pub mod reopen;
