@@ -481,7 +481,8 @@ Only when the open session has no match does the search cover the whole project.
   the same way.
   The refusal names the owning session. To act on the task anyway, pass `--other-session <owner-id>`,
   where `<owner-id>` is that owning session's id. A different id is refused. A bare `--other-session`
-  is a usage error. Each override appends a task note that names the calling session.
+  is a usage error. Each override appends a task note that names the calling session,
+  once the command succeeds. `clear` deletes its tasks, so it writes no note.
   A bare `--force` does not override this check.
 - `task done <id> [--force]` — mark a task complete. (changed in v3.12.0) Refuses a parent whose sub-tasks are
   not all `done`, and lists them; `--force` closes it anyway and prints a note.
