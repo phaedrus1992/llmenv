@@ -227,6 +227,10 @@ Sync plugin marketplaces into the cache — clone git sources that are missing,
 fast-forward those already present. Local-path marketplaces are used in place and
 need no sync.
 
+Sync reads only what an active plugin-collection selects. A marketplace or plugin that no
+active collection selects is not fetched or checked, so a profile that is not active does not
+fail the sync.
+
 (changed in v3.12.1) A local-path marketplace whose directory is missing on this host is skipped with a warning.
 The sync goes on to the marketplaces declared after it.
 Before v3.12.1 the sync stopped at the first missing path.
@@ -467,7 +471,9 @@ Only when the open session has no match does the search cover the whole project.
 - `task start <id> [--force] [--reopen]` — claim a task, moving it to `wip`. Also the
   resume action for a `waiting` task — it accepts any non-`done` state as its
   starting point. An undone **`blocked_on`** reference (`task block`,
-  below) refuses to start, since that's an explicit dependency. (changed in v3.12.0) An `open`
+  below) refuses to start, since that's an explicit dependency. A child whose
+  parent task file is corrupt or unreadable also refuses to start, and the error
+  names the parent. A parent that was deleted does not block the start. (changed in v3.12.0) An `open`
   queued task also refuses to start while the task ahead of it is not `done` or `waiting`, or while
   another queued task is in progress; the error names that task. Sub-tasks and `--parallel` tasks are not
   in the queue. Pass `--force` to override. A
@@ -489,8 +495,10 @@ Only when the open session has no match does the search cover the whole project.
   Refuses a task that was never started (`open` straight to `done`) and exits
   non-zero, because that jump means no work was tracked. Run `task start`
   first. Pass `--force` when the work is done without tracking; it prints a
-  note that the start was skipped. A task in `wip` or `waiting` completes
-  as before, and `done` on a `done` task stays a no-op. The native-tool
+  note that the start was skipped. `--force` on an `open`, `wip`, or `waiting`
+  task also appends a note to the task. The note names the prior state, the
+  time, and the caller. A task in `wip` or `waiting` completes as before, and
+  `done` on a `done` task stays a no-op. It changes nothing, including `updated_at`. The native-tool
   redirect (`TaskUpdate`, `TodoWrite`) never forces: it returns the refusal as
   the tool result.
 - `task reopen <id>...` — undo `task done`. (added in v3.12.0) Moves each named `done` task back to `open`.

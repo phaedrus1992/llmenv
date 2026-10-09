@@ -46,6 +46,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `llmenv upgrade` errors name the request URL. A non-JSON response shows the start of its body, and when `LLMENV_UPGRADE_GITHUB_API` is set the error says so (#2578) [fix:upgrade]
 - `llmenv task start` and `clear --session` stop when a task file in the store cannot be read or parsed. They used to skip the file, so a session could look empty or finished. Finish and abandon now use the same strict read (#2598) [fix:task]
 - A non-UTF-8 `LLMENV_EXTRA_TAGS` stops the command that reads it, with an error that names the variable. The tags used to be dropped, with only a log line that the default filter hid. A hook logs the error and skips the bundle features (#2575) [fix:scope]
+- `llmenv plugin-sync` fetches and checks only the marketplaces and plugins that an active plugin-collection selects. A profile that is not active no longer fails the sync with a plugin-not-found error (#2615) [fix:plugins]
+- The task commit gate applies a substitution in shell order. `git commit -m "$(llmenv task done x)"` passes when the task ends first, as bash runs it. A command that nests substitutions more than 32 levels deep is denied, not parsed (#2544) [fix:hook]
+- The slippage check sees a modifying command inside a substitution, a subshell, a brace group, or after a single `&`. It used to miss these (#2558) [fix:hook]
+- `llmenv task done --force` on an `open`, `wip`, or `waiting` task adds a note that names the prior state, the time, and the caller. A repeat `done` no longer rewrites `updated_at` (#2585) [fix:task]
+- `llmenv task start` refuses a child whose parent task file is corrupt or unreadable, and it names the parent. It used to start the child with a hidden warning. A deleted parent still lets the child start (#2597) [fix:task]
 
 ## [3.12.1] - 2026-10-07
 
