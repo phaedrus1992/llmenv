@@ -150,7 +150,7 @@ fn benchmark_scope_evaluation(c: &mut Criterion) {
     // Scope evaluation on small config
     group.bench_function("small_config", |b| {
         b.iter(|| {
-            let env = scope::matcher::Env::detect();
+            let env = scope::matcher::Env::detect().expect("bench env detection");
             let _ = black_box(scope::evaluate(&small_config, &env));
         });
     });
@@ -158,7 +158,7 @@ fn benchmark_scope_evaluation(c: &mut Criterion) {
     // Scope evaluation on large config
     group.bench_function("large_config", |b| {
         b.iter(|| {
-            let env = scope::matcher::Env::detect();
+            let env = scope::matcher::Env::detect().expect("bench env detection");
             let _ = black_box(scope::evaluate(&large_config, &env));
         });
     });

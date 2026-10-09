@@ -1333,7 +1333,7 @@ fn run_export(
     let config = crate::hook_run::load_cached_config(&config_path)?;
     let config_dir = paths::config_dir()?;
 
-    let env = crate::scope::matcher::Env::detect_for_config(&config);
+    let env = crate::scope::matcher::Env::detect_for_config(&config)?;
     let active = crate::scope::evaluate(&config, &env);
 
     // When the memory backend designates *this* host as its server, ensure the
@@ -1452,9 +1452,7 @@ fn run_export(
                 )
             }
             None => {
-                if let Err(e) = crate::throttle::store_active_throttle(None) {
-                    tracing::debug!("failed to clear throttle state (non-fatal): {e}");
-                }
+                crate::throttle::store_active_throttle(None)?;
                 Ok(None)
             }
         };
@@ -1691,7 +1689,7 @@ fn run_regenerate() -> anyhow::Result<()> {
     let config = crate::hook_run::load_cached_config(&config_path)?;
     let config_dir = paths::config_dir()?;
 
-    let env = crate::scope::matcher::Env::detect_for_config(&config);
+    let env = crate::scope::matcher::Env::detect_for_config(&config)?;
     let active = crate::scope::evaluate(&config, &env);
 
     // Collect firing bundles (same logic as run_export)
@@ -1739,9 +1737,7 @@ fn run_regenerate() -> anyhow::Result<()> {
                 )
             }
             None => {
-                if let Err(e) = crate::throttle::store_active_throttle(None) {
-                    tracing::debug!("failed to clear throttle state (non-fatal): {e}");
-                }
+                crate::throttle::store_active_throttle(None)?;
                 Ok(None)
             }
         };
@@ -2162,9 +2158,7 @@ fn build_and_materialize(
     let Some((mut manifest, cache_root)) = built else {
         // No content dirs — clear any stale throttle state so a since-removed
         // throttle config doesn't keep throttling.
-        if let Err(e) = crate::throttle::store_active_throttle(None) {
-            tracing::debug!("failed to clear throttle state (non-fatal): {e}");
-        }
+        crate::throttle::store_active_throttle(None)?;
         return Ok(None);
     };
 
@@ -2619,7 +2613,7 @@ pub(crate) fn run_check_stale(use_color: bool, auto_fix: bool) -> anyhow::Result
     let config = Config::load(&config_path)?;
     let config_dir = paths::config_dir()?;
 
-    let env = crate::scope::matcher::Env::detect_for_config(&config);
+    let env = crate::scope::matcher::Env::detect_for_config(&config)?;
     let active = crate::scope::evaluate(&config, &env);
 
     let firing: Vec<&Bundle> = firing_bundles(&config.bundle, &active, None);
@@ -4399,7 +4393,7 @@ fn run_context(bundle_filter: Option<&str>, why: bool, use_color: bool) -> anyho
         .parent()
         .ok_or_else(|| anyhow::anyhow!("config path has no parent directory"))?;
     let config = Config::load(&config_path)?;
-    let env = crate::scope::matcher::Env::detect_for_config(&config);
+    let env = crate::scope::matcher::Env::detect_for_config(&config)?;
     let active = crate::scope::evaluate(&config, &env);
     let consumed = all_consumed_tags(&config);
 
@@ -4928,7 +4922,7 @@ fn run_validate(use_color: bool) -> anyhow::Result<()> {
             valid = false;
         }
     }
-    let env = crate::scope::matcher::Env::detect_for_config(&config);
+    let env = crate::scope::matcher::Env::detect_for_config(&config)?;
     let active = crate::scope::evaluate(&config, &env);
     for scope in &active.scopes {
         if scope.kind != "project" {

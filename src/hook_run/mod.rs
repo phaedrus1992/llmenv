@@ -1371,7 +1371,7 @@ fn run_inner(
             return Ok(String::new());
         }
 
-        let env = crate::scope::matcher::Env::detect_for_config(&config);
+        let env = crate::scope::matcher::Env::detect_for_config(&config)?;
         let active = crate::scope::evaluate(&config, &env);
         let t_scope = std::time::Instant::now();
 
@@ -2725,6 +2725,8 @@ fn handle_web_fetch_in(
         tracing::error!("icm-store: failed to serialize store args");
         return None;
     };
+    // Spawns this same binary as a detached child. The path is this process's own image, not input.
+    // nosemgrep: rust.lang.security.current-exe.current-exe
     let Ok(exe) = std::env::current_exe() else {
         tracing::error!("icm-store: cannot resolve current_exe for detached store");
         return None;
@@ -3003,6 +3005,8 @@ fn trigger_codebase_memory_index(
         &inputs,
         None,
     );
+    // Spawns this same binary as a detached child. The path is this process's own image, not input.
+    // nosemgrep: rust.lang.security.current-exe.current-exe
     let exe = std::env::current_exe().ok();
     // The wrapper is used only with both a checkpoint and an executable (`index_job_command`).
     let wrapped = uses_wrapper(checkpoint.as_deref(), exe.as_deref());
@@ -3078,6 +3082,8 @@ fn respawn_job(cp: &checkpoint::Checkpoint, path: &std::path::Path) -> anyhow::R
                 cp.cwd.as_deref().unwrap_or("not recorded")
             )
         })?;
+    // Spawns this same binary as a detached child. The path is this process's own image, not input.
+    // nosemgrep: rust.lang.security.current-exe.current-exe
     let exe = std::env::current_exe()?;
     let stdin = cp.inputs.to_string();
     match cp.kind {
@@ -3185,6 +3191,8 @@ fn post_session_consolidation() {
 /// checkpoint holds the working directory, because the child derives the project from it and a
 /// resumed run must start in the same place.
 fn post_session_consolidation_in(state_dir: Option<&std::path::Path>) {
+    // Spawns this same binary as a detached child. The path is this process's own image, not input.
+    // nosemgrep: rust.lang.security.current-exe.current-exe
     let Ok(exe) = std::env::current_exe() else {
         tracing::error!("consolidation-run: cannot resolve current_exe; consolidation skipped");
         return;
