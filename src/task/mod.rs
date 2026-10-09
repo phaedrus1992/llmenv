@@ -233,6 +233,26 @@ pub(crate) fn list_tasks(state_dir: &Path) -> Vec<Task> {
 /// Returns an error if the tasks directory exists but can't be read (e.g.
 /// permission denied).
 pub(crate) fn try_list_tasks(state_dir: &Path) -> anyhow::Result<Vec<Task>> {
+    read_tasks(state_dir, UnreadablePolicy::Skip)
+}
+
+/// Like [`try_list_tasks`], but an unreadable task file also fails the listing. A guard that
+/// decides from every task in a session must not decide from a view with a hole in it, because
+/// the hidden file may belong to that session (#2598).
+pub(super) fn try_list_tasks_strict(state_dir: &Path) -> anyhow::Result<Vec<Task>> {
+    read_tasks(state_dir, UnreadablePolicy::Fail)
+}
+
+/// What [`read_tasks`] does with a task file or directory entry that cannot be read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnreadablePolicy {
+    /// Log the file and leave it out of the listing.
+    Skip,
+    /// Fail the whole listing.
+    Fail,
+}
+
+fn read_tasks(state_dir: &Path, policy: UnreadablePolicy) -> anyhow::Result<Vec<Task>> {
     let dir = tasks_dir(state_dir);
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
@@ -247,6 +267,10 @@ pub(crate) fn try_list_tasks(state_dir: &Path) -> anyhow::Result<Vec<Task>> {
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
+            Err(e) if policy == UnreadablePolicy::Fail => {
+                return Err(anyhow::Error::new(e)
+                    .context(format!("reading an entry of tasks dir {}", dir.display())));
+            }
             Err(e) => {
                 tracing::warn!(error = %e, dir = %dir.display(), "skipping unreadable directory entry");
                 continue;
@@ -267,6 +291,9 @@ pub(crate) fn try_list_tasks(state_dir: &Path) -> anyhow::Result<Vec<Task>> {
             // wrong diagnosis sends someone chasing data corruption for what's
             // actually a permissions problem (#1112).
             Err(e) if e.downcast_ref::<std::io::Error>().is_some() => {
+                if policy == UnreadablePolicy::Fail {
+                    return Err(e.context(format!("reading task file {}", path.display())));
+                }
                 tracing::warn!(error = %e, path = %path.display(), "skipping unreadable task file");
             }
             Err(e) => {
@@ -696,8 +723,10 @@ pub(crate) fn start_task(state_dir: &Path, input: &str, force: bool) -> anyhow::
         }
         if !force
             && let Some(session_id) = &task.session
-            && let Some(block) =
-                relation::queue_block(&task, &session::tasks_in_session(state_dir, session_id))
+            && let Some(block) = relation::queue_block(
+                &task,
+                &session::try_tasks_in_session(state_dir, session_id)?,
+            )
         {
             anyhow::bail!("{block}");
         }
@@ -753,7 +782,7 @@ fn ancestors_to_start(state_dir: &Path, child: &Task, force: bool) -> anyhow::Re
                 && let Some(session_id) = &parent.session
                 && let Some(block) = relation::queue_block(
                     &parent,
-                    &session::tasks_in_session(state_dir, session_id),
+                    &session::try_tasks_in_session(state_dir, session_id)?,
                 )
             {
                 anyhow::bail!("the parent of '{}' cannot start: {block}", child.slug);
