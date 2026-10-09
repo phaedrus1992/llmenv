@@ -3681,9 +3681,9 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             other_session,
         } => {
             let audit = guard_task(&state_dir, &id, other_session.as_deref())?;
-            let completed = crate::task::complete_task(&state_dir, &id, force)?;
+            // The caller is resolved before the close, so a failure here leaves the task open.
             let caller = caller_session_for_task(&state_dir)?;
-            crate::task::record_forced_close(&state_dir, &completed, force, &caller)?;
+            let completed = crate::task::complete_task_by(&state_dir, &id, force, &caller)?;
             println!("Completed '{}'", completed.task.slug);
             if let Some(note) = completed.skipped_start_note() {
                 println!("{note}");
