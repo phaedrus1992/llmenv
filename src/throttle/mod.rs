@@ -72,8 +72,12 @@ fn read_throttle_config(path: &Path) -> anyhow::Result<Option<Throttle>> {
             return Err(e).with_context(|| format!("reading throttle state: {}", path.display()));
         }
     };
-    let cfg = serde_json::from_slice(&bytes)
-        .with_context(|| format!("parsing throttle state: {}", path.display()))?;
+    let cfg = serde_json::from_slice(&bytes).with_context(|| {
+        format!(
+            "parsing throttle state {}: delete the file, or run `llmenv export` to rewrite it",
+            path.display()
+        )
+    })?;
     Ok(Some(cfg))
 }
 
@@ -489,6 +493,24 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    proptest! {
+        // Any config that the store writes reads back unchanged.
+        #[test]
+        fn stored_throttle_reads_back_unchanged(
+            backend in "[a-z]{1,8}",
+            when in proptest::collection::vec("[a-z]{1,8}", 0..4),
+            cache_ttl in 0u64..100_000,
+            max_wait in 0u64..100_000,
+            soft_threshold in 0u64..=100,
+        ) {
+            let tmp = tempfile::tempdir().unwrap();
+            let cfg = Throttle { backend, when, cache_ttl, max_wait, soft_threshold };
+            store_active_throttle_with_state_dir(Some(&cfg), tmp.path()).unwrap();
+            let back = read_throttle_config(&throttle_state_path(tmp.path())).unwrap();
+            prop_assert_eq!(serde_json::to_value(back.unwrap()).unwrap(), serde_json::to_value(&cfg).unwrap());
+        }
     }
 
     #[test]

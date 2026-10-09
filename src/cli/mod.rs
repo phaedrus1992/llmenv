@@ -1452,9 +1452,7 @@ fn run_export(
                 )
             }
             None => {
-                if let Err(e) = crate::throttle::store_active_throttle(None) {
-                    tracing::debug!("failed to clear throttle state (non-fatal): {e}");
-                }
+                crate::throttle::store_active_throttle(None)?;
                 Ok(None)
             }
         };
@@ -1739,9 +1737,7 @@ fn run_regenerate() -> anyhow::Result<()> {
                 )
             }
             None => {
-                if let Err(e) = crate::throttle::store_active_throttle(None) {
-                    tracing::debug!("failed to clear throttle state (non-fatal): {e}");
-                }
+                crate::throttle::store_active_throttle(None)?;
                 Ok(None)
             }
         };
@@ -2162,9 +2158,7 @@ fn build_and_materialize(
     let Some((mut manifest, cache_root)) = built else {
         // No content dirs — clear any stale throttle state so a since-removed
         // throttle config doesn't keep throttling.
-        if let Err(e) = crate::throttle::store_active_throttle(None) {
-            tracing::debug!("failed to clear throttle state (non-fatal): {e}");
-        }
+        crate::throttle::store_active_throttle(None)?;
         return Ok(None);
     };
 
