@@ -1092,12 +1092,9 @@ fn resolve_note_index(notes: &[TaskNote], id: &str) -> anyhow::Result<usize> {
 /// ancestor — walks up from `new_parent` and checks `slug` never reappears. A
 /// `visited` guard (mirroring [`append_forest`]'s) makes a pre-existing
 /// malformed cycle elsewhere in the store terminate instead of looping
-/// forever; that's not this call's problem to fix. A corrupt/unreadable file
-/// encountered while walking up also stops the walk there (treated the same
-/// as "no parent") — same fail-open tolerance `append_forest` and
-/// `start_task`'s dangling-`blocked_on` handling already use for a broken
-/// link elsewhere in the store; it can't itself be part of a cycle back to
-/// `slug` since the walk can't see past it either way.
+/// forever; that's not this call's problem to fix. A missing ancestor ends the
+/// walk. An unreadable or corrupt ancestor fails the change: a cycle can pass
+/// through that file once it is repaired, so the walk must not stop silently.
 fn reject_cycle(state_dir: &Path, slug: &str, new_parent: &str) -> anyhow::Result<()> {
     let mut current = new_parent.to_string();
     let mut visited = HashSet::new();
@@ -1108,11 +1105,26 @@ fn reject_cycle(state_dir: &Path, slug: &str, new_parent: &str) -> anyhow::Resul
         if !visited.insert(current.clone()) {
             return Ok(());
         }
-        match load_task(state_dir, &current).ok().and_then(|t| t.parent) {
-            Some(p) => current = p,
-            None => return Ok(()),
-        }
+        let task = match load_task(state_dir, &current) {
+            Ok(task) => task,
+            Err(e) if is_not_found(&e) => return Ok(()),
+            Err(e) => {
+                return Err(e.context(format!(
+                    "cannot check parent '{new_parent}' of '{slug}': ancestor '{current}' is unreadable"
+                )));
+            }
+        };
+        let Some(parent) = task.parent else {
+            return Ok(());
+        };
+        current = parent;
     }
+}
+
+/// True when `err` was caused by a file that does not exist.
+fn is_not_found(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<std::io::Error>()
+        .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// SessionStart hook: if any `wip` tasks exist, build a reminder listing them
@@ -4515,5 +4527,34 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod reject_cycle_tests {
+    use super::{reject_cycle, task_path};
+    use tempfile::TempDir;
+
+    #[test]
+    fn a_corrupt_ancestor_fails_the_parent_change() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = task_path(dir.path(), "ancestor");
+        std::fs::create_dir_all(path.parent().expect("task dir")).expect("mkdir");
+        std::fs::write(&path, "{not task json").expect("write corrupt ancestor");
+
+        let err = reject_cycle(dir.path(), "child", "ancestor")
+            .expect_err("a corrupt ancestor must not pass silently");
+
+        let msg = format!("{err:#}");
+        assert!(msg.contains("ancestor"), "must name the ancestor: {msg}");
+    }
+
+    #[test]
+    fn a_missing_ancestor_ends_the_walk_without_error() {
+        let dir = TempDir::new().expect("tempdir");
+
+        reject_cycle(dir.path(), "child", "absent")
+            .expect("a missing ancestor is not a cycle and not a corrupt file");
     }
 }

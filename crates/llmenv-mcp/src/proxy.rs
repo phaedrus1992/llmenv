@@ -151,33 +151,69 @@ where
 /// a lock left behind by an export that died mid-spawn can be recognized as
 /// stale — see [`adopt_or_reclaim`].
 ///
+/// The pid goes into a staging file first, which is then hard-linked to the lock
+/// path. The lock therefore never exists empty: a peer that reads an empty lock
+/// would treat it as stale and reclaim a live holder's lock (#2587).
+///
 /// # Errors
-/// Returns an error if the lockfile can't be created for a reason other than
-/// already existing, or if its holder pid can't be written.
+/// Returns an error if the staging file cannot be written or linked for a reason
+/// other than the lock already existing. The state directory must support hard
+/// links.
 fn try_lock(lock_path: &Path) -> anyhow::Result<Option<()>> {
-    use std::io::Write as _;
-    let mut file = match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(lock_path)
-    {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(None),
-        Err(e) => {
-            return Err(anyhow::Error::new(e)
-                .context(format!("creating proxy lockfile {}", lock_path.display())));
-        }
-    };
-    // An empty lock reads as stale, so a live holder must not leave one behind.
-    // Remove it and fail, rather than let a second spawn take over the lock.
-    if let Err(e) = file.write_all(std::process::id().to_string().as_bytes()) {
-        release_lock(lock_path);
-        return Err(anyhow::Error::new(e).context(format!(
-            "recording pid in proxy lockfile {}",
-            lock_path.display()
-        )));
+    let staging = staging_path(lock_path);
+    write_staging(&staging)?;
+    let linked = std::fs::hard_link(&staging, lock_path);
+    if let Err(e) = std::fs::remove_file(&staging) {
+        tracing::warn!(
+            "could not remove proxy lock staging file {} ({e})",
+            staging.display()
+        );
     }
-    Ok(Some(()))
+    match linked {
+        Ok(()) => Ok(Some(())),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+        Err(e) => Err(anyhow::Error::new(e).context(format!(
+            "creating proxy lockfile {} (the state directory must support hard links)",
+            lock_path.display()
+        ))),
+    }
+}
+
+/// The staging file for this process: `<lock>.<pid>.staging`. The suffix differs
+/// from the pidfile temp name, so the two never share a file.
+fn staging_path(lock_path: &Path) -> PathBuf {
+    let mut name = lock_path.as_os_str().to_owned();
+    name.push(format!(".{}.staging", std::process::id()));
+    PathBuf::from(name)
+}
+
+/// Writes this process's pid to a new owner-only staging file. A leftover file
+/// of a crashed export with the same pid is removed first. `create_new` refuses
+/// a symlink planted at the name, so the write never follows it.
+fn write_staging(staging: &Path) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    match std::fs::remove_file(staging) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(anyhow::Error::new(e).context(format!(
+                "removing old proxy lock staging file {}",
+                staging.display()
+            )));
+        }
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    let mut file = opts
+        .open(staging)
+        .with_context(|| format!("creating proxy lock staging file {}", staging.display()))?;
+    file.write_all(std::process::id().to_string().as_bytes())
+        .with_context(|| format!("writing proxy lock staging file {}", staging.display()))
 }
 
 /// Releases the spawn lock, complaining loudly if it can't.
@@ -195,12 +231,19 @@ fn release_lock(lock_path: &Path) {
 }
 
 /// Reads the pid recorded in the lockfile, if it holds one.
-fn lock_holder(lock_path: &Path) -> Option<u32> {
-    std::fs::read_to_string(lock_path)
-        .ok()?
-        .trim()
-        .parse::<u32>()
-        .ok()
+///
+/// An absent lock and a lock with no readable pid both give `Ok(None)`. `try_lock`
+/// never leaves a lock without a pid, so one without it comes from an older
+/// llmenv or a manual edit and reads as stale. Any other
+/// read failure is an error. Reading it as "no holder" would let a peer reclaim
+/// a lock whose holder may still be alive (#2587).
+fn lock_holder(lock_path: &Path) -> anyhow::Result<Option<u32>> {
+    match std::fs::read_to_string(lock_path) {
+        Ok(text) => Ok(text.trim().parse::<u32>().ok()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(anyhow::Error::new(e)
+            .context(format!("reading proxy lockfile {}", lock_path.display()))),
+    }
 }
 
 /// Handles the case where a peer already holds the spawn lock: wait for their
@@ -234,7 +277,7 @@ where
     // Check the holder before waiting on it. A lock whose holder is gone has
     // nothing to wait for, so reclaiming it immediately keeps a wedged lock from
     // costing the full budget on every prompt.
-    if let Some(holder) = lock_holder(lock_path).filter(|pid| is_alive(*pid) != Some(false)) {
+    if let Some(holder) = lock_holder(lock_path)?.filter(|pid| is_alive(*pid) != Some(false)) {
         if wait_for_port(bind, budget_ms) {
             reconcile_pidfile(pid_path);
             return Ok(EnsureOutcome::AlreadyRunning);
@@ -257,8 +300,17 @@ where
         "reclaiming stale proxy lockfile {} (holder is gone)",
         lock_path.display()
     );
-    std::fs::remove_file(lock_path)
-        .with_context(|| format!("removing stale proxy lockfile {}", lock_path.display()))?;
+    match std::fs::remove_file(lock_path) {
+        Ok(()) => {}
+        // A peer reclaimed it first. The `try_lock` below decides who spawns.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(anyhow::Error::new(e).context(format!(
+                "removing stale proxy lockfile {}",
+                lock_path.display()
+            )));
+        }
+    }
 
     // Single bounded retry: whoever wins the reclaimed lock does the spawn, and
     // the loser is told to retry rather than recursing.
@@ -692,10 +744,42 @@ pub fn open_bounded_log(
     {
         use std::os::unix::fs::OpenOptionsExt as _;
         opts.mode(0o600);
+        // The check above is by name, so a symlink can be swapped in before the
+        // open. O_NOFOLLOW makes the open fail on a final-component symlink. It
+        // applies on both hardening paths: a user-set path is the one most likely
+        // to be writable by another uid (#2588). O_NONBLOCK makes the open of a FIFO
+        // with no reader fail instead of blocking the shell prompt.
+        let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;
+        opts.custom_flags(flags.bits().cast_signed());
     }
     let file = opts
         .open(path)
         .with_context(|| format!("opening log {}", path.display()))?;
+    // The opened file, not the earlier name lookup, is the one written to.
+    let opened = file
+        .metadata()
+        .with_context(|| format!("inspecting opened log {}", path.display()))?;
+    if !opened.is_file() {
+        anyhow::bail!(
+            "log path {} is not a regular file ({:?}); refusing to write through it",
+            path.display(),
+            opened.file_type()
+        );
+    }
+    // Another uid can hard-link a victim's file into a shared log directory.
+    // O_NOFOLLOW and `is_file` pass for it, and the chmod below would then
+    // change the victim's file.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if opened.nlink() != 1 {
+            anyhow::bail!(
+                "log path {} has {} hard links; refusing to write through it",
+                path.display(),
+                opened.nlink()
+            );
+        }
+    }
 
     // `mode()` only applies at creation, so a log left behind with looser
     // permissions would keep them. The proxy's stderr can describe the memory
@@ -2188,6 +2272,113 @@ mod tests {
                 let bind = format!("127.0.0.1:{s}");
                 prop_assert!(parse_bind(&bind).is_err(), "must reject port {:?}", s);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod lock_and_log_safety_tests {
+    use super::{lock_holder, open_bounded_log, try_lock};
+    use tempfile::TempDir;
+
+    #[test]
+    fn try_lock_records_the_pid_before_the_lock_is_visible() {
+        let dir = TempDir::new().expect("tempdir");
+        let lock = dir.path().join("proxy.lock");
+
+        assert!(try_lock(&lock).expect("first take").is_some());
+        let pid = std::process::id().to_string();
+        assert_eq!(std::fs::read_to_string(&lock).expect("read lock"), pid);
+
+        assert!(
+            try_lock(&lock).expect("second take").is_none(),
+            "a held lock must not be taken again"
+        );
+        assert_eq!(lock_holder(&lock).expect("holder"), pid.parse::<u32>().ok());
+    }
+
+    #[test]
+    fn lock_holder_treats_an_absent_lock_as_no_holder() {
+        let dir = TempDir::new().expect("tempdir");
+        let lock = dir.path().join("absent.lock");
+
+        assert_eq!(lock_holder(&lock).expect("absent is not an error"), None);
+    }
+
+    #[test]
+    fn lock_holder_fails_closed_on_a_read_error_other_than_absent() {
+        let dir = TempDir::new().expect("tempdir");
+        // A directory at the lock path reads as an error that is not NotFound.
+        let lock = dir.path().join("is-a-dir.lock");
+        std::fs::create_dir(&lock).expect("mkdir");
+
+        assert!(
+            lock_holder(&lock).is_err(),
+            "an unreadable lock must not read as stale"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_bounded_log_refuses_a_symlink_at_the_log_path() {
+        let dir = TempDir::new().expect("tempdir");
+        let target = dir.path().join("target.log");
+        std::fs::write(&target, b"").expect("target");
+        let log = dir.path().join("proxy.log");
+        std::os::unix::fs::symlink(&target, &log).expect("symlink");
+
+        assert!(
+            open_bounded_log(&log, 1024, super::LogDirMode::Inherit).is_err(),
+            "a symlinked log must be refused, not written through"
+        );
+        assert_eq!(std::fs::read(&target).expect("read target"), b"");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_bounded_log_refuses_a_hard_linked_file() {
+        let dir = TempDir::new().expect("tempdir");
+        let victim = dir.path().join("victim.txt");
+        std::fs::write(&victim, b"keep").expect("victim");
+        let log = dir.path().join("proxy.log");
+        std::fs::hard_link(&victim, &log).expect("hard link");
+
+        assert!(
+            open_bounded_log(&log, 1024, super::LogDirMode::Inherit).is_err(),
+            "a log with another hard link must be refused"
+        );
+        assert_eq!(std::fs::read(&victim).expect("read"), b"keep");
+    }
+
+    #[test]
+    fn staging_name_is_not_the_pidfile_temp_name() {
+        let lock = std::path::Path::new("/state/mcp-proxy.pid.lock");
+
+        let staging = super::staging_path(lock);
+
+        let name = staging.to_string_lossy().into_owned();
+        assert!(name.starts_with("/state/mcp-proxy.pid.lock."), "{name}");
+        assert!(name.ends_with(".staging"), "{name}");
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn lock_holder_never_errors_on_file_content(content in ".*") {
+            let dir = TempDir::new().expect("tempdir");
+            let lock = dir.path().join("p.lock");
+            std::fs::write(&lock, content).expect("write");
+
+            proptest::prop_assert!(lock_holder(&lock).is_ok());
+        }
+
+        #[test]
+        fn lock_holder_reads_back_any_pid(pid in proptest::prelude::any::<u32>(), pad in "[ \\t\\n]{0,3}") {
+            let dir = TempDir::new().expect("tempdir");
+            let lock = dir.path().join("p.lock");
+            std::fs::write(&lock, format!("{pad}{pid}{pad}")).expect("write");
+
+            proptest::prop_assert_eq!(lock_holder(&lock).expect("holder"), Some(pid));
         }
     }
 }
