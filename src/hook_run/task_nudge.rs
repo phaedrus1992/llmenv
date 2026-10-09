@@ -357,10 +357,14 @@ fn split_at_depth(command: &str, depth: usize) -> Result<String, NestingTooDeep>
                 continue;
             }
             // Process substitution, `<(...)` and `>(...)`. Inside double quotes it is literal.
+            // Bash runs it alongside its command, not before it, so it stays in place (#2544).
             '<' | '>' if !single && !double && chars.peek() == Some(&'(') => {
                 chars.next();
                 let inner = split_at_depth(&take_until_close(&mut chars), depth + 1)?;
-                hoisted.push_str(&part(&inner));
+                out.insert_str(segment_start, &hoisted);
+                hoisted.clear();
+                out.push_str(&part(&inner));
+                segment_start = out.len();
                 continue;
             }
             ';' | '|' | '&' | '\n' if top => {
@@ -385,15 +389,30 @@ fn part(inner: &str) -> String {
 }
 
 /// Take the text up to the `)` that closes a `$(` already read, counting nested parentheses.
+/// Quotes and escapes group as they do in the outer splitter, so a `)` inside quotes is text.
 fn take_until_close(chars: &mut Peekable<Chars<'_>>) -> String {
     let mut depth = 0_usize;
+    let (mut single, mut double) = (false, false);
     let mut inner = String::new();
-    for c in chars.by_ref() {
-        match c {
-            ')' if depth == 0 => break,
-            ')' => depth = depth.saturating_sub(1),
-            '(' => depth = depth.saturating_add(1),
-            _ => {}
+    while let Some(c) = chars.next() {
+        if single {
+            single = c != '\'';
+        } else {
+            match c {
+                '\\' => {
+                    inner.push(c);
+                    if let Some(next) = chars.next() {
+                        inner.push(next);
+                    }
+                    continue;
+                }
+                '\'' if !double => single = true,
+                '"' => double = !double,
+                ')' if !double && depth == 0 => break,
+                ')' if !double => depth = depth.saturating_sub(1),
+                '(' if !double => depth = depth.saturating_add(1),
+                _ => {}
+            }
         }
         inner.push(c);
     }
@@ -461,7 +480,7 @@ pub(super) fn shell_segments(command: &str) -> Result<Vec<Vec<String>>, NestingT
 }
 
 /// The program name of a word: `/usr/bin/git` is `git`.
-fn program(word: &str) -> &str {
+pub(super) fn program(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
 }
 
@@ -470,7 +489,7 @@ const WRAPPERS: [&str; 7] = ["env", "sudo", "command", "time", "nohup", "exec", 
 
 /// The words of one segment after its group openers, env assignments, and wrappers. The first word
 /// is the program. The commit matcher and the task-end matcher both read a segment this way.
-fn program_words(words: &[String]) -> Vec<&str> {
+pub(super) fn program_words(words: &[String]) -> Vec<&str> {
     words
         .iter()
         .map(|w| w.trim_start_matches(['(', '{']))
@@ -524,7 +543,7 @@ fn starts_commit_or_pr(words: &[String]) -> bool {
 /// The script that a shell runs with `-c`. The flag may sit in a cluster, as in `bash -lc`.
 /// An option that takes a value, such as `-o pipefail`, skips its value. A long option such as
 /// `--noclobber` is not a cluster, and a script file has no `-c`.
-fn shell_script<'a>(args: &[&'a str]) -> Option<&'a str> {
+pub(super) fn shell_script<'a>(args: &[&'a str]) -> Option<&'a str> {
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         let flags = arg.strip_prefix(['-', '+'])?;
@@ -552,10 +571,10 @@ fn runs_commit_or_pr(command: &str) -> bool {
 
 /// Whether `llmenv task done <wip>` or `llmenv task wait <wip>` runs before the first commit or
 /// pull request segment. Another task's end does not end the task `wip`. A command nested too
-/// deeply to split does not count, so the gate denies it.
+/// deeply to split may end the task, so it counts as ending it and the gate denies the commit.
 fn ends_task_before_commit(command: &str, wip: &str) -> bool {
     let Ok(segments) = shell_segments(command) else {
-        return false;
+        return true;
     };
     for words in segments {
         if starts_commit_or_pr(&words) {
@@ -1207,8 +1226,38 @@ mod tests {
         let too_deep = nested(MAX_SUBSTITUTION_DEPTH + 1);
         assert_eq!(split_substitutions(&too_deep), Err(NestingTooDeep));
         assert!(shell_segments(&too_deep).is_err());
-        assert!(!ends_task_before_commit(&too_deep, "step-one"));
+        // An unsplittable command may end the task, so the gate must deny the commit (fail closed).
+        assert!(ends_task_before_commit(&too_deep, "step-one"));
         assert!(runs_commit_or_pr(&too_deep));
+    }
+
+    #[test]
+    fn a_too_deep_task_end_before_a_commit_is_denied_by_the_gate() {
+        let nested = format!(
+            "{}a{}",
+            "$(".repeat(MAX_SUBSTITUTION_DEPTH + 1),
+            ")".repeat(MAX_SUBSTITUTION_DEPTH + 1)
+        );
+        let command = format!("{nested}; llmenv task done step-one; git commit -m x");
+        assert!(ends_task_before_commit(&command, "step-one"));
+    }
+
+    #[test]
+    fn a_quoted_close_paren_does_not_end_a_substitution() {
+        // Bash reads the `)` inside the double quotes as text, so the commit after the
+        // substitution is a real segment (#2544 follow-up).
+        let command = r#"echo "$(echo ")"; git commit -m x)""#;
+        assert!(runs_commit_or_pr(command));
+        assert!(!ends_task_before_commit(command, "step-one"));
+    }
+
+    #[test]
+    fn a_process_substitution_task_end_does_not_pass_before_the_commit() {
+        // Bash runs a process substitution alongside its command, not before it.
+        assert!(!ends_task_before_commit(
+            "git commit -m x > >(llmenv task done step-one)",
+            "step-one"
+        ));
     }
 
     proptest! {
@@ -1231,7 +1280,7 @@ mod tests {
             kind in prop::sample::select(vec!["<", ">"]),
         ) {
             let command = format!("{prefix}{kind}({inner})");
-            prop_assert_eq!(split_substitutions(&command).unwrap(), format!(";{inner};{prefix}"));
+            prop_assert_eq!(split_substitutions(&command).unwrap(), format!("{prefix};{inner};"));
         }
 
         #[test]
@@ -1269,8 +1318,8 @@ mod tests {
             ("echo \"'\" $(a)", ";a;echo \"'\" "),
             ("echo '\"' $(a)", ";a;echo '\"' "),
             ("echo $HOME", "echo $HOME"),
-            ("cat <(a)", ";a;cat "),
-            ("tee >(a)", ";a;tee "),
+            ("cat <(a)", "cat ;a;"),
+            ("tee >(a)", "tee ;a;"),
             ("echo \"<(a)\"", "echo \"<(a)\""),
             ("echo '>(a)'", "echo '>(a)'"),
             // In single quotes a backslash is literal, so the quote after it closes the string.
