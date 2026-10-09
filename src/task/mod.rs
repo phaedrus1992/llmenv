@@ -758,12 +758,16 @@ fn ancestors_to_start(state_dir: &Path, child: &Task, force: bool) -> anyhow::Re
             break;
         }
         // A deleted parent leaves a dangling link, which the rest of the store tolerates. Any
-        // other read error is logged, and the start goes on.
+        // other read error fails the start, so the done and queue checks never run blind.
         let parent = match load_task(state_dir, &parent_slug) {
             Ok(parent) => parent,
+            Err(e) if is_not_found(&e) => break,
             Err(e) => {
-                tracing::warn!("sub-task parent '{parent_slug}' cannot be read: {e:#}");
-                break;
+                return Err(e.context(format!(
+                    "cannot start '{}': ancestor '{parent_slug}' is unreadable. Repair or \
+                     remove its task file, then start again",
+                    child.slug
+                )));
             }
         };
         if parent.state == TaskState::Done && !force {
@@ -880,6 +884,31 @@ pub(crate) fn complete_task(
     input: &str,
     force: bool,
 ) -> anyhow::Result<Completed> {
+    close_task(state_dir, input, force, None)
+}
+
+/// [`complete_task`] for a named caller. A `done --force` that closes an `open`, `wip`, or
+/// `waiting` task records the prior state and the caller in a note (#2585). The note saves under
+/// the same store lock as the state change, so a failed note cannot leave a closed task without
+/// its record.
+///
+/// # Errors
+/// Errors as [`complete_task`] does.
+pub(crate) fn complete_task_by(
+    state_dir: &Path,
+    input: &str,
+    force: bool,
+    caller: &ownership::Caller,
+) -> anyhow::Result<Completed> {
+    close_task(state_dir, input, force, Some(caller))
+}
+
+fn close_task(
+    state_dir: &Path,
+    input: &str,
+    force: bool,
+    caller: Option<&ownership::Caller>,
+) -> anyhow::Result<Completed> {
     let completed = with_store_lock(state_dir, || {
         let slug = resolve_identifier(state_dir, input)?;
         let mut task = load_task(state_dir, &slug)?;
@@ -896,9 +925,21 @@ pub(crate) fn complete_task(
             anyhow::bail!("{}", relation::undone_children_message(&slug, &undone));
         }
         let undone_children: Vec<String> = undone.iter().map(|t| t.slug.clone()).collect();
-        task.state = TaskState::Done;
-        task.updated_at = now_rfc3339();
-        save_task(state_dir, &task)?;
+        // A repeat done changes nothing, so `updated_at` keeps the time of the first close (#2585).
+        if prior != TaskState::Done {
+            let now = now_rfc3339();
+            if let Some(caller) = caller
+                && force
+            {
+                task.notes.push(TaskNote {
+                    at: now.clone(),
+                    text: forced_close_text(prior, caller),
+                });
+            }
+            task.state = TaskState::Done;
+            task.updated_at = now;
+            save_task(state_dir, &task)?;
+        }
         Ok(Completed {
             task,
             prior,
@@ -907,6 +948,15 @@ pub(crate) fn complete_task(
     })?;
     touch_task_session(state_dir, &completed.task);
     Ok(completed)
+}
+
+/// The note that a forced close leaves: the prior state and the caller.
+fn forced_close_text(prior: TaskState, caller: &ownership::Caller) -> String {
+    let prior = format!("{prior:?}").to_lowercase();
+    format!(
+        "Closed by done --force from {prior} (by {}).",
+        caller.describe()
+    )
 }
 
 /// Append a timestamped progress note to a task.
@@ -2319,6 +2369,29 @@ mod tests {
     }
 
     #[test]
+    fn start_task_under_a_deleted_parent_still_starts() {
+        let dir = TempDir::new().expect("test");
+        let a = mk(dir.path(), "Parent A", None).expect("test");
+        let b = mk(dir.path(), "Child B", Some(&a.slug)).expect("test");
+        std::fs::remove_file(task_path(dir.path(), &a.slug)).expect("test");
+        let started = start_task(dir.path(), &b.slug, false).expect("dangling link tolerated");
+        assert_eq!(started.state, TaskState::Wip);
+    }
+
+    #[test]
+    fn start_task_under_a_corrupt_parent_fails_and_names_the_parent() {
+        let dir = TempDir::new().expect("test");
+        let a = mk(dir.path(), "Parent A", None).expect("test");
+        let b = mk(dir.path(), "Child B", Some(&a.slug)).expect("test");
+        std::fs::write(task_path(dir.path(), &a.slug), "{ not json").expect("test");
+        let err = start_task(dir.path(), &b.slug, false).expect_err("corrupt parent refused");
+        let text = format!("{err:#}");
+        assert!(text.contains(&a.slug), "error must name the parent: {text}");
+        let on_disk = load_task(dir.path(), &b.slug).expect("test");
+        assert_eq!(on_disk.state, TaskState::Open, "child must not be started");
+    }
+
+    #[test]
     fn note_task_appends_note() {
         let dir = TempDir::new().expect("test");
         let task = mk(dir.path(), "Do thing", None).expect("test");
@@ -3236,6 +3309,58 @@ mod tests {
     }
 
     // --- done without start, reopen (#2338) ---
+
+    #[test]
+    fn forced_close_of_an_open_task_keeps_the_prior_state_in_a_note() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Never started", None).expect("test");
+        let caller = ownership::Caller::Unidentified("test".into());
+        complete_task_by(dir.path(), &task.slug, true, &caller).expect("test");
+        let stored = load_task(dir.path(), &task.slug).expect("test");
+        let note = stored.notes.last().expect("forced close leaves a note");
+        assert!(
+            note.text.contains("from open"),
+            "prior state missing: {}",
+            note.text
+        );
+        assert!(
+            note.text.contains("unidentified"),
+            "caller missing: {}",
+            note.text
+        );
+    }
+
+    #[test]
+    fn plain_done_leaves_no_forced_close_note() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Started", None).expect("test");
+        start_task(dir.path(), &task.slug, false).expect("test");
+        let caller = ownership::Caller::Unidentified("test".into());
+        complete_task_by(dir.path(), &task.slug, false, &caller).expect("test");
+        assert!(
+            load_task(dir.path(), &task.slug)
+                .expect("test")
+                .notes
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn repeat_done_keeps_updated_at_and_adds_no_note() {
+        let dir = TempDir::new().expect("test");
+        let task = mk(dir.path(), "Closed once", None).expect("test");
+        done_task(dir.path(), &task.slug).expect("test");
+        // Age the stored time, so a repeat close that rewrites it is visible even within one second.
+        let mut stored = load_task(dir.path(), &task.slug).expect("test");
+        "2000-01-01T00:00:00Z".clone_into(&mut stored.updated_at);
+        save_task(dir.path(), &stored).expect("test");
+        let caller = ownership::Caller::Unidentified("test".into());
+        let completed = complete_task_by(dir.path(), &task.slug, true, &caller).expect("test");
+        assert_eq!(completed.task.state, TaskState::Done);
+        let after = load_task(dir.path(), &task.slug).expect("test");
+        assert_eq!(after.updated_at, "2000-01-01T00:00:00Z");
+        assert!(after.notes.is_empty(), "repeat done must not add a note");
+    }
 
     #[test]
     fn complete_task_refuses_an_open_task_and_names_the_fix() {
