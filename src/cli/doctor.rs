@@ -1217,6 +1217,15 @@ pub(super) fn run_doctor(
         );
     }
 
+    // The session-end consolidation run logs its failure only to its own log, so this line is
+    // the one place the user sees it. It applies only when the anthropic-api backend is used.
+    if let Some(problem) = crate::consolidation::anthropic_model_problem() {
+        eprintln!(
+            "{warn} {problem} This stops consolidation with the anthropic-api backend at every \
+             session end."
+        );
+    }
+
     for hit in hooks_with_glob_like_matchers(&config) {
         eprintln!(
             "{warn} hook {} looks like a file-extension glob, but Claude Code matches \

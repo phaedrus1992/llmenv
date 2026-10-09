@@ -741,6 +741,8 @@ alias. Since v3.13.0 (changed in the next release), llmenv fails the run when `A
 set to a value that does not start with `claude-`, including an empty value. It does not fall back
 to the default model. Unset `ANTHROPIC_MODEL` to use `claude-sonnet-5`. The `claude-cli` backend
 does not read this setting.
+The session-end run writes its failure to its own log only. `llmenv doctor` shows the same problem
+as a warning (added in the next release).
 
 See [MCP & Memory](mcp.md) for the topology, security model, and `mcp-proxy`
 requirements.
