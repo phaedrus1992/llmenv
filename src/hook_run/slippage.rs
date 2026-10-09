@@ -11,6 +11,7 @@
 //! enforcement.
 
 use crate::config::SlippageControl;
+use crate::hook_run::task_nudge::{NestingTooDeep, shell_segments};
 
 /// The self-critique checklist appended at `Stop` (#317).
 ///
@@ -309,28 +310,38 @@ const MODIFYING_COMMANDS: &[&str] = &[
 
 /// Whether `command` starts a modifying operation, checking each top-level
 /// segment so a read-only head doesn't wave through what follows it.
+/// Whether any part of `command` runs a modifying command. The parts come from the commit gate's
+/// splitter, so a write inside a substitution, a subshell, or a brace group counts (#2558). A
+/// command nested too deeply to split counts as modifying, so the check fails closed.
 fn is_modifying(command: &str) -> bool {
-    command
-        .split(['\n', ';', '|'])
-        .flat_map(|seg| seg.split("&&"))
-        .flat_map(|seg| seg.split("||"))
-        .any(|segment| {
-            let mut words = segment.split_whitespace().skip_while(|w| w.contains('='));
-            let head = words.next().unwrap_or_default();
-            let head = head.rsplit('/').next().unwrap_or(head);
-            if head == "sudo" {
-                return words
-                    .next()
-                    .is_some_and(|next| MODIFYING_COMMANDS.contains(&next));
-            }
-            if head == "git" {
-                // Only the ones that leave the machine or rewrite history.
-                return words
-                    .next()
-                    .is_some_and(|sub| matches!(sub, "push" | "reset" | "rebase" | "clean"));
-            }
-            MODIFYING_COMMANDS.contains(&head)
-        })
+    match shell_segments(command) {
+        Ok(segments) => segments.iter().any(|words| is_modifying_segment(words)),
+        Err(NestingTooDeep) => true,
+    }
+}
+
+/// Whether one segment runs a modifying command. A group opener such as `(` or `{` is not part
+/// of the program name.
+fn is_modifying_segment(words: &[String]) -> bool {
+    let mut words = words
+        .iter()
+        .map(|w| w.trim_start_matches(['(', '{']))
+        .filter(|w| !w.is_empty())
+        .skip_while(|w| w.contains('='));
+    let head = words.next().unwrap_or_default();
+    let head = head.rsplit('/').next().unwrap_or(head);
+    if head == "sudo" {
+        return words
+            .next()
+            .is_some_and(|next| MODIFYING_COMMANDS.contains(&next));
+    }
+    if head == "git" {
+        // Only the ones that leave the machine or rewrite history.
+        return words
+            .next()
+            .is_some_and(|sub| matches!(sub, "push" | "reset" | "rebase" | "clean"));
+    }
+    MODIFYING_COMMANDS.contains(&head)
 }
 
 /// The transcript-scan layers (#317, phase 3). Both default off.
@@ -891,6 +902,27 @@ mod tests {
             !is_modifying("grep -r chmod ."),
             "a command name as an argument is not a command"
         );
+    }
+
+    #[test]
+    fn modifying_detection_sees_writes_inside_substitutions_groups_and_subshells() {
+        for command in [
+            "echo $(rm -rf build)",
+            "echo `rm -rf build`",
+            "cat <(chmod 600 key)",
+            "(rm -rf build)",
+            "{ rm -rf build; }",
+            "ls & rm -rf build",
+            "echo \"$(truncate -s 0 log)\"",
+        ] {
+            assert!(is_modifying(command), "missed a write in {command:?}");
+        }
+    }
+
+    #[test]
+    fn modifying_detection_fails_closed_on_nesting_past_the_bound() {
+        let nested = format!("{}ls{}", "$(".repeat(40), ")".repeat(40));
+        assert!(is_modifying(&nested));
     }
 
     #[test]
