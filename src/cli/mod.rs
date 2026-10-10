@@ -2860,17 +2860,14 @@ fn run_config_guard() {
     //   Strict  → <root>/claude-code/<VERSION>-<hash>   (2 levels below root)
     // Walking up to find "claude-code" and taking its parent is invariant to depth.
     let default_cache = PathBuf::from(paths::expand_tilde("~/.cache/llmenv"));
-    let config_dir = match config_dir_from_var(std::env::var("CLAUDE_CONFIG_DIR")) {
-        Ok(dir) => dir,
+    let cache_root = match config_dir_from_var(std::env::var("CLAUDE_CONFIG_DIR")) {
+        Ok(None) => default_cache, // expected when not running inside a hook
         Err(msg) => {
             // Stdout reaches the agent from a hook. Stderr from an exit-0 hook does not.
             println!("\u{26a0} llmenv config-guard: {msg}");
             return;
         }
-    };
-    let cache_root = match config_dir {
-        None => default_cache, // expected when not running inside a hook
-        Some(dir) => {
+        Ok(Some(dir)) => {
             let path = PathBuf::from(&dir);
             match path
                 .ancestors()

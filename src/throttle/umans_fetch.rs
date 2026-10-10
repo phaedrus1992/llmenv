@@ -140,7 +140,8 @@ mod tests {
                     Ok(n) => request.extend_from_slice(&chunk[..n]),
                 }
             }
-            let _ = std::io::Write::write_all(&mut stream, &response);
+            std::io::Write::write_all(&mut stream, &response)
+                .expect("test server writes the canned response");
         });
         addr
     }
