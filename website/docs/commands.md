@@ -483,7 +483,7 @@ Only when the open session has no match does the search cover the whole project.
   in v3.12.0) moves a `done` task back to `open` with a note, then starts
   it; without it, `start` refuses a `done` task.
 - `task start`, `done`, `wait`, `note`, `block`, `edit`, `reopen`, and `clear` refuse a task that
-  belongs to another session. (added in v3.13.0) `clear --session <id>` refuses another session's id
+  belongs to another session. (added in v3.12.2) `clear --session <id>` refuses another session's id
   the same way.
   The refusal names the owning session. To act on the task anyway, pass `--other-session <owner-id>`,
   where `<owner-id>` is that owning session's id. A different id is refused. A bare `--other-session`
@@ -724,7 +724,7 @@ instruction that says they are blocked. `features.task_tracker.nudges: false` re
 
 ### Stop reminder rules
 
-(added in v3.13.0)
+(added in v3.12.2)
 
 The Stop reminder ends the turn with the state of the task tracker.
 A reminder that returns the same text on every Stop makes the agent answer it again and again.
@@ -751,7 +751,7 @@ It still lists every open session of the project, because a new conversation fin
 
 ### Task nudges (added in v3.12.0)
 
-Changed in v3.13.0: only file edits and writes count toward the nudge, and a queued task gets a start reminder.
+Changed in v3.12.2: only file edits and writes count toward the nudge, and a queued task gets a start reminder.
 
 The tracker reminds the agent while work happens, and not only at the start and the end of a session.
 Each reminder names the exact `llmenv task` commands to run.
@@ -780,6 +780,12 @@ Nothing turns off the third item.
   The deny marker clears the next time a commit or pull request runs while a task is in progress, so a later gap with no
   task denies once more.
   A task that is only `open` or `waiting` does not count as in progress.
+  (changed in v3.12.2) The gate reads the command the way the shell does.
+  It sees a commit inside `bash -c`, `$( )`, a backtick substitution, or a process substitution (`<( )` and `>( )`).
+  A substitution runs before the command that holds it, so in `git commit -m "$(llmenv task done x)"` the task `x`
+  ends first, and the gate denies the commit.
+  A command that nests substitutions more than 32 levels deep is denied on every attempt, with a message that names
+  the limit and says to split the command.
 
 Two more reminders do not depend on `nudges`.
 A reminder for a parent task in progress shows how many of its sub-tasks are done, in progress, waiting, and not started.
@@ -945,6 +951,9 @@ platform-appropriate pre-built binary, performs a safe install cycle
 restores the original binary on failure.
 The binary is downloaded only over HTTPS from `github.com` or `objects.githubusercontent.com`.
 A redirect to any other host fails the upgrade.
+`LLMENV_UPGRADE_GITHUB_API` overrides the GitHub API base URL (added in v3.12.2: it must be a bare HTTPS base URL, with
+no username, password, query, or fragment).
+Any other value fails the upgrade with an error that names the variable.
 
 - `--check` compares the current version against the latest release and
   prints the result. Exits 1 if an update is available.

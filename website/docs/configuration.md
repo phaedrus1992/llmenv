@@ -737,12 +737,12 @@ features:
 The `anthropic-api` backend uses the model `claude-sonnet-5`. To use another model, set
 `ANTHROPIC_MODEL` to a full model ID such as `claude-opus-5-5`. Claude Code also reads
 `ANTHROPIC_MODEL` and accepts aliases such as `opus` or `sonnet[1m]`. The Messages API rejects an
-alias. Since v3.13.0 (changed in the next release), llmenv fails the run when `ANTHROPIC_MODEL` is
+alias. Since v3.12.2, llmenv fails the run when `ANTHROPIC_MODEL` is
 set to a value that does not start with `claude-`, including an empty value. It does not fall back
 to the default model. Unset `ANTHROPIC_MODEL` to use `claude-sonnet-5`. The `claude-cli` backend
 does not read this setting.
 The session-end run writes its failure to its own log only. `llmenv doctor` shows the same problem
-as a warning (added in the next release).
+as a warning when an enabled memory entry uses the `anthropic-api` backend (added in v3.12.2).
 
 See [MCP & Memory](mcp.md) for the topology, security model, and `mcp-proxy`
 requirements.
@@ -914,6 +914,10 @@ redirects, and it ignores proxy settings (a proxy would resolve the host
 itself). The token is never sent to a private or metadata address.
 Throttling is fail-soft: any error (missing config, network failure) skips the
 delay rather than blocking the session.
+The throttle state file is `throttle.json` in the state directory (changed in v3.12.2).
+A file that cannot be read or removed is reported with its path.
+A stale file that cannot be removed fails the export, instead of leaving throttling on.
+A hook failure is also written to the session log, and not to stderr only.
 
 ### `features.upgrade:`
 
@@ -995,10 +999,11 @@ leading step of a compound command (`cd X && …`) — silently breaks any
 ("prefer absolute paths") doesn't reliably stop this; the advisory
 mechanizes the reminder instead.
 
-A lightweight heuristic, not a shell parser: it flags any top-level segment
-(split on `&&`, `||`, `;`, `|`, or newline) whose first word is literally
-`cd`. Never blocks — a deliberate `cd` still runs; the model just gets a
-one-line nudge toward absolute paths.
+It splits the command with the same splitter as the task commit gate and flags
+any part whose first word is literally `cd`. A `cd` inside `$( )`, a subshell,
+or a brace group counts (changed in v3.12.2). A command nested more than 32
+levels deep gets no advisory. Never blocks — a deliberate `cd` still runs; the
+model just gets a one-line nudge toward absolute paths.
 
 ```yaml
 features:
@@ -1189,6 +1194,11 @@ features:
 | `metrics`            | no       | Default `true` (added in v3.11.0). Counts tool calls and stores a read-to-edit summary to memory at session end, folded into the store that already happens there.                                                                          |
 | `explain_before_act` | no       | Default `false` (added in v3.11.0). Denies a *modifying* Bash command when nothing has been said yet this turn. Off by default: a transcript heuristic.                                                                                     |
 | `answer_before_act`  | no       | Default `false` (added in v3.11.0). Denies a tool call while the user's question sits unanswered. Off by default: a transcript heuristic.                                                                                                   |
+
+The slippage checks read a Bash command the way the task commit gate does (changed in v3.12.2).
+A write inside `$( )`, a subshell, a brace group, or after a single `&` counts as modifying for `explain_before_act`.
+A command nested more than 32 levels deep counts as modifying, and the deny names that limit.
+A Bash `cat`, `head`, `tail`, `sed -n`, or `grep` of one file counts as a read for `read_before_edit`.
 
 ## `session_log:`
 
