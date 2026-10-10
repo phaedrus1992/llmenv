@@ -721,14 +721,12 @@ pub fn open_bounded_log(
             // Single generation: enough to keep the previous failure's trace
             // around without unbounded growth. NotFound means a peer rotated
             // first, which leaves the bound intact.
-            match std::fs::rename(path, path.with_extension("log.1")) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => {
-                    return Err(
-                        anyhow::Error::new(e).context(format!("rotating log {}", path.display()))
-                    );
-                }
+            if let Err(e) = std::fs::rename(path, path.with_extension("log.1"))
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(
+                    anyhow::Error::new(e).context(format!("rotating log {}", path.display()))
+                );
             }
         }
         Ok(_) => {}

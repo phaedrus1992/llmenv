@@ -311,6 +311,15 @@ const MAX_SUBSTITUTION_DEPTH: usize = 32;
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct NestingTooDeep;
 
+/// The reason a deny gives for a command nested past [`MAX_SUBSTITUTION_DEPTH`]. It names the
+/// limit and the fix, because a retry alone does not explain the refusal.
+pub(super) fn nesting_reason() -> String {
+    format!(
+        "this command nests substitutions more than {MAX_SUBSTITUTION_DEPTH} levels deep, so \
+         llmenv cannot check it. Split the command into smaller commands and run each one."
+    )
+}
+
 /// Move each live `$(...)`, `<(...)`, `>(...)`, and backtick substitution to the start of the
 /// segment that holds it, as its own `;`-separated part. Bash runs a substitution before the
 /// command that holds it, so the verdict must follow that order (#2544). Single quotes keep
@@ -626,6 +635,7 @@ pub(crate) fn handle_pre_tool_use(
     };
     // The tracking is read before the command runs, so a task that this command ends still shows
     // as in progress. It does not count for the commit.
+    let nested = shell_segments(command).is_err();
     let wip_open = match &tracking {
         Tracking::Tracked {
             wip: Some(slug), ..
@@ -649,12 +659,20 @@ pub(crate) fn handle_pre_tool_use(
             }
             String::new()
         }
-        _ if state.commit_denied => String::new(),
+        // A command nested too deeply to split is denied on every attempt. Only a split command
+        // can pass, so the retry that passes the no-task deny does not apply to it.
+        _ if state.commit_denied && !nested => String::new(),
         tracking => {
             state.commit_denied = true;
             // Without the marker the retry would be denied again, so a failed save allows.
             if !save(&path, &state) {
                 return String::new();
+            }
+            if nested {
+                return format!(
+                    "__DENY__:llmenv blocked this commit or pull request once: {}",
+                    nesting_reason()
+                );
             }
             format!(
                 "__DENY__:llmenv blocked this commit or pull request once: no task is in \
@@ -1170,6 +1188,35 @@ mod tests {
         ));
         let denied = handle_pre_tool_use(&TaskTracker::default(), &waited, Some("s1"), dir.path());
         assert!(denied.starts_with("__DENY__:"), "{denied}");
+    }
+
+    #[test]
+    fn commit_gate_names_the_nesting_limit_for_a_command_too_deep_to_split() {
+        let dir = TempDir::new().unwrap();
+        let _session = open_session(dir.path());
+        let nested = format!("{}git commit -m x{}", "$(".repeat(40), ")".repeat(40));
+        let denied = handle_pre_tool_use(
+            &TaskTracker::default(),
+            &bash(&nested),
+            Some("s1"),
+            dir.path(),
+        );
+        assert!(denied.starts_with("__DENY__:"), "{denied}");
+        assert!(denied.contains("32 levels deep"), "{denied}");
+        assert!(denied.contains("Split the command"), "{denied}");
+        assert!(!denied.contains("no task is in progress"), "{denied}");
+    }
+
+    #[test]
+    fn a_nested_commit_stays_denied_on_retry() {
+        let dir = TempDir::new().unwrap();
+        let _session = open_session(dir.path());
+        let nested = format!("{}git commit -m x{}", "$(".repeat(40), ")".repeat(40));
+        let tracker = TaskTracker::default();
+        let first = handle_pre_tool_use(&tracker, &bash(&nested), Some("s1"), dir.path());
+        let retry = handle_pre_tool_use(&tracker, &bash(&nested), Some("s1"), dir.path());
+        assert!(first.starts_with("__DENY__:"), "{first}");
+        assert!(retry.starts_with("__DENY__:"), "{retry}");
     }
 
     #[test]
