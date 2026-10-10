@@ -205,6 +205,22 @@ Each refusal names the fix.
 
 See [`task`](commands.md#task) for the rules.
 
+## An error says an environment variable is not valid UTF-8
+
+(added in v3.12.2)
+
+llmenv reads `HOME`, `USER`, `CLAUDE_CONFIG_DIR`, `LLMENV_EXTRA_TAGS`, and `CLAUDE_CODE_SESSION_ID`.
+A value that is not UTF-8 is no longer treated as unset.
+A command that reads `HOME`, `USER`, or `CLAUDE_CONFIG_DIR` stops with an error that names the variable.
+An example is `HOME is not valid UTF-8; set HOME to a UTF-8 value and retry`.
+This covers `llmenv doctor`, `llmenv setup`, user-scope matching, the keychain read, and the task project tag.
+
+- The config guard prints its error and does not run.
+- For `LLMENV_EXTRA_TAGS`, a command stops, and a hook logs the error and skips the bundle features.
+- For `CLAUDE_CODE_SESSION_ID`, llmenv logs a warning, and session ownership falls back as if no session existed.
+
+To fix it, export the variable again with a UTF-8 value, or unset it where it is optional.
+
 ## Memory commands list too much
 
 (added in v3.12.0)

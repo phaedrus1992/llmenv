@@ -20,50 +20,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+3.12.2 is a bug-fix release for 3.12.1.
+It makes the task commit gate harder to slip past, limits where llmenv connects and writes, and replaces a set of silent failures with errors that name the problem.
+
+**Security.**
+The umans usage fetch connects only to the addresses that passed the private-network check (#2518).
+`llmenv upgrade` downloads only from GitHub hosts over HTTPS, and `LLMENV_UPGRADE_GITHUB_API` must be a bare HTTPS base URL (#2525, #2566).
+The MCP proxy log refuses a symlink, a hard link, or a FIFO with no reader (#2588).
+
+**Hooks and the commit gate.**
+The task commit gate sees a commit inside `bash -lc`, a substitution, or a process substitution, and it denies a command nested more than 32 levels deep (#2537, #2543, #2544, #2620).
+The slippage check and the cd advisory read a command the same way, so a write or a `cd` inside a substitution, a subshell, or a brace group counts (#2558, #2619).
+The task tracker names the next open task, and a shell command no longer counts as a project change (#2530, #2531, #2533).
+
+**Task tracker.**
+`llmenv task` refuses to act on another session's task unless you pass `--other-session` (#2584, #2591).
+It stops with an error that names the file when it cannot read a task file (#2590, #2597, #2598).
+`llmenv task done --force` leaves a note with the prior state of the task (#2585).
+
+**Errors that no longer vanish.**
+A non-UTF-8 value in `HOME`, `USER`, `CLAUDE_CONFIG_DIR`, `LLMENV_EXTRA_TAGS`, or `CLAUDE_CODE_SESSION_ID` gives an error that names the variable (#2562, #2559, #2589, #2575).
+A command whose stdout or stderr pipe closes early exits with status 141 instead of aborting (#2554, #2561).
+The MCP proxy, the throttle state file, and hook output writes report the failures that they used to drop (#2572, #2587, #2574, #2577, #2563).
+
+**Consolidation, plugins, and adapters.**
+Consolidation refuses an alias `ANTHROPIC_MODEL` and an answer that was cut off, and `llmenv doctor` warns about the alias (#2564, #2565, #2576).
+`llmenv plugin-sync` fetches only what an active plugin-collection selects (#2615).
+`effort_level` now reaches Haiku 5.5 (#2548).
+
 ### Security
 
 - The umans usage request connects only to the addresses that passed the private-network check. It no longer follows redirects or uses proxy settings, so a DNS rebind, a redirect, or a proxy can no longer send the Bearer token to a private or metadata address (#2518) [fix:throttle]
 - `llmenv upgrade` downloads a release asset only over HTTPS from `github.com` or `objects.githubusercontent.com`, and it refuses a redirect to any other host. The consolidation client no longer follows redirects, so its API key is not sent to another host (#2525) [fix:upgrade]
-- `LLMENV_UPGRADE_GITHUB_API` must be a bare HTTPS base URL, with no username, password, query, or fragment. Any other value fails `llmenv upgrade` with an error that names the variable, so a plain-HTTP or foreign-scheme override cannot choose the installed release (#2566) [fix:upgrade]
+- `LLMENV_UPGRADE_GITHUB_API` must be a bare HTTPS base URL, with no username, password, query, or fragment. Any other value fails `llmenv upgrade` with an error that names the variable, so a plain-HTTP or foreign-scheme override cannot choose the installed release (#2566) [fix:cli]
 - The MCP proxy log refuses a symlink, a hard-linked file, or a FIFO with no reader at its path, and it checks the type of the file it opened. A file swapped in after the name check no longer receives the proxy's stderr (#2588) [fix:mcp]
 
 ### Fixed
 
-- The task tracker names the next open task when tasks are queued and none is in progress. The first file edit gets that reminder, and a denied `git commit` names the task too (#2530, #2533) [fix:task]
+- A throttle usage fetch that starts inside an async runtime no longer panics. The fetch runs on its own thread (#2527) [fix:throttle]
+- The task tracker names the next open task when tasks are queued and none is in progress. The first file edit gets that reminder, and a denied `git commit` names the task too. The work nudge counts file edits and writes only, so a shell command no longer counts as a project change (#2530, #2531, #2533) [fix:task]
 - A `llmenv task done` or `llmenv task wait` earlier in the same command no longer lets an untracked commit pass the commit gate (#2532) [fix:task]
-- The work nudge counts file edits and writes only. A shell command no longer counts as a project change (#2531) [fix:hook]
-- The task commit gate now denies a commit run as `bash -lc "git commit ..."`, `$(git commit ...)`, or a backtick substitution (#2537) [fix:hook]
-- The task commit gate also denies a commit run inside a process substitution, `<(git commit ...)` or `>(git commit ...)` (#2543) [fix:hook]
+- The task commit gate denies a commit run as `bash -lc "git commit ..."`, `$(git commit ...)`, a backtick substitution, or a process substitution `<(git commit ...)` or `>(git commit ...)`. It runs a substitution in shell order, so in `git commit -m "$(llmenv task done x)"` the task ends first, as bash runs it, and the gate denies the commit. A command that nests substitutions more than 32 levels deep is denied on every attempt, with a message that names the limit and says to split the command (#2537, #2543, #2544, #2620) [fix:hook]
 - `effort_level` now reaches Haiku 5.5. It was written only to Opus 5.5 before, so the `haiku` alias ignored it (#2548) [fix:adapter]
+- Consolidation and upgrade errors name the variable or URL and the next step. A non-UTF-8 `ANTHROPIC_MODEL` or `LLMENV_UPGRADE_GITHUB_API` fails the run instead of falling back to the default. An `llmenv upgrade` error names the request URL, a non-JSON response shows the start of its body, and the error says so when `LLMENV_UPGRADE_GITHUB_API` is set (#2546, #2578) [fix:cli]
 - A Bash `cat`, `head`, `tail`, `sed -n`, or `grep` of one file counts as a read for the read-before-Write guard, so a later Write is no longer denied as unread (#2549) [fix:hook]
-- A command whose output pipe closes early, such as `llmenv task ls | head`, exits with status 141 and no crash report. It used to abort (#2554) [fix:cli]
-- Consolidation and upgrade errors name the variable or URL and the next step. A non-UTF-8 `ANTHROPIC_MODEL` or `LLMENV_UPGRADE_GITHUB_API` fails the run instead of falling back to the default (#2546) [fix:cli]
-- Consolidation fails when `ANTHROPIC_MODEL` is a Claude Code alias such as `opus`, or is empty. It used to run on `claude-sonnet-5` instead of the model you set (#2564) [fix:cli]
+- A command whose stdout or stderr pipe closes early, such as `llmenv task ls | head`, exits with status 141 and no crash report. It used to abort (#2554, #2561) [fix:cli]
+- A hook output write that fails for a reason other than a closed pipe is logged. It used to be dropped without a message (#2563) [fix:hook]
+- Consolidation fails when `ANTHROPIC_MODEL` is a Claude Code alias such as `opus`, or is empty. It used to run on `claude-sonnet-5` instead of the model you set. `llmenv doctor` shows the same problem as a warning when an enabled memory entry uses the `anthropic-api` backend (#2564, #2576) [fix:cli]
 - Consolidation refuses an answer that did not end normally, such as one cut off at the 4096-token limit. It used to store the cut last rule as complete (#2565) [fix:cli]
-- A hook output write that fails for a reason other than a closed pipe is logged. It used to be dropped without a message (#2563) [fix:throttle]
-- A command whose stderr pipe closes early exits with status 141 and no crash report, as a closed stdout already did. It used to abort (#2561) [fix:cli]
-- The MCP proxy fails to start when it cannot record its lock pid, rotate its log, or set the log mode to `0600`. It used to drop each of these errors without a message (#2572) [fix:mcp]
+- The MCP proxy fails to start when it cannot record its lock pid, rotate its log, or set the log mode to `0600`. It used to drop each of these errors without a message. Its spawn lock is never empty, so a second `llmenv export` cannot reclaim a live proxy's lock while the holder writes its pid (#2572, #2587) [fix:mcp]
 - `llmenv task start`, `done`, `wait`, `note`, `block`, `edit`, `reopen`, and `clear` refuse a task that belongs to another session. The refusal names the owning session. Pass `--other-session <owner-id>` with that session's id to act on it anyway. A bare `--force` no longer closes another session's task (#2584, #2591) [fix:task]
-- The MCP proxy spawn lock is never empty, so a second `llmenv export` cannot reclaim a live proxy's lock while the holder writes its pid (#2587) [fix:mcp]
-- A corrupt or unreadable ancestor task file makes `llmenv task edit` refuse a parent change. The cycle check used to skip the file without a message (#2590) [fix:task]
-- A non-UTF-8 `HOME`, `USER`, or `CLAUDE_CONFIG_DIR` gives an error that names the variable. `llmenv doctor`, `llmenv setup`, user-scope matching, the keychain read, and the task project tag no longer treat it as unset (#2589) [fix:cli]
-- A non-UTF-8 `CLAUDE_CONFIG_DIR` no longer selects the default cache root. The config guard prints an error that names the variable and does not run (#2559) [fix:cli]
+- A non-UTF-8 `HOME`, `USER`, `CLAUDE_CONFIG_DIR`, `LLMENV_EXTRA_TAGS`, or `CLAUDE_CODE_SESSION_ID` is no longer treated as unset. A command that reads one stops with an error that names the variable. This covers `llmenv doctor`, `llmenv setup`, user-scope matching, the keychain read, and the task project tag. The config guard prints its error and does not run. A hook logs the error and skips the bundle features. A bad session id logs a warning, and session ownership falls back as if no session existed (#2562, #2559, #2589, #2575) [fix:task]
 - `llmenv setup` warns when `USER` is unset. The generated setup then names the user `unknown` (#2560) [fix:cli]
-- A command nested more than 32 substitutions deep is denied on every attempt, with a message that names the limit and says to split the command. The commit gate and the explain-before-act check used to give the no-task text (#2620) [fix:hook]
+- `llmenv task` stops with an error that names the file when it cannot read or parse a task file. `edit` refuses a parent change over a corrupt ancestor, and `start` refuses a child under a corrupt parent (a deleted parent still lets the child start). `start` and `clear --session` stop instead of skipping the file, so a session no longer looks empty or finished. Finish and abandon use the same strict read (#2590, #2597, #2598) [fix:task]
+- A throttle hook failure is written to the session log as well as stderr. A throttle state file that cannot be read or removed reports its path. A stale `throttle.json` that cannot be removed fails the export instead of leaving throttling on, and an unreadable file no longer turns throttling off without a message (#2574, #2577) [fix:throttle]
+- The slippage check sees a modifying command inside a substitution, a subshell, a brace group, or after a single `&`. It used to miss these (#2558) [fix:hook]
+- `llmenv plugin-sync` fetches and checks only the marketplaces and plugins that an active plugin-collection selects. A profile that is not active no longer fails the sync with a plugin-not-found error (#2615) [fix:plugins]
+- `llmenv task done --force` on an `open`, `wip`, or `waiting` task adds a note that names the prior state, the time, and the caller. A repeat `done` no longer rewrites `updated_at` (#2585) [fix:task]
 - The working-directory advisory sees a `cd` inside `$( )`, a subshell `( )`, or a brace group `{ }`. It used to miss those (#2619) [fix:hook]
 - A failed statusline read, cache `chmod`, or cache cleanup is logged with its path. A failed removal of a broken plugin clone no longer reports that the clone was removed (#2573) [fix:cli]
-- `llmenv doctor` warns when `ANTHROPIC_MODEL` is an alias or empty. The session-end consolidation run failed with that value and logged only to its own log (#2576) [fix:cli]
-- A non-UTF-8 `CLAUDE_CODE_SESSION_ID` logs a warning that names the variable. Session ownership then falls back as if no session existed (#2562) [fix:task]
-- A throttle hook failure is written to the session log as well as stderr. It used to reach only stderr, so the file log had no record of it (#2577) [fix:throttle]
-- A throttle state file that cannot be read or removed now reports the path. A stale `throttle.json` that cannot be removed fails the export instead of leaving throttling on, and an unreadable file no longer turns throttling off without a message (#2574) [fix:throttle]
-- `llmenv upgrade` errors name the request URL. A non-JSON response shows the start of its body, and when `LLMENV_UPGRADE_GITHUB_API` is set the error says so (#2578) [fix:upgrade]
-- `llmenv task start` and `clear --session` stop when a task file in the store cannot be read or parsed. They used to skip the file, so a session could look empty or finished. Finish and abandon now use the same strict read (#2598) [fix:task]
-- A non-UTF-8 `LLMENV_EXTRA_TAGS` stops the command that reads it, with an error that names the variable. The tags used to be dropped, with only a log line that the default filter hid. A hook logs the error and skips the bundle features (#2575) [fix:scope]
-- `llmenv plugin-sync` fetches and checks only the marketplaces and plugins that an active plugin-collection selects. A profile that is not active no longer fails the sync with a plugin-not-found error (#2615) [fix:plugins]
-- The task commit gate applies a substitution in shell order. `git commit -m "$(llmenv task done x)"` passes when the task ends first, as bash runs it. A command that nests substitutions more than 32 levels deep is denied, not parsed (#2544) [fix:hook]
-- The slippage check sees a modifying command inside a substitution, a subshell, a brace group, or after a single `&`. It used to miss these (#2558) [fix:hook]
-- `llmenv task done --force` on an `open`, `wip`, or `waiting` task adds a note that names the prior state, the time, and the caller. A repeat `done` no longer rewrites `updated_at` (#2585) [fix:task]
-- `llmenv task start` refuses a child whose parent task file is corrupt or unreadable, and it names the parent. It used to start the child with a hidden warning. A deleted parent still lets the child start (#2597) [fix:task]
 
 ## [3.12.1] - 2026-10-07
 
