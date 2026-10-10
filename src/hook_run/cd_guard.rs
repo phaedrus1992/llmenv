@@ -11,6 +11,7 @@
 //! current call's `tool_input.command`, no per-session tracking needed.
 
 use crate::config::CdGuard;
+use crate::hook_run::task_nudge::{NestingTooDeep, program_words, shell_segments};
 
 const ADVISORY: &str = "note: this command changes the working directory with `cd` — \
 Claude Code resets the cwd after every Bash call, so a following command that assumes \
@@ -47,21 +48,24 @@ pub fn handle_pre_tool_use(stdin_payload: &serde_json::Value, cfg: &CdGuard) -> 
     }
 }
 
-/// Whether `command` contains a `cd` invocation as any top-level segment
-/// (split on `&&`, `||`, `;`, `|`, or newline) — the shape that triggers the
+/// Whether `command` runs `cd` in any of its parts, including a substitution,
+/// a subshell, or a brace group. Those parts are the shape that triggers the
 /// cwd-reset behavior this guard warns about.
 ///
-/// A lightweight heuristic, not a shell parser: `cd` inside a string
-/// literal, subshell, or quoted argument may be misdetected (false positive,
-/// acceptable for a non-blocking advisory) or missed if nested deeper (false
-/// negative, also acceptable — this only needs to catch the common case
-/// prose guidance wasn't stopping).
+/// The parts come from the shared splitter that the commit gate uses, so a
+/// `cd` inside `$( )` or `( )` is seen (#2619). A command nested too deeply
+/// to split gets no advisory. The advisory would claim a `cd` that the parser
+/// never checked, so the parse failure is logged instead.
 fn command_uses_cd(command: &str) -> bool {
-    command
-        .split(['\n', ';', '|'])
-        .flat_map(|seg| seg.split("&&"))
-        .flat_map(|seg| seg.split("||"))
-        .any(|segment| segment.split_whitespace().next() == Some("cd"))
+    match shell_segments(command) {
+        Ok(segments) => segments
+            .iter()
+            .any(|words| program_words(words).first() == Some(&"cd")),
+        Err(NestingTooDeep) => {
+            tracing::error!("cd guard: command nests too deep to check for cd; no advisory");
+            false
+        }
+    }
 }
 
 #[cfg(test)]
@@ -105,6 +109,27 @@ mod tests {
     #[test]
     fn detects_cd_across_newlines() {
         assert!(command_uses_cd("ls\ncd /tmp"));
+    }
+
+    #[test]
+    fn detects_cd_inside_a_command_substitution() {
+        assert!(command_uses_cd("echo $(cd /tmp && ls)"));
+    }
+
+    #[test]
+    fn detects_cd_inside_a_subshell_group() {
+        assert!(command_uses_cd("(cd /tmp && ls)"));
+    }
+
+    #[test]
+    fn detects_cd_inside_a_brace_group() {
+        assert!(command_uses_cd("{ cd /tmp; ls; }"));
+    }
+
+    #[test]
+    fn a_command_too_deep_to_split_gets_no_cd_advisory() {
+        let nested = format!("{}cd /tmp{}", "$(".repeat(40), ")".repeat(40));
+        assert!(!command_uses_cd(&nested));
     }
 
     #[test]

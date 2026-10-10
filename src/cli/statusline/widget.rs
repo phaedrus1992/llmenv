@@ -809,13 +809,20 @@ fn gh_pr_view(gh: GhPrCmd<'_>, repo_dir: &Path, branch: &str) -> Option<PrInfo> 
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                // A failed or short read must not reach the parser as a full answer.
                 let mut stdout = Vec::new();
-                if let Some(mut out) = child.stdout.take() {
-                    let _ = out.read_to_end(&mut stdout);
+                if let Some(mut out) = child.stdout.take()
+                    && let Err(e) = out.read_to_end(&mut stdout)
+                {
+                    tracing::debug!("gh pr view: reading stdout failed (non-fatal): {e}");
+                    return None;
                 }
                 let mut stderr = Vec::new();
-                if let Some(mut err) = child.stderr.take() {
-                    let _ = err.read_to_end(&mut stderr);
+                if let Some(mut err) = child.stderr.take()
+                    && let Err(e) = err.read_to_end(&mut stderr)
+                {
+                    tracing::debug!("gh pr view: reading stderr failed (non-fatal): {e}");
+                    return None;
                 }
                 if !status.success() {
                     let first_line = String::from_utf8_lossy(&stderr);
