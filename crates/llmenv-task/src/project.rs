@@ -105,9 +105,9 @@ fn read_llmenv_yaml_id(dir: &Path) -> Option<String> {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(e) => {
-            eprintln!(
-                "llmenv: could not read {} for project id: {e}",
-                path.display()
+            warn_tag_change(
+                &format!("could not read {} for the project id: {e}", path.display()),
+                "check the permissions of that file",
             );
             return None;
         }
@@ -115,10 +115,13 @@ fn read_llmenv_yaml_id(dir: &Path) -> Option<String> {
     let value: serde_yaml::Value = match serde_yaml::from_str(&content) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!(
-                "llmenv: {} is not valid YAML; ignoring its project id (falling back to \
-                 the directory name — this changes the project tag): {e}",
-                path.display()
+            warn_tag_change(
+                &format!(
+                    "{} is not valid YAML, so its project id is ignored and the directory name \
+                     is used. This changes the project tag: {e}",
+                    path.display()
+                ),
+                "correct the YAML in that file",
             );
             return None;
         }
@@ -133,15 +136,27 @@ fn read_llmenv_yaml_id(dir: &Path) -> Option<String> {
             // silent tag-swap the malformed-YAML branch guards against,
             // reached through a different malformation. Warn, don't swallow.
             None => {
-                eprintln!(
-                    "llmenv: {} has a non-string `id`; ignoring it (falling back to the \
-                     directory name — this changes the project tag)",
-                    path.display()
+                warn_tag_change(
+                    &format!(
+                        "{} has an `id` that is not a string, so it is ignored and the directory \
+                         name is used. This changes the project tag",
+                        path.display()
+                    ),
+                    "quote the `id` value in that file",
                 );
                 None
             }
         },
     }
+}
+
+/// Report a problem that changes the project tag. The tag scopes sessions, so a silent change
+/// hides open sessions. Stderr reaches a CLI caller only; a hook's stderr is dropped, so the
+/// problem is also logged and noticed for the agent (#2746).
+fn warn_tag_change(problem: &str, fix: &str) {
+    eprintln!("llmenv: {problem}");
+    tracing::error!("project tag: {problem}");
+    llmenv_util::agent_notice::record(format!("llmenv: {problem}. Fix: {fix}."));
 }
 
 fn basename(path: &Path) -> String {
@@ -158,10 +173,13 @@ fn hash_root(root: &Path) -> String {
     // it — an unstable tag (canonicalize failing on one call, succeeding on
     // another for the same root) would silently re-scope sessions.
     let canonical = std::fs::canonicalize(root).unwrap_or_else(|e| {
-        eprintln!(
-            "llmenv: could not canonicalize project root {}; hashing the raw path \
-             (project tag may be unstable if this is intermittent): {e}",
-            root.display()
+        warn_tag_change(
+            &format!(
+                "could not resolve the project root {}, so the raw path is hashed. The project \
+                 tag can change if this failure comes and goes: {e}",
+                root.display()
+            ),
+            "check that the project folder exists and can be read",
         );
         root.to_path_buf()
     });
@@ -177,6 +195,19 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn a_malformed_marker_id_is_an_agent_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".llmenv.yaml"), "id: [1, 2]\n").unwrap();
+        assert_eq!(read_llmenv_yaml_id(dir.path()), None);
+        let notices = llmenv_util::agent_notice::current().unwrap_or_default();
+        let marker = dir.path().join(".llmenv.yaml").display().to_string();
+        assert!(
+            notices.contains(&marker) && notices.contains("Fix: quote the `id`"),
+            "{notices}"
+        );
+    }
 
     #[test]
     fn git_dir_root_uses_directory_basename_when_no_llmenv_yaml() {

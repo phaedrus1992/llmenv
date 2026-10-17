@@ -6,9 +6,10 @@
 //! so the roots land where the server reads them. Design: docs/design/issue-2406-cbm-allowed-roots.md
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::time::{Duration, Instant};
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
+use crate::process::run_with_timeout;
 use llmenv_config::{CodebaseMemory, Config};
 
 /// How long one `codebase-memory-mcp allow-root` call may take.
@@ -157,26 +158,6 @@ fn cbm_command(cm: &CodebaseMemory, args: &[&str]) -> anyhow::Result<Command> {
         cmd.env("CBM_CACHE_DIR", llmenv_paths::expand_tilde(index_path)?);
     }
     Ok(cmd)
-}
-
-/// Run `cmd` and wait at most `timeout`. The child is killed on a timeout.
-fn run_with_timeout(mut cmd: Command, timeout: Duration) -> std::io::Result<Output> {
-    let mut child = cmd.spawn()?;
-    let start = Instant::now();
-    loop {
-        if child.try_wait()?.is_some() {
-            return child.wait_with_output();
-        }
-        if start.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                format!("no answer within {} ms", timeout.as_millis()),
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
 }
 
 /// The roots in the output of `allow-root --list`.
@@ -768,21 +749,6 @@ mod tests {
         assert_eq!(env_of(&c), None);
         c.index_path = Some("/idx".into());
         assert_eq!(env_of(&c).as_deref(), Some("/idx"));
-    }
-
-    #[test]
-    fn a_command_that_runs_too_long_is_killed() {
-        let mut cmd = Command::new("sleep");
-        cmd.arg("30").stdout(Stdio::piped()).stderr(Stdio::piped());
-        let err = run_with_timeout(cmd, Duration::from_millis(100)).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
-        let mut quick = Command::new("echo");
-        quick
-            .arg("hi")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let out = run_with_timeout(quick, Duration::from_secs(5)).unwrap();
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hi");
     }
 
     #[test]

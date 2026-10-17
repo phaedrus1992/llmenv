@@ -283,15 +283,12 @@ pub(crate) fn prune(
     };
     let now = SystemTime::now();
     for entry in entries {
-        let entry =
-            entry.with_context(|| format!("reading cache entry under {}", cache_root.display()))?;
-        let p = entry.path();
+        let Some((p, ft)) = entry_and_type(cache_root, entry, &mut report.failed) else {
+            continue;
+        };
         // lstat-equivalent: a symlink at the top level is never followed. We
         // remove the link itself (never its target) so the cache root can't be
         // used to delete arbitrary files outside it.
-        let ft = entry
-            .file_type()
-            .with_context(|| format!("stat cache entry {}", p.display()))?;
         if ft.is_symlink() {
             remove_link(&p, dry_run, &mut report);
             continue;
@@ -308,19 +305,17 @@ pub(crate) fn prune(
         // The durable state dir (#175) is a stable sibling of the hashed config
         // folders that must outlive every materialization. It is never a prune
         // candidate under any mode — cache invalidation must not wipe tool state.
-        if entry.file_name().to_str() == Some(crate::materialize::state::STATE_DIR_NAME) {
+        if p.file_name()
+            == Some(std::ffi::OsStr::new(
+                crate::materialize::state::STATE_DIR_NAME,
+            ))
+        {
             report.kept += 1;
             continue;
         }
 
-        let is_current = entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| match hashing {
-                HashingMode::Loose => true,
-                HashingMode::Normal => current_version == Some(name),
-                HashingMode::Strict => name.starts_with(&format!("{VERSION_TAG}-")),
-            });
+        let is_current =
+            is_current_name(p.file_name().unwrap_or_default(), hashing, current_version);
 
         let should_remove = match mode {
             PruneMode::All => true,
@@ -328,22 +323,12 @@ pub(crate) fn prune(
             PruneMode::OlderThan(older_than) => {
                 // Only current-version folders are aged out; stale folders are
                 // left to a StaleOnly/All pass so the two axes stay orthogonal.
-                if is_current {
-                    let m = newest_mtime(&p)
-                        .with_context(|| format!("scanning mtimes under {}", p.display()))?;
-                    match now.duration_since(m) {
-                        Ok(elapsed) => elapsed > older_than,
-                        Err(e) => {
-                            tracing::warn!(
-                                skew_secs = e.duration().as_secs(),
-                                "clock skew: mtime {}s in future; treating as expired for GC",
-                                e.duration().as_secs()
-                            );
-                            true
-                        }
-                    }
-                } else {
+                if !is_current {
                     false
+                } else if let Some(m) = newest_mtime_or_record(&p, &mut report.failed) {
+                    is_expired(now, m, older_than)
+                } else {
+                    continue;
                 }
             }
         };
@@ -492,17 +477,79 @@ fn remove_link(p: &Path, dry_run: bool, report: &mut PruneReport) {
 }
 
 /// Check whether `mtime` is older than `older_than` relative to `now`.
-/// Clock skew (mtime in the future) is treated as expired and logged.
+/// An mtime in the future is kept and logged. A clock that moved backward must not
+/// delete live data, and the `state/tmp` sweep keeps such an entry too (#2860).
 pub(crate) fn is_expired(now: SystemTime, mtime: SystemTime, older_than: Duration) -> bool {
     match now.duration_since(mtime) {
         Ok(elapsed) => elapsed > older_than,
         Err(e) => {
-            tracing::warn!(
+            // Error level: an entry with a future mtime is never collected, so the cause must show.
+            tracing::error!(
                 skew_secs = e.duration().as_secs(),
-                "clock skew: mtime {}s in future; treating as expired for GC",
+                "clock skew: mtime {}s in future; keeping the entry",
                 e.duration().as_secs()
             );
-            true
+            false
+        }
+    }
+}
+
+/// Whether the folder `name` belongs to the current generation for `hashing`.
+/// A non-UTF-8 name is compared as bytes, so under `Loose` it is still current (#2835).
+fn is_current_name(
+    name: &std::ffi::OsStr,
+    hashing: HashingMode,
+    current_version: Option<&str>,
+) -> bool {
+    match hashing {
+        HashingMode::Loose => true,
+        HashingMode::Normal => current_version.is_some_and(|v| name == v),
+        HashingMode::Strict => name
+            .as_encoded_bytes()
+            .starts_with(format!("{VERSION_TAG}-").as_bytes()),
+    }
+}
+
+/// The path and type of a cache entry, read without following a symlink. An entry that cannot
+/// be read is logged, recorded in `failed` (by `dir` when it has no path), and skipped, so the
+/// pass goes on.
+fn entry_and_type(
+    dir: &Path,
+    entry: std::io::Result<std::fs::DirEntry>,
+    failed: &mut Vec<PathBuf>,
+) -> Option<(PathBuf, std::fs::FileType)> {
+    let Some(entry) = crate::paths::readable_entry(dir, "cache gc", entry) else {
+        failed.push(dir.to_path_buf());
+        return None;
+    };
+    let p = entry.path();
+    match entry.file_type() {
+        Ok(ft) => Some((p, ft)),
+        Err(e) => {
+            tracing::error!(
+                "cache gc cannot read the type of {}, so it is kept: {e}",
+                p.display()
+            );
+            failed.push(p);
+            None
+        }
+    }
+}
+
+/// The newest mtime under `p`. On failure, the error is logged with its path, `p`
+/// is recorded in `failed`, and `None` is returned, so one unreadable folder does
+/// not stop the rest of the pass (#2859).
+fn newest_mtime_or_record(p: &Path, failed: &mut Vec<PathBuf>) -> Option<SystemTime> {
+    match newest_mtime(p) {
+        Ok(m) => Some(m),
+        Err(e) => {
+            tracing::error!(
+                "cache gc cannot scan the mtimes under {}, so it is kept: {e:#}. Fix: check \
+                 the permissions of that folder, or remove it by hand.",
+                p.display()
+            );
+            failed.push(p.to_path_buf());
+            None
         }
     }
 }
@@ -539,15 +586,12 @@ pub fn gc(
         _ => None,
     };
     for entry in entries {
-        let entry =
-            entry.with_context(|| format!("reading cache entry under {}", cache_root.display()))?;
-        let p = entry.path();
+        let Some((p, ft)) = entry_and_type(cache_root, entry, &mut report.failed) else {
+            continue;
+        };
         // Use `file_type()` (lstat-equivalent) — a symlink at the top level
         // is never treated as a cache directory we own. Removing one removes
         // only the link, never the target.
-        let ft = entry
-            .file_type()
-            .with_context(|| format!("stat cache entry {}", p.display()))?;
         if ft.is_symlink() {
             gc_remove_link(&p, &mut report);
             continue;
@@ -562,7 +606,11 @@ pub fn gc(
         // The durable state dir (#175) is a stable sibling of the hashed config
         // folders and must outlive every materialization. It is never an age-based
         // collection candidate — cache invalidation must not wipe tool state.
-        if entry.file_name().to_str() == Some(crate::materialize::state::STATE_DIR_NAME) {
+        if p.file_name()
+            == Some(std::ffi::OsStr::new(
+                crate::materialize::state::STATE_DIR_NAME,
+            ))
+        {
             report.kept += 1;
             continue;
         }
@@ -570,13 +618,18 @@ pub fn gc(
         // is a container for per-shape leaf dirs. Walk into it and age-check each
         // shape individually instead of treating the whole generation as a unit.
         if hashing == HashingMode::Normal
-            && entry.file_name().to_str() == current_version.as_deref()
+            && is_current_name(
+                p.file_name().unwrap_or_default(),
+                hashing,
+                current_version.as_deref(),
+            )
         {
             gc_normal_shapes(&p, older_than, &now, &mut report)?;
             continue;
         }
-        let m =
-            newest_mtime(&p).with_context(|| format!("scanning mtimes under {}", p.display()))?;
+        let Some(m) = newest_mtime_or_record(&p, &mut report.failed) else {
+            continue;
+        };
         let expired = is_expired(now, m, older_than);
         if expired {
             gc_remove_dir(&p, &mut report);
@@ -648,12 +701,9 @@ fn gc_normal_shapes(
                 .context(format!("reading version dir {}", version_dir.display())));
         }
     } {
-        let entry =
-            entry.with_context(|| format!("reading entry under {}", version_dir.display()))?;
-        let p = entry.path();
-        let ft = entry
-            .file_type()
-            .with_context(|| format!("stat cache entry {}", p.display()))?;
+        let Some((p, ft)) = entry_and_type(version_dir, entry, &mut report.failed) else {
+            continue;
+        };
         if ft.is_symlink() || !ft.is_dir() {
             tracing::trace!(
                 "gc_normal_shapes: skipping unexpected entry: {}",
@@ -669,12 +719,17 @@ fn gc_normal_shapes(
         }
         // The durable state dir (#175) may appear nested under a version dir
         // in some layouts; protect it from age-based collection regardless.
-        if entry.file_name().to_str() == Some(crate::materialize::state::STATE_DIR_NAME) {
+        if p.file_name()
+            == Some(std::ffi::OsStr::new(
+                crate::materialize::state::STATE_DIR_NAME,
+            ))
+        {
             report.kept += 1;
             continue;
         }
-        let m =
-            newest_mtime(&p).with_context(|| format!("scanning mtimes under {}", p.display()))?;
+        let Some(m) = newest_mtime_or_record(&p, &mut report.failed) else {
+            continue;
+        };
         let expired = is_expired(*now, m, older_than);
         if expired {
             gc_remove_dir(&p, report);
@@ -695,29 +750,46 @@ pub(crate) fn newest_mtime(dir: &Path) -> anyhow::Result<SystemTime> {
     Ok(newest)
 }
 
+/// A child that another tool removes during the walk is skipped, not an error (#2835).
 fn walk_mtime(dir: &Path, newest: &mut SystemTime) -> anyhow::Result<()> {
-    let entries = std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
+    let Some(entries) = skip_vanished(std::fs::read_dir(dir))
+        .with_context(|| format!("reading {}", dir.display()))?
+    else {
+        return Ok(());
+    };
     for entry in entries {
         let entry = entry.with_context(|| format!("reading entry under {}", dir.display()))?;
         let p = entry.path();
-        let file_type = entry
-            .file_type()
-            .with_context(|| format!("stat {}", p.display()))?;
-        if file_type.is_symlink() {
+        // `DirEntry::metadata` does not follow a symlink, so one stat gives both the type and
+        // the mtime.
+        let Some(meta) =
+            skip_vanished(entry.metadata()).with_context(|| format!("stat {}", p.display()))?
+        else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
             continue;
         }
-        let m = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .with_context(|| format!("stat {}", p.display()))?;
+        let m = meta
+            .modified()
+            .with_context(|| format!("mtime {}", p.display()))?;
         if m > *newest {
             *newest = m;
         }
-        if file_type.is_dir() {
+        if meta.is_dir() {
             walk_mtime(&p, newest)?;
         }
     }
     Ok(())
+}
+
+/// `None` for a path that no longer exists. Any other error stays an error.
+fn skip_vanished<T>(result: std::io::Result<T>) -> std::io::Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]
@@ -1219,13 +1291,13 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn prune_io_error_names_the_path() {
-        // #1372: `llmenv prune` reported nothing but "Permission denied (os error
-        // 13)" — no path, no adapter, nothing to act on. An unreadable directory
-        // in the mtime scan is the same class of error; it must name the path.
+    fn prune_records_an_unreadable_folder_and_keeps_going() {
+        // #1372: an mtime-scan error must name its path. #2859: it must also not stop
+        // the pass, so the readable folders after it are still pruned.
         let tmp = tempfile::tempdir().unwrap();
         let cache_root = tmp.path().join("cache");
         let shape = touch_dir(&cache_root, "shape");
+        let other = touch_dir(&cache_root, "other");
         let unreadable = shape.join("unreadable");
         fs::create_dir_all(&unreadable).unwrap();
         chmod(&unreadable, 0o000);
@@ -1239,16 +1311,115 @@ mod tests {
         );
 
         chmod(&unreadable, 0o755);
-        let err = result.expect_err("an unreadable directory in the mtime scan is fatal");
-        let rendered = format!("{err:#}");
-        assert!(
-            rendered.contains("unreadable"),
-            "the error must name the path it happened on, got: {rendered}"
-        );
+        let report = result.expect("one unreadable folder is not fatal");
+        assert_eq!(report.failed, vec![shape.clone()]);
+        assert!(shape.exists(), "the unreadable folder is kept");
+        assert_eq!(report.removed, vec![other.clone()]);
+        assert!(!other.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gc_records_an_unreadable_folder_and_keeps_going() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bad = touch_dir(tmp.path(), &format!("{VERSION_TAG}-bad"));
+        let good = touch_dir(tmp.path(), &format!("{VERSION_TAG}-good"));
+        for p in [good.join("file.txt"), good.clone()] {
+            std::process::Command::new("touch")
+                .args(["-t", "200001010000", p.to_str().unwrap()])
+                .status()
+                .unwrap();
+        }
+        let unreadable = bad.join("unreadable");
+        fs::create_dir_all(&unreadable).unwrap();
+        chmod(&unreadable, 0o000);
+
+        let result = gc(tmp.path(), Duration::ZERO, HashingMode::Strict);
+
+        chmod(&unreadable, 0o755);
+        let report = result.expect("one unreadable folder is not fatal");
+        assert_eq!(report.failed, vec![bad.clone()]);
+        assert!(bad.exists());
+        assert_eq!(report.removed, vec![good.clone()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gc_normal_shapes_records_an_unreadable_leaf_and_keeps_going() {
+        let tmp = tempfile::tempdir().unwrap();
+        let generation = tmp.path().join(version_major());
+        let bad = touch_dir(&generation, "bad-shape");
+        touch_dir(&generation, "good-shape");
+        let unreadable = bad.join("unreadable");
+        fs::create_dir_all(&unreadable).unwrap();
+        chmod(&unreadable, 0o000);
+
+        let result = gc(tmp.path(), Duration::ZERO, HashingMode::Normal);
+
+        chmod(&unreadable, 0o755);
+        let report = result.expect("one unreadable leaf is not fatal");
+        assert_eq!(report.failed, vec![bad.clone()]);
+        assert!(bad.exists());
     }
 
     #[test]
-    fn gc_clock_skew_treats_future_mtime_as_expired() {
+    fn is_expired_keeps_a_future_mtime() {
+        let now = SystemTime::now();
+        let future = now + Duration::from_secs(3600);
+        assert!(!is_expired(now, future, Duration::ZERO));
+        assert!(is_expired(
+            now,
+            now - Duration::from_secs(10),
+            Duration::from_secs(1)
+        ));
+    }
+
+    #[test]
+    fn skip_vanished_turns_only_not_found_into_none() {
+        use std::io::{Error, ErrorKind};
+        assert_eq!(skip_vanished(Ok(1)).unwrap(), Some(1));
+        assert_eq!(
+            skip_vanished::<u8>(Err(Error::from(ErrorKind::NotFound))).unwrap(),
+            None
+        );
+        assert!(skip_vanished::<u8>(Err(Error::from(ErrorKind::PermissionDenied))).is_err());
+    }
+
+    #[cfg(unix)]
+    proptest::proptest! {
+        #[test]
+        fn is_current_name_follows_each_hashing_rule(
+            bytes in proptest::collection::vec(proptest::num::u8::ANY, 0..24),
+            version in "[0-9]{1,3}",
+        ) {
+            use std::os::unix::ffi::OsStrExt as _;
+            let name = std::ffi::OsStr::from_bytes(&bytes);
+            proptest::prop_assert!(is_current_name(name, HashingMode::Loose, None));
+            let strict = bytes.starts_with(format!("{VERSION_TAG}-").as_bytes());
+            proptest::prop_assert_eq!(is_current_name(name, HashingMode::Strict, None), strict);
+            proptest::prop_assert_eq!(
+                is_current_name(name, HashingMode::Normal, Some(&version)),
+                bytes == version.as_bytes()
+            );
+            proptest::prop_assert!(!is_current_name(name, HashingMode::Normal, None));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_name_is_current_under_loose_hashing() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let name = std::ffi::OsStr::from_bytes(b"shape-\xff");
+        assert!(is_current_name(name, HashingMode::Loose, None));
+        let mut strict = format!("{VERSION_TAG}-").into_bytes();
+        strict.push(0xff);
+        let strict = std::ffi::OsStr::from_bytes(&strict);
+        assert!(is_current_name(strict, HashingMode::Strict, None));
+        assert!(!is_current_name(name, HashingMode::Normal, Some("3")));
+    }
+
+    #[test]
+    fn gc_clock_skew_keeps_a_future_mtime() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = touch_dir(tmp.path(), &format!("{VERSION_TAG}-skewtest"));
         // Set mtime 1 hour in the future to simulate clock skew.
@@ -1256,13 +1427,13 @@ mod tests {
             .args(["-t", "209901010000", dir.to_str().unwrap()])
             .status()
             .unwrap();
-        // gc with older_than=0 — normal path would keep it (mtime in future means
-        // elapsed=0), but clock skew handling must prune it anyway.
+        // A clock that moved backward must not delete live data (#2860).
         let report = gc(tmp.path(), Duration::ZERO, HashingMode::Strict).unwrap();
         assert!(
-            report.removed.contains(&dir),
-            "future-mtime dir must be pruned on clock skew"
+            !report.removed.contains(&dir) && dir.exists(),
+            "a future-mtime dir must be kept"
         );
+        assert_eq!(report.kept, 1);
     }
 
     #[test]

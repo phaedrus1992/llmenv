@@ -62,9 +62,10 @@ pub(super) fn render_branch_with(
     // A read error is already shown by the branch label above, so it adds no link.
     let pr = match resolve_pr_with(data, gh) {
         Ok(pr) => pr,
-        // The branch label above already shows this read error, so the link is dropped.
+        // The branch label above already shows a branch read error, and the pr widget shows a
+        // gh failure, so the link is dropped.
         Err(e) => {
-            tracing::debug!("statusline branch link skipped: {e}");
+            tracing::debug!("statusline branch link skipped: {e:?}");
             None
         }
     };

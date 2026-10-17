@@ -21,7 +21,9 @@ mod notice;
 pub(crate) use event::HOOK_EVENT_NAMES;
 pub(crate) use event::HookEvent;
 use event::engine_event_for;
-use notice::{log_notice_without_channel, write_hook_line, write_notice_only};
+use notice::{
+    log_memory_without_channel, log_notice_without_channel, write_hook_line, write_notice_only,
+};
 use transcript_link::ensure_transcript_session;
 pub(crate) mod features_scope;
 pub(crate) mod idempotency;
@@ -733,6 +735,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
                 let out = resume_cache::with_resume_notice(out, &hook_event_name, payload);
                 // The omission notice rides in `notes`, so the log must see the joined text (#2764).
                 log_notice_without_channel(&out, Some(notes.as_str()), event);
+                log_memory_without_channel(&out, &text.memory, event);
                 if let Some(e) = write_hook_line(&mut std::io::stdout(), &out) {
                     eprintln!("llmenv: failed to write hook output: {e}");
                 }
@@ -2074,11 +2077,21 @@ async fn handle_session_log(
             // SessionStart: once per launch, worth revalidating (#1090).
             ensure_transcript_session(cfg, client, csid, ctx, state_path, true).await
         }
-        (_, Some(csid)) => state_path.and_then(|p| match state::lookup_session_at(p, csid) {
-            Ok(id) => id,
-            Err(e) => {
-                eprintln!("llmenv: session log skipped for this event: {e:#}");
-                None
+        (_, Some(csid)) => state_path.and_then(|p| {
+            let now = session_state::unix_now();
+            match state::link_at(p, csid, now) {
+                Ok(state::Link::Linked(id)) => Some(id),
+                Ok(state::Link::Pending { since }) => {
+                    transcript_link::note_pending(since, now);
+                    None
+                }
+                Ok(state::Link::Missing) => None,
+                Err(e) => {
+                    // The engine drops a hook's stderr, so the agent hears it here (#2834).
+                    tracing::error!("ICM transcript skipped for this event: {e:#}");
+                    crate::agent_notice::record(notice::session_map_unreadable_notice(&e));
+                    None
+                }
             }
         }),
         (_, None) => None,
@@ -3149,6 +3162,22 @@ mod tests {
         });
         assert!(logs.contains("ERROR"), "{logs}");
         assert!(logs.contains("the session map is locked"), "{logs}");
+    }
+
+    #[test]
+    fn memory_with_no_channel_is_logged_and_memory_with_one_is_not() {
+        let dropped = crate::test_log_capture::capture_logs(|| {
+            log_memory_without_channel("", "project memory text", "session_start");
+        });
+        assert!(
+            dropped.contains("ERROR") && dropped.contains("19 bytes"),
+            "{dropped}"
+        );
+        let delivered = crate::test_log_capture::capture_logs(|| {
+            log_memory_without_channel("{}", "project memory text", "session_start");
+            log_memory_without_channel("", "  ", "session_start");
+        });
+        assert!(delivered.is_empty(), "{delivered}");
     }
 
     #[test]
@@ -6717,6 +6746,45 @@ mod session_log_tests {
     // trigger (the test binary is not the `llmenv` binary `spawn_record`
     // expects to re-invoke). `start_session` stays synchronous/inline
     // (`ensure_transcript_session`), so it remains directly unit-testable.
+
+    #[tokio::test]
+    async fn ensure_transcript_session_starts_no_second_transcript_while_one_is_pending() {
+        // A start whose link was not recorded leaves its pending marker. A later event must not
+        // start another transcript, which would be a second orphan (#2834).
+        let state_dir = tempfile::tempdir().unwrap();
+        let state_path = state_dir.path().join("transcript-sessions.json");
+        let seen = state::Link::Missing;
+        let now = super::session_state::unix_now();
+        assert!(state::claim_pending_at(&state_path, "claude-p", &seen, now).unwrap());
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(mock_text_response("icm-new")))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
+        let cfg = SessionLog {
+            transcript: Some(llmenv_config::TranscriptSinkConfig {
+                enabled: true,
+                level: LogLevel::Info,
+                retention_days: None,
+            }),
+            ..file_only_cfg(&state_dir.path().join("unused.jsonl"))
+        };
+
+        let id = ensure_transcript_session(
+            &cfg,
+            Some(&client),
+            "claude-p",
+            &ctx(),
+            Some(&state_path),
+            true,
+        )
+        .await;
+
+        assert_eq!(id, None);
+        server.verify().await;
+    }
 
     #[tokio::test]
     async fn ensure_transcript_session_creates_and_correlates_when_none_recorded() {

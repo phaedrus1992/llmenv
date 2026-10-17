@@ -40,7 +40,11 @@ impl FileSink {
     /// dropped.
     pub(crate) fn append(&self, line: &str) {
         if let Err(e) = self.try_append(line) {
-            tracing::debug!("session_log file append failed: {e}");
+            // Error level: the default filter hides a debug, and the lost event leaves no trace.
+            tracing::error!(
+                "session_log file append to {} failed: {e}",
+                self.path.display()
+            );
         }
     }
 
@@ -58,7 +62,8 @@ impl FileSink {
         let rotated = match rotate_if_full(&self.path, MAX_BYTES) {
             Ok(rotated) => rotated,
             Err(e) => {
-                tracing::warn!(
+                // Error level: the default filter hides a warn (#2657).
+                tracing::error!(
                     path = %self.path.display(),
                     error = %e,
                     "session log rotation failed; appending to the active file"

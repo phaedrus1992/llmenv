@@ -234,11 +234,22 @@ impl LedgerStore {
         session_id: &str,
         f: impl FnOnce(&mut Ledger) -> T,
     ) -> Option<T> {
+        self.update_reporting_save(session_id, f)
+            .map(|(result, _)| result)
+    }
+
+    /// Like [`Self::update`], and also reports whether the ledger reached disk.
+    /// The flag is `false` when the save failed, and the result of `f` is still returned.
+    pub(crate) fn update_reporting_save<T>(
+        &self,
+        session_id: &str,
+        f: impl FnOnce(&mut Ledger) -> T,
+    ) -> Option<(T, bool)> {
         let _lock = self.lock(session_id)?;
         let mut ledger = self.read(session_id)?;
         let result = f(&mut ledger);
-        self.write(session_id, &ledger);
-        Some(result)
+        let saved = self.write(session_id, &ledger);
+        Some((result, saved))
     }
 
     fn file(&self, session_id: &str, ext: &str) -> PathBuf {
@@ -277,15 +288,20 @@ impl LedgerStore {
         }
     }
 
-    fn write(&self, session_id: &str, ledger: &Ledger) {
+    /// Returns `false` when the save failed. The failure is already logged and noticed.
+    fn write(&self, session_id: &str, ledger: &Ledger) -> bool {
         super::session_state::prune_stale_json_files(&self.dir, STALE_DAYS);
         super::session_state::prune_orphan_locks(&self.dir, STALE_DAYS);
         let path = self.file(session_id, "json");
         let result = serde_json::to_vec(ledger)
             .map_err(std::io::Error::other)
             .and_then(|bytes| crate::paths::write_owner_only_atomic(&path, &bytes));
-        if let Err(e) = result {
-            note_save_failure(&path, &e);
+        match result {
+            Ok(()) => true,
+            Err(e) => {
+                note_save_failure(&path, &e);
+                false
+            }
         }
     }
 }
@@ -293,10 +309,10 @@ impl LedgerStore {
 /// Logs a failed ledger save and tells the agent. `update` still returns the result of its
 /// closure, so the caller cannot see this failure (#2729).
 fn note_save_failure(path: &std::path::Path, err: &std::io::Error) {
-    tracing::error!("cannot save recall ledger {}: {err}", path.display());
-    crate::agent_notice::record(format!(
-        "llmenv: the recall ledger could not be saved ({err}), so some records may repeat. Fix: \
-         run `llmenv doctor` to check the state directory."
+    crate::agent_notice::record_logged(format!(
+        "llmenv: the recall ledger {} could not be saved ({err}), so some records may repeat. \
+         Fix: run `llmenv doctor` to check the state directory.",
+        path.display()
     ));
 }
 
@@ -663,7 +679,7 @@ mod corrupt_notice_tests {
         );
         let text = crate::agent_notice::current().unwrap_or_default();
         assert!(
-            text.contains("recall ledger could not be saved"),
+            text.contains("recall ledger /state/recall_session/s1.json could not be saved"),
             "got: {text}"
         );
     }

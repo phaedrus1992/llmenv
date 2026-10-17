@@ -110,13 +110,11 @@ impl SessionState {
     }
 
     fn save(&self, state_dir: &Path) -> anyhow::Result<()> {
-        if self.read_failed {
-            tracing::error!(
-                "repeat-detect state for session {} not saved, the file could not be read",
-                self.session_id
-            );
-            return Ok(());
-        }
+        // A write after a failed read would replace good state with this empty one.
+        anyhow::ensure!(
+            !self.read_failed,
+            "the state file could not be read, so it was kept as it is"
+        );
         let rd_dir = repeat_detect_state_dir(state_dir);
         // Same 7-day retention as `read_once`'s sibling cache — nothing here
         // needs a longer memory than that (the counter resets on any
@@ -208,7 +206,7 @@ pub(crate) fn handle_pre_tool_use(
     let consecutive = state.consecutive;
 
     if let Err(e) = state.save(state_dir) {
-        eprintln!("llmenv: failed to save repeat-detect state for session {session_id}: {e}");
+        note_save_failure(session_id, &e);
     }
 
     // `threshold: 0` isn't rejected at config-load time (no validation
@@ -264,7 +262,7 @@ pub fn handle_stop(
     let consecutive = state.stop_consecutive;
 
     if let Err(e) = state.save(state_dir) {
-        eprintln!("llmenv: failed to save repeat-detect state for session {session_id}: {e}");
+        note_save_failure(session_id, &e);
     }
 
     let threshold = config.threshold.max(1);
@@ -288,6 +286,15 @@ pub fn handle_stop(
     } else {
         reminder.to_string()
     }
+}
+
+/// Logs a failed save and tells the agent. The engine drops a hook's stderr (#2833).
+fn note_save_failure(session_id: &str, err: &impl std::fmt::Display) {
+    crate::agent_notice::record_logged(format!(
+        "llmenv: the repeat-call counter of session {session_id} could not be saved ({err}), so \
+         a repeated call may not be flagged. Fix: run `llmenv doctor` to check the state \
+         directory."
+    ));
 }
 
 #[cfg(test)]
@@ -636,9 +643,27 @@ mod tests {
         std::fs::write(&path, original).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
         let state = SessionState::load(state_dir.path(), "unread");
-        state.save(state_dir.path()).unwrap();
+        assert!(state.save(state_dir.path()).is_err());
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn a_failed_save_is_an_agent_notice() {
+        // A file where the state folder should be makes every read and write fail (#2833).
+        let dir = TempDir::new().expect("test");
+        std::fs::write(repeat_detect_state_dir(dir.path()), "").expect("test");
+        handle_pre_tool_use(
+            &bash_payload("ls"),
+            Some("notice-2833"),
+            &config(2),
+            dir.path(),
+        );
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(
+            notices.contains("session notice-2833 could not be saved"),
+            "{notices}"
+        );
     }
 
     #[cfg(unix)]

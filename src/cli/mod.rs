@@ -5131,7 +5131,10 @@ fn run_prune(
         eprintln!("  {verb}: {}", p.display());
     }
     for p in &failed {
-        eprintln!("  failed to remove: {}", p.display());
+        eprintln!(
+            "  could not check or remove (cause logged above): {}",
+            p.display()
+        );
     }
     eprintln!(
         "prune complete: {} {} entry(ies), kept {}",
@@ -5140,7 +5143,10 @@ fn run_prune(
         kept
     );
     if !failed.is_empty() {
-        eprintln!("  {} entry(ies) could not be removed", failed.len());
+        eprintln!(
+            "  {} entry(ies) could not be checked or removed",
+            failed.len()
+        );
     }
     // Drop each removed folder's platform credential entry. `doctor --gc` already
     // does this; prune deleting folders without it is how orphaned keychain items

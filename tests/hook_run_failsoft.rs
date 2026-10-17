@@ -1094,15 +1094,28 @@ impl Drop for ProxyReaper {
     }
 }
 
+/// A free port in 20000-29999. The hook's stand-in proxy binds the port itself, so the test
+/// cannot keep a listener. Other tests bind port 0, which the kernel serves from the ephemeral
+/// range above 32768, so they cannot take this port in the gap (#2824).
+#[cfg(unix)]
+fn free_port_outside_the_ephemeral_range() -> u16 {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    (0..1000)
+        .map(|_| {
+            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let offset = (std::process::id().wrapping_mul(37).wrapping_add(n)) % 10_000;
+            u16::try_from(20_000 + offset).unwrap()
+        })
+        .find(|port| std::net::TcpListener::bind(("127.0.0.1", *port)).is_ok())
+        .expect("no free port in 20000-29999")
+}
+
 /// Run session start on a host that owns ICM, with nothing listening and the given stand-in
 /// `mcp-proxy` first on `PATH`. The hook starts that stand-in when it finds ICM down.
 #[cfg(unix)]
 fn session_start_on_the_icm_host(fake_proxy: &str) -> assert_cmd::assert::Assert {
     use std::os::unix::fs::PermissionsExt;
-    let port = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.local_addr().unwrap().port()
-    };
+    let port = free_port_outside_the_ephemeral_range();
     let hostname = rustix::system::uname()
         .nodename()
         .to_string_lossy()
@@ -1319,7 +1332,6 @@ fn session_start_says_when_the_health_check_could_not_run() {
 #[cfg(unix)]
 const FAKE_ICM_FAILING_CALLS: &str = r#"#!/usr/bin/env python3
 import http.server, sys
-port = int(sys.argv[1])
 class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("content-length", 0)))
@@ -1340,8 +1352,30 @@ class H(http.server.BaseHTTPRequestHandler):
             self.wfile.write(b"upstream failure")
     def log_message(self, *args):
         pass
-http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
+server = http.server.HTTPServer(("127.0.0.1", 0), H)
+print(server.server_address[1], flush=True)
+server.serve_forever()
 "#;
+
+/// Start the failing fake ICM server and return it with the port it bound. The server picks its
+/// own port, so no parallel test can take it between a bind and a reuse (#2824).
+#[cfg(unix)]
+fn spawn_failing_icm(script_dir: &TempDir) -> (ChildGuard, u16) {
+    use std::io::BufRead as _;
+    let script = script_dir.path().join("fake_icm.py");
+    fs::write(&script, FAKE_ICM_FAILING_CALLS).unwrap();
+    let mut server = std::process::Command::new("python3")
+        .arg(&script)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(server.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let port = line.trim().parse().unwrap();
+    (ChildGuard(server), port)
+}
 
 /// Kills the fake server when the test ends.
 #[cfg(unix)]
@@ -1360,25 +1394,8 @@ impl Drop for ChildGuard {
 #[cfg(unix)]
 #[test]
 fn session_start_shows_the_memory_error_when_another_server_needs_a_notice() {
-    let port = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.local_addr().unwrap().port()
-    };
     let script_dir = TempDir::new().unwrap();
-    let script = script_dir.path().join("fake_icm.py");
-    fs::write(&script, FAKE_ICM_FAILING_CALLS).unwrap();
-    let server = std::process::Command::new("python3")
-        .arg(&script)
-        .arg(port.to_string())
-        .spawn()
-        .unwrap();
-    let _guard = ChildGuard(server);
-    for _ in 0..100 {
-        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    let (_guard, port) = spawn_failing_icm(&script_dir);
     let config = config_with_memory_addr("127.0.0.1", port).replace(
         "      when: [test]\n\ncache:",
         "      when: [test]\n  codebase_memory:\n    - when: [test]\n\ncache:",
@@ -1401,25 +1418,8 @@ fn session_start_shows_the_memory_error_when_another_server_needs_a_notice() {
 #[cfg(unix)]
 #[test]
 fn session_start_reports_a_failing_memory_call_to_the_agent() {
-    let port = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.local_addr().unwrap().port()
-    };
     let script_dir = TempDir::new().unwrap();
-    let script = script_dir.path().join("fake_icm.py");
-    fs::write(&script, FAKE_ICM_FAILING_CALLS).unwrap();
-    let server = std::process::Command::new("python3")
-        .arg(&script)
-        .arg(port.to_string())
-        .spawn()
-        .unwrap();
-    let _guard = ChildGuard(server);
-    for _ in 0..100 {
-        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    let (_guard, port) = spawn_failing_icm(&script_dir);
     let (dir, config_path) = setup_config(&config_with_memory_addr("127.0.0.1", port));
     hook_cmd(dir.path(), &config_path, "session_start")
         .timeout(Duration::from_secs(25))

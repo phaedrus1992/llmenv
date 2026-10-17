@@ -51,20 +51,12 @@ pub(crate) fn lock_state_file(dir: &Path, key: &str, label: &str) -> Option<File
 
 /// Scan `dir` and delete `.json` files older than `max_age_days`. Fail-soft:
 /// any stat/read error is logged and skipped, never propagated — pruning is
-/// a best-effort cleanup, not correctness-critical.
+/// a best-effort cleanup, not correctness-critical. Each failure is also an agent
+/// notice, because the engine drops a hook's stderr (#2746, #2833).
 pub(crate) fn prune_stale_json_files(dir: &Path, max_age_days: u64) {
-    let max_age_secs = max_age_days * 86_400;
-    let now = unix_now();
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
-        Err(e) => {
-            eprintln!(
-                "llmenv: failed to read {} for stale-session pruning: {e}",
-                dir.display()
-            );
-            return;
-        }
+    let max_age = Duration::from_secs(max_age_days.saturating_mul(86_400));
+    let Some(entries) = read_dir_logged(dir, "stale-session pruning") else {
+        return;
     };
     for entry in entries {
         let entry = match entry {
@@ -81,37 +73,42 @@ pub(crate) fn prune_stale_json_files(dir: &Path, max_age_days: u64) {
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        if let Ok(meta) = std::fs::metadata(&path).inspect_err(|e| {
-            tracing::warn!(
-                "prune_stale_json_files: stat failed for {}: {e}",
-                path.display()
-            )
-        }) && let Ok(modified) = meta.modified().inspect_err(|e| {
-            tracing::warn!(
-                "prune_stale_json_files: mtime failed for {}: {e}",
-                path.display()
-            )
-        }) && let Ok(duration) =
-            modified
-                .duration_since(std::time::UNIX_EPOCH)
-                .inspect_err(|e| {
-                    tracing::warn!(
-                        "prune_stale_json_files: duration_since failed for {}: {e}",
-                        path.display()
-                    )
-                })
-        {
-            let age_secs = now.saturating_sub(duration.as_secs() as i64);
-            if age_secs > max_age_secs as i64
-                && let Err(e) = std::fs::remove_file(&path)
-            {
-                eprintln!(
-                    "llmenv: failed to prune stale state file {}: {e}",
-                    path.display()
-                );
+        match file_age(&path) {
+            Ok(Some(age)) if is_stale(age, max_age) => {
+                if let Some(e) = removal_error_to_log(std::fs::remove_file(&path)) {
+                    note_prune_failure("cannot prune the stale state file", &path, &e);
+                }
             }
+            Ok(_) => {}
+            Err(e) => note_prune_failure("cannot read the age of the state file", &path, &e),
         }
     }
+}
+
+/// Whether a file of `age` is past `max_age`. A file exactly at the limit is kept.
+fn is_stale(age: Duration, max_age: Duration) -> bool {
+    age > max_age
+}
+
+/// The age of `path`. `None` for a file that is gone, which is the normal outcome of a race.
+/// An mtime in the future counts as age zero, so the file is kept.
+fn file_age(path: &Path) -> std::io::Result<Option<Duration>> {
+    let modified = match std::fs::metadata(path) {
+        Ok(meta) => meta.modified()?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    Ok(Some(modified.elapsed().unwrap_or(Duration::ZERO)))
+}
+
+/// Logs a state-file pruning failure at error level, which the default filter shows, and
+/// tells the agent.
+fn note_prune_failure(what: &str, path: &Path, err: &std::io::Error) {
+    crate::agent_notice::record_logged(format!(
+        "llmenv: {what} {} ({err}), so it stays on disk. Fix: check the permissions of that \
+         file and its folder, or run `llmenv doctor` to check the state directory.",
+        path.display()
+    ));
 }
 
 /// Whether a `SessionStart` `source` means the model's context was emptied, so
@@ -151,9 +148,6 @@ fn remove_if_present(path: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Remove `.lock` files in `dir` older than `max_age_days` whose `.json` is gone. A session in its
-/// first update holds a lock with no `.json` yet; removing that lock would let a second writer
-/// lock a new file and lose an update, so only old locks go.
 /// The error to log for a file removal, or `None` when the file is already gone. A missing file
 /// is the normal outcome of a race, so it is not an error (#2657).
 pub(crate) fn removal_error_to_log(result: std::io::Result<()>) -> Option<std::io::Error> {
@@ -164,24 +158,32 @@ pub(crate) fn removal_error_to_log(result: std::io::Result<()>) -> Option<std::i
     }
 }
 
-/// The entries of `dir`, or `None` after a log line that names why they cannot be read. A missing
-/// directory is normal, so it returns `None` with no log.
+/// The entries of `dir`, or `None` after a log line and an agent notice that name why they
+/// cannot be read. A missing directory is normal, so it returns `None` with no log.
 fn read_dir_logged(dir: &Path, purpose: &str) -> Option<std::fs::ReadDir> {
     match std::fs::read_dir(dir) {
         Ok(entries) => Some(entries),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => {
             tracing::error!("cannot read {} for {purpose}: {e}", dir.display());
+            crate::agent_notice::record(format!(
+                "llmenv: {purpose} cannot read {} ({e}), so old state files stay on disk. Fix: \
+                 check the permissions of that folder, or run `llmenv doctor`.",
+                dir.display()
+            ));
             None
         }
     }
 }
 
+/// Remove `.lock` files in `dir` older than `max_age_days` whose `.json` is gone. A session in its
+/// first update holds a lock with no `.json` yet; removing that lock would let a second writer
+/// lock a new file and lose an update, so only old locks go.
 pub(crate) fn prune_orphan_locks(dir: &Path, max_age_days: u64) {
     let Some(entries) = read_dir_logged(dir, "stale lock pruning") else {
         return;
     };
-    let max_age = Duration::from_secs(max_age_days * 86_400);
+    let max_age = Duration::from_secs(max_age_days.saturating_mul(86_400));
     for entry in entries {
         let path = match entry {
             Ok(entry) => entry.path(),
@@ -190,19 +192,22 @@ pub(crate) fn prune_orphan_locks(dir: &Path, max_age_days: u64) {
                 continue;
             }
         };
-        let stale = std::fs::metadata(&path)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.elapsed().ok())
-            .is_some_and(|age| age > max_age);
-        if stale
-            && path.extension().and_then(|e| e.to_str()) == Some("lock")
-            && !path.with_extension("json").exists()
-        {
-            // Logged at error: the default log filter is ERROR, so a warn would be invisible (#2657).
-            if let Some(e) = removal_error_to_log(std::fs::remove_file(&path)) {
-                tracing::error!("cannot remove stale lock {}: {e}", path.display());
+        if path.extension().and_then(|e| e.to_str()) != Some("lock") {
+            continue;
+        }
+        // A lock whose age cannot be read is kept, and the cause is logged (#2858).
+        let stale = match file_age(&path) {
+            Ok(age) => age.is_some_and(|age| is_stale(age, max_age)),
+            Err(e) => {
+                note_prune_failure("cannot read the age of the lock", &path, &e);
+                false
             }
+        };
+        if stale
+            && !path.with_extension("json").exists()
+            && let Some(e) = removal_error_to_log(std::fs::remove_file(&path))
+        {
+            note_prune_failure("cannot remove the stale lock", &path, &e);
         }
     }
 }
@@ -259,6 +264,72 @@ mod tests {
         assert!(fresh.exists(), "fresh file must survive pruning");
         assert!(!stale.exists(), "stale file must be pruned");
         assert!(non_json.exists(), "non-json file must never be touched");
+    }
+
+    #[test]
+    fn file_age_is_none_for_a_missing_file_and_an_error_for_an_unreadable_path() {
+        let dir = TempDir::new().expect("test");
+        assert!(file_age(&dir.path().join("absent.json")).unwrap().is_none());
+        let file = dir.path().join("file");
+        std::fs::write(&file, "x").expect("test");
+        // A path under a regular file fails with ENOTDIR, not NotFound.
+        assert!(file_age(&file.join("child.lock")).is_err());
+        assert!(file_age(&file).unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_whose_age_cannot_be_read_is_kept() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = TempDir::new().expect("test");
+        let locks = dir.path().join("locks");
+        std::fs::create_dir(&locks).expect("test");
+        let lock = locks.join("old.lock");
+        std::fs::write(&lock, "").expect("test");
+        let old = SystemTime::now() - Duration::from_secs(10 * 86_400);
+        filetime::set_file_mtime(&lock, filetime::FileTime::from_system_time(old)).expect("test");
+        // Read without search permission: the folder lists, but a stat of its entries fails.
+        std::fs::set_permissions(&locks, std::fs::Permissions::from_mode(0o444)).expect("test");
+
+        let logs = crate::test_log_capture::capture_logs(|| prune_orphan_locks(&locks, 7));
+
+        std::fs::set_permissions(&locks, std::fs::Permissions::from_mode(0o755)).expect("test");
+        assert!(lock.exists(), "a lock whose age cannot be read must stay");
+        assert!(
+            logs.contains("old.lock") && logs.contains("stays on disk"),
+            "the cause must be logged: {logs}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_prune_is_an_agent_notice() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = TempDir::new().expect("test");
+        let stale = dir.path().join("stale.json");
+        std::fs::write(&stale, "{}").expect("test");
+        let old = SystemTime::now() - Duration::from_secs(10 * 86_400);
+        filetime::set_file_mtime(&stale, filetime::FileTime::from_system_time(old)).expect("test");
+        // A read-only folder refuses the unlink.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).expect("test");
+
+        prune_stale_json_files(dir.path(), 7);
+
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).expect("test");
+        assert!(stale.exists());
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(
+            notices.contains(&stale.display().to_string()) && notices.contains("Fix:"),
+            "{notices}"
+        );
+    }
+
+    #[test]
+    fn a_file_at_the_limit_is_kept() {
+        let day = Duration::from_secs(86_400);
+        assert!(!is_stale(day, day));
+        assert!(is_stale(day + Duration::from_secs(1), day));
+        assert!(!is_stale(Duration::ZERO, day));
     }
 
     #[test]

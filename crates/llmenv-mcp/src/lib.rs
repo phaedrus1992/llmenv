@@ -2,6 +2,7 @@ pub mod cbm_roots;
 pub mod cleartext;
 pub mod mcp_client;
 pub mod probe;
+pub mod process;
 pub mod proxy;
 pub mod proxy_ops;
 pub mod resolve;

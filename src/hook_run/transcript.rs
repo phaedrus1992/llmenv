@@ -54,10 +54,18 @@ const TAIL_LINES: usize = 200;
 const TAIL_BYTES: u64 = 1024 * 1024;
 
 /// The last [`TAIL_BYTES`] of a regular file, starting at a line boundary.
-/// `None` for anything that is not a readable regular file.
+/// `None` for anything that is not a readable regular file. A file that exists but cannot be
+/// opened is logged, because the checks that read the tail then pass with no word.
 fn read_tail(path: &Path) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(path).ok()?;
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            tracing::error!("transcript {} cannot be opened: {e}", path.display());
+            return None;
+        }
+    };
     let meta = file.metadata().ok()?;
     if !meta.is_file() {
         return None;
@@ -177,6 +185,22 @@ mod tests {
             .concat();
         std::fs::write(file.path(), body).unwrap();
         file
+    }
+
+    #[test]
+    fn read_tail_logs_an_unopenable_file_but_not_a_missing_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("t.jsonl");
+        std::fs::write(&file, "x").unwrap();
+        let missing = crate::test_log_capture::capture_logs(|| {
+            assert!(super::read_tail(&dir.path().join("absent.jsonl")).is_none());
+        });
+        assert!(missing.is_empty(), "{missing}");
+        // A path under a regular file fails to open with ENOTDIR, not NotFound.
+        let unopenable = crate::test_log_capture::capture_logs(|| {
+            assert!(super::read_tail(&file.join("child.jsonl")).is_none());
+        });
+        assert!(unopenable.contains("cannot be opened"), "{unopenable}");
     }
 
     #[test]

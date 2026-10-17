@@ -917,18 +917,34 @@ fn move_file_at(
 }
 
 /// Whether `name` in `src_dir` is newer than the same name in `dst_dir`.
-/// A destination that can't be read counts as older, so the source wins.
+/// A destination that can't be read counts as older, so the source wins. A source that can't
+/// be read is not migrated. Each read error is logged, so the skip is visible.
 fn is_newer_at(
     src_dir: std::os::fd::BorrowedFd<'_>,
     dst_dir: std::os::fd::BorrowedFd<'_>,
     name: &std::ffi::OsStr,
 ) -> bool {
-    let Some(src) = crate::paths::dirfd::mtime_at(src_dir, name) else {
-        return false;
+    let src = match crate::paths::dirfd::mtime_at(src_dir, name) {
+        Ok(Some(src)) => src,
+        Ok(None) => return false,
+        Err(e) => {
+            tracing::error!(
+                "inherit: cannot read the age of {}, so it is not migrated: {e}",
+                name.display()
+            );
+            return false;
+        }
     };
     match crate::paths::dirfd::mtime_at(dst_dir, name) {
-        Some(dst) => src > dst,
-        None => true,
+        Ok(Some(dst)) => src > dst,
+        Ok(None) => true,
+        Err(e) => {
+            tracing::error!(
+                "inherit: cannot read the age of the copy of {}, so the source wins: {e}",
+                name.display()
+            );
+            true
+        }
     }
 }
 
@@ -959,22 +975,26 @@ fn child_dirs(dir: &Path) -> Vec<PathBuf> {
         Ok(Some(rd)) => rd,
         Ok(None) => return Vec::new(),
         Err(e) => {
-            tracing::warn!(
+            tracing::error!(
                 "inherit: cannot scan {} for transcripts: {e:#}",
                 dir.display()
             );
             return Vec::new();
         }
     };
+    // Each skipped entry is logged at error level, because its transcripts are not migrated.
     read_dir
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            let name = entry.file_name();
-            let name = name.to_str()?;
-            if name.ends_with(".tmp") {
-                return None;
+        .filter_map(|entry| crate::paths::readable_entry(dir, "transcript migration", entry))
+        .filter(|entry| !entry.file_name().as_encoded_bytes().ends_with(b".tmp"))
+        .filter_map(|entry| match entry.file_type() {
+            Ok(ft) => ft.is_dir().then(|| entry.path()),
+            Err(e) => {
+                tracing::error!(
+                    "inherit: cannot read the type of {}, so its transcripts are not migrated: {e}",
+                    entry.path().display()
+                );
+                None
             }
-            entry.file_type().ok()?.is_dir().then(|| entry.path())
         })
         .collect()
 }

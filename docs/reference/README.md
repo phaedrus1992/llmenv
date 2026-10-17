@@ -24,3 +24,6 @@ future design docs and err on the side of too much detail.
   engine and the opencode engine under opencode v2.0.31: the plugin API rewrite,
   config schema changes, hook-run tool-name mismatches, and the work to reach
   parity.
+- [crush-gap-report.md](./crush-gap-report.md) — gaps between the Claude Code
+  engine and the Crush engine under Crush v0.98.1, compared with v0.81.0 (when
+  the Crush adapter landed), and the improvements filed for v3.14.0.

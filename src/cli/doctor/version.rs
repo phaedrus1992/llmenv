@@ -28,9 +28,18 @@ pub(super) fn parse_semver_triple(text: &str) -> Option<(u64, u64, u64)> {
 }
 
 /// The warning text for a codebase-memory-mcp older than [`CBM_MIN_VERSION`],
-/// or `None` when the version is at the floor, above it, or unparseable.
+/// or for a version that cannot be parsed. `None` when the version is at the floor
+/// or above it.
+///
+/// An unparseable version warns too. Silence there would pass the floor check
+/// for a binary that may be too old.
 pub(super) fn cbm_floor_warning(version: &str) -> Option<String> {
-    let parsed = parse_semver_triple(version)?;
+    let Some(parsed) = parse_semver_triple(version) else {
+        return Some(format!(
+            "codebase-memory-mcp version {version} could not be checked against the 0.12.0 floor. \
+             Run `codebase-memory-mcp --version` to confirm the version is 0.12.0 or newer."
+        ));
+    };
     (parsed < CBM_MIN_VERSION).then(|| {
         format!(
             "codebase-memory-mcp {version} is older than 0.12.0. Older releases can corrupt a \

@@ -174,7 +174,12 @@ fn load_all_auth_entries(adapter_root: &Path) -> anyhow::Result<Vec<AuthEntry>> 
     let mut entries: Vec<AuthEntry> = read_dir
         .filter_map(|res| {
             let entry = res
-                .inspect_err(|e| tracing::warn!("failed to read auth dir entry: {e}"))
+                .inspect_err(|e| {
+                    tracing::error!(
+                        "an entry in {} cannot be read, so it is left out of the auth list: {e}",
+                        dir.display()
+                    );
+                })
                 .ok()?;
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {

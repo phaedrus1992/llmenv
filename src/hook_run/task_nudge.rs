@@ -181,9 +181,12 @@ pub(crate) fn handle_post_tool_use(
     // Held from the load to the save, so a concurrent hook cannot overwrite a deny marker (#2678).
     // No lock without a directory: taking it would create the directory for a session that never
     // wrote state, and there is no state yet to race on.
-    let _lock = session_id
-        .zip(path.parent().filter(|dir| dir.is_dir()))
+    let dir_and_id = session_id.zip(path.parent().filter(|dir| dir.is_dir()));
+    let lock = dir_and_id
         .and_then(|(id, dir)| super::session_state::lock_state_file(dir, id, "task nudge"));
+    // A save without the lock could overwrite the commit gate's deny marker, so it is skipped
+    // and the agent is told (#2747).
+    let may_save = dir_and_id.is_none() || lock.is_some();
     let Some(mut state) = load(&path) else {
         return String::new();
     };
@@ -197,9 +200,23 @@ pub(crate) fn handle_post_tool_use(
     };
     settle(&tracking, &mut state);
     if state != before {
-        save(&path, &state);
+        if may_save {
+            save(&path, &state);
+        } else {
+            note_unlocked_skip(&path);
+        }
     }
     text
+}
+
+/// Logs and notices a nudge state change that was not saved, because the lock was busy or
+/// could not be taken.
+fn note_unlocked_skip(path: &Path) {
+    crate::agent_notice::record_logged(format!(
+        "llmenv: the task nudge state {} was not saved, because its lock is busy or cannot be \
+         taken. A nudge may repeat. Fix: run `llmenv doctor` to check the state directory.",
+        path.display()
+    ));
 }
 
 /// Reset the counters while tasks are tracked.
@@ -409,9 +426,17 @@ pub(crate) fn handle_pre_tool_use(
         ));
     };
     // Same lock as the post-tool handler, so the two read-change-save cycles cannot interleave (#2678).
-    let _lock = path
+    // Without the lock, this check and a post-tool save could overwrite each other's marker,
+    // so the commit is denied until the lock can be taken (#2747).
+    let Some(_lock) = path
         .parent()
-        .and_then(|dir| super::session_state::lock_state_file(dir, id, "task nudge"));
+        .and_then(|dir| super::session_state::lock_state_file(dir, id, "task nudge"))
+    else {
+        return gate_unavailable_deny(&format!(
+            "the lock for the task nudge state {} is busy or cannot be taken",
+            path.display()
+        ));
+    };
     let tracking = crate::task::tracking(state_dir);
     let mut state = match read_state(&path) {
         Ok(state) => state,
@@ -797,6 +822,43 @@ mod tests {
         assert!(denied.contains("enforce_commit"), "{denied}");
         assert_eq!(pre("git commit -m x"), "", "the retry is allowed");
         assert_eq!(pre("git status"), "", "other commands never deny");
+    }
+
+    #[test]
+    fn a_busy_lock_denies_the_commit_and_skips_the_nudge_save() {
+        let dir = TempDir::new().unwrap();
+        let tracker = TaskTracker {
+            nudge_after: Some(1),
+            ..TaskTracker::default()
+        };
+        let path = state_path(dir.path(), "busy-2747").unwrap();
+        let state_dir = path.parent().unwrap();
+        let held =
+            super::super::session_state::lock_state_file(state_dir, "busy-2747", "test").unwrap();
+
+        let denied = handle_pre_tool_use(
+            &tracker,
+            &bash("git commit -m x"),
+            Some("busy-2747"),
+            dir.path(),
+        );
+        // The message names no session id: the deny text holds the state path.
+        assert!(
+            denied.starts_with("__DENY__:") && denied.contains("busy"),
+            "a busy lock must deny the commit"
+        );
+        let edit = serde_json::json!({ "tool_name": "Edit" });
+        handle_post_tool_use(&tracker, &edit, Some("busy-2747"), dir.path());
+        assert!(!path.exists(), "no save without the lock");
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(
+            notices.contains(&path.display().to_string()),
+            "the skipped save must be noticed"
+        );
+
+        drop(held);
+        handle_post_tool_use(&tracker, &edit, Some("busy-2747"), dir.path());
+        assert!(path.exists(), "the save goes through once the lock is free");
     }
 
     #[test]

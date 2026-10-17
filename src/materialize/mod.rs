@@ -1,5 +1,6 @@
 pub(crate) mod build_manifest;
 pub mod cache;
+pub(crate) mod cbm_sweep;
 pub(crate) mod inherit;
 pub mod manifest;
 pub(crate) mod merge_cache;

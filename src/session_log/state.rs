@@ -12,6 +12,9 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 use llmenv_paths::{state_dir, write_owner_only_atomic};
 
+mod link;
+pub(crate) use link::{Link, claim_pending_at, clear_pending_at, link_at};
+
 /// Cap on the correlation map's entry count (#509 item 2). Nothing ever
 /// removes an entry, so a long-lived install accumulates them forever
 /// without a bound. This caps *concurrently open* sessions, not lifetime
@@ -96,6 +99,14 @@ fn load_for_write(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
                 aside = %aside.display(),
                 "corrupt transcript-sessions.json moved aside, starting a new map"
             );
+            // The new map has no links, so every open session starts a new transcript (#2834).
+            crate::agent_notice::record(format!(
+                "llmenv: the session map {} was corrupt ({e}), so it was moved aside to {} and a \
+                 new map was started. Open sessions lose their ICM transcript link. Fix: look in \
+                 the aside copy for the lost links, then remove it.",
+                path.display(),
+                aside.display()
+            ));
             Ok(BTreeMap::default())
         }
     }
@@ -127,31 +138,16 @@ fn lock_map(path: &Path) -> anyhow::Result<std::fs::File> {
     )
 }
 
-/// Prove that the map at `path` can be written, without changing its entries.
-///
-/// Call this before ICM starts a transcript. A transcript that cannot be linked is an orphan,
-/// and an unwritable map fails every later event the same way (#2667). The check holds only
-/// for this moment: a lock that stays busy at record time can still orphan one transcript,
-/// and the caller logs that case.
-///
-/// # Errors
-/// The lock cannot be taken, or the map cannot be read or written.
-pub(crate) fn check_writable_at(path: &Path) -> anyhow::Result<()> {
-    let _lock = lock_map(path)?;
-    let map = load_for_write(path)?;
-    write_owner_only_atomic(path, serde_json::to_string(&map)?.as_bytes())?;
-    Ok(())
-}
-
-fn record_at(path: &Path, claude_session_id: &str, icm_session_id: &str) -> anyhow::Result<()> {
-    let _lock = lock_map(path)?;
-    let mut map = load_for_write(path)?;
+/// Insert `key -> value` and keep the map within [`MAX_CORRELATION_ENTRIES`]. Expired pending
+/// markers go first, because no record replaces a marker whose link failed (#2834).
+fn insert_capped(map: &mut BTreeMap<String, String>, key: &str, value: &str, now: i64) {
+    map.retain(|k, v| k == key || !link::is_expired_marker(v, now));
     // Evict before the insert. Evicting after it could drop the new key itself, when that key
     // sorts first, and the lookup for this session would then miss.
-    if !map.contains_key(claude_session_id) && map.len() >= MAX_CORRELATION_ENTRIES {
+    if !map.contains_key(key) && map.len() >= MAX_CORRELATION_ENTRIES {
         map.pop_first();
     }
-    map.insert(claude_session_id.to_string(), icm_session_id.to_string());
+    map.insert(key.to_string(), value.to_string());
     // ponytail: eviction order is BTreeMap key order (the random session-id
     // string), not recency — this format carries no timestamp to sort by.
     // Correlation entries are looked up by exact claude_session_id, and an
@@ -161,24 +157,33 @@ fn record_at(path: &Path, claude_session_id: &str, icm_session_id: &str) -> anyh
     while map.len() > MAX_CORRELATION_ENTRIES {
         map.pop_first();
     }
+}
+
+fn record_at(path: &Path, claude_session_id: &str, icm_session_id: &str) -> anyhow::Result<()> {
+    let _lock = lock_map(path)?;
+    let mut map = load_for_write(path)?;
+    let now = crate::hook_run::session_state::unix_now();
+    insert_capped(&mut map, claude_session_id, icm_session_id, now);
     let body = serde_json::to_string(&map)?;
     write_owner_only_atomic(path, body.as_bytes())?;
     Ok(())
 }
 
-/// The ICM session id for a Claude session, if recorded in the map at `path`.
-/// Crate-internal: lets callers that already resolved `state_path()` (e.g. one
-/// hook invocation handling several events) avoid re-resolving it, and lets
-/// tests exercise this without touching the global state-dir env var.
+/// The ICM session id for a Claude session, if recorded in the map at `path`. A pending
+/// marker is not an id, so it reads as `None`. Tests only; the hook reads [`link_at`].
 ///
 /// # Errors
-/// The map file exists but cannot be read. A caller MUST NOT start a new
-/// transcript then, because it could not record the link (#2658).
+/// The map file exists but cannot be read.
+#[cfg(test)]
 pub(crate) fn lookup_session_at(
     path: &Path,
     claude_session_id: &str,
 ) -> anyhow::Result<Option<String>> {
-    Ok(load_at(path)?.get(claude_session_id).cloned())
+    let now = crate::hook_run::session_state::unix_now();
+    Ok(match link_at(path, claude_session_id, now)? {
+        Link::Linked(id) => Some(id),
+        Link::Missing | Link::Pending { .. } => None,
+    })
 }
 
 /// Record the correlation into the map at `path` (read-modify-write, atomic,
@@ -306,6 +311,9 @@ mod tests {
             lookup_session_at(&path, "claude-new").unwrap().as_deref(),
             Some("icm-new")
         );
+        // The agent must hear that open sessions lost their links (#2834).
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(notices.contains(&aside.display().to_string()), "{notices}");
     }
 
     #[test]
@@ -343,18 +351,6 @@ mod tests {
     }
 
     #[test]
-    fn check_writable_keeps_every_stored_pair() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("transcript-sessions.json");
-        record_at(&path, "claude-1", "icm-a").unwrap();
-        check_writable_at(&path).unwrap();
-        assert_eq!(
-            lookup_session_at(&path, "claude-1").unwrap().as_deref(),
-            Some("icm-a")
-        );
-    }
-
-    #[test]
     fn a_bare_file_name_is_refused_before_anything_is_created() {
         // A bare name has no parent. The lock must not fall back to the working directory.
         let err =
@@ -365,24 +361,6 @@ mod tests {
         );
         assert!(!Path::new("transcript-sessions.json").exists());
         assert!(!Path::new("transcript-sessions.lock").exists());
-    }
-
-    #[test]
-    fn check_writable_creates_no_map_when_none_exists() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("transcript-sessions.json");
-        check_writable_at(&path).unwrap();
-        assert!(load_at(&path).unwrap().is_empty());
-    }
-
-    #[test]
-    fn check_writable_fails_when_the_lock_file_cannot_be_opened() {
-        // A directory where the lock file belongs stops the lock step. The map is not written.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("transcript-sessions.json");
-        std::fs::create_dir(dir.path().join("transcript-sessions.lock")).unwrap();
-        assert!(check_writable_at(&path).is_err());
-        assert!(!path.exists(), "no map may be written without the lock");
     }
 
     use proptest::prelude::*;
@@ -399,20 +377,6 @@ mod tests {
                 expected.insert(claude.clone(), icm.clone());
             }
             prop_assert_eq!(load_at(&path).unwrap(), expected);
-        }
-
-        #[test]
-        fn check_writable_never_changes_the_stored_pairs(
-            pairs in prop::collection::vec(("\\PC{1,16}", "\\PC{0,16}"), 0..8),
-        ) {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("transcript-sessions.json");
-            for (claude, icm) in &pairs {
-                record_at(&path, claude, icm).unwrap();
-            }
-            let before = load_at(&path).unwrap();
-            check_writable_at(&path).unwrap();
-            prop_assert_eq!(load_at(&path).unwrap(), before);
         }
 
         #[test]

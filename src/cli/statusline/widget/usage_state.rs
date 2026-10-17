@@ -28,7 +28,7 @@ fn read_usage_state(path: &Path) -> Option<(f64, i64)> {
         // A missing file is the first sample. Any other read error is logged, not hidden.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(e) => {
-            tracing::warn!("usage state {} cannot be read: {e}", path.display());
+            tracing::error!("usage state {} cannot be read: {e}", path.display());
             return None;
         }
     };
@@ -42,13 +42,16 @@ pub(super) fn write_usage_state(path: &Path, pct: f64, now: i64) {
     if let Some(parent) = path.parent()
         && let Err(e) = crate::paths::create_dir_owner_only(parent)
     {
-        tracing::debug!("usage delta state dir unavailable (non-fatal): {e}");
+        tracing::error!(
+            "usage delta state dir {} unavailable: {e}",
+            parent.display()
+        );
         return;
     }
     // Best-effort: a failed write only means the next render's `{delta}`
     // placeholder is empty, not a broken widget — but still worth a trace.
     if let Err(e) = crate::paths::write_owner_only(path, format!("{pct} {now}").as_bytes()) {
-        tracing::debug!("usage delta state write failed (non-fatal): {e}");
+        tracing::error!("usage delta state write to {} failed: {e}", path.display());
     }
 }
 

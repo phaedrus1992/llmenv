@@ -17,9 +17,6 @@ const HINT_MARKER: &str = "stale-tmp-hint.day";
 /// The fix for a problem with the state directory, named in every notice about it.
 const STATE_FIX: &str = "run `llmenv doctor` to check the state directory";
 
-/// The retention that the cache sweep uses when the config leaves it unset (#2814).
-const DEFAULT_RETENTION_HOURS: u64 = 168;
-
 const KIB: u64 = 1 << 10;
 const MIB: u64 = 1 << 20;
 const GIB: u64 = 1 << 30;
@@ -38,13 +35,14 @@ pub(super) fn session_start_notices(
         (Some(h), Some(r)) => Some(format!("{h}{r}")),
         (h, r) => h.or(r),
     };
-    let retention = config
-        .cache
-        .cache_retention_hours
-        .unwrap_or(DEFAULT_RETENTION_HOURS);
-    let hint = match crate::paths::state_dir() {
-        Ok(state_dir) => stale_tmp_hint(&state_dir, retention, SystemTime::now()),
-        Err(e) => Some(problem_notice(
+    let hint = match (
+        config.cache.cache_retention_hours,
+        crate::paths::state_dir(),
+    ) {
+        // `null` turns age-based GC off, so no entry is stale (#2829).
+        (None, _) => None,
+        (Some(hours), Ok(state_dir)) => stale_tmp_hint(&state_dir, hours, SystemTime::now()),
+        (Some(_), Err(e)) => Some(problem_notice(
             &format!("the stale state/tmp check did not run: {e:#}"),
             "run `llmenv doctor` to check the state directory",
         )),

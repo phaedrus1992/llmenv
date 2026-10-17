@@ -6,25 +6,28 @@ use std::path::{Path, PathBuf};
 
 /// Read ~/.claude/settings.json if it exists.
 fn read_claude_settings(home: &Path) -> Option<serde_json::Value> {
-    let path = home.join(".claude").join("settings.json");
-    if !path.is_file() {
-        return None;
-    }
-    let bytes = std::fs::read(&path)
-        .inspect_err(|e| eprintln!("llmenv: failed to read {}: {e:#}", path.display()))
-        .ok()?;
-    serde_json::from_slice(&bytes)
-        .inspect_err(|e| eprintln!("llmenv: failed to parse {}: {e:#}", path.display()))
-        .ok()
+    read_json_if_present(&home.join(".claude").join("settings.json"))
 }
 
 /// Read ~/.claude/plugins.json if it exists.
 fn read_claude_plugins(home: &Path) -> Option<serde_json::Value> {
-    let path = home.join(".claude").join("plugins.json");
-    if !path.is_file() {
-        return None;
+    read_json_if_present(&home.join(".claude").join("plugins.json"))
+}
+
+/// The JSON in the regular file at `path`, or `None`. A missing file is quiet. A file that
+/// cannot be checked, read, or parsed is reported, because `is_file` reads a permission error
+/// as "absent".
+fn read_json_if_present(path: &Path) -> Option<serde_json::Value> {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() => {}
+        Ok(_) => return None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            eprintln!("llmenv: cannot check {}: {e:#}", path.display());
+            return None;
+        }
     }
-    let bytes = std::fs::read(&path)
+    let bytes = std::fs::read(path)
         .inspect_err(|e| eprintln!("llmenv: failed to read {}: {e:#}", path.display()))
         .ok()?;
     serde_json::from_slice(&bytes)
@@ -789,6 +792,24 @@ mod tests {
     use super::*;
     use std::fs;
 
+    #[test]
+    fn read_json_if_present_reads_a_file_and_skips_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        assert_eq!(read_json_if_present(&file), None, "missing");
+        fs::write(&file, r#"{"a":1}"#).unwrap();
+        assert_eq!(
+            read_json_if_present(&file),
+            Some(serde_json::json!({"a": 1}))
+        );
+        // A path under a regular file fails the check with ENOTDIR, which is reported.
+        assert_eq!(read_json_if_present(&file.join("child.json")), None);
+        assert_eq!(
+            read_json_if_present(dir.path()),
+            None,
+            "a folder is not a file"
+        );
+    }
     #[test]
     fn user_uses_the_variable_when_set() {
         assert_eq!(

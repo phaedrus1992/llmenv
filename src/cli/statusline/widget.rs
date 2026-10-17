@@ -156,8 +156,10 @@ pub fn render_engine_widget(
         let pr = match resolve_pr(data) {
             Ok(pr) => pr,
             Err(e) => {
-                tracing::error!("statusline pr cannot read the branch: {e}");
-                let raw = "pr: unreadable".to_string();
+                if let PrError::Branch(cause) = &e {
+                    tracing::error!("statusline pr cannot read the branch: {cause}");
+                }
+                let raw = e.label().to_string();
                 return Some(super::finish(name, raw, cfg, None, use_color));
             }
         };
@@ -576,16 +578,61 @@ impl<'a> GhPrCmd<'a> {
 /// `gh` not installed, not authenticated, no remote, or no open PR for the
 /// branch. All of these degrade silently, matching [`render_branch`]'s
 /// fallback.
-fn resolve_pr(data: &EngineData) -> Result<Option<PrInfo>, String> {
+fn resolve_pr(data: &EngineData) -> Result<Option<PrInfo>, PrError> {
     resolve_pr_with(data, GhPrCmd::new("gh"))
 }
+
+/// Why the PR widget has no answer. Each case has its own label, so a failure does not look
+/// like "no open PR" (#2749, #2821).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum PrError {
+    /// The branch cannot be read.
+    Branch(String),
+    /// `gh` gave no answer.
+    Gh(GhFailure),
+}
+
+impl PrError {
+    /// The text the widget shows for this error.
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Branch(_) => "pr: unreadable",
+            Self::Gh(failure) => failure.label(),
+        }
+    }
+}
+
+/// A `gh pr view` call that gave no answer. A non-zero exit for "no open PR" or "no remote" is
+/// an answer, not a failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) enum GhFailure {
+    /// `gh` is not installed.
+    Missing,
+    /// `gh` is not logged in, or its login expired.
+    Unauthenticated,
+    /// A timeout, a failed read or wait, or a spawn error other than a missing binary.
+    Failed,
+}
+
+impl GhFailure {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Missing => "pr: gh missing",
+            Self::Unauthenticated => "pr: gh not logged in",
+            Self::Failed => "pr: gh failed",
+        }
+    }
+}
+
+/// The result of one PR lookup: the PR, `None` for no open PR, or why `gh` gave no answer.
+type PrLookup = Result<Option<PrInfo>, GhFailure>;
 
 /// [`resolve_pr`]'s backend, with the `gh` invocation injectable so tests can
 /// exercise the full engine-precedence + branch-resolution + derivation chain
 /// against a fake `gh` instead of the real one.
 ///
 /// A branch read error is returned, not hidden, so the widget can show it (#2749).
-fn resolve_pr_with(data: &EngineData, gh: GhPrCmd<'_>) -> Result<Option<PrInfo>, String> {
+fn resolve_pr_with(data: &EngineData, gh: GhPrCmd<'_>) -> Result<Option<PrInfo>, PrError> {
     if let Some(pr) = &data.pr {
         return Ok(Some(pr.clone()));
     }
@@ -596,29 +643,33 @@ fn resolve_pr_with(data: &EngineData, gh: GhPrCmd<'_>) -> Result<Option<PrInfo>,
     else {
         return Ok(None);
     };
-    let Some(branch) = resolve_branch_name(data)? else {
+    let Some(branch) = resolve_branch_name(data).map_err(PrError::Branch)? else {
         return Ok(None);
     };
-    Ok(derive_pr(
+    derive_pr(
         gh,
         Path::new(dir),
         &branch,
         usage_state_dir().as_deref(),
         now_unix(),
-    ))
+    )
+    .map_err(PrError::Gh)
 }
 
 /// Cache-then-derive backend for [`resolve_pr`]'s fallback path, fully
 /// parameterized (`gh`, `cache_dir`, `now`) so tests can substitute a fake
 /// `gh` and a controlled clock without touching the real network or process
 /// environment.
+///
+/// A `gh` failure is cached too, with its cause. Without the cache a timeout would stall every
+/// render, and the cause keeps the failure apart from "no open PR" (#2821).
 fn derive_pr(
     gh: GhPrCmd<'_>,
     repo_dir: &Path,
     branch: &str,
     cache_dir: Option<&Path>,
     now: i64,
-) -> Option<PrInfo> {
+) -> PrLookup {
     let cache_path = cache_dir.map(|dir| pr_cache_path(dir, repo_dir, branch));
     if let Some(path) = &cache_path
         && let Some(cached) = read_pr_cache(path, now)
@@ -646,54 +697,80 @@ fn pr_cache_path(cache_dir: &Path, repo_dir: &Path, branch: &str) -> PathBuf {
 
 /// On-disk shape of a cached PR lookup: the Unix timestamp it was written and
 /// the result (`None` caches "no open PR" too, so that outcome doesn't
-/// retrigger a `gh` call on every render either).
+/// retrigger a `gh` call on every render either). `failure` names why `gh` gave
+/// no answer; an entry from an older version has none.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct PrCacheEntry {
     ts: i64,
     pr: Option<PrInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    failure: Option<GhFailure>,
 }
 
-/// Read a still-fresh cache entry. `None` for a missing/corrupt file *or* an
-/// expired one — both cases fall through to a fresh `gh` call in [`derive_pr`].
-fn read_pr_cache(path: &Path, now: i64) -> Option<Option<PrInfo>> {
-    let contents = std::fs::read_to_string(path).ok()?;
-    let entry: PrCacheEntry = match serde_json::from_str(&contents) {
-        Ok(entry) => entry,
+/// Read a still-fresh cache entry. `None` for a missing, corrupt, unreadable, or
+/// expired entry; each falls through to a fresh `gh` call in [`derive_pr`]. A read
+/// error other than a missing file is logged (#2821).
+fn read_pr_cache(path: &Path, now: i64) -> Option<PrLookup> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(e) => {
-            tracing::debug!("pr cache: unparseable entry (non-fatal, treating as miss): {e}");
+            tracing::error!(
+                "pr cache {} cannot be read, so gh runs: {e}",
+                path.display()
+            );
             return None;
         }
     };
-    (now - entry.ts < PR_CACHE_TTL_SECS).then_some(entry.pr)
+    let entry: PrCacheEntry = match serde_json::from_str(&contents) {
+        Ok(entry) => entry,
+        Err(e) => {
+            tracing::error!("pr cache {} is corrupt, so gh runs: {e}", path.display());
+            return None;
+        }
+    };
+    let lookup = match entry.failure {
+        Some(failure) => Err(failure),
+        None => Ok(entry.pr),
+    };
+    (now.saturating_sub(entry.ts) < PR_CACHE_TTL_SECS).then_some(lookup)
 }
 
 /// Best-effort cache write: a failed write only means the next render
 /// re-queries `gh`, not a broken widget.
-fn write_pr_cache(path: &Path, pr: &Option<PrInfo>, now: i64) {
+fn write_pr_cache(path: &Path, lookup: &PrLookup, now: i64) {
     if let Some(parent) = path.parent()
         && let Err(e) = crate::paths::create_dir_owner_only(parent)
     {
-        tracing::debug!("pr cache dir unavailable (non-fatal): {e}");
+        tracing::error!("pr cache dir {} unavailable: {e}", parent.display());
         return;
     }
-    let Ok(json) = serde_json::to_string(&PrCacheEntry {
+    let entry = PrCacheEntry {
         ts: now,
-        pr: pr.clone(),
-    }) else {
-        return;
+        pr: lookup.clone().unwrap_or_default(),
+        failure: lookup.as_ref().err().copied(),
+    };
+    let json = match serde_json::to_string(&entry) {
+        Ok(json) => json,
+        Err(e) => {
+            tracing::error!(
+                "pr cache entry for {} cannot be serialized: {e}",
+                path.display()
+            );
+            return;
+        }
     };
     if let Err(e) = crate::paths::write_owner_only(path, json.as_bytes()) {
-        tracing::debug!("pr cache write failed (non-fatal): {e}");
+        tracing::error!("pr cache write to {} failed: {e}", path.display());
     }
 }
 
 /// Shell out to `gh pr view --json number,url,reviewDecision -- <branch>` in
-/// `repo_dir` and parse the result. `None` on any failure — spawn error (`gh`
-/// not installed), non-zero exit (not authenticated, no remote, no open PR
-/// for the branch), a timeout (`gh.timeout`), or unparseable output. Every
-/// failure is logged at `debug` only — this must degrade silently to the
-/// statusline, never print or panic.
-fn gh_pr_view(gh: GhPrCmd<'_>, repo_dir: &Path, branch: &str) -> Option<PrInfo> {
+/// `repo_dir` and parse the result. `Ok(None)` for no open PR, no remote, or
+/// unparseable output. A missing binary, a failed login, a timeout
+/// (`gh.timeout`), and a failed read or wait are failures, so the widget can name
+/// them instead of showing "no PR" (#2821). This never prints or panics.
+fn gh_pr_view(gh: GhPrCmd<'_>, repo_dir: &Path, branch: &str) -> PrLookup {
     let mut cmd = Command::new(gh.bin);
     // `--` terminates option parsing so `branch` (derived from git state) is
     // always read as the positional argument, never as a `gh` flag — a
@@ -724,11 +801,13 @@ fn gh_pr_view(gh: GhPrCmd<'_>, repo_dir: &Path, branch: &str) -> Option<PrInfo> 
             std::thread::sleep(Duration::from_millis(20));
             match cmd.spawn() {
                 Ok(child) => child,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    tracing::debug!("gh pr view: gh is not installed: {e}");
+                    return Err(GhFailure::Missing);
+                }
                 Err(e) => {
-                    tracing::debug!(
-                        "gh pr view: spawn failed twice (non-fatal): {first_err}, then {e}"
-                    );
-                    return None;
+                    tracing::error!("gh pr view: spawn failed twice: {first_err}, then {e}");
+                    return Err(GhFailure::Failed);
                 }
             }
         }
@@ -742,31 +821,28 @@ fn gh_pr_view(gh: GhPrCmd<'_>, repo_dir: &Path, branch: &str) -> Option<PrInfo> 
                 if let Some(mut out) = child.stdout.take()
                     && let Err(e) = out.read_to_end(&mut stdout)
                 {
-                    tracing::debug!("gh pr view: reading stdout failed (non-fatal): {e}");
-                    return None;
+                    tracing::error!("gh pr view: reading stdout failed: {e}");
+                    return Err(GhFailure::Failed);
                 }
                 let mut stderr = Vec::new();
                 if let Some(mut err) = child.stderr.take()
                     && let Err(e) = err.read_to_end(&mut stderr)
                 {
-                    tracing::debug!("gh pr view: reading stderr failed (non-fatal): {e}");
-                    return None;
+                    tracing::error!("gh pr view: reading stderr failed: {e}");
+                    return Err(GhFailure::Failed);
                 }
                 if !status.success() {
-                    let first_line = String::from_utf8_lossy(&stderr);
-                    let first_line = first_line.lines().next().unwrap_or("");
-                    tracing::debug!("gh pr view exited {status} (non-fatal): {first_line}");
-                    return None;
+                    return classify_gh_exit(status, &String::from_utf8_lossy(&stderr));
                 }
-                return parse_gh_pr_view(&stdout);
+                return Ok(parse_gh_pr_view(&stdout));
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
                     let secs = gh.timeout.as_secs_f32();
-                    tracing::debug!("gh pr view timed out after {secs}s (non-fatal)");
-                    return None;
+                    tracing::error!("gh pr view timed out after {secs}s");
+                    return Err(GhFailure::Failed);
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
@@ -775,11 +851,39 @@ fn gh_pr_view(gh: GhPrCmd<'_>, repo_dir: &Path, branch: &str) -> Option<PrInfo> 
                 // unknown, so don't abandon it still running.
                 let _ = child.kill();
                 let _ = child.wait();
-                tracing::debug!("gh pr view: wait failed (non-fatal): {e}");
-                return None;
+                tracing::error!("gh pr view: wait failed: {e}");
+                return Err(GhFailure::Failed);
             }
         }
     }
+}
+
+/// The `gh pr view` errors that mean "there is no PR to show", not a failure.
+const GH_NO_PR_SIGNS: [&str; 3] = [
+    "no pull requests found",
+    "no git remotes found",
+    "not a git repository",
+];
+
+/// The `gh` errors that mean the login is missing or expired.
+const GH_LOGIN_SIGNS: [&str; 3] = ["gh auth login", "HTTP 401", "authentication required"];
+
+/// The lookup for a `gh pr view` that exited non-zero. Only a known "no PR" answer is
+/// `Ok(None)`. The "no PR" check runs first, because that message quotes the branch name, and a
+/// branch name can hold a login word. Any other exit, such as a network or rate-limit error, is
+/// a failure, so it cannot look like "no open PR" (#2821).
+fn classify_gh_exit(status: std::process::ExitStatus, stderr: &str) -> PrLookup {
+    let first_line = stderr.lines().next().unwrap_or("");
+    if GH_NO_PR_SIGNS.iter().any(|sign| stderr.contains(sign)) {
+        tracing::debug!("gh pr view exited {status}, read as no PR: {first_line}");
+        return Ok(None);
+    }
+    if GH_LOGIN_SIGNS.iter().any(|sign| stderr.contains(sign)) {
+        tracing::error!("gh pr view: gh is not logged in ({status}): {first_line}");
+        return Err(GhFailure::Unauthenticated);
+    }
+    tracing::error!("gh pr view failed ({status}): {first_line}");
+    Err(GhFailure::Failed)
 }
 
 /// Parse `gh pr view --json number,url,reviewDecision`'s stdout into a
@@ -1742,7 +1846,7 @@ mod tests {
     /// fake to completion inside the production budget, turning every such
     /// test into a load-sensitive coin flip. The timeout's own behavior is
     /// covered separately by
-    /// `gh_pr_view_returns_none_when_gh_outlives_its_timeout`.
+    /// `gh_pr_view_fails_when_gh_outlives_its_timeout`.
     #[cfg(unix)]
     fn fake_gh(bin: &str) -> GhPrCmd<'_> {
         GhPrCmd {
@@ -1763,7 +1867,9 @@ mod tests {
             bin_dir.path(),
             "#!/bin/sh\necho '{\"number\":834,\"url\":\"https://github.com/o/r/pull/834\",\"reviewDecision\":\"CHANGES_REQUESTED\"}'\n",
         );
-        let pr = gh_pr_view(fake_gh(&gh.to_string_lossy()), repo_dir.path(), "feat/x").unwrap();
+        let pr = gh_pr_view(fake_gh(&gh.to_string_lossy()), repo_dir.path(), "feat/x")
+            .unwrap()
+            .unwrap();
         assert_eq!(pr.number, Some(834));
         assert_eq!(render_pr_info(&pr, None, false), "#834");
         assert_eq!(pr.review_state.as_deref(), Some("changes_requested"));
@@ -1799,8 +1905,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn gh_pr_view_none_when_binary_missing() {
-        // Simulates "gh isn't installed": spawn itself fails.
+    fn gh_pr_view_reports_a_missing_binary() {
+        // Simulates "gh isn't installed": spawn itself fails (#2821).
         let repo_dir = tempfile::tempdir().unwrap();
         let missing = repo_dir.path().join("no-such-gh-binary");
         assert_eq!(
@@ -1809,16 +1915,29 @@ mod tests {
                 repo_dir.path(),
                 "feat/x"
             ),
-            None
+            Err(GhFailure::Missing)
         );
     }
 
     #[cfg(unix)]
     #[test]
-    fn gh_pr_view_none_when_gh_exits_nonzero() {
-        // Covers "not authenticated" / "no remote" / "no open PR" — from
-        // gh_pr_view's perspective these are indistinguishable: a non-zero
-        // exit degrades silently to no PR either way.
+    fn gh_pr_view_reports_a_failed_login() {
+        let bin_dir = tempfile::tempdir().unwrap();
+        let repo_dir = tempfile::tempdir().unwrap();
+        let gh = write_fake_gh(
+            bin_dir.path(),
+            "#!/bin/sh\necho 'To get started with GitHub CLI, please run:  gh auth login' >&2\nexit 4\n",
+        );
+        assert_eq!(
+            gh_pr_view(fake_gh(&gh.to_string_lossy()), repo_dir.path(), "feat/x"),
+            Err(GhFailure::Unauthenticated)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gh_pr_view_no_pr_when_gh_exits_nonzero_for_no_pr() {
+        // "no remote" and "no open PR" are answers, so they read as no PR.
         let bin_dir = tempfile::tempdir().unwrap();
         let repo_dir = tempfile::tempdir().unwrap();
         let gh = write_fake_gh(
@@ -1827,13 +1946,13 @@ mod tests {
         );
         assert_eq!(
             gh_pr_view(fake_gh(&gh.to_string_lossy()), repo_dir.path(), "feat/x"),
-            None
+            Ok(None)
         );
     }
 
     #[cfg(unix)]
     #[test]
-    fn gh_pr_view_returns_none_when_gh_outlives_its_timeout() {
+    fn gh_pr_view_fails_when_gh_outlives_its_timeout() {
         // The timeout's own contract (#1073): a `gh` that would eventually
         // print a perfectly good PR still yields None if it doesn't finish in
         // time, and gh_pr_view gives up rather than blocking the render. This
@@ -1852,7 +1971,10 @@ mod tests {
             timeout: Duration::from_millis(50),
         };
         let started = Instant::now();
-        assert_eq!(gh_pr_view(cmd, repo_dir.path(), "feat/x"), None);
+        assert_eq!(
+            gh_pr_view(cmd, repo_dir.path(), "feat/x"),
+            Err(GhFailure::Failed)
+        );
         assert!(
             started.elapsed() < Duration::from_secs(30),
             "timeout must abandon the child, not wait it out"
@@ -1876,11 +1998,69 @@ mod tests {
             Some(cache_dir.path()),
             1_000,
         );
-        assert_eq!(pr.as_ref().and_then(|p| p.number), Some(1));
+        assert_eq!(pr.clone().ok().flatten().and_then(|p| p.number), Some(1));
         let calls = std::fs::read_to_string(repo_dir.path().join("gh-calls.log")).unwrap();
         assert_eq!(calls.lines().count(), 1, "gh should be called on a miss");
         let cache_path = pr_cache_path(cache_dir.path(), repo_dir.path(), "feat/x");
         assert!(cache_path.exists(), "cache miss must write a cache entry");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classify_gh_exit_reads_only_known_answers_as_no_pr() {
+        use std::os::unix::process::ExitStatusExt as _;
+        let status = std::process::ExitStatus::from_raw(1 << 8);
+        let no_pr = "no pull requests found for branch \"fix/authentication-retry\"";
+        assert_eq!(classify_gh_exit(status, no_pr), Ok(None));
+        assert_eq!(
+            classify_gh_exit(status, "To get started, please run:  gh auth login"),
+            Err(GhFailure::Unauthenticated)
+        );
+        assert_eq!(
+            classify_gh_exit(status, "error connecting to api.github.com"),
+            Err(GhFailure::Failed)
+        );
+        assert_eq!(classify_gh_exit(status, ""), Err(GhFailure::Failed));
+    }
+
+    #[cfg(unix)]
+    proptest::proptest! {
+        #[test]
+        fn classify_gh_exit_never_reads_unknown_text_as_no_pr(stderr in "\\PC{0,80}") {
+            use std::os::unix::process::ExitStatusExt as _;
+            let status = std::process::ExitStatus::from_raw(1 << 8);
+            let known = GH_NO_PR_SIGNS.iter().chain(GH_LOGIN_SIGNS.iter()).any(|s| stderr.contains(s));
+            proptest::prop_assume!(!known);
+            proptest::prop_assert_eq!(classify_gh_exit(status, &stderr), Err(GhFailure::Failed));
+        }
+    }
+
+    #[test]
+    fn a_cached_failure_reads_back_as_a_failure_not_as_no_pr() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let path = cache_dir.path().join("pr-cache-x");
+        write_pr_cache(&path, &Err(GhFailure::Unauthenticated), 1_000);
+        assert_eq!(
+            read_pr_cache(&path, 1_010),
+            Some(Err(GhFailure::Unauthenticated))
+        );
+        assert_eq!(read_pr_cache(&path, 1_000 + PR_CACHE_TTL_SECS), None);
+        // An entry from an older version has no failure field.
+        std::fs::write(&path, r#"{"ts":1000,"pr":null}"#).unwrap();
+        assert_eq!(read_pr_cache(&path, 1_010), Some(Ok(None)));
+        assert_eq!(GhFailure::Unauthenticated.label(), "pr: gh not logged in");
+    }
+
+    #[test]
+    fn an_unreadable_cache_is_logged_and_read_as_a_miss() {
+        // A directory in place of the file fails the read with an error other than NotFound.
+        let cache_dir = tempfile::tempdir().unwrap();
+        let path = cache_dir.path().join("pr-cache-x");
+        std::fs::create_dir(&path).unwrap();
+        let logs = crate::test_log_capture::capture_logs(|| {
+            assert_eq!(read_pr_cache(&path, 1_000), None);
+        });
+        assert!(logs.contains("cannot be read"), "{logs}");
     }
 
     #[cfg(unix)]
@@ -1896,11 +2076,11 @@ mod tests {
         let cache_path = pr_cache_path(cache_dir.path(), repo_dir.path(), "feat/x");
         write_pr_cache(
             &cache_path,
-            &Some(PrInfo {
+            &Ok(Some(PrInfo {
                 number: Some(999),
                 url: None,
                 review_state: None,
-            }),
+            })),
             1_000,
         );
         // now=1_030 is within the 60s TTL of the ts=1_000 cache entry.
@@ -1912,7 +2092,7 @@ mod tests {
             1_030,
         );
         assert_eq!(
-            pr.as_ref().and_then(|p| p.number),
+            pr.clone().ok().flatten().and_then(|p| p.number),
             Some(999),
             "must return the cached value, not gh's"
         );
@@ -1935,11 +2115,11 @@ mod tests {
         let cache_path = pr_cache_path(cache_dir.path(), repo_dir.path(), "feat/x");
         write_pr_cache(
             &cache_path,
-            &Some(PrInfo {
+            &Ok(Some(PrInfo {
                 number: Some(999),
                 url: None,
                 review_state: None,
-            }),
+            })),
             1_000,
         );
         // now=1_000+PR_CACHE_TTL_SECS+1 is past the cache entry's TTL.
@@ -1952,7 +2132,7 @@ mod tests {
             now,
         );
         assert_eq!(
-            pr.as_ref().and_then(|p| p.number),
+            pr.clone().ok().flatten().and_then(|p| p.number),
             Some(2),
             "expiry must re-query gh, not reuse the stale cache"
         );
@@ -1969,7 +2149,7 @@ mod tests {
         let cache_dir = tempfile::tempdir().unwrap();
         let repo_dir = tempfile::tempdir().unwrap();
         let cache_path = pr_cache_path(cache_dir.path(), repo_dir.path(), "feat/x");
-        write_pr_cache(&cache_path, &None, 1_000);
+        write_pr_cache(&cache_path, &Ok(None), 1_000);
 
         let mode = std::fs::metadata(cache_path.parent().unwrap())
             .unwrap()
@@ -2802,8 +2982,16 @@ mod tests {
         /// `PrCacheEntry` (the on-disk cache record) round-trips through JSON
         /// exactly, matching `read_pr_cache`/`write_pr_cache`'s expectations.
         #[test]
-        fn pr_cache_entry_json_roundtrips(ts in any::<i64>(), pr in prop::option::of(arb_pr_info())) {
-            let entry = PrCacheEntry { ts, pr };
+        fn pr_cache_entry_json_roundtrips(
+            ts in any::<i64>(),
+            pr in prop::option::of(arb_pr_info()),
+            failure in prop::option::of(prop_oneof![
+                Just(GhFailure::Missing),
+                Just(GhFailure::Unauthenticated),
+                Just(GhFailure::Failed),
+            ]),
+        ) {
+            let entry = PrCacheEntry { ts, pr, failure };
             let json = serde_json::to_string(&entry).unwrap();
             let parsed: PrCacheEntry = serde_json::from_str(&json).unwrap();
             prop_assert_eq!(entry, parsed);

@@ -32,6 +32,7 @@ pub mod merge;
 pub mod panic_hook;
 pub mod paths;
 pub mod plugins;
+pub(crate) mod process;
 pub mod scope;
 pub mod session_log;
 pub mod sync;

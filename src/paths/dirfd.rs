@@ -167,17 +167,28 @@ pub(crate) fn remove_file_at(dir: BorrowedFd<'_>, name: &OsStr) -> io::Result<()
     Ok(rustix::fs::unlinkat(dir, name, AtFlags::empty())?)
 }
 
-/// The modification time of `name` in `dir`, without following a symlink.
-/// `None` when it can't be read at all — a missing entry and an unreadable one
-/// are the same answer to "is the source newer".
-pub(crate) fn mtime_at(dir: BorrowedFd<'_>, name: &OsStr) -> Option<std::time::SystemTime> {
-    if reject_traversal(name).is_err() {
-        return None;
-    }
-    let st = statat(dir, name, AtFlags::SYMLINK_NOFOLLOW).ok()?;
-    let secs = u64::try_from(st.st_mtime).ok()?;
-    let nanos = u32::try_from(st.st_mtime_nsec).ok()?;
-    Some(std::time::UNIX_EPOCH + std::time::Duration::new(secs, nanos))
+/// The modification time of `name` in `dir`, without following a symlink. `None` for a missing
+/// entry, and for an mtime before 1970.
+///
+/// # Errors
+/// `name` is not a single component, or the entry exists but cannot be read.
+pub(crate) fn mtime_at(
+    dir: BorrowedFd<'_>,
+    name: &OsStr,
+) -> io::Result<Option<std::time::SystemTime>> {
+    reject_traversal(name)?;
+    let st = match statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(st) => st,
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let (Ok(secs), Ok(nanos)) = (u64::try_from(st.st_mtime), u32::try_from(st.st_mtime_nsec))
+    else {
+        return Ok(None);
+    };
+    Ok(Some(
+        std::time::UNIX_EPOCH + std::time::Duration::new(secs, nanos),
+    ))
 }
 
 /// Write `bytes` to `name` in `dir`, replacing whatever is there — including a
@@ -500,9 +511,10 @@ mod tests {
     fn mtime_is_none_for_a_missing_entry() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = open_dir_nofollow(tmp.path()).unwrap();
-        assert!(mtime_at(dir.as_fd(), OsStr::new("nope")).is_none());
+        assert!(mtime_at(dir.as_fd(), OsStr::new("nope")).unwrap().is_none());
         std::fs::write(tmp.path().join("here"), b"x").unwrap();
-        assert!(mtime_at(dir.as_fd(), OsStr::new("here")).is_some());
+        assert!(mtime_at(dir.as_fd(), OsStr::new("here")).unwrap().is_some());
+        assert!(mtime_at(dir.as_fd(), OsStr::new("../x")).is_err());
     }
     // ---- open_or_create_dir_at / write_file_through_dirs (#1427) ----
 

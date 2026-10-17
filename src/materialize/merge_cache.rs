@@ -52,23 +52,51 @@ pub(crate) fn write(
     Ok(())
 }
 
-/// Read the persisted slice iff its stored key matches `key`. Any I/O error,
-/// missing file, or malformed content is treated as a cache miss (`None`)
-/// rather than an error — this is a pure optimization over the live-merge
-/// fallback, so a broken cache file must never block resolution.
+/// Read the persisted slice iff its stored key matches `key`. A missing file is
+/// a quiet miss. A read error or malformed content is logged, noticed, and also
+/// a miss: this is a pure optimization over the live-merge fallback, so a broken
+/// cache file must never block resolution. It must still be visible, or a
+/// permission error rebuilds the merge on every run with no cause shown (#2861).
 #[must_use]
 pub(crate) fn read_if_matching(
     cache_root: &Path,
     key: &str,
 ) -> Option<(Vec<Memory>, BTreeMap<String, HostEntry>)> {
     let start = std::time::Instant::now();
-    let result = (|| {
-        let bytes = std::fs::read(cache_file(cache_root)).ok()?;
-        let entry: PersistedMergeCache = serde_json::from_slice(&bytes).ok()?;
-        (entry.key == key).then_some((entry.bundle_memory, entry.bundle_host))
-    })();
+    let path = cache_file(cache_root);
+    let result = match read_entry(&path) {
+        Ok(entry) => entry
+            .filter(|entry| entry.key == key)
+            .map(|entry| (entry.bundle_memory, entry.bundle_host)),
+        Err(e) => {
+            note_unreadable(&path, &e);
+            None
+        }
+    };
     crate::cache_trace::emit_cache_trace("merge_sig", result.is_some(), start.elapsed(), None);
     result
+}
+
+/// The stored entry. `None` for a missing file.
+fn read_entry(path: &Path) -> anyhow::Result<Option<PersistedMergeCache>> {
+    use anyhow::Context as _;
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
+    };
+    let entry = serde_json::from_slice(&bytes)
+        .with_context(|| format!("{} is not a valid merge cache", path.display()))?;
+    Ok(Some(entry))
+}
+
+fn note_unreadable(path: &Path, err: &anyhow::Error) {
+    tracing::error!("merge cache unusable, using a live merge: {err:#}");
+    crate::agent_notice::record(format!(
+        "llmenv: the merge cache is unusable ({err:#}), so each run rebuilds the bundle merge. \
+         Fix: delete {} and run `llmenv regenerate`.",
+        path.display()
+    ));
 }
 
 #[cfg(test)]
@@ -124,6 +152,23 @@ mod tests {
         std::fs::create_dir_all(dir.path()).unwrap();
         std::fs::write(cache_file(dir.path()), b"not json").unwrap();
 
+        assert!(read_if_matching(dir.path(), "anything").is_none());
+        assert!(read_entry(&cache_file(dir.path())).is_err());
+    }
+
+    #[test]
+    fn a_missing_artifact_is_not_an_error() {
+        let dir = tempdir().unwrap();
+        assert!(read_entry(&cache_file(dir.path())).unwrap().is_none());
+    }
+
+    #[test]
+    fn an_unreadable_artifact_is_an_error_not_a_miss() {
+        // A directory in place of the file fails the read with an error other than NotFound.
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(cache_file(dir.path())).unwrap();
+        let err = read_entry(&cache_file(dir.path())).unwrap_err();
+        assert!(format!("{err:#}").contains("merge-cache.json"), "{err:#}");
         assert!(read_if_matching(dir.path(), "anything").is_none());
     }
 }

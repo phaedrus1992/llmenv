@@ -172,49 +172,110 @@ fn compute_delay(snapshot: &UsageSnapshot, cfg: &Throttle) -> Duration {
     }
 }
 
-/// CLI entry for `llmenv throttle <event>`. Fail-soft: warns on stderr and
-/// exits 0 on any error. Never panics.
+/// CLI entry for `llmenv throttle <event>`. Fail-soft: exits 0 on any error. Never panics.
+///
+/// The engine drops a hook's stderr, so each failure goes to the error log and to the hook
+/// output as a notice for the agent (#2746, #2833).
 pub(crate) fn run_throttle_hook(event: &str) {
     use std::io::Read;
 
     // Consume stdin so the pipe doesn't break, even if we don't use the body.
     let mut stdin_buf = String::new();
-    if let Err(e) = std::io::stdin().read_to_string(&mut stdin_buf) {
-        eprintln!("llmenv throttle: failed to read stdin: {e}");
+    let mut notices = Vec::new();
+    let hook_event_name = match std::io::stdin().read_to_string(&mut stdin_buf) {
+        Ok(_) => hook_event_name(&stdin_buf, event, &mut notices),
+        Err(e) => {
+            notices.push(format!(
+                "llmenv: the throttle hook cannot read its stdin ({e}), so it did not run. \
+                 Fix: run `llmenv doctor` to check the hook setup."
+            ));
+            write_output(&engine_event_name(event), "", &notices);
+            return;
+        }
+    };
+    let note = run_throttle_inner(event).unwrap_or_else(|e| {
+        notices.push(format!(
+            "llmenv: the throttle hook failed: {e:#}. Fix: run `llmenv doctor` to check the \
+             throttle state."
+        ));
+        String::new()
+    });
+    write_output(&hook_event_name, &note, &notices);
+}
+
+/// The engine name of the hook event in `stdin`. Text that is not JSON, or JSON with no name,
+/// falls back to the name that `event` maps to. Text that is not JSON adds a notice.
+fn hook_event_name(stdin: &str, event: &str, notices: &mut Vec<String>) -> String {
+    let parsed = match serde_json::from_str::<serde_json::Value>(stdin) {
+        Ok(v) => match &v["hook_event_name"] {
+            serde_json::Value::String(name) => Some(name.clone()),
+            serde_json::Value::Null => None,
+            other => {
+                notices.push(format!(
+                    "llmenv: the throttle hook got a hook_event_name that is not a string ({other}). \
+                     Fix: run `llmenv regenerate` so the hook matches this engine."
+                ));
+                None
+            }
+        },
+        Err(e) if !stdin.trim().is_empty() => {
+            notices.push(format!(
+                "llmenv: the throttle hook got stdin that is not valid JSON ({e}). Fix: run \
+                 `llmenv regenerate` so the hook matches this engine."
+            ));
+            None
+        }
+        Err(_) => None,
+    };
+    parsed
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| engine_event_name(event))
+}
+
+/// The Claude Code event that runs `llmenv throttle <event>`. Empty for an unknown event.
+fn engine_event_name(event: &str) -> String {
+    match event {
+        "prompt" => "UserPromptSubmit",
+        "pre-tool" => "PreToolUse",
+        _ => "",
+    }
+    .to_string()
+}
+
+/// Log each notice, then write the budget note and the notices as one hook context line.
+fn write_output(hook_event_name: &str, note: &str, notices: &[String]) {
+    for notice in notices {
+        tracing::error!("{notice}");
+    }
+    let text = [note.to_string()]
+        .into_iter()
+        .chain(notices.iter().cloned())
+        .chain(crate::agent_notice::current())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.is_empty() {
         return;
     }
-
-    // Parse hook_event_name for emit_hook_context (needed for prompt output).
-    let hook_event_name = match serde_json::from_str::<serde_json::Value>(&stdin_buf) {
-        Ok(v) => v["hook_event_name"]
-            .as_str()
-            .map(str::to_owned)
-            .unwrap_or_default(),
-        Err(e) if !stdin_buf.trim().is_empty() => {
-            eprintln!("llmenv throttle: stdin is not valid JSON (budget note suppressed): {e}");
-            String::new()
-        }
-        Err(_) => String::new(),
-    };
-
-    if let Err(e) = run_throttle_inner(event, &hook_event_name) {
-        // `{e:#}` keeps the cause chain. The plain form prints only the outer context.
-        eprintln!("llmenv throttle: {e:#}");
-        // The file log is the only record a user can read later, so the error goes there too.
-        tracing::error!("llmenv throttle failed: {e:#}");
+    let out = crate::adapter::active_adapter().emit_hook_context(hook_event_name, "", &text);
+    if out.is_empty() {
+        tracing::error!("throttle hook {hook_event_name:?} has no channel to the agent: {text}");
+    } else if let Err(e) = write_hook_context(&mut std::io::stdout(), &out) {
+        tracing::error!("llmenv throttle: failed to write hook output: {e}");
     }
 }
 
-fn run_throttle_inner(event: &str, hook_event_name: &str) -> anyhow::Result<()> {
+/// Apply the delay, and return the budget note for a `prompt` event (empty otherwise).
+fn run_throttle_inner(event: &str) -> anyhow::Result<String> {
     let state_dir = crate::paths::state_dir()?;
     let path = throttle_state_path(&state_dir);
 
     let Some(cfg) = read_throttle_config(&path)? else {
-        return Ok(()); // No state file = throttling off.
+        return Ok(String::new()); // No state file = throttling off.
     };
 
     let Some(backend) = backend_for(&cfg) else {
-        return Ok(());
+        return Ok(String::new());
     };
 
     let snapshot = backend::fetch_cached(backend.as_ref(), &state_dir, &cfg)?;
@@ -229,20 +290,11 @@ fn run_throttle_inner(event: &str, hook_event_name: &str) -> anyhow::Result<()> 
         std::thread::sleep(delay);
     }
 
-    if event == "prompt" {
-        let note = budget_note(&snapshot, &cfg);
-        if !note.is_empty() {
-            let adapter = crate::adapter::active_adapter();
-            let out = adapter.emit_hook_context(hook_event_name, "", &note);
-            if !out.is_empty()
-                && let Err(e) = write_hook_context(&mut std::io::stdout(), &out)
-            {
-                eprintln!("llmenv throttle: failed to write hook output: {e}");
-            }
-        }
-    }
-
-    Ok(())
+    Ok(if event == "prompt" {
+        budget_note(&snapshot, &cfg)
+    } else {
+        String::new()
+    })
 }
 
 /// Write the hook context line. A closed reader (`BrokenPipe`) is expected, so it is not an error.
@@ -307,6 +359,59 @@ mod tests {
             resets_at: None,
             penalized,
         }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn hook_event_name_never_panics_and_always_names_an_event(stdin in "\\PC{0,64}") {
+            let mut notices = Vec::new();
+            let name = hook_event_name(&stdin, "prompt", &mut notices);
+            proptest::prop_assert!(!name.is_empty());
+        }
+
+        #[test]
+        fn a_string_event_name_is_returned_verbatim(name in "[A-Za-z]{1,24}") {
+            let mut notices = Vec::new();
+            let stdin = serde_json::json!({ "hook_event_name": name }).to_string();
+            proptest::prop_assert_eq!(hook_event_name(&stdin, "prompt", &mut notices), name);
+            proptest::prop_assert!(notices.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_non_string_event_name_falls_back_with_a_notice() {
+        let mut notices = Vec::new();
+        let got = hook_event_name(r#"{"hook_event_name": 7}"#, "pre-tool", &mut notices);
+        assert_eq!(got, "PreToolUse");
+        assert!(
+            notices.len() == 1 && notices[0].contains("not a string"),
+            "{notices:?}"
+        );
+    }
+
+    #[test]
+    fn hook_event_name_reads_stdin_and_falls_back_with_a_notice() {
+        let mut notices = Vec::new();
+        assert_eq!(
+            hook_event_name(
+                r#"{"hook_event_name":"PreToolUse"}"#,
+                "prompt",
+                &mut notices
+            ),
+            "PreToolUse"
+        );
+        assert_eq!(
+            hook_event_name("", "prompt", &mut notices),
+            "UserPromptSubmit"
+        );
+        assert!(notices.is_empty(), "{notices:?}");
+        assert_eq!(
+            hook_event_name("not json", "pre-tool", &mut notices),
+            "PreToolUse"
+        );
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains("not valid JSON") && notices[0].contains("Fix:"));
+        assert_eq!(engine_event_name("other"), "");
     }
 
     #[test]

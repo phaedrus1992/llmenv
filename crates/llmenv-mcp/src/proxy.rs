@@ -1577,6 +1577,10 @@ mod tests {
     // What follows unit-tests the private helpers around it.
 
     /// Spawns a child that stays alive but never binds anything.
+    /// An address that never accepts a connection. A port that a test binds and frees can be
+    /// taken by a parallel test, and the probe then sees a live proxy (#2824).
+    const CLOSED_BIND: &str = "127.0.0.1:0";
+
     fn idle_child() -> std::process::Child {
         Command::new("sleep")
             .arg("30")
@@ -1594,11 +1598,7 @@ mod tests {
         use super::{BindResult, wait_for_bind};
 
         let _guard = port_guard();
-        let port = {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-            l.local_addr().expect("addr").port()
-        };
-        let bind = format!("127.0.0.1:{port}");
+        let bind = CLOSED_BIND.to_string();
         let mut child = idle_child();
 
         let started = std::time::Instant::now();
@@ -1625,11 +1625,7 @@ mod tests {
         use super::{BindResult, wait_for_bind};
 
         let _guard = port_guard();
-        let port = {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-            l.local_addr().expect("addr").port()
-        };
-        let bind = format!("127.0.0.1:{port}");
+        let bind = CLOSED_BIND.to_string();
         let mut child = Command::new("false")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -1689,11 +1685,7 @@ mod tests {
         use super::ensure_running_within;
 
         let _guard = port_guard();
-        let port = {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-            l.local_addr().expect("addr").port()
-        };
-        let bind = format!("127.0.0.1:{port}");
+        let bind = CLOSED_BIND.to_string();
         let dir = tempfile::tempdir().expect("tempdir");
         let pid_path = dir.path().join("mcp-proxy.pid");
 
@@ -1763,23 +1755,17 @@ mod tests {
         use super::ensure_running_within;
         use std::os::unix::fs::PermissionsExt;
 
-        let _guard = port_guard();
-        let port = {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-            l.local_addr().expect("addr").port()
-        };
-        let bind = format!("127.0.0.1:{port}");
+        // A live proxy on the port would return before the directory exists (#2824).
+        let bind = CLOSED_BIND;
         let dir = tempfile::tempdir().expect("tempdir");
         let pid_path = dir.path().join("nested").join("mcp-proxy.pid");
 
         let result =
-            ensure_running_within(&bind, &pid_path, |_| Err(anyhow::anyhow!("no spawn")), 50);
-        let err = result.expect_err("must fail: spawn always errors");
-        assert!(
-            err.to_string().contains("no spawn"),
-            "must fail via the injected spawn error, not an earlier step, got: {err}"
-        );
+            ensure_running_within(bind, &pid_path, |_| Err(anyhow::anyhow!("no spawn")), 50);
 
+        // Reaching the spawn proves the call passed the step that creates the directory.
+        let err = result.expect_err("the spawn closure fails");
+        assert!(format!("{err:#}").contains("no spawn"), "{err:#}");
         let parent = pid_path.parent().expect("parent");
         let mode = std::fs::metadata(parent)
             .expect("metadata")
