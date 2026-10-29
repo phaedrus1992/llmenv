@@ -1280,6 +1280,10 @@ It keeps three rotated files, `session-log.jsonl.1` to `session-log.jsonl.3`, an
 The first line of the new file names the rotated file that holds the older lines.
 `llmenv clean` removes rotated files older than `cache_retention_hours`.
 
+The configured file path must be a regular file path. If it is a symbolic link,
+llmenv leaves the link and its target untouched and reports a fix hint; point
+`session_log.path` at a regular file or remove the link.
+
 For finer control, `transcript` can be a mapping instead of a boolean:
 
 ```yaml

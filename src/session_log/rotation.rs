@@ -43,13 +43,35 @@ pub(crate) fn rotate_if_full(path: &Path, max_bytes: u64) -> std::io::Result<Opt
         .map(|name| name.to_string_lossy().into_owned()))
 }
 
-/// Whether `path` holds at least `max_bytes`. A missing file is not full.
+/// Reject a symbolic link at the active session-log path. Missing paths are allowed so the
+/// sink can create the file on its first append.
+pub(crate) fn reject_symlink(path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(symlink_path_error(path)),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether the non-symlink file at path holds at least max_bytes. A missing file is not full.
 fn is_full(path: &Path, max_bytes: u64) -> std::io::Result<bool> {
-    match std::fs::metadata(path) {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(symlink_path_error(path)),
         Ok(meta) => Ok(meta.len() >= max_bytes),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e),
     }
+}
+
+fn symlink_path_error(path: &Path) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!(
+            "session log path {} is a symbolic link. Fix: set session_log.path to a regular file path or remove the symbolic link",
+            path.display()
+        ),
+    )
 }
 
 /// The suffix of the rotation lock file beside the active log.
@@ -232,6 +254,26 @@ mod tests {
 
     fn write_bytes(path: &Path, len: u64) {
         std::fs::write(path, vec![b'x'; usize::try_from(len).unwrap()]).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rotation_rejects_a_symlink_without_moving_it_or_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.jsonl");
+        let path = dir.path().join("session-log.jsonl");
+        write_bytes(&target, 10);
+        symlink(&target, &path).unwrap();
+
+        let error = rotate_if_full(&path, 10).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("Fix:"));
+        assert_eq!(std::fs::read_link(&path).unwrap(), target);
+        assert_eq!(std::fs::metadata(&target).unwrap().len(), 10);
+        assert!(!rotation_path(&path, 1).exists());
     }
 
     #[test]

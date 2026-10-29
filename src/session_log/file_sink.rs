@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use llmenv_paths::{create_dir_owner_only, state_dir};
 
-use crate::session_log::rotation::{MAX_BYTES, rotate_if_full, rotation_marker};
+use crate::session_log::rotation::{MAX_BYTES, reject_symlink, rotate_if_full, rotation_marker};
 
 /// Default file-sink path: `<state_dir>/session-log.jsonl`.
 ///
@@ -52,6 +52,7 @@ impl FileSink {
         if let Some(parent) = self.path.parent() {
             create_dir_owner_only(parent)?;
         }
+        reject_symlink(&self.path)?;
         // A failed rotation must not stop logging. The event goes to the active file, and the
         // next append tries the rotation again.
         let rotated = match rotate_if_full(&self.path, MAX_BYTES) {
@@ -174,6 +175,28 @@ mod tests {
         );
         assert_eq!(lines.next(), Some("{\"after\":1}"));
         assert!(rotation_path(&path, 1).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn append_rejects_a_symlink_without_moving_it_or_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.jsonl");
+        let path = dir.path().join("session-log.jsonl");
+        File::create(&target).unwrap().set_len(MAX_BYTES).unwrap();
+        symlink(&target, &path).unwrap();
+
+        let error = FileSink::new(path.clone())
+            .try_append("{\"event\":true}")
+            .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("Fix:"));
+        assert_eq!(std::fs::read_link(&path).unwrap(), target);
+        assert_eq!(std::fs::metadata(&target).unwrap().len(), MAX_BYTES);
+        assert!(!rotation_path(&path, 1).exists());
     }
 
     #[test]

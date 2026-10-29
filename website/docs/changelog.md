@@ -1442,6 +1442,9 @@ the rc.1 and rc.2 sections below.
 
 ### Fixed
 
+- Reject symbolic links at the session-log path without rotating or writing through them
+  ([session-log docs](https://phaedrus1992.github.io/llmenv/docs/configuration#session_log), #3117)
+
 - Fix marketplace and plugin-payload sync returning a broken clone with unstable cache key when
   git HEAD cannot be resolved. Now detects and errors on broken clones (after clone or pull),
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
