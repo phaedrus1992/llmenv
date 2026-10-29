@@ -1,16 +1,16 @@
-//! Doctor check for the program name in llmenv's hook commands (#3049). With no absolute `PATH`
-//! folder that holds llmenv, the hook commands use the bare name, and a relative `PATH` entry can
-//! shadow that name.
+//! Doctor check for the program name in llmenv's hook commands (#3049, #3081). The hook commands
+//! name the running llmenv binary. The bare name is used only when that binary's path is not
+//! UTF-8 or the OS cannot report it.
 
-use crate::adapter::hook_program::program_name;
+use crate::adapter::hook_program::{fallback_message, program_name};
 
-/// Print the hook-command check for the current `PATH`.
+/// Print the hook-command check for the running binary.
 pub(super) fn run_doctor_hook_command(use_color: bool) {
     let pass = super::super::doctor_pass(use_color);
     let warn = super::super::doctor_warning(use_color);
-    match program_name(std::env::var_os("PATH").as_deref()).fallback_warning() {
-        Some(message) => eprintln!("{warn} {message}"),
-        None => eprintln!("{pass} Hook commands name llmenv by an absolute PATH folder"),
+    match program_name(std::env::current_exe()) {
+        Ok(_) => eprintln!("{pass} Hook commands name llmenv by the path of the running binary"),
+        Err(reason) => eprintln!("{warn} {}", fallback_message(&reason)),
     }
 }
 
@@ -21,34 +21,18 @@ pub(super) fn run_doctor_hook_command(use_color: bool) {
 )]
 mod tests {
     use super::*;
-    use std::ffi::OsString;
 
     #[test]
-    fn warns_with_the_fix_when_path_is_unset() {
-        let warning = program_name(None)
-            .fallback_warning()
-            .expect("the bare name is warned about");
-        assert!(warning.contains("Fix: install llmenv"), "{warning}");
+    fn an_unknown_binary_path_is_reported_with_the_fix() {
+        let reason = program_name(Err(std::io::Error::other("no path")))
+            .expect_err("an unknown path is reported");
+        let message = fallback_message(&reason);
+        assert!(message.contains("Fix: move the llmenv binary"), "{message}");
     }
 
-    #[cfg(unix)]
     #[test]
-    fn no_warning_when_llmenv_is_on_an_absolute_path_folder() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let binary = dir.path().join("llmenv");
-        std::fs::write(&binary, "#!/bin/sh\n").expect("write fake llmenv");
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod fake llmenv");
-        let path_var = OsString::from(dir.path());
-
-        assert_eq!(program_name(Some(&path_var)).fallback_warning(), None);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn warns_when_llmenv_is_only_in_a_relative_path_folder() {
-        let path_var = OsString::from(".");
-        assert!(program_name(Some(&path_var)).fallback_warning().is_some());
+    fn a_known_binary_path_is_not_reported() {
+        let exe = std::path::PathBuf::from("/opt/llmenv/bin/llmenv");
+        assert!(program_name(Ok(exe)).is_ok());
     }
 }
