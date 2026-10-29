@@ -219,7 +219,8 @@ fn inherit_copied_files_named(
 fn is_real_file(path: &Path) -> bool {
     match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_symlink() => {
-            tracing::warn!(path = %path.display(), "inherit: skipping symlinked file");
+            // The skip is intended (#1341), so it runs on every pass and is debug only.
+            tracing::debug!(path = %path.display(), "inherit: skipping symlinked file");
             false
         }
         Ok(meta) => meta.is_file(),

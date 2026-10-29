@@ -37,7 +37,9 @@ pub(super) fn cache_key(path: &Path) -> String {
              key. Fix: check the file path and its parent directory.",
                 path.display()
             ));
-            tracing::warn!(
+            // A path that does not exist yet is valid input, and the notice above already tells
+            // the agent, so the log is debug only.
+            tracing::debug!(
                 error = %e,
                 path = %path.display(),
                 "cannot canonicalize read-once cache path, using raw path"
@@ -88,5 +90,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("nope.txt");
         assert_eq!(cache_key(&missing), missing.to_string_lossy());
+    }
+
+    #[test]
+    fn a_missing_path_writes_no_warning_to_the_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("events.jsonl");
+        let missing = dir.path().join("nope.txt");
+        // A path that does not exist yet is valid input, so only the agent notice is raised.
+        let _ = crate::session_log::tracing_layer::capture_file_logs_at(
+            &log,
+            tracing_subscriber::filter::LevelFilter::WARN,
+            || cache_key(&missing),
+        );
+        let body = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(!body.contains("cannot canonicalize"), "{body}");
     }
 }
