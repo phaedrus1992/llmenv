@@ -1781,7 +1781,8 @@ fn recover_from_pipeline_error(
     // as a notice, so the kept text does not hide the skipped memory step.
     eprintln!("llmenv: memory {event} skipped: {error}");
     crate::agent_notice::record(memory_skipped_notice(event, &error));
-    warn!(
+    // The stderr line and the agent notice above already report this, so the log is debug only.
+    tracing::debug!(
         error = %error,
         "hook-run: pipeline failed after hook text was already computed; \
          returning it instead of silently dropping it"

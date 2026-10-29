@@ -52,11 +52,13 @@ pub fn handle_pre_tool_use(stdin_payload: &serde_json::Value, cfg: &CdGuard) -> 
 /// shell, so a `cd` just before the closer still outlives the call.
 const CLOSERS: [&str; 4] = ["}", "fi", "done", "esac"];
 
-/// Whether the last command of a call sits before this segment. A closer ends a group or a
-/// compound command, and an `eval` segment comes after the commands it runs.
+/// Whether the last command of a call sits before this segment. A bare closer ends a group or a
+/// compound command, and an `eval` segment comes after the commands it runs. A closer with a
+/// word after it is a command of its own, so it is not transparent (`fi a` runs `a`).
 fn is_transparent(words: &[String]) -> bool {
-    words.first().is_some_and(|w| CLOSERS.contains(&w.as_str()))
-        || program_words(words).first() == Some(&"eval")
+    let program = program_words(words);
+    let bare_closer = program.len() == 1 && CLOSERS.contains(&program[0]);
+    bare_closer || program.first() == Some(&"eval")
 }
 
 /// The words that open a branch or a loop body ahead of the command they run.
@@ -116,6 +118,12 @@ mod tests {
     fn a_cd_followed_by_more_commands_gets_no_advisory() {
         assert!(!command_ends_with_cd("cd /tmp && ls"));
         assert!(!command_ends_with_cd("cd /tmp; cargo test"));
+    }
+
+    #[test]
+    fn a_closer_with_a_word_after_it_runs_that_word() {
+        assert!(!command_ends_with_cd("cd a && fi a"));
+        assert!(command_ends_with_cd("cd a && fi"));
     }
 
     #[test]

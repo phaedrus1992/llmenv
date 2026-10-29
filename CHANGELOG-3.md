@@ -34,9 +34,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Send a failed opencode tool call to `PostToolUseFailure`, not `PostToolUse`, as Claude Code does. Bundle hooks on `PostToolUse` no longer see failed calls. [fix:opencode]
 - Skip the `lsof` call in `llmenv doctor` and `llmenv clean` when no entry under `state/tmp` or `state/codebase-memory` is old enough to remove. `lsof` can take up to a minute on a hung mount. [perf:doctor] [#3039]
 - Show warnings on stderr by default. `RUST_LOG` still overrides the level. [fix:cli] [#3061]
+- Name the running llmenv binary in hook commands, not the first `llmenv` on `PATH`. A project folder on `PATH` can no longer put its own `llmenv` into an engine config. [fix:hook] [#3081]
+- Log a warning on a hook or statusline path only for a degraded result. A stale MCP session, a read-once path that does not exist yet, and a pipeline failure that is already shown on stderr now log at debug level. [#3082]
 
 ### Fixed
 
+- Judge a symlink in state-file pruning by the link's own age, and remove the link itself. A fresh link to an old file is no longer pruned, and an old link is pruned without touching its target. [fix:hook] [#3094, #3108]
+- Stop a corrupt session map from replacing the first aside copy when the aside name cannot be checked. The map stays in place and the error names it. [fix:hook] [#3108]
+- Refuse a `known_files` key that contains `..` in every build. A release build no longer joins it into the cache path. [fix:adapter] [#3107]
 - Stop showing `pr: gh failed` on a branch with no open PR. Real `gh` prints "No pull requests found" with a capital N, and that now counts as no PR. [fix:statusline] [#2975]
 - Print a hint to add the next step when `llmenv task done` closes the last open task in a session. The all-done stop reminder now says that a question blocks only its own step, and that a running CI job is not a stop point. `task session start` without tasks suggests adding the known steps. [fix:task] [#2987]
 - Stop reading the keychain on every shell prompt when the credential is expired. A dead read is held back for five minutes, and a dead folder credential is no longer written over the cache. [fix:auth] [#3008]
