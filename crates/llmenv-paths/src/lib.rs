@@ -8,6 +8,7 @@ mod bounded_read;
 mod names;
 mod owner_only;
 mod tilde;
+mod unsynced_write;
 mod write_stats;
 pub use tilde::expand_tilde;
 use tilde::expand_tilde_with_env;
@@ -22,6 +23,7 @@ pub use owner_only::{
     create_dir_owner_only, is_executable, open_append_owner_only, write_owner_only,
     write_owner_only_executable, write_owner_only_like,
 };
+pub use unsynced_write::write_owner_only_atomic_unsynced;
 
 /// `read_dir` that treats a missing directory as "nothing to iterate":
 /// returns `Ok(None)` on `NotFound` but propagates every other I/O error (e.g.

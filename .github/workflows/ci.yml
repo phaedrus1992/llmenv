@@ -49,6 +49,7 @@ jobs:
               - '.github/workflows/ci.yml'
             workflow_tests:
               - '.github/workflows/**'
+              - '.github/renovate.json5'
               - 'scripts/**'
   test:
     needs: changes
@@ -163,9 +164,12 @@ jobs:
       - id: hawk-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
+          # cargo-hawk runs doctests through cargo-hawk-rustdoc. A cache without it passes on the
+          # run that installs the tool and fails on every run that restores the cache.
           path: |
             ~/.cargo/bin/cargo-hawk
             ~/.cargo/bin/cargo-hawk-driver
+            ~/.cargo/bin/cargo-hawk-rustdoc
           key: ${{ steps.hawk-key.outputs.key }}
       - if: steps.hawk-cache.outputs.cache-hit != 'true'
         env:

@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Save the repeat-detect counter and the recall health ring without a disk flush. The flush (`fsync`) costs about 5 ms per write on macOS, so a `PreToolUse` hook runs about 5 ms faster. A power loss can leave one of these two files empty, and the next hook replaces it with a fresh one. Other state files keep the flush. [perf:hook-run] [#3127]
+- Scan the repeat-detect state directory for stale files once per session, on the first save, and not on every tool call. [perf:hook-run] [#3127]
+- Skip the project lookup (a git subprocess) at `SessionStart` and `TurnStart` when no memory backend resolved, so `TurnStart` with memory off runs about 25 ms faster. A run with no memory backend no longer shows the notice that memory was skipped because git could not run. [perf:hook-run] [#3127]
 - Show `?` for the prunable cache size in the statusline when the size cannot be read. The field no longer disappears. [feat:statusline] [#3054]
 - Skip a write when an owner-only file already holds the same bytes at the same mode, so a repeat `llmenv regenerate` leaves current files untouched. An existing file with a looser mode, such as 0644, is now tightened to 0600 on its next write. [#3020, #3024]
 - Run llmenv's PreToolUse guards on every Crush tool call, including the commit gate, cd guard, read-once, repeat detection, and slippage. Crush tool names map to Claude Code's names first, so these guards now apply to Crush sessions. [feat:crush]

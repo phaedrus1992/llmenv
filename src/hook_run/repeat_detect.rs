@@ -116,14 +116,17 @@ impl SessionState {
             "the state file could not be read, so it was kept as it is"
         );
         let rd_dir = repeat_detect_state_dir(state_dir);
+        let path = session_state_path(state_dir, &self.session_id);
         // Same 7-day retention as `read_once`'s sibling cache — nothing here
         // needs a longer memory than that (the counter resets on any
-        // different call, or expires with the session itself).
-        super::session_state::prune_stale_json_files(&rd_dir, 7);
-        super::session_state::prune_orphan_locks(&rd_dir, 7);
-        let path = session_state_path(state_dir, &self.session_id);
+        // different call, or expires with the session itself). The two directory scans run
+        // once per session, on its first save, not on every tool call.
+        if !path.exists() {
+            super::session_state::prune_stale_json_files(&rd_dir, 7);
+            super::session_state::prune_orphan_locks(&rd_dir, 7);
+        }
         let json = serde_json::to_string(&self)?;
-        crate::paths::write_owner_only_atomic(&path, json.as_bytes())?;
+        crate::paths::write_owner_only_atomic_unsynced(&path, json.as_bytes())?;
         Ok(())
     }
 }
