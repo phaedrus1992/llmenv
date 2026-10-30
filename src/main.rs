@@ -1,17 +1,12 @@
 use std::path::PathBuf;
 
-use llmenv::session_log::{FileLogLayer, FileSink, default_file_path};
+use llmenv::session_log::{FileLogLayer, FileSink, resolve_file_path};
 use tracing_subscriber::{EnvFilter, prelude::*};
 
-/// Resolve the session-log file sink's path: explicit `path:` override
-/// (tilde-expanded) or `<state_dir>/session-log.jsonl`. `None` turns the file sink off: a
-/// relative fallback would write the log into the working directory, which is a repository in a hook.
+/// Resolve the session-log file sink's path. `None` turns the file sink off: a relative
+/// fallback would write the log into the working directory, which is a repository in a hook.
 fn session_log_file_path(configured: Option<&str>) -> Option<PathBuf> {
-    let resolved = match configured {
-        Some(raw) => llmenv_paths::expand_tilde(raw).map(PathBuf::from),
-        None => default_file_path(),
-    };
-    resolved
+    resolve_file_path(configured)
         .inspect_err(|e| {
             eprintln!("llmenv: failed to resolve the session log path: {e:#}; the file log is off");
         })

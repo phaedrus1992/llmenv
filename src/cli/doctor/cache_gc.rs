@@ -114,12 +114,12 @@ fn sweep_state(state_dir: &Path, config: &Config, retention: Duration, out: GcOu
         CacheUse::Live
     );
     if !state_may_have_stale_entries(state_dir, retention, cbm_live) {
-        return prune_session_log(state_dir, retention, out);
+        return prune_session_log(state_dir, config, retention, out);
     }
     let in_use = crate::materialize::open_files::open_paths().map_err(|e| format!("{e:#}"));
     let in_use = in_use.as_ref().map(Vec::as_slice).map_err(String::as_str);
     sweep_state_tmp(state_dir, retention, in_use, out)
-        + prune_session_log(state_dir, retention, out)
+        + prune_session_log(state_dir, config, retention, out)
         + sweep_cbm_indexes(state_dir, config, retention, in_use, out)
 }
 

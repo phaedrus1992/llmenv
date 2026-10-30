@@ -75,6 +75,8 @@ With `null`, `llmenv clean` (and the deprecated `llmenv doctor --gc`) skips the 
 
 `llmenv clean` applies the same window to the state temp folder, `state/tmp`, which `TMPDIR` points at, and to session-log rotations (see `session_log` below).
 An entry in `state/tmp` is kept while a process holds a file open in it.
+(changed in v3.14.0) The age of a cache entry and of a `state/tmp` entry comes from the newest file in it, not from folder mtimes.
+So a tree unpacked with its old file mtimes kept (`tar -x`, `cp -p`) looks old as soon as no process holds a file open in it.
 That check uses `lsof`, and llmenv runs it only when an entry is old enough to remove.
 When `lsof` cannot run, the sweep stops and names the fix, so no entry is removed on a guess.
 
@@ -1320,8 +1322,12 @@ Both sinks take the same sub-fields, plus one each of their own:
 | --------- | -------- | ---------- | ----- |
 | `enabled` | no | both | Turn the sink on or off |
 | `level` | no | both | Minimum event level (`info`, `debug`, `trace`); default `info`. `debug` is what adds tool calls — prompts are already captured at the default `info` level, see [What gets logged](#what-gets-logged) |
-| `path` | no | `file` | Override the file sink's path; default `<state_dir>/session-log.jsonl` |
+| `path` | no | `file` | Override the file sink's path; default `<state_dir>/session-log.jsonl`. A leading `~` is expanded. (changed in v3.14.0) A relative path turns the file sink off with an error, because a hook runs in a repository |
 | `retention_days` | no | `transcript` | Stale file-sink transcripts on disk are best-effort removed when older than this many days; `null` = disabled; must be >= 1 |
+
+(changed in v3.14.0) The file sink opens the file without following a symlink.
+A path that is a symlink, a FIFO, or a device fails on each event, so llmenv logs the first failure as an error and later ones at debug level.
+`llmenv doctor` names such a path and the fix.
 
 Omitting the `session_log:` block entirely enables the transcript sink at
 `info` — ICM transcript logging is **on by default**. To turn logging off
