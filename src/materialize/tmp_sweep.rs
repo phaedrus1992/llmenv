@@ -10,14 +10,14 @@ use std::time::{Duration, SystemTime};
 use anyhow::Context;
 
 use crate::materialize::cache::{
-    GcReport, gc_remove_dir, gc_remove_link, is_expired, newest_mtime,
+    GcReport, gc_remove_dir, gc_remove_link, is_expired, newest_file_mtime,
 };
 use crate::materialize::dir_size::{DirSize, dir_size};
 use crate::materialize::open_files::open_paths;
 
 mod claude_root;
 
-use claude_root::{is_claude_root, scan_claude_root};
+use claude_root::{is_split_root, scan_split_root};
 
 /// One entry that the scan found old enough to remove, and not in use.
 struct Stale {
@@ -157,10 +157,10 @@ fn scan(tmp_root: &Path, older_than: Duration, in_use: &[PathBuf]) -> anyhow::Re
                 continue;
             }
         };
-        // The per-user TMPDIR root is not judged by its own mtime, because that does not show use
-        // (#1379). Its entries are judged one by one instead.
-        if is_dir && is_claude_root(&name) {
-            scan_claude_root(&path, older_than, in_use, now, &mut scan);
+        // A root that holds unrelated entries is not judged as one entry, because one fresh entry
+        // would keep all the others (#1379, #3184). Its entries are judged one by one instead.
+        if is_dir && is_split_root(&name) {
+            scan_split_root(&path, older_than, in_use, now, &mut scan);
             continue;
         }
         judge_entry(&path, is_dir, older_than, now, &mut scan);
@@ -168,7 +168,7 @@ fn scan(tmp_root: &Path, older_than: Duration, in_use: &[PathBuf]) -> anyhow::Re
     Ok(scan)
 }
 
-/// Mark one entry stale when its newest mtime is older than `older_than`. Keep it otherwise.
+/// Mark one entry stale when its newest file mtime is older than `older_than`. Keep it otherwise.
 fn judge_entry(path: &Path, is_dir: bool, older_than: Duration, now: SystemTime, scan: &mut Scan) {
     let modified = match entry_mtime(path, is_dir) {
         Ok(modified) => modified,
@@ -189,10 +189,10 @@ fn judge_entry(path: &Path, is_dir: bool, older_than: Duration, now: SystemTime,
     }
 }
 
-/// The newest mtime of an entry. A symlink is judged by its own mtime and never followed.
+/// The newest file mtime of an entry. A symlink is judged by its own mtime and never followed.
 fn entry_mtime(path: &Path, is_dir: bool) -> anyhow::Result<SystemTime> {
     if is_dir {
-        return newest_mtime(path);
+        return newest_file_mtime(path);
     }
     std::fs::symlink_metadata(path)
         .and_then(|meta| meta.modified())

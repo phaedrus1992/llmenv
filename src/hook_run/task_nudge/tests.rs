@@ -8,6 +8,7 @@ use proptest::prelude::*;
 use tempfile::TempDir;
 mod commit_deny;
 mod fail_open;
+mod foreign_session;
 mod nudges;
 mod parsing;
 mod same_command;

@@ -25,7 +25,12 @@ pub(super) fn resolve_stop_reminder(
         .as_ref()
         .and_then(|f| f.task_tracker.as_ref())
     {
-        let waiting = crate::hook_run::task_nudge::handle_stop(tracker, stop_payload, state_dir);
+        let waiting = crate::hook_run::task_nudge::handle_stop(
+            tracker,
+            stop_payload,
+            claude_session_id,
+            state_dir,
+        );
         if !waiting.is_empty() {
             if !reminder.is_empty() {
                 reminder.push_str("\n\n");
