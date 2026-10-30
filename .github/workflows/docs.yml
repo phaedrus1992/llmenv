@@ -5,20 +5,26 @@ on:
     branches: [main]
     paths:
       - 'website/**'
+      - '.github/workflows/docs.yml'
+  # No `paths:` filter: a PR that never triggers this workflow reports no
+  # status, so docs-build could not be a required check (#3132). The build runs
+  # on every PR instead; a gate job that skips it would count as a pass when
+  # the gate itself fails.
   pull_request:
-    paths:
-      - 'website/**'
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# Push runs share one group so deploys publish in push order. Each PR gets its
+# own group, so a PR run never waits for, or cancels, another PR or a deploy.
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: ${{ github.event_name == 'pull_request' && format('docs-pr-{0}', github.ref) || 'pages' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  build:
+  # A unique job id, because a required check is matched by job name.
+  docs-build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -51,7 +57,7 @@ jobs:
           path: website/build
 
   deploy:
-    needs: build
+    needs: docs-build
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
