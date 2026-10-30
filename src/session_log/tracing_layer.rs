@@ -3,6 +3,8 @@
 //! events — this is the diagnostic value the pre-3.0 `session_log` file had.
 //! Never touches the transcript sink: internal events have no agent session.
 
+use std::cell::Cell;
+
 use tracing::field::{Field, Visit};
 use tracing::{Level, Subscriber};
 use tracing_subscriber::Layer;
@@ -42,12 +44,37 @@ impl Visit for MessageVisitor {
     }
 }
 
+thread_local! {
+    static IN_ON_EVENT: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Clears the re-entry flag when `on_event` returns, also on a panic.
+struct ReentryGuard;
+
+impl ReentryGuard {
+    /// `None` when this thread is already inside `on_event`.
+    fn enter() -> Option<Self> {
+        IN_ON_EVENT.with(|flag| (!flag.replace(true)).then_some(Self))
+    }
+}
+
+impl Drop for ReentryGuard {
+    fn drop(&mut self) {
+        IN_ON_EVENT.with(|flag| flag.set(false));
+    }
+}
+
 impl<S: Subscriber> Layer<S> for FileLogLayer {
     fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
         let meta = event.metadata();
         if *meta.level() > Level::INFO {
             return;
         }
+        // A failed append emits an event of its own. The global dispatcher sends that event
+        // back here, and with no guard the recursion overflows the stack (#3136).
+        let Some(_guard) = ReentryGuard::enter() else {
+            return;
+        };
         let mut visitor = MessageVisitor::default();
         event.record(&mut visitor);
 
@@ -154,5 +181,30 @@ mod tests {
             },
         );
         assert!(!path.exists());
+    }
+}
+
+// #3136: an append that keeps failing must not recurse through the layer.
+#[cfg(all(test, unix))]
+#[allow(clippy::unwrap_used)]
+mod reentry_tests {
+    use super::*;
+    use tracing_subscriber::prelude::*;
+
+    // The global dispatcher has no re-entry guard, but a scoped `with_default` one has.
+    // `main.rs` installs the layer globally, so the test must too. nextest runs each test
+    // in its own process, so the global default does not leak into other tests.
+    #[test]
+    fn a_failing_append_through_the_global_layer_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real.jsonl");
+        std::fs::write(&target, "").unwrap();
+        let link = dir.path().join("link.jsonl");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let sub = tracing_subscriber::registry().with(FileLogLayer::new(FileSink::new(link)));
+        tracing::subscriber::set_global_default(sub).unwrap();
+        tracing::error!("first event");
+        tracing::error!("second event");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "");
     }
 }

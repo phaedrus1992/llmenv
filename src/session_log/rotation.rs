@@ -97,6 +97,11 @@ pub(crate) fn rotation_marker(rotated_to: &str) -> String {
     serde_json::json!({"llmenv_log": "rotated", "rotated_to": rotated_to}).to_string()
 }
 
+/// The line that records a failed rotation in the active file. The event follows it there.
+pub(crate) fn rotation_failed_marker(error: &std::io::Error) -> String {
+    serde_json::json!({"llmenv_log": "rotation_failed", "error": error.to_string()}).to_string()
+}
+
 /// The path of rotation `n` of `path`, such as `session-log.jsonl.1`.
 pub(crate) fn rotation_path(path: &Path, n: u32) -> PathBuf {
     let mut name = path.as_os_str().to_owned();

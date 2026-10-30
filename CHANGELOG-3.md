@@ -86,6 +86,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Refuse a symlinked cache directory in `llmenv clean`, and name the real folder. [fix:statusline] [#3089]
 - Show an error for an unreadable `.git` in the statusline, instead of the branch of an enclosing repository. [fix:statusline] [#3089]
 - Scrub credentials and control bytes from `gh` errors in the statusline log. [fix:statusline] [#3089]
+- Stop a session-log file that cannot be written (a symlink, no permission, a full disk) from crashing llmenv with a stack overflow. The first failure for the path is logged as an error, and later ones at debug level. [fix:session-log] [#3136]
+- Check `session_log.file.path` in `llmenv doctor`: a symlink, FIFO, socket, device, or folder there is named with the fix. `llmenv clean` now also removes old rotations of a configured path. The `session_log` status-line widget now counts the configured file. Hooks now expand a leading `~` in the path, so hook events no longer go to a `~` folder in the working directory. A relative path turns the file log off with an error, because it resolves against the repository in a hook. See [`session_log:`](https://phaedrus1992.github.io/llmenv/docs/configuration#session_log). [fix:doctor] [#3138]
+- Stop the question reminder at the end of a turn from naming a task of a session that another conversation owns. The commit gate uses the same rule, so another conversation's task no longer counts as tracked work. [fix:task] [#3185]
+- Remove old builds from `state/tmp` that a partial delete kept. An entry's age, in `state/tmp` and in the cache, now comes from its newest file, not from folder mtimes, and each build in `cargo-hawk-target` is judged alone. A removal that stops part-way names the path that another user owns. [fix:gc] [#3184]
 
 ### Security
 

@@ -130,14 +130,17 @@ fn a_question_to_the_user_parks_the_task_in_progress() {
         "{text}"
     );
     let stop = serde_json::json!({ "last_assistant_message": "Which one do you want?" });
-    assert!(handle_stop(&tracker, &stop, dir.path()).contains("llmenv task wait"));
+    assert!(handle_stop(&tracker, &stop, Some("s1"), dir.path()).contains("llmenv task wait"));
     let no_question = serde_json::json!({ "last_assistant_message": "Done." });
-    assert_eq!(handle_stop(&tracker, &no_question, dir.path()), "");
+    assert_eq!(
+        handle_stop(&tracker, &no_question, Some("s1"), dir.path()),
+        ""
+    );
     let off = TaskTracker {
         nudges: false,
         ..TaskTracker::default()
     };
-    assert_eq!(handle_stop(&off, &stop, dir.path()), "");
+    assert_eq!(handle_stop(&off, &stop, Some("s1"), dir.path()), "");
 }
 
 #[test]
@@ -148,7 +151,7 @@ fn a_waiting_task_is_reported_as_waiting_on_the_user_at_a_question() {
     start_task(dir.path(), &slug, false).unwrap();
     crate::task::wait_task(dir.path(), &slug, "needs an answer").unwrap();
     let stop = serde_json::json!({ "last_assistant_message": "Ready?" });
-    let text = handle_stop(&TaskTracker::default(), &stop, dir.path());
+    let text = handle_stop(&TaskTracker::default(), &stop, Some("s1"), dir.path());
     assert!(text.contains("waiting on the user: step-one"), "{text}");
 }
 
@@ -212,7 +215,7 @@ fn an_unreadable_task_store_denies_a_commit_and_skips_the_nudge() {
     // A file where the task store directory belongs: the store cannot be read.
     std::fs::write(dir.path().join("tasks"), "x").unwrap();
     assert!(matches!(
-        crate::task::tracking(dir.path()),
+        crate::task::tracking(dir.path(), Some("s1")),
         Tracking::Unknown(_)
     ));
     let tracker = TaskTracker {
@@ -232,6 +235,6 @@ fn an_unreadable_task_store_denies_a_commit_and_skips_the_nudge() {
         ""
     );
     // The end of the turn says why the reminders did not run.
-    let stop = handle_stop(&tracker, &serde_json::json!({}), dir.path());
+    let stop = handle_stop(&tracker, &serde_json::json!({}), Some("s1"), dir.path());
     assert!(stop.contains("task reminders did not run"), "{stop}");
 }

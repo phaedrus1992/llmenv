@@ -35,21 +35,19 @@ fn wants_transcript(cfg: &SessionLog, scope: EventScope, level: LogLevel) -> boo
     cfg.transcript_wants(level) && scope == EventScope::AgentSession
 }
 
-/// The file-sink path: the configured path, else `default`. A failed default
-/// logs at `warn` with the effect and the fix, so a missing file is not silent.
+/// The file-sink path: the configured path with `~` expanded, else `default`. A failure logs
+/// at `warn` with the effect and the fix, so a missing file is not silent.
 fn resolve_file_sink_path(
     cfg: &SessionLog,
     default: impl FnOnce() -> anyhow::Result<std::path::PathBuf>,
 ) -> Option<std::path::PathBuf> {
-    cfg.file_path().map(std::path::PathBuf::from).or_else(|| {
-        default()
-            .inspect_err(|e| {
-                warn!(
-                    "session_log: file sink disabled, no path resolved, so events are not written to a file: {e}. Fix: set HOME or the session log path."
-                );
-            })
-            .ok()
-    })
+    crate::session_log::file_sink::resolve_file_path_with(cfg.file_path(), default)
+        .inspect_err(|e| {
+            warn!(
+                "session_log: file sink disabled, no path resolved, so events are not written to a file: {e:#}. Fix: set HOME, or set session_log.file.path to an absolute path."
+            );
+        })
+        .ok()
 }
 
 #[cfg(test)]
