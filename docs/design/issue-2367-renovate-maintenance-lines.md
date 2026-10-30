@@ -52,7 +52,7 @@ Edit `.github/renovate.json5` only:
 2. Add the new rule directly after it.
 3. Update the `lockFileMaintenance` comment.
 
-Run the Renovate config validator before opening the PR (`npx --yes --package renovate -- renovate-config-validator .github/renovate.json5`, or the repo's existing way if one exists).
+Run `bash .github/workflows/__tests__/renovate-config.sh` before opening the PR. It validates the config with the pinned Renovate version that CI uses.
 
 ## Tests
 

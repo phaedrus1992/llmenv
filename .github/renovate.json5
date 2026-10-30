@@ -36,11 +36,6 @@
   "semanticCommitType": "chore",
   "semanticCommitScope": "deps",
 
-  // Rust crate updates
-  postUpdateOptions: [
-    'cargoLockPackages',
-  ],
-
   // vulnerabilityAlerts (below) only remediates dependencies Renovate has
   // extracted from a manifest (package.json/Cargo.toml) — it can't attach a
   // fix to a purely transitive/indirect dependency that's only pinned in the

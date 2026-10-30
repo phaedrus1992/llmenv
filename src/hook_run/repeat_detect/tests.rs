@@ -283,6 +283,42 @@ fn corrupt_state_file_fail_soft() {
     );
 }
 
+/// A state file that is ten days old, past the seven-day retention.
+fn write_stale_state_file(rd_dir: &Path, name: &str) -> PathBuf {
+    std::fs::create_dir_all(rd_dir).expect("test");
+    let path = rd_dir.join(name);
+    std::fs::write(&path, b"{}").expect("test");
+    let ten_days_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(10 * 86_400);
+    filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(ten_days_ago))
+        .expect("test");
+    path
+}
+
+#[test]
+fn the_first_save_of_a_session_prunes_stale_state_files() {
+    let dir = TempDir::new().expect("test");
+    let stale = write_stale_state_file(&repeat_detect_state_dir(dir.path()), "old.json");
+
+    SessionState::new("s1").save(dir.path()).expect("save");
+
+    assert!(!stale.exists(), "the first save removes a stale file");
+}
+
+#[test]
+fn a_later_save_of_the_same_session_does_not_scan_for_stale_files() {
+    let dir = TempDir::new().expect("test");
+    SessionState::new("s1")
+        .save(dir.path())
+        .expect("first save");
+    let stale = write_stale_state_file(&repeat_detect_state_dir(dir.path()), "old.json");
+
+    SessionState::new("s1")
+        .save(dir.path())
+        .expect("second save");
+
+    assert!(stale.exists(), "only the first save of a session prunes");
+}
+
 mod proptests {
     use super::*;
     use proptest::prelude::*;
@@ -324,6 +360,29 @@ mod proptests {
             let json = serde_json::to_string(&state).unwrap();
             let back: SessionState = serde_json::from_str(&json).unwrap();
             prop_assert_eq!(back, state);
+        }
+
+        // The counter is saved without an fsync, so a power loss can leave a cut-off file.
+        // Any strict prefix of a saved state, including the empty file, must load as a fresh
+        // streak that can be saved again, not as a read failure that blocks the save.
+        #[test]
+        fn a_truncated_state_file_loads_as_a_fresh_streak(
+            state in arb_session_state(),
+            cut in 0.0..1.0f64,
+        ) {
+            let json = serde_json::to_string(&state).unwrap();
+            let mut end = (json.len() as f64 * cut) as usize;
+            while !json.is_char_boundary(end) {
+                end -= 1;
+            }
+            let dir = TempDir::new().unwrap();
+            let path = session_state_path(dir.path(), "s1");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &json.as_bytes()[..end]).unwrap();
+            let loaded = SessionState::load(dir.path(), "s1");
+            prop_assert_eq!(loaded.consecutive, 0);
+            prop_assert!(loaded.last_signature.is_none());
+            prop_assert!(!loaded.read_failed);
         }
     }
 }

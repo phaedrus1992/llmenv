@@ -1426,15 +1426,21 @@ fn run_inner(
         chunk = apply_memory_config_defaults(chunk, settings.as_ref());
         storage_chunk = apply_memory_config_defaults(storage_chunk, settings.as_ref());
         // A failed project lookup skips this event's memory work, and the agent is told why (#2688).
-        let (wake, memory_notice) = match wake_args(
-            event,
-            settings.as_ref(),
-            stdin_payload,
-            &env.cwd,
-            claude_session_id,
-        ) {
-            Ok(args) => (args, None),
-            Err(e) => {
+        // With no client, no memory call runs, so the lookup (a git subprocess) would go unused.
+        // The dispatch below needs a client too, so a missing project never reaches it.
+        let wake_result = resolved_client.as_ref().map(|_| {
+            wake_args(
+                event,
+                settings.as_ref(),
+                stdin_payload,
+                &env.cwd,
+                claude_session_id,
+            )
+        });
+        let (wake, memory_notice) = match wake_result {
+            None => (WakeUpArgs::default(), None),
+            Some(Ok(args)) => (args, None),
+            Some(Err(e)) => {
                 tracing::error!("memory skipped for {event}: {e:#}");
                 let args = WakeUpArgs {
                     max_tokens: settings.as_ref().and_then(|s| s.wakeup_max_tokens),
