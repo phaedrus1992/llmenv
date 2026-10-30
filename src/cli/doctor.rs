@@ -29,6 +29,7 @@ use token_env::effective_token_efficiency_var;
 mod icm_server;
 use icm_server::icm_server_check;
 mod recall_health;
+mod session_log_path;
 mod tool_availability;
 use tool_availability::run_doctor_tool_availability;
 mod version;
@@ -1772,6 +1773,7 @@ pub(super) fn run_doctor(
             .map_or(&[][..], |(m, _)| m.capabilities.mcp.as_slice()),
     );
     cbm_index::run_doctor_cbm_index(use_color, &config, &active);
+    session_log_path::run_doctor_session_log_path(use_color, &config);
     match crate::paths::state_dir() {
         Ok(state_dir) => {
             background::run_doctor_checkpoints(use_color, &state_dir);

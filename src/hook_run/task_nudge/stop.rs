@@ -25,6 +25,7 @@ pub(super) fn waiting_reminder(tracking: &Tracking) -> String {
 pub(crate) fn handle_stop(
     tracker: &TaskTracker,
     payload: &serde_json::Value,
+    caller: Option<&str>,
     state_dir: &Path,
 ) -> String {
     if !tracker.nudges {
@@ -33,7 +34,7 @@ pub(crate) fn handle_stop(
     let asks = payload["last_assistant_message"]
         .as_str()
         .is_some_and(|m| m.trim_end().ends_with('?'));
-    let tracking = crate::task::tracking(state_dir);
+    let tracking = crate::task::tracking(state_dir, caller);
     match &tracking {
         Tracking::Tracked { wip: Some(_), .. } if asks => waiting_reminder(&tracking),
         Tracking::Tracked { waiting, .. } if asks && !waiting.is_empty() => format!(

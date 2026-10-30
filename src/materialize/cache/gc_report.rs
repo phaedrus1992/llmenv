@@ -44,6 +44,9 @@ impl GcReport {
 /// Same reasoning as [`remove_dir`](super::remove_dir) (#1372): one undeletable entry must not
 /// abort collection of everything after it, since `doctor --gc` reported only
 /// the bare errno and left the rest of the cache untouched.
+///
+/// A removal that stops part-way names a path in the tree that another user owns, with the fix
+/// (#3184).
 pub(crate) fn gc_remove_dir(p: &Path, report: &mut GcReport) {
     gc_remove(
         p,
@@ -59,7 +62,7 @@ pub(crate) fn gc_remove_link(p: &Path, report: &mut GcReport) {
 }
 
 /// Record `p` as removed. A dry run stops there; a real run calls `remove` first, and records a
-/// failure instead when it fails.
+/// failure instead when it fails. The cause names a path that another user owns (#3184).
 fn gc_remove(
     p: &Path,
     report: &mut GcReport,
@@ -73,12 +76,13 @@ fn gc_remove(
     match remove(p) {
         Ok(()) => report.removed.push(p.to_path_buf()),
         Err(e) => {
+            let cause = super::owner::removal_cause(p, &e);
             tracing::error!(
                 path = %p.display(),
-                error = %e,
+                error = %cause,
                 "gc: failed to {action}; skipping"
             );
-            report.record_failure(p.to_path_buf(), e.to_string());
+            report.record_failure(p.to_path_buf(), cause);
         }
     }
 }
