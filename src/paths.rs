@@ -6,8 +6,8 @@ pub use llmenv_paths::{
     cwd_under_prefix, expand_tilde, has_parent_component, is_executable, is_unsafe_join_target,
     is_valid_short_name, read_dir_optional, refuse_symlink, reject_non_regular_file,
     resolve_in_path_list, resolve_on_path, resolve_user_link, state_dir, write_owner_only,
-    write_owner_only_atomic, write_owner_only_executable, write_owner_only_like,
-    write_user_file_atomic,
+    write_owner_only_atomic, write_owner_only_atomic_unsynced, write_owner_only_executable,
+    write_owner_only_like, write_user_file_atomic,
 };
 
 #[cfg(all(test, unix))]
