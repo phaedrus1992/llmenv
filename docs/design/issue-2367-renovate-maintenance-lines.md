@@ -5,6 +5,7 @@
 - **Base branch:** `main` (Renovate reads its config from the default branch only; this is the one exception to the "oldest release branch first" rule for this milestone)
 - **Type:** CI fix (dependency policy)
 - **Decision owner:** ranger confirmed on 2026-10-02 that `release/1.x` and `release/2.x` still promise transitive security fixes
+- **Superseded:** on 2026-10-30 the owner declared `release/1.x` and `release/2.x` unmaintained, and Renovate no longer tracks them (#3170).
 
 This is a spec, not a plan.
 
@@ -41,7 +42,8 @@ So transitive CVEs on the maintenance lines are never raised, and nothing report
    The `lockFileMaintenance` comment names the two lines as covered.
 3. **No new groups or schedules.** #2364 already slowed lock maintenance to daily; more granularity was rejected there.
 4. **Verify from the Renovate side, not by guessing.**
-   After merge, the dependency dashboard issue lists a lock-maintenance entry for each line within a day.
+   After merge, the Mend job log lists a `lock-file-maintenance` branch for each line, and a lock PR opens on each line within a day.
+   The dependency dashboard is off since #3146, so the job log is the place to check.
    If the lines' CI is red for reasons unrelated to the lock, that is a separate issue to file, not a reason to revert.
 
 ## Design
@@ -57,7 +59,7 @@ Run `bash .github/workflows/__tests__/renovate-config.sh` before opening the PR.
 ## Tests
 
 1. The config validator passes.
-2. Manual: after merge, the dependency dashboard shows `Lock file maintenance` entries for `release/1.x` and `release/2.x`.
+2. Manual: after merge, the Mend job log shows `lock-file-maintenance` branches for `release/1.x` and `release/2.x`.
 3. Manual: the first lock PR on each line is automerged when green; if either line's CI is red, file an issue naming the failure.
 
 ## Acceptance criteria
