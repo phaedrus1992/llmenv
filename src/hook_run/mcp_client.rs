@@ -353,7 +353,8 @@ impl McpHttpClient {
         let result = match self.try_call_tool(name, &arguments).await {
             Ok(text) => Ok(text),
             Err(CallToolError::StaleSession(first_err)) => {
-                tracing::warn!(
+                // Expires with the MCP server's session, so it is normal and debug only.
+                tracing::debug!(
                     error = %first_err,
                     tool = %name,
                     "cached MCP session rejected, re-initializing and retrying once"

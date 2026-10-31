@@ -1,6 +1,8 @@
-//! The per-user TMPDIR root that Claude Code creates under `state/tmp` (#1379).
+//! The roots under `state/tmp` that hold unrelated entries: the per-user TMPDIR root that Claude
+//! Code creates (#1379), and the shared `cargo hawk` target folder, with one build per workspace
+//! (#3184).
 //!
-//! The root is never removed, because its mtime does not show use. Its entries are judged one by
+//! A root is never removed, because its mtime does not show use. Its entries are judged one by
 //! one, with the same in-use check as the rest of the sweep.
 
 use std::path::{Path, PathBuf};
@@ -8,20 +10,27 @@ use std::time::{Duration, SystemTime};
 
 use super::walk::{Scan, judge_entry, record_failure};
 
-/// Judge the entries one level down inside Claude Code's `claude-<uid>` root. The root itself is
-/// never a candidate.
-pub(super) fn scan_claude_root(
-    claude_root: &Path,
+/// The `cargo hawk` target folder. It holds one build folder per workspace.
+const HAWK_TARGET_ROOT: &str = "cargo-hawk-target";
+
+/// Whether the entry `name` is a root whose entries are judged one by one.
+pub(super) fn is_split_root(name: &std::ffi::OsStr) -> bool {
+    name == HAWK_TARGET_ROOT || is_claude_root(name)
+}
+
+/// Judge the entries one level down inside a split root. The root itself is never a candidate.
+pub(super) fn scan_split_root(
+    split_root: &Path,
     older_than: Duration,
     in_use: &[PathBuf],
     now: SystemTime,
     scan: &mut Scan,
 ) {
-    let entries = match crate::paths::read_dir_optional(claude_root) {
+    let entries = match crate::paths::read_dir_optional(split_root) {
         Ok(Some(entries)) => entries,
         Ok(None) => return,
         Err(e) => {
-            record_failure(claude_root, &e, scan);
+            record_failure(split_root, &e, scan);
             return;
         }
     };
@@ -29,11 +38,11 @@ pub(super) fn scan_claude_root(
         let entry = match entry {
             Ok(entry) => entry,
             Err(e) => {
-                record_failure(claude_root, &e, scan);
+                record_failure(split_root, &e, scan);
                 continue;
             }
         };
-        let path = claude_root.join(entry.file_name());
+        let path = split_root.join(entry.file_name());
         if in_use.iter().any(|used| used.starts_with(&path)) {
             scan.kept += 1;
             continue;
@@ -44,8 +53,9 @@ pub(super) fn scan_claude_root(
         }
     }
 }
+
 /// Whether `name` is `claude-<uid>`, the per-user TMPDIR root that Claude Code creates.
-pub(super) fn is_claude_root(name: &std::ffi::OsStr) -> bool {
+fn is_claude_root(name: &std::ffi::OsStr) -> bool {
     name.to_str()
         .and_then(|name| name.strip_prefix("claude-"))
         .is_some_and(|uid| !uid.is_empty() && uid.bytes().all(|b| b.is_ascii_digit()))
@@ -143,7 +153,17 @@ mod tests {
 mod name_tests {
     use proptest::prelude::*;
 
-    use super::is_claude_root;
+    use super::{is_claude_root, is_split_root};
+
+    #[cfg(unix)]
+    #[test]
+    fn a_name_that_is_not_utf8_is_never_a_split_root() {
+        use std::os::unix::ffi::OsStrExt;
+        assert!(!is_split_root(std::ffi::OsStr::from_bytes(b"claude-5\xff")));
+        assert!(!is_split_root(std::ffi::OsStr::from_bytes(
+            b"cargo-hawk-target\xff"
+        )));
+    }
 
     #[test]
     fn only_a_claude_prefix_with_digits_is_a_root() {
@@ -169,6 +189,23 @@ mod name_tests {
             prop_assume!(!name.starts_with("claude-"));
 
             prop_assert!(!is_claude_root(std::ffi::OsStr::new(&name)));
+        }
+
+        /// A split root is the hawk target folder, or `claude-` and ASCII digits, and nothing else.
+        #[test]
+        fn a_split_root_is_the_hawk_folder_or_a_claude_uid(
+            name in prop_oneof![
+                Just("cargo-hawk-target".to_owned()),
+                "claude-[0-9]{0,6}",
+                "[a-z0-9-]{0,20}",
+                "claude-[0-9]{1,3}[a-z\u{0660}-\u{0669}]{1,2}",
+            ],
+        ) {
+            let digits = name.strip_prefix("claude-").is_some_and(|uid| {
+                !uid.is_empty() && uid.bytes().all(|b| b.is_ascii_digit())
+            });
+            let expected = name == "cargo-hawk-target" || digits;
+            prop_assert_eq!(is_split_root(std::ffi::OsStr::new(&name)), expected);
         }
     }
 }

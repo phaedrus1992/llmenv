@@ -22,8 +22,8 @@
     "clsx": "2.1.1",
     "midi-player-js": "2.0.17",
     "prism-react-renderer": "2.4.1",
-    "react": "19.3.0",
-    "react-dom": "19.3.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
     "soundfont-player": "0.12.0"
   },
   "devDependencies": {
@@ -32,14 +32,14 @@
   },
   "overrides": {
     "lodash-es": "4.18.1",
-    "serialize-javascript": "7.1.2",
-    "uuid": "14.0.2"
+    "serialize-javascript": "7.1.4",
+    "uuid": "14.0.3"
   },
   "browserslist": {
     "production": [">0.5%", "not dead", "not op_mini all"],
     "development": ["last 3 chrome version", "last 3 firefox version", "last 5 safari version"]
   },
   "engines": {
-    "node": ">=24.21.0"
+    "node": ">=24.22.2"
   }
 }

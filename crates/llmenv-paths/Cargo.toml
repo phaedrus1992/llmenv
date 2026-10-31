@@ -14,10 +14,9 @@ workspace = true
 anyhow = { workspace = true }
 tracing = { workspace = true }
 
-# `O_NOFOLLOW` has a different value on each Unix. The version matches the root crate's pin,
-# so the lock file keeps one copy of rustix.
+# `O_NOFOLLOW` has a different value on each Unix, so the unix target enables the `fs` feature.
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "=1.1.5", features = ["fs"] }
+rustix = { workspace = true, features = ["fs"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

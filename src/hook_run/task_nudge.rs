@@ -190,7 +190,7 @@ pub(crate) fn handle_post_tool_use(
     let Some(tool) = payload["tool_name"].as_str() else {
         return String::new();
     };
-    let tracking = crate::task::tracking(state_dir);
+    let tracking = crate::task::tracking(state_dir, session_id);
     if tool == "AskUserQuestion" {
         return waiting_reminder(&tracking);
     }
@@ -358,7 +358,7 @@ pub(crate) fn handle_pre_tool_use(
             ));
         }
     };
-    let tracking = crate::task::tracking(state_dir);
+    let tracking = crate::task::tracking(state_dir, Some(id));
     let (mut state, reset) = match read_state(&path) {
         Ok(loaded) => loaded,
         Err(e) => return state_unreadable_deny(&e),

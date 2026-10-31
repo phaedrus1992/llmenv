@@ -127,10 +127,11 @@ pub fn command_count(hooks: &serde_json::Value, event: &str, command: &str) -> u
 
 /// Replace the absolute llmenv program that a rendered hook command names with `llmenv`.
 ///
-/// A hook command names llmenv by its PATH location (#2956), which differs per machine.
+/// A hook command names the running llmenv binary (#3081), whose path differs per machine and
+/// per build. A test process runs its own test binary, so that path is what gets redacted.
 pub fn redact_llmenv_program(text: &str) -> String {
-    match llmenv_paths::program::find_on_path("llmenv", std::env::var_os("PATH").as_deref()) {
-        Some(path) => text.replace(&path.display().to_string(), "llmenv"),
-        None => text.to_string(),
+    match std::env::current_exe() {
+        Ok(path) => text.replace(&path.display().to_string(), "llmenv"),
+        Err(_) => text.to_string(),
     }
 }

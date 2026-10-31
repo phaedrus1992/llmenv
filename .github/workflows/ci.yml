@@ -16,6 +16,8 @@ jobs:
   # always runs and each downstream job gates itself via `needs`/`if` instead.
   # Already fixed this way on release/4.x/main (28f225ae); backported here
   # because it was never applied to this branch's copy (#1596).
+  # A gated job also runs when `changes` itself fails: a skipped job counts as
+  # a pass, so a failed gate must not skip a required check.
   #
   # `test` must NOT use a matrix (#1536): the repo ruleset's required status
   # check is named literally "test", but a matrixed job always reports under
@@ -51,10 +53,11 @@ jobs:
               - '.github/workflows/ci.yml'
             workflow_tests:
               - '.github/workflows/**'
+              - '.github/renovate.json5'
               - 'scripts/**'
   test:
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -89,8 +92,8 @@ jobs:
         with:
           path: *rustup-cache-path
           key: *rustup-cache-key
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
-      - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e  # v2.85.4
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037  # v2.87.32
         with:
           tool: cargo-nextest
       - name: Detect CPU count
@@ -102,7 +105,7 @@ jobs:
       - run: bash scripts/check-binary-version.sh
   deny:
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -113,7 +116,7 @@ jobs:
           command: check
   hawk:
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -155,9 +158,12 @@ jobs:
       - id: hawk-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
+          # cargo-hawk runs doctests through cargo-hawk-rustdoc. A cache without it passes on the
+          # run that installs the tool and fails on every run that restores the cache.
           path: |
             ~/.cargo/bin/cargo-hawk
             ~/.cargo/bin/cargo-hawk-driver
+            ~/.cargo/bin/cargo-hawk-rustdoc
           key: ${{ steps.hawk-key.outputs.key }}
       - if: steps.hawk-cache.outputs.cache-hit != 'true'
         env:
@@ -179,7 +185,7 @@ jobs:
     # before this job, so a regression in the logic they cover shipped
     # undetected.
     needs: changes
-    if: needs.changes.outputs.workflow_tests == 'true'
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.workflow_tests == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

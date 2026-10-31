@@ -207,8 +207,9 @@ The network and SSID scope detectors are covered too.
 They are `route`, `arp`, `ip`, `networksetup`, `ipconfig`, `iw`, `nmcli`, and `netsh`.
 When one of them is not found, its scopes do not match.
 llmenv also gives `mcp-proxy` the absolute path of `icm`, because `mcp-proxy` would otherwise do its own `PATH` search.
-The hook commands that llmenv writes into each engine's config also name llmenv by its absolute path (changed in v3.14.0).
-When no absolute `PATH` folder holds llmenv, the hook commands use the bare name `llmenv`, and llmenv logs a warning.
+The hook commands in each engine's config name the running llmenv binary by its absolute path (changed in v3.14.0).
+The bare name `llmenv` is used only when that path is not UTF-8 or the OS cannot report it.
+llmenv then logs an error that names the fix.
 `llmenv doctor` also reports this fallback, with the fix (added in v3.14.0).
 
 If a program is installed but reported as not found, run `llmenv doctor`.

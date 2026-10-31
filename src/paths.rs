@@ -5,7 +5,8 @@ pub use llmenv_paths::{
     config_dir, config_path, create_dir_owner_only, cwd_under_prefix, expand_tilde,
     has_parent_component, is_executable, is_unsafe_join_target, is_valid_short_name,
     read_dir_optional, resolve_user_link, state_dir, write_owner_only, write_owner_only_atomic,
-    write_owner_only_executable, write_owner_only_like, write_user_file_atomic,
+    write_owner_only_atomic_unsynced, write_owner_only_executable, write_owner_only_like,
+    write_user_file_atomic,
 };
 
 /// Makes an open refuse a symlink at the final path component (#2599).

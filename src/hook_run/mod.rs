@@ -18,6 +18,8 @@ pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
 mod engine_rules;
 mod event;
+mod memory_endpoint;
+use memory_endpoint::resolve_memory_client;
 mod notice;
 use bundle_names::recall_bundle_names;
 use engine_rules::blocks_by_exit_code;
@@ -1406,15 +1408,21 @@ fn run_inner(
         chunk = apply_memory_config_defaults(chunk, settings.as_ref());
         storage_chunk = apply_memory_config_defaults(storage_chunk, settings.as_ref());
         // A failed project lookup skips this event's memory work, and the agent is told why (#2688).
-        let (wake, memory_notice) = match wake_args(
-            event,
-            settings.as_ref(),
-            stdin_payload,
-            &env.cwd,
-            claude_session_id,
-        ) {
-            Ok(args) => (args, None),
-            Err(e) => {
+        // With no client, no memory call runs, so the lookup (a git subprocess) would go unused.
+        // The dispatch below needs a client too, so a missing project never reaches it.
+        let wake_result = resolved_client.as_ref().map(|_| {
+            wake_args(
+                event,
+                settings.as_ref(),
+                stdin_payload,
+                &env.cwd,
+                claude_session_id,
+            )
+        });
+        let (wake, memory_notice) = match wake_result {
+            None => (WakeUpArgs::default(), None),
+            Some(Ok(args)) => (args, None),
+            Some(Err(e)) => {
                 tracing::error!("memory skipped for {event}: {e:#}");
                 let args = WakeUpArgs {
                     max_tokens: settings.as_ref().and_then(|s| s.wakeup_max_tokens),
@@ -1761,7 +1769,8 @@ fn recover_from_pipeline_error(
     // as a notice, so the kept text does not hide the skipped memory step.
     eprintln!("llmenv: memory {event} skipped: {error}");
     crate::agent_notice::record(memory_skipped_notice(event, &error));
-    warn!(
+    // The stderr line and the agent notice above already report this, so the log is debug only.
+    tracing::debug!(
         error = %error,
         "hook-run: pipeline failed after hook text was already computed; \
          returning it instead of silently dropping it"
@@ -1954,15 +1963,14 @@ async fn handle_session_log(
         (HookEvent::SessionStart, Some(csid)) => {
             // Best-effort reaping before any session-log activity.
             if let Some(days) = cfg.transcript.as_ref().and_then(|t| t.retention_days) {
-                let log_path = cfg.file_path().map(std::path::PathBuf::from).or_else(|| {
-                    crate::session_log::default_file_path()
-                        .inspect_err(|e| {
-                            tracing::warn!(
-                "session_log reaper: cannot resolve the default path, so retention is skipped: {e}. Fix: set HOME or the session log path."
-            )
-                        })
-                        .ok()
-                });
+                let log_path = crate::session_log::resolve_file_path(cfg.file_path())
+                    .inspect_err(|e| {
+                        tracing::warn!(
+                            "session_log reaper: cannot resolve the session log path, so \
+                             retention is skipped: {e:#}. Fix: set HOME or session_log.file.path."
+                        );
+                    })
+                    .ok();
                 if let Some(p) = log_path.as_ref() {
                     crate::session_log::reap_session_log(p, days);
                 }
@@ -2154,56 +2162,6 @@ fn default_memory_hook() -> MemoryHookSettings {
         default_importance: None,
         global_topics: crate::config::Memory::default().global_topics,
     }
-}
-
-/// A resolved memory-backend client plus the active `features.memory`
-/// entry's hook settings (#1216, #2249) — the two travel together since both
-/// come from the same resolved endpoint.
-struct ResolvedMemoryClient {
-    client: McpHttpClient,
-    settings: MemoryHookSettings,
-}
-
-/// Resolve (or reuse from `cache`) the MCP client for the active memory
-/// backend, for lifecycle-hook events. Returns `Option`, never `Result`: no
-/// cause of an unresolved backend — including a bundle-merge failure
-/// (#1132) — is fatal to the hook event. Memory actions are simply skipped;
-/// session logging (independent of the memory backend) still proceeds. A
-/// caller that instead wrote `memory_url(...)?.into_url()` would propagate
-/// `memory_url`'s own `Err` via that leading `?` before `.into_url()` ever
-/// ran, silently reintroducing the abort this function exists to prevent
-/// (#1139).
-fn resolve_memory_client(
-    config: &crate::config::Config,
-    config_dir: &std::path::Path,
-    active: &crate::scope::ActiveScopes,
-    event: impl std::fmt::Display,
-    cache: &'static OnceLock<Mutex<HashMap<String, McpHttpClient>>>,
-) -> Option<ResolvedMemoryClient> {
-    let (url, settings) = match memory_url(config, config_dir, active)
-        .and_then(MemoryEndpoint::into_url_and_settings)
-    {
-        Ok(pair) => pair,
-        Err(e) => {
-            eprintln!("llmenv: memory {event} skipped: {e}");
-            return None;
-        }
-    };
-    let clients = cache.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut clients = clients.lock().unwrap_or_else(|e| e.into_inner());
-    let client = match clients.entry(url) {
-        std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
-        std::collections::hash_map::Entry::Vacant(entry) => {
-            match McpHttpClient::new(entry.key().clone(), HOOK_TIMEOUT) {
-                Ok(client) => entry.insert(client).clone(),
-                Err(e) => {
-                    eprintln!("llmenv: memory {event} skipped: invalid memory backend URL: {e}");
-                    return None;
-                }
-            }
-        }
-    };
-    Some(ResolvedMemoryClient { client, settings })
 }
 
 /// Find the resolved memory backend's HTTP URL for the active tags, or the

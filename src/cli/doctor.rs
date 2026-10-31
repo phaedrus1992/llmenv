@@ -1,3 +1,5 @@
+mod cache_check;
+
 use crate::adapter::AgentAdapter;
 use crate::config::{Bundle, Capabilities, Config};
 use crate::paths;
@@ -29,6 +31,7 @@ use token_env::effective_token_efficiency_var;
 mod icm_server;
 use icm_server::icm_server_check;
 mod recall_health;
+mod session_log_path;
 mod tool_availability;
 use tool_availability::run_doctor_tool_availability;
 mod version;
@@ -947,15 +950,7 @@ pub(super) fn run_doctor(
     // with a different uid, the same regression #1196 walked back for
     // codebase_memory.index_path (#1198).
     let cache_dir = PathBuf::from(crate::paths::expand_tilde(&config.cache.cache_dir)?);
-    if cache_dir.exists() {
-        let probe = cache_dir.join(".llmenv-doctor-probe");
-        crate::paths::write_owner_only(&probe, b"").context("cache directory not writable")?;
-        if let Err(e) = std::fs::remove_file(&probe) {
-            tracing::error!("could not remove doctor probe {} ({e})", probe.display());
-        }
-    } else {
-        crate::paths::create_dir_owner_only(&cache_dir).context("cache directory not writable")?;
-    }
+    cache_check::check_cache_dir_writable(&cache_dir)?;
     eprintln!(
         "{pass} Cache directory is writable: {}",
         cache_dir.display()
@@ -1514,6 +1509,7 @@ pub(super) fn run_doctor(
             .map_or(&[][..], |(m, _)| m.capabilities.mcp.as_slice()),
     );
     cbm_index::run_doctor_cbm_index(use_color, &config, &active);
+    session_log_path::run_doctor_session_log_path(use_color, &config);
     match crate::paths::state_dir() {
         Ok(state_dir) => {
             background::run_doctor_checkpoints(use_color, &state_dir);

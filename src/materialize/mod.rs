@@ -134,7 +134,8 @@ pub fn materialize_with_mode(
             }
             // Only a directory is a copy that can be used. A file at `dest` is an error (#2657).
             if dest.is_dir() {
-                tracing::warn!(
+                // A concurrent writer that won the race is a normal outcome, so this is debug only.
+                tracing::debug!(
                     "rename into {} failed, so the copy already there is used: {e}",
                     dest.display()
                 );

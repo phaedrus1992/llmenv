@@ -75,6 +75,8 @@ With `null`, `llmenv clean` (and the deprecated `llmenv doctor --gc`) skips the 
 
 `llmenv clean` applies the same window to the state temp folder, `state/tmp`, which `TMPDIR` points at, and to session-log rotations (see `session_log` below).
 An entry in `state/tmp` is kept while a process holds a file open in it.
+(changed in v3.14.0) The age of a cache entry and of a `state/tmp` entry comes from the newest file in it, not from folder mtimes.
+So a tree unpacked with its old file mtimes kept (`tar -x`, `cp -p`) looks old as soon as no process holds a file open in it.
 That check uses `lsof`, and llmenv runs it only when an entry is old enough to remove.
 When `lsof` cannot run, the sweep stops and names the fix, so no entry is removed on a guess.
 
@@ -1270,7 +1272,7 @@ session_log:
 | `transcript` | no | Record into ICM's transcript store via the ICM MCP; default `true` |
 | `file` | no | Mirror the same event stream to a local JSONL file; default `false` |
 | `verbose` | no | Also capture `UserPromptSubmit`/`PreToolUse`/`PostToolUse`/`Notification`/`Stop`/`SubagentStop`/`PreCompact` events, not just the lifecycle + scope header; default `false` |
-| `path` | no | Override the file sink's path; default `<state_dir>/session-log.jsonl` |
+| `path` | no | Override the file sink's path; default `<state_dir>/session-log.jsonl`. A leading `~` is expanded. (changed in v3.14.0) A relative path turns the file sink off with an error, because a hook runs in a repository |
 | `max_content_bytes` | no | Cap each event's `content` field to this many bytes before it's written/recorded; default `16384` |
 
 (added in v3.13.0)
@@ -1280,9 +1282,15 @@ It keeps three rotated files, `session-log.jsonl.1` to `session-log.jsonl.3`, an
 The first line of the new file names the rotated file that holds the older lines.
 `llmenv clean` removes rotated files older than `cache_retention_hours`.
 
-The configured file path must be a regular file path. If it is a symbolic link,
-llmenv leaves the link and its target untouched and reports a fix hint; point
-`session_log.path` at a regular file or remove the link.
+(changed in v3.14.0) The sink opens the file without following a symlink.
+The active path must be a regular file.
+A symlink, FIFO, or device is rejected before rotation or append; a rejected symlink and its target are left untouched.
+The error names the path and recommends setting `session_log.file.path` to a regular file or removing the invalid entry.
+Without a path override, the default is `<state_dir>/session-log.jsonl`.
+The first append failure is logged at error level; later failures for the same path are logged at debug level.
+`llmenv doctor` also names an invalid path and its fix.
+On Unix, no-follow prevents symlink substitutions, nonblocking prevents FIFO opens from hanging, and the opened file is verified as regular.
+Other platforms rely on the path check, so a symlink swapped in before open may still be followed and a newly substituted FIFO may block.
 
 For finer control, `transcript` can be a mapping instead of a boolean:
 

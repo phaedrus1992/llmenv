@@ -314,15 +314,9 @@ pub(crate) fn write_first_class_skills(
         let dest = skills_dir.join(&skill.name);
         let written = super::claude_code::copy_dir_owner_only(src, &dest)?;
         // Track relative paths (relative to `out`) in the owned set.
-        // strip_prefix is infallible here: copy_dir_owner_only writes under
-        // `dest` which is `out/skills/<name>`, so every returned path starts
-        // with `out`. The debug_assert guards this invariant in test builds.
+        // A returned path outside `out` is an error in every build, so the strip_prefix
+        // failure below is never silent.
         for abs_path in written {
-            debug_assert!(
-                abs_path.starts_with(out),
-                "copy_dir_owner_only returned a path outside `out`: {}",
-                abs_path.display()
-            );
             let rel = abs_path.strip_prefix(out).map_err(|_| {
                 anyhow::anyhow!(
                     "internal error: written path '{}' is not under output dir '{}'",

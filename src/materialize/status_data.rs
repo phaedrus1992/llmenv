@@ -98,7 +98,7 @@ pub fn collect_status_data(
             config_stale: config_stale
                 .and_then(|inputs| collect_config_stale(inputs.booted_hash, inputs.current_hash)),
             cache: Some(collect_cache(cache_root, hashing)),
-            session_log: collect_session_log(),
+            session_log: collect_session_log(config),
             tasks: Some(collect_tasks()),
             unreadable: false,
         },
@@ -337,14 +337,15 @@ fn collect_config_stale(booted: Option<&str>, current: &str) -> Option<bool> {
     }
 }
 
-/// Best-effort session-log line count.
-fn collect_session_log() -> Option<u64> {
-    let path = match crate::session_log::file_sink::default_file_path() {
+/// Best-effort session-log line count, of the configured `session_log.file.path` or the default.
+fn collect_session_log(config: &Config) -> Option<u64> {
+    let configured = config.session_log_resolved();
+    let path = match crate::session_log::resolve_file_path(configured.file_path()) {
         Ok(path) => path,
         Err(e) => {
             tracing::warn!(
-                "session log stat collection failed, so the line count is empty: {e}. Fix: check \
-                 that the session log folder is readable."
+                "session log stat collection failed, so the line count is empty: {e:#}. Fix: \
+                 check session_log.file.path, and that the session log folder is readable."
             );
             return None;
         }
@@ -1062,5 +1063,19 @@ mod tests {
 
         let data = collect_tasks_from_state_dir(dir.path(), PROJECT);
         assert_eq!(data.current.as_deref(), Some("In progress"));
+    }
+
+    // A configured session_log.file.path is the file the widget counts, not the default one.
+    #[test]
+    fn the_session_log_count_reads_the_configured_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("custom.jsonl");
+        std::fs::write(&path, "{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n").unwrap();
+        let yaml = format!(
+            "session_log:\n  file:\n    enabled: true\n    path: {}\n",
+            path.display()
+        );
+        let config: Config = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(collect_session_log(&config), Some(3));
     }
 }

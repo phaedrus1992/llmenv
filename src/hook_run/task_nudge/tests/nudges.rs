@@ -141,7 +141,7 @@ fn a_stop_with_queued_tasks_and_none_started_names_the_next_one() {
     add(dir.path(), &session, "Step one");
     for message in ["Ready?", "Done."] {
         let stop = serde_json::json!({ "last_assistant_message": message });
-        let text = handle_stop(&TaskTracker::default(), &stop, dir.path());
+        let text = handle_stop(&TaskTracker::default(), &stop, Some("s1"), dir.path());
         assert!(
             text.contains("llmenv task start step-one"),
             "{message}: {text}"

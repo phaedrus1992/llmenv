@@ -25,10 +25,11 @@ pub(crate) enum Tracking {
     },
 }
 
-/// The tracking state of the current project, over every open session of the project: a task in
-/// progress in any of them counts. A read error is [`Tracking::Unknown`], so a hook never nudges
-/// on a guess.
-pub(crate) fn tracking(state_dir: &Path) -> Tracking {
+/// The tracking state of the current project for the conversation `caller`, over every open
+/// session of the project that [`session::Session::visible_to`] the caller: a task in progress in
+/// any of them counts. A session that another conversation owns does not (#3185). A read error is
+/// [`Tracking::Unknown`], so a hook never nudges on a guess.
+pub(crate) fn tracking(state_dir: &Path, caller: Option<&str>) -> Tracking {
     let project = match project::current_tag() {
         Ok(project) => project,
         Err(e) => {
@@ -47,7 +48,11 @@ pub(crate) fn tracking(state_dir: &Path) -> Tracking {
             return Tracking::Unknown(format!("{e:#}"));
         }
     };
-    let ids: Vec<String> = sessions.into_iter().map(|s| s.id).collect();
+    let ids: Vec<String> = sessions
+        .into_iter()
+        .filter(|s| s.visible_to(caller))
+        .map(|s| s.id)
+        .collect();
     if ids.is_empty() {
         return Tracking::NoSession;
     }

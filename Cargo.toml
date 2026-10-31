@@ -11,15 +11,33 @@ resolver = "2"
 [workspace.dependencies]
 anyhow = "=1.0.104"
 ipnet = "=2.12.2"
+if-addrs = "=0.15.0"
 serde = { version = "=1.0.229", features = ["derive"] }
-serde_json = "=1.0.151"
+serde_json = "=1.0.154"
 serde_yaml = { package = "serde_yaml_ng", version = "=0.10.0" }
+# Reads the [package] and [tool.*] tables of scanned Cargo.toml and pyproject.toml files for
+# onboarding (#2785). No writer: onboarding never re-serializes a manifest.
+toml = { version = "=1.1.8", default-features = false, features = ["std", "parse", "serde"] }
 thiserror = "=2.0.21"
 tracing = "=0.1.44"
-proptest = "=1.11.0"
+proptest = "=1.12.0"
 pulldown-cmark = "=0.13.5"
 tempfile = "=3.27.0"
-globset = "=0.4.20"
+globset = "=0.4.21"
+walkdir = "=2.5.0"
+sha2 = "=0.11.1"
+anstyle = "=1.0.14"
+url = "=2.5.8"
+humantime = "=2.4.0"
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "sync"] }
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "json", "blocking"] }
+# Hostname via the uname(2) syscall instead of spawning the `hostname` binary on
+# every hook-run ("system" enables uname). "process" enables kill_process_group
+# for #1165's consolidation-timeout group-kill: a direct syscall instead of
+# fork+exec'ing `kill`, which narrows the already-small window in which a
+# reaped pid could be recycled before the group-kill fires. rustix is already
+# in the tree transitively. No unsafe.
+rustix = { version = "=1.1.6", features = ["fs", "process", "system", "time"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -58,35 +76,27 @@ llmenv-util = { path = "crates/llmenv-util", version = "3.13.0" }
 clap = { version = "=4.6.7", features = ["derive"] }
 clap_complete = "=4.6.11"
 serde = { version = "=1.0.229", features = ["derive"] }
-serde_json = "=1.0.151"
+serde_json = "=1.0.154"
 serde_yaml = { package = "serde_yaml_ng", version = "=0.10.0" }
-# Reads the [package] and [tool.*] tables of scanned Cargo.toml and pyproject.toml files for
-# onboarding (#2785). No writer: onboarding never re-serializes a manifest.
-toml = { version = "=1.1.8", default-features = false, features = ["std", "parse", "serde"] }
-tokio = { version = "=1.53.3", features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "sync"] }
-tracing = "=0.1.44"
+toml = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "json"] }
 thiserror = "=2.0.21"
 anyhow = "=1.0.104"
-walkdir = "=2.5.0"
-sha2 = "=0.11.0"
+walkdir = { workspace = true }
+sha2 = { workspace = true }
 hex = "=0.4.3"
-humantime = "=2.4.0"
-jiff = { version = "=0.2.37", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
-anstyle = "=1.0.14"
+humantime = { workspace = true }
+jiff = { version = "=0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
+anstyle = { workspace = true }
 globset = { workspace = true }
-schemars = "=1.2.2"
-reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "json", "blocking"] }
-url = "=2.5.8"
+schemars = "=1.2.3"
+reqwest = { workspace = true }
+url = { workspace = true }
 ipnet = { workspace = true }
-if-addrs = "=0.15.0"
-# Hostname via the uname(2) syscall instead of spawning the `hostname` binary on
-# every hook-run ("system" enables uname). "process" enables kill_process_group
-# for #1165's consolidation-timeout group-kill: a direct syscall instead of
-# fork+exec'ing `kill`, which narrows the already-small window in which a
-# reaped pid could be recycled before the group-kill fires. rustix is already
-# in the tree transitively. No unsafe.
-rustix = { version = "=1.1.5", features = ["fs", "process", "system", "time"] }
+if-addrs = { workspace = true }
+rustix = { workspace = true }
 tempfile = "=3.27.0"
 pulldown-cmark = { workspace = true }
 dialoguer = "=0.12.0"
@@ -98,9 +108,9 @@ keychain-stub = []
 
 [dev-dependencies]
 assert_cmd = "=2.2.2"
-insta = { version = "=1.48.0", features = ["yaml"] }
+insta = { version = "=1.49.0", features = ["yaml"] }
 predicates = "=3.1.4"
-proptest = "=1.11.0"
+proptest = "=1.12.0"
 criterion = { version = "=0.8.2", features = ["html_reports"] }
 wiremock = "=0.6.5"
 filetime = "=0.2.29"

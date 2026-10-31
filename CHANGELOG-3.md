@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Save the repeat-detect counter and the recall health ring without a disk flush. The flush (`fsync`) costs about 5 ms per write on macOS, so a `PreToolUse` hook runs about 5 ms faster. A power loss can leave one of these two files empty, and the next hook replaces it with a fresh one. Other state files keep the flush. [perf:hook-run] [#3127]
+- Scan the repeat-detect state directory for stale files once per session, on the first save, and not on every tool call. [perf:hook-run] [#3127]
+- Skip the project lookup (a git subprocess) at `SessionStart` and `TurnStart` when no memory backend resolved, so `TurnStart` with memory off runs about 25 ms faster. A run with no memory backend no longer shows the notice that memory was skipped because git could not run. [perf:hook-run] [#3127]
 - Show `?` for the prunable cache size in the statusline when the size cannot be read. The field no longer disappears. [feat:statusline] [#3054]
 - Skip a write when an owner-only file already holds the same bytes at the same mode, so a repeat `llmenv regenerate` leaves current files untouched. An existing file with a looser mode, such as 0644, is now tightened to 0600 on its next write. [#3020, #3024]
 - Run llmenv's PreToolUse guards on every Crush tool call, including the commit gate, cd guard, read-once, repeat detection, and slippage. Crush tool names map to Claude Code's names first, so these guards now apply to Crush sessions. [feat:crush]
@@ -34,9 +37,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Send a failed opencode tool call to `PostToolUseFailure`, not `PostToolUse`, as Claude Code does. Bundle hooks on `PostToolUse` no longer see failed calls. [fix:opencode]
 - Skip the `lsof` call in `llmenv doctor` and `llmenv clean` when no entry under `state/tmp` or `state/codebase-memory` is old enough to remove. `lsof` can take up to a minute on a hung mount. [perf:doctor] [#3039]
 - Show warnings on stderr by default. `RUST_LOG` still overrides the level. [fix:cli] [#3061]
+- Name the running llmenv binary in hook commands, not the first `llmenv` on `PATH`. A project folder on `PATH` can no longer put its own `llmenv` into an engine config. [fix:hook] [#3081]
+- Log a warning on a hook or statusline path only for a degraded result. A stale MCP session, a read-once path that does not exist yet, and a pipeline failure that is already shown on stderr now log at debug level. [#3082]
 
 ### Fixed
 
+- Reject symlink, FIFO, and device session-log paths before rotation or append. The fix hint names `session_log.file.path`; Unix opens also reject link and FIFO substitutions. [fix:session-log] [#3117]
+- Judge a symlink in state-file pruning by the link's own age, and remove the link itself. A fresh link to an old file is no longer pruned, and an old link is pruned without touching its target. [fix:hook] [#3094, #3108]
+- Stop a corrupt session map from replacing the first aside copy when the aside name cannot be checked. The map stays in place and the error names it. [fix:hook] [#3108]
+- Refuse a `known_files` key that contains `..` in every build. A release build no longer joins it into the cache path. [fix:adapter] [#3107]
 - Stop showing `pr: gh failed` on a branch with no open PR. Real `gh` prints "No pull requests found" with a capital N, and that now counts as no PR. [fix:statusline] [#2975]
 - Print a hint to add the next step when `llmenv task done` closes the last open task in a session. The all-done stop reminder now says that a question blocks only its own step, and that a running CI job is not a stop point. `task session start` without tasks suggests adding the known steps. [fix:task] [#2987]
 - Stop reading the keychain on every shell prompt when the credential is expired. A dead read is held back for five minutes, and a dead folder credential is no longer written over the cache. [fix:auth] [#3008]
@@ -78,6 +87,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Refuse a symlinked cache directory in `llmenv clean`, and name the real folder. [fix:statusline] [#3089]
 - Show an error for an unreadable `.git` in the statusline, instead of the branch of an enclosing repository. [fix:statusline] [#3089]
 - Scrub credentials and control bytes from `gh` errors in the statusline log. [fix:statusline] [#3089]
+- Stop a session-log file that cannot be written (a symlink, no permission, a full disk) from crashing llmenv with a stack overflow. The first failure for the path is logged as an error, and later ones at debug level. [fix:session-log] [#3136]
+- Check `session_log.file.path` in `llmenv doctor`: a symlink, FIFO, socket, device, or folder there is named with the fix. `llmenv clean` now also removes old rotations of a configured path. The `session_log` status-line widget now counts the configured file. Hooks now expand a leading `~` in the path, so hook events no longer go to a `~` folder in the working directory. A relative path turns the file log off with an error, because it resolves against the repository in a hook. See [`session_log:`](https://phaedrus1992.github.io/llmenv/docs/configuration#session_log). [fix:doctor] [#3138]
+- Stop the question reminder at the end of a turn from naming a task of a session that another conversation owns. The commit gate uses the same rule, so another conversation's task no longer counts as tracked work. [fix:task] [#3185]
+- Remove old builds from `state/tmp` that a partial delete kept. An entry's age, in `state/tmp` and in the cache, now comes from its newest file, not from folder mtimes, and each build in `cargo-hawk-target` is judged alone. A removal that stops part-way names the path that another user owns. [fix:gc] [#3184]
+- Refuse a link at a state or config folder that llmenv sets to owner-only, instead of changing the link's target. A folder left unreadable by an earlier bug is still repaired. [fix:paths] [#3137]
+- Stop a corrupt session-map copy from being lost when two llmenv processes move a map aside at once. A failed cleanup of the empty reservation is now reported to the agent. [fix:session-log] [#3121]
+- Refuse a trace field named `v` or `op` in release builds, not only debug builds. The trace line is dropped, and the error is logged. [fix:trace] [#3118]
+- Report a memory backend with an invalid URL to the agent, not only on stderr. A bundle with missing content is still reported on stderr only, until a follow-up lands. [fix:hook] [#3129]
+- Remove a dangling link at the read-once cache folder, and stop pruning a stale lock whose session file is a dangling link. Undo now removes a link to a folder and keeps the folder. [fix:state] [#3116]
+- Make `llmenv doctor` refuse a link at the cache directory instead of writing its probe into the link's target. [fix:hook] [#3116]
 
 ### Security
 
@@ -1432,9 +1451,6 @@ the rc.1 and rc.2 sections below.
   superseded by the built-in context-mode feature. (#490, removes #464)
 
 ### Fixed
-
-- Reject symbolic links at the session-log path without rotating or writing through them
-  ([session-log docs](https://phaedrus1992.github.io/llmenv/docs/configuration#session_log), #3117)
 
 - Fix marketplace and plugin-payload sync returning a broken clone with unstable cache key when
   git HEAD cannot be resolved. Now detects and errors on broken clones (after clone or pull),

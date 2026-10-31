@@ -24,6 +24,12 @@ use anyhow::Context as _;
 /// folder that holds it (#1066, #2949). So a folder swapped for a symlink during the walk cannot
 /// redirect it.
 pub(super) fn move_dir_newest_wins(src: &Path, dst: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    // A link at `dst` is refused before the owner-only create, which also refuses it (#3137).
+    anyhow::ensure!(
+        !std::fs::symlink_metadata(dst).is_ok_and(|md| md.file_type().is_symlink()),
+        "durable transcript dir {} is not a real directory",
+        dst.display()
+    );
     crate::adapter::skills::create_dir_owner_only(dst)
         .with_context(|| format!("creating {}", dst.display()))?;
     // `create_dir_owner_only`/`create_dir_all` is a no-op (success) when `dst`

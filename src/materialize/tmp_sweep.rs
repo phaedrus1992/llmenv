@@ -438,4 +438,104 @@ mod tests {
             }
         );
     }
+
+    /// Set the mtime of the folders under `path`, and of `path`, to now. Files keep theirs.
+    fn touch_dirs(path: &Path) {
+        for entry in fs::read_dir(path).unwrap() {
+            let child = entry.unwrap().path();
+            if child.is_dir() {
+                touch_dirs(&child);
+            }
+        }
+        File::open(path)
+            .unwrap()
+            .set_modified(SystemTime::now())
+            .unwrap();
+    }
+
+    // #3184: a partial delete or a scan changes folder mtimes, so they do not show use.
+    #[test]
+    fn an_entry_with_old_files_and_fresh_folders_is_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let entry = root.path().join("build");
+        fs::create_dir_all(entry.join("deep").join("deeper")).unwrap();
+        fs::write(entry.join("deep").join("f"), b"x").unwrap();
+        age_tree(&entry, old());
+        touch_dirs(&entry);
+
+        let report = sweep(root.path(), DAY * 7, &[], false).unwrap();
+
+        assert_eq!(
+            report.removed,
+            vec![fs::canonicalize(root.path()).unwrap().join("build")]
+        );
+    }
+
+    #[test]
+    fn an_entry_with_a_fresh_file_is_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let entry = root.path().join("build");
+        fs::create_dir_all(entry.join("deep")).unwrap();
+        fs::write(entry.join("deep").join("old"), b"x").unwrap();
+        age_tree(&entry, old());
+        fs::write(entry.join("deep").join("new"), b"x").unwrap();
+
+        let report = sweep(root.path(), DAY * 7, &[], false).unwrap();
+
+        assert!(report.removed.is_empty(), "{:?}", report.removed);
+    }
+
+    #[test]
+    fn a_fresh_folder_tree_with_no_file_is_kept() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("empty").join("sub")).unwrap();
+
+        let report = sweep(root.path(), DAY * 7, &[], false).unwrap();
+
+        assert!(report.removed.is_empty(), "{:?}", report.removed);
+    }
+
+    #[test]
+    fn an_old_folder_tree_with_no_file_is_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let entry = root.path().join("empty");
+        fs::create_dir_all(entry.join("sub")).unwrap();
+        age_tree(&entry, old());
+
+        let report = sweep(root.path(), DAY * 7, &[], false).unwrap();
+
+        assert_eq!(report.removed.len(), 1);
+    }
+
+    // #3184: one fresh workspace build must not keep the old builds beside it.
+    #[test]
+    fn each_build_in_the_hawk_target_root_is_judged_alone() {
+        let root = tempfile::tempdir().unwrap();
+        let hawk = root.path().join("cargo-hawk-target");
+        for name in ["old-build", "fresh-build"] {
+            fs::create_dir_all(hawk.join(name)).unwrap();
+            fs::write(hawk.join(name).join("f"), b"x").unwrap();
+        }
+        age_tree(&hawk, old());
+        fs::write(hawk.join("fresh-build").join("g"), b"x").unwrap();
+
+        let report = sweep(root.path(), DAY * 7, &[], false).unwrap();
+
+        let resolved = fs::canonicalize(&hawk).unwrap();
+        assert_eq!(report.removed, vec![resolved.join("old-build")]);
+        assert!(hawk.join("fresh-build").exists());
+    }
+
+    #[test]
+    fn an_old_hawk_target_root_is_kept_when_empty() {
+        let root = tempfile::tempdir().unwrap();
+        let hawk = root.path().join("cargo-hawk-target");
+        fs::create_dir(&hawk).unwrap();
+        age_tree(&hawk, old());
+
+        let report = sweep(root.path(), DAY * 7, &[], false).unwrap();
+
+        assert!(report.removed.is_empty());
+        assert!(hawk.exists());
+    }
 }

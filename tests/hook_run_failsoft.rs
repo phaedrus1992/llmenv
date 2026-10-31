@@ -1417,3 +1417,16 @@ fn session_start_reports_a_failing_memory_call_to_the_agent() {
         .stdout(predicate::str::contains("could not run a memory action"))
         .stdout(predicate::str::contains("icm_wake_up returned HTTP 500"));
 }
+
+/// A configured backend with an invalid URL is an agent notice, not only a stderr line. Hook
+/// stderr never reaches the agent (#3129).
+#[test]
+fn an_invalid_memory_backend_url_is_a_notice_on_stdout() {
+    let (dir, config_path) = setup_config(&config_with_memory_addr("no-such-host.invalid", 9));
+
+    hook_cmd(dir.path(), &config_path, "session_start")
+        .timeout(Duration::from_secs(25))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("memory session_start skipped"));
+}

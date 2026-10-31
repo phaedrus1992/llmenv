@@ -14,7 +14,8 @@ pub(crate) mod state;
 pub mod tracing_layer;
 pub(crate) mod transcript;
 
-pub use file_sink::{FileSink, default_file_path};
+pub(crate) use file_sink::default_file_path;
+pub use file_sink::{FileSink, resolve_file_path};
 pub(crate) use reaper::reap_session_log;
 pub(crate) use scope_header::{ScopeContext, scope_header_content, scope_metadata_json};
 pub use tracing_layer::FileLogLayer;

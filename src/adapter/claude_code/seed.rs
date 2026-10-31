@@ -212,7 +212,8 @@ pub(crate) fn seed_status_line(out: &std::path::Path) -> anyhow::Result<()> {
                 None => {}
                 // A null entry is a user's setting, so it is kept. The log says why it is kept.
                 Some(serde_json::Value::Null) => {
-                    tracing::warn!(
+                    // A kept user setting is not a degraded result, so this is debug only.
+                    tracing::debug!(
                         "statusLine is null in {}, so llmenv does not seed the default. Fix: \
                          remove the statusLine key, and the next run seeds the default.",
                         settings_path.display()

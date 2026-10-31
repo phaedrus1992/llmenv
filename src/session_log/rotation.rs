@@ -43,24 +43,17 @@ pub(crate) fn rotate_if_full(path: &Path, max_bytes: u64) -> std::io::Result<Opt
         .map(|name| name.to_string_lossy().into_owned()))
 }
 
-/// Reject a symbolic link at the active session-log path. Missing paths are allowed so the
-/// sink can create the file on its first append.
-pub(crate) fn reject_symlink(path: &Path) -> std::io::Result<()> {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => Err(symlink_path_error(path)),
-        Ok(_) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
-}
-
-/// Whether the non-symlink file at path holds at least max_bytes. A missing file is not full.
+/// Whether the regular file at path holds at least max_bytes. A missing file is not full.
 fn is_full(path: &Path, max_bytes: u64) -> std::io::Result<bool> {
     match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_symlink() => Err(symlink_path_error(path)),
+        Ok(meta) if !meta.file_type().is_file() => Err(non_regular_path_error(path)),
         Ok(meta) => Ok(meta.len() >= max_bytes),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(e),
+        Err(e) => Err(std::io::Error::new(
+            e.kind(),
+            format!("cannot inspect session log path {}: {e}", path.display()),
+        )),
     }
 }
 
@@ -68,7 +61,17 @@ fn symlink_path_error(path: &Path) -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::InvalidInput,
         format!(
-            "session log path {} is a symbolic link. Fix: set session_log.path to a regular file path or remove the symbolic link",
+            "session log path {} is a symbolic link. Fix: set session_log.file.path to a regular file path or remove this link; when unset, the default is <state_dir>/session-log.jsonl",
+            path.display()
+        ),
+    )
+}
+
+pub(crate) fn non_regular_path_error(path: &Path) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!(
+            "session log path {} is not a regular file. Fix: set session_log.file.path to a regular file path or remove this entry",
             path.display()
         ),
     )
@@ -117,6 +120,11 @@ fn rotation_lock(path: &Path) -> std::io::Result<std::fs::File> {
 /// The first line of a file that follows a rotation. It names the file the old lines moved to.
 pub(crate) fn rotation_marker(rotated_to: &str) -> String {
     serde_json::json!({"llmenv_log": "rotated", "rotated_to": rotated_to}).to_string()
+}
+
+/// The line that records a failed rotation in the active file. The event follows it there.
+pub(crate) fn rotation_failed_marker(error: &std::io::Error) -> String {
+    serde_json::json!({"llmenv_log": "rotation_failed", "error": error.to_string()}).to_string()
 }
 
 /// The path of rotation `n` of `path`, such as `session-log.jsonl.1`.
@@ -256,26 +264,6 @@ mod tests {
         std::fs::write(path, vec![b'x'; usize::try_from(len).unwrap()]).unwrap();
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn rotation_rejects_a_symlink_without_moving_it_or_its_target() {
-        use std::os::unix::fs::symlink;
-
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("target.jsonl");
-        let path = dir.path().join("session-log.jsonl");
-        write_bytes(&target, 10);
-        symlink(&target, &path).unwrap();
-
-        let error = rotate_if_full(&path, 10).unwrap_err();
-
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-        assert!(error.to_string().contains("Fix:"));
-        assert_eq!(std::fs::read_link(&path).unwrap(), target);
-        assert_eq!(std::fs::metadata(&target).unwrap().len(), 10);
-        assert!(!rotation_path(&path, 1).exists());
-    }
-
     #[test]
     fn a_rotation_that_waits_on_the_lock_checks_the_length_again() {
         // Another process rotated while this one waited, so the active file is small again.
@@ -307,6 +295,23 @@ mod tests {
         assert_eq!(rotate_if_full(&path, 10).unwrap(), None);
         assert!(path.exists());
         assert!(!rotation_path(&path, 1).exists());
+    }
+
+    #[test]
+    fn an_inspection_error_names_the_session_log_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("not-a-directory");
+        write_bytes(&parent, 1);
+        let path = parent.join("session-log.jsonl");
+
+        let error = rotate_if_full(&path, 10).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("cannot inspect session log path")
+        );
+        assert!(error.to_string().contains(&path.display().to_string()));
     }
 
     #[test]

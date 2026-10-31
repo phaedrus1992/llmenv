@@ -428,7 +428,11 @@ The age-based sweeps remove:
   It does not follow the link, so it never removes entries under a link target.
 - Old entries in the state temp folder, `state/tmp`, which `TMPDIR` points at.
   An entry that a process holds open is kept.
-- Old session-log rotations.
+  (changed in v3.14.0) An entry's age comes from the newest file in it, not from folder mtimes.
+  So a partial delete does not make an old tree look new.
+  Each build in `cargo-hawk-target` is judged alone, the same as each entry in `claude-<uid>`.
+  When a removal stops part-way, the report names the path that another user owns, with the fix.
+- Old session-log rotations, of the default path and of a configured `session_log.file.path` (changed in v3.14.0).
 - Old codebase-memory index databases (`*.db`, `*.db-wal`, `*.db-shm`) in `state/codebase-memory`.
   Since v3.11.1 (#1493) codebase-memory-mcp keeps its indexes in its own cache unless `index_path` is set.
   So those files are left from an older setup.
@@ -834,6 +838,9 @@ Nothing turns off the third item.
 - When the agent asks the user a question (the `AskUserQuestion` tool, or a turn that ends with `?`) while a task is
   in progress, the reminder tells it to run `llmenv task wait <slug> "<reason>"`, and `llmenv task start <slug>` after
   the answer. A waiting task is reported as "waiting on the user".
+  (changed in v3.14.0) The reminder names only tasks of sessions that this conversation owns, or that have no owner.
+  A task of a session that another conversation owns is not named.
+  It does not count as tracked work for the commit gate.
 - The first `git commit` or `gh pr create` of a session with no task in progress is denied once, with the commands to
   run. A `llmenv task done` or `llmenv task wait` earlier in the same command does not count as a task in
   progress. The same command runs on the next try.
@@ -1197,6 +1204,10 @@ active context (active bundles, active MCP servers, etc.). Checks:
   scope never matches there. See [Network match fields](configuration.md#network-match-fields)
 - cleartext MCP URLs (added in v3.12.0) — warns when the hostname of an `http://` MCP URL
   resolves to a public address. See [MCP](mcp.md)
+- session-log path (added in v3.14.0) — when the file sink is on, or `session_log.file.path` is set, checks the path.
+  It warns when the path is a symlink, a FIFO, a socket, a device, or a folder, because the sink cannot append to it.
+  It also warns when the file does not exist yet and the nearest existing folder above it is not writable.
+  See [`session_log:`](configuration.md#session_log)
 - lifecycle hooks (added in v3.11.0) — lists which lifecycle events
   (`session_start`, `session_end`, `post_model_switch`, `turn_start`, `post_tool_batch`,
   `post_tool_use_failure`, `subagent_start`, `stop`) are wired for

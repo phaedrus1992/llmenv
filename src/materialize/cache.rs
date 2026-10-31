@@ -12,10 +12,11 @@ use crate::merge::MergedManifest;
 
 mod gc_report;
 mod mtime;
+mod owner;
 
 pub use gc_report::GcReport;
 pub(crate) use gc_report::{gc_remove_dir, gc_remove_link};
-pub(crate) use mtime::newest_mtime;
+pub(crate) use mtime::newest_file_mtime;
 
 /// Stable SHA-256 of the merged manifest. Each field is length-prefixed
 /// (little-endian u64) before its bytes so concatenation cannot ambiguate
@@ -333,7 +334,7 @@ pub(crate) fn prune(
                 if !is_current {
                     false
                 } else if let Some(m) =
-                    newest_mtime_or_record(&p, |path, _| report.failed.push(path))
+                    newest_file_mtime_or_record(&p, |path, _| report.failed.push(path))
                 {
                     is_expired(now, m, older_than, &p)
                 } else {
@@ -526,11 +527,15 @@ fn entry_and_type(
     }
 }
 
-/// The newest mtime under `p`. On failure, the error is logged with its path, `p`
-/// is recorded in `failed`, and `None` is returned, so one unreadable folder does
-/// not stop the rest of the pass (#2859).
-fn newest_mtime_or_record(p: &Path, record: impl FnOnce(PathBuf, String)) -> Option<SystemTime> {
-    match newest_mtime(p) {
+/// The newest file mtime under `p`, as the `state/tmp` sweep judges age: a folder mtime changes
+/// when a child is removed, so a partial delete would reset the age (#3184). On failure, the
+/// error is logged with its path, `p` is recorded in `failed`, and `None` is returned, so one
+/// unreadable folder does not stop the rest of the pass (#2859).
+fn newest_file_mtime_or_record(
+    p: &Path,
+    record: impl FnOnce(PathBuf, String),
+) -> Option<SystemTime> {
+    match newest_file_mtime(p) {
         Ok(m) => Some(m),
         Err(e) => {
             tracing::error!(
@@ -620,7 +625,8 @@ pub fn gc(
             gc_normal_shapes(&p, older_than, &now, &mut report)?;
             continue;
         }
-        let Some(m) = newest_mtime_or_record(&p, |path, cause| report.record_failure(path, cause))
+        let Some(m) =
+            newest_file_mtime_or_record(&p, |path, cause| report.record_failure(path, cause))
         else {
             continue;
         };
@@ -687,7 +693,8 @@ fn gc_normal_shapes(
             report.kept += 1;
             continue;
         }
-        let Some(m) = newest_mtime_or_record(&p, |path, cause| report.record_failure(path, cause))
+        let Some(m) =
+            newest_file_mtime_or_record(&p, |path, cause| report.record_failure(path, cause))
         else {
             continue;
         };
@@ -715,7 +722,7 @@ pub(super) fn skip_vanished<T>(result: std::io::Result<T>) -> std::io::Result<Op
 mod tests {
     #[cfg(unix)]
     #[test]
-    fn newest_mtime_counts_a_symlink_its_own_age() {
+    fn newest_file_mtime_counts_a_symlink_its_own_age() {
         // A folder older than the test window, with a symlink created now inside it. The
         // symlink's own mtime is the newest thing in the folder, so the folder is fresh (#3076).
         let root = tempfile::tempdir().unwrap();
@@ -726,7 +733,7 @@ mod tests {
             .set_modified(old)
             .unwrap();
 
-        let newest = newest_mtime(root.path()).unwrap();
+        let newest = newest_file_mtime(root.path()).unwrap();
 
         assert!(
             newest > old + Duration::from_secs(86_400),
@@ -1362,9 +1369,9 @@ mod tests {
     fn gc_clock_skew_keeps_a_future_mtime() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = touch_dir(tmp.path(), &format!("{VERSION_TAG}-skewtest"));
-        // Set mtime 1 hour in the future to simulate clock skew.
+        // A future mtime on the file, which the age check reads, simulates clock skew.
         std::process::Command::new("touch")
-            .args(["-t", "209901010000", dir.to_str().unwrap()])
+            .args(["-t", "209901010000", dir.join("file.txt").to_str().unwrap()])
             .status()
             .unwrap();
         // A clock that moved backward must not delete live data (#2860).
@@ -1387,7 +1394,7 @@ mod tests {
         let v = version_major();
 
         // A stale shape — backdate both the dir and any files inside so that
-        // `newest_mtime` finds nothing recent in the subtree.
+        // `newest_file_mtime` finds nothing recent in the subtree.
         let stale_shape = touch_dir(tmp.path(), &format!("{v}/stale_shape"));
         std::process::Command::new("touch")
             .args(["-t", "201001010000", stale_shape.to_str().unwrap()])
