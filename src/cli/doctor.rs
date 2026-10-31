@@ -1,3 +1,6 @@
+mod cache_check;
+use cache_check::ensure_cache_dir_writable;
+
 use crate::adapter::AgentAdapter;
 use crate::config::{Bundle, Capabilities, Config};
 use crate::paths;
@@ -240,51 +243,6 @@ fn bundles_with_missing_dirs<'a>(
         }
     }
     Ok(missing)
-}
-
-/// Create the cache directory if it is absent, otherwise probe that llmenv can
-/// write into it.
-///
-/// Hardening only applies when this creates the directory; an existing one
-/// keeps whatever permissions its owner set — forcing 0700 here would hard-fail
-/// on a cache dir shared with a different uid, the same regression #1196 walked
-/// back for `codebase_memory.index_path` (#1198).
-///
-/// # Errors
-///
-/// A stat error other than "not found" — permission denied on a parent, an
-/// unreachable mount — is reported as the stat failure it is (#1445, the same
-/// class as #1436). `exists()` folded those into "does not exist", which sent
-/// a present-but-unreachable cache dir into the create branch and surfaced it
-/// under the generic "not writable" message; that reads as a permissions
-/// problem on the directory itself rather than on the path leading to it.
-/// Also errors when the path exists but is not a directory, and when the write
-/// probe or the directory creation fails.
-fn ensure_cache_dir_writable(cache_dir: &Path) -> anyhow::Result<()> {
-    match std::fs::metadata(cache_dir) {
-        Ok(meta) if meta.is_dir() => {
-            let probe = cache_dir.join(".llmenv-doctor-probe");
-            crate::paths::write_owner_only(&probe, b"").context("cache directory not writable")?;
-            if let Err(e) = std::fs::remove_file(&probe) {
-                tracing::error!("could not remove doctor probe {} ({e})", probe.display());
-            }
-        }
-        Ok(_) => anyhow::bail!(
-            "cache directory {} is not a directory",
-            crate::util::display_safe(&cache_dir.display().to_string())
-        ),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            crate::paths::create_dir_owner_only(cache_dir)
-                .context("cache directory not writable")?;
-        }
-        Err(e) => {
-            return Err(anyhow::Error::new(e).context(format!(
-                "stat cache directory {}",
-                crate::util::display_safe(&cache_dir.display().to_string())
-            )));
-        }
-    }
-    Ok(())
 }
 
 /// Version folder names cached under one adapter's cache directory, with any

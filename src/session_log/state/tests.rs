@@ -192,19 +192,55 @@ proptest! {
 }
 
 #[test]
-fn an_aside_name_is_free_only_when_nothing_is_there() {
+fn a_free_aside_name_is_reserved_with_the_plain_suffix() {
     let dir = TempDir::new().expect("test");
-    let aside = dir.path().join("transcript-sessions.json.corrupt");
-    assert!(aside_name_is_free(&aside).unwrap());
-    std::fs::write(&aside, "old").expect("test");
-    assert!(!aside_name_is_free(&aside).unwrap());
+    let map = dir.path().join("transcript-sessions.json");
+    let aside = reserve_aside_name(&map).expect("test");
+    assert_eq!(aside, dir.path().join("transcript-sessions.json.corrupt"));
+    assert!(aside.exists(), "the reservation must create the name");
 }
 
 #[test]
-fn an_aside_name_that_cannot_be_checked_is_an_error_not_a_free_name() {
+fn a_taken_aside_name_is_never_overwritten() {
+    let dir = TempDir::new().expect("test");
+    let map = dir.path().join("transcript-sessions.json");
+    let taken = dir.path().join("transcript-sessions.json.corrupt");
+    std::fs::write(&taken, "first copy").expect("test");
+    let aside = reserve_aside_name(&map).expect("test");
+    assert_ne!(aside, taken);
+    assert_eq!(std::fs::read_to_string(&taken).expect("test"), "first copy");
+}
+
+#[test]
+fn an_aside_name_that_cannot_be_reserved_is_an_error_not_a_free_name() {
     let dir = TempDir::new().expect("test");
     let file = dir.path().join("regular");
     std::fs::write(&file, "x").expect("test");
-    // A path under a regular file fails with ENOTDIR, so the name cannot be checked.
-    assert!(aside_name_is_free(&file.join("x.corrupt")).is_err());
+    // A map path under a regular file fails with ENOTDIR, so no name can be reserved.
+    assert!(reserve_aside_name(&file.join("transcript-sessions.json")).is_err());
+}
+
+proptest::proptest! {
+    // A taken aside name keeps its bytes whatever they are, and a reservation is always a new
+    // empty file. The example tests above use one content value, so they cannot show this.
+    #[test]
+    fn reserve_aside_name_never_changes_a_taken_name(
+        base_is_taken in proptest::prelude::any::<bool>(),
+        content in "[ -~]{0,32}",
+    ) {
+        let dir = TempDir::new().expect("test");
+        let map = dir.path().join("transcript-sessions.json");
+        let base = dir.path().join("transcript-sessions.json.corrupt");
+        if base_is_taken {
+            std::fs::write(&base, &content).expect("test");
+        }
+        let aside = reserve_aside_name(&map).expect("test");
+        if base_is_taken {
+            proptest::prop_assert_ne!(&aside, &base);
+            proptest::prop_assert_eq!(std::fs::read_to_string(&base).expect("test"), content);
+        } else {
+            proptest::prop_assert_eq!(&aside, &base);
+        }
+        proptest::prop_assert_eq!(std::fs::metadata(&aside).expect("test").len(), 0);
+    }
 }

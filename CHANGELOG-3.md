@@ -90,6 +90,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Check `session_log.file.path` in `llmenv doctor`: a symlink, FIFO, socket, device, or folder there is named with the fix. `llmenv clean` now also removes old rotations of a configured path. The `session_log` status-line widget now counts the configured file. Hooks now expand a leading `~` in the path, so hook events no longer go to a `~` folder in the working directory. A relative path turns the file log off with an error, because it resolves against the repository in a hook. See [`session_log:`](https://phaedrus1992.github.io/llmenv/docs/configuration#session_log). [fix:doctor] [#3138]
 - Stop the question reminder at the end of a turn from naming a task of a session that another conversation owns. The commit gate uses the same rule, so another conversation's task no longer counts as tracked work. [fix:task] [#3185]
 - Remove old builds from `state/tmp` that a partial delete kept. An entry's age, in `state/tmp` and in the cache, now comes from its newest file, not from folder mtimes, and each build in `cargo-hawk-target` is judged alone. A removal that stops part-way names the path that another user owns. [fix:gc] [#3184]
+- Refuse a link at a state or config folder that llmenv sets to owner-only, instead of changing the link's target. A folder left unreadable by an earlier bug is still repaired. [fix:paths] [#3137]
+- Stop a corrupt session-map copy from being lost when two llmenv processes move a map aside at once. A failed cleanup of the empty reservation is now reported to the agent. [fix:session-log] [#3121]
+- Refuse a trace field named `v` or `op` in release builds, not only debug builds. The trace line is dropped, and the error is logged. [fix:trace] [#3118]
+- Report a memory backend with an invalid URL to the agent, not only on stderr. A bundle with missing content is still reported on stderr only, until a follow-up lands. [fix:hook] [#3129]
+- Remove a dangling link at the read-once cache folder, and stop pruning a stale lock whose session file is a dangling link. Undo now removes a link to a folder and keeps the folder. [fix:state] [#3116]
+- Make `llmenv doctor` refuse a link at the cache directory instead of writing its probe into the link's target. [fix:hook] [#3116]
 
 ### Security
 
