@@ -25,6 +25,7 @@ pub(crate) mod version;
 
 #[cfg(test)]
 use seed::classify_claude_path;
+mod hook_json;
 mod lsp_plugin;
 pub(crate) use seed::{apply_seeded_settings, seed_install_method, seed_status_line};
 pub(crate) use skill_copy::copy_dir_owner_only;
@@ -1204,43 +1205,22 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         // 2. Shell-var / absolute prefixes (e.g.
         //    `bash ${HOME}/.../hooks/guard.sh`) — suffix-match against the
         //    files we already copied into `out`.
-        let resolved_command = hook.handler.command.as_deref().map(|cmd| {
-            crate::adapter::hook_command::resolve_hook_command(
-                cmd,
-                hook.bundle_origin.as_deref(),
-                out,
-                &manifest.files,
-                &mut warned_hook_paths,
-            )
-        });
+        let resolved_command = hook
+            .handler
+            .command
+            .as_deref()
+            .map(|cmd| {
+                crate::adapter::hook_command::resolve_hook_command(
+                    cmd,
+                    hook.bundle_origin.as_deref(),
+                    out,
+                    &manifest.files,
+                    &mut warned_hook_paths,
+                )
+            })
+            .transpose()?;
 
-        // Build handler as a Map so null-valued keys (e.g. "tool": null for
-        // command-type hooks) are omitted rather than serialized. The json!
-        // macro would produce `"tool": null` for None, which later differs
-        // from absent in JSON PartialEq — causing duplicate hooks across
-        // renders when reconcile_settings merges fresh with existing disk
-        // state that happens to lack the null key (#720 / the #699 no-null
-        // invariant).
-        let handler = {
-            let mut m = serde_json::Map::new();
-            if let Some(ref cmd) = resolved_command {
-                m.insert("command".into(), serde_json::Value::String(cmd.clone()));
-            }
-            if let Some(ref tool) = hook.handler.tool {
-                m.insert("tool".into(), serde_json::Value::String(tool.clone()));
-            }
-            m.insert(
-                "type".into(),
-                serde_json::Value::String(
-                    match hook.handler.kind {
-                        crate::config::HookHandlerKind::Command => "command",
-                        crate::config::HookHandlerKind::McpTool => "mcp_tool",
-                    }
-                    .into(),
-                ),
-            );
-            serde_json::Value::Object(m)
-        };
+        let handler = hook_json::hook_handler_value(hook, resolved_command);
 
         let mut hook_entry = serde_json::Map::new();
         if let Some(matcher) = &hook.matcher {

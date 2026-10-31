@@ -74,10 +74,14 @@ pub(crate) fn already_current(path: &std::path::Path, content: &[u8], mode: u32)
 /// then writes the file as usual.
 #[cfg(unix)]
 fn touch(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    // A link at `path` is refused, so the mtime of a link's target is never changed (#3139).
     std::fs::OpenOptions::new()
         .write(true)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits().cast_signed())
         .open(path)
         .and_then(|file| file.set_modified(std::time::SystemTime::now()))
+        .inspect_err(|e| tracing::debug!("cannot touch {}, so the write runs: {e}", path.display()))
         .is_ok()
 }
 
@@ -195,5 +199,31 @@ mod tests {
                 other_mode == mode,
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn touch_never_changes_the_mtime_of_a_link_target() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = dir.path().join("target.json");
+        std::fs::write(&target, b"{}").expect("write the target");
+        let old = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&target)
+            .expect("open the target")
+            .set_modified(old)
+            .expect("age the target");
+        let link = dir.path().join("link.json");
+        std::os::unix::fs::symlink(&target, &link).expect("plant a link");
+        assert!(
+            !touch(&link),
+            "a link must be refused, so touch reports no change"
+        );
+        let mtime = std::fs::metadata(&target)
+            .expect("stat the target")
+            .modified();
+        assert_eq!(mtime.ok(), Some(old), "the target's mtime must not move");
     }
 }
