@@ -6,6 +6,8 @@ mod github;
 use github::{fetch_beta, fetch_latest};
 mod install;
 use install::install_binary;
+mod track;
+use track::resolve_is_beta;
 
 /// Map the current platform to a GitHub release asset name.
 fn platform_asset_name() -> Result<&'static str> {
@@ -77,21 +79,6 @@ struct GhRelease {
     #[serde(default)]
     draft: bool,
     assets: Vec<GhAsset>,
-}
-
-/// Resolve which release track to use: CLI flag > config > default (release).
-fn resolve_is_beta(track: Option<String>) -> bool {
-    if let Some(t) = track {
-        return t == "beta";
-    }
-    // Try `features.upgrade.track` from config
-    if let Ok(dir) = crate::paths::config_dir()
-        && let Ok(cfg) = crate::config::Config::load(&dir.join("config.yaml"))
-        && let Some(upgrade) = cfg.features.as_ref().and_then(|f| f.upgrade.as_ref())
-    {
-        return upgrade.track.as_str() == "beta";
-    }
-    false
 }
 
 /// Hosts that may serve a release asset. The asset URL comes from a remote JSON response, so its

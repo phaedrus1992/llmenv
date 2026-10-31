@@ -47,14 +47,36 @@ const STATE_LOG: &str = "detached-trace.log";
 const STATE_LOG_MAX_BYTES: u64 = 1024 * 1024;
 
 fn append_to_state_log(path: &std::path::Path, line: &str) {
-    if std::fs::metadata(path).is_ok_and(|m| m.len() > STATE_LOG_MAX_BYTES) {
-        let mut older = path.as_os_str().to_owned();
-        older.push(".1");
-        if let Err(e) = std::fs::rename(path, &older) {
-            tracing::warn!("detached trace: cannot rotate {}: {e}", path.display());
-        }
+    if is_oversized_regular_file(path) {
+        rotate_state_log(path);
     }
     crate::trace::append_trace_line(path, line);
+}
+
+/// True when `path` is a regular file over the size limit. `symlink_metadata` does not follow a
+/// link, so a link is never rotated, and a link cannot move the log of its target (#3139).
+fn is_oversized_regular_file(path: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && m.len() > STATE_LOG_MAX_BYTES)
+}
+
+/// Rename `path` to `<name>.1` relative to its open folder. The rename resolves no path component
+/// again, so a folder swapped for a link after the check cannot move the rename elsewhere (#3139).
+fn rotate_state_log(path: &std::path::Path) {
+    let dir_path = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => std::path::Path::new("."),
+    };
+    let Some(name) = path.file_name() else {
+        return;
+    };
+    let mut older = name.to_owned();
+    older.push(".1");
+    let rotated = crate::paths::dirfd::open_dir_nofollow(dir_path).and_then(|dir| {
+        rustix::fs::renameat(&dir, name, &dir, older.as_os_str()).map_err(std::io::Error::from)
+    });
+    if let Err(e) = rotated {
+        tracing::warn!("detached trace: cannot rotate {}: {e}", path.display());
+    }
 }
 
 /// Return user+sys CPU time of this process as microseconds.
@@ -119,5 +141,38 @@ mod tests {
         assert_eq!(json_str(r#"{"a":"b"}"#, "c"), None);
         assert_eq!(json_str(r#"{"a":1}"#, "a"), None);
         assert_eq!(json_str("{oops", "a"), None);
+    }
+
+    #[cfg(unix)]
+    fn oversized(path: &std::path::Path) {
+        let big = vec![b'x'; usize::try_from(STATE_LOG_MAX_BYTES).expect("limit fits") + 1];
+        std::fs::write(path, big).expect("write an oversized log");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_oversized_regular_log_moves_to_the_older_name() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let log = dir.path().join(STATE_LOG);
+        oversized(&log);
+        append_to_state_log(&log, "line");
+        assert!(dir.path().join(format!("{STATE_LOG}.1")).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_an_oversized_log_is_never_rotated() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = dir.path().join("target.log");
+        oversized(&target);
+        let log = dir.path().join(STATE_LOG);
+        std::os::unix::fs::symlink(&target, &log).expect("plant a link");
+        assert!(
+            !is_oversized_regular_file(&log),
+            "a link is not a regular log"
+        );
+        append_to_state_log(&log, "line");
+        assert!(target.exists(), "the link target must stay in place");
+        assert!(!dir.path().join(format!("{STATE_LOG}.1")).exists());
     }
 }

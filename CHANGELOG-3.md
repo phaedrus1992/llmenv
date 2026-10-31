@@ -101,6 +101,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Show proxy lockfile, attribution, and probe cleanup failures to the agent, with the path or server name. These failures used to reach only stderr. [fix:mcp] [#3204]
 - Show trace sink failures to the agent: a bad `LLMENV_TRACE_FILE` path, a failed stderr write, and a trace line dropped for a reserved field. [fix:trace] [#3205]
 
+- Fail the hook when a bundle file key contains `..`, and name the bundle, the key, and a fix. The command used to fall back to a relative path that could run a different file. [fix:hook] [#3120]
+- Log the cause at five error paths that used to fail silently, such as a bad `config.yaml` in `llmenv upgrade` and a plugin error on the status line. Read-once now passes a file through when its modification time is unknown, instead of treating the time as `0`. [fix:errors] [#3109]
+- Stop cache cleanup and bundle file writes from following a link that appears during the write. An unreadable cache folder is now logged and is not repaired during cleanup. [fix:materialize] [#3203]
+- Stop state file copies, state log rotation, and the recall ledger from following a link. A link no longer redirects a copy, a rotation, or a timestamp update to its target. [fix:materialize] [#3139]
+- Show the agent a notice for MCP proxy pidfile and log failures, probe server errors, lock reclaims, dropped scope tags, and hook notices that lacked a fix. Each notice names the path or server and the fix. [fix:agent] [#3217]
+
 ### Security
 
 - Update `rustls-webpki` and `webpki-root-certs` to clear RUSTSEC-2026-0382 and RUSTSEC-2026-0383, which accept distrusted certificate intermediates. [chore:deps]

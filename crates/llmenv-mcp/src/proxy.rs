@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 
 mod launcher;
 mod lockfile;
+mod state_files;
 use lockfile::{lock_holder, release_lock, try_lock};
+use state_files::{discard_pidfile_temp, proxy_stderr, reconcile_pidfile};
 mod log_tail;
 use launcher::mcp_proxy_command;
 #[cfg(test)]
@@ -206,10 +208,13 @@ where
         return Ok(EnsureOutcome::AlreadyRunning);
     }
 
-    tracing::debug!(
-        "reclaiming stale proxy lockfile {} (holder is gone)",
+    // Recorded, not only logged: a lock whose pid cannot be read is a sign that something else
+    // writes the lock, and the agent should see it (#3217).
+    llmenv_util::agent_notice::record_logged(format!(
+        "llmenv: reclaimed stale proxy lockfile {} (its holder is gone or its pid is unreadable). \
+         Fix: none is needed unless this repeats. If it repeats, check what writes the lockfile.",
         lock_path.display()
-    );
+    ));
     match std::fs::remove_file(lock_path) {
         Ok(()) => {}
         // A peer reclaimed it first. The `try_lock` below decides who spawns.
@@ -378,54 +383,6 @@ fn wait_for_bind(bind: &str, child: &mut Child, budget_ms: u64) -> anyhow::Resul
     }
 }
 
-/// Delete a stale pidfile. A failed delete is logged with its path, not dropped.
-fn clear_pidfile(pid_path: &Path, reason: &str) {
-    match std::fs::remove_file(pid_path) {
-        Ok(()) => tracing::debug!("cleared proxy pidfile {}: {reason}", pid_path.display()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => tracing::error!(
-            "cannot remove proxy pidfile {}: {e} ({reason})",
-            pid_path.display()
-        ),
-    }
-}
-
-/// Clears a pidfile that names a process which is not running.
-///
-/// Called once the port has proved a proxy is up. A pidfile naming a dead or
-/// recycled pid is worse than no pidfile — the old fast path read any non-empty
-/// pidfile as proof of life, so a wrong pid could never be recovered from
-/// (#1085). A pid that *is* alive is left alone: `kill -0` cannot prove which
-/// process owns the port, so the running pid is the best available answer to
-/// "who do I signal".
-///
-/// Best-effort and non-fatal: liveness has already been established by the port,
-/// so failing an export over an unwritable pidfile would trade a cosmetic
-/// problem for a real one.
-fn reconcile_pidfile(pid_path: &Path) {
-    match read_pidfile(pid_path) {
-        Ok(None) => {}
-        // Only a definite "not running" justifies deleting the record. `None`
-        // means the check itself failed, and deleting on a guess would discard a
-        // valid pid.
-        Ok(Some(pid)) => {
-            if is_alive(pid) == Some(false) {
-                clear_pidfile(pid_path, &format!("pid {pid} is not running"));
-            }
-        }
-        Err(PidfileError::Unparseable(e)) => {
-            clear_pidfile(pid_path, &format!("unparseable: {e}"));
-        }
-        // An I/O error is not evidence the contents are wrong, and deleting would
-        // fail for the same reason. Say so instead — `eprintln!` because the
-        // default tracing filter is ERROR-only, so a `warn!` would reach nobody.
-        Err(PidfileError::Io(e)) => eprintln!(
-            "llmenv: cannot read proxy pidfile {} ({e}); fix its permissions or remove it",
-            pid_path.display()
-        ),
-    }
-}
-
 fn lockfile_path(pid_path: &Path) -> PathBuf {
     let mut s = pid_path.as_os_str().to_owned();
     s.push(".lock");
@@ -465,14 +422,6 @@ fn write_pidfile_atomic(pid_path: &Path, pid: u32) -> anyhow::Result<()> {
         .inspect_err(|_| discard_pidfile_temp(&tmp))
         .with_context(|| format!("publishing pidfile {}", pid_path.display()))?;
     Ok(())
-}
-
-/// Removes the pidfile temp after a failed write or publish. A failed removal is logged, so a
-/// leftover temp file is not silent (#2657).
-fn discard_pidfile_temp(tmp: &Path) {
-    if let Err(e) = std::fs::remove_file(tmp) {
-        tracing::error!("could not remove pidfile temp {} ({e})", tmp.display());
-    }
 }
 
 /// Default path for the proxy pidfile — `$XDG_STATE_HOME/llmenv/mcp-proxy.pid`,
@@ -838,23 +787,8 @@ pub fn spawn_mcp_proxy(bind: &str, pid_path: &Path, source: SpawnSource) -> anyh
         .arg(icm)
         .arg("serve");
     pin_icm_serve_dir(&mut cmd, Path::new(ICM_SERVE_DIR))?;
-    // Point stderr at the log so a startup failure is diagnosable (#1086). If the
-    // log can't be opened we still spawn — a missing diagnostic is a smaller
-    // problem than no memory backend — but say so rather than degrading silently.
-    let stderr = match open_proxy_log(&log_path_for(pid_path)) {
-        Ok(file) => Stdio::from(file),
-        Err(e) => {
-            // `eprintln!` rather than `tracing::warn!`: the default subscriber
-            // filter is ERROR-only, so a warn here would reach nobody — leaving
-            // the user in exactly the state #1086 was filed about, silently.
-            // Only stdout feeds `source <(llmenv export)`, so stderr is safe.
-            eprintln!(
-                "llmenv: proxy stderr log unavailable ({e:#}); starting mcp-proxy with its \
-                 stderr discarded, so a startup failure will not be diagnosable"
-            );
-            Stdio::null()
-        }
-    };
+    // Point stderr at the log so a startup failure is diagnosable (#1086).
+    let stderr = proxy_stderr(pid_path);
     configure_detached(&mut cmd, stderr);
     let child = crate::trace::spawn_counted("proxy:start", &mut cmd).with_context(|| {
         format!(
@@ -2252,5 +2186,27 @@ mod lock_and_log_safety_tests {
 
             proptest::prop_assert_eq!(lock_holder(&lock).expect("holder"), Some(pid));
         }
+    }
+
+    /// A lock whose pid cannot be read is reclaimed, and the reclaim is named for the agent. The
+    /// spawn fails on purpose, so the test stops after the reclaim (#3217).
+    #[test]
+    fn reclaimed_unreadable_lock_is_recorded_for_the_agent() {
+        use super::adopt_or_reclaim;
+        let dir = TempDir::new().expect("tempdir");
+        let lock = dir.path().join("proxy-3217-garbage.lock");
+        std::fs::write(&lock, "not-a-pid").expect("write lock");
+        let pid_path = dir.path().join("mcp-proxy.pid");
+        let result = adopt_or_reclaim(
+            "127.0.0.1:1",
+            &pid_path,
+            |_| anyhow::bail!("spawn is not part of this test"),
+            50,
+            &lock,
+        );
+        assert!(result.is_err(), "the failed spawn must surface");
+        let notices = llmenv_util::agent_notice::current().unwrap_or_default();
+        assert!(notices.contains("proxy-3217-garbage.lock"), "{notices}");
+        assert!(notices.contains("Fix:"), "{notices}");
     }
 }

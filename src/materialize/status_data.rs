@@ -17,11 +17,15 @@ use serde::{Deserialize, Serialize};
 
 mod cache;
 mod icm;
+mod tasks;
 use crate::config::{Config, HashingMode, McpServer, Throttle};
 use cache::collect_cache;
 use icm::collect_icm;
 #[cfg(test)]
 use icm::{extract_stat_line, parse_icm_stats};
+use tasks::collect_tasks;
+#[cfg(test)]
+use tasks::collect_tasks_from_state_dir;
 
 // `Serialize` is derived alongside `Deserialize` on every type in this module
 // (not just `StatusData`) so this module — the writer side — can construct
@@ -243,9 +247,9 @@ fn current_timestamp() -> String {
 /// reference is broken. There's no per-plugin error accumulation today, so
 /// this reports "1 error, 0 known-good" rather than fabricating a count.
 ///
-/// The statusline calls this on each render (#1547). A broken plugin reference
-/// logs at `debug`, because `regenerate` already reports the same resolve error
-/// loudly, and a warning on each render repeats it.
+/// The statusline calls this on each render, so a broken plugin reference logs
+/// a warning on each render (#3109). The status line has no text channel for
+/// the cause, and the log is the only place it can be seen.
 pub(crate) fn collect_plugins(
     config: &Config,
     active_tags: &BTreeSet<String>,
@@ -256,7 +260,11 @@ pub(crate) fn collect_plugins(
             errors: 0,
         }),
         Err(e) => {
-            tracing::debug!("plugin resolution failed (non-fatal): {e}");
+            // The status line shows only a count, so the cause goes to the log (#3109).
+            tracing::warn!(
+                "cannot resolve plugins for the status line: {e:#}. Fix: correct the plugin \
+                 references in config.yaml."
+            );
             Some(CountData {
                 total: 0,
                 errors: 1,
@@ -315,76 +323,6 @@ fn collect_mcps(
             errors: 1,
         }),
     }
-}
-
-/// Task-tracker progress, scoped to the sessions open for the current project (mandatory-sessions
-/// design). `session` is `None` when zero sessions are open for this project (the widget renders
-/// empty); `Some` carries the summed `(done, total)` across every session open for this project.
-/// A state dir or cwd that cannot be resolved is the `unreadable` marker, not an empty section, so
-/// the status line never reads as "no work" (#2687).
-fn collect_tasks() -> TasksData {
-    let unreadable = |what: &str, e: &dyn std::fmt::Display| {
-        tracing::error!(
-            "cannot read the tasks, {what} is unknown: {e}; the status line shows unreadable"
-        );
-        TasksData {
-            session: None,
-            current: None,
-            unreadable: true,
-        }
-    };
-    let state_dir = match crate::paths::state_dir() {
-        Ok(dir) => dir,
-        Err(e) => return unreadable("the state directory", &e),
-    };
-    match crate::task::project::current_tag() {
-        Ok(project) => collect_tasks_from_state_dir(&state_dir, &project),
-        Err(e) => unreadable("the project of the working directory", &e),
-    }
-}
-
-/// Internal helper taking injectable state dir + project tag so tests can
-/// exercise this without touching the real, ambient state dir or cwd.
-fn collect_tasks_from_state_dir(state_dir: &Path, project: &str) -> TasksData {
-    // The status line has no text channel for a warning, so the error goes to the log. The
-    // widget shows the `unreadable` marker, so a read failure never looks like "no work".
-    match try_tasks_data(state_dir, project) {
-        Ok(data) => data,
-        Err(e) => {
-            tracing::error!(error = %e, "cannot read the tasks; the status line shows unreadable");
-            TasksData {
-                session: None,
-                current: None,
-                unreadable: true,
-            }
-        }
-    }
-}
-
-/// The task fields of the status line, read strictly: any unreadable session or task file is an
-/// error.
-fn try_tasks_data(state_dir: &Path, project: &str) -> anyhow::Result<TasksData> {
-    let open_sessions = crate::task::session::open_sessions_strict(state_dir, project)?;
-    let session = if open_sessions.is_empty() {
-        None
-    } else {
-        let mut total_progress = (0, 0);
-        for s in &open_sessions {
-            let (d, t) = crate::task::session::try_session_progress(state_dir, &s.id)?;
-            total_progress = (total_progress.0 + d, total_progress.1 + t);
-        }
-        Some(SessionProgress {
-            done: total_progress.0,
-            total: total_progress.1,
-        })
-    };
-    let session_ids: Vec<String> = open_sessions.into_iter().map(|s| s.id).collect();
-    let current = crate::task::current_wip_title(state_dir, &session_ids)?;
-    Ok(TasksData {
-        session,
-        current,
-        unreadable: false,
-    })
 }
 
 /// Prefer resolving fresh against current config (reflects a same-render
@@ -592,6 +530,34 @@ mod tests {
                 errors: 0
             })
         );
+    }
+
+    #[test]
+    fn collect_plugins_logs_the_cause_of_a_broken_reference() {
+        let config = Config {
+            plugin_collection: vec![crate::config::PluginCollection {
+                name: "c".into(),
+                when: vec!["t".into()],
+                plugins: vec!["ghost:p".into()],
+            }],
+            ..Config::default()
+        };
+        let mut result = None;
+        let logs = crate::test_log_capture::capture_logs(|| {
+            result = collect_plugins(&config, &tags(&["t"]));
+        });
+        assert_eq!(
+            result,
+            Some(CountData {
+                total: 0,
+                errors: 1
+            })
+        );
+        assert!(
+            logs.contains("ghost"),
+            "the log must name the cause: {logs}"
+        );
+        assert!(logs.contains("Fix:"), "{logs}");
     }
 
     #[test]

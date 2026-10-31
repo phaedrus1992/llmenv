@@ -14,6 +14,8 @@ use crate::merge::MergedManifest;
 mod gc_report;
 mod mtime;
 mod owner;
+mod write_bits;
+use write_bits::remove_dir_all_forcing_writable;
 
 pub use gc_report::GcReport;
 pub(crate) use gc_report::{gc_remove_dir, gc_remove_link};
@@ -369,87 +371,6 @@ fn remove_dir(p: &Path, dry_run: bool, report: &mut PruneReport) {
             );
             report.failed.push(p.to_path_buf());
         }
-    }
-}
-
-/// `remove_dir_all`, retried once after restoring the owner write bit on any
-/// directory in the tree that lacks it.
-///
-/// `remove_dir_all` unlinks children *through* their parent directory, so a
-/// directory with no owner write bit (a `0o555` left behind by some other tool
-/// that used the cache as scratch space) makes its whole subtree undeletable
-/// and fails with `PermissionDenied`. llmenv created that tree, so a cache GC
-/// restoring write access to its own directories is expected behavior, not an
-/// escalation — without it the cache grows forever with no way for the tool to
-/// clean up after itself.
-fn remove_dir_all_forcing_writable(p: &Path) -> std::io::Result<()> {
-    match std::fs::remove_dir_all(p) {
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            // Best-effort: if the chmod pass can't fix it either, the retry
-            // surfaces the real error rather than the chmod's.
-            restore_dir_write_bits(p);
-            std::fs::remove_dir_all(p)
-        }
-        other => other,
-    }
-}
-
-/// Add the owner `rwx` bits to `dir` and every directory beneath it.
-///
-/// Symlinks are never followed and never chmod'd, so a link planted inside the
-/// cache can't be used to widen permissions on a target outside it — the walk
-/// stays within the tree it was handed. Errors are logged, not returned: this is
-/// a best-effort assist for the retry in [`remove_dir_all_forcing_writable`],
-/// and the retry reports the failure that actually matters.
-fn restore_dir_write_bits(dir: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let Ok(meta) = std::fs::symlink_metadata(dir) else {
-            return;
-        };
-        if !meta.is_dir() {
-            return;
-        }
-        let mode = meta.permissions().mode();
-        // 0o700: traverse + write + read, the minimum needed to unlink children.
-        if mode & 0o700 != 0o700
-            && let Err(e) =
-                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode | 0o700))
-        {
-            tracing::error!(
-                "cannot make {} writable for cache cleanup: {e}; cleanup of its contents may fail",
-                dir.display()
-            );
-        }
-        let entries = match std::fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(e) => {
-                tracing::error!("cannot list {} during cache cleanup: {e}", dir.display());
-                return;
-            }
-        };
-        let readable =
-            entries.filter_map(|entry| crate::paths::readable_entry(dir, "cache cleanup", entry));
-        for entry in readable {
-            // `file_type()` is lstat-equivalent: a symlink reports as a symlink
-            // rather than as the directory it points at.
-            // An unreadable type is not a directory, so the write bits would stay unrestored.
-            // The error is logged with its path, and the cleanup fails at the next step.
-            match entry.file_type() {
-                Ok(ft) if ft.is_dir() => restore_dir_write_bits(&entry.path()),
-                Ok(_) => {}
-                Err(e) => tracing::error!(
-                    "cache cleanup cannot read the type of {}: {e}",
-                    entry.path().display()
-                ),
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = dir;
     }
 }
 

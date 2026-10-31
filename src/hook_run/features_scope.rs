@@ -55,8 +55,8 @@ fn record_unresolved(err: &dyn std::fmt::Display) {
 /// The text that tells the agent which features were skipped, and why.
 fn unresolved_notice(err: &dyn std::fmt::Display) -> String {
     format!(
-        "llmenv: features set by bundles are off for this session: {err:#}. Fix the cause, \
-         then start a new session."
+        "llmenv: features set by bundles are off for this session: {err:#}. Fix: correct the \
+         cause, then start a new session."
     )
 }
 
@@ -367,9 +367,9 @@ mod tests {
         // The notice list is process-wide, so only the shared text is asserted.
         let notice = crate::agent_notice::current();
         assert!(
-            notice
-                .as_deref()
-                .is_some_and(|n| n.contains("Fix the cause")),
+            notice.as_deref().is_some_and(|n| {
+                n.contains("features set by bundles are off") && n.contains("Fix:")
+            }),
             "the skip must reach the agent: {notice:?}"
         );
     }
@@ -382,10 +382,7 @@ mod tests {
             notice.contains("LLMENV_EXTRA_TAGS is not valid UTF-8"),
             "{notice}"
         );
-        assert!(
-            notice.contains("Fix the cause"),
-            "must state the fix: {notice}"
-        );
+        assert!(notice.contains("Fix:"), "must state the fix: {notice}");
         assert!(
             notice.contains("bundles"),
             "must say which features are off: {notice}"

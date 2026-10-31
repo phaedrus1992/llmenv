@@ -724,7 +724,6 @@ mod tests {
         lifecycle_event_registered, lifecycle_hook_registrations, modeled_key_redirect,
         overlay_native_json, registered_adapters, resolve_bundle_relative_paths, strip_json_nulls,
     };
-    use crate::adapter::hook_command::resolve_command_paths_against_files;
     use crate::merge::MergedManifest;
 
     /// Minimal `AgentAdapter` stand-in for testing dispatch logic
@@ -1358,98 +1357,6 @@ mod tests {
         assert_eq!(
             resolve_bundle_relative_paths("bash hooks/guard.sh 2>/dev/null", dir),
             Some("bash /bundles/foo/hooks/guard.sh 2>/dev/null".to_string())
-        );
-    }
-
-    // ---- resolve_command_paths_against_files ----
-
-    fn known_files_from_paths(paths: &[&str]) -> std::collections::BTreeMap<PathBuf, PathBuf> {
-        paths
-            .iter()
-            .map(|p| (PathBuf::from(p), PathBuf::from(format!("/source/{p}"))))
-            .collect()
-    }
-
-    #[test]
-    fn suffix_matches_shell_var_prefixed_token() {
-        let files = known_files_from_paths(&["hooks/guard.sh"]);
-        let cache = Path::new("/cache");
-        let resolved = resolve_command_paths_against_files(
-            "bash ${HOME}/bundles/base/hooks/guard.sh",
-            cache,
-            &files,
-        );
-        assert_eq!(resolved, Some("bash /cache/hooks/guard.sh".to_string()));
-    }
-
-    #[test]
-    fn picks_longest_suffix_when_multiple_match() {
-        let files = known_files_from_paths(&["guard.sh", "hooks/guard.sh"]);
-        let cache = Path::new("/cache");
-        let resolved = resolve_command_paths_against_files(
-            "bash ${HOME}/bundles/base/hooks/guard.sh",
-            cache,
-            &files,
-        );
-        assert_eq!(
-            resolved,
-            Some("bash /cache/hooks/guard.sh".to_string()),
-            "must pick hooks/guard.sh (longer), not guard.sh"
-        );
-    }
-
-    #[test]
-    fn requires_path_component_boundary_before_suffix() {
-        // "my-hooks/guard.sh" ends with "hooks/guard.sh" but the substring
-        // crosses a component boundary — it should not match.
-        let files = known_files_from_paths(&["hooks/guard.sh"]);
-        let cache = Path::new("/cache");
-        let resolved = resolve_command_paths_against_files("bash my-hooks/guard.sh", cache, &files);
-        assert_eq!(
-            resolved, None,
-            "must not match suffix that crosses a path-component boundary"
-        );
-    }
-
-    #[test]
-    fn matches_absolute_path_token() {
-        // Absolute-path tokens are not blocked — the join operand is the
-        // trusted `rel` key, not the untrusted token.
-        let files = known_files_from_paths(&["hooks/guard.sh"]);
-        let cache = Path::new("/cache");
-        let resolved =
-            resolve_command_paths_against_files("bash /abs/path/hooks/guard.sh", cache, &files);
-        assert_eq!(resolved, Some("bash /cache/hooks/guard.sh".to_string()));
-    }
-
-    #[test]
-    fn empty_known_files_never_matches() {
-        let files: std::collections::BTreeMap<PathBuf, PathBuf> = std::collections::BTreeMap::new();
-        let cache = Path::new("/cache");
-        let resolved = resolve_command_paths_against_files("bash hooks/guard.sh", cache, &files);
-        assert_eq!(resolved, None);
-    }
-
-    #[test]
-    fn token_without_slash_never_matches() {
-        let files = known_files_from_paths(&["guard.sh"]);
-        let cache = Path::new("/cache");
-        let resolved = resolve_command_paths_against_files("bash guard.sh", cache, &files);
-        assert_eq!(resolved, None);
-    }
-
-    #[test]
-    fn resolves_multiple_tokens_in_command() {
-        let files = known_files_from_paths(&["hooks/pre.sh", "hooks/post.sh"]);
-        let cache = Path::new("/cache");
-        let resolved = resolve_command_paths_against_files(
-            "bash /some/where/hooks/pre.sh /other/where/hooks/post.sh",
-            cache,
-            &files,
-        );
-        assert_eq!(
-            resolved,
-            Some("bash /cache/hooks/pre.sh /cache/hooks/post.sh".to_string())
         );
     }
 

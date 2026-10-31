@@ -259,3 +259,42 @@ proptest! {
         prop_assert!(root.exists(), "root must still exist after second prune");
     }
 }
+
+/// A link planted at the destination is replaced, and its target is not written (#1427).
+#[cfg(unix)]
+#[test]
+fn write_bundle_file_does_not_write_through_a_link_at_the_destination() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("source.sh");
+    std::fs::write(&source, b"echo new\n").expect("write the source");
+    let victim = dir.path().join("victim.txt");
+    std::fs::write(&victim, b"keep me").expect("write the victim");
+    let root = dir.path().join("root");
+    std::fs::create_dir(&root).expect("make the root");
+    std::os::unix::fs::symlink(&victim, root.join("out.sh")).expect("plant a link");
+    write_bundle_file(&root, Path::new("out.sh"), &source).expect("write the bundle file");
+    assert_eq!(std::fs::read(&victim).expect("read the victim"), b"keep me");
+    let copy = std::fs::read(root.join("out.sh")).expect("read the copy");
+    assert_eq!(copy, b"echo new\n");
+}
+
+/// A bundle script keeps its executable bit when it is written under a new folder (#3203).
+#[cfg(unix)]
+#[test]
+fn write_bundle_file_copies_content_and_keeps_the_executable_bit() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("hook.sh");
+    std::fs::write(&source, b"echo hi\n").expect("write the source");
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let root = dir.path().join("root");
+    std::fs::create_dir(&root).expect("make the root");
+    write_bundle_file(&root, Path::new("sub/out.sh"), &source).expect("copy the file");
+    let out = root.join("sub/out.sh");
+    assert_eq!(std::fs::read(&out).expect("read the copy"), b"echo hi\n");
+    let mode = std::fs::metadata(&out)
+        .expect("stat the copy")
+        .permissions()
+        .mode();
+    assert_ne!(mode & 0o100, 0, "the copy must stay executable: {mode:o}");
+}
