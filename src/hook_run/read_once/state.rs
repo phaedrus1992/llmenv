@@ -17,11 +17,21 @@ pub(in crate::hook_run) fn session_cache_path(state_dir: &Path, session_id: &str
 /// happened.
 pub fn clear_cache(state_dir: &Path) -> anyhow::Result<()> {
     let ro_dir = read_once_state_dir(state_dir);
-    if ro_dir.exists() {
-        std::fs::remove_dir_all(&ro_dir)?;
-        writeln!(std::io::stdout(), "Read-once cache cleared")?;
-    } else {
-        writeln!(std::io::stdout(), "No read-once cache to clear")?;
+    // Judge the entry itself. `exists()` follows a link, so a dangling link reported "no cache"
+    // and stayed in place (#3116).
+    match std::fs::symlink_metadata(&ro_dir) {
+        Ok(meta) => {
+            if meta.is_dir() {
+                std::fs::remove_dir_all(&ro_dir)?;
+            } else {
+                std::fs::remove_file(&ro_dir)?;
+            }
+            writeln!(std::io::stdout(), "Read-once cache cleared")?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            writeln!(std::io::stdout(), "No read-once cache to clear")?;
+        }
+        Err(e) => return Err(e.into()),
     }
     Ok(())
 }
@@ -72,6 +82,34 @@ mod tests {
     fn clear_cache_with_no_folder_succeeds() {
         let dir = tempfile::tempdir().unwrap();
         clear_cache(dir.path()).unwrap();
+    }
+
+    // Only "not found" means no cache. Any other lookup failure is an error. Here the cache
+    // folder's parent is a regular file, so the lookup fails with ENOTDIR.
+    #[cfg(unix)]
+    #[test]
+    fn clear_cache_reports_a_failed_lookup_as_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("read_once");
+        std::fs::write(&state, "not a folder").unwrap();
+
+        assert!(clear_cache(&state).is_err());
+    }
+
+    // #3116: `exists()` follows the link, so a dangling link at the folder reported no cache.
+    #[cfg(unix)]
+    #[test]
+    fn clear_cache_removes_a_dangling_link_at_the_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let ro = read_once_state_dir(dir.path());
+        std::os::unix::fs::symlink(dir.path().join("gone"), &ro).unwrap();
+
+        clear_cache(dir.path()).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&ro).is_err(),
+            "the dangling link must be removed"
+        );
     }
 
     #[test]

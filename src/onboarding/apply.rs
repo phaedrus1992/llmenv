@@ -302,10 +302,11 @@ fn make_dir(dir: &Path, made: &mut Vec<PathBuf>) -> anyhow::Result<()> {
 fn undo(made: &[PathBuf]) -> String {
     let mut left = Vec::new();
     for path in made.iter().rev() {
-        let removed = if path.is_dir() {
-            std::fs::remove_dir(path)
-        } else {
-            std::fs::remove_file(path)
+        // Judge the entry itself. `is_dir()` follows a link, and `remove_dir` refuses a link, so a
+        // link to a folder would stay in place (#3116).
+        let removed = match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.is_dir() => std::fs::remove_dir(path),
+            _ => std::fs::remove_file(path),
         };
         if let Err(e) = removed
             && path_exists(path).unwrap_or(true)
