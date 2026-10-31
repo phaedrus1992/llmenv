@@ -143,7 +143,8 @@ fn assess(calls: &VecDeque<Call>) -> Option<Health> {
 fn note_reset(path: &Path, why: &str) {
     crate::agent_notice::record_logged(format!(
         "llmenv: the recall health file {} was not a valid ring ({why}), so a new one was \
-         started. `llmenv doctor` now counts only the calls after this point.",
+         started. `llmenv doctor` now counts only the calls after this point. Fix: none is needed \
+         unless this repeats. If it repeats, check the file for damage.",
         path.display()
     ));
 }
@@ -256,6 +257,7 @@ mod tests {
         assert_eq!((h.calls, h.newest_at), (1, 7));
         let notice = crate::agent_notice::current().unwrap_or_default();
         assert!(notice.contains("was not a valid ring"), "{notice}");
+        assert!(notice.contains("Fix:"), "{notice}");
     }
 
     #[test]

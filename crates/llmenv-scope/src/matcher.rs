@@ -3,7 +3,9 @@ use llmenv_config::{HostScope, UserScope};
 
 pub(crate) use super::content_walk::matches_content_all;
 pub use super::marker_file::discover_project;
-use std::collections::BTreeSet;
+// Kept public here: the root crate's `scope::matcher` shim and the hook code import it from this path.
+pub use super::tags::is_valid_tag_charset;
+use super::tags::sanitize_tags;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -220,90 +222,6 @@ fn parse_extra_tags(raw: &str) -> Vec<String> {
     sanitize_tags(tags, "$LLMENV_EXTRA_TAGS")
 }
 
-/// Charset every tag must satisfy, regardless of source: non-empty,
-/// alphanumeric plus `-`/`_`. Matches `hook_run::validate_tag`'s recall-query
-/// charset — a tag outside it trips that validation at ICM-recall time, and
-/// the resulting error silently disables memory recall/store *and*
-/// session-log for the whole session (#1035), so untrusted sources are
-/// filtered here, at creation, rather than left to fail downstream.
-pub fn is_valid_tag_charset(tag: &str) -> bool {
-    !tag.is_empty()
-        && tag
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-}
-
-/// Max bytes for a single tag from an untrusted source. Charset alone
-/// doesn't bound length, and an oversized tag still bloats
-/// `LLMENV_ACTIVE_TAGS` and every ICM recall keyword built from it (#1035).
-const MAX_TAG_LEN: usize = 64;
-
-/// Max tags accepted from a single untrusted source in one ingest pass. A
-/// hand-written `.llmenv.yaml` never approaches this; a generated/scripted
-/// `$LLMENV_EXTRA_TAGS` trivially could, and every active tag becomes one
-/// `Action::RecallTag` per turn (#1035).
-const MAX_TAGS_PER_SOURCE: usize = 64;
-
-/// Drop tags that fail [`is_valid_tag_charset`] or exceed [`MAX_TAG_LEN`],
-/// then cap the remainder to [`MAX_TAGS_PER_SOURCE`] — logging a warning
-/// naming each rejected tag and any overflow. `source` labels the origin in
-/// the warning (e.g. `.llmenv.yaml` or `$LLMENV_EXTRA_TAGS`). Also used for
-/// bundle names (`enable_bundles`/`disable_bundles`), which share the same
-/// charset rule and the same downstream `hook_run::validate_bundle` failure
-/// mode as tags.
-pub(crate) fn sanitize_tags(raw: Vec<String>, source: &str) -> Vec<String> {
-    // #1345: these report a tag the *user* wrote never taking effect, so they
-    // have to be `eprintln!`. The session-log file layer's `EnvFilter` is `ERROR`, so a
-    // `tracing::warn!` here reached neither stderr nor the log file — the tag
-    // silently did nothing and no bundle gated on it ever fired.
-    let mut valid = Vec::with_capacity(raw.len());
-    for tag in raw {
-        if !is_valid_tag_charset(&tag) {
-            eprintln!("warning: {source}: dropping tag {tag:?} (only alphanumeric, -, _ allowed)");
-        } else if tag.len() > MAX_TAG_LEN {
-            eprintln!("warning: {source}: dropping tag {tag:?} (exceeds {MAX_TAG_LEN}-byte limit)");
-        } else {
-            valid.push(tag);
-        }
-    }
-    if valid.len() > MAX_TAGS_PER_SOURCE {
-        eprintln!(
-            "warning: {source}: {} tags exceeds cap of {MAX_TAGS_PER_SOURCE}; keeping the first {MAX_TAGS_PER_SOURCE}",
-            valid.len()
-        );
-        valid.truncate(MAX_TAGS_PER_SOURCE);
-    }
-    valid
-}
-
-/// Cap the *union* of tags across every source (`config.yaml`'s network/
-/// host/user/content scopes, `.llmenv.yaml`, `$LLMENV_EXTRA_TAGS`, `env.os`)
-/// to [`MAX_TAGS_PER_SOURCE`] — [`sanitize_tags`] already bounds each source
-/// individually, but several active scopes plus a large `.llmenv.yaml` plus
-/// `$LLMENV_EXTRA_TAGS` can still combine into several hundred tags, each
-/// becoming one `Action::RecallTag` per turn (#1041). Reuses
-/// `MAX_TAGS_PER_SOURCE` as the aggregate bound too, rather than a second
-/// magic number: the same "one source's worth" ceiling that's already
-/// accepted as tolerable for a single source is exactly the ceiling worth
-/// enforcing on the combination.
-///
-/// Keeps the alphabetically-first entries (`BTreeSet`'s natural iteration
-/// order) — the same "keep the first N, warn about the rest" policy
-/// `sanitize_tags` uses per-source, just applied to the union so no one
-/// source is treated as more important than another when something has to
-/// be dropped.
-pub(crate) fn cap_aggregate_tags(tags: BTreeSet<String>) -> BTreeSet<String> {
-    let total = tags.len();
-    if total <= MAX_TAGS_PER_SOURCE {
-        return tags;
-    }
-    tracing::warn!(
-        "aggregate tag count {total} exceeds cap of {MAX_TAGS_PER_SOURCE} across all sources \
-         combined; keeping the alphabetically-first {MAX_TAGS_PER_SOURCE}"
-    );
-    tags.into_iter().take(MAX_TAGS_PER_SOURCE).collect()
-}
-
 fn detect_hostname() -> Option<String> {
     // uname(2) syscall rather than spawning the `hostname` binary: each hook-run
     // is a fresh process, so the process-static Env cache never helps the hook
@@ -378,9 +296,9 @@ pub(crate) fn matches_user(s: &UserScope, env: &Env) -> bool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::{
-        Env, MAX_TAGS_PER_SOURCE, cap_aggregate_tags, discover_project, glob_matches,
-        is_valid_tag_charset, matches_content_all, parse_extra_tags, sanitize_tags,
+    use super::{Env, discover_project, glob_matches, matches_content_all, parse_extra_tags};
+    use crate::tags::{
+        MAX_TAG_LEN, MAX_TAGS_PER_SOURCE, cap_aggregate_tags, is_valid_tag_charset, sanitize_tags,
     };
     use llmenv_config::ContentScope;
     use proptest::prelude::*;
@@ -503,8 +421,8 @@ mod tests {
     #[test]
     fn sanitize_tags_drops_tag_over_max_len() {
         // #1035: charset alone doesn't bound length.
-        let at_limit = "a".repeat(super::MAX_TAG_LEN);
-        let over_limit = "a".repeat(super::MAX_TAG_LEN + 1);
+        let at_limit = "a".repeat(MAX_TAG_LEN);
+        let over_limit = "a".repeat(MAX_TAG_LEN + 1);
         assert_eq!(
             sanitize_tags(vec![at_limit.clone(), over_limit], "test"),
             vec![at_limit]
@@ -888,10 +806,10 @@ mod tests {
         #[test]
         fn parse_extra_tags_output_obeys_tag_rules(raw in r"\PC*") {
             let tags = parse_extra_tags(&raw);
-            prop_assert!(tags.len() <= super::MAX_TAGS_PER_SOURCE);
+            prop_assert!(tags.len() <= MAX_TAGS_PER_SOURCE);
             for tag in &tags {
                 prop_assert!(!tag.is_empty());
-                prop_assert!(tag.len() <= super::MAX_TAG_LEN);
+                prop_assert!(tag.len() <= MAX_TAG_LEN);
                 prop_assert!(is_valid_tag_charset(tag));
             }
         }

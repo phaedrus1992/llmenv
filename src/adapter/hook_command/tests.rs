@@ -1,5 +1,5 @@
 use super::*;
-use proptest::prop_assert;
+use proptest::{prop_assert, prop_assert_eq};
 
 proptest::proptest! {
     /// A key with `..` in any segment is never joined into the cache path, whatever the command.
@@ -13,10 +13,7 @@ proptest::proptest! {
         files.insert(PathBuf::from(&key), PathBuf::from("/src/tool.sh"));
         let command = format!("bash /root/{key}");
         let got = resolve_command_paths_against_files(&command, Path::new(CACHE), &files);
-        prop_assert!(
-            got.as_deref().is_none_or(|out| !out.contains(&format!("{CACHE}/{key}"))),
-            "a traversal key was joined into the cache: {got:?}"
-        );
+        prop_assert!(got.is_err(), "a traversal key must fail the hook: {got:?}");
     }
 
     /// Rewriting never panics on arbitrary command text, and text with no bundle path is unchanged.
@@ -24,7 +21,10 @@ proptest::proptest! {
     fn rewriting_never_panics_and_keeps_text_without_a_bundle_path(command in "\\PC{0,120}") {
         let files = BTreeMap::new();
         let got = resolve_command_paths_against_files(&command, Path::new(CACHE), &files);
-        prop_assert!(got.is_none(), "no known file means no rewrite: {got:?}");
+        prop_assert!(
+            got.as_ref().is_ok_and(Option::is_none),
+            "no known file means no rewrite: {got:?}"
+        );
     }
 
     #[test]
@@ -114,6 +114,10 @@ fn a_trailing_slash_or_bare_root_is_not_a_script() {
     }
 }
 
+#[allow(
+    clippy::expect_used,
+    reason = "a test helper: a failed resolve must stop the test"
+)]
 fn resolve(command: &str, files: &[&str], warned: &mut BTreeSet<String>) -> String {
     let files = files
         .iter()
@@ -126,6 +130,7 @@ fn resolve(command: &str, files: &[&str], warned: &mut BTreeSet<String>) -> Stri
         &files,
         warned,
     )
+    .expect("resolve a hook command in a test")
 }
 
 #[test]
@@ -137,10 +142,13 @@ fn warning_is_given_once_for_each_bundle_and_path() {
     let cmd = "bash $HOME/x/guard.sh";
     let first = resolve_hook_command(cmd, Some(bundle), out, &files, &mut warned);
     let second = resolve_hook_command(cmd, Some(bundle), out, &files, &mut warned);
-    assert_eq!((first.as_str(), second.as_str()), (cmd, cmd));
+    assert_eq!(
+        (first.ok().as_deref(), second.ok().as_deref()),
+        (Some(cmd), Some(cmd))
+    );
     assert_eq!(warned.len(), 1, "{warned:?}");
     let other = Path::new("/bundles/other");
-    resolve_hook_command(cmd, Some(other), out, &files, &mut warned);
+    let _ = resolve_hook_command(cmd, Some(other), out, &files, &mut warned);
     assert_eq!(warned.len(), 2, "{warned:?}");
 }
 
@@ -226,6 +234,10 @@ fn an_unresolved_rooted_path_warns_beside_a_resolved_one() {
 }
 
 #[test]
+#[allow(
+    clippy::expect_used,
+    reason = "a test: an unexpected error must stop it"
+)]
 fn a_command_without_a_bundle_is_unchanged() {
     let got = resolve_hook_command(
         "bash hooks/guard.sh",
@@ -233,7 +245,8 @@ fn a_command_without_a_bundle_is_unchanged() {
         Path::new(CACHE),
         &BTreeMap::new(),
         &mut BTreeSet::new(),
-    );
+    )
+    .expect("a command without a bundle resolves");
     assert_eq!(got, "bash hooks/guard.sh");
 }
 
@@ -246,8 +259,138 @@ fn a_traversal_key_is_never_joined_into_the_cache() {
     );
     let got =
         resolve_command_paths_against_files("bash /tmp/../escape.sh", Path::new(CACHE), &files);
+    let message = got
+        .as_ref()
+        .err()
+        .map(|e| format!("{e:#}"))
+        .unwrap_or_default();
     assert!(
-        got.is_none(),
-        "a traversal key must not rewrite the word: {got:?}"
+        got.is_err() && message.contains("../escape.sh") && message.contains("Fix:"),
+        "a traversal key must fail with its key and a fix: {got:?}"
     );
+}
+
+// ---- resolve_command_paths_against_files ----
+
+fn known_files_from_paths(paths: &[&str]) -> std::collections::BTreeMap<PathBuf, PathBuf> {
+    paths
+        .iter()
+        .map(|p| (PathBuf::from(p), PathBuf::from(format!("/source/{p}"))))
+        .collect()
+}
+
+#[allow(
+    clippy::expect_used,
+    reason = "a test helper: a failed rewrite must stop the test"
+)]
+fn rewrite(
+    command: &str,
+    cache: &Path,
+    files: &std::collections::BTreeMap<PathBuf, PathBuf>,
+) -> Option<String> {
+    resolve_command_paths_against_files(command, cache, files).expect("rewrite in a test")
+}
+
+#[test]
+fn suffix_matches_shell_var_prefixed_token() {
+    let files = known_files_from_paths(&["hooks/guard.sh"]);
+    let cache = Path::new("/cache");
+    let resolved = rewrite("bash ${HOME}/bundles/base/hooks/guard.sh", cache, &files);
+    assert_eq!(resolved, Some("bash /cache/hooks/guard.sh".to_string()));
+}
+
+#[test]
+fn picks_longest_suffix_when_multiple_match() {
+    let files = known_files_from_paths(&["guard.sh", "hooks/guard.sh"]);
+    let cache = Path::new("/cache");
+    let resolved = rewrite("bash ${HOME}/bundles/base/hooks/guard.sh", cache, &files);
+    assert_eq!(
+        resolved,
+        Some("bash /cache/hooks/guard.sh".to_string()),
+        "must pick hooks/guard.sh (longer), not guard.sh"
+    );
+}
+
+#[test]
+fn requires_path_component_boundary_before_suffix() {
+    // "my-hooks/guard.sh" ends with "hooks/guard.sh" but the substring
+    // crosses a component boundary — it should not match.
+    let files = known_files_from_paths(&["hooks/guard.sh"]);
+    let cache = Path::new("/cache");
+    let resolved = rewrite("bash my-hooks/guard.sh", cache, &files);
+    assert_eq!(
+        resolved, None,
+        "must not match suffix that crosses a path-component boundary"
+    );
+}
+
+#[test]
+fn matches_absolute_path_token() {
+    // Absolute-path tokens are not blocked — the join operand is the
+    // trusted `rel` key, not the untrusted token.
+    let files = known_files_from_paths(&["hooks/guard.sh"]);
+    let cache = Path::new("/cache");
+    let resolved = rewrite("bash /abs/path/hooks/guard.sh", cache, &files);
+    assert_eq!(resolved, Some("bash /cache/hooks/guard.sh".to_string()));
+}
+
+#[test]
+fn empty_known_files_never_matches() {
+    let files: std::collections::BTreeMap<PathBuf, PathBuf> = std::collections::BTreeMap::new();
+    let cache = Path::new("/cache");
+    let resolved = rewrite("bash hooks/guard.sh", cache, &files);
+    assert_eq!(resolved, None);
+}
+
+#[test]
+fn token_without_slash_never_matches() {
+    let files = known_files_from_paths(&["guard.sh"]);
+    let cache = Path::new("/cache");
+    let resolved = rewrite("bash guard.sh", cache, &files);
+    assert_eq!(resolved, None);
+}
+
+#[test]
+fn resolves_multiple_tokens_in_command() {
+    let files = known_files_from_paths(&["hooks/pre.sh", "hooks/post.sh"]);
+    let cache = Path::new("/cache");
+    let resolved = rewrite(
+        "bash /some/where/hooks/pre.sh /other/where/hooks/post.sh",
+        cache,
+        &files,
+    );
+    assert_eq!(
+        resolved,
+        Some("bash /cache/hooks/pre.sh /cache/hooks/post.sh".to_string())
+    );
+}
+
+proptest::proptest! {
+    /// The three pieces of a word join back to the word, for any punctuation a command can hold.
+    #[test]
+    fn split_word_pieces_join_back_to_the_word(word in r#"[a-z/"'();&|$]{0,24}"#) {
+        let (prefix, core, suffix) = split_word(&word);
+        prop_assert_eq!(format!("{prefix}{core}{suffix}"), word);
+    }
+
+    /// The core of a word never keeps an outer quote, bracket, or shell punctuation mark.
+    #[test]
+    fn split_word_core_has_no_outer_quote_or_punctuation(word in r#"[a-z/"'();&|$]{0,24}"#) {
+        let (_, core, _) = split_word(&word);
+        prop_assert!(!core.starts_with(['"', '\'', '(']), "core: {core:?}");
+        prop_assert!(!core.ends_with(['"', '\'', ';', '&', '|', ')']), "core: {core:?}");
+    }
+
+    /// A rewrite that changes no word leaves the command unchanged, and reports no change.
+    #[test]
+    fn rewrite_words_with_no_change_reports_none(command in r#"[a-z/ \t\n"';&|()$]{0,80}"#) {
+        prop_assert!(rewrite_words(&command, |_| None).is_none());
+    }
+
+    /// A rewrite that returns each core as it was keeps the command text exactly, spacing included.
+    #[test]
+    fn rewrite_words_with_identity_keeps_the_text(command in r#"[a-z/ \t\n"';&|()$]{0,80}"#) {
+        let got = rewrite_words(&command, |core| Some(core.to_string()));
+        prop_assert_eq!(got.unwrap_or_else(|| command.clone()), command.clone());
+    }
 }
