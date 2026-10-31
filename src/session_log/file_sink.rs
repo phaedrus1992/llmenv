@@ -10,7 +10,7 @@ use std::sync::{Mutex, PoisonError};
 use llmenv_paths::{create_dir_owner_only, state_dir};
 
 use crate::session_log::rotation::{
-    MAX_BYTES, rotate_if_full, rotation_failed_marker, rotation_marker,
+    MAX_BYTES, non_regular_path_error, rotate_if_full, rotation_failed_marker, rotation_marker,
 };
 
 /// Default file-sink path: `<state_dir>/session-log.jsonl`.
@@ -111,6 +111,7 @@ impl FileSink {
         // next append tries the rotation again.
         let (rotated, rotation_error) = match rotate_if_full(&self.path, MAX_BYTES) {
             Ok(rotated) => (rotated, None),
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => return Err(e),
             Err(e) => {
                 tracing::error!(
                     path = %self.path.display(),
@@ -126,8 +127,27 @@ impl FileSink {
         {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
+            opts.custom_flags(
+                (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK)
+                    .bits()
+                    .cast_signed(),
+            );
         }
-        let mut f = crate::paths::refuse_symlink(&mut opts).open(&self.path)?;
+        #[cfg(not(unix))]
+        crate::paths::refuse_symlink(&mut opts);
+        let mut f = opts.open(&self.path)?;
+        let metadata = f.metadata().map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!(
+                    "cannot inspect opened session log {}: {e}",
+                    self.path.display()
+                ),
+            )
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(non_regular_path_error(&self.path));
+        }
         // `mode(0o600)` above only applies on creation (O_CREAT); a file that
         // already existed (e.g. created with a looser umask before this sink
         // ran, or by an older llmenv version) keeps its prior permissions. Set
@@ -234,6 +254,56 @@ mod tests {
         );
         assert_eq!(lines.next(), Some("{\"after\":1}"));
         assert!(rotation_path(&path, 1).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn append_rejects_a_symlink_without_moving_it_or_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.jsonl");
+        let path = dir.path().join("session-log.jsonl");
+        File::create(&target).unwrap().set_len(MAX_BYTES).unwrap();
+        symlink(&target, &path).unwrap();
+
+        let error = FileSink::new(path.clone())
+            .try_append("{\"event\":true}")
+            .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("Fix:"));
+        assert!(error.to_string().contains("session_log.file.path"));
+        assert_eq!(std::fs::read_link(&path).unwrap(), target);
+        assert_eq!(std::fs::metadata(&target).unwrap().len(), MAX_BYTES);
+        assert!(!rotation_path(&path, 1).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn append_rejects_a_fifo_before_opening_it() {
+        use std::os::unix::fs::FileTypeExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-log.fifo");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "mkfifo exited with {status}");
+
+        let error = FileSink::new(path.clone())
+            .try_append("{\"event\":true}")
+            .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("not a regular file"));
+        assert!(
+            std::fs::symlink_metadata(path)
+                .unwrap()
+                .file_type()
+                .is_fifo()
+        );
     }
 
     #[test]
