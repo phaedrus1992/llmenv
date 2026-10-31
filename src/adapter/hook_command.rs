@@ -3,6 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
+
 /// Top-level directories that hold system tools, never bundle scripts.
 const SYSTEM_DIRS: [&str; 12] = [
     "dev", "usr", "bin", "sbin", "etc", "tmp", "var", "proc", "sys", "opt", "System", "Library",
@@ -75,45 +77,47 @@ pub(crate) fn resolve_bundle_relative_paths(command: &str, bundle_dir: &Path) ->
 /// ```
 ///
 /// The word above ends with `hooks/guard.sh`, a file that was copied into the cache.
-pub(crate) fn resolve_command_paths_against_files(
+fn resolve_command_paths_against_files(
     command: &str,
     cache_dir: &Path,
     known_files: &BTreeMap<PathBuf, PathBuf>,
-) -> Option<String> {
+) -> anyhow::Result<Option<String>> {
     // Longest key first, so the first match is the most specific suffix.
-    // A traversal key is dropped, not joined. The map comes from bundle config, so the check
-    // runs in every build, not only debug builds (#3107).
     let mut candidates: Vec<(&Path, String)> = known_files
         .keys()
-        .filter(|k| {
-            let unsafe_key = crate::paths::is_unsafe_join_target(k.to_string_lossy().as_ref());
-            if unsafe_key {
-                tracing::error!(
-                    "bundle file {} has a path that leaves the bundle, so its hook command \
-                     word is not rewritten. Fix: rename the bundle file so its path stays \
-                     inside the bundle, then regenerate.",
-                    k.display()
-                );
-            }
-            !unsafe_key
-        })
         .map(|k| (k.as_path(), k.to_string_lossy().into_owned()))
         .collect();
     candidates.sort_by_key(|(_, s)| std::cmp::Reverse(s.len()));
 
-    rewrite_words(command, |word| {
+    // A traversal key that matches a word fails the hook (#3120). It is never joined.
+    let mut refused: Option<&str> = None;
+    let rewritten = rewrite_words(command, |word| {
         if !word.contains('/') {
             return None;
         }
-        // The join operand is `rel`, a trusted key from known_files, so an absolute or `../`
-        // word is safe to suffix-match.
-        let (rel, _) = candidates.iter().find(|(_, s)| {
-            let prefix_len = word.len().saturating_sub(s.len());
-            word.ends_with(s.as_str())
-                && (prefix_len == 0 || word.as_bytes().get(prefix_len - 1) == Some(&b'/'))
-        })?;
+        let (rel, key) = candidates
+            .iter()
+            .find(|(_, s)| suffix_matches(word, s.as_str()))?;
+        if crate::paths::is_unsafe_join_target(key) {
+            refused.get_or_insert(key.as_str());
+            return None;
+        }
         Some(cache_dir.join(rel).to_string_lossy().into_owned())
-    })
+    });
+    match refused {
+        Some(key) => Err(anyhow::anyhow!(
+            "bundle file `{key}` has a path that leaves the bundle, so the hook command cannot \
+             use it. Fix: rename the bundle file so its path stays inside the bundle, then \
+             regenerate."
+        )),
+        None => Ok(rewritten),
+    }
+}
+
+/// True when `word` ends with `key` at a path-component boundary.
+fn suffix_matches(word: &str, key: &str) -> bool {
+    let prefix_len = word.len().saturating_sub(key.len());
+    word.ends_with(key) && (prefix_len == 0 || word.as_bytes().get(prefix_len - 1) == Some(&b'/'))
 }
 
 /// Rewrite the bundle paths in `command` to the cache folder `out`.
@@ -126,20 +130,21 @@ pub(crate) fn resolve_hook_command(
     out: &Path,
     files: &BTreeMap<PathBuf, PathBuf>,
     warned: &mut BTreeSet<String>,
-) -> String {
+) -> anyhow::Result<String> {
     let Some(bundle) = bundle_origin else {
-        return command.to_string();
+        return Ok(command.to_string());
     };
-    let relative = resolve_bundle_relative_paths(command, out);
-    let by_suffix =
-        resolve_command_paths_against_files(relative.as_deref().unwrap_or(command), out, files);
-    let resolved = by_suffix
-        .or(relative)
-        .unwrap_or_else(|| command.to_string());
     let name = bundle.file_name().map_or_else(
         || bundle.display().to_string(),
         |n| n.to_string_lossy().into_owned(),
     );
+    let relative = resolve_bundle_relative_paths(command, out);
+    let by_suffix =
+        resolve_command_paths_against_files(relative.as_deref().unwrap_or(command), out, files)
+            .with_context(|| format!("bundle '{name}': cannot resolve the hook command"))?;
+    let resolved = by_suffix
+        .or(relative)
+        .unwrap_or_else(|| command.to_string());
     for token in unresolved_path_tokens(&resolved, out) {
         if warned.insert(format!("{name}\0{token}")) {
             eprintln!(
@@ -150,7 +155,7 @@ pub(crate) fn resolve_hook_command(
             );
         }
     }
-    resolved
+    Ok(resolved)
 }
 
 /// The words of `command` that name a script path outside the bundle files and outside `cache`.

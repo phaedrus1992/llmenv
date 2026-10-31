@@ -4,7 +4,8 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-use super::matcher::{Env, ResolvedProject, sanitize_tags};
+use super::matcher::{Env, ResolvedProject};
+use super::tags::sanitize_tags;
 
 /// Schema for the body of `.llmenv.yaml` (project marker file).
 /// All fields optional; an empty file is valid.

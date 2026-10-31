@@ -4,7 +4,9 @@
 //! (2,048 characters by default). The cut is silent. This module asks a server for that text and
 //! counts it. Design: docs/design/issue-2148-mcp-description-cap.md
 
+mod last_words;
 mod stop;
+use last_words::stderr_tail;
 use std::time::Duration;
 use stop::stop_group;
 
@@ -137,27 +139,11 @@ async fn probe_stdio(
     );
     match result {
         Ok(ok) => Ok(ok),
-        Err(e) => Err(match stderr_tail(stderr.as_mut()).await {
+        Err(e) => Err(match stderr_tail(stderr.as_mut(), command).await {
             Some(tail) => e.context(format!("the server wrote: {tail}")),
             None => e,
         }),
     }
-}
-
-/// What the stopped server left on stderr, as one clean line.
-async fn stderr_tail(stderr: Option<&mut tokio::process::ChildStderr>) -> Option<String> {
-    use tokio::io::AsyncReadExt as _;
-    let stderr = stderr?;
-    let mut buf = Vec::new();
-    // The child is stopped, so the pipe ends at its last write. The timeout is a backstop for a
-    // grandchild that still holds the pipe open.
-    let _ = tokio::time::timeout(
-        Duration::from_millis(200),
-        (&mut *stderr).take(2048).read_to_end(&mut buf),
-    )
-    .await;
-    let text = crate::stdio_rpc::tidy_reason(&String::from_utf8_lossy(&buf));
-    (!text.is_empty()).then_some(text)
 }
 
 /// The `initialize` and `tools/list` exchange, over any line-delimited JSON-RPC pipe.

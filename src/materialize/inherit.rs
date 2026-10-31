@@ -18,15 +18,19 @@
 //! into the store when the store has none, and copied back into a new folder that
 //! has none. Neither direction ever overwrites an existing copy.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::Context as _;
 use zeroize::Zeroizing;
 
+mod copy;
 mod fold;
 mod link_site;
+mod stranded;
+use copy::{copy_file_no_follow, dest_already_present, is_real_file};
 use fold::move_dir_newest_wins;
 use link_site::clear_link_site;
+pub(crate) use stranded::migrate_stranded_projects;
 
 /// Subdirectory of the durable state dir holding Claude Code's transcripts.
 const PROJECTS_DIR: &str = "projects";
@@ -202,55 +206,10 @@ fn inherit_copied_files_named(
         if dest_already_present(&dst) || !is_real_file(&src) {
             continue;
         }
-        copy_owner_only(&src, &dst)?;
+        copy_file_no_follow(&src, &dst)
+            .with_context(|| format!("copying {} -> {}", src.display(), dst.display()))?;
     }
     Ok(())
-}
-
-/// True when `path` is a regular file (`symlink_metadata`, not `is_file()`
-/// — #1341: `is_file()` follows a symlink, so a symlinked entry under
-/// `state_dir`/`config_dir` would otherwise be read/copied through
-/// silently). Skips (warns) rather than errors: a stray symlink here
-/// shouldn't block a whole `materialize`/inherit pass over one file. A
-/// missing source is the documented, common no-op case (nothing cached
-/// yet) and stays silent; any other stat failure (permission denied, ...)
-/// is warned rather than folded into the same "absent" outcome
-/// (security-audit, #1341).
-fn is_real_file(path: &Path) -> bool {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            // The skip is intended (#1341), so it runs on every pass and is debug only.
-            tracing::debug!(path = %path.display(), "inherit: skipping symlinked file");
-            false
-        }
-        Ok(meta) => meta.is_file(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-        Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "inherit: could not stat file, skipping");
-            false
-        }
-    }
-}
-
-/// True when something already exists at `path`, including a dangling
-/// symlink (`symlink_metadata`, not `exists()` — #1341 security-audit:
-/// `exists()` follows a symlink and reports `false` for a dangling one,
-/// which would fall through to `std::fs::copy` opening
-/// `O_CREAT|O_TRUNC` through the link and writing the copied content at
-/// the link's target instead of replacing the link itself).
-fn dest_already_present(path: &Path) -> bool {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) => {
-            if meta.file_type().is_symlink() {
-                tracing::warn!(
-                    path = %path.display(),
-                    "inherit: skipping copy — destination is a symlink"
-                );
-            }
-            true
-        }
-        Err(_) => false,
-    }
 }
 
 /// Copy a folder's single-file state back into the durable store when the store
@@ -288,7 +247,8 @@ fn capture_copied_files_named(
         if dest_already_present(&dst) || !is_real_file(&src) {
             continue;
         }
-        copy_owner_only(&src, &dst)?;
+        copy_file_no_follow(&src, &dst)
+            .with_context(|| format!("copying {} -> {}", src.display(), dst.display()))?;
     }
     Ok(())
 }
@@ -752,37 +712,6 @@ fn attach_store_atomic(target: &Path, link: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Move every `projects/` tree stranded in an old hashed folder into the durable
-/// store, newest mtime winning per file. Returns how many trees were folded.
-///
-/// Handles both layouts: `<root>/<shape>/projects` (loose, strict) and
-/// `<root>/<version>/<shape>/projects` (normal) — the old code only ever scanned
-/// the flat one, which is why transcripts piled up unmigrated. The now-empty
-/// source directories are left for `llmenv clean` to reclaim.
-///
-/// # Errors
-/// Returns an error when a tree cannot be folded into the durable store.
-pub(crate) fn migrate_stranded_projects(
-    adapter_root: &Path,
-    state_dir: &Path,
-) -> anyhow::Result<usize> {
-    let target = state_dir.join(PROJECTS_DIR);
-    let mut folded = 0usize;
-    for src in stranded_projects_dirs(adapter_root, state_dir) {
-        let skipped = move_dir_newest_wins(&src, &target)
-            .with_context(|| format!("folding stranded transcripts from {}", src.display()))?;
-        if !skipped.is_empty() {
-            tracing::warn!(
-                "{} entries stay in {}, which the fold does not move",
-                skipped.len(),
-                src.display()
-            );
-        }
-        folded = folded.saturating_add(1);
-    }
-    Ok(folded)
-}
-
 /// Attach the durable store to the config dir.
 #[cfg(unix)]
 fn attach_store(target: &Path, link: &Path) -> anyhow::Result<()> {
@@ -795,65 +724,6 @@ fn attach_store(target: &Path, link: &Path) -> anyhow::Result<()> {
 #[cfg(not(unix))]
 fn attach_store(_target: &Path, _link: &Path) -> anyhow::Result<()> {
     anyhow::bail!("inheriting Claude Code transcripts needs symlink support (unix only)")
-}
-
-/// Every stranded `projects/` directory under `adapter_root`, at both the flat
-/// and version-nested depths. Excludes the durable store and already-linked
-/// folders (following a link would fold the store into itself).
-fn stranded_projects_dirs(adapter_root: &Path, state_dir: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    for level1 in child_dirs(adapter_root) {
-        if level1 == state_dir {
-            continue;
-        }
-        push_projects_dir(&level1, &mut out);
-        for level2 in child_dirs(&level1) {
-            push_projects_dir(&level2, &mut out);
-        }
-    }
-    out
-}
-
-/// Immediate subdirectories of `dir`, skipping symlinks and staging dirs.
-/// An unreadable directory yields nothing — migration is best-effort.
-fn child_dirs(dir: &Path) -> Vec<PathBuf> {
-    // An absent dir is nothing to migrate; anything else (a permission error,
-    // say) is warned rather than swallowed — treating it as "no children" would
-    // silently skip a folder full of transcripts.
-    let read_dir = match crate::paths::read_dir_optional(dir) {
-        Ok(Some(rd)) => rd,
-        Ok(None) => return Vec::new(),
-        Err(e) => {
-            tracing::error!(
-                "inherit: cannot scan {} for transcripts: {e:#}",
-                dir.display()
-            );
-            return Vec::new();
-        }
-    };
-    // Each skipped entry is logged at error level, because its transcripts are not migrated.
-    read_dir
-        .filter_map(|entry| crate::paths::readable_entry(dir, "transcript migration", entry))
-        .filter(|entry| !entry.file_name().as_encoded_bytes().ends_with(b".tmp"))
-        .filter_map(|entry| match entry.file_type() {
-            Ok(ft) => ft.is_dir().then(|| entry.path()),
-            Err(e) => {
-                tracing::error!(
-                    "inherit: cannot read the type of {}, so its transcripts are not migrated: {e}",
-                    entry.path().display()
-                );
-                None
-            }
-        })
-        .collect()
-}
-
-/// Push `<dir>/projects` onto `out` when it is a real directory (not a link).
-fn push_projects_dir(dir: &Path, out: &mut Vec<PathBuf>) {
-    let candidate = dir.join(PROJECTS_DIR);
-    if std::fs::symlink_metadata(&candidate).is_ok_and(|md| md.file_type().is_dir()) {
-        out.push(candidate);
-    }
 }
 
 #[cfg(test)]
@@ -2054,4 +1924,31 @@ mod tests {
     // `dst` already resolves through a symlink to an existing directory —
     // it never lstats first. `move_dir_newest_wins` must refuse to proceed
     // rather than silently folding into the symlink's target.
+
+    #[test]
+    fn a_destination_that_cannot_be_read_is_not_treated_as_absent() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file = dir.path().join("plain");
+        std::fs::write(&file, "x").expect("write a test file");
+        // A file used as a folder makes `symlink_metadata` fail with a non-NotFound error.
+        let under_a_file = file.join("child");
+        let mut present = false;
+        let logs = crate::test_log_capture::capture_logs(|| {
+            present = dest_already_present(&under_a_file);
+        });
+        assert!(present, "an unreadable destination must not look absent");
+        assert!(logs.contains("cannot read the destination"), "{logs}");
+        assert!(logs.contains("Fix:"), "{logs}");
+    }
+
+    #[test]
+    fn a_missing_destination_is_absent_and_logs_nothing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut present = true;
+        let logs = crate::test_log_capture::capture_logs(|| {
+            present = dest_already_present(&dir.path().join("absent"));
+        });
+        assert!(!present);
+        assert!(logs.is_empty(), "{logs}");
+    }
 }
