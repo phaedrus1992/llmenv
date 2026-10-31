@@ -357,6 +357,21 @@ Each notice starts with `llmenv:` and appears once per hook run.
   project for the task tracker. Run `llmenv task` in the project to see the error.
 - `the agent config could not be read, so its model history was reset.` — the per-session agent
   config file could not be read and was replaced. The model history starts again.
+- `memory <event> skipped: the memory backend failed to load` — (added in v3.14.0) a bundle or
+  config that declares `features.memory` failed to load. The notice names the cause. Fix that
+  bundle or config. A bundle with no content directory is not reported here, because its
+  declaration cannot be read.
+- `could not release proxy lockfile <path>` — (added in v3.14.0) the MCP proxy lock stayed on disk,
+  so later proxy starts fail. Remove the file by hand.
+- `proxy attribution line not written to <path>` — (added in v3.14.0) the proxy log directory is
+  not writable. Make it writable.
+- `could not remove proxy lock staging file <path>` — (added in v3.14.0) a leftover staging file
+  stays on disk. Remove it by hand.
+- `cannot stop the process group of MCP server <name>` and `cannot stop the MCP text probe <name>` —
+  (added in v3.14.0) a probe process may still run. Stop that process by hand.
+- `cannot write the trace file <path>`, `cannot write a trace line to stderr`, and `trace line
+  dropped` — (added in v3.14.0) a trace line was lost. Fix `LLMENV_TRACE_FILE`, or unset
+  `LLMENV_TRACE_TIMING`, as the notice says.
 
 ## Profiling hook-run latency
 

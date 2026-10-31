@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 
 /// An mtime this far ahead of the clock is a fresh write, not skew. A coarse file-system
 /// timestamp can put a write slightly ahead of the clock read.
-const CLOCK_SKEW_TOLERANCE: Duration = Duration::from_secs(5);
+pub(crate) const CLOCK_SKEW_TOLERANCE: Duration = Duration::from_secs(5);
 
 /// The paths whose clock-skew error is already logged in this process. A cache sweep scans a
 /// folder twice, once for its gate and once for the sweep, so one skewed entry would log twice.
