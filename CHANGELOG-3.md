@@ -96,6 +96,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Report a memory backend with an invalid URL to the agent, not only on stderr. A bundle with missing content is still reported on stderr only, until a follow-up lands. [fix:hook] [#3129]
 - Remove a dangling link at the read-once cache folder, and stop pruning a stale lock whose session file is a dangling link. Undo now removes a link to a folder and keeps the folder. [fix:state] [#3116]
 - Make `llmenv doctor` refuse a link at the cache directory instead of writing its probe into the link's target. [fix:hook] [#3116]
+- Show a configured memory backend that fails to load to the agent, with the cause and a fix. The failure used to reach only hook stderr, which the engine drops, so the agent saw no memory. [fix:hook] [#3129, #3202]
+- Apply a 5-second clock-skew tolerance when checking whether a login token has expired. A clock that runs ahead no longer discards a live login. [fix:auth] [#3098]
+- Show proxy lockfile, attribution, and probe cleanup failures to the agent, with the path or server name. These failures used to reach only stderr. [fix:mcp] [#3204]
+- Show trace sink failures to the agent: a bad `LLMENV_TRACE_FILE` path, a failed stderr write, and a trace line dropped for a reserved field. [fix:trace] [#3205]
 
 ### Security
 

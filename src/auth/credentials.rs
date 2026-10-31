@@ -25,6 +25,8 @@ use sha2::{Digest, Sha256};
 
 mod cache;
 mod dead_folder;
+mod debug;
+mod expiry;
 mod keychain;
 pub(crate) use cache::{cache_if_needed, cache_path, inject_if_missing, load_cached, save_cached};
 pub(crate) use keychain::forget;
@@ -94,19 +96,6 @@ impl Drop for Credentials {
     }
 }
 
-/// Redacting `Debug` — a derived one would print the access and refresh tokens
-/// verbatim into any `{:?}` or `tracing` field. Only the expiry timestamps are
-/// safe to show, and they're the only part worth debugging.
-impl std::fmt::Debug for Credentials {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Credentials")
-            .field("expires_at", &self.expires_at())
-            .field("refresh_expires_at", &self.refresh_expires_at())
-            .field("token", &"<redacted>")
-            .finish()
-    }
-}
-
 impl Credentials {
     /// Wrap a raw credential document.
     ///
@@ -159,33 +148,6 @@ impl Credentials {
             .get(OAUTH_KEY)?
             .get("refreshTokenExpiresAt")?
             .as_i64()
-    }
-
-    /// True when this blob is worthless: the access token has expired *and* no
-    /// live refresh token remains. A stale access token with a live refresh
-    /// token is still worth caching — Claude Code renews it on next use.
-    ///
-    /// A blob with no `expiresAt` is treated as live; an unknown expiry is not
-    /// grounds for discarding a credential.
-    #[must_use]
-    fn is_expired(&self, now_ms: i64) -> bool {
-        // MCP server tokens are siblings of the login token in the same store and
-        // expire independently, so a dead login token must not discard them —
-        // that would silently log the user out of every third-party MCP server
-        // (Slack, Notion, …). MCP entries carry no expiry of their own; Claude
-        // Code refreshes or re-authorizes them per server (#1058).
-        if self.mcp_server_count() > 0 {
-            return false;
-        }
-        let access_dead = self.expires_at().is_some_and(|t| t <= now_ms);
-        let refresh_live = self.refresh_expires_at().is_some_and(|t| t > now_ms);
-        access_dead && !refresh_live
-    }
-
-    /// [`Credentials::is_expired`] against the current wall clock.
-    #[must_use]
-    pub(crate) fn is_expired_now(&self) -> bool {
-        self.is_expired(now_ms())
     }
 
     /// The raw document, for verbatim re-injection.
@@ -303,7 +265,6 @@ mod tests {
     const PAST_MS: i64 = 1_000_000_000_000;
     /// Comfortably in the future (year ~2096).
     const FUTURE_MS: i64 = 4_000_000_000_000;
-
     fn blob(expires_at: i64, refresh_expires_at: Option<i64>) -> serde_json::Value {
         let mut oauth = serde_json::json!({
             "accessToken": "sk-ant-oat-TESTONLY",
@@ -381,39 +342,6 @@ mod tests {
         let creds = Credentials::from_json(blob(1_785_282_755_897, Some(FUTURE_MS))).unwrap();
         assert_eq!(creds.expires_at(), Some(1_785_282_755_897));
         assert_eq!(creds.refresh_expires_at(), Some(FUTURE_MS));
-    }
-
-    /// A blob carrying MCP server tokens is worth keeping even when the login
-    /// token is dead — they authenticate different things and expire
-    /// independently (#1058). Discarding it would silently log the user out of
-    /// every third-party MCP server (Slack, Notion, …).
-    #[test]
-    fn dead_login_token_with_mcp_tokens_is_not_expired() {
-        let mut doc = blob(PAST_MS, Some(PAST_MS));
-        doc["mcpOAuth"] = serde_json::json!({
-            "notion|0123456789abcdef": { "accessToken": "mcp-TESTONLY" }
-        });
-        let creds = Credentials::from_json(doc).unwrap();
-        assert!(
-            !creds.is_expired(PAST_MS + 1),
-            "a dead login token must not discard live MCP server tokens"
-        );
-    }
-
-    /// Without any MCP tokens, a dead login token is still worthless.
-    #[test]
-    fn dead_login_token_without_mcp_tokens_is_expired() {
-        let creds = Credentials::from_json(blob(PAST_MS, Some(PAST_MS))).unwrap();
-        assert!(creds.is_expired(PAST_MS + 1));
-    }
-
-    /// An empty `mcpOAuth` map is not a reason to keep a dead blob.
-    #[test]
-    fn empty_mcp_map_does_not_rescue_a_dead_blob() {
-        let mut doc = blob(PAST_MS, Some(PAST_MS));
-        doc["mcpOAuth"] = serde_json::json!({});
-        let creds = Credentials::from_json(doc).unwrap();
-        assert!(creds.is_expired(PAST_MS + 1));
     }
 
     /// A blob with MCP tokens but no login token at all is still worth caching —
@@ -504,38 +432,6 @@ mod tests {
         assert!(rendered.contains("redacted"), "expected a redaction marker");
         // The expiry is the part that's actually useful to debug.
         assert!(rendered.contains(&FUTURE_MS.to_string()));
-    }
-
-    #[test]
-    fn live_access_token_is_not_expired() {
-        let creds = Credentials::from_json(blob(FUTURE_MS, Some(FUTURE_MS))).unwrap();
-        assert!(!creds.is_expired(PAST_MS));
-    }
-
-    #[test]
-    fn stale_access_token_with_live_refresh_is_not_expired() {
-        let creds = Credentials::from_json(blob(PAST_MS, Some(FUTURE_MS))).unwrap();
-        assert!(!creds.is_expired(PAST_MS + 1));
-    }
-
-    #[test]
-    fn stale_access_token_without_refresh_is_expired() {
-        let creds = Credentials::from_json(blob(PAST_MS, None)).unwrap();
-        assert!(creds.is_expired(PAST_MS + 1));
-    }
-
-    #[test]
-    fn stale_access_token_with_stale_refresh_is_expired() {
-        let creds = Credentials::from_json(blob(PAST_MS, Some(PAST_MS))).unwrap();
-        assert!(creds.is_expired(PAST_MS + 1));
-    }
-
-    #[test]
-    fn missing_expiry_is_treated_as_live() {
-        let creds =
-            Credentials::from_json(serde_json::json!({ "claudeAiOauth": { "accessToken": "x" } }))
-                .unwrap();
-        assert!(!creds.is_expired(FUTURE_MS));
     }
 
     // -- cache round-trip --
