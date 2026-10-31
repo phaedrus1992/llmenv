@@ -240,3 +240,36 @@ fn unix_now_reads_the_real_clock() {
     let now = u64::try_from(unix_now()).expect("test");
     assert!(now.abs_diff(expected) <= 5, "{now} vs {expected}");
 }
+
+// #3116: an entry that exists only as a dangling link still belongs to its session, so the
+// lock beside it is not an orphan. `exists()` follows the link and reports the entry as absent.
+#[cfg(unix)]
+#[test]
+fn a_lock_stays_when_its_json_is_a_dangling_link() {
+    let dir = TempDir::new().expect("test");
+    let lock = dir.path().join("s.lock");
+    std::fs::write(&lock, "").expect("test");
+    let old = SystemTime::now() - Duration::from_secs(10 * 86_400);
+    filetime::set_file_mtime(&lock, filetime::FileTime::from_system_time(old)).expect("test");
+    std::os::unix::fs::symlink(dir.path().join("gone.json"), dir.path().join("s.json"))
+        .expect("test");
+
+    prune_orphan_locks(dir.path(), 7);
+
+    assert!(
+        lock.exists(),
+        "a lock whose .json entry is a dangling link must stay"
+    );
+}
+
+// A lookup that fails for a reason other than "not found" must keep the lock. Here the parent is a
+// regular file, so the lookup fails with ENOTDIR.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_session_entry_counts_as_present() {
+    let dir = TempDir::new().expect("test");
+    let file = dir.path().join("regular");
+    std::fs::write(&file, "x").expect("test");
+
+    assert!(!json_entry_is_absent(&file.join("s.json")));
+}
