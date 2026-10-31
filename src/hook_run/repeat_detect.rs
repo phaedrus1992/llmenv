@@ -121,7 +121,7 @@ impl SessionState {
         // needs a longer memory than that (the counter resets on any
         // different call, or expires with the session itself). The two directory scans run
         // once per session, on its first save, not on every tool call.
-        if !path.exists() {
+        if super::session_state::json_entry_is_absent(&path) {
             super::session_state::prune_stale_json_files(&rd_dir, 7);
             super::session_state::prune_orphan_locks(&rd_dir, 7);
         }

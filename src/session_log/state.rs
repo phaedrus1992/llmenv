@@ -67,14 +67,49 @@ fn read_map_text(path: &Path) -> anyhow::Result<Option<String>> {
     }
 }
 
-/// Whether `aside` can take a corrupt map. `Err` for a stat failure other than not-found: the
-/// name may be taken, so the rename must not run (#3108).
-fn aside_name_is_free(aside: &Path) -> std::io::Result<bool> {
-    match std::fs::symlink_metadata(aside) {
-        Ok(_) => Ok(false),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
-        Err(e) => Err(e),
+/// Create an empty file at `aside` only if nothing is there. `create_new` makes the check and
+/// the create one step, so another llmenv cannot take the name in between (#3121).
+fn create_new_empty(aside: &Path) -> std::io::Result<()> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(aside)
+        .map(|_| ())
+}
+
+/// Reserve a name for a corrupt map: `.json.corrupt`, or a nanosecond-suffixed name when that
+/// one is taken. The empty reservation file is replaced by the rename that follows, so the
+/// name stays ours from reservation to rename.
+fn reserve_aside_name(path: &Path) -> anyhow::Result<PathBuf> {
+    let base = path.with_extension("json.corrupt");
+    match create_new_empty(&base) {
+        Ok(()) => return Ok(base),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => {
+            return Err(e).with_context(|| {
+                format!(
+                    "the session map {} cannot be moved aside: its aside name {} cannot be \
+                     reserved. Fix: check the permissions of the folder that holds the map, then \
+                     retry.",
+                    path.display(),
+                    base.display()
+                )
+            });
+        }
     }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let fallback = path.with_extension(format!("json.corrupt.{nanos}"));
+    create_new_empty(&fallback).with_context(|| {
+        format!(
+            "the session map {} cannot be moved aside: its aside name {} cannot be reserved. \
+             Fix: check the permissions of the folder that holds the map, then retry.",
+            path.display(),
+            fallback.display()
+        )
+    })?;
+    Ok(fallback)
 }
 
 /// Load the map before a write. A file that does not parse is moved to
@@ -88,29 +123,31 @@ fn load_for_write(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
         Ok(map) => Ok(map),
         Err(e) => {
             // A second corruption must not overwrite the first aside copy (#2658 review).
-            let mut aside = path.with_extension("json.corrupt");
-            let free = aside_name_is_free(&aside).with_context(|| {
+            let aside = reserve_aside_name(path).with_context(|| {
                 format!(
-                    "the session map {} is corrupt ({e}), and its aside name {} cannot be \
-                     checked, so the map was not moved. Fix: check the permissions of the \
-                     folder that holds the map, then retry.",
-                    path.display(),
-                    aside.display()
+                    "the session map {} is corrupt ({e}), so it was not moved",
+                    path.display()
                 )
             })?;
-            if !free {
-                let nanos = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_nanos());
-                aside = path.with_extension(format!("json.corrupt.{nanos}"));
+            if let Err(e) = std::fs::rename(path, &aside) {
+                // The reservation is ours and empty. Drop it so a failed move leaves no stray file.
+                // The rename error is the one the caller needs. A failed cleanup is a notice,
+                // because the default log filter hides warn lines (#2657).
+                if let Err(cleanup) = std::fs::remove_file(&aside) {
+                    crate::agent_notice::record_logged(format!(
+                        "llmenv: could not remove the empty aside reservation {} ({cleanup}). \
+                         Fix: remove that file by hand.",
+                        aside.display()
+                    ));
+                }
+                return Err(e).with_context(|| {
+                    format!(
+                        "moving the corrupt session map {} aside to {}",
+                        path.display(),
+                        aside.display()
+                    )
+                });
             }
-            std::fs::rename(path, &aside).with_context(|| {
-                format!(
-                    "moving the corrupt session map {} aside to {}",
-                    path.display(),
-                    aside.display()
-                )
-            })?;
             // Error level: the default log filter is ERROR, so a warn is never shown (#2657).
             tracing::error!(
                 error = %e,

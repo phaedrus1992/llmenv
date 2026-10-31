@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::path::Path;
 
-use super::{Prompter, apply, make_files, new_folders, undo};
+use super::{Prompter, apply};
 
 /// Answers from a list, and records each question.
 struct Script {
@@ -339,40 +339,6 @@ fn a_shipped_bundle_is_created_with_its_folders_and_modes() {
     );
 }
 
-/// The undo after a failure removes the nested folders of a shipped bundle, newest first.
-#[test]
-fn undo_removes_the_nested_folders_of_a_shipped_bundle() {
-    let s = Setup::new(CONFIG, "bundles: [{name: objc-dev, shipped: true}]");
-    let plan = crate::onboarding::plan::Plan::load(&s.path("plan.yaml")).unwrap();
-    let mut made = Vec::new();
-    make_files(&plan, s.dir.path(), &mut made).unwrap();
-    assert!(
-        s.path("bundles/objc-dev/skills/arc-ownership-check/scripts")
-            .is_dir()
-    );
-    let note = undo(&made);
-    assert!(note.contains("the files it made are removed"), "{note}");
-    assert!(!s.path("bundles/objc-dev").exists());
-}
+mod undo;
 
-proptest::proptest! {
-    /// The folders to make are each folder below `bundles/<name>` and above the file, outermost
-    /// first.
-    #[test]
-    fn new_folders_are_the_folders_between_the_bundle_and_the_file(
-        name in "[a-z]{1,8}",
-        dirs in proptest::collection::vec("[a-z]{1,6}", 0..4),
-    ) {
-        let bundle = Path::new("bundles").join(&name);
-        let mut expected = Vec::new();
-        let mut folder = bundle.clone();
-        for dir in &dirs {
-            folder = folder.join(dir);
-            expected.push(folder.clone());
-        }
-        let rel = folder.join("file.md");
-        let got: Vec<std::path::PathBuf> =
-            new_folders(&rel).into_iter().map(Path::to_path_buf).collect();
-        proptest::prop_assert_eq!(got, expected);
-    }
-}
+mod folders;

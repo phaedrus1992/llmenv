@@ -237,6 +237,20 @@ fn read_dir_logged(dir: &Path, purpose: &str) -> Option<std::fs::ReadDir> {
     }
 }
 
+/// Whether the session file at `json` is gone. A dangling link still counts as present, since
+/// the entry exists and belongs to its session. `exists()` follows the link and would say absent
+/// (#3116). An unreadable entry counts as present, so the lock is kept and the cause is logged.
+pub(super) fn json_entry_is_absent(json: &Path) -> bool {
+    match std::fs::symlink_metadata(json) {
+        Ok(_) => false,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(e) => {
+            note_prune_failure("cannot read the session file, so the lock stays", json, &e);
+            false
+        }
+    }
+}
+
 /// Remove `.lock` files in `dir` older than `max_age_days` whose `.json` is gone. A session in its
 /// first update holds a lock with no `.json` yet; removing that lock would let a second writer
 /// lock a new file and lose an update, so only old locks go.
@@ -265,7 +279,7 @@ pub(crate) fn prune_orphan_locks(dir: &Path, max_age_days: u64) {
             }
         };
         if stale
-            && !path.with_extension("json").exists()
+            && json_entry_is_absent(&path.with_extension("json"))
             && let Some(e) = removal_error_to_log(std::fs::remove_file(&path))
         {
             note_prune_failure("cannot remove the stale lock", &path, &e);
