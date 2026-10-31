@@ -1740,6 +1740,10 @@ Two rules govern the cache, and both exist to avoid destroying a working login:
 remains. An expired access token with a valid refresh token is still worth
 keeping — Claude Code renews it on next use.
 
+(added in v3.14.0) Both token expiries get a 5-second tolerance, so a token that
+expired a moment ago still counts as live. A clock that runs ahead no longer
+discards a live login. The tolerance does not help a clock that runs behind.
+
 `llmenv login` caches the token alongside the account identity, and writes both
 into the current folder when one is active.
 

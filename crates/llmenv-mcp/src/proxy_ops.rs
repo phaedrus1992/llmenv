@@ -84,12 +84,16 @@ pub(super) fn record_spawn(pid_path: &Path, child_pid: u32, source: SpawnSource)
         .ok()
         .map(|d| d.as_secs());
     let line = attribution_line(child_pid, source, &Spawner::current(), now);
-    let written = open_proxy_log(&log_path_for(pid_path))
+    let log_path = log_path_for(pid_path);
+    let written = open_proxy_log(&log_path)
         .and_then(|mut log| writeln!(log, "{line}").map_err(anyhow::Error::from));
     if let Err(e) = written {
-        // `eprintln!`: the default tracing filter drops warnings, and only stdout feeds the
-        // shell hook, so stderr is safe.
-        eprintln!("llmenv: proxy attribution line not written: {e:#}");
+        // Hook stderr never reaches the agent, so the failure is recorded as a notice (#3204).
+        llmenv_util::agent_notice::record_logged(format!(
+            "llmenv: proxy attribution line not written to {}: {e:#}. Fix: make the proxy log \
+             directory writable.",
+            log_path.display()
+        ));
     }
 }
 
@@ -408,3 +412,6 @@ mod tests {
         }
     }
 }
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "test code")]
+mod notice_tests;
