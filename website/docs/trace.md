@@ -274,6 +274,10 @@ to the named file. The object carries `"ts"` (Unix epoch seconds, a number), `"p
 `"line"` (the original text). A consumer can reconstruct the original text while
 still being able to parse the file as JSON Lines.
 
+(added in v3.14.0) A trace file that cannot be written, a failed stderr write, and a trace
+line dropped for a reserved field each reach the agent as an `llmenv:` notice. See
+[Troubleshooting](troubleshooting.md#the-agent-sees-an-llmenv-notice).
+
 ```json
 {"ts": 1729700000, "pid": 12345, "line": "[LLMENV_CACHE] content_hash hit 1.234ms"}
 ```

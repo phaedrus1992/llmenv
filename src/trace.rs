@@ -54,8 +54,9 @@ fn json_trace_line(
 pub(crate) fn emit_json_trace(op: &str, fields: serde_json::Map<String, serde_json::Value>) {
     match json_trace_line(op, fields) {
         Ok(line) => emit_trace_line(&line),
-        // A trace must never fail the command it observes, so the error is logged instead.
-        Err(e) => tracing::error!("{e:#}"),
+        // A trace must never fail the command it observes. The dropped line is recorded for
+        // the agent, because the log has no reader in a hook (#3205).
+        Err(e) => crate::agent_notice::record_logged(format!("llmenv: trace line dropped: {e:#}")),
     }
 }
 

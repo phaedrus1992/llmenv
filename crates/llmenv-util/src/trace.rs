@@ -29,8 +29,14 @@ pub fn file_sink_path() -> Option<std::path::PathBuf> {
 /// consumer can parse it as JSON Lines.
 pub fn emit_trace_line(line: &str) {
     if std::env::var_os("LLMENV_TRACE_TIMING").is_some() {
-        // A closed stderr must not abort the hook that is being traced.
-        let _ = writeln!(std::io::stderr(), "{line}");
+        // A closed stderr must not abort the hook that is being traced. The loss itself is
+        // recorded for the agent, because hook stderr never reaches it (#3205).
+        if let Err(e) = writeln!(std::io::stderr(), "{line}") {
+            crate::agent_notice::record_logged(format!(
+                "llmenv: cannot write a trace line to stderr: {e}. \
+                 Fix: unset LLMENV_TRACE_TIMING."
+            ));
+        }
     }
     if let Some(path) = file_sink_path() {
         append_trace_line(&path, line);
@@ -42,13 +48,18 @@ pub fn emit_trace_line(line: &str) {
 fn report_sink_error(path: &std::path::Path, error: &std::io::Error) {
     static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        let _ = writeln!(
-            std::io::stderr(),
-            "llmenv: cannot write the trace file {}: {error}. \
-             Fix: set LLMENV_TRACE_FILE to a path in a writable directory that is not a symlink.",
-            path.display()
-        );
+        crate::agent_notice::record_logged(sink_error_notice(path, error));
     }
+}
+
+/// The notice for a trace file that cannot be written. Kept apart from [`report_sink_error`]
+/// so a test can check the text without the once-per-process flag.
+pub fn sink_error_notice(path: &std::path::Path, error: &std::io::Error) -> String {
+    format!(
+        "llmenv: cannot write the trace file {}: {error}. \
+         Fix: set LLMENV_TRACE_FILE to a path in a writable directory that is not a symlink.",
+        path.display()
+    )
 }
 
 /// Append `line` to `path` as one JSON object, in a single write.
