@@ -51,6 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Reject symlink, FIFO, and device session-log paths before rotation or append. The fix hint names `session_log.file.path`; Unix opens also reject link and FIFO substitutions. [fix:session-log] [#3117]
 - Judge a symlink in state-file pruning by the link's own age, and remove the link itself. A fresh link to an old file is no longer pruned, and an old link is pruned without touching its target. [fix:hook] [#3094, #3108]
 - Stop a corrupt session map from replacing the first aside copy when the aside name cannot be checked. The map stays in place and the error names it. [fix:hook] [#3108]
 - Refuse a `known_files` key that contains `..` in every build. A release build no longer joins it into the cache path. [fix:adapter] [#3107]

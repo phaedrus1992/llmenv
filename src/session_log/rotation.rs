@@ -43,13 +43,38 @@ pub(crate) fn rotate_if_full(path: &Path, max_bytes: u64) -> std::io::Result<Opt
         .map(|name| name.to_string_lossy().into_owned()))
 }
 
-/// Whether `path` holds at least `max_bytes`. A missing file is not full.
+/// Whether the regular file at path holds at least max_bytes. A missing file is not full.
 fn is_full(path: &Path, max_bytes: u64) -> std::io::Result<bool> {
-    match std::fs::metadata(path) {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(symlink_path_error(path)),
+        Ok(meta) if !meta.file_type().is_file() => Err(non_regular_path_error(path)),
         Ok(meta) => Ok(meta.len() >= max_bytes),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(e),
+        Err(e) => Err(std::io::Error::new(
+            e.kind(),
+            format!("cannot inspect session log path {}: {e}", path.display()),
+        )),
     }
+}
+
+fn symlink_path_error(path: &Path) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!(
+            "session log path {} is a symbolic link. Fix: set session_log.file.path to a regular file path or remove this link; when unset, the default is <state_dir>/session-log.jsonl",
+            path.display()
+        ),
+    )
+}
+
+pub(crate) fn non_regular_path_error(path: &Path) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!(
+            "session log path {} is not a regular file. Fix: set session_log.file.path to a regular file path or remove this entry",
+            path.display()
+        ),
+    )
 }
 
 /// The suffix of the rotation lock file beside the active log.
@@ -270,6 +295,23 @@ mod tests {
         assert_eq!(rotate_if_full(&path, 10).unwrap(), None);
         assert!(path.exists());
         assert!(!rotation_path(&path, 1).exists());
+    }
+
+    #[test]
+    fn an_inspection_error_names_the_session_log_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("not-a-directory");
+        write_bytes(&parent, 1);
+        let path = parent.join("session-log.jsonl");
+
+        let error = rotate_if_full(&path, 10).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("cannot inspect session log path")
+        );
+        assert!(error.to_string().contains(&path.display().to_string()));
     }
 
     #[test]
