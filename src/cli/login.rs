@@ -123,8 +123,22 @@ fn capture_login_credentials(
     login_dir: &Path,
     current_folder: Option<&Path>,
 ) -> anyhow::Result<()> {
+    capture_with_backend(
+        crate::auth::credentials::Backend::detect(),
+        adapter_root,
+        login_dir,
+        current_folder,
+    )
+}
+
+/// [`capture_login_credentials`] for a given backend, so a test can use the file backend.
+fn capture_with_backend(
+    backend: crate::auth::credentials::Backend,
+    adapter_root: &Path,
+    login_dir: &Path,
+    current_folder: Option<&Path>,
+) -> anyhow::Result<()> {
     use crate::auth::credentials;
-    let backend = credentials::Backend::detect();
     let Some(creds) = credentials::read_backend(backend, login_dir)? else {
         tracing::debug!("login produced no OAuth credential; only the account identity was cached");
         return Ok(());
@@ -142,13 +156,29 @@ fn capture_login_credentials(
     }
     // The login dir is a temp dir about to be removed; on macOS its keychain
     // item would outlive it, so drop it now that the blob is cached.
-    if let Err(e) = credentials::forget(login_dir) {
+    if let Err(e) = drop_login_entry(backend, login_dir) {
         tracing::error!(
             "could not drop the login dir credential entry: {e}. Fix: run `llmenv clean`, or delete the keychain item by hand."
         );
     }
     Ok(())
 }
+
+/// Drop the keychain item that a login dir owns, when the backend keeps one. A file backend keeps
+/// the credential in the dir, and the caller removes that dir.
+fn drop_login_entry(
+    backend: crate::auth::credentials::Backend,
+    login_dir: &Path,
+) -> anyhow::Result<bool> {
+    match backend {
+        crate::auth::credentials::Backend::File => Ok(false),
+        #[cfg(target_os = "macos")]
+        crate::auth::credentials::Backend::Keychain => crate::auth::credentials::forget(login_dir),
+    }
+}
+
+#[cfg(test)]
+mod tests;
 
 /// Import auth from an existing `.claude.json` file into the stable cache (#172).
 pub(super) fn import_auth_from_file(source: &Path, adapter_root: &Path) -> anyhow::Result<()> {
