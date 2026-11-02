@@ -91,4 +91,32 @@ mod tests {
     fn tally_of_no_entries_is_all_zero() {
         assert_eq!(tally(Vec::new()), CredentialDrops::default());
     }
+
+    proptest::proptest! {
+        /// Any run of drop results counts each result once, and the order of the run does not
+        /// change the count.
+        #[test]
+        fn tally_counts_every_result_and_ignores_order(
+            outcomes in proptest::collection::vec(proptest::prelude::any::<Option<bool>>(), 0..40),
+        ) {
+            let results = |outcomes: &[Option<bool>]| -> Vec<anyhow::Result<bool>> {
+                outcomes
+                    .iter()
+                    .map(|o| o.ok_or_else(|| anyhow::anyhow!("keychain locked")))
+                    .collect()
+            };
+            let removed = outcomes.iter().filter(|o| **o == Some(true)).count();
+            let failed = outcomes.iter().filter(|o| o.is_none()).count();
+            let mut reversed = outcomes.clone();
+            reversed.reverse();
+            proptest::prop_assert_eq!(
+                tally(results(&outcomes)),
+                CredentialDrops { removed, failed }
+            );
+            proptest::prop_assert_eq!(
+                tally(results(&reversed)),
+                CredentialDrops { removed, failed }
+            );
+        }
+    }
 }
