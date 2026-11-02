@@ -18,16 +18,23 @@ mod guard;
 mod init_settings;
 mod login;
 use login::{import_auth_from_file, run_login, run_login_capture};
+use sync_cmd::run_sync;
 mod plugin_payloads;
 mod post_materialize;
 use plugin_payloads::sync_plugin_payloads;
 
 mod doctor;
+mod init_cmd;
+#[cfg(test)]
+mod init_run_tests;
+use init_cmd::run_init;
+mod init_templates;
 mod proxy_restart;
 mod setup;
 mod status;
 pub(crate) mod statusline;
 mod style;
+mod sync_cmd;
 mod task_done;
 mod upgrade;
 
@@ -2685,190 +2692,6 @@ fn run_hook(shell: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_init(path: Option<std::path::PathBuf>, repo: Option<String>) -> anyhow::Result<()> {
-    let config_dir = match path {
-        Some(p) => {
-            let path_str = p
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("init path is not valid UTF-8: {}", p.display()))?;
-            PathBuf::from(paths::expand_tilde(path_str)?)
-        }
-        None => paths::config_dir()?,
-    };
-    paths::create_dir_owner_only(&config_dir)
-        .with_context(|| format!("creating config dir {}", config_dir.display()))?;
-
-    if let Some(_repo_url) = repo {
-        anyhow::bail!("Git clone not yet implemented");
-    }
-
-    let config_path = config_dir.join("config.yaml");
-    if config_path.exists() {
-        eprintln!("Config already exists at {}", config_path.display());
-        return Ok(());
-    }
-
-    let template = crate::config::generate_template();
-    std::fs::write(&config_path, template)
-        .with_context(|| format!("writing template to {}", config_path.display()))?;
-    eprintln!("Created template config at {}", config_path.display());
-
-    let config = Config::load(&config_path).with_context(|| {
-        format!(
-            "validating newly-written config at {}",
-            config_path.display()
-        )
-    })?;
-    eprintln!("✓ Config validated successfully");
-
-    let agents_path = config_dir.join("AGENTS.md");
-    if !agents_path.exists() {
-        let agents_template = r#"# Agent Orientation
-
-This directory contains llmenv configuration. Agents (Claude Code, Copilot, Gemini CLI)
-operating here will have access to the merged config and bundles.
-
-## Key Files & Directories
-
-- **config.yaml** — Main configuration. Declares scopes, bundles, MCP servers, state locations.
-- **bundles/** — Bundle directories. Each bundle contains files merged into agent config:
-  - `CLAUDE.md` / `AGENTS.md` / `GEMINI.md` — Agent instructions (loaded automatically)
-  - `skills/` — Custom skills directory
-  - `hooks/` — Hook definitions
-  - `mcp.json` — MCP server configurations (optional)
-- **state/** — Durable per-tool state (managed by llmenv; don't write here directly)
-- **.llmenv.yaml** — Project scope marker (place in project roots, not here)
-
-## Where to Add Things
-
-### New Agent Instructions
-Create or edit a bundle's `CLAUDE.md` (Claude Code), `AGENTS.md` (all agents), or `GEMINI.md` (Gemini CLI):
-```
-bundles/myname/CLAUDE.md
-```
-
-### New Skills
-Add to a bundle's `skills/` directory:
-```
-bundles/myname/skills/my-skill.json
-```
-
-### New Hooks
-Add to a bundle's `hooks/` directory or declare in `config.yaml`:
-```
-bundles/myname/hooks/some-hook.sh
-```
-
-### MCP Servers
-Either add to a bundle's `mcp.json` or declare in `config.yaml` under `mcp:`.
-
-### Per-Tool Durable State
-Declare in `config.yaml` under `state: tools:`:
-```yaml
-state:
-  tools:
-    - env: MY_TOOL_STATE_DIR
-      subdir: my-tool
-```
-
-## Scopes & Tags
-
-Scopes (network, host, user, content, project) emit **tags** when they match. Bundles and other
-resources fire when one of their tags is in the active tag set. See `config.yaml` comments
-for examples.
-
----
-
-For more, see the llmenv documentation and the `config.yaml` template comments.
-"#;
-
-        std::fs::write(&agents_path, agents_template)
-            .with_context(|| format!("writing agents template to {}", agents_path.display()))?;
-        eprintln!(
-            "Created agent orientation guide at {}",
-            agents_path.display()
-        );
-    }
-
-    let readme_path = config_dir.join("README.md");
-    let readme_content = r#"# llmenv Configuration
-
-This directory contains your llmenv configuration.
-
-## Layout
-
-- **config.yaml** — Main configuration file. Declares scopes, bundles, MCP servers,
-  plugins, and the memory backend. Edit this to define which environments activate
-  in which contexts (networks, hosts, users, project directory contents, projects).
-
-- **.llmenv.yaml** — Project markers (one per project). Drop a marker file at the
-  root of any project directory to give that project its own scope, tags, and
-  enabled bundles. llmenv discovers these by walking upward from the current
-  directory.
-
-- **bundles/** — Bundle content directories. Each directory here matches a
-  `bundle:` entry in `config.yaml`. Bundles can contain:
-  - YAML files (`bundle.yaml`) with MCP servers, hooks, and other capabilities
-  - Environment variables
-  - Plugin declarations
-
-## Getting Started
-
-1. **Edit config.yaml** to add your first scopes (network, host, user) and a bundle.
-   See the comments in the file for examples and reference the [Configuration docs](https://phaedrus1992.github.io/llmenv/docs/configuration).
-
-2. **Install the shell hook** to activate llmenv on every prompt:
-
-   ```bash
-   eval "$(llmenv hook zsh)"      # Add to ~/.zshrc
-   # or
-   eval "$(llmenv hook bash)"     # Add to ~/.bashrc
-   ```
-
-3. **Verify setup**:
-
-   ```bash
-   llmenv doctor        # Check for configuration errors
-   llmenv status        # Show active scopes and tags
-   llmenv export        # Preview the exported environment
-   ```
-
-4. **Add projects** by creating `.llmenv.yaml` marker files at project roots.
-
-## Concepts
-
-- **Scopes** — Describe where you are (network/host/user/content/project). Each emits **tags**.
-- **Tags** — Labels that trigger bundles, MCP servers, plugins, and memory.
-- **Bundles** — Fire when their tags match the active set. Contribute config, env vars, and capabilities.
-- **Materialize** — llmenv combines active scopes/bundles into a content-addressed config directory.
-- **Adapter** — Renders the materialized config into the agent's native format (e.g. Claude Code).
-
-## Documentation
-
-- [Getting Started](https://phaedrus1992.github.io/llmenv/docs/getting-started) — First-run walkthrough
-- [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration) — Complete schema reference
-- [Concepts](https://phaedrus1992.github.io/llmenv/docs/concepts) — Scopes, tags, bundles, precedence
-- [Main Site](https://phaedrus1992.github.io/llmenv/) — All documentation
-"#;
-    if !readme_path.exists() {
-        std::fs::write(&readme_path, readme_content)
-            .with_context(|| format!("writing README to {}", readme_path.display()))?;
-        eprintln!("Created README at {}", readme_path.display());
-    }
-
-    // Interactive first-run prompts, only on a terminal: dialoguer reads stdin and asks on stderr.
-    // Intentionally Claude Code-only: Crush has no auth/settings concept yet.
-    use std::io::IsTerminal;
-    if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
-        let adapter_root = PathBuf::from(paths::expand_tilde(&config.cache.cache_dir)?)
-            .join(ClaudeCodeAdapter.name());
-        run_init_auth_prompt(&adapter_root)?;
-        init_settings::run_init_settings_prompt(&config_path)?;
-    }
-
-    Ok(())
-}
-
 /// Interactive auth setup for `llmenv init` (#172).
 ///
 /// Prompts the user to (a) login via `claude auth login`, (b) import from the
@@ -4178,44 +4001,6 @@ fn check_selected_plugins(
             missing_plugins.len(),
             missing_plugins.join(", ")
         );
-    }
-    Ok(())
-}
-
-fn run_sync(dry_run: bool) -> anyhow::Result<()> {
-    let config_dir = paths::config_dir()?;
-    if dry_run {
-        let out = git::secure_git()
-            .args(["status", "--short"])
-            .current_dir(&config_dir)
-            .output()
-            .context("failed to run git status")?;
-        if !out.status.success() {
-            let detail = llmenv_git::git_failure_detail(&out.stderr, &out.stdout, out.status);
-            anyhow::bail!("git status failed: {detail}");
-        }
-        let output = String::from_utf8_lossy(&out.stdout);
-        if output.trim().is_empty() {
-            eprintln!("Nothing to sync (working tree clean)");
-        } else {
-            eprintln!("Would sync:\n{output}");
-        }
-        return Ok(());
-    }
-    match crate::sync::commit_and_push(
-        &config_dir,
-        "Update llmenv config",
-        crate::sync::PushMode::Push,
-    )? {
-        crate::sync::SyncOutcome::NothingToCommit => {
-            eprintln!("No changes to commit (working tree clean)");
-        }
-        crate::sync::SyncOutcome::Pushed => {
-            eprintln!("✓ Synced config to GitHub");
-        }
-        crate::sync::SyncOutcome::CommittedLocally => {
-            eprintln!("✓ Committed locally (remote sync disabled — push skipped)");
-        }
     }
     Ok(())
 }
