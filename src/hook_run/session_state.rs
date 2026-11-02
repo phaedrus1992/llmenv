@@ -6,6 +6,8 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::materialize::cache::{AgeSource, file_stamp};
+
 /// A hook must not stall the agent on a busy state file, so a lock gives up after
 /// `LOCK_ATTEMPTS` polls, about 200 ms.
 const LOCK_ATTEMPTS: u32 = 20;
@@ -97,6 +99,12 @@ pub(crate) fn lock_state_file_timed(
 /// a best-effort cleanup, not correctness-critical. Each failure is also an agent
 /// notice, because the engine drops a hook's stderr (#2746, #2833).
 pub(crate) fn prune_stale_json_files(dir: &Path, max_age_days: u64) {
+    prune_stale_json_files_with(dir, max_age_days, AgeSource::MtimeOrCtime);
+}
+
+/// [`prune_stale_json_files`] with the age source given. A file restored with an old mtime keeps
+/// that mtime, so production counts the change time too (#3275).
+fn prune_stale_json_files_with(dir: &Path, max_age_days: u64, source: AgeSource) {
     let max_age = Duration::from_secs(max_age_days.saturating_mul(86_400));
     let Some(entries) = read_dir_logged(dir, "stale-session pruning") else {
         return;
@@ -116,7 +124,7 @@ pub(crate) fn prune_stale_json_files(dir: &Path, max_age_days: u64) {
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        match file_age(&path) {
+        match file_age(&path, source) {
             Ok(Some(age)) if is_stale(age, max_age) => {
                 if let Some(e) = removal_error_to_log(std::fs::remove_file(&path)) {
                     note_prune_failure("cannot prune the stale state file", &path, &e);
@@ -137,13 +145,13 @@ fn is_stale(age: Duration, max_age: Duration) -> bool {
 /// An mtime in the future counts as age zero, so the file is kept.
 /// The age is the entry's own, not its target's: the caller removes the entry itself, so a
 /// symlink must be judged by its own mtime (#3094, #3108).
-fn file_age(path: &Path) -> std::io::Result<Option<Duration>> {
-    let modified = match std::fs::symlink_metadata(path) {
-        Ok(meta) => meta.modified()?,
+fn file_age(path: &Path, source: AgeSource) -> std::io::Result<Option<Duration>> {
+    let stamp = match std::fs::symlink_metadata(path) {
+        Ok(meta) => file_stamp(&meta, source)?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
-    Ok(Some(modified.elapsed().unwrap_or(Duration::ZERO)))
+    Ok(Some(stamp.elapsed().unwrap_or(Duration::ZERO)))
 }
 
 /// Logs a state-file pruning failure at error level, which the default filter shows, and
@@ -255,6 +263,11 @@ pub(super) fn json_entry_is_absent(json: &Path) -> bool {
 /// first update holds a lock with no `.json` yet; removing that lock would let a second writer
 /// lock a new file and lose an update, so only old locks go.
 pub(crate) fn prune_orphan_locks(dir: &Path, max_age_days: u64) {
+    prune_orphan_locks_with(dir, max_age_days, AgeSource::MtimeOrCtime);
+}
+
+/// [`prune_orphan_locks`] with the age source given (#3275).
+fn prune_orphan_locks_with(dir: &Path, max_age_days: u64, source: AgeSource) {
     let Some(entries) = read_dir_logged(dir, "stale lock pruning") else {
         return;
     };
@@ -271,7 +284,7 @@ pub(crate) fn prune_orphan_locks(dir: &Path, max_age_days: u64) {
             continue;
         }
         // A lock whose age cannot be read is kept, and the cause is logged (#2858).
-        let stale = match file_age(&path) {
+        let stale = match file_age(&path, source) {
             Ok(age) => age.is_some_and(|age| is_stale(age, max_age)),
             Err(e) => {
                 note_prune_failure("cannot read the age of the lock", &path, &e);
