@@ -5,7 +5,7 @@
     reason = "test code: a failed fixture stops the test"
 )]
 
-use super::{init_config_dir, run_init, write_starter_if_missing};
+use super::init_cmd::{init_config_dir, run_init, write_starter_if_missing};
 use crate::config::Config;
 use std::path::{Path, PathBuf};
 
@@ -86,5 +86,5 @@ fn a_starter_write_into_a_missing_folder_names_the_file() {
         Err(e) => format!("{e:#}"),
     };
     assert!(result.is_err(), "a starter needs an existing folder");
-    assert!(message.contains("writing README to"), "{message}");
+    assert!(message.contains("creating README at"), "{message}");
 }

@@ -285,3 +285,19 @@ fn write_owner_only_truncates_existing_file() {
     let body = std::fs::read(&path).expect("read");
     assert_eq!(body, b"short");
 }
+
+/// #3223: a readable folder the user chose keeps its mode, because llmenv does not own it.
+#[cfg(unix)]
+#[test]
+fn refusing_variant_keeps_a_readable_user_dir_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("user-log");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    create_dir_owner_only_refusing_unreadable(&dir).unwrap();
+    let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+
+    assert_eq!(mode, 0o755, "a user-chosen folder's mode must not change");
+}

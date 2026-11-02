@@ -19,55 +19,63 @@ use std::path::Path;
 /// already-existing directory (e.g. owned by another user). On Unix, a symlink
 /// at `dir` is an error, and the link target keeps its mode.
 pub fn create_dir_owner_only(dir: &Path) -> std::io::Result<()> {
-    create_owner_only(dir, UnreadableDir::Heal)
+    #[cfg(unix)]
+    {
+        create_mode_0o700(dir, true)?;
+        // DirBuilder's mode only governs directories it creates. If `dir`
+        // already existed (an older llmenv version, a caller that used a
+        // bare create_dir_all, a permissive umask), its mode is left
+        // untouched -- self-heal it so every caller gets an owner-only
+        // directory regardless of whether it was just created.
+        harden_existing_dir(dir)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
+    }
 }
 
-/// As [`create_dir_owner_only`], but an existing folder that cannot be read is refused, not
-/// chmod'd. Use it for a folder the user chose, such as the parent of a log path, because llmenv
-/// does not own that folder (#3223).
+/// As [`create_dir_owner_only`], but an existing folder keeps its mode and must be readable. Use it
+/// for a folder the user chose, such as the parent of a log path. llmenv does not own that folder,
+/// so it is neither chmod'd nor healed (#3223). A folder that this call creates still gets 0o700.
 ///
 /// # Errors
-/// As [`create_dir_owner_only`], and an existing folder that cannot be read.
+/// An existing folder that cannot be listed, a link or a file at `dir`, and a failed create.
 pub fn create_dir_owner_only_refusing_unreadable(dir: &Path) -> std::io::Result<()> {
-    create_owner_only(dir, UnreadableDir::Refuse)
+    #[cfg(unix)]
+    {
+        match std::fs::symlink_metadata(dir) {
+            Ok(meta) if meta.is_dir() => std::fs::read_dir(dir)
+                .map(|_| ())
+                .map_err(|e| path_error(dir, "open", &e)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => create_mode_0o700(dir, true),
+            // A non-recursive create fails on any existing path, so a link or a file is refused.
+            _ => create_mode_0o700(dir, false),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
+    }
 }
 
-/// What to do with an existing folder that cannot be opened for reading.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UnreadableDir {
-    /// Set the owner bits by path. The heal is not race-free, so it is for a folder llmenv owns.
-    Heal,
-    /// Return an error and leave the mode alone.
-    Refuse,
-}
-
+/// Create `dir` with mode 0o700 from the moment of creation. A recursive create also makes the
+/// missing parents.
 #[cfg(unix)]
-fn create_owner_only(dir: &Path, unreadable: UnreadableDir) -> std::io::Result<()> {
+fn create_mode_0o700(dir: &Path, recursive: bool) -> std::io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
     std::fs::DirBuilder::new()
-        .recursive(true)
+        .recursive(recursive)
         .mode(0o700)
-        .create(dir)?;
-    // DirBuilder's mode only governs directories it creates. If `dir`
-    // already existed (an older llmenv version, a caller that used a
-    // bare create_dir_all, a permissive umask), its mode is left
-    // untouched -- self-heal it so every caller gets an owner-only
-    // directory regardless of whether it was just created.
-    harden_existing_dir(dir, unreadable)
-}
-
-#[cfg(not(unix))]
-fn create_owner_only(dir: &Path, _unreadable: UnreadableDir) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)
+        .create(dir)
 }
 
 /// Set an existing folder to 0o700 without following a link at `dir` (#3137). The chmod runs on
 /// an open handle, which is race-free. Opening needs read permission, so a folder left unreadable
 /// (0o300) by an earlier bug falls back to an lstat check and a chmod by path. That fallback is
-/// not atomic: a link put in place between the two calls is followed. The `Refuse` policy skips
-/// that fallback, so a folder llmenv does not own is never chmod'd by path.
+/// not atomic: a link put in place between the two calls is followed.
 #[cfg(unix)]
-fn harden_existing_dir(dir: &Path, unreadable: UnreadableDir) -> std::io::Result<()> {
+fn harden_existing_dir(dir: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let owner_only = std::fs::Permissions::from_mode(0o700);
     let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::DIRECTORY;
@@ -80,9 +88,6 @@ fn harden_existing_dir(dir: &Path, unreadable: UnreadableDir) -> std::io::Result
             .set_permissions(owner_only)
             .map_err(|e| path_error(dir, "chmod", &e)),
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            if unreadable == UnreadableDir::Refuse {
-                return Err(path_error(dir, "open", &e));
-            }
             if !std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir()) {
                 return Err(path_error(dir, "open", &e));
             }
