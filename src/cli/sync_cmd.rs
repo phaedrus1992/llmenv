@@ -9,13 +9,17 @@ use crate::paths;
 use crate::sync::SyncOutcome;
 
 pub(super) fn run_sync(dry_run: bool) -> anyhow::Result<()> {
-    let config_dir = paths::config_dir()?;
+    sync_in(&paths::config_dir()?, dry_run)
+}
+
+/// `llmenv sync` for the config repository in `config_dir`.
+fn sync_in(config_dir: &Path, dry_run: bool) -> anyhow::Result<()> {
     if dry_run {
-        eprintln!("{}", sync_dry_run_report(&config_dir)?);
+        eprintln!("{}", sync_dry_run_report(config_dir)?);
         return Ok(());
     }
     let outcome = crate::sync::commit_and_push(
-        &config_dir,
+        config_dir,
         "Update llmenv config",
         crate::sync::PushMode::Push,
     )?;

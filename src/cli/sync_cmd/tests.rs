@@ -5,7 +5,7 @@
     reason = "test code: a failed fixture stops the test"
 )]
 
-use super::{sync_dry_run_report, sync_outcome_message};
+use super::{sync_dry_run_report, sync_in, sync_outcome_message};
 use crate::sync::SyncOutcome;
 
 fn repo() -> tempfile::TempDir {
@@ -58,4 +58,17 @@ fn each_outcome_has_its_own_line() {
         "✓ Synced config to GitHub"
     );
     assert!(sync_outcome_message(&SyncOutcome::CommittedLocally).contains("push skipped"));
+}
+
+#[test]
+fn a_dry_run_in_a_clean_repository_succeeds() {
+    let dir = repo();
+    sync_in(dir.path(), true).expect("a clean dry run is not an error");
+}
+
+#[test]
+fn a_dry_run_outside_a_repository_fails() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let result = sync_in(dir.path(), true);
+    assert!(result.is_err(), "a dry run needs a repository to report on");
 }
