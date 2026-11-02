@@ -5,7 +5,7 @@
     reason = "test code: a failed fixture stops the test"
 )]
 
-use super::capture_with_backend;
+use super::capture_login_credentials;
 use crate::auth::credentials::{Backend, load_cached};
 use std::path::Path;
 
@@ -34,7 +34,7 @@ fn a_fresh_credential_is_cached_and_written_to_the_current_folder() {
     let login = login_dir_with(FUTURE_MS);
     let folder = tempfile::tempdir().expect("temp dir");
 
-    capture_with_backend(
+    capture_login_credentials(
         Backend::File,
         adapter.path(),
         login.path(),
@@ -60,7 +60,7 @@ fn a_login_without_a_credential_saves_nothing_and_succeeds() {
     let login = tempfile::tempdir().expect("temp dir");
     let folder = tempfile::tempdir().expect("temp dir");
 
-    capture_with_backend(
+    capture_login_credentials(
         Backend::File,
         adapter.path(),
         login.path(),
@@ -82,7 +82,7 @@ fn an_expired_credential_is_refused_and_nothing_is_written() {
     let login = login_dir_with(PAST_MS);
     let folder = tempfile::tempdir().expect("temp dir");
 
-    let err = capture_with_backend(
+    let err = capture_login_credentials(
         Backend::File,
         adapter.path(),
         login.path(),
@@ -106,7 +106,7 @@ fn no_current_folder_caches_the_credential_only() {
     let adapter = tempfile::tempdir().expect("temp dir");
     let login = login_dir_with(FUTURE_MS);
 
-    capture_with_backend(Backend::File, adapter.path(), login.path(), None)
+    capture_login_credentials(Backend::File, adapter.path(), login.path(), None)
         .expect("a missing session folder is not an error");
 
     assert!(
@@ -123,7 +123,7 @@ fn a_current_folder_that_is_not_a_directory_is_skipped() {
     let not_a_dir = adapter.path().join("plain-file");
     std::fs::write(&not_a_dir, "x").expect("write a file");
 
-    capture_with_backend(
+    capture_login_credentials(
         Backend::File,
         adapter.path(),
         login.path(),

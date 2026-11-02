@@ -81,7 +81,12 @@ pub(super) fn run_login_capture(
 
     crate::auth::save_auth_entry(adapter_root, &entry)?;
     eprintln!("[llmenv] login: saved auth for {}", entry.email);
-    capture_login_credentials(adapter_root, tmp.path(), current_folder)?;
+    capture_login_credentials(
+        crate::auth::credentials::Backend::detect(),
+        adapter_root,
+        tmp.path(),
+        current_folder,
+    )?;
 
     if let Some(folder) = current_folder
         && folder.is_dir()
@@ -119,20 +124,6 @@ pub(super) fn run_login_capture(
 /// # Errors
 /// Returns an error when the cache or folder write fails.
 fn capture_login_credentials(
-    adapter_root: &Path,
-    login_dir: &Path,
-    current_folder: Option<&Path>,
-) -> anyhow::Result<()> {
-    capture_with_backend(
-        crate::auth::credentials::Backend::detect(),
-        adapter_root,
-        login_dir,
-        current_folder,
-    )
-}
-
-/// [`capture_login_credentials`] for a given backend, so a test can use the file backend.
-fn capture_with_backend(
     backend: crate::auth::credentials::Backend,
     adapter_root: &Path,
     login_dir: &Path,
