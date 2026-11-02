@@ -9,6 +9,8 @@ use super::skip_vanished;
 
 /// Which timestamp judges the age of a file under a GC candidate.
 ///
+/// On a platform without a status-change time in `std`, `MtimeOrCtime` reads as `MtimeOnly`.
+///
 /// `MtimeOnly` trusts the modification time alone. A tree unpacked with its old mtimes kept
 /// (`tar -x`, `cp -p`) then looks old at once. `MtimeOrCtime` also counts the status-change time,
 /// which an unpack sets to now, so the tree reads as used (#3195).
@@ -54,6 +56,10 @@ struct Newest {
 /// The cost of `MtimeOnly`: a folder that only gains new empty folders does not look used, and a
 /// tree unpacked with its old file mtimes kept looks old. `MtimeOrCtime` removes the second cost.
 /// A chmod or chown also sets a new ctime, which only delays removal.
+///
+/// A folder keeps its mtime under both sources. A folder change time moves on every child change,
+/// so a partial delete would make an old tree look new again (#3184). A tree with no file therefore
+/// reads as its newest folder mtime, so an unpacked tree of only folders still looks old.
 pub(crate) fn newest_file_mtime(dir: &Path, age: AgeSource) -> anyhow::Result<SystemTime> {
     let newest = walk_from(dir, age)?;
     Ok(newest.non_dir.unwrap_or(newest.any))
@@ -204,6 +210,23 @@ mod tests {
             }
             let got = newest_file_mtime(dir.path(), AgeSource::MtimeOnly).unwrap();
             prop_assert_eq!(got, newest_file.unwrap_or(newest_folder));
+        }
+
+        /// The change-time rule only adds to the mtime rule: it never reads a tree as older than
+        /// the mtime-only rule does, whatever the mtimes are (#3195).
+        #[test]
+        fn the_change_time_rule_never_reads_a_tree_as_older(
+            secs in proptest::collection::vec(1u64..1_000_000, 1..6),
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            for (i, s) in secs.iter().enumerate() {
+                let path = dir.path().join(format!("f{i}"));
+                std::fs::write(&path, b"x").unwrap();
+                set(&path, *s);
+            }
+            let only = newest_file_mtime(dir.path(), AgeSource::MtimeOnly).unwrap();
+            let both = newest_file_mtime(dir.path(), AgeSource::MtimeOrCtime).unwrap();
+            prop_assert!(both >= only, "ctime rule {both:?} is older than mtime rule {only:?}");
         }
     }
 }
