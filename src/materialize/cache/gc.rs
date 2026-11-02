@@ -82,7 +82,13 @@ pub fn gc(
                 current_version.as_deref(),
             )
         {
-            gc_normal_shapes(&p, rule, &now, &mut report)?;
+            if let Err(e) = gc_normal_shapes(&p, rule, &now, &mut report) {
+                tracing::error!(
+                    "cache gc cannot sweep the generation {}, so it is kept: {e:#}. Fix: check the permissions of that folder.",
+                    p.display()
+                );
+                report.record_failure(p.clone(), format!("{e:#}"));
+            }
             continue;
         }
         let Some(m) = newest_file_mtime_or_record(&p, rule.source, |path, cause| {
