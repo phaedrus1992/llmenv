@@ -8,10 +8,13 @@ use super::{
     build_manifest, ensure_local_memory_proxy, firing_bundles, installed_adapters,
     validate_var_name, validate_var_value, warn_dead_config,
 };
+use crate::config::{Bundle, Config};
 use crate::scope::ActiveScopes;
+use crate::scope::matcher::Env;
 use anyhow::Context;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -71,45 +74,8 @@ pub(crate) fn run_export_core(
     // (network gateway/ssid/cidr, host hostname, user user, project path/
     // marker) are already evaluated by evaluate() above — this simply
     // narrows the result to one scope's contribution.
-    let (firing, use_active) = {
-        if let Some(ref scope_id) = scope {
-            let filtered_scopes = active
-                .scopes
-                .iter()
-                .filter(|s| s.id == *scope_id)
-                .cloned()
-                .collect::<Vec<_>>();
-
-            if filtered_scopes.is_empty() {
-                eprintln!(
-                    "warning: scope '{scope_id}' not active in current environment \
-                     — no bundles will fire for this scope"
-                );
-                let firing = firing_bundles(&config.bundle, &active, tag.as_deref());
-                (firing, active.clone())
-            } else {
-                let mut filtered_tags: BTreeSet<String> = filtered_scopes
-                    .iter()
-                    .flat_map(|s| s.tags.iter().cloned())
-                    .collect();
-                if !env.os.is_empty() {
-                    filtered_tags.insert(env.os.clone());
-                }
-                filtered_tags.extend(active.extra_tags.iter().cloned());
-
-                let filtered = ActiveScopes {
-                    scopes: filtered_scopes,
-                    tags: filtered_tags,
-                    extra_tags: active.extra_tags.clone(),
-                };
-                let firing = firing_bundles(&config.bundle, &filtered, tag.as_deref());
-                (firing, filtered)
-            }
-        } else {
-            let firing = firing_bundles(&config.bundle, &active, tag.as_deref());
-            (firing, active.clone())
-        }
-    };
+    let (firing, use_active) =
+        select_firing(&config, &active, &env, scope.as_deref(), tag.as_deref());
 
     // Merge + materialize the agent config directory for each installed adapter
     // and collect env vars. PATH-gating skips adapters whose binary is absent so
@@ -164,24 +130,7 @@ pub(crate) fn run_export_core(
                 }
                 // Auth sync: detect in-session login changes and refresh the
                 // stable cache. Non-fatal — export must not fail on auth errors.
-                let adapter_root = cache_dir_root.join(adapter.name());
-                match crate::materialize::manifest::CacheManifest::read(cache_path) {
-                    Ok(Some(mut manifest)) => {
-                        crate::auth::detect::sync_auth_on_export(
-                            cache_path,
-                            &adapter_root,
-                            &mut manifest,
-                            crate::auth::credentials::Backend::detect(),
-                        );
-                    }
-                    Ok(None) => {} // absent/corrupt: already logged inside CacheManifest::read
-                    Err(e) => {
-                        tracing::warn!(
-                            "auth sync skipped: could not read cache manifest at {}: {e}",
-                            cache_path.display()
-                        );
-                    }
-                }
+                sync_adapter_auth(cache_path, &cache_dir_root.join(adapter.name()));
             }
             Ok(None) => {
                 tracing::debug!(
@@ -339,4 +288,68 @@ pub(crate) fn run_export_core(
     );
 
     Ok(())
+}
+
+/// The bundles that fire, and the scopes that the materialize step uses. With `--scope`, only that
+/// scope's tags count. An unknown scope id fires nothing for it, and a warning says so.
+fn select_firing<'a>(
+    config: &'a Config,
+    active: &ActiveScopes,
+    env: &Env,
+    scope: Option<&str>,
+    tag: Option<&str>,
+) -> (Vec<&'a Bundle>, ActiveScopes) {
+    let Some(scope_id) = scope else {
+        let firing = firing_bundles(&config.bundle, active, tag);
+        return (firing, active.clone());
+    };
+    let filtered_scopes = active
+        .scopes
+        .iter()
+        .filter(|s| s.id == scope_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    if filtered_scopes.is_empty() {
+        eprintln!(
+            "warning: scope '{scope_id}' not active in current environment \
+             — no bundles will fire for this scope"
+        );
+        let firing = firing_bundles(&config.bundle, active, tag);
+        return (firing, active.clone());
+    }
+    let mut filtered_tags: BTreeSet<String> = filtered_scopes
+        .iter()
+        .flat_map(|s| s.tags.iter().cloned())
+        .collect();
+    if !env.os.is_empty() {
+        filtered_tags.insert(env.os.clone());
+    }
+    filtered_tags.extend(active.extra_tags.iter().cloned());
+
+    let filtered = ActiveScopes {
+        scopes: filtered_scopes,
+        tags: filtered_tags,
+        extra_tags: active.extra_tags.clone(),
+    };
+    let firing = firing_bundles(&config.bundle, &filtered, tag);
+    (firing, filtered)
+}
+
+/// Refresh the stable auth cache from a materialized folder's login state. Non-fatal: export must
+/// not fail on an auth error.
+fn sync_adapter_auth(cache_path: &Path, adapter_root: &Path) {
+    match crate::materialize::manifest::CacheManifest::read(cache_path) {
+        Ok(Some(mut manifest)) => crate::auth::detect::sync_auth_on_export(
+            cache_path,
+            adapter_root,
+            &mut manifest,
+            crate::auth::credentials::Backend::detect(),
+        ),
+        // Absent or corrupt: already logged inside CacheManifest::read.
+        Ok(None) => {}
+        Err(e) => tracing::warn!(
+            "auth sync skipped: could not read cache manifest at {}: {e}",
+            cache_path.display()
+        ),
+    }
 }
