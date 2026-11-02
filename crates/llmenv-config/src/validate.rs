@@ -4499,6 +4499,19 @@ mod hostname_properties {
     use super::is_valid_hostname;
     use proptest::prelude::*;
 
+    #[test]
+    fn a_name_of_exactly_253_octets_is_accepted() {
+        let labels = [
+            "a".repeat(63),
+            "a".repeat(63),
+            "a".repeat(63),
+            "a".repeat(61),
+        ];
+        let name = labels.join(".");
+        assert_eq!(name.len(), 253);
+        assert!(is_valid_hostname(&name));
+    }
+
     proptest! {
         /// A name over 253 octets is refused, even when every label is valid.
         #[test]
