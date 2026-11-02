@@ -1,25 +1,28 @@
 #![expect(clippy::expect_used, reason = "test scaffolding")]
 //! `llmenv clean` runs every cleanup: the stale cache folders that `prune` removed, and the
 //! sweeps that `doctor --gc` ran. `prune` and `doctor --gc` are deprecated forms (#2917).
+//!
+//! These tests do not age a `state/tmp` file to removal. The sweep judges age by the later of
+//! mtime and ctime (#3195), and a test cannot move a ctime back. Removal of an aged entry is
+//! covered by the unit tests of `tmp_sweep`, which use the mtime-only rule.
 
 mod support;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
 
 use support::isolated_llmenv_cmd;
 
 const PRUNE_DEPRECATED: &str = "llmenv prune is deprecated; use llmenv clean";
 const DOCTOR_GC_DEPRECATED: &str = "llmenv doctor --gc is deprecated; use llmenv clean";
 
-/// One stale item for each share of the cleanup.
+/// One item for each share of the cleanup.
 struct Fixture {
     dir: tempfile::TempDir,
     /// An orphaned staging folder in the cache. The `prune` share removes it.
     orphan_stage: PathBuf,
-    /// A file in `state/tmp` older than the retention. The `doctor --gc` share removes it.
-    old_tmp_file: PathBuf,
+    /// A fresh file in `state/tmp`. No share removes it, because it is not old.
+    tmp_file: PathBuf,
 }
 
 fn fixture() -> Fixture {
@@ -30,18 +33,12 @@ fn fixture() -> Fixture {
     fs::create_dir_all(&orphan_stage).expect("mkdir stage");
     let tmp = dir.path().join("tmp");
     fs::create_dir_all(&tmp).expect("mkdir tmp");
-    let old_tmp_file = tmp.join("scratch.txt");
-    fs::write(&old_tmp_file, b"x").expect("write scratch");
-    fs::File::options()
-        .write(true)
-        .open(&old_tmp_file)
-        .expect("open scratch")
-        .set_modified(SystemTime::now() - Duration::from_secs(30 * 86_400))
-        .expect("backdate scratch");
+    let tmp_file = tmp.join("scratch.txt");
+    fs::write(&tmp_file, b"x").expect("write scratch");
     Fixture {
         dir,
         orphan_stage,
-        old_tmp_file,
+        tmp_file,
     }
 }
 
@@ -65,23 +62,26 @@ fn lists(stderr: &str, path: &Path) -> bool {
 }
 
 #[test]
-fn a_dry_run_lists_both_shares_and_removes_nothing() {
+fn a_dry_run_lists_the_orphan_stage_and_removes_nothing() {
     let f = fixture();
     let (ok, stderr) = run(f.dir.path(), &["clean", "--dry-run"]);
     assert!(ok, "clean --dry-run failed: {stderr}");
     assert!(lists(&stderr, &f.orphan_stage), "no prune share: {stderr}");
-    assert!(lists(&stderr, &f.old_tmp_file), "no gc share: {stderr}");
-    assert!(f.orphan_stage.exists() && f.old_tmp_file.exists());
+    assert!(
+        !lists(&stderr, &f.tmp_file),
+        "a fresh tmp file is listed: {stderr}"
+    );
+    assert!(f.orphan_stage.exists() && f.tmp_file.exists());
     assert!(!stderr.contains("deprecated"), "{stderr}");
 }
 
 #[test]
-fn clean_removes_both_shares() {
+fn clean_removes_the_orphan_stage_and_keeps_a_fresh_tmp_file() {
     let f = fixture();
     let (ok, stderr) = run(f.dir.path(), &["clean"]);
     assert!(ok, "clean failed: {stderr}");
     assert!(!f.orphan_stage.exists(), "the orphan stage is still there");
-    assert!(!f.old_tmp_file.exists(), "the old tmp file is still there");
+    assert!(f.tmp_file.exists(), "clean removed a fresh tmp file");
 }
 
 #[test]
@@ -90,8 +90,8 @@ fn prune_runs_clean_and_prints_the_deprecation_line() {
     let (ok, stderr) = run(f.dir.path(), &["prune", "--dry-run"]);
     assert!(ok, "prune --dry-run failed: {stderr}");
     assert!(stderr.lines().any(|l| l == PRUNE_DEPRECATED), "{stderr}");
-    assert!(lists(&stderr, &f.orphan_stage) && lists(&stderr, &f.old_tmp_file));
-    assert!(f.orphan_stage.exists() && f.old_tmp_file.exists());
+    assert!(lists(&stderr, &f.orphan_stage), "{stderr}");
+    assert!(f.orphan_stage.exists() && f.tmp_file.exists());
 }
 
 #[test]
@@ -103,23 +103,17 @@ fn doctor_gc_keeps_its_sweeps_and_prints_the_deprecation_line() {
         "{stderr}"
     );
     assert!(
-        !f.old_tmp_file.exists(),
-        "doctor --gc no longer sweeps state/tmp"
-    );
-    assert!(
         f.orphan_stage.exists(),
         "doctor --gc took over the prune share"
     );
+    assert!(f.tmp_file.exists(), "doctor --gc removed a fresh tmp file");
 }
 
 #[test]
 fn doctor_without_gc_removes_nothing() {
     let f = fixture();
     let (_, stderr) = run(f.dir.path(), &["doctor"]);
-    assert!(
-        f.orphan_stage.exists() && f.old_tmp_file.exists(),
-        "{stderr}"
-    );
+    assert!(f.orphan_stage.exists() && f.tmp_file.exists(), "{stderr}");
     assert!(!stderr.contains("deprecated"), "{stderr}");
 }
 
@@ -129,7 +123,7 @@ fn all_and_older_than_are_refused_together() {
     let (ok, stderr) = run(f.dir.path(), &["clean", "--all", "--older-than", "1d"]);
     assert!(!ok, "clean accepted --all with --older-than");
     assert!(stderr.contains("--all"), "{stderr}");
-    assert!(f.orphan_stage.exists() && f.old_tmp_file.exists());
+    assert!(f.orphan_stage.exists() && f.tmp_file.exists());
 }
 
 #[test]
@@ -152,7 +146,7 @@ fn a_failed_sweep_fails_clean_after_the_other_removals() {
         stderr.contains("could not be checked or removed"),
         "{stderr}"
     );
-    assert!(!f.orphan_stage.exists() && !f.old_tmp_file.exists());
+    assert!(!f.orphan_stage.exists(), "the prune share did not run");
 }
 
 #[test]
@@ -161,5 +155,5 @@ fn a_bad_older_than_value_removes_nothing() {
     let (ok, stderr) = run(f.dir.path(), &["clean", "--older-than", "14dayz"]);
     assert!(!ok, "clean accepted a bad duration");
     assert!(stderr.contains("--older-than"), "{stderr}");
-    assert!(f.orphan_stage.exists() && f.old_tmp_file.exists());
+    assert!(f.orphan_stage.exists() && f.tmp_file.exists());
 }
