@@ -15,13 +15,21 @@ pub(super) fn state_may_have_stale_entries(
     state_dir: &Path,
     retention: Duration,
     cbm_live: bool,
+    source: crate::materialize::cache::AgeSource,
 ) -> bool {
     let tmp = state_dir.join("tmp");
-    let tmp_may_be_stale = match tmp_sweep::stale_summary_in(&tmp, retention, &[]) {
+    let tmp_may_be_stale = match tmp_sweep::stale_summary_in(
+        &tmp,
+        crate::materialize::expiry::AgeRule {
+            older_than: retention,
+            source,
+        },
+        &[],
+    ) {
         Ok(summary) => summary.count > 0 || summary.unreadable > 0,
         Err(e) => {
             tracing::error!(
-                "state GC cannot scan {}, so lsof runs: {e:#}",
+                "state GC cannot scan {}, so lsof runs: {e:#}. Fix: make the folder readable, then run the GC again",
                 tmp.display()
             );
             true
@@ -79,14 +87,24 @@ mod tests {
         std::fs::create_dir(state.path().join("codebase-memory")).unwrap();
         std::fs::write(state.path().join("codebase-memory").join("index.db"), b"x").unwrap();
 
-        assert!(!state_may_have_stale_entries(state.path(), DAY * 7, false));
+        assert!(!state_may_have_stale_entries(
+            state.path(),
+            DAY * 7,
+            false,
+            crate::materialize::cache::AgeSource::MtimeOnly
+        ));
     }
 
     #[test]
     fn a_state_folder_with_no_tmp_and_no_index_needs_no_in_use_list() {
         let state = tempfile::tempdir().unwrap();
 
-        assert!(!state_may_have_stale_entries(state.path(), DAY * 7, false));
+        assert!(!state_may_have_stale_entries(
+            state.path(),
+            DAY * 7,
+            false,
+            crate::materialize::cache::AgeSource::MtimeOnly
+        ));
     }
 
     #[test]
@@ -97,7 +115,12 @@ mod tests {
         std::fs::write(&db, b"x").unwrap();
         age(&db);
 
-        assert!(!state_may_have_stale_entries(state.path(), DAY * 7, true));
+        assert!(!state_may_have_stale_entries(
+            state.path(),
+            DAY * 7,
+            true,
+            crate::materialize::cache::AgeSource::MtimeOnly
+        ));
     }
 
     #[test]
@@ -108,7 +131,12 @@ mod tests {
         std::fs::write(&db, b"x").unwrap();
         age(&db);
 
-        assert!(state_may_have_stale_entries(state.path(), DAY * 7, false));
+        assert!(state_may_have_stale_entries(
+            state.path(),
+            DAY * 7,
+            false,
+            crate::materialize::cache::AgeSource::MtimeOnly
+        ));
     }
 
     #[test]
@@ -122,7 +150,12 @@ mod tests {
         std::fs::write(&wal, b"x").unwrap();
         age(&wal);
 
-        assert!(!state_may_have_stale_entries(state.path(), DAY * 7, false));
+        assert!(!state_may_have_stale_entries(
+            state.path(),
+            DAY * 7,
+            false,
+            crate::materialize::cache::AgeSource::MtimeOnly
+        ));
     }
 
     #[test]
@@ -134,7 +167,12 @@ mod tests {
         std::fs::write(&log, b"x").unwrap();
         age(&log);
 
-        assert!(!state_may_have_stale_entries(state.path(), DAY * 7, false));
+        assert!(!state_may_have_stale_entries(
+            state.path(),
+            DAY * 7,
+            false,
+            crate::materialize::cache::AgeSource::MtimeOnly
+        ));
     }
 
     #[cfg(unix)]
@@ -146,7 +184,12 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
 
-        let needs_lsof = state_may_have_stale_entries(state.path(), DAY * 7, false);
+        let needs_lsof = state_may_have_stale_entries(
+            state.path(),
+            DAY * 7,
+            false,
+            crate::materialize::cache::AgeSource::MtimeOnly,
+        );
 
         // Restore the mode first, so the temporary folder can be removed.
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -161,6 +204,11 @@ mod tests {
         std::fs::write(&old, b"x").unwrap();
         age(&old);
 
-        assert!(state_may_have_stale_entries(state.path(), DAY * 7, false));
+        assert!(state_may_have_stale_entries(
+            state.path(),
+            DAY * 7,
+            false,
+            crate::materialize::cache::AgeSource::MtimeOnly
+        ));
     }
 }

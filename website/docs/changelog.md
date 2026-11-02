@@ -183,6 +183,8 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 
 ### Fixed
 
+- Keep a tree unpacked with old file mtimes (`tar -x`, `cp -p`) in `llmenv clean`. The cache and `state/tmp` sweeps now judge a file by the later of its mtime and its change time, so an unpack reads as new. [fix:clean] [#3195]
+- `llmenv clean` now reports an unreadable codebase-memory bundle config when no `state/tmp` entry is old. It used to exit 0 with no message. [fix:clean] [#3195]
 - Export validates every variable before it prints, so one bad value prints no `export` line, and `eval` never sources part of the environment. [fix:cli] [#3268]
 - A failed throttled config pull is a notice for the agent, and export still runs on the config it has. [fix:cli] [#3268]
 - `llmenv sync --dry-run` refuses a file name that is not UTF-8, instead of printing a replaced name. [fix:cli] [#3268]

@@ -5,14 +5,15 @@
 //! than the retention, and no process holds a path inside it open.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use anyhow::Context;
 
 use crate::materialize::cache::{
-    GcReport, gc_remove_dir, gc_remove_link, is_expired, newest_file_mtime,
+    AgeSource, GcReport, file_stamp, gc_remove_dir, gc_remove_link, is_expired, newest_file_mtime,
 };
 use crate::materialize::dir_size::{DirSize, dir_size};
+use crate::materialize::expiry::AgeRule;
 use crate::materialize::open_files::open_paths;
 
 mod claude_root;
@@ -56,11 +57,11 @@ pub struct StaleSummary {
 /// With `dry_run`, the report lists the same entries and nothing is removed (#2917).
 pub fn sweep(
     tmp_root: &Path,
-    older_than: Duration,
+    rule: AgeRule,
     in_use: &[PathBuf],
     dry_run: bool,
 ) -> anyhow::Result<GcReport> {
-    let scan = scan(tmp_root, older_than, in_use)?;
+    let scan = scan(tmp_root, rule, in_use)?;
     let mut report = GcReport {
         kept: scan.kept,
         failed: scan.failed,
@@ -80,8 +81,8 @@ pub fn sweep(
 ///
 /// # Errors
 /// Fails when the in-use list cannot be read. See [`open_paths`].
-pub fn stale_summary(state_dir: &Path, older_than: Duration) -> anyhow::Result<StaleSummary> {
-    stale_summary_with(state_dir, older_than, open_paths)
+pub fn stale_summary(state_dir: &Path, rule: AgeRule) -> anyhow::Result<StaleSummary> {
+    stale_summary_with(state_dir, rule, open_paths)
 }
 
 /// [`stale_summary`] with the in-use list supplied on demand.
@@ -92,15 +93,15 @@ pub fn stale_summary(state_dir: &Path, older_than: Duration) -> anyhow::Result<S
 /// file on the host, and it can take seconds (#3031).
 fn stale_summary_with(
     state_dir: &Path,
-    older_than: Duration,
+    rule: AgeRule,
     in_use: impl FnOnce() -> anyhow::Result<Vec<PathBuf>>,
 ) -> anyhow::Result<StaleSummary> {
     let tmp_root = state_dir.join("tmp");
-    let bound = stale_summary_in(&tmp_root, older_than, &[])?;
+    let bound = stale_summary_in(&tmp_root, rule, &[])?;
     if bound.count == 0 && bound.unreadable == 0 {
         return Ok(bound);
     }
-    stale_summary_in(&tmp_root, older_than, &in_use()?)
+    stale_summary_in(&tmp_root, rule, &in_use()?)
 }
 
 /// The summary for `tmp_root`, with the in-use list given by the caller.
@@ -109,10 +110,10 @@ fn stale_summary_with(
 /// Fails when `tmp_root` cannot be read or resolved.
 pub fn stale_summary_in(
     tmp_root: &Path,
-    older_than: Duration,
+    rule: AgeRule,
     in_use: &[PathBuf],
 ) -> anyhow::Result<StaleSummary> {
-    let scan = scan(tmp_root, older_than, in_use)?;
+    let scan = scan(tmp_root, rule, in_use)?;
     let sizes = scan
         .stale
         .iter()
@@ -128,7 +129,7 @@ pub fn stale_summary_in(
 }
 
 /// Walk `tmp_root` and sort every entry into stale, kept, or failed. The walk changes nothing.
-fn scan(tmp_root: &Path, older_than: Duration, in_use: &[PathBuf]) -> anyhow::Result<Scan> {
+fn scan(tmp_root: &Path, rule: AgeRule, in_use: &[PathBuf]) -> anyhow::Result<Scan> {
     let mut scan = Scan::default();
     let Some(entries) = crate::paths::read_dir_optional(tmp_root)? else {
         return Ok(scan);
@@ -160,17 +161,17 @@ fn scan(tmp_root: &Path, older_than: Duration, in_use: &[PathBuf]) -> anyhow::Re
         // A root that holds unrelated entries is not judged as one entry, because one fresh entry
         // would keep all the others (#1379, #3184). Its entries are judged one by one instead.
         if is_dir && is_split_root(&name) {
-            scan_split_root(&path, older_than, in_use, now, &mut scan);
+            scan_split_root(&path, rule, in_use, now, &mut scan);
             continue;
         }
-        judge_entry(&path, is_dir, older_than, now, &mut scan);
+        judge_entry(&path, is_dir, rule, now, &mut scan);
     }
     Ok(scan)
 }
 
 /// Mark one entry stale when its newest file mtime is older than `older_than`. Keep it otherwise.
-fn judge_entry(path: &Path, is_dir: bool, older_than: Duration, now: SystemTime, scan: &mut Scan) {
-    let modified = match entry_mtime(path, is_dir) {
+fn judge_entry(path: &Path, is_dir: bool, rule: AgeRule, now: SystemTime, scan: &mut Scan) {
+    let modified = match entry_mtime(path, is_dir, rule.source) {
         Ok(modified) => modified,
         Err(e) => {
             record_failure(path, &e, scan);
@@ -179,7 +180,7 @@ fn judge_entry(path: &Path, is_dir: bool, older_than: Duration, now: SystemTime,
     };
     // `is_expired` keeps a future mtime and logs the skew. A removal on a bad clock is not
     // reversible, so the entry must reach that check.
-    if !is_expired(now, modified, older_than, path) {
+    if !is_expired(now, modified, rule.older_than, path) {
         scan.kept += 1;
     } else {
         scan.stale.push(Stale {
@@ -190,12 +191,12 @@ fn judge_entry(path: &Path, is_dir: bool, older_than: Duration, now: SystemTime,
 }
 
 /// The newest file mtime of an entry. A symlink is judged by its own mtime and never followed.
-fn entry_mtime(path: &Path, is_dir: bool) -> anyhow::Result<SystemTime> {
+fn entry_mtime(path: &Path, is_dir: bool, source: AgeSource) -> anyhow::Result<SystemTime> {
     if is_dir {
-        return newest_file_mtime(path);
+        return newest_file_mtime(path, source);
     }
     std::fs::symlink_metadata(path)
-        .and_then(|meta| meta.modified())
+        .and_then(|meta| file_stamp(&meta, source))
         .with_context(|| format!("stat {}", path.display()))
 }
 
@@ -209,6 +210,9 @@ fn record_failure(path: &Path, error: impl std::fmt::Display, scan: &mut Scan) {
     scan.failed.push(path.to_path_buf());
 }
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod summary_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests;
