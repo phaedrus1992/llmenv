@@ -75,10 +75,11 @@ fn read_project_file(path: &std::path::Path) -> ProjectFile {
             pf
         }
         Err(e) => {
-            tracing::error!(
-                "project marker file {} is not valid YAML: {e}; using defaults",
+            llmenv_util::agent_notice::record_logged(format!(
+                "llmenv: project marker file {} is not valid YAML ({e}); using defaults, so its \
+                 tags and bundles do not apply. Fix: correct the YAML in that file.",
                 path.display()
-            );
+            ));
             ProjectFile::default()
         }
     }
