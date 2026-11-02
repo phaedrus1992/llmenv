@@ -102,3 +102,110 @@ pub(crate) fn matches_content_all<'a>(
     }
     matched
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "a test fails loudly when its fixture cannot be set up"
+)]
+mod tests {
+    use super::*;
+    use crate::config::{ContentMatch, ContentScope};
+    use proptest::prelude::*;
+    use std::collections::BTreeSet;
+    use std::path::Path;
+
+    const GLOBS: [&str; 7] = [
+        "*.rs",
+        "**/*.rs",
+        "src/**",
+        "*.md",
+        "**/deep/*",
+        "src/*.rs",
+        "missing/**",
+    ];
+    const DEPTHS: [Option<usize>; 5] = [None, Some(0), Some(1), Some(2), Some(3)];
+
+    fn scope(id: &str, glob: &str, depth: Option<usize>) -> ContentScope {
+        ContentScope {
+            id: id.to_string(),
+            r#match: ContentMatch {
+                glob: glob.to_string(),
+                depth,
+            },
+            tags: Vec::new(),
+        }
+    }
+
+    /// A fixed tree with files at several depths.
+    fn fixture() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("temp dir");
+        for file in [
+            "top.rs",
+            "top.md",
+            "src/lib.rs",
+            "src/notes.md",
+            "src/deep/mod.rs",
+            "src/deep/deeper/x.rs",
+        ] {
+            let path = dir.path().join(file);
+            std::fs::create_dir_all(path.parent().expect("a file has a parent"))
+                .expect("create the folders");
+            std::fs::write(&path, "x").expect("write a fixture file");
+        }
+        dir
+    }
+
+    /// The reference: one full walk per scope, as each content scope walked before #703.
+    fn naive_matches<'a>(scopes: &'a [ContentScope], cwd: &Path) -> BTreeSet<&'a str> {
+        scopes
+            .iter()
+            .filter(|s| {
+                let Ok(glob) = globset::Glob::new(&s.r#match.glob) else {
+                    return false;
+                };
+                let matcher = glob.compile_matcher();
+                let mut walk = walkdir::WalkDir::new(cwd).follow_links(false);
+                if let Some(depth) = s.r#match.depth {
+                    walk = walk.max_depth(depth);
+                }
+                walk.into_iter()
+                    .filter_map(Result::ok)
+                    .filter(|e| !e.file_type().is_dir())
+                    .any(|e| {
+                        e.path()
+                            .strip_prefix(cwd)
+                            .is_ok_and(|rel| matcher.is_match(rel))
+                    })
+            })
+            .map(|s| s.id.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn no_scopes_match_nothing() {
+        let dir = fixture();
+        assert!(matches_content_all(&[], dir.path()).is_empty());
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// One shared walk gives the same matches as one walk per scope, for any scope set.
+        #[test]
+        fn one_walk_matches_what_a_walk_per_scope_matches(
+            picks in prop::collection::vec((0..GLOBS.len(), 0..DEPTHS.len()), 1..5),
+        ) {
+            let dir = fixture();
+            let scopes: Vec<ContentScope> = picks
+                .iter()
+                .enumerate()
+                .map(|(i, (g, d))| scope(&format!("s{i}"), GLOBS[*g], DEPTHS[*d]))
+                .collect();
+            prop_assert_eq!(
+                matches_content_all(&scopes, dir.path()),
+                naive_matches(&scopes, dir.path())
+            );
+        }
+    }
+}
