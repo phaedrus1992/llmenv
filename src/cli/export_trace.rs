@@ -46,19 +46,7 @@ pub(crate) fn run_export_core(
         &active,
         crate::mcp::proxy_ops::SpawnSource::Export,
     );
-    // Throttled pull: check sync interval and fetch+pull if enough time has elapsed.
-    // Skipped entirely when remote_sync is disabled (e.g. 1Password locked).
-    if config.cache.remote_sync {
-        let interval_secs = config.cache.sync_interval_minutes * 60;
-        let state_dir = crate::paths::state_dir()?;
-        if let Err(e) = crate::sync::maybe_pull(
-            &config_dir,
-            &state_dir,
-            std::time::Duration::from_secs(interval_secs),
-        ) {
-            tracing::warn!("throttled pull failed (non-fatal): {e}");
-        }
-    }
+    pull_if_due(&config, &config_dir)?;
 
     // A bundle fires when either:
     //   - one of its tags is in the active tag set (normal tag-based firing), OR
@@ -156,38 +144,7 @@ pub(crate) fn run_export_core(
 
     let t_adapters = Instant::now();
 
-    if !any_adapter_eligible {
-        eprintln!(
-            "warning: no registered adapter binary found on PATH (expected: {})",
-            crate::adapter::registered_adapters()
-                .iter()
-                .map(|a| a.binary_name())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
-
-    // If every attempted adapter failed and none produced env vars, surface
-    // that loudly instead of exiting 0 with an empty environment — an `eval
-    // "$(llmenv export)"` wrapper only reacts to a non-zero exit, and silently
-    // sourcing nothing looks identical to "no bundles fire" (#543).
-    if vars.is_empty() && !failed_adapters.is_empty() {
-        anyhow::bail!("all adapter materializations failed — no env vars to export");
-    }
-
-    // #1346: unlike `llmenv regenerate`, a *partial* failure here stays exit 0.
-    // This path runs on every prompt through the shell hook, so failing the
-    // command would break the prompt for as long as the config is bad, and the
-    // env vars the other adapters produced are still correct and worth
-    // exporting. Name the failures in one summary line instead, so the reason
-    // is still legible after the per-adapter warnings scroll past.
-    if !failed_adapters.is_empty() {
-        eprintln!(
-            "warning: exported environment is missing output from: {}. Run `llmenv \
-             regenerate` to see the full error.",
-            failed_adapters.join(", ")
-        );
-    }
+    report_adapter_outcome(vars.is_empty(), &failed_adapters, any_adapter_eligible)?;
 
     // Introspection env: comma-separated, deterministic order. Scopes get
     // a `<kind>:<id>` prefix so the kind is visible without re-running
@@ -248,31 +205,12 @@ pub(crate) fn run_export_core(
     // Auto-prune: TTL-based memory retention pass after materialization (#270)
     crate::memory::auto_prune::auto_prune_if_enabled(&config, &config_dir, &use_active);
 
-    if explain {
-        let bundle_list = firing
-            .iter()
-            .map(|b| b.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        for (key, value) in vars {
-            validate_var_name(&key).with_context(|| format!("variable '{key}'"))?;
-            validate_var_value(&value)
-                .with_context(|| format!("variable '{key}': invalid value"))?;
-            if key.starts_with("LLMENV_") {
-                println!("# source: llmenv introspection");
-            } else {
-                println!("# source: adapter (bundles: {bundle_list})");
-            }
-            println!("export {}={}", key, crate::util::single_quote(&value));
-        }
-    } else {
-        for (key, value) in vars {
-            validate_var_name(&key).with_context(|| format!("variable '{key}'"))?;
-            validate_var_value(&value)
-                .with_context(|| format!("variable '{key}': invalid value"))?;
-            println!("export {}={}", key, crate::util::single_quote(&value));
-        }
-    }
+    let bundle_list = firing
+        .iter()
+        .map(|b| b.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    print_exports(&vars, explain.then_some(bundle_list.as_str()))?;
 
     crate::export_trace::emit_phase_trace(
         "export",
@@ -352,4 +290,69 @@ fn sync_adapter_auth(cache_path: &Path, adapter_root: &Path) {
             cache_path.display()
         ),
     }
+}
+
+/// Print one `export` line for each variable. With `bundle_list`, each line first names its source,
+/// so an explained export shows which bundles fired.
+fn print_exports(vars: &BTreeMap<String, String>, bundle_list: Option<&str>) -> anyhow::Result<()> {
+    for (key, value) in vars {
+        validate_var_name(key).with_context(|| format!("variable '{key}'"))?;
+        validate_var_value(value).with_context(|| format!("variable '{key}': invalid value"))?;
+        if let Some(bundle_list) = bundle_list {
+            if key.starts_with("LLMENV_") {
+                println!("# source: llmenv introspection");
+            } else {
+                println!("# source: adapter (bundles: {bundle_list})");
+            }
+        }
+        println!("export {}={}", key, crate::util::single_quote(value));
+    }
+    Ok(())
+}
+
+/// Throttled pull: fetch and pull the config repository once the sync interval has passed. It is
+/// skipped when remote sync is off, for example while 1Password is locked. A failed pull is only a
+/// warning, because export must still run.
+fn pull_if_due(config: &Config, config_dir: &Path) -> anyhow::Result<()> {
+    if !config.cache.remote_sync {
+        return Ok(());
+    }
+    let interval_secs = config.cache.sync_interval_minutes * 60;
+    let state_dir = crate::paths::state_dir()?;
+    let interval = std::time::Duration::from_secs(interval_secs);
+    if let Err(e) = crate::sync::maybe_pull(config_dir, &state_dir, interval) {
+        tracing::warn!("throttled pull failed (non-fatal): {e}");
+    }
+    Ok(())
+}
+
+/// Report the adapter outcome. A missing adapter binary is a warning. Every adapter failing with no
+/// env vars is an error, so `eval` does not source nothing and exit 0 (#543). A partial failure
+/// stays exit 0, because this runs on every prompt through the shell hook (#1346).
+fn report_adapter_outcome(
+    no_vars: bool,
+    failed: &[&str],
+    any_eligible: bool,
+) -> anyhow::Result<()> {
+    if !any_eligible {
+        eprintln!(
+            "warning: no registered adapter binary found on PATH (expected: {})",
+            crate::adapter::registered_adapters()
+                .iter()
+                .map(|a| a.binary_name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    if no_vars && !failed.is_empty() {
+        anyhow::bail!("all adapter materializations failed — no env vars to export");
+    }
+    if !failed.is_empty() {
+        eprintln!(
+            "warning: exported environment is missing output from: {}. Run `llmenv \
+             regenerate` to see the full error.",
+            failed.join(", ")
+        );
+    }
+    Ok(())
 }
