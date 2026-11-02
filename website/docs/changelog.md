@@ -51,6 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Tell the agent when scope matching is off because the hostname, `$USER`, or the working directory cannot be read. The failure reached only the error log before, so the agent ran with a different scope and no reason. [fix:scope] [#3224]
+- Refuse an unreadable log folder that you chose, instead of changing its mode. Cache cleanup again restores write access to an unreadable llmenv cache folder, so GC can remove it. A link in place of either folder is never changed. [fix:paths] [#3223]
 - Judge a symlink in state-file pruning by the link's own age, and remove the link itself. A fresh link to an old file is no longer pruned, and an old link is pruned without touching its target. [fix:hook] [#3094, #3108]
 - Stop a corrupt session map from replacing the first aside copy when the aside name cannot be checked. The map stays in place and the error names it. [fix:hook] [#3108]
 - Refuse a `known_files` key that contains `..` in every build. A release build no longer joins it into the cache path. [fix:adapter] [#3107]
