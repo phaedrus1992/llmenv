@@ -54,21 +54,24 @@ fn restore_dir_write_bits(dir: &Path) {
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
             match heal_unreadable_dir(dir) {
                 Ok(fd) => fd,
-                Err(heal_error) => return log_unreadable(dir, &heal_error),
+                Err(heal_error) => {
+                    return log_unreadable(dir, &format!("{e}; the heal failed: {heal_error}"));
+                }
             }
         }
-        Err(e) => return log_unreadable(dir, &e),
+        Err(e) => return log_unreadable(dir, &e.to_string()),
     };
     restore_open_dir(std::fs::File::from(fd), dir);
 }
 
-/// Add the owner bits to an unreadable folder by path, then open it. A link is refused by the
-/// lstat check, so a link target is never chmod'd. The check and the chmod are not one atomic step:
-/// a link swapped in between them would be followed. The cache tree is llmenv's own, so accepting
-/// that window here is deliberate.
+/// Set an unreadable cache folder to 0o700 by path, then open it. The chmod has no race-free form,
+/// because the folder cannot be opened before it is readable. A link is refused by the lstat check,
+/// so a link target is never chmod'd. The check and the chmod are not one atomic step, so a link
+/// swapped in between them is followed. The accepted window is for the cache tree, which llmenv
+/// owns. A folder that another user owns is refused, because the chmod would fail on it anyway.
 #[cfg(unix)]
 fn heal_unreadable_dir(dir: &Path) -> std::io::Result<std::os::fd::OwnedFd> {
-    use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
     let meta = std::fs::symlink_metadata(dir)?;
     if !meta.is_dir() {
         return Err(std::io::Error::other(format!(
@@ -76,13 +79,20 @@ fn heal_unreadable_dir(dir: &Path) -> std::io::Result<std::os::fd::OwnedFd> {
             dir.display()
         )));
     }
-    let owner_bits = meta.permissions().mode() | 0o700;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(owner_bits))?;
+    if meta.uid() != rustix::process::geteuid().as_raw() {
+        return Err(std::io::Error::other(format!(
+            "{} is owned by another user",
+            dir.display()
+        )));
+    }
+    // Exactly 0o700, not the old mode with the owner bits added. The folder is removed next, so
+    // group and other bits are never needed.
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     crate::paths::dirfd::open_dir_nofollow(dir)
 }
 
 #[cfg(unix)]
-fn log_unreadable(dir: &Path, cause: &std::io::Error) {
+fn log_unreadable(dir: &Path, cause: &str) {
     tracing::error!(
         "cannot read {} for cache cleanup: {cause}. Fix: check the cache folder's \
          permissions; its contents may not be removed.",
@@ -256,7 +266,8 @@ mod tests {
         let result = remove_dir_all_forcing_writable(&folder);
         // Restore a mode that lets the temp dir clean up, whatever the result.
         if folder.exists() {
-            let _ = std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700));
+            std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700))
+                .expect("restore the cache folder mode");
         }
         result.expect("the heal must let the cache folder be removed");
         assert!(!folder.exists(), "the unreadable cache folder must be gone");
