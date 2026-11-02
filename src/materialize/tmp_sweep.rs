@@ -4,17 +4,13 @@
 //! removes what those tools leave behind. An entry is removed when its newest mtime is older
 //! than the retention, and no process holds a path inside it open.
 
-use std::path::{Path, PathBuf};
-use std::time::Duration;
-
-use crate::materialize::cache::{GcReport, gc_remove_dir, gc_remove_link};
-use crate::materialize::dir_size::{DirSize, dir_size};
-use crate::materialize::open_files::open_paths;
-
 mod claude_root;
 
+mod remove;
+mod summary;
+pub use remove::sweep;
 mod walk;
-use walk::scan;
+pub use summary::{stale_summary, stale_summary_in};
 
 /// The stale entries of `state/tmp`: how many, and how many bytes they hold.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -27,89 +23,6 @@ pub struct StaleSummary {
     pub unreadable: usize,
 }
 
-/// Remove the entries of `tmp_root` that are older than `older_than` and not in use.
-///
-/// `in_use` lists paths that a process holds open. An entry that contains one of them is kept,
-/// because removing it would break a live process. lsof reports resolved paths, so the root is
-/// resolved too. Otherwise a symlink on the way to the root hides every match.
-///
-/// A failure on one entry is recorded and the sweep goes on, so one unreadable entry does not
-/// block the others (#1372).
-///
-/// With `dry_run`, the report lists the same entries and nothing is removed (#2917).
-pub fn sweep(
-    tmp_root: &Path,
-    older_than: Duration,
-    in_use: &[PathBuf],
-    dry_run: bool,
-) -> anyhow::Result<GcReport> {
-    let scan = scan(tmp_root, older_than, in_use)?;
-    let mut report = GcReport {
-        kept: scan.kept,
-        failed: scan.failed,
-        ..GcReport::new(dry_run)
-    };
-    for stale in &scan.stale {
-        if stale.is_dir {
-            gc_remove_dir(&stale.path, &mut report);
-        } else {
-            gc_remove_link(&stale.path, &mut report);
-        }
-    }
-    Ok(report)
-}
-
-/// Count and size the entries that [`sweep`] would remove, without removing any.
-///
-/// # Errors
-/// Fails when the in-use list cannot be read. See [`open_paths`].
-pub fn stale_summary(state_dir: &Path, older_than: Duration) -> anyhow::Result<StaleSummary> {
-    stale_summary_with(state_dir, older_than, open_paths)
-}
-
-/// [`stale_summary`] with the in-use list supplied on demand.
-///
-/// The in-use list only removes entries from the stale count, so a scan with no in-use list
-/// gives the upper bound. When that bound holds no stale and no unreadable entry, the answer
-/// is final and `lsof` never runs. A `SessionStart` hook needs this: `lsof` lists every open
-/// file on the host, and it can take seconds (#3031).
-fn stale_summary_with(
-    state_dir: &Path,
-    older_than: Duration,
-    in_use: impl FnOnce() -> anyhow::Result<Vec<PathBuf>>,
-) -> anyhow::Result<StaleSummary> {
-    let tmp_root = state_dir.join("tmp");
-    let bound = stale_summary_in(&tmp_root, older_than, &[])?;
-    if bound.count == 0 && bound.unreadable == 0 {
-        return Ok(bound);
-    }
-    stale_summary_in(&tmp_root, older_than, &in_use()?)
-}
-
-/// The summary for `tmp_root`, with the in-use list given by the caller.
-///
-/// # Errors
-/// Fails when `tmp_root` cannot be read or resolved.
-pub fn stale_summary_in(
-    tmp_root: &Path,
-    older_than: Duration,
-    in_use: &[PathBuf],
-) -> anyhow::Result<StaleSummary> {
-    let scan = scan(tmp_root, older_than, in_use)?;
-    let sizes = scan
-        .stale
-        .iter()
-        .map(|s| dir_size(&s.path))
-        .collect::<anyhow::Result<Vec<DirSize>>>()?;
-    let total = sizes.into_iter().fold(DirSize::default(), DirSize::combine);
-    Ok(StaleSummary {
-        count: scan.stale.len(),
-        bytes: total.bytes,
-        bytes_partial: total.skipped > 0,
-        unreadable: scan.failed.len(),
-    })
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -117,15 +30,27 @@ mod tests {
     use std::path::Path;
     use std::time::{Duration, SystemTime};
 
-    use super::{StaleSummary, stale_summary_in, stale_summary_with, sweep};
+    use super::summary::{stale_summary_in, stale_summary_with};
+    use super::{StaleSummary, sweep};
+    use crate::materialize::cache::AgeSource;
+    use crate::materialize::expiry::AgeRule;
 
     pub(super) const DAY: Duration = Duration::from_secs(86_400);
+
+    // Tests age a tree with `set_modified`, which cannot move the change time back. The mtime-only
+    // rule is the one that sees that age, so these tests use it (#3195).
+    pub(super) fn mtime_rule(older_than: Duration) -> AgeRule {
+        AgeRule {
+            older_than,
+            source: AgeSource::MtimeOnly,
+        }
+    }
 
     #[test]
     fn summary_never_asks_lsof_when_no_entry_is_a_candidate() {
         let state = tempfile::tempdir().unwrap();
         fs::create_dir_all(state.path().join("tmp").join("fresh")).unwrap();
-        let summary = stale_summary_with(state.path(), DAY, || {
+        let summary = stale_summary_with(state.path(), mtime_rule(DAY), || {
             anyhow::bail!("lsof must not run when nothing is stale")
         })
         .unwrap();
@@ -138,7 +63,7 @@ mod tests {
         let entry = state.path().join("tmp").join("old");
         fs::create_dir_all(&entry).unwrap();
         age_tree(&entry, SystemTime::now() - 2 * DAY);
-        let summary = stale_summary_with(state.path(), DAY, || Ok(Vec::new())).unwrap();
+        let summary = stale_summary_with(state.path(), mtime_rule(DAY), || Ok(Vec::new())).unwrap();
         assert_eq!(summary.count, 1);
     }
 
@@ -149,8 +74,38 @@ mod tests {
         fs::create_dir_all(&entry).unwrap();
         age_tree(&entry, SystemTime::now() - 2 * DAY);
         let in_use = vec![fs::canonicalize(&entry).unwrap()];
-        let summary = stale_summary_with(state.path(), DAY, || Ok(in_use)).unwrap();
+        let summary = stale_summary_with(state.path(), mtime_rule(DAY), || Ok(in_use)).unwrap();
         assert_eq!(summary.count, 0);
+    }
+
+    // `set_modified` also sets the change time to now, the same as an unpack that keeps old
+    // mtimes. The change-time rule therefore keeps the tree, and the mtime-only rule removes it.
+    #[test]
+    fn an_unpacked_tree_with_old_mtimes_is_kept_by_the_change_time_rule() {
+        let root = tempfile::tempdir().unwrap();
+        let unpacked = root.path().join("unpacked");
+        fs::create_dir(&unpacked).unwrap();
+        fs::write(unpacked.join("artifact"), b"x").unwrap();
+        age_tree(&unpacked, old());
+        let rule = AgeRule {
+            older_than: DAY * 7,
+            source: AgeSource::MtimeOrCtime,
+        };
+        let report = sweep(root.path(), rule, &[], false).unwrap();
+        assert!(report.removed.is_empty(), "removed {:?}", report.removed);
+        assert!(unpacked.exists());
+    }
+
+    #[test]
+    fn the_mtime_only_rule_removes_an_unpacked_tree_with_old_mtimes() {
+        let root = tempfile::tempdir().unwrap();
+        let unpacked = root.path().join("unpacked");
+        fs::create_dir(&unpacked).unwrap();
+        fs::write(unpacked.join("artifact"), b"x").unwrap();
+        age_tree(&unpacked, old());
+        let report = sweep(root.path(), mtime_rule(DAY * 7), &[], false).unwrap();
+        assert_eq!(report.removed, vec![unpacked.clone()]);
+        assert!(!unpacked.exists());
     }
 
     /// Set the mtime of `path` and of everything under it, so the newest mtime is `when`.
@@ -205,9 +160,9 @@ mod tests {
             }
             let before = listing(root.path());
 
-            let preview = sweep(root.path(), DAY * 7, &in_use, true).unwrap();
+            let preview = sweep(root.path(), mtime_rule(DAY * 7), &in_use, true).unwrap();
             prop_assert_eq!(&listing(root.path()), &before);
-            let real = sweep(root.path(), DAY * 7, &in_use, false).unwrap();
+            let real = sweep(root.path(), mtime_rule(DAY * 7), &in_use, false).unwrap();
 
             let mut listed = preview.removed.clone();
             listed.sort();
@@ -230,7 +185,7 @@ mod tests {
         age_tree(&old_file, old());
         fs::create_dir(root.path().join("fresh")).unwrap();
 
-        let report = sweep(root.path(), DAY * 7, &[], true).unwrap();
+        let report = sweep(root.path(), mtime_rule(DAY * 7), &[], true).unwrap();
 
         let mut listed = report.removed.clone();
         listed.sort();
@@ -254,7 +209,7 @@ mod tests {
         let fresh = root.path().join("fresh");
         fs::create_dir(&fresh).unwrap();
 
-        let report = sweep(root.path(), DAY * 7, &[], false).unwrap();
+        let report = sweep(root.path(), mtime_rule(DAY * 7), &[], false).unwrap();
 
         assert_eq!(report.removed.len(), 2, "removed: {:?}", report.removed);
         assert_eq!(report.kept, 1);
@@ -272,7 +227,13 @@ mod tests {
         fs::write(&held, b"z").unwrap();
         age_tree(&busy, old());
 
-        let report = sweep(root.path(), DAY * 7, std::slice::from_ref(&held), false).unwrap();
+        let report = sweep(
+            root.path(),
+            mtime_rule(DAY * 7),
+            std::slice::from_ref(&held),
+            false,
+        )
+        .unwrap();
 
         assert!(
             report.removed.is_empty(),
@@ -297,7 +258,13 @@ mod tests {
         std::os::unix::fs::symlink(real.path(), &link).unwrap();
 
         // lsof reports the resolved path, so the in-use list holds it, not the link path.
-        let report = sweep(&link, DAY * 7, std::slice::from_ref(&held), false).unwrap();
+        let report = sweep(
+            &link,
+            mtime_rule(DAY * 7),
+            std::slice::from_ref(&held),
+            false,
+        )
+        .unwrap();
 
         assert!(
             report.removed.is_empty(),
@@ -317,7 +284,7 @@ mod tests {
             .set_modified(SystemTime::now() + DAY)
             .unwrap();
 
-        let report = sweep(root.path(), DAY * 7, &[], false).unwrap();
+        let report = sweep(root.path(), mtime_rule(DAY * 7), &[], false).unwrap();
 
         assert!(report.removed.is_empty());
         assert!(future.exists());
@@ -336,7 +303,7 @@ mod tests {
         fs::write(&old_file, b"o").unwrap();
         age_tree(&old_file, old());
 
-        let report = sweep(root.path(), DAY * 7, &[], false).unwrap();
+        let report = sweep(root.path(), mtime_rule(DAY * 7), &[], false).unwrap();
 
         // Restore the mode before any assertion, so the tempdir can be removed.
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
@@ -362,7 +329,7 @@ mod tests {
         let link = tmp.join("link");
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
-        let report = sweep(&tmp, Duration::ZERO, &[], false).unwrap();
+        let report = sweep(&tmp, mtime_rule(Duration::ZERO), &[], false).unwrap();
 
         assert_eq!(
             report.removed,
@@ -384,7 +351,7 @@ mod tests {
         fs::create_dir(&fresh).unwrap();
         fs::write(fresh.join("x"), [0_u8; 999]).unwrap();
 
-        let summary = stale_summary_in(root.path(), DAY * 7, &[]).unwrap();
+        let summary = stale_summary_in(root.path(), mtime_rule(DAY * 7), &[]).unwrap();
 
         assert_eq!(
             summary,
@@ -408,7 +375,12 @@ mod tests {
         fs::create_dir(&busy).unwrap();
         age_tree(&busy, old());
 
-        let summary = stale_summary_in(root.path(), DAY * 7, std::slice::from_ref(&busy)).unwrap();
+        let summary = stale_summary_in(
+            root.path(),
+            mtime_rule(DAY * 7),
+            std::slice::from_ref(&busy),
+        )
+        .unwrap();
 
         assert_eq!(
             summary,
@@ -426,7 +398,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let missing = root.path().join("no-such-tmp");
 
-        let summary = stale_summary_in(&missing, DAY * 7, &[]).unwrap();
+        let summary = stale_summary_in(&missing, mtime_rule(DAY * 7), &[]).unwrap();
 
         assert_eq!(
             summary,
@@ -463,7 +435,7 @@ mod tests {
         age_tree(&entry, old());
         touch_dirs(&entry);
 
-        let report = sweep(root.path(), DAY * 7, &[], false).unwrap();
+        let report = sweep(root.path(), mtime_rule(DAY * 7), &[], false).unwrap();
 
         assert_eq!(
             report.removed,
@@ -480,7 +452,7 @@ mod tests {
         age_tree(&entry, old());
         fs::write(entry.join("deep").join("new"), b"x").unwrap();
 
-        let report = sweep(root.path(), DAY * 7, &[], false).unwrap();
+        let report = sweep(root.path(), mtime_rule(DAY * 7), &[], false).unwrap();
 
         assert!(report.removed.is_empty(), "{:?}", report.removed);
     }
@@ -490,7 +462,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("empty").join("sub")).unwrap();
 
-        let report = sweep(root.path(), DAY * 7, &[], false).unwrap();
+        let report = sweep(root.path(), mtime_rule(DAY * 7), &[], false).unwrap();
 
         assert!(report.removed.is_empty(), "{:?}", report.removed);
     }
@@ -502,7 +474,7 @@ mod tests {
         fs::create_dir_all(entry.join("sub")).unwrap();
         age_tree(&entry, old());
 
-        let report = sweep(root.path(), DAY * 7, &[], false).unwrap();
+        let report = sweep(root.path(), mtime_rule(DAY * 7), &[], false).unwrap();
 
         assert_eq!(report.removed.len(), 1);
     }
@@ -519,7 +491,7 @@ mod tests {
         age_tree(&hawk, old());
         fs::write(hawk.join("fresh-build").join("g"), b"x").unwrap();
 
-        let report = sweep(root.path(), DAY * 7, &[], false).unwrap();
+        let report = sweep(root.path(), mtime_rule(DAY * 7), &[], false).unwrap();
 
         let resolved = fs::canonicalize(&hawk).unwrap();
         assert_eq!(report.removed, vec![resolved.join("old-build")]);
@@ -533,7 +505,7 @@ mod tests {
         fs::create_dir(&hawk).unwrap();
         age_tree(&hawk, old());
 
-        let report = sweep(root.path(), DAY * 7, &[], false).unwrap();
+        let report = sweep(root.path(), mtime_rule(DAY * 7), &[], false).unwrap();
 
         assert!(report.removed.is_empty());
         assert!(hawk.exists());
