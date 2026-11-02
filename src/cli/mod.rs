@@ -18,6 +18,7 @@ mod guard;
 mod init_settings;
 mod login;
 use login::{import_auth_from_file, run_login, run_login_capture};
+use sync_cmd::run_sync;
 mod plugin_payloads;
 mod post_materialize;
 use plugin_payloads::sync_plugin_payloads;
@@ -28,6 +29,7 @@ mod setup;
 mod status;
 pub(crate) mod statusline;
 mod style;
+mod sync_cmd;
 mod task_done;
 mod upgrade;
 
@@ -4178,44 +4180,6 @@ fn check_selected_plugins(
             missing_plugins.len(),
             missing_plugins.join(", ")
         );
-    }
-    Ok(())
-}
-
-fn run_sync(dry_run: bool) -> anyhow::Result<()> {
-    let config_dir = paths::config_dir()?;
-    if dry_run {
-        let out = git::secure_git()
-            .args(["status", "--short"])
-            .current_dir(&config_dir)
-            .output()
-            .context("failed to run git status")?;
-        if !out.status.success() {
-            let detail = llmenv_git::git_failure_detail(&out.stderr, &out.stdout, out.status);
-            anyhow::bail!("git status failed: {detail}");
-        }
-        let output = String::from_utf8_lossy(&out.stdout);
-        if output.trim().is_empty() {
-            eprintln!("Nothing to sync (working tree clean)");
-        } else {
-            eprintln!("Would sync:\n{output}");
-        }
-        return Ok(());
-    }
-    match crate::sync::commit_and_push(
-        &config_dir,
-        "Update llmenv config",
-        crate::sync::PushMode::Push,
-    )? {
-        crate::sync::SyncOutcome::NothingToCommit => {
-            eprintln!("No changes to commit (working tree clean)");
-        }
-        crate::sync::SyncOutcome::Pushed => {
-            eprintln!("✓ Synced config to GitHub");
-        }
-        crate::sync::SyncOutcome::CommittedLocally => {
-            eprintln!("✓ Committed locally (remote sync disabled — push skipped)");
-        }
     }
     Ok(())
 }
