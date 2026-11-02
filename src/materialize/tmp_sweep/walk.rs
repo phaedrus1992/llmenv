@@ -2,12 +2,13 @@
 //! nothing. The sweep and the summary both build on it.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use anyhow::Context;
 
 use super::claude_root::{is_split_root, scan_split_root};
-use crate::materialize::cache::{is_expired, newest_file_mtime};
+use crate::materialize::cache::{AgeSource, file_stamp, is_expired, newest_file_mtime};
+use crate::materialize::expiry::AgeRule;
 
 /// One entry that the scan found old enough to remove, and not in use.
 pub(super) struct Stale {
@@ -24,11 +25,7 @@ pub(super) struct Scan {
 }
 
 /// Walk `tmp_root` and sort every entry into stale, kept, or failed. The walk changes nothing.
-pub(super) fn scan(
-    tmp_root: &Path,
-    older_than: Duration,
-    in_use: &[PathBuf],
-) -> anyhow::Result<Scan> {
+pub(super) fn scan(tmp_root: &Path, rule: AgeRule, in_use: &[PathBuf]) -> anyhow::Result<Scan> {
     let mut scan = Scan::default();
     let Some(entries) = crate::paths::read_dir_optional(tmp_root)? else {
         return Ok(scan);
@@ -60,10 +57,10 @@ pub(super) fn scan(
         // A root that holds unrelated entries is not judged as one entry, because one fresh entry
         // would keep all the others (#1379, #3184). Its entries are judged one by one instead.
         if is_dir && is_split_root(&name) {
-            scan_split_root(&path, older_than, in_use, now, &mut scan);
+            scan_split_root(&path, rule, in_use, now, &mut scan);
             continue;
         }
-        judge_entry(&path, is_dir, older_than, now, &mut scan);
+        judge_entry(&path, is_dir, rule, now, &mut scan);
     }
     Ok(scan)
 }
@@ -72,11 +69,11 @@ pub(super) fn scan(
 pub(super) fn judge_entry(
     path: &Path,
     is_dir: bool,
-    older_than: Duration,
+    rule: AgeRule,
     now: SystemTime,
     scan: &mut Scan,
 ) {
-    let modified = match entry_mtime(path, is_dir) {
+    let modified = match entry_mtime(path, is_dir, rule.source) {
         Ok(modified) => modified,
         Err(e) => {
             record_failure(path, &e, scan);
@@ -85,7 +82,7 @@ pub(super) fn judge_entry(
     };
     // `is_expired` keeps a future mtime and logs the skew. A removal on a bad clock is not
     // reversible, so the entry must reach that check.
-    if !is_expired(now, modified, older_than, path) {
+    if !is_expired(now, modified, rule.older_than, path) {
         scan.kept += 1;
     } else {
         scan.stale.push(Stale {
@@ -96,12 +93,12 @@ pub(super) fn judge_entry(
 }
 
 /// The newest file mtime of an entry. A symlink is judged by its own mtime and never followed.
-fn entry_mtime(path: &Path, is_dir: bool) -> anyhow::Result<SystemTime> {
+fn entry_mtime(path: &Path, is_dir: bool, source: AgeSource) -> anyhow::Result<SystemTime> {
     if is_dir {
-        return newest_file_mtime(path);
+        return newest_file_mtime(path, source);
     }
     std::fs::symlink_metadata(path)
-        .and_then(|meta| meta.modified())
+        .and_then(|meta| file_stamp(&meta, source))
         .with_context(|| format!("stat {}", path.display()))
 }
 
@@ -139,7 +136,16 @@ mod tests {
 
         let mut scan = Scan::default();
         let logs = capture_logs(|| {
-            judge_entry(&file, false, DAY * 7, SystemTime::now(), &mut scan);
+            judge_entry(
+                &file,
+                false,
+                AgeRule {
+                    older_than: DAY * 7,
+                    source: AgeSource::MtimeOnly,
+                },
+                SystemTime::now(),
+                &mut scan,
+            );
         });
 
         assert!(scan.stale.is_empty(), "a future mtime must not be stale");

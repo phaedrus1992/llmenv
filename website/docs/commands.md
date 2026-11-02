@@ -429,7 +429,8 @@ The age-based sweeps remove:
 - Old entries in the state temp folder, `state/tmp`, which `TMPDIR` points at.
   An entry that a process holds open is kept.
   (changed in v3.14.0) An entry's age comes from the newest file in it, not from folder mtimes.
-  So a partial delete does not make an old tree look new.
+  A file's age is the later of its mtime and its change time.
+  So a partial delete does not make an old tree look new, and an unpack does not make a new tree look old.
   Each build in `cargo-hawk-target` is judged alone, the same as each entry in `claude-<uid>`.
   When a removal stops part-way, the report names the path that another user owns, with the fix.
 - Old session-log rotations, of the default path and of a configured `session_log.file.path` (changed in v3.14.0).

@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 pub(crate) use crate::materialize::expiry::is_expired;
 use tracing;
@@ -10,15 +10,19 @@ use sha2::{Digest, Sha256};
 use crate::config::HashingMode;
 use crate::merge::MergedManifest;
 
+mod gc;
 mod gc_report;
+pub use gc::gc;
 mod mtime;
 mod owner;
 mod write_bits;
 use write_bits::remove_dir_all_forcing_writable;
 
+pub use crate::materialize::expiry::AgeRule;
 pub use gc_report::GcReport;
 pub(crate) use gc_report::{gc_remove_dir, gc_remove_link};
-pub(crate) use mtime::newest_file_mtime;
+pub use mtime::AgeSource;
+pub(crate) use mtime::{file_stamp, newest_file_mtime, newest_file_mtime_or_record};
 
 /// Stable SHA-256 of the merged manifest. Each field is length-prefixed
 /// (little-endian u64) before its bytes so concatenation cannot ambiguate
@@ -232,8 +236,8 @@ fn hash_native_capability_map(
 pub enum PruneMode {
     /// Remove every cache folder unconditionally.
     All,
-    /// Remove current-version folders whose newest mtime is older than this.
-    OlderThan(Duration),
+    /// Remove current-version folders whose newest file age, by the rule's source, is older than the rule.
+    OlderThan(crate::materialize::expiry::AgeRule),
     /// Remove only stale (version-mismatched) folders. `*.tmp` always go.
     StaleOnly,
 }
@@ -330,15 +334,15 @@ pub(crate) fn prune(
         let should_remove = match mode {
             PruneMode::All => true,
             PruneMode::StaleOnly => !is_current,
-            PruneMode::OlderThan(older_than) => {
+            PruneMode::OlderThan(rule) => {
                 // Only current-version folders are aged out; stale folders are
                 // left to a StaleOnly/All pass so the two axes stay orthogonal.
                 if !is_current {
                     false
                 } else if let Some(m) =
-                    newest_file_mtime_or_record(&p, |path, _| report.failed.push(path))
+                    newest_file_mtime_or_record(&p, rule.source, |path, _| report.failed.push(path))
                 {
-                    is_expired(now, m, older_than, &p)
+                    is_expired(now, m, rule.older_than, &p)
                 } else {
                     continue;
                 }
@@ -448,187 +452,6 @@ fn entry_and_type(
     }
 }
 
-/// The newest file mtime under `p`, as the `state/tmp` sweep judges age: a folder mtime changes
-/// when a child is removed, so a partial delete would reset the age (#3184). On failure, the
-/// error is logged with its path, `p` is recorded in `failed`, and `None` is returned, so one
-/// unreadable folder does not stop the rest of the pass (#2859).
-fn newest_file_mtime_or_record(
-    p: &Path,
-    record: impl FnOnce(PathBuf, String),
-) -> Option<SystemTime> {
-    match newest_file_mtime(p) {
-        Ok(m) => Some(m),
-        Err(e) => {
-            tracing::error!(
-                "cache gc cannot scan the mtimes under {}, so it is kept: {e:#}. Fix: check \
-                 the permissions of that folder, or remove it by hand.",
-                p.display()
-            );
-            record(p.to_path_buf(), format!("{e:#}"));
-            None
-        }
-    }
-}
-
-/// Remove cache subdirectories whose newest mtime is older than `older_than`.
-/// `*.tmp` staging directories are removed regardless of age — they represent
-/// orphaned partial writes from a previous crashed `materialize` call.
-///
-/// `hashing` controls how folders are identified and whether per-shape
-/// collection applies (#738):
-/// - [`HashingMode::Loose`] — every shape folder is a direct child of
-///   `cache_root`; each is age-checked individually.
-/// - [`HashingMode::Normal`] — direct children are `<version_major>` generation
-///   dirs. When a child matches the current generation (computed internally
-///   from [`version_major()`]), [`gc_normal_shapes`] walks into it and age-checks
-///   each per-shape leaf dir individually, so a single stale shape doesn't
-///   block cleanup of the others. Non-current generation dirs are age-checked
-///   as a unit (they'll be collected entirely next upgrade).
-/// - [`HashingMode::Strict`] — each `{VERSION_TAG}-{content_hash}` folder is a
-///   direct child; each is age-checked individually.
-///
-/// With `dry_run`, the report lists the same entries and nothing is removed (#2917).
-pub fn gc(
-    cache_root: &Path,
-    older_than: Duration,
-    hashing: HashingMode,
-    dry_run: bool,
-) -> anyhow::Result<GcReport> {
-    let mut report = GcReport::new(dry_run);
-    // #918: a missing cache dir → nothing to gc; a permission error propagates.
-    let Some(entries) = crate::paths::read_dir_optional(cache_root)? else {
-        return Ok(report);
-    };
-    let now = SystemTime::now();
-    let current_version = match hashing {
-        HashingMode::Normal => Some(version_major()),
-        _ => None,
-    };
-    for entry in entries {
-        let Some((p, ft)) = entry_and_type(cache_root, entry, &mut report.failed) else {
-            continue;
-        };
-        // Use `file_type()` (lstat-equivalent) — a symlink at the top level
-        // is never treated as a cache directory we own. Removing one removes
-        // only the link, never the target.
-        if ft.is_symlink() {
-            gc_remove_link(&p, &mut report);
-            continue;
-        }
-        if !ft.is_dir() {
-            continue;
-        }
-        if p.extension().is_some_and(|e| e == "tmp") {
-            gc_remove_dir(&p, &mut report);
-            continue;
-        }
-        // The durable state dir (#175) is a stable sibling of the hashed config
-        // folders and must outlive every materialization. It is never an age-based
-        // collection candidate — cache invalidation must not wipe tool state.
-        if p.file_name()
-            == Some(std::ffi::OsStr::new(
-                crate::materialize::state::STATE_DIR_NAME,
-            ))
-        {
-            report.kept += 1;
-            continue;
-        }
-        // In Normal mode, a top-level dir matching the current generation version
-        // is a container for per-shape leaf dirs. Walk into it and age-check each
-        // shape individually instead of treating the whole generation as a unit.
-        if hashing == HashingMode::Normal
-            && is_current_name(
-                p.file_name().unwrap_or_default(),
-                hashing,
-                current_version.as_deref(),
-            )
-        {
-            gc_normal_shapes(&p, older_than, &now, &mut report)?;
-            continue;
-        }
-        let Some(m) =
-            newest_file_mtime_or_record(&p, |path, cause| report.record_failure(path, cause))
-        else {
-            continue;
-        };
-        let expired = is_expired(now, m, older_than, &p);
-        if expired {
-            gc_remove_dir(&p, &mut report);
-        } else {
-            report.kept += 1;
-        }
-    }
-    Ok(report)
-}
-
-/// Age-check each per-shape leaf directory under a `<version_major>` generation
-/// dir individually, rather than collecting the whole generation at once.
-///
-/// This is the per-shape collection for [`HashingMode::Normal`] (#738): a
-/// stale shape leaf (all its files older than `older_than`) is cleaned up
-/// while a live shape in the same generation is preserved. The durable state
-/// dir is also protected from collection.
-fn gc_normal_shapes(
-    version_dir: &Path,
-    older_than: Duration,
-    now: &SystemTime,
-    report: &mut GcReport,
-) -> anyhow::Result<()> {
-    for entry in match std::fs::read_dir(version_dir) {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            tracing::debug!(
-                "gc_normal_shapes: version dir vanished: {}",
-                version_dir.display()
-            );
-            return Ok(());
-        }
-        Err(e) => {
-            return Err(anyhow::Error::from(e)
-                .context(format!("reading version dir {}", version_dir.display())));
-        }
-    } {
-        let Some((p, ft)) = entry_and_type(version_dir, entry, &mut report.failed) else {
-            continue;
-        };
-        if ft.is_symlink() || !ft.is_dir() {
-            tracing::trace!(
-                "gc_normal_shapes: skipping unexpected entry: {}",
-                p.display()
-            );
-            continue;
-        }
-        // Unconditionally remove .tmp staging directories — they represent
-        // orphaned partial writes from a previous crashed materialize call.
-        if p.extension().is_some_and(|e| e == "tmp") {
-            gc_remove_dir(&p, report);
-            continue;
-        }
-        // The durable state dir (#175) may appear nested under a version dir
-        // in some layouts; protect it from age-based collection regardless.
-        if p.file_name()
-            == Some(std::ffi::OsStr::new(
-                crate::materialize::state::STATE_DIR_NAME,
-            ))
-        {
-            report.kept += 1;
-            continue;
-        }
-        let Some(m) =
-            newest_file_mtime_or_record(&p, |path, cause| report.record_failure(path, cause))
-        else {
-            continue;
-        };
-        let expired = is_expired(*now, m, older_than, &p);
-        if expired {
-            gc_remove_dir(&p, report);
-        } else {
-            report.kept += 1;
-        }
-    }
-    Ok(())
-}
-
 /// `None` for a path that no longer exists. Any other error stays an error.
 pub(super) fn skip_vanished<T>(result: std::io::Result<T>) -> std::io::Result<Option<T>> {
     match result {
@@ -654,7 +477,7 @@ mod tests {
             .set_modified(old)
             .unwrap();
 
-        let newest = newest_file_mtime(root.path()).unwrap();
+        let newest = newest_file_mtime(root.path(), AgeSource::MtimeOnly).unwrap();
 
         assert!(
             newest > old + Duration::from_secs(86_400),
@@ -664,6 +487,7 @@ mod tests {
 
     use super::*;
     use std::fs;
+    use std::time::Duration;
 
     fn touch_dir(root: &Path, name: &str) -> PathBuf {
         let p = root.join(name);
@@ -928,7 +752,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = touch_dir(tmp.path(), STATE_DIR_NAME);
         let stale = touch_dir(tmp.path(), &format!("{VERSION_TAG}-deadbeef"));
-        let report = gc(tmp.path(), Duration::ZERO, HashingMode::Strict, false).unwrap();
+        let report = gc(
+            tmp.path(),
+            crate::materialize::expiry::AgeRule {
+                older_than: Duration::ZERO,
+                source: AgeSource::MtimeOnly,
+            },
+            HashingMode::Strict,
+            false,
+        )
+        .unwrap();
         assert!(state.exists(), "state dir must survive gc");
         assert!(
             !report.removed.contains(&state),
@@ -975,7 +808,10 @@ mod tests {
         let stale = touch_dir(tmp.path(), "0.0.1-old-bbbb");
         let report = prune(
             tmp.path(),
-            PruneMode::OlderThan(Duration::ZERO),
+            PruneMode::OlderThan(crate::materialize::expiry::AgeRule {
+                older_than: Duration::ZERO,
+                source: AgeSource::MtimeOnly,
+            }),
             HashingMode::Strict,
             None,
             false,
@@ -1145,7 +981,15 @@ mod tests {
         chmod(&cache_root, 0o555);
 
         // older_than=0 expires everything.
-        let result = gc(&cache_root, Duration::ZERO, HashingMode::Strict, false);
+        let result = gc(
+            &cache_root,
+            crate::materialize::expiry::AgeRule {
+                older_than: Duration::ZERO,
+                source: AgeSource::MtimeOnly,
+            },
+            HashingMode::Strict,
+            false,
+        );
 
         chmod(&cache_root, 0o755);
         let report = result.expect("an unremovable entry is reported, not propagated");
@@ -1171,7 +1015,10 @@ mod tests {
 
         let result = prune(
             &cache_root,
-            PruneMode::OlderThan(Duration::ZERO),
+            PruneMode::OlderThan(crate::materialize::expiry::AgeRule {
+                older_than: Duration::ZERO,
+                source: AgeSource::MtimeOnly,
+            }),
             HashingMode::Loose,
             None,
             false,
@@ -1201,7 +1048,15 @@ mod tests {
         fs::create_dir_all(&unreadable).unwrap();
         chmod(&unreadable, 0o000);
 
-        let result = gc(tmp.path(), Duration::ZERO, HashingMode::Strict, false);
+        let result = gc(
+            tmp.path(),
+            crate::materialize::expiry::AgeRule {
+                older_than: Duration::ZERO,
+                source: AgeSource::MtimeOnly,
+            },
+            HashingMode::Strict,
+            false,
+        );
 
         chmod(&unreadable, 0o755);
         let report = result.expect("one unreadable folder is not fatal");
@@ -1221,7 +1076,15 @@ mod tests {
         fs::create_dir_all(&unreadable).unwrap();
         chmod(&unreadable, 0o000);
 
-        let result = gc(tmp.path(), Duration::ZERO, HashingMode::Normal, false);
+        let result = gc(
+            tmp.path(),
+            crate::materialize::expiry::AgeRule {
+                older_than: Duration::ZERO,
+                source: AgeSource::MtimeOnly,
+            },
+            HashingMode::Normal,
+            false,
+        );
 
         chmod(&unreadable, 0o755);
         let report = result.expect("one unreadable leaf is not fatal");
@@ -1296,7 +1159,16 @@ mod tests {
             .status()
             .unwrap();
         // A clock that moved backward must not delete live data (#2860).
-        let report = gc(tmp.path(), Duration::ZERO, HashingMode::Strict, false).unwrap();
+        let report = gc(
+            tmp.path(),
+            crate::materialize::expiry::AgeRule {
+                older_than: Duration::ZERO,
+                source: AgeSource::MtimeOnly,
+            },
+            HashingMode::Strict,
+            false,
+        )
+        .unwrap();
         assert!(
             !report.removed.contains(&dir) && dir.exists(),
             "a future-mtime dir must be kept"
@@ -1343,7 +1215,16 @@ mod tests {
         // Use a 1-second retention so only the shape with backdated files is
         // collected; everything else was just created (mtime ≈ now) and survives.
         let retention = Duration::from_secs(1);
-        let report = gc(tmp.path(), retention, HashingMode::Normal, false).unwrap();
+        let report = gc(
+            tmp.path(),
+            crate::materialize::expiry::AgeRule {
+                older_than: retention,
+                source: AgeSource::MtimeOnly,
+            },
+            HashingMode::Normal,
+            false,
+        )
+        .unwrap();
 
         // Stale shape was collected — the file inside had its mtime backdated.
         assert!(
