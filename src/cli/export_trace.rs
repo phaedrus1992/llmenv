@@ -46,7 +46,7 @@ pub(crate) fn run_export_core(
         &active,
         crate::mcp::proxy_ops::SpawnSource::Export,
     );
-    pull_if_due(&config, &config_dir)?;
+    pull_if_due(&config, &config_dir);
 
     // A bundle fires when either:
     //   - one of its tags is in the active tag set (normal tag-based firing), OR
@@ -283,7 +283,8 @@ fn sync_adapter_auth(cache_path: &Path, adapter_root: &Path) {
             &mut manifest,
             crate::auth::credentials::Backend::detect(),
         ),
-        // Absent or corrupt: already logged inside CacheManifest::read.
+        // No manifest yet, so there is no login state to sync. A corrupt manifest is logged
+        // inside CacheManifest::read.
         Ok(None) => {}
         Err(e) => tracing::warn!(
             "auth sync skipped: could not read cache manifest at {}: {e}",
@@ -292,38 +293,66 @@ fn sync_adapter_auth(cache_path: &Path, adapter_root: &Path) {
     }
 }
 
-/// Print one `export` line for each variable. With `bundle_list`, each line first names its source,
-/// so an explained export shows which bundles fired.
-fn print_exports(vars: &BTreeMap<String, String>, bundle_list: Option<&str>) -> anyhow::Result<()> {
+/// The `export` lines for `vars`. Every variable is validated before any line is returned, so one
+/// bad value fails the whole export and a shell never sources part of it (#543). With `bundle_list`,
+/// each line first names its source, so an explained export shows which bundles fired.
+fn export_lines(
+    vars: &BTreeMap<String, String>,
+    bundle_list: Option<&str>,
+) -> anyhow::Result<Vec<String>> {
+    let mut lines = Vec::with_capacity(vars.len() * 2);
     for (key, value) in vars {
         validate_var_name(key).with_context(|| format!("variable '{key}'"))?;
         validate_var_value(value).with_context(|| format!("variable '{key}': invalid value"))?;
         if let Some(bundle_list) = bundle_list {
             if key.starts_with("LLMENV_") {
-                println!("# source: llmenv introspection");
+                lines.push("# source: llmenv introspection".to_string());
             } else {
-                println!("# source: adapter (bundles: {bundle_list})");
+                lines.push(format!("# source: adapter (bundles: {bundle_list})"));
             }
         }
-        println!("export {}={}", key, crate::util::single_quote(value));
+        lines.push(format!(
+            "export {}={}",
+            key,
+            crate::util::single_quote(value)
+        ));
+    }
+    Ok(lines)
+}
+
+/// Print the `export` lines for `vars`. Nothing prints unless every variable is valid.
+fn print_exports(vars: &BTreeMap<String, String>, bundle_list: Option<&str>) -> anyhow::Result<()> {
+    for line in export_lines(vars, bundle_list)? {
+        println!("{line}");
     }
     Ok(())
 }
 
 /// Throttled pull: fetch and pull the config repository once the sync interval has passed. It is
-/// skipped when remote sync is off, for example while 1Password is locked. A failed pull is only a
-/// warning, because export must still run.
-fn pull_if_due(config: &Config, config_dir: &Path) -> anyhow::Result<()> {
+/// skipped when remote sync is off, for example while 1Password is locked. A failed pull is a
+/// notice for the agent, and export still runs on the config it has.
+fn pull_if_due(config: &Config, config_dir: &Path) {
     if !config.cache.remote_sync {
-        return Ok(());
+        return;
     }
     let interval_secs = config.cache.sync_interval_minutes * 60;
-    let state_dir = crate::paths::state_dir()?;
+    let state_dir = match crate::paths::state_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the throttled pull is skipped, because the state folder is unknown \
+                 ({e:#}). Fix: check $HOME and LLMENV_STATE_DIR."
+            ));
+            return;
+        }
+    };
     let interval = std::time::Duration::from_secs(interval_secs);
     if let Err(e) = crate::sync::maybe_pull(config_dir, &state_dir, interval) {
-        tracing::warn!("throttled pull failed (non-fatal): {e}");
+        crate::agent_notice::record_logged(format!(
+            "llmenv: the throttled pull of the config repository failed, so this export uses the \
+             config it has ({e:#}). Fix: check the remote and the network, then run `llmenv sync`."
+        ));
     }
-    Ok(())
 }
 
 /// Report the adapter outcome. A missing adapter binary is a warning. Every adapter failing with no
@@ -356,3 +385,6 @@ fn report_adapter_outcome(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
