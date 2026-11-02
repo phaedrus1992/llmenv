@@ -282,9 +282,13 @@ mod tests {
         let result = read_or_init_snapshot(&path, "current state");
         let readable_anyway = fs::read_dir(&dir).is_ok();
         fs::set_permissions(&dir, Permissions::from_mode(0o755)).unwrap(); // restore for cleanup
-        if readable_anyway {
-            return; // running as root / FS ignores perms — can't exercise EACCES
-        }
+        // A process that bypasses permissions (root) cannot get EACCES here. A silent return
+        // would pass without testing anything, so the test fails and names the cause (#3086).
+        assert!(
+            !readable_anyway,
+            "EACCES cannot be exercised: this process reads the locked folder. Run the test as a \
+             non-root user."
+        );
         assert!(
             result.is_err(),
             "permission error must propagate, got {result:?}"

@@ -21,11 +21,7 @@ use std::path::Path;
 pub fn create_dir_owner_only(dir: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)?;
+        create_mode_0o700(dir, true)?;
         // DirBuilder's mode only governs directories it creates. If `dir`
         // already existed (an older llmenv version, a caller that used a
         // bare create_dir_all, a permissive umask), its mode is left
@@ -37,6 +33,41 @@ pub fn create_dir_owner_only(dir: &Path) -> std::io::Result<()> {
     {
         std::fs::create_dir_all(dir)
     }
+}
+
+/// As [`create_dir_owner_only`], but an existing folder keeps its mode and must be readable. Use it
+/// for a folder the user chose, such as the parent of a log path. llmenv does not own that folder,
+/// so it is neither chmod'd nor healed (#3223). A folder that this call creates still gets 0o700.
+///
+/// # Errors
+/// An existing folder that cannot be listed, a link or a file at `dir`, and a failed create.
+pub fn create_dir_owner_only_refusing_unreadable(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        match std::fs::symlink_metadata(dir) {
+            Ok(meta) if meta.is_dir() => std::fs::read_dir(dir)
+                .map(|_| ())
+                .map_err(|e| path_error(dir, "open", &e)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => create_mode_0o700(dir, true),
+            // A non-recursive create fails on any existing path, so a link or a file is refused.
+            _ => create_mode_0o700(dir, false),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
+    }
+}
+
+/// Create `dir` with mode 0o700 from the moment of creation. A recursive create also makes the
+/// missing parents.
+#[cfg(unix)]
+fn create_mode_0o700(dir: &Path, recursive: bool) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(recursive)
+        .mode(0o700)
+        .create(dir)
 }
 
 /// Set an existing folder to 0o700 without following a link at `dir` (#3137). The chmod runs on

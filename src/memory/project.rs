@@ -143,6 +143,40 @@ mod tests {
         assert!(status.success(), "git {args:?}");
     }
 
+    /// #3053: `git diff --quiet` exits 1 on a dirty tree. Only a config lookup treats exit 1 as
+    /// absent, so this failure must surface as an error.
+    #[test]
+    fn a_git_failure_outside_config_is_an_error_not_an_absent_name() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-q"]);
+        // The fixture repo sets its own identity. Signing and hooks come from the user's global
+        // config, so the fixture turns both off in its own repo.
+        git(dir.path(), &["config", "user.name", "t"]);
+        git(dir.path(), &["config", "user.email", "t@t"]);
+        git(dir.path(), &["config", "commit.gpgsign", "false"]);
+        git(dir.path(), &["config", "core.hooksPath", "/dev/null"]);
+        let file = dir.path().join("f.txt");
+        std::fs::write(&file, "one").unwrap();
+        git(dir.path(), &["add", "f.txt"]);
+        git(dir.path(), &["commit", "-qm", "init"]);
+        // A longer body, so git sees a size change even within the same timestamp tick.
+        std::fs::write(&file, "two, changed").unwrap();
+
+        let result = git_output(dir.path(), &["diff", "--quiet"]);
+        let message = match &result {
+            Ok(_) => String::new(),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(
+            result.is_err(),
+            "a dirty tree makes diff --quiet exit 1, a real failure: {result:?}"
+        );
+        assert!(
+            message.contains("could not name the project"),
+            "the error must name the failed lookup: {message}"
+        );
+    }
+
     #[test]
     fn session_project_prefers_the_origin_repo_name() {
         let dir = tempfile::tempdir().unwrap();

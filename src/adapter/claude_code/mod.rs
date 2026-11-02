@@ -16,8 +16,10 @@ use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
 use crate::merge::MergedManifest;
 use crate::plugins::resolve::ResolvedMarketplace;
 use crate::util::{dedup, merge_json};
+use hooks_sidecar::read_hooks_sidecar;
 use lsp_plugin::write_lsp_plugin;
 
+mod hooks_sidecar;
 pub(crate) mod retired;
 mod seed;
 mod skill_copy;
@@ -1949,32 +1951,6 @@ const HOOKS_SIDECAR_FILE: &str = ".llmenv-hooks.json";
 /// external plugin llmenv rendered as enabled, for the disabled-plugin hook
 /// purge in [`reconcile_settings`] (#1793). Dotfile so it stays out of the way.
 const PLUGIN_INSTALL_PATHS_SIDECAR_FILE: &str = ".llmenv-plugin-paths.json";
-
-/// Read the previously-rendered hooks sidecar. Returns `None` when absent or
-/// unparseable — reconcile then falls back to union-only behavior.
-fn read_hooks_sidecar(path: &Path) -> Option<serde_json::Value> {
-    // A missing sidecar is the normal first-run case. Any other failure makes reconcile
-    // union-only, so it is logged for the user (#2721).
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(e) => {
-            tracing::error!(
-                "cannot read hooks sidecar {}, hooks are not reconciled: {e}",
-                path.display()
-            );
-            return None;
-        }
-    };
-    serde_json::from_slice(&bytes)
-        .inspect_err(|e| {
-            tracing::error!(
-                "hooks sidecar {} is not valid JSON, hooks are not reconciled: {e}",
-                path.display()
-            );
-        })
-        .ok()
-}
 
 /// Build the `{"<plugin>@<marketplace>": "<install_path>"}` sidecar body for
 /// this round's resolved plugins (#1793). A first-party plugin has no separate
