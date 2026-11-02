@@ -66,7 +66,8 @@ fn read_settings_object(path: &Path) -> Option<serde_json::Map<String, serde_jso
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(e) => {
             eprintln!(
-                "warning: could not read {} — skipping settings import: {e}",
+                "warning: could not read {} — skipping settings import: {e}. \
+                 Fix: make the file readable, or remove it to skip the import.",
                 path.display()
             );
             return None;
@@ -74,10 +75,18 @@ fn read_settings_object(path: &Path) -> Option<serde_json::Map<String, serde_jso
     };
     match serde_json::from_slice(&bytes) {
         Ok(serde_json::Value::Object(obj)) => Some(obj),
-        Ok(_) => None,
+        Ok(_) => {
+            eprintln!(
+                "warning: {} is not a JSON object — skipping settings import. \
+                 Fix: keep the settings as one JSON object.",
+                path.display()
+            );
+            None
+        }
         Err(e) => {
             eprintln!(
-                "warning: {} is not valid JSON — skipping settings import: {e}",
+                "warning: {} is not valid JSON — skipping settings import: {e}. \
+                 Fix: correct the JSON, or remove the file to skip the import.",
                 path.display()
             );
             None
@@ -209,5 +218,71 @@ mod tests {
         assert!(seed_settings(&config, &[(&key, &value)]).is_err());
         let text = std::fs::read_to_string(&config).expect("read");
         assert_eq!(text, "log_level: [unclosed\n");
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "test code")]
+mod property_tests {
+    use super::{import_candidates, with_seeded_settings};
+    use crate::adapter::claude_code::LLMENV_OWNED_SETTINGS_KEYS;
+    use proptest::prelude::*;
+    use std::collections::BTreeSet;
+
+    /// A JSON value of up to two levels, with awkward strings: colons, quotes, hashes, newlines.
+    fn json_value() -> impl Strategy<Value = serde_json::Value> {
+        let leaf = prop_oneof![
+            Just(serde_json::Value::Null),
+            any::<bool>().prop_map(serde_json::Value::Bool),
+            any::<i32>().prop_map(|n| serde_json::json!(n)),
+            "[ -~\n]{0,24}".prop_map(serde_json::Value::String),
+        ];
+        leaf.prop_recursive(2, 16, 4, |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..4).prop_map(serde_json::Value::Array),
+                proptest::collection::btree_map("[a-z]{1,6}", inner, 0..4)
+                    .prop_map(|m| serde_json::Value::Object(m.into_iter().collect())),
+            ]
+        })
+    }
+
+    proptest! {
+        /// The offered keys are exactly the keys that llmenv does not own.
+        #[test]
+        fn offered_keys_are_exactly_the_non_owned_keys(
+            extra in proptest::collection::btree_set("[a-z]{1,8}", 0..6),
+            owned_mask in proptest::collection::vec(any::<bool>(), LLMENV_OWNED_SETTINGS_KEYS.len()),
+        ) {
+            let mut obj = serde_json::Map::new();
+            for (key, take) in LLMENV_OWNED_SETTINGS_KEYS.iter().zip(owned_mask) {
+                if take {
+                    obj.insert((*key).to_string(), serde_json::json!(1));
+                }
+            }
+            for key in &extra {
+                obj.insert(key.clone(), serde_json::json!(1));
+            }
+            let offered: BTreeSet<String> =
+                import_candidates(&obj).into_iter().map(|(k, _)| k.clone()).collect();
+            let expected: BTreeSet<String> = obj
+                .keys()
+                .filter(|k| !LLMENV_OWNED_SETTINGS_KEYS.contains(&k.as_str()))
+                .cloned()
+                .collect();
+            prop_assert_eq!(offered, expected);
+        }
+
+        /// A seeded value reads back equal from the spliced config, whatever its shape.
+        #[test]
+        fn a_seeded_value_reads_back_equal_after_the_splice(value in json_value()) {
+            let key = "model".to_string();
+            let text = with_seeded_settings("log_level: info\n", &[(&key, &value)])
+                .expect("the splice accepts any JSON value");
+            let parsed: serde_yaml::Value =
+                serde_yaml::from_str(&text).expect("the spliced config parses as YAML");
+            let read_back = serde_json::to_value(&parsed["init"]["seeded_settings"]["model"])
+                .expect("a YAML value converts to JSON");
+            prop_assert_eq!(read_back, value);
+        }
     }
 }
