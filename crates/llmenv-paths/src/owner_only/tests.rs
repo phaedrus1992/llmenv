@@ -144,6 +144,51 @@ fn create_dir_owner_only_heals_an_unreadable_dir() {
     result.unwrap();
 }
 
+/// #3223: a folder the user chose is refused when unreadable, and its mode is left alone.
+#[cfg(unix)]
+#[test]
+fn refusing_variant_leaves_an_unreadable_dir_alone() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("user-log");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o300)).unwrap();
+
+    let result = create_dir_owner_only_refusing_unreadable(&dir);
+    let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+    // Restore a mode that lets the tempdir clean up, whatever the result.
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert!(
+        result.is_err(),
+        "an unreadable user-chosen folder must be refused"
+    );
+    assert_eq!(mode, 0o300, "the refused folder must keep its mode");
+}
+
+/// #3223: a link at a user-chosen folder path is refused, and the link target keeps its mode.
+#[cfg(unix)]
+#[test]
+fn refusing_variant_leaves_a_link_target_alone() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let target = tmp.path().join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o300)).unwrap();
+    let link = tmp.path().join("user-log");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let result = create_dir_owner_only_refusing_unreadable(&link);
+    let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert!(
+        result.is_err(),
+        "a link at a user-chosen folder must be refused"
+    );
+    assert_eq!(mode, 0o300, "the link target must keep its mode");
+}
+
 #[test]
 fn write_owner_only_sets_mode_0o600() {
     use std::os::unix::fs::PermissionsExt;

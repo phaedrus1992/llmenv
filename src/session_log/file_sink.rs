@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
-use llmenv_paths::{create_dir_owner_only, state_dir};
+use llmenv_paths::{create_dir_owner_only_refusing_unreadable, state_dir};
 
 use crate::session_log::rotation::{
     MAX_BYTES, rotate_if_full, rotation_failed_marker, rotation_marker,
@@ -105,7 +105,9 @@ impl FileSink {
 
     fn try_append(&self, line: &str) -> std::io::Result<()> {
         if let Some(parent) = self.path.parent() {
-            create_dir_owner_only(parent)?;
+            // The parent is a folder the user chose, so an unreadable one is refused, not
+            // chmod'd by path (#3223).
+            create_dir_owner_only_refusing_unreadable(parent)?;
         }
         // A failed rotation must not stop logging. The event goes to the active file, and the
         // next append tries the rotation again.
