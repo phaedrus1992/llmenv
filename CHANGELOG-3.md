@@ -42,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Export validates every variable before it prints, so one bad value prints no `export` line, and `eval` never sources part of the environment. [fix:cli] [#3268]
+- A failed throttled config pull is a notice for the agent, and export still runs on the config it has. [fix:cli] [#3268]
+- `llmenv sync --dry-run` refuses a file name that is not UTF-8, instead of printing a replaced name. [fix:cli] [#3268]
+- `llmenv init --path` leaves the mode of an existing folder unchanged, and the starter files are owner-only. [fix:cli] [#3268]
 - Tell the agent when scope matching is off because the hostname, `$USER`, or the working directory cannot be read. The failure reached only the error log before, so the agent ran with a different scope and no reason. [fix:scope] [#3224]
 - Refuse an unreadable log folder that you chose, instead of changing its mode. Cache cleanup again restores write access to an unreadable llmenv cache folder, so GC can remove it. A link in place of either folder is never changed. [fix:paths] [#3223]
 - Judge a symlink in state-file pruning by the link's own age, and remove the link itself. A fresh link to an old file is no longer pruned, and an old link is pruned without touching its target. [fix:hook] [#3094, #3108]
