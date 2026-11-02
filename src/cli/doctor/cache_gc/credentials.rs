@@ -93,28 +93,19 @@ mod tests {
     }
 
     proptest::proptest! {
-        /// Any run of drop results counts each result once, and the order of the run does not
-        /// change the count.
+        /// Any run of drop results counts each result once, as removed or as failed.
         #[test]
-        fn tally_counts_every_result_and_ignores_order(
+        fn tally_counts_every_result(
             outcomes in proptest::collection::vec(proptest::prelude::any::<Option<bool>>(), 0..40),
         ) {
-            let results = |outcomes: &[Option<bool>]| -> Vec<anyhow::Result<bool>> {
-                outcomes
-                    .iter()
-                    .map(|o| o.ok_or_else(|| anyhow::anyhow!("keychain locked")))
-                    .collect()
-            };
+            let results: Vec<anyhow::Result<bool>> = outcomes
+                .iter()
+                .map(|o| o.ok_or_else(|| anyhow::anyhow!("keychain locked")))
+                .collect();
             let removed = outcomes.iter().filter(|o| **o == Some(true)).count();
             let failed = outcomes.iter().filter(|o| o.is_none()).count();
-            let mut reversed = outcomes.clone();
-            reversed.reverse();
             proptest::prop_assert_eq!(
-                tally(results(&outcomes)),
-                CredentialDrops { removed, failed }
-            );
-            proptest::prop_assert_eq!(
-                tally(results(&reversed)),
+                tally(results),
                 CredentialDrops { removed, failed }
             );
         }
