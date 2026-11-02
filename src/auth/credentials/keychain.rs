@@ -20,45 +20,6 @@ const READ_TIMEOUT: Duration = Duration::from_secs(120);
 #[cfg(target_os = "macos")]
 const WRITE_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// The message for a keychain call that gave no answer within `timeout`.
-#[cfg(any(target_os = "macos", test))]
-fn timeout_error(operation: &str, service: &str, timeout: Duration) -> anyhow::Error {
-    anyhow::anyhow!(
-        "`security {operation}` for keychain item {service} gave no answer within {} s, so the outcome is unknown. Fix: \
-         unlock the login keychain (`security unlock-keychain`), answer any macOS keychain \
-         prompt, then run the command again.",
-        timeout.as_secs()
-    )
-}
-
-/// Why a call run by [`with_deadline`] gave no answer.
-#[cfg(any(target_os = "macos", test))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NoAnswer {
-    /// The call was still running at the deadline.
-    TimedOut,
-    /// The worker ended before it sent an answer, for example after a panic (#3067 review).
-    WorkerLost,
-}
-
-/// Run `call` on a worker thread for at most `timeout`. A call past the deadline keeps its thread,
-/// because the Security framework gives no way to stop it, and the caller gets [`NoAnswer`].
-#[cfg(any(target_os = "macos", test))]
-fn with_deadline<T: Send + 'static>(
-    timeout: Duration,
-    call: impl FnOnce() -> T + Send + 'static,
-) -> Result<T, NoAnswer> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        // The receiver is gone after a timeout, so a late answer has no reader.
-        let _ = tx.send(call());
-    });
-    rx.recv_timeout(timeout).map_err(|e| match e {
-        std::sync::mpsc::RecvTimeoutError::Timeout => NoAnswer::TimedOut,
-        std::sync::mpsc::RecvTimeoutError::Disconnected => NoAnswer::WorkerLost,
-    })
-}
-
 /// Run one `security` call with a deadline. A timeout names the operation, the keychain item, and
 /// the fix, because a locked keychain blocks the call with no output.
 #[cfg(any(target_os = "macos", test))]
@@ -103,6 +64,12 @@ fn parse_keychain_blob(service: &str, raw: &str) -> anyhow::Result<super::Creden
 }
 
 #[cfg(any(target_os = "macos", test))]
+mod deadline;
+#[cfg(any(target_os = "macos", test))]
+#[cfg(all(test, target_os = "macos"))]
+mod write_tests;
+#[cfg(any(target_os = "macos", test))]
+use deadline::{NoAnswer, timeout_error, with_deadline};
 mod outcome;
 #[cfg(any(target_os = "macos", test))]
 use outcome::forget_outcome;
@@ -293,23 +260,35 @@ pub(super) fn keychain_read(config_dir: &Path) -> anyhow::Result<Option<super::C
 /// silently stored a corrupt token with no error.
 #[cfg(target_os = "macos")]
 pub(super) fn keychain_write(config_dir: &Path, creds: &super::Credentials) -> anyhow::Result<()> {
+    keychain_write_with(config_dir, creds, WRITE_TIMEOUT, set_generic_password)
+}
+
+/// The Security framework write for one item. The seam in [`keychain_write_with`] takes it as a
+/// parameter, so a test can run the write logic without a real keychain.
+#[cfg(target_os = "macos")]
+fn set_generic_password(item: &str, account: &str, blob: &[u8]) -> Result<(), String> {
+    security_framework::passwords::set_generic_password(item, account, blob)
+        .map_err(|e| e.to_string())
+}
+
+/// Store `creds` with `set`, and wait at most `timeout` for it. A locked keychain blocks the write,
+/// as it blocks the read, and export runs this (#2892).
+#[cfg(target_os = "macos")]
+fn keychain_write_with(
+    config_dir: &Path,
+    creds: &super::Credentials,
+    timeout: Duration,
+    set: fn(&str, &str, &[u8]) -> Result<(), String>,
+) -> anyhow::Result<()> {
     let service = super::keychain_service(config_dir);
     let account = keychain_account()?;
     let blob = creds.to_blob()?;
-    // A locked keychain blocks the write as it blocks the read, and export runs this (#2892).
     let item = service.clone();
-    let answer = with_deadline(WRITE_TIMEOUT, move || {
-        security_framework::passwords::set_generic_password(&item, &account, blob.as_bytes())
-            .map_err(|e| e.to_string())
-    });
+    let answer = with_deadline(timeout, move || set(&item, &account, blob.as_bytes()));
     let written = match answer {
         Ok(written) => written,
         Err(NoAnswer::TimedOut) => {
-            return Err(timeout_error(
-                "add-generic-password",
-                &service,
-                WRITE_TIMEOUT,
-            ));
+            return Err(timeout_error("add-generic-password", &service, timeout));
         }
         Err(NoAnswer::WorkerLost) => {
             anyhow::bail!(
