@@ -41,7 +41,10 @@ fn sync_dry_run_report(config_dir: &Path) -> anyhow::Result<String> {
         let detail = llmenv_git::git_failure_detail(&out.stderr, &out.stdout, out.status);
         anyhow::bail!("git status failed: {detail}");
     }
-    let output = String::from_utf8_lossy(&out.stdout);
+    // A lossy decode would print a name that does not exist, so a non-UTF-8 name is an error.
+    let output = String::from_utf8(out.stdout).context(
+        "git status printed a file name that is not UTF-8. Fix: rename the file to a UTF-8 name.",
+    )?;
     if output.trim().is_empty() {
         return Ok("Nothing to sync (working tree clean)".to_string());
     }
