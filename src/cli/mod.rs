@@ -24,6 +24,8 @@ mod post_materialize;
 use plugin_payloads::sync_plugin_payloads;
 
 mod doctor;
+#[cfg(test)]
+mod init_run_tests;
 mod init_templates;
 mod proxy_restart;
 mod setup;
