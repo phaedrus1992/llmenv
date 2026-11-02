@@ -50,7 +50,12 @@ pub(super) fn session_start_notices(
     ) {
         // `null` turns age-based GC off, so no entry is stale (#2829).
         (None, _) => None,
-        (Some(hours), Ok(state_dir)) => stale_tmp_hint(&state_dir, hours, SystemTime::now()),
+        (Some(hours), Ok(state_dir)) => stale_tmp_hint(
+            &state_dir,
+            hours,
+            SystemTime::now(),
+            crate::materialize::cache::AgeSource::MtimeOrCtime,
+        ),
         (Some(_), Err(e)) => Some(problem_notice(
             &format!("the stale state/tmp check did not run: {e:#}"),
             "run `llmenv doctor` to check the state directory",
@@ -68,7 +73,12 @@ pub(super) fn session_start_notices(
 
 /// The hint for stale `state/tmp` entries, or `None` when today's hint is already shown, or
 /// when nothing is stale. A failed check returns a notice, so the problem reaches the agent.
-fn stale_tmp_hint(state_dir: &Path, hours: u64, now: SystemTime) -> Option<String> {
+fn stale_tmp_hint(
+    state_dir: &Path,
+    hours: u64,
+    now: SystemTime,
+    source: crate::materialize::cache::AgeSource,
+) -> Option<String> {
     let day = utc_day(now);
     let marker = state_dir.join(HINT_MARKER);
     match crate::paths::bounded::state_text_io(&marker) {
@@ -83,7 +93,10 @@ fn stale_tmp_hint(state_dir: &Path, hours: u64, now: SystemTime) -> Option<Strin
         }
     }
     let older_than = Duration::from_secs(hours.saturating_mul(3600));
-    let summary = match tmp_sweep::stale_summary(state_dir, older_than) {
+    let summary = match tmp_sweep::stale_summary(
+        state_dir,
+        crate::materialize::expiry::AgeRule { older_than, source },
+    ) {
         Ok(summary) => summary,
         Err(e) => {
             return Some(problem_notice(
@@ -218,14 +231,32 @@ mod tests {
         }
         let now = SystemTime::now();
 
-        let first = stale_tmp_hint(state.path(), 168, now).expect("a stale entry gives a hint");
+        let first = stale_tmp_hint(
+            state.path(),
+            168,
+            now,
+            crate::materialize::cache::AgeSource::MtimeOnly,
+        )
+        .expect("a stale entry gives a hint");
         assert!(first.contains("1 state/tmp entries"), "{first}");
         assert!(
-            stale_tmp_hint(state.path(), 168, now).is_none(),
+            stale_tmp_hint(
+                state.path(),
+                168,
+                now,
+                crate::materialize::cache::AgeSource::MtimeOnly
+            )
+            .is_none(),
             "the hint repeated on the same day"
         );
         assert!(
-            stale_tmp_hint(state.path(), 168, now + DAY).is_some(),
+            stale_tmp_hint(
+                state.path(),
+                168,
+                now + DAY,
+                crate::materialize::cache::AgeSource::MtimeOnly
+            )
+            .is_some(),
             "the hint did not return on the next day"
         );
         assert!(stale.exists(), "the hint removed an entry");
@@ -236,7 +267,15 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         fs::create_dir_all(state.path().join("tmp").join("fresh")).unwrap();
 
-        assert!(stale_tmp_hint(state.path(), 168, SystemTime::now()).is_none());
+        assert!(
+            stale_tmp_hint(
+                state.path(),
+                168,
+                SystemTime::now(),
+                crate::materialize::cache::AgeSource::MtimeOnly
+            )
+            .is_none()
+        );
     }
 }
 
@@ -283,8 +322,13 @@ mod failure_tests {
         // A directory where the marker file belongs: reading it fails, and it is not NotFound.
         fs::create_dir(state.path().join(HINT_MARKER)).unwrap();
 
-        let notice = stale_tmp_hint(state.path(), 168, SystemTime::now())
-            .expect("an unreadable marker is shown, not skipped");
+        let notice = stale_tmp_hint(
+            state.path(),
+            168,
+            SystemTime::now(),
+            crate::materialize::cache::AgeSource::MtimeOnly,
+        )
+        .expect("an unreadable marker is shown, not skipped");
 
         assert!(notice.contains("cannot read"), "{notice}");
         assert!(notice.contains("llmenv doctor"), "no fix named: {notice}");
@@ -298,7 +342,12 @@ mod failure_tests {
         fs::write(locked.join("inner"), b"i").unwrap();
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
 
-        let notice = stale_tmp_hint(state.path(), 168, SystemTime::now());
+        let notice = stale_tmp_hint(
+            state.path(),
+            168,
+            SystemTime::now(),
+            crate::materialize::cache::AgeSource::MtimeOnly,
+        );
 
         // Restore the mode before any assertion, so the tempdir can be removed.
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();

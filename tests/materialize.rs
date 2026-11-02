@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use llmenv::config::HashingMode;
+use llmenv::materialize::cache::{AgeRule, AgeSource};
 use llmenv::materialize::{cache, materialize_with_mode};
 use llmenv::merge::{BundleRef, merge};
 use tempfile::tempdir;
@@ -142,7 +143,7 @@ fn gc_removes_old_entries_and_keeps_fresh_ones() {
 
     let report = cache::gc(
         tmp.path(),
-        Duration::from_secs(60 * 60 * 24 * 7),
+        mtime_rule(Duration::from_secs(60 * 60 * 24 * 7)),
         HashingMode::Loose,
         false,
     )
@@ -162,7 +163,7 @@ fn gc_removes_tmp_stage_dirs_regardless_of_age() {
 
     let report = cache::gc(
         tmp.path(),
-        Duration::from_secs(60 * 60 * 24 * 365),
+        mtime_rule(Duration::from_secs(60 * 60 * 24 * 365)),
         HashingMode::Loose,
         false,
     )
@@ -298,8 +299,13 @@ fn default_mode_self_heals_a_preexisting_cache_root() {
 fn gc_on_missing_root_is_noop() {
     let tmp = tempdir().expect("tempdir");
     let missing = tmp.path().join("nope");
-    let report =
-        cache::gc(&missing, Duration::from_secs(1), HashingMode::Loose, false).expect("gc");
+    let report = cache::gc(
+        &missing,
+        mtime_rule(Duration::from_secs(1)),
+        HashingMode::Loose,
+        false,
+    )
+    .expect("gc");
     assert!(report.removed.is_empty());
     assert_eq!(report.kept, 0);
 }
@@ -330,7 +336,8 @@ fn gc_dry_run_lists_the_same_entries_and_removes_none() {
     std::fs::create_dir_all(&fresh).expect("mkdir fresh");
 
     let week = Duration::from_secs(60 * 60 * 24 * 7);
-    let preview = cache::gc(tmp.path(), week, HashingMode::Loose, true).expect("gc preview");
+    let preview =
+        cache::gc(tmp.path(), mtime_rule(week), HashingMode::Loose, true).expect("gc preview");
     assert!(
         old.exists() && stage.exists(),
         "a dry run must not remove anything"
@@ -340,7 +347,7 @@ fn gc_dry_run_lists_the_same_entries_and_removes_none() {
     assert_eq!(previewed, vec![stage.clone(), old.clone()]);
     assert_eq!(preview.kept, 1);
 
-    let real = cache::gc(tmp.path(), week, HashingMode::Loose, false).expect("gc");
+    let real = cache::gc(tmp.path(), mtime_rule(week), HashingMode::Loose, false).expect("gc");
     let mut removed = real.removed.clone();
     removed.sort();
     assert_eq!(
@@ -379,9 +386,9 @@ fn gc_dry_run_matches_the_real_run() {
         let week = Duration::from_secs(60 * 60 * 24 * 7);
         let before = listing(tmp.path());
 
-        let preview = cache::gc(tmp.path(), week, HashingMode::Loose, true).expect("gc preview");
+        let preview = cache::gc(tmp.path(), mtime_rule(week), HashingMode::Loose, true).expect("gc preview");
         prop_assert_eq!(listing(tmp.path()), before);
-        let real = cache::gc(tmp.path(), week, HashingMode::Loose, false).expect("gc");
+        let real = cache::gc(tmp.path(), mtime_rule(week), HashingMode::Loose, false).expect("gc");
 
         let mut listed = preview.removed.clone();
         listed.sort();
@@ -389,4 +396,13 @@ fn gc_dry_run_matches_the_real_run() {
         removed.sort();
         prop_assert_eq!(listed, removed);
     });
+}
+
+/// The mtime-only rule. These tests age a tree with `set_modified`, which cannot move the change
+/// time back, so the rule that reads the mtime alone is the one they exercise (#3195).
+fn mtime_rule(older_than: Duration) -> AgeRule {
+    AgeRule {
+        older_than,
+        source: AgeSource::MtimeOnly,
+    }
 }
