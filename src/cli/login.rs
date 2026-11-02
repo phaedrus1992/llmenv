@@ -162,7 +162,11 @@ fn drop_login_entry(
     login_dir: &Path,
 ) -> anyhow::Result<bool> {
     match backend {
-        crate::auth::credentials::Backend::File => Ok(false),
+        crate::auth::credentials::Backend::File => {
+            // The file backend keeps the credential in the folder, so the folder is not used here.
+            let _ = login_dir;
+            Ok(false)
+        }
         #[cfg(target_os = "macos")]
         crate::auth::credentials::Backend::Keychain => crate::auth::credentials::forget(login_dir),
     }

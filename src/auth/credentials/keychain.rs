@@ -69,6 +69,7 @@ mod deadline;
 mod write_tests;
 #[cfg(any(target_os = "macos", test))]
 use deadline::{NoAnswer, timeout_error, with_deadline};
+#[cfg(any(target_os = "macos", test))]
 mod outcome;
 #[cfg(any(target_os = "macos", test))]
 use outcome::forget_outcome;
