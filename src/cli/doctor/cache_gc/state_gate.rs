@@ -29,7 +29,7 @@ pub(super) fn state_may_have_stale_entries(
         Ok(summary) => summary.count > 0 || summary.unreadable > 0,
         Err(e) => {
             tracing::error!(
-                "state GC cannot scan {}, so lsof runs: {e:#}",
+                "state GC cannot scan {}, so lsof runs: {e:#}. Fix: make the folder readable, then run the GC again",
                 tmp.display()
             );
             true
