@@ -51,7 +51,10 @@ pub(crate) fn handle_roots(
     let active = crate::scope::matcher::Env::detect_for_config(config)
         .map(|env| crate::scope::evaluate(config, &env))
         .inspect_err(|e| {
-            tracing::error!("index guard checks every codebase-memory entry: scopes unread: {e:#}");
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the codebase-memory index guard checks root entries only, because the \
+                 scopes cannot be read ({e:#}). Fix: check the config and marker files."
+            ));
         })
         .ok();
     let entries = match &active {

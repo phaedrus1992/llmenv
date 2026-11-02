@@ -4,10 +4,12 @@ use super::PermissionRule;
 use llmenv_paths::has_parent_component;
 
 mod permissions;
+mod scope_match;
 mod widgets;
 #[cfg(test)]
 use permissions::has_balanced_parens;
 pub use permissions::{validate_permission_rule, validate_permission_string};
+use scope_match::{is_valid_cidr, is_valid_hostname, is_valid_mac_address};
 use thiserror::Error;
 pub use widgets::check_widget_display;
 
@@ -301,48 +303,6 @@ fn is_safe_state_subdir(subdir: &str) -> bool {
         && !subdir.contains('\0')
 }
 
-/// Whether `cidr` is an IPv4 or IPv6 network in `address/prefix` form. Uses the `ipnet`
-/// parser that the scope matcher uses, so validation and matching cannot disagree (#1051).
-fn is_valid_cidr(cidr: &str) -> bool {
-    let Some((addr, _prefix)) = cidr.split_once('/') else {
-        return false;
-    };
-    // `ipnet` accepts a leading zero in a dotted-quad octet. RFC 4632 forbids it, and it
-    // invites octal confusion, so reject it here.
-    let ipv4_leading_zero = !addr.contains(':')
-        && addr
-            .split('.')
-            .any(|octet| octet.len() > 1 && octet.starts_with('0'));
-    !ipv4_leading_zero && cidr.parse::<ipnet::IpNet>().is_ok()
-}
-
-fn is_valid_mac_address(mac: &str) -> bool {
-    let parts: Vec<&str> = mac.split(':').collect();
-    if parts.len() != 6 {
-        return false;
-    }
-    parts
-        .iter()
-        // macOS `arp` drops the leading zero of an octet (`1c:b:8b:e4:5f:94`), and the
-        // matcher accepts that form, so the validator must too (#2487).
-        .all(|part| (1..=2).contains(&part.len()) && u8::from_str_radix(part, 16).is_ok())
-}
-
-fn is_valid_hostname(hostname: &str) -> bool {
-    // RFC 1123 §2.1 / RFC 952: total length <= 253 octets, each label
-    // 1..=63 octets, labels are alphanumeric plus interior hyphens.
-    if hostname.is_empty() || hostname.len() > 253 {
-        return false;
-    }
-    hostname.split('.').all(|label| {
-        !label.is_empty()
-            && label.len() <= 63
-            && !label.starts_with('-')
-            && !label.ends_with('-')
-            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-    })
-}
-
 /// Array-index segments in a `launch_proxy` JSON-path-lite are bounded to
 /// keep a typo'd config from allocating an unreasonably large array. A
 /// request body has no legitimate use for an index anywhere near this —
@@ -434,6 +394,28 @@ fn allowed_root_shape_is_valid(root: &str) -> bool {
 
 impl Config {
     pub fn validate(&self) -> Result<(), ValidateError> {
+        self.validate_cache()?;
+        self.validate_widget_displays()?;
+        self.validate_scope_ids()?;
+        self.validate_scope_matches()?;
+        self.validate_bundles()?;
+        self.validate_capability_env()?;
+        self.validate_mcps()?;
+        self.validate_hooks()?;
+        self.validate_lsp()?;
+        self.validate_skills()?;
+        self.validate_output_styles()?;
+        self.validate_model_providers()?;
+        self.validate_default_models()?;
+        self.validate_plugins()?;
+        self.validate_state()?;
+        self.validate_permissions()?;
+        self.validate_launch_proxy()?;
+        self.validate_sandbox()?;
+        Ok(())
+    }
+
+    fn validate_cache(&self) -> Result<(), ValidateError> {
         if !is_safe_cache_dir(&self.cache.cache_dir) {
             return Err(ValidateError::CacheDirTraversal(
                 self.cache.cache_dir.clone(),
@@ -453,7 +435,11 @@ impl Config {
         {
             return Err(ValidateError::RetentionDaysInvalid);
         }
-        self.validate_widget_displays()?;
+        Ok(())
+    }
+
+    /// A scope id names one scope across every scope kind, so it must be unique over all of them.
+    fn validate_scope_ids(&self) -> Result<(), ValidateError> {
         let mut seen_scope_ids = std::collections::HashSet::new();
         let ids = self
             .scope
@@ -468,6 +454,10 @@ impl Config {
                 return Err(ValidateError::DuplicateScopeId(id.clone()));
             }
         }
+        Ok(())
+    }
+
+    fn validate_scope_matches(&self) -> Result<(), ValidateError> {
         for scope in &self.scope.network {
             if let Some(cidr) = &scope.r#match.cidr
                 && !is_valid_cidr(cidr)
@@ -487,6 +477,10 @@ impl Config {
                 return Err(ValidateError::InvalidHostname(hostname.clone()));
             }
         }
+        Ok(())
+    }
+
+    fn validate_bundles(&self) -> Result<(), ValidateError> {
         let mut seen_bundle_names = std::collections::HashSet::new();
         for b in &self.bundle {
             if b.when.is_empty() {
@@ -503,24 +497,15 @@ impl Config {
                 return Err(ValidateError::InvalidBundleName(b.name.clone()));
             }
         }
+        Ok(())
+    }
+
+    fn validate_capability_env(&self) -> Result<(), ValidateError> {
         for key in self.capabilities.env.keys() {
             validate_capabilities_env_key("config.yaml: capabilities", key)?;
         }
         crate::effort::validate_effort("config.yaml: capabilities", &self.capabilities)?;
-        crate::advisor::validate_advisor("config.yaml: capabilities", &self.capabilities)?;
-        self.validate_mcps()?;
-        self.validate_hooks()?;
-        self.validate_lsp()?;
-        self.validate_skills()?;
-        self.validate_output_styles()?;
-        self.validate_model_providers()?;
-        self.validate_default_models()?;
-        self.validate_plugins()?;
-        self.validate_state()?;
-        self.validate_permissions()?;
-        self.validate_launch_proxy()?;
-        self.validate_sandbox()?;
-        Ok(())
+        crate::advisor::validate_advisor("config.yaml: capabilities", &self.capabilities)
     }
 
     fn validate_sandbox(&self) -> Result<(), ValidateError> {
@@ -4823,5 +4808,50 @@ mod tests {
             cfg.validate(),
             Err(ValidateError::InvalidProxyPath(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod hostname_properties {
+    use super::is_valid_hostname;
+    use proptest::prelude::*;
+
+    #[test]
+    fn a_name_of_exactly_253_octets_is_accepted() {
+        let labels = [
+            "a".repeat(63),
+            "a".repeat(63),
+            "a".repeat(63),
+            "a".repeat(61),
+        ];
+        let name = labels.join(".");
+        assert_eq!(name.len(), 253);
+        assert!(is_valid_hostname(&name));
+    }
+
+    proptest! {
+        /// A name over 253 octets is refused, even when every label is valid.
+        #[test]
+        fn a_name_over_253_octets_is_refused(labels in 4usize..9) {
+            let name = vec!["a".repeat(63); labels].join(".");
+            prop_assert!(name.len() > 253);
+            prop_assert!(!is_valid_hostname(&name));
+        }
+
+        /// A hyphen at the start or the end of any one label refuses the whole name.
+        #[test]
+        fn a_label_edged_by_a_hyphen_refuses_the_name(
+            mut labels in proptest::collection::vec("[a-z0-9]{1,8}", 1..4),
+            index in 0usize..4,
+            leading in any::<bool>(),
+        ) {
+            let at = index % labels.len();
+            labels[at] = if leading {
+                format!("-{}", labels[at])
+            } else {
+                format!("{}-", labels[at])
+            };
+            prop_assert!(!is_valid_hostname(&labels.join(".")));
+        }
     }
 }
