@@ -26,7 +26,7 @@ pub(super) fn detect_hostname() -> Option<String> {
 pub(super) fn hostname_or_notice(hostname: Option<String>) -> String {
     hostname.unwrap_or_else(|| {
         crate::agent_notice::record_logged(
-            "llmenv: hostname lookup failed; host-scope matching is off. \
+            "llmenv: the system hostname is empty; host-scope matching is off. \
              Fix: set the system hostname, then start a new session.",
         );
         String::new()
@@ -36,10 +36,10 @@ pub(super) fn hostname_or_notice(hostname: Option<String>) -> String {
 /// The user for user-scope matching. An empty string disables user matching.
 pub(super) fn user_or_notice(user: anyhow::Result<Option<String>>) -> String {
     match user {
-        Ok(Some(user)) => user,
-        Ok(None) => {
+        Ok(Some(user)) if !user.is_empty() => user,
+        Ok(None | Some(_)) => {
             crate::agent_notice::record_logged(
-                "llmenv: $USER is unset; user-scope matching is off. \
+                "llmenv: $USER is unset or empty; user-scope matching is off. \
                  Fix: set USER in the shell environment, then start a new session.",
             );
             String::new()
@@ -73,7 +73,7 @@ mod tests {
     fn missing_hostname_is_recorded_for_the_agent() {
         assert!(hostname_or_notice(None).is_empty());
         let notices = crate::agent_notice::current().unwrap_or_default();
-        assert!(notices.contains("hostname lookup failed"), "{notices}");
+        assert!(notices.contains("hostname is empty"), "{notices}");
         assert!(notices.contains("Fix:"), "{notices}");
     }
 
@@ -103,5 +103,17 @@ mod tests {
             "{notices}"
         );
         assert!(notices.contains("Fix:"), "{notices}");
+    }
+}
+
+#[cfg(test)]
+mod empty_user_tests {
+    use super::user_or_notice;
+
+    #[test]
+    fn an_empty_user_is_recorded_for_the_agent() {
+        assert!(user_or_notice(Ok(Some(String::new()))).is_empty());
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(notices.contains("unset or empty"), "{notices}");
     }
 }

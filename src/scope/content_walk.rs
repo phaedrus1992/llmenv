@@ -6,12 +6,11 @@ use crate::config::ContentScope;
 /// below the root skips one entry, so it is a warning (#3070).
 fn report_walk_error(err: &walkdir::Error, cwd: &std::path::Path) {
     if err.depth() == 0 {
-        tracing::error!(
-            cwd = %cwd.display(),
-            error = %err,
-            "content scopes cannot read the working directory, so none of them match. Fix: check \
-             the permissions of the working directory."
-        );
+        crate::agent_notice::record_logged(format!(
+            "llmenv: content scopes cannot read the working directory {}, so none of them match \
+             ({err}). Fix: check the permissions of the working directory.",
+            cwd.display()
+        ));
     } else {
         tracing::warn!(error = %err, "walkdir entry error; skipping");
     }
@@ -38,13 +37,11 @@ pub(crate) fn matches_content_all<'a>(
             Ok(glob) => Some((s.id.as_str(), glob.compile_matcher(), s.r#match.depth)),
             // The scope cannot match at all, so this is logged where a user sees it (#3070 review).
             Err(e) => {
-                tracing::error!(
-                    scope = %s.id,
-                    glob = %s.r#match.glob,
-                    error = %e,
-                    "content scope has an invalid glob, so it never matches. Fix: correct the \
-                     glob in config.yaml."
-                );
+                crate::agent_notice::record_logged(format!(
+                    "llmenv: content scope '{}' has an invalid glob '{}' ({e}), so it never \
+                     matches. Fix: correct the glob in config.yaml.",
+                    s.id, s.r#match.glob
+                ));
                 None
             }
         })

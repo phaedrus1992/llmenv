@@ -241,13 +241,12 @@ pub(super) fn crush_tool_name(neutral: &str) -> Option<&'static str> {
 /// see [`crush_tool_name`] for why this isn't a hard error.
 pub(super) fn render_permission_rule(rule: &crate::config::PermissionRule) -> Vec<String> {
     if let Some(pattern) = &rule.pattern {
-        tracing::error!(
+        crate::agent_notice::record_logged(format!(
             "crush: allowed_tools has no pattern matching; rule `{}` + pattern `{pattern}` \
              cannot be expressed for Crush and is dropped rather than widened to allow \
              ALL `{}` calls — this tool will still prompt for approval",
-            rule.tool,
-            rule.tool
-        );
+            rule.tool, rule.tool
+        ));
         return Vec::new();
     }
     if !rule.paths.is_empty() {

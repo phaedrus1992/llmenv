@@ -38,7 +38,10 @@ pub fn handle_pre_tool_use(stdin_payload: &serde_json::Value, cfg: &CdGuard) -> 
         // `error!`, not `warn!`/`debug!`: the default `EnvFilter` (`RUST_LOG`
         // unset) is ERROR-only and drops anything weaker before it reaches a
         // default-configured user's log (#1133 precedent).
-        tracing::error!("tool_input.command missing or not a string for Bash PreToolUse payload");
+        crate::agent_notice::record_logged(
+            "llmenv: a Bash hook payload has no string tool_input.command, so the cd advisory \
+             is skipped. Fix: report this payload shape to llmenv, because it should not occur.",
+        );
         return String::new();
     };
     if command_ends_with_cd(command) {
@@ -275,20 +278,17 @@ mod tests {
     // payload shape ever drifts, cd_guard would otherwise stop firing with no
     // trace in the logs.
     #[test]
-    fn handle_pre_tool_use_logs_error_when_bash_command_missing() {
+    fn handle_pre_tool_use_records_a_notice_when_bash_command_missing() {
         let payload = serde_json::json!({ "tool_name": "Bash", "tool_input": {} });
-        let logs = crate::test_log_capture::capture_logs(|| {
-            let text = handle_pre_tool_use(&payload, &CdGuard { enabled: true });
-            assert!(text.is_empty());
-        });
+        let text = handle_pre_tool_use(&payload, &CdGuard { enabled: true });
+        assert!(text.is_empty());
+        // Hook stderr is dropped, so the agent sees the case only as a notice.
+        let notices = crate::agent_notice::current().unwrap_or_default();
         assert!(
-            logs.contains("tool_input.command missing"),
-            "expected an error log when tool_input.command is absent, got: {logs}"
+            notices.contains("no string tool_input.command"),
+            "{notices}"
         );
-        assert!(
-            logs.contains("ERROR"),
-            "must log at error level so it survives the default (RUST_LOG-unset) filter, got: {logs}"
-        );
+        assert!(notices.contains("Fix:"), "{notices}");
     }
 
     proptest! {
