@@ -24,6 +24,7 @@ mod post_materialize;
 use plugin_payloads::sync_plugin_payloads;
 
 mod doctor;
+mod init_templates;
 mod proxy_restart;
 mod setup;
 mod status;
@@ -2687,16 +2688,33 @@ fn run_hook(shell: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_init(path: Option<std::path::PathBuf>, repo: Option<String>) -> anyhow::Result<()> {
-    let config_dir = match path {
+/// The folder that `llmenv init` writes into: the `--path` value with `~` expanded, or the default
+/// config folder.
+fn init_config_dir(path: Option<std::path::PathBuf>) -> anyhow::Result<PathBuf> {
+    match path {
         Some(p) => {
             let path_str = p
                 .to_str()
                 .ok_or_else(|| anyhow::anyhow!("init path is not valid UTF-8: {}", p.display()))?;
-            PathBuf::from(paths::expand_tilde(path_str)?)
+            Ok(PathBuf::from(paths::expand_tilde(path_str)?))
         }
-        None => paths::config_dir()?,
-    };
+        None => paths::config_dir(),
+    }
+}
+
+/// Write a starter file into a new config folder. A file that exists stays as it is.
+fn write_starter_if_missing(path: &Path, content: &str, label: &str) -> anyhow::Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    std::fs::write(path, content)
+        .with_context(|| format!("writing {label} to {}", path.display()))?;
+    eprintln!("Created {label} at {}", path.display());
+    Ok(())
+}
+
+fn run_init(path: Option<std::path::PathBuf>, repo: Option<String>) -> anyhow::Result<()> {
+    let config_dir = init_config_dir(path)?;
     paths::create_dir_owner_only(&config_dir)
         .with_context(|| format!("creating config dir {}", config_dir.display()))?;
 
@@ -2724,139 +2742,14 @@ fn run_init(path: Option<std::path::PathBuf>, repo: Option<String>) -> anyhow::R
     eprintln!("✓ Config validated successfully");
 
     let agents_path = config_dir.join("AGENTS.md");
-    if !agents_path.exists() {
-        let agents_template = r#"# Agent Orientation
-
-This directory contains llmenv configuration. Agents (Claude Code, Copilot, Gemini CLI)
-operating here will have access to the merged config and bundles.
-
-## Key Files & Directories
-
-- **config.yaml** — Main configuration. Declares scopes, bundles, MCP servers, state locations.
-- **bundles/** — Bundle directories. Each bundle contains files merged into agent config:
-  - `CLAUDE.md` / `AGENTS.md` / `GEMINI.md` — Agent instructions (loaded automatically)
-  - `skills/` — Custom skills directory
-  - `hooks/` — Hook definitions
-  - `mcp.json` — MCP server configurations (optional)
-- **state/** — Durable per-tool state (managed by llmenv; don't write here directly)
-- **.llmenv.yaml** — Project scope marker (place in project roots, not here)
-
-## Where to Add Things
-
-### New Agent Instructions
-Create or edit a bundle's `CLAUDE.md` (Claude Code), `AGENTS.md` (all agents), or `GEMINI.md` (Gemini CLI):
-```
-bundles/myname/CLAUDE.md
-```
-
-### New Skills
-Add to a bundle's `skills/` directory:
-```
-bundles/myname/skills/my-skill.json
-```
-
-### New Hooks
-Add to a bundle's `hooks/` directory or declare in `config.yaml`:
-```
-bundles/myname/hooks/some-hook.sh
-```
-
-### MCP Servers
-Either add to a bundle's `mcp.json` or declare in `config.yaml` under `mcp:`.
-
-### Per-Tool Durable State
-Declare in `config.yaml` under `state: tools:`:
-```yaml
-state:
-  tools:
-    - env: MY_TOOL_STATE_DIR
-      subdir: my-tool
-```
-
-## Scopes & Tags
-
-Scopes (network, host, user, content, project) emit **tags** when they match. Bundles and other
-resources fire when one of their tags is in the active tag set. See `config.yaml` comments
-for examples.
-
----
-
-For more, see the llmenv documentation and the `config.yaml` template comments.
-"#;
-
-        std::fs::write(&agents_path, agents_template)
-            .with_context(|| format!("writing agents template to {}", agents_path.display()))?;
-        eprintln!(
-            "Created agent orientation guide at {}",
-            agents_path.display()
-        );
-    }
+    write_starter_if_missing(
+        &agents_path,
+        init_templates::AGENTS_TEMPLATE,
+        "agent orientation guide",
+    )?;
 
     let readme_path = config_dir.join("README.md");
-    let readme_content = r#"# llmenv Configuration
-
-This directory contains your llmenv configuration.
-
-## Layout
-
-- **config.yaml** — Main configuration file. Declares scopes, bundles, MCP servers,
-  plugins, and the memory backend. Edit this to define which environments activate
-  in which contexts (networks, hosts, users, project directory contents, projects).
-
-- **.llmenv.yaml** — Project markers (one per project). Drop a marker file at the
-  root of any project directory to give that project its own scope, tags, and
-  enabled bundles. llmenv discovers these by walking upward from the current
-  directory.
-
-- **bundles/** — Bundle content directories. Each directory here matches a
-  `bundle:` entry in `config.yaml`. Bundles can contain:
-  - YAML files (`bundle.yaml`) with MCP servers, hooks, and other capabilities
-  - Environment variables
-  - Plugin declarations
-
-## Getting Started
-
-1. **Edit config.yaml** to add your first scopes (network, host, user) and a bundle.
-   See the comments in the file for examples and reference the [Configuration docs](https://phaedrus1992.github.io/llmenv/docs/configuration).
-
-2. **Install the shell hook** to activate llmenv on every prompt:
-
-   ```bash
-   eval "$(llmenv hook zsh)"      # Add to ~/.zshrc
-   # or
-   eval "$(llmenv hook bash)"     # Add to ~/.bashrc
-   ```
-
-3. **Verify setup**:
-
-   ```bash
-   llmenv doctor        # Check for configuration errors
-   llmenv status        # Show active scopes and tags
-   llmenv export        # Preview the exported environment
-   ```
-
-4. **Add projects** by creating `.llmenv.yaml` marker files at project roots.
-
-## Concepts
-
-- **Scopes** — Describe where you are (network/host/user/content/project). Each emits **tags**.
-- **Tags** — Labels that trigger bundles, MCP servers, plugins, and memory.
-- **Bundles** — Fire when their tags match the active set. Contribute config, env vars, and capabilities.
-- **Materialize** — llmenv combines active scopes/bundles into a content-addressed config directory.
-- **Adapter** — Renders the materialized config into the agent's native format (e.g. Claude Code).
-
-## Documentation
-
-- [Getting Started](https://phaedrus1992.github.io/llmenv/docs/getting-started) — First-run walkthrough
-- [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration) — Complete schema reference
-- [Concepts](https://phaedrus1992.github.io/llmenv/docs/concepts) — Scopes, tags, bundles, precedence
-- [Main Site](https://phaedrus1992.github.io/llmenv/) — All documentation
-"#;
-    if !readme_path.exists() {
-        std::fs::write(&readme_path, readme_content)
-            .with_context(|| format!("writing README to {}", readme_path.display()))?;
-        eprintln!("Created README at {}", readme_path.display());
-    }
+    write_starter_if_missing(&readme_path, init_templates::README_TEMPLATE, "README")?;
 
     // Interactive first-run prompts, only on a terminal: dialoguer reads stdin and asks on stderr.
     // Intentionally Claude Code-only: Crush has no auth/settings concept yet.
