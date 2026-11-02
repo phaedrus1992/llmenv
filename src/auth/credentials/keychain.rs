@@ -65,7 +65,6 @@ fn parse_keychain_blob(service: &str, raw: &str) -> anyhow::Result<super::Creden
 
 #[cfg(any(target_os = "macos", test))]
 mod deadline;
-#[cfg(any(target_os = "macos", test))]
 #[cfg(all(test, target_os = "macos"))]
 mod write_tests;
 #[cfg(any(target_os = "macos", test))]
@@ -260,15 +259,10 @@ pub(super) fn keychain_read(config_dir: &Path) -> anyhow::Result<Option<super::C
 /// silently stored a corrupt token with no error.
 #[cfg(target_os = "macos")]
 pub(super) fn keychain_write(config_dir: &Path, creds: &super::Credentials) -> anyhow::Result<()> {
-    keychain_write_with(config_dir, creds, WRITE_TIMEOUT, set_generic_password)
-}
-
-/// The Security framework write for one item. The seam in [`keychain_write_with`] takes it as a
-/// parameter, so a test can run the write logic without a real keychain.
-#[cfg(target_os = "macos")]
-fn set_generic_password(item: &str, account: &str, blob: &[u8]) -> Result<(), String> {
-    security_framework::passwords::set_generic_password(item, account, blob)
-        .map_err(|e| e.to_string())
+    keychain_write_with(config_dir, creds, WRITE_TIMEOUT, |item, account, blob| {
+        security_framework::passwords::set_generic_password(item, account, blob)
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// Store `creds` with `set`, and wait at most `timeout` for it. A locked keychain blocks the write,
