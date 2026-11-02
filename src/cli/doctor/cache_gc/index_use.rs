@@ -29,6 +29,9 @@ pub(super) fn cache_use(config: &Config, bundles_dir: &Path, dir: &Path) -> Cach
     };
     let canonical_dir = match std::fs::canonicalize(dir) {
         Ok(canonical) => canonical,
+        // A folder that does not exist holds no index in use. A fresh install has none, so this
+        // must not make the state sweep run lsof (#3195 review).
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return CacheUse::Unused,
         Err(e) => return CacheUse::Unknown(format!("cannot resolve {}: {e}", dir.display())),
     };
     for raw in raws {
@@ -84,5 +87,22 @@ pub(super) fn cbm_use(config: &Config, dir: &Path) -> CacheUse {
             tracing::debug!("bundles folder unknown, but no bundle needs it: {e:#}");
             cache_use(config, Path::new(""), dir)
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_codebase_memory_folder_is_unused_not_unknown() {
+        let root = tempfile::tempdir().unwrap();
+        let config = crate::config::Config::default();
+        let missing = root.path().join("codebase-memory");
+        assert!(matches!(
+            cache_use(&config, root.path(), &missing),
+            CacheUse::Unused
+        ));
     }
 }
