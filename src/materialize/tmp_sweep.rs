@@ -10,6 +10,9 @@ mod remove;
 mod summary;
 pub use remove::sweep;
 mod walk;
+
+#[cfg(test)]
+mod walk_tests;
 pub use summary::{stale_summary, stale_summary_in};
 
 /// The stale entries of `state/tmp`: how many, and how many bytes they hold.
