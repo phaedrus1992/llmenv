@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use crate::materialize::cbm_units::{Unit, scan_units};
+use crate::materialize::cbm_units::{Unit, scan_units_with};
 use crate::materialize::tmp_sweep;
 
 /// Whether a sweep of `state/tmp` or `state/codebase-memory` could remove an entry. Both sweeps
@@ -38,14 +38,19 @@ pub(super) fn state_may_have_stale_entries(
     // A codebase-memory folder that a features.codebase_memory index_path uses is live, and the
     // sweep never removes it, so it needs no in-use list (#3075).
     tmp_may_be_stale
-        || (!cbm_live && cbm_may_have_stale_units(&state_dir.join("codebase-memory"), retention))
+        || (!cbm_live
+            && cbm_may_have_stale_units(&state_dir.join("codebase-memory"), retention, source))
 }
 
 /// Whether the codebase-memory sweep could act on `dir`: a unit past `retention`, or a unit whose
 /// age cannot be read. It uses the sweep's own scan, so the gate and the sweep agree (#3072).
 /// A unit that cannot be scanned counts as possibly stale, and it is logged.
-fn cbm_may_have_stale_units(dir: &Path, retention: Duration) -> bool {
-    match scan_units(dir, retention) {
+fn cbm_may_have_stale_units(
+    dir: &Path,
+    retention: Duration,
+    source: crate::materialize::cache::AgeSource,
+) -> bool {
+    match scan_units_with(dir, retention, source) {
         Ok(None) => false,
         Ok(Some(units)) => !units.iter().all(Unit::is_fresh),
         Err(e) => {
