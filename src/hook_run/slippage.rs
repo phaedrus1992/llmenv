@@ -163,7 +163,12 @@ pub(crate) fn handle_pre_tool_use(
             String::new()
         }
         "Write" => {
-            if !std::path::Path::new(path).exists() {
+            // Only a path that is absent is new. `exists()` would also allow a path it cannot
+            // stat, so every other error falls through to the read check.
+            if matches!(
+                std::fs::symlink_metadata(path),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound
+            ) {
                 return String::new();
             }
             match read_stats(state_dir, session_id) {
@@ -203,6 +208,9 @@ pub(super) fn save_stats(state_dir: &std::path::Path, session_id: &str, stats: &
     super::session_state::prune_stale_json_files(&state_dir.join("slippage"), 7);
     super::session_state::prune_orphan_locks(&state_dir.join("slippage"), 7);
     let Ok(json) = serde_json::to_string(stats) else {
+        crate::agent_notice::record_logged(format!(
+            "llmenv: cannot encode the slippage stats of session {session_id}. A later Write to a file you read may be denied. Fix: file a bug with this message."
+        ));
         return;
     };
     if let Err(e) =

@@ -48,8 +48,7 @@ fn a_session_id_that_is_not_a_plain_name_names_the_fix() {
     assert!(notices().contains("not a plain file name"), "{}", notices());
 }
 
-// #3332: the deny names the stats log and its fix. It does not point the agent at the file it
-// tried to write, because reading that file does not repair the log.
+// #3332: the deny names the stats log that caused it, and not the file the agent tried to write.
 #[test]
 fn a_write_deny_on_a_corrupt_stats_log_names_the_log() {
     let state = tempfile::tempdir().unwrap();
@@ -75,4 +74,33 @@ fn a_write_deny_on_a_corrupt_stats_log_names_the_log() {
     assert!(deny.contains(&log.display().to_string()), "{deny}");
     assert!(deny.contains("Fix:"), "{deny}");
     assert!(!deny.contains("haven't read"), "{deny}");
+}
+
+// #3348 review: a stats log reads back exactly what was saved.
+#[test]
+fn a_saved_stats_log_reads_back_unchanged() {
+    use proptest::prelude::*;
+    proptest!(|(paths in proptest::collection::btree_set("[a-z/.]{1,12}", 0..6))| {
+        let state = tempfile::tempdir().unwrap();
+        let stats = SessionStats {
+            paths,
+            ..Default::default()
+        };
+        save_stats(state.path(), "s-round", &stats);
+        let back = read_stats(state.path(), "s-round").unwrap();
+        prop_assert_eq!(back.paths, stats.paths);
+    });
+}
+
+// #3348 review: a stats log reads as Ok exactly when serde_json parses its bytes.
+#[test]
+fn read_stats_is_ok_exactly_when_the_log_parses() {
+    use proptest::prelude::*;
+    proptest!(|(bytes in proptest::collection::vec(any::<u8>(), 0..200))| {
+        let state = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(state.path().join("slippage")).unwrap();
+        std::fs::write(stats_path(state.path(), "s-prop"), &bytes).unwrap();
+        let parses = serde_json::from_slice::<SessionStats>(&bytes).is_ok();
+        prop_assert_eq!(read_stats(state.path(), "s-prop").is_ok(), parses);
+    });
 }

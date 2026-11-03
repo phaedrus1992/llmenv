@@ -17,14 +17,14 @@ pub(super) fn read_stats(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(SessionStats::default()),
         Err(e) => {
             return Err(format!(
-                "cannot read the slippage stats log {} ({e}). Fix: check the permissions of that file.",
+                "cannot read the slippage stats log {} ({e}). Fix: correct the problem in the error, or remove the file.",
                 path.display()
             ));
         }
     };
     serde_json::from_str(&text).map_err(|e| {
         format!(
-            "the slippage stats log {} is corrupt ({e}). Fix: a Read of any file rewrites the log.",
+            "the slippage stats log {} is corrupt ({e}). Fix: remove the file, or Read any file to rewrite the log.",
             path.display()
         )
     })
@@ -38,9 +38,7 @@ pub(in crate::hook_run) fn load_stats(
     // An unreadable or corrupt log means "nothing known to have been read". The write guard then
     // denies a Write to an existing file until the next Read rewrites the log.
     read_stats(state_dir, session_id).unwrap_or_else(|problem| {
-        crate::agent_notice::record_logged(format!(
-            "llmenv: {problem} Writes to existing files may be denied. Earlier read records in the log are lost."
-        ));
+        crate::agent_notice::record_logged(format!("llmenv: {problem}"));
         SessionStats::default()
     })
 }
