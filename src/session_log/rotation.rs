@@ -107,7 +107,7 @@ pub(crate) fn rotation_path(path: &Path, n: u32) -> PathBuf {
 }
 
 /// Treat a file that is already gone as done. Any other failure is returned.
-pub(super) fn ignore_missing(result: std::io::Result<()>) -> std::io::Result<()> {
+fn ignore_missing(result: std::io::Result<()>) -> std::io::Result<()> {
     match result {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
