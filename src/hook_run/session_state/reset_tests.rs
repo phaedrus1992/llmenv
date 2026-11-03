@@ -53,7 +53,8 @@ fn a_compaction_reset_removes_the_session_read_state() {
     std::fs::create_dir_all(own.parent().expect("test")).expect("test");
     std::fs::write(&own, "{}").expect("test");
 
-    reset_after_compaction_in(Some("s9"), Ok(dir.path().to_path_buf()));
+    let state_dir = dir.path().to_path_buf();
+    reset_read_state_after_compaction(Some("s9"), || Ok(state_dir));
 
     assert!(
         !own.exists(),
@@ -63,7 +64,7 @@ fn a_compaction_reset_removes_the_session_read_state() {
 
 #[test]
 fn a_compaction_reset_without_a_state_dir_is_an_agent_notice() {
-    reset_after_compaction_in(Some("s9"), Err(anyhow::anyhow!("no home marker 7f3a")));
+    reset_read_state_after_compaction(Some("s9"), || Err(anyhow::anyhow!("no home marker 7f3a")));
 
     let notices = crate::agent_notice::current().unwrap_or_default();
     assert!(
