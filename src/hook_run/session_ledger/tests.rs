@@ -1,7 +1,7 @@
 use super::*;
 use crate::hook_run::record_hash::HASH_HEX_CHARS;
 
-fn store() -> (tempfile::TempDir, LedgerStore) {
+pub(super) fn store() -> (tempfile::TempDir, LedgerStore) {
     let dir = tempfile::tempdir().unwrap();
     let store = LedgerStore::new(dir.path());
     (dir, store)
@@ -279,52 +279,6 @@ fn a_lock_held_past_the_wait_skips_the_update() {
     assert!(store.update("s1", |l| l.last_turn_at = 1).is_none());
     drop(held);
     assert_eq!(store.load("s1").unwrap().last_turn_at, 0);
-}
-
-// A busy lock gives no update, but the timing still says how long it polled and that the
-// state is unsaved (#3012).
-#[test]
-fn a_busy_lock_reports_its_poll_count_and_an_unsaved_state() {
-    let (_dir, store) = store();
-    let held = store.lock("s1").unwrap();
-    let (updated, timing) = store.update_reporting_save("s1", |l| l.last_turn_at = 1);
-    assert!(updated.is_none());
-    assert!(timing.lock_attempts.unwrap() > 1);
-    assert_eq!(timing.state_unsaved, Some(true));
-    assert!(timing.read_us.is_none() && timing.write_us.is_none());
-    drop(held);
-    assert_eq!(
-        store.load("s1").unwrap().last_turn_at,
-        0,
-        "a busy lock changes nothing"
-    );
-}
-
-// `update_timed` gives the same result as `update`, and keeps the timing when the lock is busy.
-#[test]
-fn update_timed_keeps_the_timing_of_a_skipped_update() {
-    let (_dir, store) = store();
-    let held = store.lock("s1").unwrap();
-    let (skipped, timing) = store.update_timed("s1", |l| l.last_turn_at = 1);
-    assert!(skipped.is_none());
-    assert!(timing.lock_attempts.unwrap() > 1);
-    drop(held);
-    let (done, timing) = store.update_timed("s1", |l| l.last_turn_at = 2);
-    assert_eq!(done, Some(()));
-    assert_eq!(timing.lock_attempts, Some(1));
-}
-
-// An uncontended update takes the lock on the first poll and reaches disk.
-#[test]
-fn a_free_lock_is_taken_on_the_first_poll() {
-    let (_dir, store) = store();
-    let (updated, timing) = store.update_reporting_save("s1", |l| l.last_turn_at = 7);
-    assert!(matches!(updated, Some(((), true))));
-    assert_eq!(timing.lock_attempts, Some(1));
-    assert_eq!(timing.state_unsaved, Some(false));
-    assert!(timing.read_us.is_some() && timing.write_us.is_some());
-    assert!(timing.lock_wait_us.is_some());
-    assert_eq!(store.load("s1").unwrap().last_turn_at, 7);
 }
 
 #[test]

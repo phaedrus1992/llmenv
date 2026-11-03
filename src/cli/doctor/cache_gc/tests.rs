@@ -81,7 +81,10 @@ fn an_unreadable_bundle_leaves_the_folder_use_unknown() {
 }
 
 #[test]
-fn the_state_sweep_removes_an_old_rotation_and_keeps_the_active_log() {
+// A test cannot set a change time, so removal by age is covered by the prune tests, which use
+// the mtime only. This test checks the change-time rule: a rotation restored with an old mtime
+// has a fresh change time, so it stays.
+fn the_state_sweep_keeps_a_rotation_restored_with_an_old_mtime() {
     let state = tempfile::tempdir().unwrap();
     let active = state.path().join("session-log.jsonl");
     std::fs::write(&active, b"{}").unwrap();
@@ -96,7 +99,7 @@ fn the_state_sweep_removes_an_old_rotation_and_keeps_the_active_log() {
 
     sweep_state(state.path(), &Config::default(), DAY * 7, OUT);
 
-    assert!(!rotated.exists(), "the old rotation was kept");
+    assert!(rotated.exists(), "a restored rotation was removed");
     assert!(active.exists(), "the active log was removed");
 }
 

@@ -8,6 +8,7 @@ pub(crate) mod detached_log;
 pub(crate) mod dispatch;
 pub mod event;
 pub mod file_sink;
+pub(crate) mod prune;
 pub(crate) mod reaper;
 pub(crate) mod rotation;
 pub mod scope_header;
