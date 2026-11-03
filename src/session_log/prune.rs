@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::materialize::cache::{AgeSource, file_stamp, is_expired};
+use crate::session_log::prune_error::PruneError;
 use crate::session_log::rotation::rotation_lock;
 
 /// Remove the rotated files of `path` that are older than `older_than`, judged by `age`. Under
@@ -13,7 +14,7 @@ use crate::session_log::rotation::rotation_lock;
 /// returns the files that a real run removes, and removes none (#2917).
 ///
 /// A file that cannot be removed does not stop the pass. The error names every file that failed,
-/// with the count of files that were removed.
+/// with the count of files that were removed, and it carries the files that were removed.
 ///
 /// # Errors
 /// Fails when the directory cannot be read, or when any rotated file could not be removed.
@@ -22,14 +23,17 @@ pub(crate) fn prune_rotations(
     older_than: Duration,
     dry_run: bool,
     age: AgeSource,
-) -> anyhow::Result<Vec<PathBuf>> {
+) -> Result<Vec<PathBuf>, PruneError> {
     let (Some(dir), Some(base)) = (path.parent(), path.file_name()) else {
-        anyhow::bail!(
-            "cannot prune the rotations of {}: the path has no folder or file name. Fix: pass the session log file, not a folder.",
+        return Err(PruneError::without_removals(format!(
+            "cannot prune the rotations of {}: the path has no folder or file name. \
+             Fix: pass the session log file, not a folder.",
             path.display()
-        );
+        )));
     };
-    let Some(entries) = crate::paths::read_dir_optional(dir)? else {
+    let entries = crate::paths::read_dir_optional(dir)
+        .map_err(|e| PruneError::without_removals(format!("{e:#}")))?;
+    let Some(entries) = entries else {
         return Ok(Vec::new());
     };
     let expiry = Expiry {
@@ -71,13 +75,14 @@ pub(crate) fn prune_rotations(
         }
     };
     if !failures.is_empty() {
-        anyhow::bail!(
+        let message = format!(
             "{} rotated session-log file(s) could not be checked or removed, {} removed: {}. \
              Fix: check the permissions of the listed files and of the state directory",
             failures.len(),
             removed.len(),
             failures.join("; ")
         );
+        return Err(PruneError::with_removals(removed, message));
     }
     Ok(removed)
 }
@@ -143,3 +148,7 @@ pub(super) fn is_rotation_of(name: &std::ffi::OsStr, base: &std::ffi::OsStr) -> 
         .and_then(|rest| rest.strip_prefix('.'))
         .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests;

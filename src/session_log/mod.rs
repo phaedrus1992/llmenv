@@ -8,6 +8,7 @@ pub(crate) mod dispatch;
 pub mod event;
 pub mod file_sink;
 pub(crate) mod prune;
+pub(crate) mod prune_error;
 pub(crate) mod reaper;
 pub(crate) mod rotation;
 pub mod scope_header;
