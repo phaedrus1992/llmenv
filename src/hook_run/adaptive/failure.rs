@@ -134,11 +134,10 @@ pub(in crate::hook_run) async fn tool_failure(
         l.push_error(tool, error, now);
         l.clone()
     }) else {
-        tracing::error!(
-            "tool_failure: session {} tool {tool}: error not recorded and recall skipped, \
-             the recall ledger cannot be updated (unsafe session id, busy lock, or unreadable file)",
+        crate::agent_notice::record_logged(format!(
+            "llmenv: tool_failure: session {} tool {tool}: error not recorded and recall skipped, the recall ledger cannot be updated (unsafe session id, busy lock, or unreadable file). Fix: check the permissions of the session state folder.",
             ctx.session_id
-        );
+        ));
         note_skipped();
         return Ok(crate::hook_run::HookText::default());
     };

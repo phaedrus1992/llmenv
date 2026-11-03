@@ -10,7 +10,7 @@ use crate::materialize::cache::{AgeSource, file_stamp};
 
 /// A hook must not stall the agent on a busy state file, so a lock gives up after
 /// `LOCK_ATTEMPTS` polls, about 200 ms.
-const LOCK_ATTEMPTS: u32 = 20;
+pub(crate) const LOCK_ATTEMPTS: u32 = 20;
 const LOCK_POLL: Duration = Duration::from_millis(10);
 
 /// Lock `dir/<key>.lock`, creating the owner-only directory and the file. `label` names the

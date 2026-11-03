@@ -276,16 +276,16 @@ pub(crate) fn resume_pending(
             continue;
         }
         if checkpoint.attempts >= MAX_ATTEMPTS {
-            tracing::error!(
-                "background job {} gave up after {MAX_ATTEMPTS} attempts; see `llmenv doctor`",
+            crate::agent_notice::record_logged(format!(
+                "llmenv: background job {} gave up after {MAX_ATTEMPTS} attempts. Fix: run `llmenv doctor`, then start the job again.",
                 path.display()
-            );
+            ));
             continue;
         }
         if resumed >= MAX_RESUMED_PER_START {
-            tracing::error!(
-                "more than {MAX_RESUMED_PER_START} unfinished background jobs; the rest wait for the next session"
-            );
+            crate::agent_notice::record_logged(format!(
+                "llmenv: more than {MAX_RESUMED_PER_START} unfinished background jobs, so the rest wait for the next session. Fix: finish or remove the older jobs with `llmenv doctor`."
+            ));
             break;
         }
         if restart(&path, &checkpoint, now, &mut spawn) {
@@ -308,15 +308,18 @@ fn restart(
     bumped.attempts += 1;
     bumped.started_at = now;
     if let Err(e) = save(path, &bumped) {
-        tracing::error!("background job {} not resumed: {e:#}", path.display());
+        crate::agent_notice::record_logged(format!(
+            "llmenv: background job {} not resumed, its checkpoint cannot be saved ({e:#}). Fix: check the permissions of the checkpoint folder.",
+            path.display()
+        ));
         return false;
     }
     if let Err(e) = spawn(&bumped, path) {
-        tracing::error!(
-            "background job {} not resumed (attempt {}/{MAX_ATTEMPTS}): {e:#}",
+        crate::agent_notice::record_logged(format!(
+            "llmenv: background job {} not resumed (attempt {}/{MAX_ATTEMPTS}): {e:#}. Fix: fix the cause in the error, then start the job again.",
             path.display(),
             bumped.attempts
-        );
+        ));
         return false;
     }
     true
@@ -387,7 +390,10 @@ pub(crate) fn begin(
 ) -> Option<PathBuf> {
     let state_dir = state_dir?;
     let inputs = serde_json::to_value(inputs)
-        .inspect_err(|e| tracing::error!("{} checkpoint not written: {e}", kind.as_str()))
+        .inspect_err(|e| crate::agent_notice::record_logged(format!(
+            "llmenv: the {} checkpoint is not written ({e}), so the job runs without resume. Fix: check the permissions of the checkpoint folder.",
+            kind.as_str()
+        )))
         .ok()?;
     let mut checkpoint = Checkpoint::new(kind, inputs, session_id);
     if kind == JobKind::CbmIndex {
@@ -404,7 +410,10 @@ pub(crate) fn begin(
         }
     }
     write(state_dir, &checkpoint)
-        .inspect_err(|e| tracing::error!("{} checkpoint not written: {e:#}", kind.as_str()))
+        .inspect_err(|e| crate::agent_notice::record_logged(format!(
+            "llmenv: the {} checkpoint is not written ({e:#}), so the job runs without resume. Fix: check the permissions of the checkpoint folder.",
+            kind.as_str()
+        )))
         .ok()
         .flatten()
 }
@@ -463,3 +472,7 @@ mod tests;
 #[cfg(test)]
 #[expect(clippy::unwrap_used, clippy::panic, reason = "test code")]
 mod resume_tests;
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test code")]
+mod notice_tests;
