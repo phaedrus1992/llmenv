@@ -1298,6 +1298,9 @@ session_log:
     path: "~/custom/path.jsonl"
 ```
 
+(changed in v3.14.0) The reaper judges a transcript's age by the later of its mtime and change time.
+A transcript restored with an old mtime, such as by `cp -p` or `tar -x`, is kept until it is old by its change time too.
+
 | Sub-field | Required | Notes |
 | --------- | -------- | ----- |
 | `enabled` | no | Enable/disable the ICM transcript sink; default `true` |
