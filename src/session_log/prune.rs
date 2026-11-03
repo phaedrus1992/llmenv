@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::materialize::cache::{AgeSource, file_stamp, is_expired};
-use crate::session_log::prune_error::PruneError;
 use crate::session_log::rotation::rotation_lock;
 
 /// Remove the rotated files of `path` that are older than `older_than`, judged by `age`. Under
@@ -17,7 +16,8 @@ use crate::session_log::rotation::rotation_lock;
 /// with the count of files that were removed, and it carries the files that were removed.
 ///
 /// # Errors
-/// Fails when the directory cannot be read, or when any rotated file could not be removed.
+/// Fails when the directory cannot be read, when a rotated file cannot be checked or removed, or
+/// when the rotation lock cannot be taken. The error keeps the files removed before the failure.
 pub(crate) fn prune_rotations(
     path: &Path,
     older_than: Duration,
@@ -25,14 +25,19 @@ pub(crate) fn prune_rotations(
     age: AgeSource,
 ) -> Result<Vec<PathBuf>, PruneError> {
     let (Some(dir), Some(base)) = (path.parent(), path.file_name()) else {
-        return Err(PruneError::without_removals(format!(
-            "cannot prune the rotations of {}: the path has no folder or file name. \
-             Fix: pass the session log file, not a folder.",
-            path.display()
-        )));
+        return Err(PruneError {
+            removed: Vec::new(),
+            message: format!(
+                "cannot prune the rotations of {}: the path has no folder or file name. \
+                 Fix: pass the session log file, not a folder.",
+                path.display()
+            ),
+        });
     };
-    let entries = crate::paths::read_dir_optional(dir)
-        .map_err(|e| PruneError::without_removals(format!("{e:#}")))?;
+    let entries = crate::paths::read_dir_optional(dir).map_err(|e| PruneError {
+        removed: Vec::new(),
+        message: format!("{e:#}"),
+    })?;
     let Some(entries) = entries else {
         return Ok(Vec::new());
     };
@@ -75,16 +80,28 @@ pub(crate) fn prune_rotations(
         }
     };
     if !failures.is_empty() {
+        // A dry run removes nothing, so its count must not claim removals.
+        let verb = if dry_run { "would remove" } else { "removed" };
         let message = format!(
-            "{} rotated session-log file(s) could not be checked or removed, {} removed: {}. \
+            "{} rotated session-log file(s) could not be checked or removed, {} {verb}: {}. \
              Fix: check the permissions of the listed files and of the state directory",
             failures.len(),
             removed.len(),
             failures.join("; ")
         );
-        return Err(PruneError::with_removals(removed, message));
+        return Err(PruneError { removed, message });
     }
     Ok(removed)
+}
+
+/// A prune pass that failed. It keeps the files it removed before the failure, so a caller can
+/// report them next to the error.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub(crate) struct PruneError {
+    /// The files that the pass removed, or would remove in a dry run.
+    pub(crate) removed: Vec<PathBuf>,
+    message: String,
 }
 
 /// The clock, the retention, and the timestamp that judges one rotated file.

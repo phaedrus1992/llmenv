@@ -204,3 +204,38 @@ fn prune_in_a_missing_directory_removes_nothing() {
             .is_empty()
     );
 }
+
+// #3348 review: a directory named like a rotation fails `remove_file`. The error must list
+// exactly the files that were removed before that failure.
+#[test]
+fn a_partial_failure_lists_exactly_the_removed_files() {
+    use proptest::prelude::*;
+    proptest!(|(files in 0u32..4, dirs in 0u32..3)| {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-log.jsonl");
+        write_bytes(&path, 3);
+        let mut expect = Vec::new();
+        for n in 1..=files {
+            let rotation = rotation_path(&path, n);
+            write_bytes(&rotation, 3);
+            expect.push(rotation);
+        }
+        for n in files + 1..=files + dirs {
+            std::fs::create_dir(rotation_path(&path, n)).unwrap();
+        }
+
+        let result = prune_rotations(&path, Duration::ZERO, false, AgeSource::MtimeOnly);
+
+        prop_assert_eq!(result.is_err(), dirs > 0);
+        let mut removed = match result {
+            Ok(removed) => removed,
+            Err(err) => err.removed,
+        };
+        removed.sort();
+        expect.sort();
+        prop_assert_eq!(removed, expect.clone());
+        for rotation in &expect {
+            prop_assert!(!rotation.exists(), "{} was not removed", rotation.display());
+        }
+    });
+}
