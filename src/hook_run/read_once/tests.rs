@@ -454,3 +454,24 @@ fn the_advisory_reports_a_quarter_of_the_file_size_as_tokens_saved() {
         "a 400-byte file saves 100 tokens: {second}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn a_busy_read_once_cache_lock_is_an_agent_notice() {
+    let dir = TempDir::new().expect("test");
+    let file = dir.path().join("a.txt");
+    fs::write(&file, "content").expect("test");
+    let cache_dir = dir.path().join("read_once");
+    let _held =
+        crate::hook_run::session_state::lock_state_file(&cache_dir, "test-session", "test holder")
+            .expect("the first lock is taken");
+    // The read still passes through unlocked, so only the notice shows the fallback (#3312).
+    handle_pre_tool_use(
+        &read_payload(&file.display().to_string()),
+        Some("test-session"),
+        &test_config_warn(),
+        dir.path(),
+    );
+    let notice = crate::agent_notice::current().unwrap_or_default();
+    assert!(notice.contains("the read-once cache lock"), "{notice}");
+}

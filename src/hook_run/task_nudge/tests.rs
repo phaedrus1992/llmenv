@@ -6,6 +6,7 @@ use crate::task::session::{StartDecision, StartOutcome, start_session};
 use crate::task::{NewTask, ParentSpec, SessionChoice, add_task_with, complete_task, start_task};
 use proptest::prelude::*;
 use tempfile::TempDir;
+mod boundary;
 mod commit_deny;
 mod fail_open;
 mod foreign_session;

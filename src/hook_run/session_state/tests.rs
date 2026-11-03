@@ -362,3 +362,16 @@ fn the_production_prune_removes_an_expired_orphan_lock() {
         "the production prune kept an expired orphan lock"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn a_busy_lock_is_an_agent_notice_naming_the_lock_and_a_fix() {
+    let dir = TempDir::new().expect("test");
+    let label = "busy notice test 3312";
+    let _held = lock_state_file(dir.path(), "busy-3312", label).expect("the first lock is taken");
+    assert!(lock_state_file(dir.path(), "busy-3312", label).is_none());
+    let notices = crate::agent_notice::current().unwrap_or_default();
+    assert!(notices.contains(label), "{notices}");
+    assert!(notices.contains("stays held by another hook"), "{notices}");
+    assert!(notices.contains("Fix:"), "{notices}");
+}
