@@ -73,9 +73,9 @@ pub(crate) fn lock_state_file_timed(
         match file.try_lock() {
             Ok(()) => {
                 timing.wait_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
-                // The orphan prune goes by age, so a held lock must look new.
-                if let Err(e) = file.set_modified(std::time::SystemTime::now()) {
-                    tracing::error!("cannot refresh {label} lock age: {e}");
+                // Without a fresh age, the orphan prune can remove this live lock.
+                if let Err(why) = refresh_lock_age(&file, &path, label) {
+                    return (Err(why), timing);
                 }
                 return (Ok(file), timing);
             }
@@ -92,6 +92,21 @@ pub(crate) fn lock_state_file_timed(
         path.display()
     );
     (Err(why), timing)
+}
+
+/// Set a held lock's modified time to now, so the orphan prune keeps it.
+///
+/// # Errors
+/// Returns the lock path, the cause, and a fix line when the time cannot be set.
+fn refresh_lock_age(file: &File, path: &Path, label: &str) -> Result<(), String> {
+    file.set_modified(std::time::SystemTime::now())
+        .map_err(|e| {
+            format!(
+                "cannot refresh the age of the {label} lock {} ({e}). Fix: check the permissions \
+             of that file and its folder, or run `llmenv doctor` to check the state directory.",
+                path.display()
+            )
+        })
 }
 
 /// Scan `dir` and delete `.json` files older than `max_age_days`. Fail-soft:
@@ -148,7 +163,17 @@ fn file_age(path: &Path, source: AgeSource) -> std::io::Result<Option<Duration>>
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
-    Ok(Some(stamp.elapsed().unwrap_or(Duration::ZERO)))
+    match stamp.elapsed() {
+        Ok(age) => Ok(Some(age)),
+        Err(_) => {
+            // The file is kept, as with any fresh write. The log shows why its age is zero.
+            tracing::warn!(
+                path = %path.display(),
+                "modified time is in the future (clock skew); the file is kept"
+            );
+            Ok(Some(Duration::ZERO))
+        }
+    }
 }
 
 /// Logs a state-file pruning failure at error level, which the default filter shows, and
@@ -200,8 +225,15 @@ pub(crate) fn reset_read_state(state_dir: &Path, session_id: &str) {
         super::slippage::stats_path(state_dir, session_id),
         super::repeat_detect::session_state_path(state_dir, session_id),
     ] {
+        // The model lost this content in compaction, so a record that survives can deny a re-read
+        // or excuse an edit. The agent must hear about it, because the engine drops hook stderr.
         if let Err(e) = remove_if_present(&path) {
-            tracing::error!("reset_read_state: cannot remove {}: {e}", path.display());
+            crate::agent_notice::record_logged(format!(
+                "llmenv: cannot reset the read state {} ({e}), so a stale record may stay. Fix: \
+                 check the permissions of that file and its folder, or run `llmenv doctor` to \
+                 check the state directory.",
+                path.display()
+            ));
         }
     }
 }

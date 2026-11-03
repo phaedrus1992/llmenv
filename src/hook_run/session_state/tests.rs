@@ -9,6 +9,19 @@ fn the_agent_key_hashes_the_session_and_the_agent_id_as_text() {
 use std::time::{Duration, SystemTime};
 use tempfile::TempDir;
 
+#[cfg(unix)]
+#[test]
+fn a_failed_lock_age_refresh_is_an_error_naming_the_lock_and_a_fix() {
+    // /dev/null is owned by root, so a normal user cannot set its times. That refusal is the failure.
+    let file = std::fs::File::open("/dev/null").expect("test");
+    let err = refresh_lock_age(&file, Path::new("/dev/null"), "recall ledger").unwrap_err();
+    assert!(
+        err.contains("recall ledger") && err.contains("/dev/null"),
+        "{err}"
+    );
+    assert!(err.contains("Fix:"), "{err}");
+}
+
 #[test]
 fn prunes_only_stale_json_files() {
     let dir = TempDir::new().expect("test");
@@ -59,14 +72,74 @@ fn a_lock_whose_age_cannot_be_read_is_kept() {
     // Read without search permission: the folder lists, but a stat of its entries fails.
     std::fs::set_permissions(&locks, std::fs::Permissions::from_mode(0o444)).expect("test");
 
-    let logs = crate::test_log_capture::capture_logs(|| prune_orphan_locks(&locks, 7));
+    prune_orphan_locks(&locks, 7);
 
     std::fs::set_permissions(&locks, std::fs::Permissions::from_mode(0o755)).expect("test");
     assert!(lock.exists(), "a lock whose age cannot be read must stay");
+    // The notice is read, not the log stream: parallel tests share the log, but this lock path is
+    // unique to this test, so only this test's notice names it.
+    let notices = crate::agent_notice::current().unwrap_or_default();
     assert!(
-        logs.contains("old.lock") && logs.contains("stays on disk"),
-        "the cause must be logged: {logs}"
+        notices.contains(&lock.display().to_string()) && notices.contains("stays on disk"),
+        "the cause must reach the agent: {notices}"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_read_state_reset_is_an_agent_notice() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = TempDir::new().expect("test");
+    let cache = super::super::read_once::session_cache_path(dir.path(), "s1");
+    std::fs::create_dir_all(cache.parent().expect("test")).expect("test");
+    std::fs::write(&cache, "{}").expect("test");
+    let folder = cache.parent().expect("test").to_path_buf();
+    // A read-only folder refuses the unlink, so the read state survives the reset.
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).expect("test");
+
+    reset_read_state(dir.path(), "s1");
+
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).expect("test");
+    assert!(cache.exists());
+    let notices = crate::agent_notice::current().unwrap_or_default();
+    assert!(
+        notices.contains(&cache.display().to_string()) && notices.contains("Fix:"),
+        "{notices}"
+    );
+}
+
+proptest::proptest! {
+    /// The change time is never older than the mtime, so the newer stamp never gives an older age.
+    #[test]
+    fn the_newer_stamp_never_gives_an_older_age(offset_secs in 0u64..864_000) {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("state.json");
+        std::fs::write(&file, "{}").unwrap();
+        let old = SystemTime::now() - Duration::from_secs(offset_secs);
+        filetime::set_file_mtime(&file, filetime::FileTime::from_system_time(old)).unwrap();
+
+        let or_ctime = file_age(&file, AgeSource::MtimeOrCtime).unwrap();
+        let mtime_only = file_age(&file, AgeSource::MtimeOnly).unwrap();
+
+        proptest::prop_assert!(or_ctime <= mtime_only, "{or_ctime:?} > {mtime_only:?}");
+    }
+}
+
+#[test]
+fn a_future_mtime_is_logged_as_clock_skew_and_kept() {
+    let dir = TempDir::new().expect("test");
+    let file = dir.path().join("future.json");
+    std::fs::write(&file, "{}").expect("test");
+    let future = SystemTime::now() + Duration::from_secs(86_400);
+    filetime::set_file_mtime(&file, filetime::FileTime::from_system_time(future)).expect("test");
+
+    let mut age = None;
+    let logs = crate::test_log_capture::capture_logs(|| {
+        age = file_age(&file, AgeSource::MtimeOnly).expect("test");
+    });
+
+    assert_eq!(age, Some(Duration::ZERO));
+    assert!(logs.contains("future.json"), "{logs}");
 }
 
 #[cfg(unix)]
