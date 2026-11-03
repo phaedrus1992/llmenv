@@ -103,7 +103,7 @@ pub(super) fn stats_path(state_dir: &std::path::Path, session_id: &str) -> std::
 }
 
 /// Lock for one read-change-save of the session's stats file (#2678). When the lock fails,
-/// `lock_state_file` logs it and the update runs unlocked, as it did before the lock existed.
+/// `lock_state_file` records a notice and the update runs unlocked, as it did before the lock existed.
 fn stats_lock(state_dir: &std::path::Path, session_id: &str) -> Option<std::fs::File> {
     stats_path(state_dir, session_id)
         .parent()

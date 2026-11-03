@@ -16,9 +16,14 @@ const LOCK_POLL: Duration = Duration::from_millis(10);
 /// Lock `dir/<key>.lock`, creating the owner-only directory and the file. `label` names the
 /// state in log lines. `None` for an unsafe `key`, an I/O error, or a lock that stays busy.
 pub(crate) fn lock_state_file(dir: &Path, key: &str, label: &str) -> Option<File> {
-    lock_state_file_why(dir, key, label)
-        .inspect_err(|why| tracing::error!("{label} lock not taken: {why}"))
-        .ok()
+    lock_state_file_why(dir, key, label).ok()
+}
+
+/// Record a lock that is not taken, and return it. Each caller falls back on a missing lock.
+/// A log line alone is dropped by the engine, so the agent hears the cause through a notice (#3312).
+fn not_taken(why: String, timing: LockTiming) -> (Result<File, String>, LockTiming) {
+    crate::agent_notice::record_logged(why.clone());
+    (Err(why), timing)
 }
 
 /// [`lock_state_file`] with the reason for a lock that is not taken, for a caller that must name
@@ -52,20 +57,17 @@ pub(crate) fn lock_state_file_timed(
     let mut timing = LockTiming::default();
     // The key can come from hook stdin; an unsafe value must never reach a path join.
     if !crate::paths::is_valid_short_name(key) {
-        return (
-            Err(format!("the key for {label} is not a plain name")),
-            timing,
-        );
+        return not_taken(format!("the key for {label} is not a plain name"), timing);
     }
     if let Err(e) = crate::paths::create_dir_owner_only(dir) {
-        return (Err(format!("cannot create {}: {e}", dir.display())), timing);
+        return not_taken(format!("cannot create {}: {e}", dir.display()), timing);
     }
     let mut opts = OpenOptions::new();
     opts.create(true).truncate(false).write(true).mode(0o600);
     let path = dir.join(format!("{key}.lock"));
     let file = match crate::paths::refuse_symlink(&mut opts).open(&path) {
         Ok(file) => file,
-        Err(e) => return (Err(format!("cannot open {}: {e}", path.display())), timing),
+        Err(e) => return not_taken(format!("cannot open {}: {e}", path.display()), timing),
     };
     let start = std::time::Instant::now();
     for _ in 0..LOCK_ATTEMPTS {
@@ -75,9 +77,7 @@ pub(crate) fn lock_state_file_timed(
                 timing.wait_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
                 // Without a fresh age, the orphan prune can remove this live lock.
                 if let Err(why) = refresh_lock_age(&file, &path) {
-                    // Each caller falls back on a missing lock, so the agent must hear the cause here.
-                    crate::agent_notice::record_logged(why.clone());
-                    return (Err(why), timing);
+                    return not_taken(why, timing);
                 }
                 return (Ok(file), timing);
             }
@@ -88,17 +88,17 @@ pub(crate) fn lock_state_file_timed(
                     "cannot lock {}: {e}. Fix: check the permissions of that file and its folder.",
                     path.display()
                 );
-                return (Err(why), timing);
+                return not_taken(why, timing);
             }
         }
     }
     timing.wait_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
     let why = format!(
-        "{} stays locked by another hook of this session. Fix: wait for that hook to finish, or \
-         end the session that holds it",
+        "llmenv: the {label} lock {} stays held by another hook of this session, so this hook used \
+         its fallback. Fix: wait for that hook to finish, or end the session that holds it.",
         path.display()
     );
-    (Err(why), timing)
+    not_taken(why, timing)
 }
 
 /// Set a held lock's modified time to now, so the orphan prune keeps it.

@@ -48,7 +48,7 @@ pub(crate) fn emit_once(state_dir: &Path, session_id: Option<&str>, reminder: &s
         return reminder.to_string();
     };
     // The lock covers the read and the save, so two Stop hooks cannot both see the reminder as
-    // new (#2678). When the lock fails, lock_state_file logs it, and the reminder is emitted:
+    // new (#2678). When the lock fails, lock_state_file records a notice, and the reminder is emitted:
     // that can only repeat a reminder, the same as a damaged record.
     let _lock = path
         .parent()
@@ -165,6 +165,9 @@ mod tests {
         .unwrap();
         // A lock that cannot be taken must not swallow the reminder: the worst case is one repeat.
         assert_eq!(emit_once(dir.path(), Some("s1"), "reminder"), "reminder");
+        // The fallback is also an agent notice, not only a log line (#3312).
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(notices.contains("the stop dedupe lock"), "{notices}");
     }
 
     #[test]

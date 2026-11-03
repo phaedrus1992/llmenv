@@ -66,7 +66,8 @@ fn a_task_of_another_conversation_does_not_count_as_tracked_work() {
         Tracking::Tracked {
             wip: Some(slug),
             waiting: Vec::new(),
-            next: None
+            next: None,
+            queued: 0,
         }
     );
 }

@@ -258,6 +258,10 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 - Tell the agent when a read-once or read-before-edit record cannot be removed on session reset. The failure used to reach only the log. [fix:hook] [#3291]
 - Keep a session log that is restored with an old mtime. The reaper now judges age by the later of mtime and change time, as the state sweeps do. [fix:session-log] [#3292]
 - Log the folder and the cause when a `state/tmp` entry cannot be read. The read error does not name the entry, so the log names the folder. [fix:tmp-sweep] [#3291]
+- Remind the agent to finish or close a task after a `git push`, `gh pr create`, `gh pr ready`, or `gh pr merge` when the task stays in progress with tasks queued behind it. The end of a turn repeats the reminder every `stop_nudge_every` turns, default 5. [fix:task] [#3318]
+- Name the cause in `llmenv doctor` when a `state/tmp` entry cannot be read. [fix:tmp-sweep] [#3313]
+- Judge a throttle cache's age by the later of its mtime and change time, so a cache restored with an old mtime is kept. [fix:throttle] [#3314]
+- Show the agent a notice that names the lock and the fix when a busy session lock makes a hook fall back. Before, only the log showed it. [fix:hook] [#3312]
 
 ### Security
 

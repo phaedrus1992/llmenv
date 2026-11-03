@@ -126,6 +126,9 @@ fn a_second_resume_in_progress_blocks_this_one() {
         )),
         0
     );
+    // The agent hears about the skipped resume, not only the log (#3312).
+    let notices = crate::agent_notice::current().unwrap_or_default();
+    assert!(notices.contains("the checkpoint resume lock"), "{notices}");
     drop(held);
     assert_eq!(resume_pending(dir.path(), 1_000_000, |_, _| Ok(())), 1);
 }
