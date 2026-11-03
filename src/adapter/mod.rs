@@ -467,9 +467,9 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        AgentAdapter, SessionStartContext, active_adapter_from, binary_on_path, binary_on_path_in,
-        emit_hook_context, engine_id, known_engine_ids, modeled_key_redirect, overlay_native_json,
-        registered_adapters, resolve_bundle_relative_paths, strip_json_nulls,
+        AgentAdapter, active_adapter_from, binary_on_path, binary_on_path_in, engine_id,
+        known_engine_ids, modeled_key_redirect, overlay_native_json, registered_adapters,
+        resolve_bundle_relative_paths, strip_json_nulls,
     };
     use crate::merge::MergedManifest;
 
@@ -593,118 +593,6 @@ mod tests {
                 .config_schema()
                 .is_none()
         );
-    }
-
-    #[test]
-    fn emit_hook_context_treats_whitespace_only_as_empty() {
-        for ss in [SessionStartContext::Accepted, SessionStartContext::Rejected] {
-            assert!(emit_hook_context("UserPromptSubmit", "\n\n", "", ss).is_empty());
-            assert!(emit_hook_context("SessionStart", "   ", "", ss).is_empty());
-            assert!(emit_hook_context("PreToolUse", "", " \n", ss).is_empty());
-        }
-    }
-
-    use proptest::prelude::*;
-
-    proptest! {
-        // The header labels the memory exactly when memory has text, and the memory is the last
-        // text in the envelope, so no notice can follow it unlabeled (#2754).
-        #[test]
-        fn memory_is_labelled_once_and_ends_the_context(
-            memory in "[ -~\n]{0,80}",
-            notes in "[ -~\n]{0,80}",
-        ) {
-            let out = emit_hook_context("UserPromptSubmit", &memory, &notes, SessionStartContext::Accepted);
-            let ctx = additional_context(&out);
-            let labels = ctx.matches("[ICM MEMORY CONTEXT (auto-injected)]").count();
-            prop_assert_eq!(labels, usize::from(!memory.trim().is_empty()));
-            if memory.trim().is_empty() && notes.trim().is_empty() {
-                prop_assert!(out.is_empty());
-            }
-            if !memory.trim().is_empty() {
-                prop_assert!(ctx.ends_with(&memory));
-            }
-        }
-    }
-
-    fn additional_context(out: &str) -> String {
-        // Invalid JSON yields Null here, so the assertion that follows fails with the output.
-        let value: serde_json::Value = serde_json::from_str(out).unwrap_or_default();
-        value["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string()
-    }
-
-    // #2754: only ICM memory carries the ICM header. llmenv notes go out unlabeled.
-    #[test]
-    fn notes_go_out_without_the_icm_header() {
-        let out = emit_hook_context(
-            "PreToolUse",
-            "",
-            "note: this command changes the working directory",
-            SessionStartContext::Accepted,
-        );
-        assert_eq!(
-            additional_context(&out),
-            "note: this command changes the working directory"
-        );
-    }
-
-    #[test]
-    fn memory_is_labelled_and_the_notes_follow_it() {
-        let out = emit_hook_context(
-            "UserPromptSubmit",
-            "recalled fact",
-            "note: budget",
-            SessionStartContext::Accepted,
-        );
-        assert_eq!(
-            additional_context(&out),
-            "note: budget\n\n[ICM MEMORY CONTEXT (auto-injected)]\nrecalled fact"
-        );
-    }
-
-    // #2142: per event and per engine capability, the header that wraps the
-    // text, or `None` for no output.
-    #[test]
-    fn emit_hook_context_event_table() {
-        use SessionStartContext::{Accepted, Rejected};
-        let cases = [
-            (
-                "SessionStart",
-                Accepted,
-                Some("[ICM MEMORY CONTEXT (session start)]"),
-            ),
-            ("SessionStart", Rejected, None),
-            ("SessionEnd", Accepted, None),
-            ("SessionEnd", Rejected, None),
-            (
-                "UserPromptSubmit",
-                Accepted,
-                Some("[ICM MEMORY CONTEXT (auto-injected)]"),
-            ),
-            (
-                "UserPromptSubmit",
-                Rejected,
-                Some("[ICM MEMORY CONTEXT (auto-injected)]"),
-            ),
-        ];
-        for (event, ss, header) in cases {
-            let out = emit_hook_context(event, "body", "", ss);
-            match header {
-                None => assert_eq!(out, "", "{event} {ss:?}"),
-                Some(header) => {
-                    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-                    assert_eq!(v["hookSpecificOutput"]["hookEventName"], event);
-                    assert_eq!(
-                        v["hookSpecificOutput"]["additionalContext"],
-                        format!("{header}\nbody"),
-                        "{event} {ss:?}"
-                    );
-                }
-            }
-        }
     }
 
     #[test]
@@ -1161,3 +1049,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod hook_context_tests;
