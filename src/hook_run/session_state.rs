@@ -3,7 +3,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::materialize::cache::{AgeSource, file_stamp};
@@ -249,10 +249,16 @@ fn reset_read_state(state_dir: &Path, session_id: &str) {
 /// The compaction reset for the session `session_id`, when the engine sent one. A state dir that
 /// cannot be found is an agent notice, because the engine drops hook stderr.
 pub(crate) fn reset_read_state_after_compaction(session_id: Option<&str>) {
+    reset_after_compaction_in(session_id, crate::paths::state_dir());
+}
+
+/// [`reset_read_state_after_compaction`] with the state dir already resolved. Tests pass the dir
+/// in, because the real one comes from the process environment.
+fn reset_after_compaction_in(session_id: Option<&str>, state_dir: anyhow::Result<PathBuf>) {
     let Some(session_id) = session_id else {
         return;
     };
-    match crate::paths::state_dir() {
+    match state_dir {
         Ok(state_dir) => reset_read_state(&state_dir, session_id),
         Err(e) => crate::agent_notice::record_logged(format!(
             "llmenv: the read state was not reset after compaction, because no state dir could be \
@@ -381,3 +387,7 @@ pub(crate) fn unix_now() -> i64 {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod reset_tests;

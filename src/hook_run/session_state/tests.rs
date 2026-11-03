@@ -82,29 +82,6 @@ fn a_lock_whose_age_cannot_be_read_is_kept() {
     );
 }
 
-#[cfg(unix)]
-#[test]
-fn a_failed_read_state_reset_is_an_agent_notice() {
-    use std::os::unix::fs::PermissionsExt as _;
-    let dir = TempDir::new().expect("test");
-    let cache = super::super::read_once::session_cache_path(dir.path(), "s1");
-    std::fs::create_dir_all(cache.parent().expect("test")).expect("test");
-    std::fs::write(&cache, "{}").expect("test");
-    let folder = cache.parent().expect("test").to_path_buf();
-    // A read-only folder refuses the unlink, so the read state survives the reset.
-    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).expect("test");
-
-    reset_read_state(dir.path(), "s1");
-
-    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).expect("test");
-    assert!(cache.exists());
-    let notices = crate::agent_notice::current().unwrap_or_default();
-    assert!(
-        notices.contains(&cache.display().to_string()) && notices.contains("Fix:"),
-        "{notices}"
-    );
-}
-
 proptest::proptest! {
     #![proptest_config(proptest::prelude::ProptestConfig::with_cases(32))]
 
@@ -259,28 +236,6 @@ fn a_file_at_the_limit_is_kept() {
 fn missing_dir_is_a_noop() {
     let dir = TempDir::new().expect("test");
     prune_stale_json_files_with(&dir.path().join("does-not-exist"), 7, AgeSource::MtimeOnly);
-}
-
-#[test]
-fn reset_read_state_removes_both_files_of_one_session_only() {
-    let dir = TempDir::new().expect("test");
-    let own = [
-        super::super::read_once::session_cache_path(dir.path(), "s1"),
-        super::super::slippage::stats_path(dir.path(), "s1"),
-        super::super::repeat_detect::session_state_path(dir.path(), "s1"),
-    ];
-    let other = super::super::read_once::session_cache_path(dir.path(), "s2");
-    for p in own.iter().chain([&other]) {
-        std::fs::create_dir_all(p.parent().expect("test")).expect("test");
-        std::fs::write(p, "{}").expect("test");
-    }
-
-    reset_read_state(dir.path(), "s1");
-
-    assert!(own.iter().all(|p| !p.exists()), "own state must go");
-    assert!(other.exists(), "another session's state must stay");
-    reset_read_state(dir.path(), "s1");
-    reset_read_state(dir.path(), "../escape");
 }
 
 #[test]
