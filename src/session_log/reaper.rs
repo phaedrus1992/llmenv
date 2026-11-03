@@ -12,18 +12,19 @@ use std::time::{Duration, SystemTime};
 
 use crate::materialize::cache::{AgeSource, file_stamp};
 
-/// Garbage-collect the session-log file at `log_path` when its mtime is older
-/// than `retention_days`. Best-effort: failures are logged at `error!` and
-/// dropped — session logging never fails a launch.
+/// Garbage-collect the session-log file at `log_path` when its age is past
+/// `retention_days`. The age is the newer of its mtime and its change time.
+/// Best-effort: failures are logged at `error!` and dropped — session logging
+/// never fails a launch.
 ///
 /// The directory `log_path` lives in is cleaned up (removed if empty) after
 /// deletion to prevent accumulation of empty state directories.
 ///
 /// # Effects
-/// Deletes the file on disk. No-op when the file does not exist, when its mtime
-/// cannot be read (logged at `error!` and noticed), or when retention is zero (guarded by caller — the config
-/// validator rejects `retention_days: 0`, but this function still handles it
-/// defensively).
+/// Deletes the file on disk. No-op when the file does not exist, when its age
+/// cannot be read or the removal fails (both logged at `error!` and noticed), or
+/// when retention is zero. The config validator rejects `retention_days: 0`, but
+/// this function still handles it defensively.
 pub(crate) fn reap_session_log(log_path: &Path, retention_days: u64) {
     reap_session_log_with(log_path, retention_days, AgeSource::MtimeOrCtime);
 }
@@ -53,7 +54,13 @@ fn reap_session_log_with(log_path: &Path, retention_days: u64, source: AgeSource
         return;
     }
     if let Err(e) = std::fs::remove_file(log_path) {
+        // Hook stderr is dropped, so the agent gets a notice as well as the error log.
         tracing::error!("session_log reaper: failed to remove {log_path:?}: {e}");
+        crate::agent_notice::record_logged(format!(
+            "llmenv: the session log reaper could not remove {} ({e}), so it stays on disk. Fix: \
+             check the permissions of that file and its folder.",
+            log_path.display()
+        ));
         return;
     }
     tracing::info!(
@@ -63,10 +70,7 @@ fn reap_session_log_with(log_path: &Path, retention_days: u64, source: AgeSource
     );
     // Best-effort cleanup of the parent directory if it became empty.
     if let Some(parent) = log_path.parent()
-        && parent
-            .read_dir()
-            .map(|mut it| it.next().is_none())
-            .unwrap_or(false)
+        && dir_is_empty(parent)
     {
         // A non-empty parent is the normal case and is kept quietly. Any other failure is logged.
         if let Err(e) = std::fs::remove_dir(parent)
@@ -77,8 +81,20 @@ fn reap_session_log_with(log_path: &Path, retention_days: u64, source: AgeSource
     }
 }
 
-/// The age of the file at `path`. `None` for a missing file, and for an mtime in the
-/// future, which is kept rather than deleted.
+/// Whether `dir` has no entries. A read error is logged and counts as not empty, so the
+/// folder is kept.
+fn dir_is_empty(dir: &Path) -> bool {
+    match dir.read_dir() {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(e) => {
+            tracing::error!("cannot read session log dir {}: {e}", dir.display());
+            false
+        }
+    }
+}
+
+/// The age of the file at `path`. `None` for a missing file, and for a stamp in the
+/// future, which is kept rather than deleted and logged as clock skew.
 fn log_age(path: &Path, source: AgeSource) -> std::io::Result<Option<Duration>> {
     // `symlink_metadata` reads the link itself, because the reaper removes the link, not its target.
     // The newer of mtime and change time decides, as in the state sweeps (#3275). A restore with an
@@ -88,7 +104,17 @@ fn log_age(path: &Path, source: AgeSource) -> std::io::Result<Option<Duration>> 
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
-    Ok(SystemTime::now().duration_since(stamp).ok())
+    match SystemTime::now().duration_since(stamp) {
+        Ok(age) => Ok(Some(age)),
+        Err(_) => {
+            // Hooks keep only ERROR-level logs, so the skew is logged at that level.
+            tracing::error!(
+                path = %path.display(),
+                "session log has a future modified time (clock skew); it is kept"
+            );
+            Ok(None)
+        }
+    }
 }
 
 #[cfg(test)]
