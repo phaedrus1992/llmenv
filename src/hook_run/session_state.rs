@@ -220,7 +220,7 @@ pub(crate) fn context_was_lost(source: Option<&str>) -> bool {
 /// The model also cannot remember the earlier calls, so a stale repeat counter
 /// would warn about a call that is new to it.
 /// Fail-soft: a file that cannot be removed is logged and the hook goes on.
-pub(crate) fn reset_read_state(state_dir: &Path, session_id: &str) {
+fn reset_read_state(state_dir: &Path, session_id: &str) {
     if !crate::paths::is_valid_short_name(session_id) {
         crate::agent_notice::record_logged(format!(
             "llmenv: the read state was not reset, because the session id {session_id:?} is not \
