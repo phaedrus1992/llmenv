@@ -20,10 +20,7 @@ use crate::config::{
     Capabilities, CodebaseMemory, Features, Memory, NativePermissionRules, PermissionPreset,
     PermissionRule, Permissions, Throttle,
 };
-use crate::merge::precedence::{
-    highest_precedence, merge_native_feature, merge_native_flat, resolve_default_mode,
-    resolve_per_key,
-};
+use crate::merge::precedence::{highest_precedence, merge_native_feature, resolve_per_key};
 use crate::util::dedup;
 
 /// A single source of capability fragments. `precedence` encodes scope rank
@@ -122,13 +119,15 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         dedup(&mut rules.deny);
     }
 
-    let default_mode = resolve_default_mode(contributors)?;
+    let default_mode = highest_precedence(contributors, "default_mode", |c| {
+        c.permissions.default_mode.as_ref()
+    })?;
     let native_hooks = merge_native_feature(contributors, |c| &c.native_hooks);
     let native_plugins = merge_native_feature(contributors, |c| &c.native_plugins);
     let native_mcp = merge_native_feature(contributors, |c| &c.native_mcp);
     let native_model_providers = merge_native_feature(contributors, |c| &c.native_model_providers);
     let native_default_models = merge_native_feature(contributors, |c| &c.native_default_models);
-    let native = merge_native_flat(contributors);
+    let native = merge_native_feature(contributors, |c| &c.native);
     let host = resolve_per_key(contributors, "host entry", |c| &c.host)?;
 
     // Scalar resolution: highest precedence wins (not positional order), via
@@ -689,6 +688,22 @@ mod tests {
     }
 
     // #355: same-precedence, same-value agreement must not error.
+    // A tie below the winning tier is still a conflict, whatever the input order.
+    #[test]
+    fn a_tie_below_the_winning_tier_errors_in_any_order() {
+        let build = || {
+            [
+                contributor("a", 1, with_mode(PermissionMode::Default)),
+                contributor("b", 1, with_mode(PermissionMode::AcceptEdits)),
+                contributor("c", 5, with_mode(PermissionMode::Plan)),
+            ]
+        };
+        let [a, b, c] = build();
+        assert!(merge_capabilities(&[a, b, c]).is_err());
+        let [a, b, c] = build();
+        assert!(merge_capabilities(&[c, a, b]).is_err());
+    }
+
     #[test]
     fn env_same_precedence_same_value_is_ok() {
         let a = contributor("a", 3, with_env(&[("KEY", "shared")]));

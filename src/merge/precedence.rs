@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::config::{Capabilities, PermissionMode};
+use crate::config::Capabilities;
 use crate::merge::capabilities::CapabilityContributor;
 use crate::util::{merge_yaml, normalize_yaml};
 
@@ -41,60 +41,52 @@ pub(super) fn merge_native_feature(
     merged
 }
 
+/// Fail when two entries at the same precedence hold different values.
+///
+/// Every pair is checked, at every precedence tier. A tie below the winning tier is still a
+/// conflict, so the result does not depend on the order of the contributors (#3329 review).
+fn check_same_precedence_ties<V: PartialEq + std::fmt::Debug>(
+    what: &str,
+    entries: &[(&CapabilityContributor, &V)],
+) -> anyhow::Result<()> {
+    for (i, (a, a_value)) in entries.iter().enumerate() {
+        for (b, b_value) in &entries[i + 1..] {
+            if a.precedence == b.precedence && a_value != b_value {
+                anyhow::bail!(
+                    "conflicting {what} at the same precedence: \
+                     '{}' sets {a_value:?} but '{}' sets {b_value:?} — no scope can break \
+                     the tie; resolve by giving one a higher-precedence scope",
+                    a.name,
+                    b.name,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Resolve a scalar `Capabilities`/`features.*` field by highest-precedence-wins:
 /// the value from the contributor with the highest `precedence` that set it
 /// (#1023/#1025 — shared by the scalar fields that all followed this same
 /// filter_map/max_by_key pattern, at both the `Capabilities` and `Features` level).
 ///
-/// Same-precedence disagreement is a hard error naming both contributors,
-/// matching [`resolve_default_mode`]'s policy and the module doc comment's
-/// promise for every scalar (#1215 — this helper used to pick the last-seen
-/// value silently instead, an undocumented, iteration-order-dependent
-/// divergence from that promise).
+/// Same-precedence disagreement is a hard error naming both contributors, for every
+/// scalar (#1215 — this helper used to pick the last-seen value silently instead, an
+/// undocumented, iteration-order-dependent divergence from that promise).
 pub(super) fn highest_precedence<T: Clone + PartialEq + std::fmt::Debug>(
     contributors: &[CapabilityContributor],
     field_name: &str,
     pick: impl Fn(&Capabilities) -> Option<&T>,
 ) -> anyhow::Result<Option<T>> {
-    let mut winner: Option<(&CapabilityContributor, T)> = None;
-    for c in contributors {
-        let Some(v) = pick(&c.capabilities) else {
-            continue;
-        };
-        let v = v.clone();
-        match winner {
-            None => winner = Some((c, v)),
-            Some((prev_c, prev_v)) => {
-                if c.precedence > prev_c.precedence {
-                    winner = Some((c, v));
-                } else if c.precedence == prev_c.precedence && v != prev_v {
-                    anyhow::bail!(
-                        "conflicting {field_name} at the same precedence: \
-                         '{}' sets {prev_v:?} but '{}' sets {v:?} — no scope can break \
-                         the tie; resolve by giving one a higher-precedence scope",
-                        prev_c.name,
-                        c.name,
-                    );
-                } else {
-                    winner = Some((prev_c, prev_v));
-                }
-            }
-        }
-    }
-    Ok(winner.map(|(_, v)| v))
-}
-
-/// Merge the flat `native:` map across all contributors.
-///
-/// The flat `native:` map has the same structure as per-engine maps: each
-/// top-level key is deep-merged ([`merge_yaml`]) across contributors in
-/// ascending precedence order so the highest-precedence contributor wins on any
-/// scalar collision.  Delegates to [`merge_native_feature`] with the `native`
-/// field accessor.
-pub(super) fn merge_native_flat(
-    contributors: &[CapabilityContributor],
-) -> BTreeMap<String, serde_yaml::Value> {
-    merge_native_feature(contributors, |c| &c.native)
+    let entries: Vec<(&CapabilityContributor, &T)> = contributors
+        .iter()
+        .filter_map(|c| pick(&c.capabilities).map(|v| (c, v)))
+        .collect();
+    check_same_precedence_ties(field_name, &entries)?;
+    Ok(entries
+        .iter()
+        .max_by_key(|(c, _)| c.precedence)
+        .map(|(_, v)| (*v).clone()))
 }
 
 /// Merge one map field across contributors: per key, the highest-precedence
@@ -105,66 +97,18 @@ pub(super) fn resolve_per_key<V: Clone + PartialEq + std::fmt::Debug>(
     label: &str,
     pick: impl Fn(&Capabilities) -> &BTreeMap<String, V>,
 ) -> anyhow::Result<BTreeMap<String, V>> {
-    let mut result: BTreeMap<String, (&CapabilityContributor, &V)> = BTreeMap::new();
+    let mut by_key: BTreeMap<&String, Vec<(&CapabilityContributor, &V)>> = BTreeMap::new();
     for c in contributors {
         for (key, value) in pick(&c.capabilities) {
-            match result.get(key) {
-                Some((prev_c, _)) if c.precedence < prev_c.precedence => {}
-                Some((prev_c, prev_value)) if c.precedence == prev_c.precedence => {
-                    if value != *prev_value {
-                        anyhow::bail!(
-                            "conflicting {label} '{key}' at the same precedence: \
-                             '{}' sets {:?} but '{}' sets {:?} — no scope can break \
-                             the tie; resolve by giving one a higher-precedence scope",
-                            prev_c.name,
-                            prev_value,
-                            c.name,
-                            value,
-                        );
-                    }
-                }
-                _ => {
-                    result.insert(key.clone(), (c, value));
-                }
-            }
+            by_key.entry(key).or_default().push((c, value));
         }
     }
-    Ok(result
-        .into_iter()
-        .map(|(k, (_, v))| (k, v.clone()))
-        .collect())
-}
-
-/// Resolve the `default_mode` scalar across contributors: highest precedence
-/// wins; same-precedence disagreement is a hard error.
-pub(super) fn resolve_default_mode(
-    contributors: &[CapabilityContributor],
-) -> anyhow::Result<Option<PermissionMode>> {
-    let mut winner: Option<(&CapabilityContributor, PermissionMode)> = None;
-    for c in contributors {
-        let Some(mode) = c.capabilities.permissions.default_mode else {
-            continue;
-        };
-        match winner {
-            None => winner = Some((c, mode)),
-            Some((prev_c, prev_mode)) => {
-                if c.precedence > prev_c.precedence {
-                    winner = Some((c, mode));
-                } else if c.precedence == prev_c.precedence && mode != prev_mode {
-                    anyhow::bail!(
-                        "conflicting default_mode at the same precedence: \
-                         '{}' sets {:?} but '{}' sets {:?} — no scope can break \
-                         the tie; resolve by giving one a higher-precedence scope",
-                        prev_c.name,
-                        prev_mode,
-                        c.name,
-                        mode,
-                    );
-                }
-                // c.precedence < prev: prev keeps winning. c.precedence == prev
-                // with equal value: agreement, no-op.
-            }
+    let mut result = BTreeMap::new();
+    for (key, entries) in by_key {
+        check_same_precedence_ties(&format!("{label} '{key}'"), &entries)?;
+        if let Some((_, value)) = entries.iter().max_by_key(|(c, _)| c.precedence) {
+            result.insert(key.clone(), (*value).clone());
         }
     }
-    Ok(winner.map(|(_, mode)| mode))
+    Ok(result)
 }
