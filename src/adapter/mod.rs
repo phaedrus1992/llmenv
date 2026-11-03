@@ -388,7 +388,7 @@ pub(crate) enum SessionStartContext {
 /// * `notes` — llmenv notices. They go out unlabeled.
 /// * `session_start` — whether the engine accepts `SessionStart` context.
 #[must_use]
-pub(crate) fn emit_hook_context(
+fn emit_hook_context(
     hook_event_name: &str,
     memory: &str,
     notes: &str,
