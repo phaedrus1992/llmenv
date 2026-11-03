@@ -1123,13 +1123,8 @@ fn run_inner(
 
     // #2381: a compaction empties the model's context, so the per-session "already read" state
     // must go before the first Read or Edit of the new context.
-    if resets_read_state(event, stdin_payload)
-        && let Some(session_id) = claude_session_id
-    {
-        match crate::paths::state_dir() {
-            Ok(state_dir) => session_state::reset_read_state(&state_dir, session_id),
-            Err(e) => tracing::error!("no state dir, read state not reset after compaction: {e}"),
-        }
+    if resets_read_state(event, stdin_payload) {
+        session_state::reset_read_state_after_compaction(claude_session_id);
     }
 
     let pre_tool_text = if event == HookEvent::PreToolUse {

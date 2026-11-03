@@ -74,7 +74,9 @@ pub(crate) fn lock_state_file_timed(
             Ok(()) => {
                 timing.wait_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
                 // Without a fresh age, the orphan prune can remove this live lock.
-                if let Err(why) = refresh_lock_age(&file, &path, label) {
+                if let Err(why) = refresh_lock_age(&file, &path) {
+                    // Each caller falls back on a missing lock, so the agent must hear the cause here.
+                    crate::agent_notice::record_logged(why.clone());
                     return (Err(why), timing);
                 }
                 return (Ok(file), timing);
@@ -82,13 +84,18 @@ pub(crate) fn lock_state_file_timed(
             Err(std::fs::TryLockError::WouldBlock) => std::thread::sleep(LOCK_POLL),
             Err(e) => {
                 timing.wait_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
-                return (Err(format!("cannot lock {}: {e}", path.display())), timing);
+                let why = format!(
+                    "cannot lock {}: {e}. Fix: check the permissions of that file and its folder.",
+                    path.display()
+                );
+                return (Err(why), timing);
             }
         }
     }
     timing.wait_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
     let why = format!(
-        "{} stays locked by another hook of this session",
+        "{} stays locked by another hook of this session. Fix: wait for that hook to finish, or \
+         end the session that holds it",
         path.display()
     );
     (Err(why), timing)
@@ -98,12 +105,12 @@ pub(crate) fn lock_state_file_timed(
 ///
 /// # Errors
 /// Returns the lock path, the cause, and a fix line when the time cannot be set.
-fn refresh_lock_age(file: &File, path: &Path, label: &str) -> Result<(), String> {
+fn refresh_lock_age(file: &File, path: &Path) -> Result<(), String> {
     file.set_modified(std::time::SystemTime::now())
         .map_err(|e| {
             format!(
-                "cannot refresh the age of the {label} lock {} ({e}). Fix: check the permissions \
-             of that file and its folder, or run `llmenv doctor` to check the state directory.",
+                "cannot refresh the age of the lock {} ({e}). Fix: check the permissions of that \
+                 file and its folder, or run `llmenv doctor` to check the state directory.",
                 path.display()
             )
         })
@@ -163,17 +170,15 @@ fn file_age(path: &Path, source: AgeSource) -> std::io::Result<Option<Duration>>
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
-    match stamp.elapsed() {
-        Ok(age) => Ok(Some(age)),
-        Err(_) => {
-            // The file is kept, as with any fresh write. The log shows why its age is zero.
-            tracing::warn!(
-                path = %path.display(),
-                "modified time is in the future (clock skew); the file is kept"
-            );
-            Ok(Some(Duration::ZERO))
-        }
-    }
+    // Hooks keep only ERROR-level logs, so the skew is logged at that level.
+    let age = stamp.elapsed().unwrap_or_else(|_| {
+        tracing::error!(
+            path = %path.display(),
+            "modified time is in the future (clock skew); the file is kept"
+        );
+        Duration::ZERO
+    });
+    Ok(Some(age))
 }
 
 /// Logs a state-file pruning failure at error level, which the default filter shows, and
@@ -217,7 +222,10 @@ pub(crate) fn context_was_lost(source: Option<&str>) -> bool {
 /// Fail-soft: a file that cannot be removed is logged and the hook goes on.
 pub(crate) fn reset_read_state(state_dir: &Path, session_id: &str) {
     if !crate::paths::is_valid_short_name(session_id) {
-        tracing::debug!("reset_read_state: session id is not a valid state file name, skipped");
+        crate::agent_notice::record_logged(format!(
+            "llmenv: the read state was not reset, because the session id {session_id:?} is not \
+             a plain name. Fix: check the session id that the engine sends to the hook."
+        ));
         return;
     }
     for path in [
@@ -235,6 +243,21 @@ pub(crate) fn reset_read_state(state_dir: &Path, session_id: &str) {
                 path.display()
             ));
         }
+    }
+}
+
+/// The compaction reset for the session `session_id`, when the engine sent one. A state dir that
+/// cannot be found is an agent notice, because the engine drops hook stderr.
+pub(crate) fn reset_read_state_after_compaction(session_id: Option<&str>) {
+    let Some(session_id) = session_id else {
+        return;
+    };
+    match crate::paths::state_dir() {
+        Ok(state_dir) => reset_read_state(&state_dir, session_id),
+        Err(e) => crate::agent_notice::record_logged(format!(
+            "llmenv: the read state was not reset after compaction, because no state dir could be \
+             found ({e}). Fix: set the state directory, or run `llmenv doctor` to check the paths."
+        )),
     }
 }
 

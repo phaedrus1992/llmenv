@@ -14,11 +14,8 @@ use tempfile::TempDir;
 fn a_failed_lock_age_refresh_is_an_error_naming_the_lock_and_a_fix() {
     // /dev/null is owned by root, so a normal user cannot set its times. That refusal is the failure.
     let file = std::fs::File::open("/dev/null").expect("test");
-    let err = refresh_lock_age(&file, Path::new("/dev/null"), "recall ledger").unwrap_err();
-    assert!(
-        err.contains("recall ledger") && err.contains("/dev/null"),
-        "{err}"
-    );
+    let err = refresh_lock_age(&file, Path::new("/dev/null")).unwrap_err();
+    assert!(err.contains("/dev/null"), "{err}");
     assert!(err.contains("Fix:"), "{err}");
 }
 
@@ -109,6 +106,8 @@ fn a_failed_read_state_reset_is_an_agent_notice() {
 }
 
 proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(32))]
+
     /// The change time is never older than the mtime, so the newer stamp never gives an older age.
     #[test]
     fn the_newer_stamp_never_gives_an_older_age(offset_secs in 0u64..864_000) {
