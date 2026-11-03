@@ -17,10 +17,11 @@
 use std::collections::BTreeMap;
 
 use crate::config::{
-    Capabilities, CodebaseMemory, Features, Memory, NativePermissionRules, PermissionMode,
-    PermissionPreset, PermissionRule, Permissions, Throttle,
+    Capabilities, CodebaseMemory, Features, Memory, NativePermissionRules, PermissionPreset,
+    PermissionRule, Permissions, Throttle,
 };
-use crate::util::{dedup, merge_yaml, normalize_yaml};
+use crate::merge::precedence::{highest_precedence, merge_native_feature, resolve_per_key};
+use crate::util::dedup;
 
 /// A single source of capability fragments. `precedence` encodes scope rank
 /// (higher wins for scalars); `name` is used only in collision errors.
@@ -118,13 +119,15 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         dedup(&mut rules.deny);
     }
 
-    let default_mode = resolve_default_mode(contributors)?;
+    let default_mode = highest_precedence(contributors, "default_mode", |c| {
+        c.permissions.default_mode.as_ref()
+    })?;
     let native_hooks = merge_native_feature(contributors, |c| &c.native_hooks);
     let native_plugins = merge_native_feature(contributors, |c| &c.native_plugins);
     let native_mcp = merge_native_feature(contributors, |c| &c.native_mcp);
     let native_model_providers = merge_native_feature(contributors, |c| &c.native_model_providers);
     let native_default_models = merge_native_feature(contributors, |c| &c.native_default_models);
-    let native = merge_native_flat(contributors);
+    let native = merge_native_feature(contributors, |c| &c.native);
     let host = resolve_per_key(contributors, "host entry", |c| &c.host)?;
 
     // Scalar resolution: highest precedence wins (not positional order), via
@@ -311,172 +314,13 @@ fn safe_readonly_deny_rules_for(preset: PermissionPreset) -> Vec<PermissionRule>
         ],
     }
 }
-
-/// Merge one of the per-engine opaque `native_*` maps across all contributors.
-///
-/// Each engine's fragment is deep-merged ([`merge_yaml`]) in ascending
-/// precedence order so the highest-precedence contributor wins on any scalar
-/// collision (sequences concat, mappings union — see `merge_yaml`).
-fn merge_native_feature(
-    contributors: &[CapabilityContributor],
-    select: impl Fn(&Capabilities) -> &BTreeMap<String, serde_yaml::Value>,
-) -> BTreeMap<String, serde_yaml::Value> {
-    let mut ordered: Vec<&CapabilityContributor> = contributors.iter().collect();
-    ordered.sort_by_key(|c| c.precedence);
-
-    let mut merged: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
-    for c in ordered {
-        for (engine, fragment) in select(&c.capabilities) {
-            match merged.get_mut(engine) {
-                Some(existing) => merge_yaml(existing, fragment.clone()),
-                None => {
-                    // Normalize on first insert so the result matches what the
-                    // merge path produces — otherwise a fragment with duplicate
-                    // sequence elements keeps them on insert but loses them on a
-                    // later merge, making this function non-idempotent.
-                    let mut fragment = fragment.clone();
-                    normalize_yaml(&mut fragment);
-                    merged.insert(engine.clone(), fragment);
-                }
-            }
-        }
-    }
-    merged
-}
-
-/// Resolve a scalar `Capabilities`/`features.*` field by highest-precedence-wins:
-/// the value from the contributor with the highest `precedence` that set it
-/// (#1023/#1025 — shared by the scalar fields that all followed this same
-/// filter_map/max_by_key pattern, at both the `Capabilities` and `Features` level).
-///
-/// Same-precedence disagreement is a hard error naming both contributors,
-/// matching [`resolve_default_mode`]'s policy and the module doc comment's
-/// promise for every scalar (#1215 — this helper used to pick the last-seen
-/// value silently instead, an undocumented, iteration-order-dependent
-/// divergence from that promise).
-fn highest_precedence<T: Clone + PartialEq + std::fmt::Debug>(
-    contributors: &[CapabilityContributor],
-    field_name: &str,
-    pick: impl Fn(&Capabilities) -> Option<&T>,
-) -> anyhow::Result<Option<T>> {
-    let mut winner: Option<(&CapabilityContributor, T)> = None;
-    for c in contributors {
-        let Some(v) = pick(&c.capabilities) else {
-            continue;
-        };
-        let v = v.clone();
-        match winner {
-            None => winner = Some((c, v)),
-            Some((prev_c, prev_v)) => {
-                if c.precedence > prev_c.precedence {
-                    winner = Some((c, v));
-                } else if c.precedence == prev_c.precedence && v != prev_v {
-                    anyhow::bail!(
-                        "conflicting {field_name} at the same precedence: \
-                         '{}' sets {prev_v:?} but '{}' sets {v:?} — no scope can break \
-                         the tie; resolve by giving one a higher-precedence scope",
-                        prev_c.name,
-                        c.name,
-                    );
-                } else {
-                    winner = Some((prev_c, prev_v));
-                }
-            }
-        }
-    }
-    Ok(winner.map(|(_, v)| v))
-}
-
-/// Merge the flat `native:` map across all contributors.
-///
-/// The flat `native:` map has the same structure as per-engine maps: each
-/// top-level key is deep-merged ([`merge_yaml`]) across contributors in
-/// ascending precedence order so the highest-precedence contributor wins on any
-/// scalar collision.  Delegates to [`merge_native_feature`] with the `native`
-/// field accessor.
-fn merge_native_flat(
-    contributors: &[CapabilityContributor],
-) -> BTreeMap<String, serde_yaml::Value> {
-    merge_native_feature(contributors, |c| &c.native)
-}
-
-/// Merge one map field across contributors: per key, the highest-precedence
-/// contributor wins. Same-precedence disagreement on one key is a hard error
-/// that names both contributors, the same policy as the scalar fields.
-fn resolve_per_key<V: Clone + PartialEq + std::fmt::Debug>(
-    contributors: &[CapabilityContributor],
-    label: &str,
-    pick: impl Fn(&Capabilities) -> &BTreeMap<String, V>,
-) -> anyhow::Result<BTreeMap<String, V>> {
-    let mut result: BTreeMap<String, (&CapabilityContributor, &V)> = BTreeMap::new();
-    for c in contributors {
-        for (key, value) in pick(&c.capabilities) {
-            match result.get(key) {
-                Some((prev_c, _)) if c.precedence < prev_c.precedence => {}
-                Some((prev_c, prev_value)) if c.precedence == prev_c.precedence => {
-                    if value != *prev_value {
-                        anyhow::bail!(
-                            "conflicting {label} '{key}' at the same precedence: \
-                             '{}' sets {:?} but '{}' sets {:?} — no scope can break \
-                             the tie; resolve by giving one a higher-precedence scope",
-                            prev_c.name,
-                            prev_value,
-                            c.name,
-                            value,
-                        );
-                    }
-                }
-                _ => {
-                    result.insert(key.clone(), (c, value));
-                }
-            }
-        }
-    }
-    Ok(result
-        .into_iter()
-        .map(|(k, (_, v))| (k, v.clone()))
-        .collect())
-}
-
-/// Resolve the `default_mode` scalar across contributors: highest precedence
-/// wins; same-precedence disagreement is a hard error.
-fn resolve_default_mode(
-    contributors: &[CapabilityContributor],
-) -> anyhow::Result<Option<PermissionMode>> {
-    let mut winner: Option<(&CapabilityContributor, PermissionMode)> = None;
-    for c in contributors {
-        let Some(mode) = c.capabilities.permissions.default_mode else {
-            continue;
-        };
-        match winner {
-            None => winner = Some((c, mode)),
-            Some((prev_c, prev_mode)) => {
-                if c.precedence > prev_c.precedence {
-                    winner = Some((c, mode));
-                } else if c.precedence == prev_c.precedence && mode != prev_mode {
-                    anyhow::bail!(
-                        "conflicting default_mode at the same precedence: \
-                         '{}' sets {:?} but '{}' sets {:?} — no scope can break \
-                         the tie; resolve by giving one a higher-precedence scope",
-                        prev_c.name,
-                        prev_mode,
-                        c.name,
-                        mode,
-                    );
-                }
-                // c.precedence < prev: prev keeps winning. c.precedence == prev
-                // with equal value: agreement, no-op.
-            }
-        }
-    }
-    Ok(winner.map(|(_, mode)| mode))
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::config::{Hook, HookHandler, HookHandlerKind, PermissionPreset, PermissionRule};
+    use crate::config::{
+        Hook, HookHandler, HookHandlerKind, PermissionMode, PermissionPreset, PermissionRule,
+    };
 
     fn rule(tool: &str, pattern: &str) -> PermissionRule {
         PermissionRule {
@@ -844,6 +688,22 @@ mod tests {
     }
 
     // #355: same-precedence, same-value agreement must not error.
+    // A tie below the winning tier is still a conflict, whatever the input order.
+    #[test]
+    fn a_tie_below_the_winning_tier_errors_in_any_order() {
+        let build = || {
+            [
+                contributor("a", 1, with_mode(PermissionMode::Default)),
+                contributor("b", 1, with_mode(PermissionMode::AcceptEdits)),
+                contributor("c", 5, with_mode(PermissionMode::Plan)),
+            ]
+        };
+        let [a, b, c] = build();
+        assert!(merge_capabilities(&[a, b, c]).is_err());
+        let [a, b, c] = build();
+        assert!(merge_capabilities(&[c, a, b]).is_err());
+    }
+
     #[test]
     fn env_same_precedence_same_value_is_ok() {
         let a = contributor("a", 3, with_env(&[("KEY", "shared")]));
@@ -1205,6 +1065,24 @@ mod tests {
         // Varies engine names, precedence (1-10), and number of engines (0-3) to
         // exercise merge_native_flat across realistic multi-engine,
         // multi-precedence scenarios.
+        /// Contributors with unique names and precedences. Two contributors that share a
+        /// precedence and an env key conflict by design, so random ties made the merge fail.
+        fn arb_scoped_contributors(
+            len: std::ops::Range<usize>,
+        ) -> impl Strategy<Value = Vec<CapabilityContributor>> {
+            prop::collection::vec(arb_list_contributor(), len).prop_map(|contribs| {
+                contribs
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, mut c)| {
+                        c.name = format!("c{i}");
+                        c.precedence = u8::try_from(i + 1).unwrap_or(u8::MAX);
+                        c
+                    })
+                    .collect()
+            })
+        }
+
         fn arb_list_contributor() -> impl Strategy<Value = CapabilityContributor> {
             let arb_engine_entry =
                 ("[a-z_]{1,8}", "[a-z]{1,4}", "[a-z]{1,6}").prop_map(|(engine, key, val)| {
@@ -1281,7 +1159,7 @@ mod tests {
             // merge_capabilities as a single contributor changes nothing.
             #[test]
             fn merge_is_idempotent(
-                contribs in prop::collection::vec(arb_list_contributor(), 0..5)
+                contribs in arb_scoped_contributors(0..5)
             ) {
                 let once = merge_capabilities(&contribs).unwrap();
                 let again = merge_capabilities(&[CapabilityContributor {
@@ -1338,7 +1216,7 @@ mod tests {
             // may differ, but membership is invariant).
             #[test]
             fn list_union_is_order_independent(
-                contribs in prop::collection::vec(arb_list_contributor(), 0..5)
+                contribs in arb_scoped_contributors(0..5)
             ) {
                 let forward = merge_capabilities(&contribs).unwrap();
                 let mut reversed = contribs.clone();
@@ -1352,7 +1230,7 @@ mod tests {
             // Output lists carry no duplicates.
             #[test]
             fn merged_lists_have_no_duplicates(
-                contribs in prop::collection::vec(arb_list_contributor(), 0..5)
+                contribs in arb_scoped_contributors(0..5)
             ) {
                 let out = merge_capabilities(&contribs).unwrap();
                 let allow_len = out.permissions.allow.len();
@@ -1437,7 +1315,7 @@ mod tests {
             // retain every key across all contributors.
             #[test]
             fn env_merge_retains_all_keys(
-                contribs in prop::collection::vec(arb_list_contributor(), 2..5),
+                contribs in arb_scoped_contributors(2..5),
             ) {
                 let out = merge_capabilities(&contribs).unwrap();
                 let max_keys = contribs.iter().map(|c| c.capabilities.env.len()).max().unwrap_or(0);
@@ -1452,7 +1330,7 @@ mod tests {
             // #357: Capabilities with non-empty env survives JSON serde roundtrip.
             #[test]
             fn capabilities_env_serde_roundtrip(
-                contributors in prop::collection::vec(arb_list_contributor(), 0..5),
+                contributors in arb_scoped_contributors(0..5),
             ) {
                 // Merge first (the real usage path), then roundtrip the merged result.
                 let merged = merge_capabilities(&contributors).unwrap();

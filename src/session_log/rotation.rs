@@ -4,9 +4,6 @@
 //! one generation, so `<name>.1` holds the newest rotated lines.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
-
-use crate::materialize::cache::is_expired;
 
 /// Size at which the active file rotates. Each line is one hook event, so the cap bounds how
 /// much busy hooks add to one file (#2816).
@@ -65,7 +62,7 @@ const LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(10);
 ///
 /// # Errors
 /// The lock file cannot be opened, or the lock stays busy for the whole wait.
-fn rotation_lock(path: &Path) -> std::io::Result<std::fs::File> {
+pub(super) fn rotation_lock(path: &Path) -> std::io::Result<std::fs::File> {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(LOCK_SUFFIX);
     let mut opts = std::fs::OpenOptions::new();
@@ -117,122 +114,14 @@ fn ignore_missing(result: std::io::Result<()>) -> std::io::Result<()> {
     }
 }
 
-/// Remove the rotated files of `path` that were last written more than `older_than` ago. The
-/// active file is never removed. Returns the files that were removed (#2816). With `dry_run`, it
-/// returns the files that a real run removes, and removes none (#2917).
-///
-/// A file that cannot be removed does not stop the pass. The error names every file that failed,
-/// with the count of files that were removed.
-///
-/// # Errors
-/// Fails when the directory cannot be read, or when any rotated file could not be removed.
-pub(crate) fn prune_rotations(
-    path: &Path,
-    older_than: Duration,
-    dry_run: bool,
-) -> anyhow::Result<Vec<PathBuf>> {
-    let (Some(dir), Some(base)) = (path.parent(), path.file_name()) else {
-        return Ok(Vec::new());
-    };
-    let Some(entries) = crate::paths::read_dir_optional(dir)? else {
-        return Ok(Vec::new());
-    };
-    let now = SystemTime::now();
-    let mut failures = Vec::new();
-    let mut expired = Vec::new();
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(e) => {
-                failures.push(format!("an entry in {}: {e}", dir.display()));
-                continue;
-            }
-        };
-        if !is_rotation_of(&entry.file_name(), base) {
-            continue;
-        }
-        match is_old(&entry.path(), now, older_than) {
-            Ok(true) => expired.push(entry.path()),
-            Ok(false) => {}
-            Err(e) => failures.push(format!("{}: {e}", entry.path().display())),
-        }
-    }
-    let removed = if dry_run || expired.is_empty() {
-        expired
-    } else {
-        remove_under_lock(path, expired, now, older_than, &mut failures)?
-    };
-    if !failures.is_empty() {
-        anyhow::bail!(
-            "{} rotated session-log file(s) could not be checked or removed, {} removed: {}. \
-             Fix: check the permissions of the state directory",
-            failures.len(),
-            removed.len(),
-            failures.join("; ")
-        );
-    }
-    Ok(removed)
-}
-
-/// Whether the file at `path` was last written more than `older_than` before `now`.
-fn is_old(path: &Path, now: SystemTime, older_than: Duration) -> std::io::Result<bool> {
-    let modified = std::fs::symlink_metadata(path)?.modified()?;
-    Ok(is_expired(now, modified, older_than, path))
-}
-
-/// Remove each candidate under the rotation lock, after a second age check.
-///
-/// A rotation renames each generation up by one. Without the lock, a name judged old can name a
-/// newer file by the time it is removed. A file that is gone, or that is no longer old, stays out
-/// of the result.
-fn remove_under_lock(
-    path: &Path,
-    candidates: Vec<PathBuf>,
-    now: SystemTime,
-    older_than: Duration,
-    failures: &mut Vec<String>,
-) -> anyhow::Result<Vec<PathBuf>> {
-    let _lock = rotation_lock(path).map_err(|e| {
-        anyhow::anyhow!(
-            "cannot lock {} to prune its rotations: {e}. Fix: run llmenv clean again when no \
-             rotation is in progress",
-            path.display()
-        )
-    })?;
-    let mut removed = Vec::new();
-    for candidate in candidates {
-        match is_old(&candidate, now, older_than) {
-            Ok(true) => {}
-            Ok(false) => continue,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => {
-                failures.push(format!("{}: {e}", candidate.display()));
-                continue;
-            }
-        }
-        match std::fs::remove_file(&candidate) {
-            Ok(()) => removed.push(candidate),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => failures.push(format!("{}: {e}", candidate.display())),
-        }
-    }
-    Ok(removed)
-}
-
-/// Whether `name` is `<base>.<digits>`, the name of a rotated file.
-fn is_rotation_of(name: &std::ffi::OsStr, base: &std::ffi::OsStr) -> bool {
-    let (Some(name), Some(base)) = (name.to_str(), base.to_str()) else {
-        return false;
-    };
-    name.strip_prefix(base)
-        .and_then(|rest| rest.strip_prefix('.'))
-        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::time::{Duration, SystemTime};
+
+    use crate::materialize::cache::AgeSource;
+    use crate::session_log::prune::{Expiry, is_rotation_of, prune_rotations, remove_under_lock};
     use std::fs::File;
 
     fn write_bytes(path: &Path, len: u64) {
@@ -349,7 +238,13 @@ mod tests {
             .set_modified(old_time)
             .unwrap();
 
-        let removed = prune_rotations(&path, Duration::from_secs(7 * 86_400), false).unwrap();
+        let removed = prune_rotations(
+            &path,
+            Duration::from_secs(7 * 86_400),
+            false,
+            AgeSource::MtimeOnly,
+        )
+        .unwrap();
 
         assert_eq!(removed, vec![old_rotation.clone()]);
         assert!(!old_rotation.exists());
@@ -373,7 +268,13 @@ mod tests {
             .set_modified(SystemTime::now() - Duration::from_secs(30 * 86_400))
             .unwrap();
 
-        let listed = prune_rotations(&path, Duration::from_secs(7 * 86_400), true).unwrap();
+        let listed = prune_rotations(
+            &path,
+            Duration::from_secs(7 * 86_400),
+            true,
+            AgeSource::MtimeOnly,
+        )
+        .unwrap();
 
         assert_eq!(listed, vec![old_rotation.clone()]);
         assert!(old_rotation.exists());
@@ -396,11 +297,11 @@ mod tests {
             }
             let week = Duration::from_secs(7 * 86_400);
 
-            let mut listed = prune_rotations(&path, week, true).unwrap();
+            let mut listed = prune_rotations(&path, week, true, AgeSource::MtimeOnly).unwrap();
             for (i, _) in ages.iter().enumerate() {
                 prop_assert!(rotation_path(&path, u32::try_from(i + 1).unwrap()).exists());
             }
-            let mut removed = prune_rotations(&path, week, false).unwrap();
+            let mut removed = prune_rotations(&path, week, false, AgeSource::MtimeOnly).unwrap();
 
             listed.sort();
             removed.sort();
@@ -421,8 +322,11 @@ mod tests {
         let removed = remove_under_lock(
             &path,
             vec![renewed.clone(), gone],
-            SystemTime::now(),
-            Duration::from_secs(7 * 86_400),
+            Expiry {
+                now: SystemTime::now(),
+                older_than: Duration::from_secs(7 * 86_400),
+                age: AgeSource::MtimeOnly,
+            },
             &mut failures,
         )
         .unwrap();
@@ -438,11 +342,43 @@ mod tests {
         let path = dir.path().join("session-log.jsonl");
         write_bytes(&rotation_path(&path, 1), 3);
         assert!(
-            prune_rotations(&path, Duration::from_secs(7 * 86_400), false)
-                .unwrap()
-                .is_empty()
+            prune_rotations(
+                &path,
+                Duration::from_secs(7 * 86_400),
+                false,
+                AgeSource::MtimeOnly
+            )
+            .unwrap()
+            .is_empty()
         );
         assert!(rotation_path(&path, 1).exists());
+    }
+
+    // A generation restored with an old mtime keeps its change time, which is now, so it stays.
+    #[test]
+    fn a_restored_rotation_is_kept_by_its_change_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-log.jsonl");
+        write_bytes(&path, 3);
+        let rotation = rotation_path(&path, 2);
+        write_bytes(&rotation, 3);
+        File::options()
+            .write(true)
+            .open(&rotation)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(30 * 86_400))
+            .unwrap();
+
+        let removed = prune_rotations(
+            &path,
+            Duration::from_secs(7 * 86_400),
+            false,
+            AgeSource::MtimeOrCtime,
+        )
+        .unwrap();
+
+        assert!(removed.is_empty());
+        assert!(rotation.exists());
     }
 
     #[test]
@@ -450,7 +386,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("absent").join("session-log.jsonl");
         assert!(
-            prune_rotations(&path, Duration::ZERO, false)
+            prune_rotations(&path, Duration::ZERO, false, AgeSource::MtimeOnly)
                 .unwrap()
                 .is_empty()
         );
