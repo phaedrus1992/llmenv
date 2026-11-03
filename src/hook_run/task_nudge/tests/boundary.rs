@@ -137,3 +137,39 @@ fn a_wip_task_with_an_empty_queue_gets_no_stop_reminder() {
     );
     assert_eq!(text, "");
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(16))]
+
+    /// However many pushes repeat, the same task and boundary reminds once.
+    #[test]
+    fn a_repeated_boundary_reminds_once(pushes in 1usize..6) {
+        let dir = TempDir::new().unwrap();
+        wip_with_queue(dir.path());
+        let tracker = TaskTracker::default();
+        let fired = (0..pushes)
+            .filter(|_| {
+                !handle_post_tool_use(&tracker, &bash("git push origin HEAD"), Some("s1"), dir.path())
+                    .is_empty()
+            })
+            .count();
+        prop_assert_eq!(fired, 1);
+    }
+
+    /// The Stop reminder fires on turn end 1, then every `every` turn ends.
+    #[test]
+    fn the_stop_throttle_reminds_at_every_nth_turn_end(every in 1u32..6, turns in 1usize..14) {
+        let dir = TempDir::new().unwrap();
+        wip_with_queue(dir.path());
+        let tracker = TaskTracker {
+            stop_nudge_every: Some(every),
+            ..TaskTracker::default()
+        };
+        let fired = (0..turns)
+            .filter(|_| {
+                !handle_stop(&tracker, &serde_json::json!({}), Some("s1"), dir.path()).is_empty()
+            })
+            .count();
+        prop_assert_eq!(fired, turns.div_ceil(every as usize));
+    }
+}
