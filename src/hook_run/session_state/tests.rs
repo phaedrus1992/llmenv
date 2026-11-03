@@ -306,3 +306,32 @@ fn a_lock_restored_with_an_old_mtime_is_kept_by_the_change_time_rule() {
 
     assert!(restored.exists(), "a restored lock was removed (#3275)");
 }
+
+#[test]
+fn the_production_prune_removes_an_expired_state_file() {
+    let dir = TempDir::new().expect("test");
+    let stale = dir.path().join("stale.json");
+    std::fs::write(&stale, "{}").expect("test");
+
+    // A zero limit makes any file written before this line expired, under the production rule.
+    prune_stale_json_files(dir.path(), 0);
+
+    assert!(
+        !stale.exists(),
+        "the production prune kept an expired state file"
+    );
+}
+
+#[test]
+fn the_production_prune_removes_an_expired_orphan_lock() {
+    let dir = TempDir::new().expect("test");
+    let stale = dir.path().join("stale.lock");
+    std::fs::write(&stale, "").expect("test");
+
+    prune_orphan_locks(dir.path(), 0);
+
+    assert!(
+        !stale.exists(),
+        "the production prune kept an expired orphan lock"
+    );
+}
