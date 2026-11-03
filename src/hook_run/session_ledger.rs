@@ -290,10 +290,8 @@ impl LedgerStore {
         };
         let _lock = match lock {
             Ok(file) => file,
-            Err(why) => {
-                tracing::error!("recall ledger lock not taken: {why}");
-                return (None, timing);
-            }
+            // The lock helper already recorded the cause for the agent.
+            Err(_) => return (None, timing),
         };
         let t_read = Instant::now();
         let Some(mut ledger) = self.read(session_id) else {
