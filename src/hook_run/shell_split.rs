@@ -378,10 +378,10 @@ fn boundary_of(words: &[String]) -> Option<&'static str> {
 }
 
 /// The first step boundary in a shell command, or `None`. A command nested too deeply to split
-/// has no boundary that can be named, so the reminder is skipped for it.
-pub(super) fn step_boundary(command: &str) -> Option<&'static str> {
-    let segments = shell_segments(command).ok()?;
-    segments.iter().find_map(|words| boundary_of(words))
+/// has no boundary that can be named, so the caller is told by `Err`.
+pub(super) fn step_boundary(command: &str) -> Result<Option<&'static str>, NestingTooDeep> {
+    let segments = shell_segments(command)?;
+    Ok(segments.iter().find_map(|words| boundary_of(words)))
 }
 
 /// The script that a shell runs with `-c`. The flag may sit in a cluster, as in `bash -lc`.

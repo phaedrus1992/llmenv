@@ -3,7 +3,7 @@
 //! the step needs its `done` and the next `start` (#3318).
 
 use super::{NudgeState, start_next};
-use crate::hook_run::shell_split::step_boundary;
+use crate::hook_run::shell_split::{nesting_reason, step_boundary};
 use crate::task::Tracking;
 
 /// The reminder after a shell command that reaches a step boundary, or an empty string. It fires
@@ -16,9 +16,24 @@ pub(super) fn boundary_reminder(
     let command = payload["tool_input"]["command"]
         .as_str()
         .unwrap_or_default();
-    let Some(event) = step_boundary(command) else {
-        return String::new();
+    let event = match step_boundary(command) {
+        Ok(Some(event)) => event,
+        Ok(None) => return String::new(),
+        Err(_) => {
+            crate::agent_notice::record_logged(format!(
+                "llmenv task tracker: the step reminder did not run. {}",
+                nesting_reason()
+            ));
+            return String::new();
+        }
     };
+    if let Tracking::Unknown(cause) = tracking {
+        crate::agent_notice::record_logged(format!(
+            "llmenv task tracker: the step reminder did not run, because the task store cannot be \
+             read ({cause}). Fix: run `llmenv doctor` to check the state directory."
+        ));
+        return String::new();
+    }
     let Tracking::Tracked {
         wip: Some(slug),
         queued,

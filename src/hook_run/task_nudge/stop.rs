@@ -87,12 +87,16 @@ fn stop_wip_reminder(
         .stop_nudge_every
         .unwrap_or(DEFAULT_STOP_NUDGE_EVERY)
         .max(1);
-    let due = with_stop_state(caller, state_dir, |state| {
-        let due = state.stop_quiet_turns == 0;
-        state.stop_quiet_turns = state.stop_quiet_turns.saturating_add(1) % every;
-        due
-    });
-    if due != Some(true) {
+    // Without a usable session id no state can count the turns, so the reminder shows at each
+    // turn end. A failed lock or read is noticed by its own helper and the reminder is held.
+    let counted = caller.is_some_and(|id| state_path(state_dir, id).is_some());
+    let due = !counted
+        || with_stop_state(caller, state_dir, |state| {
+            let due = state.stop_quiet_turns == 0;
+            state.stop_quiet_turns = state.stop_quiet_turns.saturating_add(1) % every;
+            due
+        }) == Some(true);
+    if !due {
         return String::new();
     }
     format!(
@@ -108,8 +112,16 @@ fn clear_stop_turns(caller: Option<&str>, state_dir: &Path) {
     let Some(path) = caller.and_then(|id| state_path(state_dir, id)) else {
         return;
     };
-    if path.is_file() {
-        with_stop_state(caller, state_dir, |state| state.stop_quiet_turns = 0);
+    match path.try_exists() {
+        Ok(true) => {
+            with_stop_state(caller, state_dir, |state| state.stop_quiet_turns = 0);
+        }
+        Ok(false) => {}
+        Err(e) => crate::agent_notice::record_logged(format!(
+            "llmenv: the task nudge state {} cannot be checked: {e}. Fix: check the permissions of \
+             the state directory.",
+            path.display()
+        )),
     }
 }
 
@@ -125,10 +137,13 @@ fn with_stop_state<T>(
     let path = state_path(state_dir, id)?;
     let dir = path.parent()?;
     let _lock = lock_state_file(dir, id, "task nudge")?;
-    let (mut state, _) = load(&path)?;
+    // A corrupt file loads as the default state with `reset` set. Saving it replaces the file,
+    // so the reset notice is raised once and not again at every turn end.
+    let (mut state, reset) = load(&path)?;
     let before = state.clone();
     let out = change(&mut state);
-    if state != before {
+    if state != before || reset {
+        // `save` records its own agent notice when the write fails.
         save(&path, &state);
     }
     Some(out)
