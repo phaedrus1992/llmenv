@@ -76,6 +76,7 @@ fn memory_is_labelled_and_the_notes_follow_it() {
 // a JSON object would drop the notice. Every registered adapter must keep this contract.
 #[test]
 fn every_adapter_returns_a_json_object_or_an_empty_string() {
+    use proptest::prelude::*;
     let events = [
         "SessionStart",
         "SessionEnd",
@@ -83,22 +84,20 @@ fn every_adapter_returns_a_json_object_or_an_empty_string() {
         "PreToolUse",
         "PostToolUse",
     ];
-    let texts = ["", "   ", "memory body", "note: budget"];
-    for adapter in registered_adapters() {
-        for event in events {
-            for memory in texts {
-                for notes in texts {
-                    let out = adapter.emit_hook_context(event, memory, notes);
-                    if out.is_empty() {
-                        continue;
-                    }
-                    let is_object = serde_json::from_str::<serde_json::Value>(&out)
-                        .is_ok_and(|value| value.is_object());
-                    assert!(is_object, "{event} output is not a JSON object: {out}");
+    // Control characters, quotes, backslashes, and non-ASCII must reach the JSON encoder.
+    proptest!(|(memory in "(\\PC|\n|\t|\r){0,60}", notes in "(\\PC|\n|\t|\r){0,60}")| {
+        for adapter in registered_adapters() {
+            for event in events {
+                let out = adapter.emit_hook_context(event, &memory, &notes);
+                if out.is_empty() {
+                    continue;
                 }
+                let is_object = serde_json::from_str::<serde_json::Value>(&out)
+                    .is_ok_and(|value| value.is_object());
+                prop_assert!(is_object, "{event} output is not a JSON object: {out}");
             }
         }
-    }
+    });
 }
 
 // #2142: per event and per engine capability, the header that wraps the
