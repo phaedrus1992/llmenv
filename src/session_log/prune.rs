@@ -90,9 +90,9 @@ pub(crate) fn prune_rotations(
 /// The clock, the retention, and the timestamp that judges one rotated file.
 #[derive(Clone, Copy)]
 pub(super) struct Expiry {
-    pub(super) now: SystemTime,
-    pub(super) older_than: Duration,
-    pub(super) age: AgeSource,
+    now: SystemTime,
+    older_than: Duration,
+    age: AgeSource,
 }
 
 /// Whether the file at `path` is past the retention in `expiry`, judged by its age stamp.
@@ -106,7 +106,7 @@ fn is_old(path: &Path, expiry: Expiry) -> std::io::Result<bool> {
 /// A rotation renames each generation up by one. Without the lock, a name judged old can name a
 /// newer file by the time it is removed. A file that is gone, or that is no longer old, stays out
 /// of the result.
-pub(super) fn remove_under_lock(
+fn remove_under_lock(
     path: &Path,
     candidates: Vec<PathBuf>,
     expiry: Expiry,
