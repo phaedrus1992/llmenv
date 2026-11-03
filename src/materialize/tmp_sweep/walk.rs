@@ -34,12 +34,8 @@ pub(super) fn scan(tmp_root: &Path, rule: AgeRule, in_use: &[PathBuf]) -> anyhow
         .with_context(|| format!("resolving {}", tmp_root.display()))?;
     let now = SystemTime::now();
     for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(e) => {
-                record_failure(&root, &e, &mut scan);
-                continue;
-            }
+        let Some(entry) = entry_or_failure(&root, entry, &mut scan) else {
+            continue;
         };
         let name = entry.file_name();
         let path = root.join(&name);
@@ -118,6 +114,22 @@ fn entry_mtime(path: &Path, is_dir: bool, source: AgeSource) -> anyhow::Result<S
         .with_context(|| format!("stat {}", path.display()))
 }
 
+/// Keep a readable entry of `root`. The read error does not carry the entry name, so the record
+/// names the folder and the cause.
+fn entry_or_failure(
+    root: &Path,
+    entry: std::io::Result<std::fs::DirEntry>,
+    scan: &mut Scan,
+) -> Option<std::fs::DirEntry> {
+    match entry {
+        Ok(entry) => Some(entry),
+        Err(e) => {
+            record_failure(root, format!("an entry in {} ({e})", root.display()), scan);
+            None
+        }
+    }
+}
+
 /// Record an entry the sweep could not read or judge. The entry stays, and the next run retries.
 pub(super) fn record_failure(path: &Path, error: impl std::fmt::Display, scan: &mut Scan) {
     tracing::error!(
@@ -139,6 +151,51 @@ mod tests {
     use super::*;
     use crate::materialize::tmp_sweep::tests::DAY;
     use crate::test_log_capture::capture_logs;
+
+    /// A missing entry is recognised at every depth of context, and no other kind is.
+    /// The domain is finite, so every pair is checked.
+    #[test]
+    fn a_not_found_is_vanished_at_every_context_depth() {
+        use std::io::ErrorKind;
+        let kinds = [
+            ErrorKind::NotFound,
+            ErrorKind::PermissionDenied,
+            ErrorKind::InvalidData,
+            ErrorKind::Other,
+        ];
+        for kind in kinds {
+            for depth in 0..5 {
+                let mut error = anyhow::Error::from(std::io::Error::from(kind));
+                for layer in 0..depth {
+                    error = error.context(format!("layer {layer}"));
+                }
+                assert_eq!(
+                    is_vanished(&error),
+                    kind == ErrorKind::NotFound,
+                    "{kind:?} at {depth}"
+                );
+            }
+        }
+    }
+
+    proptest::proptest! {
+        /// Every entry of the folder lands in exactly one class: stale, kept, or failed.
+        #[test]
+        fn every_entry_is_classified_exactly_once(ages in proptest::collection::vec(0u64..30, 0..8)) {
+            use crate::materialize::tmp_sweep::tests::mtime_rule;
+            let dir = tempfile::tempdir().unwrap();
+            let now = std::time::SystemTime::now();
+            for (i, age_days) in ages.iter().enumerate() {
+                let file = dir.path().join(format!("entry-{i}.tmp"));
+                std::fs::write(&file, "x").unwrap();
+                let mtime = now - std::time::Duration::from_secs(age_days * 86_400);
+                filetime::set_file_mtime(&file, filetime::FileTime::from_system_time(mtime)).unwrap();
+            }
+            let rule = mtime_rule(std::time::Duration::from_secs(7 * 86_400));
+            let result = scan(dir.path(), rule, &[]).unwrap();
+            proptest::prop_assert_eq!(result.stale.len() + result.kept + result.failed.len(), ages.len());
+        }
+    }
 
     #[test]
     fn a_future_mtime_entry_is_kept_and_its_clock_skew_is_logged() {
@@ -167,5 +224,20 @@ mod tests {
         assert!(scan.stale.is_empty(), "a future mtime must not be stale");
         assert_eq!(scan.kept, 1);
         assert!(logs.contains("clock skew"), "skew not logged: {logs}");
+    }
+
+    #[test]
+    fn an_unreadable_entry_is_logged_against_its_folder_and_skipped() {
+        let root = Path::new("/state/tmp");
+        let mut scan = Scan::default();
+        let error = std::io::Error::other("bad directory block");
+        let mut entry = None;
+        let logs = capture_logs(|| {
+            entry = entry_or_failure(root, Err(error), &mut scan);
+        });
+        assert!(entry.is_none());
+        assert_eq!(scan.failed, vec![root.to_path_buf()]);
+        assert!(logs.contains("an entry in /state/tmp"), "{logs}");
+        assert!(logs.contains("bad directory block"), "{logs}");
     }
 }
