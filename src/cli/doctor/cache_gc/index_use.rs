@@ -89,7 +89,7 @@ pub(super) fn cbm_use(config: &Config, dir: &Path) -> CacheUse {
             if config
                 .features
                 .as_ref()
-                .is_some_and(|f| !f.codebase_memory.is_empty())
+                .is_some_and(|f| f.codebase_memory.iter().any(|cm| cm.index_path.is_some()))
             {
                 tracing::warn!(
                     "bundles folder unknown, so only the top-level index_path is checked: {e:#}. \
