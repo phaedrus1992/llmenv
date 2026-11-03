@@ -47,3 +47,32 @@ fn a_session_id_that_is_not_a_plain_name_names_the_fix() {
     assert!(safe_session(Some("../escape")).is_none());
     assert!(notices().contains("not a plain file name"), "{}", notices());
 }
+
+// #3332: the deny names the stats log and its fix. It does not point the agent at the file it
+// tried to write, because reading that file does not repair the log.
+#[test]
+fn a_write_deny_on_a_corrupt_stats_log_names_the_log() {
+    let state = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let file = work.path().join("existing.txt");
+    std::fs::write(&file, "important").unwrap();
+    std::fs::create_dir_all(state.path().join("slippage")).unwrap();
+    let log = stats_path(state.path(), "s-deny");
+    std::fs::write(&log, b"{not json").unwrap();
+    let cfg = SlippageControl {
+        enabled: true,
+        read_before_edit: true,
+        ..Default::default()
+    };
+    let payload = serde_json::json!({
+        "tool_name": "Write",
+        "tool_input": { "file_path": file.to_str().unwrap() },
+    });
+
+    let deny = handle_pre_tool_use(Some(&cfg), &payload, Some("s-deny"), state.path());
+
+    assert!(deny.starts_with("__DENY__:"), "{deny}");
+    assert!(deny.contains(&log.display().to_string()), "{deny}");
+    assert!(deny.contains("Fix:"), "{deny}");
+    assert!(!deny.contains("haven't read"), "{deny}");
+}
