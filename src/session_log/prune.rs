@@ -6,7 +6,9 @@ use std::time::{Duration, SystemTime};
 use crate::materialize::cache::{AgeSource, file_stamp, is_expired};
 use crate::session_log::rotation::rotation_lock;
 
-/// Remove the rotated files of `path` that were last written more than `older_than` ago. The
+/// Remove the rotated files of `path` that are older than `older_than`, judged by `age`. Under
+/// `AgeSource::MtimeOrCtime` a rename or a chmod restarts the age, so a rotation that was just
+/// renamed or restored stays for one more period (#3321). The
 /// active file is never removed. Returns the files that were removed (#2816). With `dry_run`, it
 /// returns the files that a real run removes, and removes none (#2917).
 ///
@@ -22,7 +24,10 @@ pub(crate) fn prune_rotations(
     age: AgeSource,
 ) -> anyhow::Result<Vec<PathBuf>> {
     let (Some(dir), Some(base)) = (path.parent(), path.file_name()) else {
-        return Ok(Vec::new());
+        anyhow::bail!(
+            "cannot prune the rotations of {}: the path has no folder or file name. Fix: pass the session log file, not a folder.",
+            path.display()
+        );
     };
     let Some(entries) = crate::paths::read_dir_optional(dir)? else {
         return Ok(Vec::new());
@@ -48,18 +53,27 @@ pub(crate) fn prune_rotations(
         match is_old(&entry.path(), expiry) {
             Ok(true) => expired.push(entry.path()),
             Ok(false) => {}
+            // A rotation that another pass renames during this scan is not a failure. The
+            // locked pass below judges it again.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => failures.push(format!("{}: {e}", entry.path().display())),
         }
     }
     let removed = if dry_run || expired.is_empty() {
         expired
     } else {
-        remove_under_lock(path, expired, expiry, &mut failures)?
+        match remove_under_lock(path, expired, expiry, &mut failures) {
+            Ok(removed) => removed,
+            Err(lock_err) => {
+                failures.push(format!("{lock_err:#}"));
+                Vec::new()
+            }
+        }
     };
     if !failures.is_empty() {
         anyhow::bail!(
             "{} rotated session-log file(s) could not be checked or removed, {} removed: {}. \
-             Fix: check the permissions of the state directory",
+             Fix: check the permissions of the listed files and of the state directory",
             failures.len(),
             removed.len(),
             failures.join("; ")
