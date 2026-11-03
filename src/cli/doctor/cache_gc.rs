@@ -205,6 +205,7 @@ fn sweep_cbm_indexes(
             retention,
             in_use,
             out.dry_run,
+            crate::materialize::cache::AgeSource::MtimeOrCtime,
         )
         .map_err(|e| format!("{e:#}"))
     });
