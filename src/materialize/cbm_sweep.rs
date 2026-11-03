@@ -33,7 +33,7 @@ pub(crate) fn sweep_legacy_indexes(
 }
 
 /// [`sweep_legacy_indexes`] with the age source given (#3275).
-pub(crate) fn sweep_legacy_indexes_with(
+fn sweep_legacy_indexes_with(
     dir: &Path,
     older_than: Duration,
     in_use: &[PathBuf],
