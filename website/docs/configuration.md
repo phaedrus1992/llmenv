@@ -1318,6 +1318,9 @@ The first line of the new file names the rotated file that holds the older lines
 
 Both sinks take the same sub-fields, plus one each of their own:
 
+(changed in v3.14.0) The reaper judges a transcript's age by the later of its mtime and change time.
+A transcript restored with an old mtime, such as by `cp -p` or `tar -x`, is kept until it is old by its change time too.
+
 | Sub-field | Required | Applies to | Notes |
 | --------- | -------- | ---------- | ----- |
 | `enabled` | no | both | Turn the sink on or off |

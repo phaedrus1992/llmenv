@@ -117,6 +117,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Stop cache cleanup and bundle file writes from following a link that appears during the write. An unreadable cache folder is now logged and is not repaired during cleanup. [fix:materialize] [#3203]
 - Stop state file copies, state log rotation, and the recall ledger from following a link. A link no longer redirects a copy, a rotation, or a timestamp update to its target. [fix:materialize] [#3139]
 - Show the agent a notice for MCP proxy pidfile and log failures, probe server errors, lock reclaims, dropped scope tags, and hook notices that lacked a fix. Each notice names the path or server and the fix. [fix:agent] [#3217]
+- Fail the hook when a session lock's modified time cannot be refreshed, with the lock path and a fix line. The lock used to count as held, so a concurrent prune could remove a live lock. [fix:hook] [#3290]
+- Tell the agent when a read-once or read-before-edit record cannot be removed on session reset. The failure used to reach only the log. [fix:hook] [#3291]
+- Keep a session log that is restored with an old mtime. The reaper now judges age by the later of mtime and change time, as the state sweeps do. [fix:session-log] [#3292]
+- Log the folder and the cause when a `state/tmp` entry cannot be read. The read error does not name the entry, so the log names the folder. [fix:tmp-sweep] [#3291]
 
 ### Security
 

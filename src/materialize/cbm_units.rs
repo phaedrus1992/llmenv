@@ -159,8 +159,40 @@ mod restored_tests;
 mod tests {
     use std::collections::BTreeSet;
     use std::ffi::OsStr;
+    use std::time::UNIX_EPOCH;
 
     use super::*;
+
+    proptest::proptest! {
+        /// A unit expires exactly when its newest present file is older than the retention. A file
+        /// that has gone is left out of the unit.
+        #[test]
+        fn a_unit_expires_on_its_newest_present_file(
+            ages in proptest::collection::vec(0u64..864_000, 1..4),
+            older_days in 1u64..8,
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            // Whole seconds, so each mtime is exact and the boundary is not blurred by rounding.
+            let now = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+            let mut files = Vec::new();
+            for (i, age) in ages.iter().enumerate() {
+                let file = dir.path().join(format!("repo-{i}.db"));
+                std::fs::write(&file, "x").unwrap();
+                let mtime = now - Duration::from_secs(*age);
+                filetime::set_file_mtime(&file, filetime::FileTime::from_system_time(mtime)).unwrap();
+                files.push(file);
+            }
+            let gone = dir.path().join("repo-gone.db-wal");
+            files.push(gone.clone());
+            let older_than = Duration::from_secs(older_days * 86_400);
+
+            let unit = unit_of(files, now, older_than, dir.path(), AgeSource::MtimeOnly).unwrap();
+
+            let newest_age = Duration::from_secs(*ages.iter().min().unwrap());
+            proptest::prop_assert_eq!(matches!(unit.age, Age::Expired), newest_age > older_than);
+            proptest::prop_assert!(!unit.files.contains(&gone));
+        }
+    }
 
     #[cfg(unix)]
     #[test]
