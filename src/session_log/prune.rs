@@ -13,23 +13,32 @@ use crate::session_log::rotation::rotation_lock;
 /// returns the files that a real run removes, and removes none (#2917).
 ///
 /// A file that cannot be removed does not stop the pass. The error names every file that failed,
-/// with the count of files that were removed.
+/// with the count of files that were removed, and it carries the files that were removed.
 ///
 /// # Errors
-/// Fails when the directory cannot be read, or when any rotated file could not be removed.
+/// Fails when the directory cannot be read, when a rotated file cannot be checked or removed, or
+/// when the rotation lock cannot be taken. The error keeps the files removed before the failure.
 pub(crate) fn prune_rotations(
     path: &Path,
     older_than: Duration,
     dry_run: bool,
     age: AgeSource,
-) -> anyhow::Result<Vec<PathBuf>> {
+) -> Result<Vec<PathBuf>, PruneError> {
     let (Some(dir), Some(base)) = (path.parent(), path.file_name()) else {
-        anyhow::bail!(
-            "cannot prune the rotations of {}: the path has no folder or file name. Fix: pass the session log file, not a folder.",
-            path.display()
-        );
+        return Err(PruneError {
+            removed: Vec::new(),
+            message: format!(
+                "cannot prune the rotations of {}: the path has no folder or file name. \
+                 Fix: pass the session log file, not a folder.",
+                path.display()
+            ),
+        });
     };
-    let Some(entries) = crate::paths::read_dir_optional(dir)? else {
+    let entries = crate::paths::read_dir_optional(dir).map_err(|e| PruneError {
+        removed: Vec::new(),
+        message: format!("{e:#}"),
+    })?;
+    let Some(entries) = entries else {
         return Ok(Vec::new());
     };
     let expiry = Expiry {
@@ -71,23 +80,36 @@ pub(crate) fn prune_rotations(
         }
     };
     if !failures.is_empty() {
-        anyhow::bail!(
-            "{} rotated session-log file(s) could not be checked or removed, {} removed: {}. \
+        // A dry run removes nothing, so its count must not claim removals.
+        let verb = if dry_run { "would remove" } else { "removed" };
+        let message = format!(
+            "{} rotated session-log file(s) could not be checked or removed, {} {verb}: {}. \
              Fix: check the permissions of the listed files and of the state directory",
             failures.len(),
             removed.len(),
             failures.join("; ")
         );
+        return Err(PruneError { removed, message });
     }
     Ok(removed)
+}
+
+/// A prune pass that failed. It keeps the files it removed before the failure, so a caller can
+/// report them next to the error.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub(crate) struct PruneError {
+    /// The files that the pass removed, or would remove in a dry run.
+    pub(crate) removed: Vec<PathBuf>,
+    message: String,
 }
 
 /// The clock, the retention, and the timestamp that judges one rotated file.
 #[derive(Clone, Copy)]
 pub(super) struct Expiry {
-    pub(super) now: SystemTime,
-    pub(super) older_than: Duration,
-    pub(super) age: AgeSource,
+    now: SystemTime,
+    older_than: Duration,
+    age: AgeSource,
 }
 
 /// Whether the file at `path` is past the retention in `expiry`, judged by its age stamp.
@@ -101,7 +123,7 @@ fn is_old(path: &Path, expiry: Expiry) -> std::io::Result<bool> {
 /// A rotation renames each generation up by one. Without the lock, a name judged old can name a
 /// newer file by the time it is removed. A file that is gone, or that is no longer old, stays out
 /// of the result.
-pub(super) fn remove_under_lock(
+fn remove_under_lock(
     path: &Path,
     candidates: Vec<PathBuf>,
     expiry: Expiry,
@@ -143,3 +165,7 @@ pub(super) fn is_rotation_of(name: &std::ffi::OsStr, base: &std::ffi::OsStr) -> 
         .and_then(|rest| rest.strip_prefix('.'))
         .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests;
