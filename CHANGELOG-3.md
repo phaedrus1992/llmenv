@@ -120,7 +120,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Fail the hook when a session lock's modified time cannot be refreshed, with the lock path and a fix line. The lock used to count as held, so a concurrent prune could remove a live lock. [fix:hook] [#3290]
 - Tell the agent when a read-once or read-before-edit record cannot be removed on session reset. The failure used to reach only the log. [fix:hook] [#3291]
 - Keep a session log that is restored with an old mtime. The reaper now judges age by the later of mtime and change time, as the state sweeps do. [fix:session-log] [#3292]
-- Name the folder and the cause when a `state/tmp` entry cannot be read. The read error does not name the entry. [fix:tmp-sweep] [#3291]
+- Log the folder and the cause when a `state/tmp` entry cannot be read. The read error does not name the entry, so the log names the folder. [fix:tmp-sweep] [#3291]
 
 ### Security
 
