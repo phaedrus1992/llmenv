@@ -4,6 +4,7 @@ pub(crate) mod bundle_file;
 use bundle_file::BUNDLE_YAML_KNOWN_KEYS;
 pub(crate) use bundle_file::read_bundle_yaml;
 pub mod capabilities;
+mod precedence;
 pub mod rules;
 
 use std::collections::BTreeMap;
