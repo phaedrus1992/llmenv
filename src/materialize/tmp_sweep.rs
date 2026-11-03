@@ -138,12 +138,8 @@ fn scan(tmp_root: &Path, rule: AgeRule, in_use: &[PathBuf]) -> anyhow::Result<Sc
         .with_context(|| format!("resolving {}", tmp_root.display()))?;
     let now = SystemTime::now();
     for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(e) => {
-                record_failure(&root, &e, &mut scan);
-                continue;
-            }
+        let Some(entry) = entry_or_failure(&root, entry, &mut scan) else {
+            continue;
         };
         let name = entry.file_name();
         let path = root.join(&name);
@@ -226,9 +222,32 @@ fn record_failure(path: &Path, error: impl std::fmt::Display, scan: &mut Scan) {
     scan.failed.push(path.to_path_buf());
 }
 
+/// Keep a readable entry of `root`. The read error does not carry the entry name, so the record
+/// names the folder and the cause.
+fn entry_or_failure(
+    root: &Path,
+    entry: std::io::Result<std::fs::DirEntry>,
+    scan: &mut Scan,
+) -> Option<std::fs::DirEntry> {
+    match entry {
+        Ok(entry) => Some(entry),
+        Err(e) => {
+            record_failure(root, format!("an entry in {} ({e})", root.display()), scan);
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod summary_tests;
+
+#[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: a failed setup step should abort the test"
+)]
+mod entry_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests;
