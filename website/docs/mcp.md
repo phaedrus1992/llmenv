@@ -508,6 +508,9 @@ Consolidation keeps the model summary in its checkpoint, so a resume never pays 
 The index job is not resumed, because every session start runs the indexer anyway.
 See [Background work](troubleshooting.md#background-work-that-did-not-finish).
 
+(added in v3.14.0) If llmenv cannot save a checkpoint, it shows a notice at every session start until the state folder is fixed.
+The save is what fails, so llmenv cannot store a count of failed starts toward the 3-attempt cap.
+
 A resumed memory store or transcript record must not store the same thing twice.
 llmenv derives a request id from the event, so a resume sends the same id.
 The child records each stored id in `<state dir>/idempotency/<session>.json` (the last 1000 ids)
