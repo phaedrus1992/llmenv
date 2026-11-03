@@ -42,6 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Log the unknown-bundles-folder message at warning level only when a codebase-memory `index_path` is set. Otherwise it stays at debug level. [fix:cli] [#3278]
+- Skip a `state/tmp` entry that another process removes during `llmenv clean`, instead of reporting it as unreadable. [fix:materialize] [#3276]
+- Keep state files, locks, and codebase-memory index units that are restored with old mtimes. The state prune and the cbm sweep now judge age by the later of mtime and change time, as `state/tmp` does. [fix:hook] [#3275]
 - Keep a tree unpacked with old file mtimes (`tar -x`, `cp -p`) in `llmenv clean`. The cache and `state/tmp` sweeps now judge a file by the later of its mtime and its change time, so an unpack reads as new. [fix:clean] [#3195]
 - `llmenv clean` now reports an unreadable codebase-memory bundle config when no `state/tmp` entry is old. It used to exit 0 with no message. [fix:clean] [#3195]
 - Export validates every variable before it prints, so one bad value prints no `export` line, and `eval` never sources part of the environment. [fix:cli] [#3268]
