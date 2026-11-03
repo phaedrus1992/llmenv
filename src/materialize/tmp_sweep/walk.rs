@@ -1,6 +1,7 @@
 //! The walk of `state/tmp`: it sorts every entry into stale, kept, or failed, and changes
 //! nothing. The sweep and the summary both build on it.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -21,7 +22,8 @@ pub(super) struct Stale {
 pub(super) struct Scan {
     pub(super) stale: Vec<Stale>,
     pub(super) kept: usize,
-    pub(super) failed: Vec<PathBuf>,
+    /// Each entry that could not be read, with the reason, so `llmenv doctor` can name it.
+    pub(super) failed: BTreeMap<PathBuf, String>,
 }
 
 /// Walk `tmp_root` and sort every entry into stale, kept, or failed. The walk changes nothing.
@@ -137,7 +139,7 @@ pub(super) fn record_failure(path: &Path, error: impl std::fmt::Display, scan: &
         error = %error,
         "state/tmp sweep: cannot read entry; skipping"
     );
-    scan.failed.push(path.to_path_buf());
+    scan.failed.insert(path.to_path_buf(), error.to_string());
 }
 
 #[cfg(test)]
@@ -236,7 +238,10 @@ mod tests {
             entry = entry_or_failure(root, Err(error), &mut scan);
         });
         assert!(entry.is_none());
-        assert_eq!(scan.failed, vec![root.to_path_buf()]);
+        assert_eq!(
+            scan.failed.keys().cloned().collect::<Vec<PathBuf>>(),
+            vec![root.to_path_buf()]
+        );
         assert!(logs.contains("an entry in /state/tmp"), "{logs}");
         assert!(logs.contains("bad directory block"), "{logs}");
     }

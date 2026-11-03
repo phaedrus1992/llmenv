@@ -1199,7 +1199,14 @@ features:
 (added in v3.12.0) While the tracker is on, SessionStart also injects a short statement of the core tracking rules.
 `nudges: false` removes that text too.
 See [Commands](commands.md#core-task-rules-added-in-v3120).
-`llmenv validate` rejects a `nudge_after` or `nudge_every` of `0`, and a `workflow_skills` entry that is empty.
+`llmenv validate` rejects a `nudge_after`, `nudge_every`, or `stop_nudge_every` of `0`, and a `workflow_skills` entry that is empty.
+
+(added in v3.14.0) Two reminders cover a task that stays in progress while tasks are queued behind it.
+A step boundary is a `git push`, `gh pr create`, `gh pr ready`, or `gh pr merge`.
+When one runs, the agent gets one reminder for that task and that boundary.
+At the end of a turn, the same state repeats its reminder. The first such turn end is reminded at once.
+`stop_nudge_every` (added in v3.14.0) sets how many turn ends pass between two of these Stop reminders.
+Default `5`. Must be 1 or more.
 
 See [Commands](commands.md#task) for the full `llmenv task` CLI reference.
 
@@ -1300,6 +1307,8 @@ session_log:
 
 (changed in v3.14.0) The reaper judges a transcript's age by the later of its mtime and change time.
 A transcript restored with an old mtime, such as by `cp -p` or `tar -x`, is kept until it is old by its change time too.
+A metadata-only change also resets the change time. Examples are `chmod`, `chown`, an extended attribute write, and a new hard link.
+So a transcript can be kept past `retention_days` after such a change, and no log line records it.
 
 | Sub-field | Required | Notes |
 | --------- | -------- | ----- |

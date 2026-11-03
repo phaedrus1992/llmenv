@@ -136,7 +136,7 @@ fn repeat_detect_state_dir(state_dir: &Path) -> PathBuf {
 }
 
 /// Lock for one read-change-save of the session's counter file (#2678). When the lock fails,
-/// `lock_state_file` logs it and the update runs unlocked, as it did before the lock existed.
+/// `lock_state_file` records a notice and the update runs unlocked, as it did before the lock existed.
 fn counter_lock(state_dir: &Path, session_id: &str) -> Option<std::fs::File> {
     super::session_state::lock_state_file(
         &repeat_detect_state_dir(state_dir),
