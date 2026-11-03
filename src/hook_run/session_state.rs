@@ -113,10 +113,7 @@ fn prune_stale_json_files_with(dir: &Path, max_age_days: u64, source: AgeSource)
         let entry = match entry {
             Ok(entry) => entry,
             Err(e) => {
-                tracing::error!(
-                    "stale-session pruning skipped an entry in {}: {e}",
-                    dir.display()
-                );
+                note_prune_failure("cannot read an entry of the state folder", dir, &e);
                 continue;
             }
         };
@@ -276,7 +273,7 @@ fn prune_orphan_locks_with(dir: &Path, max_age_days: u64, source: AgeSource) {
         let path = match entry {
             Ok(entry) => entry.path(),
             Err(e) => {
-                tracing::error!("lock pruning skipped an entry in {}: {e}", dir.display());
+                note_prune_failure("cannot read an entry of the lock folder", dir, &e);
                 continue;
             }
         };

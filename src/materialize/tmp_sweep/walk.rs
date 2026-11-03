@@ -87,7 +87,10 @@ pub(super) fn judge_entry(
         Ok(modified) => modified,
         // Another process removed the entry after the walk listed it. That is not a failure,
         // the same as a child that vanishes inside a folder walk (#2835, #3276).
-        Err(e) if is_vanished(&e) => return,
+        Err(e) if is_vanished(&e) => {
+            tracing::debug!(path = %path.display(), "state/tmp entry removed during the walk");
+            return;
+        }
         Err(e) => {
             record_failure(path, &e, scan);
             return;
