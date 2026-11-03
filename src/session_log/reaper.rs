@@ -10,23 +10,31 @@
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-/// Garbage-collect the session-log file at `log_path` when its mtime is older
-/// than `retention_days`. Best-effort: failures are logged at `error!` and
-/// dropped — session logging never fails a launch.
+use crate::materialize::cache::{AgeSource, file_stamp};
+
+/// Garbage-collect the session-log file at `log_path` when its age is past
+/// `retention_days`. The age is the newer of its mtime and its change time.
+/// Best-effort: failures are logged at `error!` and dropped — session logging
+/// never fails a launch.
 ///
 /// The directory `log_path` lives in is cleaned up (removed if empty) after
 /// deletion to prevent accumulation of empty state directories.
 ///
 /// # Effects
-/// Deletes the file on disk. No-op when the file does not exist, when its mtime
-/// cannot be read (logged at `error!` and noticed), or when retention is zero (guarded by caller — the config
-/// validator rejects `retention_days: 0`, but this function still handles it
-/// defensively).
+/// Deletes the file on disk. No-op when the file does not exist, when its age
+/// cannot be read or the removal fails (both logged at `error!` and noticed), or
+/// when retention is zero. The config validator rejects `retention_days: 0`, but
+/// this function still handles it defensively.
 pub(crate) fn reap_session_log(log_path: &Path, retention_days: u64) {
+    reap_session_log_with(log_path, retention_days, AgeSource::MtimeOrCtime);
+}
+
+/// [`reap_session_log`] with the age source given. Tests use it to judge an old mtime alone.
+fn reap_session_log_with(log_path: &Path, retention_days: u64, source: AgeSource) {
     if retention_days == 0 {
         return;
     }
-    let age = match log_age(log_path) {
+    let age = match log_age(log_path, source) {
         Ok(Some(age)) => age,
         Ok(None) => return,
         Err(e) => {
@@ -46,7 +54,13 @@ pub(crate) fn reap_session_log(log_path: &Path, retention_days: u64) {
         return;
     }
     if let Err(e) = std::fs::remove_file(log_path) {
+        // Hook stderr is dropped, so the agent gets a notice as well as the error log.
         tracing::error!("session_log reaper: failed to remove {log_path:?}: {e}");
+        crate::agent_notice::record_logged(format!(
+            "llmenv: the session log reaper could not remove {} ({e}), so it stays on disk. Fix: \
+             check the permissions of that file and its folder.",
+            log_path.display()
+        ));
         return;
     }
     tracing::info!(
@@ -56,10 +70,7 @@ pub(crate) fn reap_session_log(log_path: &Path, retention_days: u64) {
     );
     // Best-effort cleanup of the parent directory if it became empty.
     if let Some(parent) = log_path.parent()
-        && parent
-            .read_dir()
-            .map(|mut it| it.next().is_none())
-            .unwrap_or(false)
+        && dir_is_empty(parent)
     {
         // A non-empty parent is the normal case and is kept quietly. Any other failure is logged.
         if let Err(e) = std::fs::remove_dir(parent)
@@ -70,22 +81,64 @@ pub(crate) fn reap_session_log(log_path: &Path, retention_days: u64) {
     }
 }
 
-/// The age of the file at `path`. `None` for a missing file, and for an mtime in the
-/// future, which is kept rather than deleted.
-fn log_age(path: &Path) -> std::io::Result<Option<Duration>> {
+/// Whether `dir` has no entries. A read error is logged and counts as not empty, so the
+/// folder is kept.
+fn dir_is_empty(dir: &Path) -> bool {
+    match dir.read_dir() {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(e) => {
+            tracing::error!("cannot read session log dir {}: {e}", dir.display());
+            false
+        }
+    }
+}
+
+/// The age of the file at `path`. `None` for a missing file, and for a stamp in the
+/// future, which is kept rather than deleted and logged as clock skew.
+fn log_age(path: &Path, source: AgeSource) -> std::io::Result<Option<Duration>> {
     // `symlink_metadata` reads the link itself, because the reaper removes the link, not its target.
-    let modified = match path.symlink_metadata() {
-        Ok(meta) => meta.modified()?,
+    // The newer of mtime and change time decides, as in the state sweeps (#3275). A restore with an
+    // old mtime leaves a new change time, so a restored log is not removed at once.
+    let stamp = match path.symlink_metadata() {
+        Ok(meta) => file_stamp(&meta, source)?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
-    Ok(SystemTime::now().duration_since(modified).ok())
+    match SystemTime::now().duration_since(stamp) {
+        Ok(age) => Ok(Some(age)),
+        Err(_) => {
+            // Hooks keep only ERROR-level logs, so the skew is logged at that level.
+            tracing::error!(
+                path = %path.display(),
+                "session log has a future modified time (clock skew); it is kept"
+            );
+            Ok(None)
+        }
+    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_log_restored_with_an_old_mtime_is_kept_by_its_change_time() {
+        // Restoring a file with an old mtime (cp -p, tar -x) sets its change time to now.
+        // The change time is the newer stamp, so the log is judged young and kept (#3292).
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("restored.jsonl");
+        std::fs::write(&log, "{}").unwrap();
+        let old = SystemTime::now() - Duration::from_secs(30 * 86_400);
+        filetime::set_file_mtime(&log, filetime::FileTime::from_system_time(old)).unwrap();
+
+        let age = log_age(&log, AgeSource::MtimeOrCtime).unwrap().unwrap();
+
+        assert!(
+            age < Duration::from_secs(86_400),
+            "restored log judged {age:?} old"
+        );
+    }
 
     #[cfg(unix)]
     #[test]
@@ -102,7 +155,7 @@ mod tests {
         let link = dir.path().join("session-log.jsonl");
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
-        let age = log_age(&link).unwrap().unwrap();
+        let age = log_age(&link, AgeSource::MtimeOnly).unwrap().unwrap();
 
         assert!(
             age < Duration::from_secs(3600),
@@ -113,7 +166,8 @@ mod tests {
     #[test]
     fn log_age_is_none_for_a_missing_file() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(log_age(&dir.path().join("absent.jsonl")).unwrap().is_none());
+        let absent = dir.path().join("absent.jsonl");
+        assert!(log_age(&absent, AgeSource::MtimeOnly).unwrap().is_none());
     }
 
     #[test]
@@ -122,7 +176,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("file");
         std::fs::write(&file, "x").unwrap();
-        let err = log_age(&file.join("session-log.jsonl")).unwrap_err();
+        let err = log_age(&file.join("session-log.jsonl"), AgeSource::MtimeOnly).unwrap_err();
         assert_ne!(err.kind(), std::io::ErrorKind::NotFound, "{err}");
         // The reaper logs and returns; it must not panic or delete anything.
         reap_session_log(&file.join("session-log.jsonl"), 1);
@@ -153,7 +207,8 @@ mod tests {
         let old = SystemTime::now() - Duration::from_secs(3 * 86_400);
         filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(old)).unwrap();
 
-        reap_session_log(&path, 1);
+        // Setting the mtime also sets the change time to now, so only the mtime rule can age this file.
+        reap_session_log_with(&path, 1, AgeSource::MtimeOnly);
         assert!(!path.exists(), "file past retention must be deleted");
     }
 
@@ -181,7 +236,7 @@ mod tests {
         std::fs::write(&path, "{}").unwrap();
         let old = SystemTime::now() - Duration::from_secs(3 * 86_400);
         filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(old)).unwrap();
-        reap_session_log(&path, 1);
+        reap_session_log_with(&path, 1, AgeSource::MtimeOnly);
         assert!(!path.exists(), "file must be deleted");
         assert!(!dir.path().exists(), "empty parent dir must be removed");
     }

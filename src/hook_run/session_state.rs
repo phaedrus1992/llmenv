@@ -3,7 +3,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::materialize::cache::{AgeSource, file_stamp};
@@ -73,25 +73,47 @@ pub(crate) fn lock_state_file_timed(
         match file.try_lock() {
             Ok(()) => {
                 timing.wait_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
-                // The orphan prune goes by age, so a held lock must look new.
-                if let Err(e) = file.set_modified(std::time::SystemTime::now()) {
-                    tracing::error!("cannot refresh {label} lock age: {e}");
+                // Without a fresh age, the orphan prune can remove this live lock.
+                if let Err(why) = refresh_lock_age(&file, &path) {
+                    // Each caller falls back on a missing lock, so the agent must hear the cause here.
+                    crate::agent_notice::record_logged(why.clone());
+                    return (Err(why), timing);
                 }
                 return (Ok(file), timing);
             }
             Err(std::fs::TryLockError::WouldBlock) => std::thread::sleep(LOCK_POLL),
             Err(e) => {
                 timing.wait_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
-                return (Err(format!("cannot lock {}: {e}", path.display())), timing);
+                let why = format!(
+                    "cannot lock {}: {e}. Fix: check the permissions of that file and its folder.",
+                    path.display()
+                );
+                return (Err(why), timing);
             }
         }
     }
     timing.wait_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
     let why = format!(
-        "{} stays locked by another hook of this session",
+        "{} stays locked by another hook of this session. Fix: wait for that hook to finish, or \
+         end the session that holds it",
         path.display()
     );
     (Err(why), timing)
+}
+
+/// Set a held lock's modified time to now, so the orphan prune keeps it.
+///
+/// # Errors
+/// Returns the lock path, the cause, and a fix line when the time cannot be set.
+fn refresh_lock_age(file: &File, path: &Path) -> Result<(), String> {
+    file.set_modified(std::time::SystemTime::now())
+        .map_err(|e| {
+            format!(
+                "cannot refresh the age of the lock {} ({e}). Fix: check the permissions of that \
+                 file and its folder, or run `llmenv doctor` to check the state directory.",
+                path.display()
+            )
+        })
 }
 
 /// Scan `dir` and delete `.json` files older than `max_age_days`. Fail-soft:
@@ -148,7 +170,15 @@ fn file_age(path: &Path, source: AgeSource) -> std::io::Result<Option<Duration>>
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
-    Ok(Some(stamp.elapsed().unwrap_or(Duration::ZERO)))
+    // Hooks keep only ERROR-level logs, so the skew is logged at that level.
+    let age = stamp.elapsed().unwrap_or_else(|_| {
+        tracing::error!(
+            path = %path.display(),
+            "modified time is in the future (clock skew); the file is kept"
+        );
+        Duration::ZERO
+    });
+    Ok(Some(age))
 }
 
 /// Logs a state-file pruning failure at error level, which the default filter shows, and
@@ -190,9 +220,12 @@ pub(crate) fn context_was_lost(source: Option<&str>) -> bool {
 /// The model also cannot remember the earlier calls, so a stale repeat counter
 /// would warn about a call that is new to it.
 /// Fail-soft: a file that cannot be removed is logged and the hook goes on.
-pub(crate) fn reset_read_state(state_dir: &Path, session_id: &str) {
+fn reset_read_state(state_dir: &Path, session_id: &str) {
     if !crate::paths::is_valid_short_name(session_id) {
-        tracing::debug!("reset_read_state: session id is not a valid state file name, skipped");
+        crate::agent_notice::record_logged(format!(
+            "llmenv: the read state was not reset, because the session id {session_id:?} is not \
+             a plain name. Fix: check the session id that the engine sends to the hook."
+        ));
         return;
     }
     for path in [
@@ -200,9 +233,34 @@ pub(crate) fn reset_read_state(state_dir: &Path, session_id: &str) {
         super::slippage::stats_path(state_dir, session_id),
         super::repeat_detect::session_state_path(state_dir, session_id),
     ] {
+        // The model lost this content in compaction, so a record that survives can deny a re-read
+        // or excuse an edit. The agent must hear about it, because the engine drops hook stderr.
         if let Err(e) = remove_if_present(&path) {
-            tracing::error!("reset_read_state: cannot remove {}: {e}", path.display());
+            crate::agent_notice::record_logged(format!(
+                "llmenv: cannot reset the read state {} ({e}), so a stale record may stay. Fix: \
+                 check the permissions of that file and its folder, or run `llmenv doctor` to \
+                 check the state directory.",
+                path.display()
+            ));
         }
+    }
+}
+
+/// The compaction reset for the session `session_id`, when the engine sent one. A state dir that
+/// cannot be found is an agent notice, because the engine drops hook stderr.
+pub(crate) fn reset_read_state_after_compaction(
+    session_id: Option<&str>,
+    state_dir: impl FnOnce() -> anyhow::Result<PathBuf>,
+) {
+    let Some(session_id) = session_id else {
+        return;
+    };
+    match state_dir() {
+        Ok(state_dir) => reset_read_state(&state_dir, session_id),
+        Err(e) => crate::agent_notice::record_logged(format!(
+            "llmenv: the read state was not reset after compaction, because no state dir could be \
+             found ({e}). Fix: set the state directory, or run `llmenv doctor` to check the paths."
+        )),
     }
 }
 
@@ -326,3 +384,7 @@ pub(crate) fn unix_now() -> i64 {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod reset_tests;
