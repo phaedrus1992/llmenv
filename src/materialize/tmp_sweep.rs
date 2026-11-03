@@ -169,10 +169,26 @@ fn scan(tmp_root: &Path, rule: AgeRule, in_use: &[PathBuf]) -> anyhow::Result<Sc
     Ok(scan)
 }
 
+/// Whether `error` is a missing entry, anywhere in its chain. A `NotFound` is the entry being
+/// removed while the walk runs. Other errors stay failures.
+fn is_vanished(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+    })
+}
+
 /// Mark one entry stale when its newest file mtime is older than `older_than`. Keep it otherwise.
 fn judge_entry(path: &Path, is_dir: bool, rule: AgeRule, now: SystemTime, scan: &mut Scan) {
     let modified = match entry_mtime(path, is_dir, rule.source) {
         Ok(modified) => modified,
+        // Another process removed the entry after the walk listed it. That is not a failure,
+        // the same as a child that vanishes inside a folder walk (#2835, #3276).
+        Err(e) if is_vanished(&e) => {
+            tracing::debug!(path = %path.display(), "state/tmp entry removed during the walk");
+            return;
+        }
         Err(e) => {
             record_failure(path, &e, scan);
             return;
@@ -216,3 +232,6 @@ mod summary_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod walk_tests;

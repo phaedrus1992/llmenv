@@ -295,13 +295,17 @@ fn write_stale_state_file(rd_dir: &Path, name: &str) -> PathBuf {
 }
 
 #[test]
-fn the_first_save_of_a_session_prunes_stale_state_files() {
+fn the_first_save_of_a_session_keeps_a_state_file_restored_with_an_old_mtime() {
     let dir = TempDir::new().expect("test");
     let stale = write_stale_state_file(&repeat_detect_state_dir(dir.path()), "old.json");
 
     SessionState::new("s1").save(dir.path()).expect("save");
 
-    assert!(!stale.exists(), "the first save removes a stale file");
+    // The production rule also counts the change time, which a restore sets to now (#3275).
+    assert!(
+        stale.exists(),
+        "the first save removed a file restored with an old mtime"
+    );
 }
 
 #[test]

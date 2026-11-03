@@ -5,7 +5,7 @@ use std::fs;
 use tempfile::TempDir;
 
 #[test]
-fn prune_stale_sessions_removes_old_cache_and_orphan_lock_files() {
+fn prune_stale_sessions_keeps_files_restored_with_an_old_mtime() {
     let dir = tempfile::tempdir().expect("test");
     let cache_dir = read_once_state_dir(dir.path());
     std::fs::create_dir_all(&cache_dir).expect("test");
@@ -17,8 +17,9 @@ fn prune_stale_sessions_removes_old_cache_and_orphan_lock_files() {
 
     SessionCache::prune_stale_sessions(dir.path(), 7);
 
-    assert!(!cache_dir.join("old.json").exists());
-    assert!(!cache_dir.join("orphan.lock").exists());
+    // The production rule also counts the change time, which a restore sets to now (#3275).
+    assert!(cache_dir.join("old.json").exists());
+    assert!(cache_dir.join("orphan.lock").exists());
 }
 
 fn test_config_warn() -> ReadOnceConfig {

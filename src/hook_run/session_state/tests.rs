@@ -23,7 +23,7 @@ fn prunes_only_stale_json_files() {
     let old_ft = filetime::FileTime::from_system_time(old);
     filetime::set_file_mtime(&stale, old_ft).expect("test");
 
-    prune_stale_json_files(dir.path(), 7);
+    prune_stale_json_files_with(dir.path(), 7, AgeSource::MtimeOnly);
 
     assert!(fresh.exists(), "fresh file must survive pruning");
     assert!(!stale.exists(), "stale file must be pruned");
@@ -33,12 +33,16 @@ fn prunes_only_stale_json_files() {
 #[test]
 fn file_age_is_none_for_a_missing_file_and_an_error_for_an_unreadable_path() {
     let dir = TempDir::new().expect("test");
-    assert!(file_age(&dir.path().join("absent.json")).unwrap().is_none());
+    assert!(
+        file_age(&dir.path().join("absent.json"), AgeSource::MtimeOnly)
+            .unwrap()
+            .is_none()
+    );
     let file = dir.path().join("file");
     std::fs::write(&file, "x").expect("test");
     // A path under a regular file fails with ENOTDIR, not NotFound.
-    assert!(file_age(&file.join("child.lock")).is_err());
-    assert!(file_age(&file).unwrap().is_some());
+    assert!(file_age(&file.join("child.lock"), AgeSource::MtimeOnly).is_err());
+    assert!(file_age(&file, AgeSource::MtimeOnly).unwrap().is_some());
 }
 
 #[cfg(unix)]
@@ -77,7 +81,7 @@ fn a_failed_prune_is_an_agent_notice() {
     // A read-only folder refuses the unlink.
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).expect("test");
 
-    prune_stale_json_files(dir.path(), 7);
+    prune_stale_json_files_with(dir.path(), 7, AgeSource::MtimeOnly);
 
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).expect("test");
     assert!(stale.exists());
@@ -101,7 +105,7 @@ fn a_fresh_link_to_an_old_file_is_kept() {
     let link = dir.path().join("link.json");
     std::os::unix::fs::symlink(&target, &link).expect("test");
 
-    prune_stale_json_files(dir.path(), 7);
+    prune_stale_json_files_with(dir.path(), 7, AgeSource::MtimeOnly);
 
     assert!(
         link.is_symlink(),
@@ -122,7 +126,7 @@ fn an_old_link_to_a_fresh_file_is_pruned_as_a_link() {
         filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_secs(10 * 86_400));
     filetime::set_symlink_file_times(&link, old, old).expect("test");
 
-    prune_stale_json_files(dir.path(), 7);
+    prune_stale_json_files_with(dir.path(), 7, AgeSource::MtimeOnly);
 
     assert!(
         !link.is_symlink(),
@@ -142,7 +146,7 @@ fn a_fresh_lock_link_to_an_old_lock_is_kept() {
     let link = dir.path().join("link.lock");
     std::os::unix::fs::symlink(&target, &link).expect("test");
 
-    prune_orphan_locks(dir.path(), 7);
+    prune_orphan_locks_with(dir.path(), 7, AgeSource::MtimeOnly);
 
     assert!(
         link.is_symlink(),
@@ -162,7 +166,7 @@ fn an_old_lock_link_to_a_fresh_lock_is_pruned_as_a_link() {
         filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_secs(10 * 86_400));
     filetime::set_symlink_file_times(&link, old, old).expect("test");
 
-    prune_orphan_locks(dir.path(), 7);
+    prune_orphan_locks_with(dir.path(), 7, AgeSource::MtimeOnly);
 
     assert!(
         !link.is_symlink(),
@@ -182,7 +186,7 @@ fn a_file_at_the_limit_is_kept() {
 #[test]
 fn missing_dir_is_a_noop() {
     let dir = TempDir::new().expect("test");
-    prune_stale_json_files(&dir.path().join("does-not-exist"), 7);
+    prune_stale_json_files_with(&dir.path().join("does-not-exist"), 7, AgeSource::MtimeOnly);
 }
 
 #[test]
@@ -254,7 +258,7 @@ fn a_lock_stays_when_its_json_is_a_dangling_link() {
     std::os::unix::fs::symlink(dir.path().join("gone.json"), dir.path().join("s.json"))
         .expect("test");
 
-    prune_orphan_locks(dir.path(), 7);
+    prune_orphan_locks_with(dir.path(), 7, AgeSource::MtimeOnly);
 
     assert!(
         lock.exists(),
@@ -272,4 +276,62 @@ fn an_unreadable_session_entry_counts_as_present() {
     std::fs::write(&file, "x").expect("test");
 
     assert!(!json_entry_is_absent(&file.join("s.json")));
+}
+
+#[test]
+fn a_state_file_restored_with_an_old_mtime_is_kept_by_the_change_time_rule() {
+    let dir = TempDir::new().expect("test");
+    let restored = dir.path().join("restored.json");
+    std::fs::write(&restored, "{}").expect("test");
+    let old = SystemTime::now() - Duration::from_secs(10 * 86_400);
+    filetime::set_file_mtime(&restored, filetime::FileTime::from_system_time(old)).expect("test");
+
+    prune_stale_json_files_with(dir.path(), 7, AgeSource::MtimeOrCtime);
+
+    assert!(
+        restored.exists(),
+        "a restored state file was removed (#3275)"
+    );
+}
+
+#[test]
+fn a_lock_restored_with_an_old_mtime_is_kept_by_the_change_time_rule() {
+    let dir = TempDir::new().expect("test");
+    let restored = dir.path().join("restored.lock");
+    std::fs::write(&restored, "").expect("test");
+    let old = SystemTime::now() - Duration::from_secs(10 * 86_400);
+    filetime::set_file_mtime(&restored, filetime::FileTime::from_system_time(old)).expect("test");
+
+    prune_orphan_locks_with(dir.path(), 7, AgeSource::MtimeOrCtime);
+
+    assert!(restored.exists(), "a restored lock was removed (#3275)");
+}
+
+#[test]
+fn the_production_prune_removes_an_expired_state_file() {
+    let dir = TempDir::new().expect("test");
+    let stale = dir.path().join("stale.json");
+    std::fs::write(&stale, "{}").expect("test");
+
+    // A zero limit makes any file written before this line expired, under the production rule.
+    prune_stale_json_files(dir.path(), 0);
+
+    assert!(
+        !stale.exists(),
+        "the production prune kept an expired state file"
+    );
+}
+
+#[test]
+fn the_production_prune_removes_an_expired_orphan_lock() {
+    let dir = TempDir::new().expect("test");
+    let stale = dir.path().join("stale.lock");
+    std::fs::write(&stale, "").expect("test");
+
+    prune_orphan_locks(dir.path(), 0);
+
+    assert!(
+        !stale.exists(),
+        "the production prune kept an expired orphan lock"
+    );
 }

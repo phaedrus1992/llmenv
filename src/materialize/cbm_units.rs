@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::Context as _;
 
-use crate::materialize::cache::is_expired;
+use crate::materialize::cache::{AgeSource, file_stamp, is_expired};
 
 /// The file name endings of a codebase-memory-mcp index database and its SQLite side files.
 const DB_SUFFIXES: [&[u8]; 3] = [b".db", b".db-wal", b".db-shm"];
@@ -66,7 +66,13 @@ impl Unit {
 ///
 /// # Errors
 /// `dir` exists but cannot be read, or one of its entries cannot be read.
-pub(crate) fn scan_units(dir: &Path, older_than: Duration) -> anyhow::Result<Option<Vec<Unit>>> {
+/// Production passes `AgeSource::MtimeOrCtime`, so a restored index keeps its old mtime and the
+/// change time counts too (#3275).
+pub(crate) fn scan_units_with(
+    dir: &Path,
+    older_than: Duration,
+    source: AgeSource,
+) -> anyhow::Result<Option<Vec<Unit>>> {
     let Some(entries) = crate::paths::read_dir_optional(dir)? else {
         return Ok(None);
     };
@@ -88,14 +94,20 @@ pub(crate) fn scan_units(dir: &Path, older_than: Duration) -> anyhow::Result<Opt
     let now = SystemTime::now();
     let units = databases
         .into_values()
-        .filter_map(|files| unit_of(files, now, older_than, dir))
+        .filter_map(|files| unit_of(files, now, older_than, dir, source))
         .collect();
     Ok(Some(units))
 }
 
 /// Judge one unit. `None` when every file of the unit has already gone.
-fn unit_of(files: Vec<PathBuf>, now: SystemTime, older_than: Duration, dir: &Path) -> Option<Unit> {
-    let present = match present_mtimes(&files) {
+fn unit_of(
+    files: Vec<PathBuf>,
+    now: SystemTime,
+    older_than: Duration,
+    dir: &Path,
+    source: AgeSource,
+) -> Option<Unit> {
+    let present = match present_mtimes(&files, source) {
         Ok(present) => present,
         Err((file, e)) => {
             return Some(Unit {
@@ -125,10 +137,11 @@ fn unit_of(files: Vec<PathBuf>, now: SystemTime, older_than: Duration, dir: &Pat
 /// already gone is left out: SQLite can remove a `-wal` between the directory read and this stat.
 fn present_mtimes(
     files: &[PathBuf],
+    source: AgeSource,
 ) -> Result<Vec<(PathBuf, SystemTime)>, (PathBuf, std::io::Error)> {
     let mut present = Vec::with_capacity(files.len());
     for file in files {
-        match std::fs::symlink_metadata(file).and_then(|meta| meta.modified()) {
+        match std::fs::symlink_metadata(file).and_then(|meta| file_stamp(&meta, source)) {
             Ok(modified) => present.push((file.clone(), modified)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err((file.clone(), e)),
@@ -136,6 +149,10 @@ fn present_mtimes(
     }
     Ok(present)
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod restored_tests;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
@@ -185,7 +202,7 @@ mod tests {
             for name in &written {
                 std::fs::write(dir.path().join(name), "x").unwrap();
             }
-            let units = scan_units(dir.path(), Duration::from_secs(3600)).unwrap().unwrap();
+            let units = scan_units_with(dir.path(), Duration::from_secs(3600), AgeSource::MtimeOnly).unwrap().unwrap();
 
             let mut grouped: Vec<String> = units
                 .iter()
@@ -215,7 +232,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let gone = dir.path().join("a.db-wal");
 
-        let present = present_mtimes(std::slice::from_ref(&gone)).unwrap();
+        let present = present_mtimes(std::slice::from_ref(&gone), AgeSource::MtimeOnly).unwrap();
 
         assert!(present.is_empty());
     }
