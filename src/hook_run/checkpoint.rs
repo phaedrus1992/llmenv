@@ -308,15 +308,18 @@ fn restart(
     bumped.attempts += 1;
     bumped.started_at = now;
     if let Err(e) = save(path, &bumped) {
-        tracing::error!("background job {} not resumed: {e:#}", path.display());
+        crate::agent_notice::record_logged(format!(
+            "llmenv: background job {} not resumed, its checkpoint cannot be saved ({e:#}). Fix: check the permissions of the checkpoint folder.",
+            path.display()
+        ));
         return false;
     }
     if let Err(e) = spawn(&bumped, path) {
-        tracing::error!(
-            "background job {} not resumed (attempt {}/{MAX_ATTEMPTS}): {e:#}",
+        crate::agent_notice::record_logged(format!(
+            "llmenv: background job {} not resumed (attempt {}/{MAX_ATTEMPTS}): {e:#}. Fix: fix the cause in the error, then start the job again.",
             path.display(),
             bumped.attempts
-        );
+        ));
         return false;
     }
     true
@@ -463,3 +466,7 @@ mod tests;
 #[cfg(test)]
 #[expect(clippy::unwrap_used, clippy::panic, reason = "test code")]
 mod resume_tests;
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test code")]
+mod notice_tests;

@@ -92,7 +92,9 @@ fn safe_session(session_id: Option<&str>) -> Option<&str> {
     if crate::paths::is_valid_short_name(id) {
         return Some(id);
     }
-    tracing::error!("session_id failed path-safety validation for slippage, rejecting");
+    crate::agent_notice::record_logged(
+        "llmenv: a session id is not a plain file name, so its slippage stats are not kept. Fix: check the session id in the hook input.",
+    );
     None
 }
 
@@ -121,12 +123,15 @@ pub(super) fn load_stats(state_dir: &std::path::Path, session_id: &str) -> Sessi
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return SessionStats::default(),
         Err(e) => {
             // Error level: the default log filter is ERROR, so a warn is never shown (#2657).
-            tracing::error!(path = %path.display(), error = %e, "slippage: read log unreadable");
+            crate::agent_notice::record_logged(format!(
+                "llmenv: cannot read the slippage stats log {} ({e}). Writes to existing files may be denied. Fix: check the permissions of that file.",
+                path.display()
+            ));
             return SessionStats::default();
         }
     };
     serde_json::from_str(&text).unwrap_or_else(|e| {
-        tracing::error!(path = %path.display(), error = %e, "slippage: read log is corrupt");
+        crate::agent_notice::record_logged(format!("llmenv: the slippage stats log {} is corrupt ({e}). Writes to existing files may be denied until the file is read again. Fix: read the file again, so llmenv rewrites the log.", path.display()));
         SessionStats::default()
     })
 }
@@ -223,7 +228,9 @@ pub(super) fn save_stats(state_dir: &std::path::Path, session_id: &str, stats: &
         crate::paths::write_owner_only_atomic(&stats_path(state_dir, session_id), json.as_bytes())
     {
         // A lost read record makes the next Write to that file deny, so the failure must be visible.
-        tracing::error!("slippage: could not record session stats: {e}");
+        crate::agent_notice::record_logged(format!(
+            "llmenv: cannot save the slippage stats ({e}). A later Write to a file you read may be denied. Fix: check the permissions of the slippage state folder."
+        ));
     }
 }
 
@@ -1202,3 +1209,7 @@ mod tests {
         assert!(!denied.contains("changes something"), "{denied}");
     }
 }
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test code")]
+mod notice_tests;
