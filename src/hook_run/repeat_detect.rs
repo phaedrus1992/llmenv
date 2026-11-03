@@ -89,18 +89,12 @@ impl SessionState {
         let path = session_state_path(state_dir, session_id);
         match crate::paths::bounded::state_text_io(&path) {
             Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
-                tracing::error!(
-                    "failed to parse repeat-detect state {}, starting fresh: {e}",
-                    path.display()
-                );
+                crate::agent_notice::record_logged(format!("llmenv: repeat-detect state {} cannot be parsed ({e}), so it starts fresh. Fix: delete that file to clear this error.", path.display()));
                 Self::new(session_id)
             }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::new(session_id),
             Err(e) => {
-                tracing::error!(
-                    "failed to read repeat-detect state {}, saves are skipped: {e}",
-                    path.display()
-                );
+                crate::agent_notice::record_logged(format!("llmenv: repeat-detect state {} cannot be read ({e}), so its saves are skipped. Fix: check the permissions of that file.", path.display()));
                 Self {
                     read_failed: true,
                     ..Self::new(session_id)

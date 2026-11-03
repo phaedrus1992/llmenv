@@ -45,9 +45,5 @@ fn an_unsaved_stats_log_names_the_fix() {
 #[test]
 fn a_session_id_that_is_not_a_plain_name_names_the_fix() {
     assert!(safe_session(Some("../escape")).is_none());
-    assert!(
-        notices().contains("is not a plain file name"),
-        "{}",
-        notices()
-    );
+    assert!(notices().contains("not a plain file name"), "{}", notices());
 }

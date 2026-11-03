@@ -48,10 +48,9 @@ pub(in crate::hook_run) fn record_local(
                 payload["tool_use_id"].as_str().filter(|id| !id.is_empty()),
                 input["prompt"].as_str().filter(|p| !p.is_empty()),
             ) else {
-                tracing::error!(
-                    "subagent task not queued for session {session_id}: the Agent call has no \
-                     string tool_use_id or tool_input.prompt, so the subagent gets no task memories"
-                );
+                crate::agent_notice::record_logged(format!(
+                    "llmenv: subagent task not queued for session {session_id}: the Agent call has no string tool_use_id or tool_input.prompt, so the subagent gets no task memories. Fix: send the Agent call with a string tool_use_id and tool_input.prompt."
+                ));
                 return;
             };
             note_unless_saved(

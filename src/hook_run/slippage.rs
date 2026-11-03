@@ -93,7 +93,7 @@ fn safe_session(session_id: Option<&str>) -> Option<&str> {
         return Some(id);
     }
     crate::agent_notice::record_logged(
-        "llmenv: a session id is not a plain file name, so its slippage stats are not kept. Fix: check the session id in the hook input.",
+        "llmenv: the hook input has a session id that is not a plain file name, so its slippage stats are not kept. Fix: report the engine session id format to the llmenv maintainers.",
     );
     None
 }
@@ -124,14 +124,14 @@ pub(super) fn load_stats(state_dir: &std::path::Path, session_id: &str) -> Sessi
         Err(e) => {
             // Error level: the default log filter is ERROR, so a warn is never shown (#2657).
             crate::agent_notice::record_logged(format!(
-                "llmenv: cannot read the slippage stats log {} ({e}). Writes to existing files may be denied. Fix: check the permissions of that file.",
+                "llmenv: cannot read the slippage stats log {} ({e}). Writes to existing files may be denied. Fix: check the permissions of that file. A read replaces the file, so earlier read records are lost.",
                 path.display()
             ));
             return SessionStats::default();
         }
     };
     serde_json::from_str(&text).unwrap_or_else(|e| {
-        crate::agent_notice::record_logged(format!("llmenv: the slippage stats log {} is corrupt ({e}). Writes to existing files may be denied until the file is read again. Fix: read the file again, so llmenv rewrites the log.", path.display()));
+        crate::agent_notice::record_logged(format!("llmenv: the slippage stats log {} is corrupt ({e}). Writes to existing files may be denied until the file is read again. Fix: read the file again, so llmenv rewrites the log. Earlier read records in it are lost.", path.display()));
         SessionStats::default()
     })
 }
