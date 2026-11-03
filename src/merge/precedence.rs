@@ -49,17 +49,22 @@ fn check_same_precedence_ties<V: PartialEq + std::fmt::Debug>(
     what: &str,
     entries: &[(&CapabilityContributor, &V)],
 ) -> anyhow::Result<()> {
-    for (i, (a, a_value)) in entries.iter().enumerate() {
-        for (b, b_value) in &entries[i + 1..] {
-            if a.precedence == b.precedence && a_value != b_value {
+    let mut first_at: BTreeMap<u8, (&CapabilityContributor, &V)> = BTreeMap::new();
+    for &(c, value) in entries {
+        match first_at.get(&c.precedence).copied() {
+            None => {
+                first_at.insert(c.precedence, (c, value));
+            }
+            Some((first, first_value)) if first_value != value => {
                 anyhow::bail!(
                     "conflicting {what} at the same precedence: \
-                     '{}' sets {a_value:?} but '{}' sets {b_value:?} — no scope can break \
+                     '{}' sets {first_value:?} but '{}' sets {value:?} — no scope can break \
                      the tie; resolve by giving one a higher-precedence scope",
-                    a.name,
-                    b.name,
+                    first.name,
+                    c.name,
                 );
             }
+            Some(_) => {}
         }
     }
     Ok(())
