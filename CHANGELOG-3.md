@@ -127,6 +127,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Show the agent a notice that names the lock and the fix when a busy session lock makes a hook fall back. Before, only the log showed it. [fix:hook] [#3312]
 - Tell the agent when slippage stats or a background job checkpoint cannot be read or saved, or when hook output cannot take the resume cache notice. Each notice names the cause and the fix. [fix:hook] [#3320]
 - Keep a rotated session log that was restored with an old mtime, for example by `tar -x` or `cp -p`. Rotation now ages a file by the later of its mtime and its change time, as the cache sweep already did. [fix:cache] [#3321]
+- Fail a merge when two scopes at the same precedence set different values for one key or field, even when a higher-precedence scope also sets it. A config that merged before can now fail with a conflict error that names both scopes. [fix:merge]
 
 ### Security
 
