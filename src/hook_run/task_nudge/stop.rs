@@ -2,9 +2,14 @@
 
 use std::path::Path;
 
-use super::queued_reminder;
+use super::{NudgeState, load, queued_reminder, save, state_path};
 use crate::config::TaskTracker;
+use crate::hook_run::session_state::lock_state_file;
 use crate::task::Tracking;
+
+/// Turn ends between two Stop reminders for a task in progress with tasks queued behind it. Absent
+/// means 5, so a long run is reminded once every five turn ends (#3318).
+const DEFAULT_STOP_NUDGE_EVERY: u32 = 5;
 
 /// The reminder to park the task that waits for the user's answer.
 pub(super) fn waiting_reminder(tracking: &Tracking) -> String {
@@ -35,6 +40,14 @@ pub(crate) fn handle_stop(
         .as_str()
         .is_some_and(|m| m.trim_end().ends_with('?'));
     let tracking = crate::task::tracking(state_dir, caller);
+    let stalled = matches!(
+        &tracking,
+        Tracking::Tracked { wip: Some(_), queued, .. } if *queued > 0
+    );
+    if !stalled {
+        // The throttle restarts with the next stalled turn end, so that one is reminded at once.
+        clear_stop_turns(caller, state_dir);
+    }
     match &tracking {
         Tracking::Tracked { wip: Some(_), .. } if asks => waiting_reminder(&tracking),
         Tracking::Tracked { waiting, .. } if asks && !waiting.is_empty() => format!(
@@ -47,6 +60,11 @@ pub(crate) fn handle_stop(
             next: Some(slug),
             ..
         } => queued_reminder(slug),
+        Tracking::Tracked {
+            wip: Some(slug),
+            queued,
+            ..
+        } if *queued > 0 => stop_wip_reminder(tracker, slug, *queued, caller, state_dir),
         // The nudges cannot run, so the agent hears why at the end of each turn.
         Tracking::Unknown(cause) => format!(
             "llmenv task tracker: the task reminders did not run, because the task store cannot \
@@ -54,4 +72,64 @@ pub(crate) fn handle_stop(
         ),
         _ => String::new(),
     }
+}
+
+/// The reminder at a turn end while a task is in progress with tasks queued behind it. It comes at
+/// the first such turn end, then every `stop_nudge_every` turn ends, so a long run is not nagged.
+fn stop_wip_reminder(
+    tracker: &TaskTracker,
+    slug: &str,
+    queued: usize,
+    caller: Option<&str>,
+    state_dir: &Path,
+) -> String {
+    let every = tracker
+        .stop_nudge_every
+        .unwrap_or(DEFAULT_STOP_NUDGE_EVERY)
+        .max(1);
+    let due = with_stop_state(caller, state_dir, |state| {
+        let due = state.stop_quiet_turns == 0;
+        state.stop_quiet_turns = state.stop_quiet_turns.saturating_add(1) % every;
+        due
+    });
+    if due != Some(true) {
+        return String::new();
+    }
+    format!(
+        "llmenv task tracker: '{slug}' is in progress, and {queued} task(s) are queued behind it. If \
+         '{slug}' is done, run `llmenv task done {slug}`. Then run `llmenv task start <slug>` for the \
+         next open step."
+    )
+}
+
+/// Restart the Stop throttle. Only an existing state file is touched, so a session that never
+/// wrote one gets no new file.
+fn clear_stop_turns(caller: Option<&str>, state_dir: &Path) {
+    let Some(path) = caller.and_then(|id| state_path(state_dir, id)) else {
+        return;
+    };
+    if path.is_file() {
+        with_stop_state(caller, state_dir, |state| state.stop_quiet_turns = 0);
+    }
+}
+
+/// Apply `change` to the session's nudge state under its lock, and save the state when `change`
+/// altered it. Returns `None` when there is no session, or when the state cannot be locked or
+/// read. Each of those failures records its own agent notice.
+fn with_stop_state<T>(
+    caller: Option<&str>,
+    state_dir: &Path,
+    change: impl FnOnce(&mut NudgeState) -> T,
+) -> Option<T> {
+    let id = caller?;
+    let path = state_path(state_dir, id)?;
+    let dir = path.parent()?;
+    let _lock = lock_state_file(dir, id, "task nudge")?;
+    let (mut state, _) = load(&path)?;
+    let before = state.clone();
+    let out = change(&mut state);
+    if state != before {
+        save(&path, &state);
+    }
+    Some(out)
 }

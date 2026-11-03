@@ -686,6 +686,7 @@ impl Config {
                 for (name, value) in [
                     ("nudge_after", tracker.nudge_after),
                     ("nudge_every", tracker.nudge_every),
+                    ("stop_nudge_every", tracker.stop_nudge_every),
                 ] {
                     if value == Some(0) {
                         return Err(ValidateError::TaskTrackerNudgeCountInvalid(name));
@@ -2181,6 +2182,15 @@ mod tests {
                 ..base.clone()
             }),
             Err(ValidateError::TaskTrackerNudgeCountInvalid("nudge_every"))
+        ));
+        assert!(matches!(
+            with(crate::TaskTracker {
+                stop_nudge_every: Some(0),
+                ..base.clone()
+            }),
+            Err(ValidateError::TaskTrackerNudgeCountInvalid(
+                "stop_nudge_every"
+            ))
         ));
         assert!(matches!(
             with(crate::TaskTracker {

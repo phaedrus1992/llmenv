@@ -313,44 +313,75 @@ fn takes_value(word: &str, value_opts: &[&str]) -> bool {
 }
 
 /// Whether one segment starts a commit or a pull request.
+/// The first two subcommand words of a `gh` call. A `-R` or `--repo` value is skipped with its flag.
+fn gh_subcommands<'a>(tail: &[&'a str]) -> Vec<&'a str> {
+    let mut iter = tail.iter();
+    let mut subcommands: Vec<&str> = Vec::new();
+    while let Some(word) = iter.next() {
+        match *word {
+            "-R" | "--repo" => {
+                iter.next();
+            }
+            w if w.starts_with('-') => {}
+            w => subcommands.push(w),
+        }
+        if subcommands.len() == 2 {
+            break;
+        }
+    }
+    subcommands
+}
+
+/// The first subcommand word of a `git` call. A `-C`, `-c`, `--git-dir`, or `--work-tree` value is
+/// skipped with its flag.
+fn git_subcommand<'a>(tail: &[&'a str]) -> Option<&'a str> {
+    let mut iter = tail.iter();
+    while let Some(word) = iter.next() {
+        match *word {
+            "-C" | "-c" | "--git-dir" | "--work-tree" => {
+                iter.next();
+            }
+            w if w.starts_with('-') => {}
+            w => return Some(w),
+        }
+    }
+    None
+}
+
 fn starts_commit_or_pr(words: &[String]) -> bool {
     let words = program_words(words);
     let Some((first, tail)) = words.split_first() else {
         return false;
     };
     match program(first) {
-        "gh" => {
-            let mut iter = tail.iter();
-            let mut subcommands: Vec<&str> = Vec::new();
-            while let Some(word) = iter.next() {
-                match *word {
-                    "-R" | "--repo" => {
-                        iter.next();
-                    }
-                    w if w.starts_with('-') => {}
-                    w => subcommands.push(w),
-                }
-                if subcommands.len() == 2 {
-                    break;
-                }
-            }
-            subcommands == ["pr", "create"]
-        }
-        "git" => {
-            let mut iter = tail.iter();
-            while let Some(word) = iter.next() {
-                match *word {
-                    "-C" | "-c" | "--git-dir" | "--work-tree" => {
-                        iter.next();
-                    }
-                    w if w.starts_with('-') => {}
-                    w => return w == "commit",
-                }
-            }
-            false
-        }
+        "gh" => gh_subcommands(tail) == ["pr", "create"],
+        "git" => git_subcommand(tail) == Some("commit"),
         _ => false,
     }
+}
+
+/// The step boundary that one command segment reaches, or `None`. A boundary ends a step of the
+/// agent's work: a push, or a pull request opened, marked ready, or merged (#3318).
+fn boundary_of(words: &[String]) -> Option<&'static str> {
+    let words = program_words(words);
+    let (first, tail) = words.split_first()?;
+    match program(first) {
+        "git" => (git_subcommand(tail) == Some("push")).then_some("git push"),
+        "gh" => match gh_subcommands(tail).as_slice() {
+            ["pr", "create"] => Some("gh pr create"),
+            ["pr", "ready"] => Some("gh pr ready"),
+            ["pr", "merge"] => Some("gh pr merge"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The first step boundary in a shell command, or `None`. A command nested too deeply to split
+/// has no boundary that can be named, so the reminder is skipped for it.
+pub(super) fn step_boundary(command: &str) -> Option<&'static str> {
+    let segments = shell_segments(command).ok()?;
+    segments.iter().find_map(|words| boundary_of(words))
 }
 
 /// The script that a shell runs with `-c`. The flag may sit in a cluster, as in `bash -lc`.
@@ -410,22 +441,4 @@ fn task_end_target(words: &[String]) -> Option<&str> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn takes_value_reads_exact_options_and_short_clusters() {
-        let opts = wrappers::TIMEOUT_OPTS;
-        assert!(takes_value("-s", opts));
-        assert!(takes_value("--signal", opts));
-        // A cluster that ends in a value option takes the next word.
-        assert!(takes_value("-ks", opts));
-        // An attached value takes none.
-        assert!(!takes_value("-sKILL", opts));
-        assert!(!takes_value("--signal=KILL", opts));
-        // A long option is never a cluster, even when its last letter is a value option.
-        assert!(!takes_value("--x-s", opts));
-        assert!(!takes_value("-x", opts));
-        assert!(!takes_value("-", opts));
-    }
-}
+mod tests;

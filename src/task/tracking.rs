@@ -17,11 +17,12 @@ pub(crate) enum Tracking {
     NoTasks,
     /// A session has unfinished tasks. `wip` is the slug of one task in progress, if any,
     /// `waiting` lists the slugs of the tasks that wait on the user, and `next` is the first
-    /// task still `open`, the one to start next.
+    /// task still `open`, the one to start next. `queued` counts every task still `open`.
     Tracked {
         wip: Option<String>,
         waiting: Vec<String>,
         next: Option<String>,
+        queued: usize,
     },
 }
 
@@ -79,5 +80,14 @@ pub(crate) fn tracking(state_dir: &Path, caller: Option<&str>) -> Tracking {
         .filter(|t| t.state == TaskState::Open)
         .min_by(|a, b| queue_order(a, b))
         .map(|t| t.slug.clone());
-    Tracking::Tracked { wip, waiting, next }
+    let queued = unfinished
+        .iter()
+        .filter(|t| t.state == TaskState::Open)
+        .count();
+    Tracking::Tracked {
+        wip,
+        waiting,
+        next,
+        queued,
+    }
 }
