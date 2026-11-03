@@ -81,6 +81,29 @@ pub(super) fn safe_readonly_deny_rules_for(preset: PermissionPreset) -> Vec<Perm
             bash_rule("ast-grep *--update-all*"),
             bash_rule("shfmt *-w*"),
             bash_rule("shfmt *--write*"),
+            // `--output=<file>` is a diff option that git accepts on diff, log, and show. It
+            // creates or overwrites the named file (#3348 review).
+            bash_rule("git diff *--output*"),
+            bash_rule("git log *--output*"),
+            bash_rule("git show *--output*"),
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Git writes the file that `--output=<file>` names, so each read-only git allow needs a deny.
+    #[test]
+    fn every_git_read_allow_has_an_output_deny() {
+        let denies: Vec<String> = safe_readonly_deny_rules_for(PermissionPreset::SafeReadonly)
+            .into_iter()
+            .filter_map(|r| r.pattern)
+            .collect();
+        for git in ["git diff", "git log", "git show"] {
+            let want = format!("{git} *--output*");
+            assert!(denies.contains(&want), "missing deny {want}: {denies:?}");
+        }
     }
 }

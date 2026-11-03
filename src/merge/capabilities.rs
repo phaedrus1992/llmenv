@@ -367,6 +367,9 @@ mod tests {
             rule("Bash", "ast-grep *--update-all*"),
             rule("Bash", "shfmt *-w*"),
             rule("Bash", "shfmt *--write*"),
+            rule("Bash", "git diff *--output*"),
+            rule("Bash", "git log *--output*"),
+            rule("Bash", "git show *--output*"),
         ]
     }
 
