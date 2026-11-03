@@ -104,3 +104,12 @@ fn read_stats_is_ok_exactly_when_the_log_parses() {
         prop_assert_eq!(read_stats(state.path(), "s-prop").is_ok(), parses);
     });
 }
+
+// #3348 CI: a missing stats log is the first-use case. It reads as Ok and empty, and it is not
+// an error, so a Write deny does not name a stats log problem.
+#[test]
+fn a_missing_stats_log_reads_as_empty() {
+    let state = tempfile::tempdir().unwrap();
+    let stats = read_stats(state.path(), "s-missing").unwrap();
+    assert!(stats.paths.is_empty());
+}
