@@ -4,12 +4,10 @@ use super::*;
 use proptest::prelude::*;
 
 /// Contributors with a small precedence range and a small env key space, so ties occur often.
-fn arb_tie_contributors(
-    len: std::ops::Range<usize>,
-) -> impl Strategy<Value = Vec<CapabilityContributor>> {
+fn arb_tie_contributors() -> impl Strategy<Value = Vec<CapabilityContributor>> {
     prop::collection::vec(
         (1u8..=3, prop::collection::vec(("[ab]", "[xy]"), 0..3)),
-        len,
+        0..6,
     )
     .prop_map(|rows| {
         rows.into_iter()
@@ -28,17 +26,23 @@ fn arb_tie_contributors(
 
 /// Whether two contributors at one precedence set one env key to different values.
 fn has_tie_conflict(contribs: &[CapabilityContributor]) -> bool {
-    contribs.iter().enumerate().any(|(i, a)| {
-        contribs[i + 1..].iter().any(|b| {
-            a.precedence == b.precedence
-                && a.capabilities.env.iter().any(|(key, value)| {
-                    b.capabilities
-                        .env
-                        .get(key)
-                        .is_some_and(|other| other != value)
-                })
-        })
-    })
+    for (i, a) in contribs.iter().enumerate() {
+        for b in &contribs[i + 1..] {
+            if a.precedence != b.precedence {
+                continue;
+            }
+            for (key, value) in &a.capabilities.env {
+                if b.capabilities
+                    .env
+                    .get(key)
+                    .is_some_and(|other| other != value)
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 proptest! {
@@ -46,7 +50,7 @@ proptest! {
     // change that answer.
     #[test]
     fn a_tie_is_an_error_exactly_when_same_precedence_values_disagree(
-        contribs in arb_tie_contributors(0..6),
+        contribs in arb_tie_contributors(),
     ) {
         let expected = has_tie_conflict(&contribs);
         let mut reversed = contribs.clone();
