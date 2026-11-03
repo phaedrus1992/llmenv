@@ -18,7 +18,10 @@ fn an_unreadable_entry_is_logged_against_its_folder_and_skipped() {
         entry = entry_or_failure(root, Err(error), &mut scan);
     });
     assert!(entry.is_none());
-    assert_eq!(scan.failed, vec![root.to_path_buf()]);
+    assert_eq!(
+        scan.failed.keys().cloned().collect::<Vec<PathBuf>>(),
+        vec![root.to_path_buf()]
+    );
     assert!(logs.contains("an entry in /state/tmp"), "{logs}");
     assert!(logs.contains("bad directory block"), "{logs}");
 }
