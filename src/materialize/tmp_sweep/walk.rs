@@ -152,25 +152,33 @@ mod tests {
     use crate::materialize::tmp_sweep::tests::DAY;
     use crate::test_log_capture::capture_logs;
 
-    proptest::proptest! {
-        /// A missing entry is recognised at any depth of context, and no other kind is.
-        #[test]
-        fn a_not_found_is_vanished_at_any_context_depth(kind_index in 0usize..4, depth in 0usize..5) {
-            use std::io::ErrorKind;
-            let kinds = [
-                ErrorKind::NotFound,
-                ErrorKind::PermissionDenied,
-                ErrorKind::InvalidData,
-                ErrorKind::Other,
-            ];
-            let kind = kinds[kind_index];
-            let mut error = anyhow::Error::from(std::io::Error::from(kind));
-            for layer in 0..depth {
-                error = error.context(format!("layer {layer}"));
+    /// A missing entry is recognised at every depth of context, and no other kind is.
+    /// The domain is finite, so every pair is checked.
+    #[test]
+    fn a_not_found_is_vanished_at_every_context_depth() {
+        use std::io::ErrorKind;
+        let kinds = [
+            ErrorKind::NotFound,
+            ErrorKind::PermissionDenied,
+            ErrorKind::InvalidData,
+            ErrorKind::Other,
+        ];
+        for kind in kinds {
+            for depth in 0..5 {
+                let mut error = anyhow::Error::from(std::io::Error::from(kind));
+                for layer in 0..depth {
+                    error = error.context(format!("layer {layer}"));
+                }
+                assert_eq!(
+                    is_vanished(&error),
+                    kind == ErrorKind::NotFound,
+                    "{kind:?} at {depth}"
+                );
             }
-            proptest::prop_assert_eq!(is_vanished(&error), kind == ErrorKind::NotFound);
         }
+    }
 
+    proptest::proptest! {
         /// Every entry of the folder lands in exactly one class: stale, kept, or failed.
         #[test]
         fn every_entry_is_classified_exactly_once(ages in proptest::collection::vec(0u64..30, 0..8)) {
