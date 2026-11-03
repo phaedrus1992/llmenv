@@ -377,3 +377,15 @@ fn orphan_locks_are_kept_on_write_when_only_their_mtime_is_old() {
     );
     assert!(dir.path().join("recall_session").join("s1.lock").exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn a_busy_recall_ledger_lock_is_an_agent_notice() {
+    let (dir, store) = store();
+    let _held =
+        crate::hook_run::session_state::lock_state_file(&store.dir, "s1", "test holder").unwrap();
+    assert!(store.lock("s1").is_none());
+    let notices = crate::agent_notice::current().unwrap_or_default();
+    assert!(notices.contains("the recall ledger lock"), "{notices}");
+    drop(dir);
+}

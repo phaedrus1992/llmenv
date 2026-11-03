@@ -31,7 +31,8 @@ struct Stale {
 struct Scan {
     stale: Vec<Stale>,
     kept: usize,
-    failed: Vec<PathBuf>,
+    /// Each entry that could not be read, with the reason, so `llmenv doctor` can name it.
+    failed: std::collections::BTreeMap<PathBuf, String>,
 }
 
 /// The stale entries of `state/tmp`: how many, and how many bytes they hold.
@@ -64,7 +65,8 @@ pub fn sweep(
     let scan = scan(tmp_root, rule, in_use)?;
     let mut report = GcReport {
         kept: scan.kept,
-        failed: scan.failed,
+        failed: scan.failed.keys().cloned().collect(),
+        causes: scan.failed,
         ..GcReport::new(dry_run)
     };
     for stale in &scan.stale {
@@ -219,7 +221,7 @@ fn record_failure(path: &Path, error: impl std::fmt::Display, scan: &mut Scan) {
         error = %error,
         "state/tmp sweep: cannot read entry; skipping"
     );
-    scan.failed.push(path.to_path_buf());
+    scan.failed.insert(path.to_path_buf(), error.to_string());
 }
 
 /// Keep a readable entry of `root`. The read error does not carry the entry name, so the record
