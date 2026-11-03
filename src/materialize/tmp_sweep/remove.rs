@@ -27,6 +27,7 @@ pub fn sweep(
     let mut report = GcReport {
         kept: scan.kept,
         failed: scan.failed,
+        causes: scan.causes,
         ..GcReport::new(dry_run)
     };
     for stale in &scan.stale {
