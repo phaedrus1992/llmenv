@@ -107,11 +107,8 @@ fn try_read_cache(cache_file: &std::path::Path, cache_ttl: u64) -> Option<UsageS
     let age = match SystemTime::now().duration_since(stamp) {
         Ok(d) => d,
         Err(e) => {
-            tracing::error!(
-                "throttle cache {} mtime is {} s in the future; treating the cache as stale",
-                cache_file.display(),
-                e.duration().as_secs()
-            );
+            let ahead = format!("{} s ahead", e.duration().as_secs());
+            unusable("has a modified time in the future", &ahead);
             return None;
         }
     };

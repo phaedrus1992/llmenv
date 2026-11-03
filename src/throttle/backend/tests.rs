@@ -183,3 +183,40 @@ fn a_restored_cache_with_an_old_mtime_is_still_used() {
 
     assert_eq!(try_read_cache(&cache_file, 300), Some(snap));
 }
+
+#[test]
+fn a_missing_cache_is_silent() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("absent-usage.json");
+    assert_eq!(try_read_cache(&cache, 300), None);
+    let notices = crate::agent_notice::current().unwrap_or_default();
+    assert!(!notices.contains("absent-usage.json"), "{notices}");
+}
+
+#[test]
+fn a_cache_path_under_a_regular_file_is_noticed_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let blocker = dir.path().join("blocker-3318");
+    std::fs::write(&blocker, b"x").unwrap();
+    let cache = blocker.join("usage.json");
+    assert_eq!(try_read_cache(&cache, 300), None);
+    let notices = crate::agent_notice::current().unwrap_or_default();
+    assert_eq!(
+        notices.matches("blocker-3318/usage.json").count(),
+        1,
+        "{notices}"
+    );
+}
+
+#[test]
+fn a_cache_from_the_future_is_noticed_and_fetched_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("future-3314.json");
+    std::fs::write(&cache, b"{}").unwrap();
+    let ahead = SystemTime::now() + Duration::from_secs(3600);
+    filetime::set_file_mtime(&cache, filetime::FileTime::from_system_time(ahead)).unwrap();
+    assert_eq!(try_read_cache(&cache, 300), None);
+    let notices = crate::agent_notice::current().unwrap_or_default();
+    assert!(notices.contains("future-3314.json"), "{notices}");
+    assert!(notices.contains("in the future"), "{notices}");
+}
