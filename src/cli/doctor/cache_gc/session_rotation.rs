@@ -69,6 +69,9 @@ fn prune_one(path: &Path, retention: Duration, out: GcOutput<'_>) -> usize {
                 out.warn,
                 path.display()
             );
+            for removed in &e.removed {
+                eprintln!("  {} before the failure: {}", out.verb(), removed.display());
+            }
             1
         }
     }
