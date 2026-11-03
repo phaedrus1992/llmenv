@@ -288,10 +288,9 @@ impl LedgerStore {
             state_unsaved: Some(true),
             ..LedgerTiming::default()
         };
-        let _lock = match lock {
-            Ok(file) => file,
-            // The lock helper already recorded the cause for the agent.
-            Err(_) => return (None, timing),
+        // The lock helper already recorded the cause for the agent.
+        let Ok(_lock) = lock else {
+            return (None, timing);
         };
         let t_read = Instant::now();
         let Some(mut ledger) = self.read(session_id) else {
