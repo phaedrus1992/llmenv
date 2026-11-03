@@ -83,8 +83,21 @@ pub(super) fn cbm_use(config: &Config, dir: &Path) -> CacheUse {
             "cannot resolve the config folder, so the index_path of each bundle is unknown: {e:#}"
         )),
         Err(e) => {
-            // No bundle is configured, so no index_path needs the folder. The error is logged.
-            tracing::debug!("bundles folder unknown, but no bundle needs it: {e:#}");
+            // No bundle is configured, so no bundle index_path needs the folder. The top-level
+            // index_path is still checked. A codebase-memory config makes the error a warning,
+            // because that config is the case a user expects this check to cover (#3278).
+            if config
+                .features
+                .as_ref()
+                .is_some_and(|f| f.codebase_memory.iter().any(|cm| cm.index_path.is_some()))
+            {
+                tracing::warn!(
+                    "bundles folder unknown, so only the top-level index_path is checked: {e:#}. \
+                     Fix: make the llmenv config folder resolvable (CLAUDE_CONFIG_DIR or HOME)."
+                );
+            } else {
+                tracing::debug!("bundles folder unknown, but no bundle needs it: {e:#}");
+            }
             cache_use(config, Path::new(""), dir)
         }
     }

@@ -9,8 +9,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::materialize::cache::{GcReport, gc_remove_link};
-use crate::materialize::cbm_units::scan_units;
+use crate::materialize::cache::{AgeSource, GcReport, gc_remove_link};
+use crate::materialize::cbm_units::scan_units_with;
 
 /// Remove the index databases in `dir` that were last written more than `older_than` ago. A
 /// database and its `-wal` and `-shm` files are one unit: the newest of them gives the age, and
@@ -22,14 +22,18 @@ use crate::materialize::cbm_units::scan_units;
 ///
 /// # Errors
 /// `dir` exists but cannot be read, or one of its entries cannot be read.
+///
+/// `source` judges each file by mtime, or by the later of mtime and change time. Production
+/// passes `AgeSource::MtimeOrCtime`, so a restored file is kept (#3275).
 pub(crate) fn sweep_legacy_indexes(
     dir: &Path,
     older_than: Duration,
     in_use: &[PathBuf],
     dry_run: bool,
+    source: AgeSource,
 ) -> anyhow::Result<GcReport> {
     let mut report = GcReport::new(dry_run);
-    let Some(units) = scan_units(dir, older_than)? else {
+    let Some(units) = scan_units_with(dir, older_than, source)? else {
         return Ok(report);
     };
     for unit in units {
@@ -99,9 +103,9 @@ mod tests {
             };
             let before = names(dir.path());
 
-            let preview = sweep_legacy_indexes(dir.path(), week, &in_use, true).unwrap();
+            let preview = sweep_legacy_indexes(dir.path(), week, &in_use, true, AgeSource::MtimeOnly).unwrap();
             prop_assert_eq!(names(dir.path()), before.clone());
-            let real = sweep_legacy_indexes(dir.path(), week, &in_use, false).unwrap();
+            let real = sweep_legacy_indexes(dir.path(), week, &in_use, false, AgeSource::MtimeOnly).unwrap();
 
             let mut listed = preview.removed.clone();
             listed.sort();
@@ -132,7 +136,8 @@ mod tests {
         }
 
         let week = Duration::from_secs(7 * 86_400);
-        let report = sweep_legacy_indexes(dir.path(), week, &[], true).unwrap();
+        let report =
+            sweep_legacy_indexes(dir.path(), week, &[], true, AgeSource::MtimeOnly).unwrap();
 
         let mut listed = report.removed.clone();
         listed.sort();
@@ -156,7 +161,8 @@ mod tests {
         }
 
         let week = Duration::from_secs(7 * 86_400);
-        let report = sweep_legacy_indexes(dir.path(), week, &[], false).unwrap();
+        let report =
+            sweep_legacy_indexes(dir.path(), week, &[], false, AgeSource::MtimeOnly).unwrap();
 
         assert_eq!(report.removed.len(), 2, "{report:?}");
         assert!(!old_db.exists() && !old_wal.exists());
@@ -180,8 +186,14 @@ mod tests {
         backdate(&open);
 
         let week = Duration::from_secs(7 * 86_400);
-        let report =
-            sweep_legacy_indexes(dir.path(), week, std::slice::from_ref(&open), false).unwrap();
+        let report = sweep_legacy_indexes(
+            dir.path(),
+            week,
+            std::slice::from_ref(&open),
+            false,
+            AgeSource::MtimeOnly,
+        )
+        .unwrap();
 
         assert!(report.removed.is_empty(), "{report:?}");
         assert!(db.exists() && wal.exists() && open.exists());
@@ -191,8 +203,14 @@ mod tests {
     #[test]
     fn a_missing_folder_is_an_empty_report() {
         let dir = tempfile::tempdir().unwrap();
-        let report =
-            sweep_legacy_indexes(&dir.path().join("absent"), Duration::ZERO, &[], false).unwrap();
+        let report = sweep_legacy_indexes(
+            &dir.path().join("absent"),
+            Duration::ZERO,
+            &[],
+            false,
+            AgeSource::MtimeOnly,
+        )
+        .unwrap();
         assert!(report.removed.is_empty() && report.failed.is_empty());
     }
 }
