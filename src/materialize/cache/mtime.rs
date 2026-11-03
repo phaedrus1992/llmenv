@@ -57,19 +57,19 @@ struct Newest {
 /// tree unpacked with its old file mtimes kept looks old. `MtimeOrCtime` removes the second cost.
 /// A chmod or chown also sets a new ctime, which only delays removal.
 ///
-/// A folder keeps its mtime under both sources. A folder change time moves on every child change,
-/// so a partial delete would make an old tree look new again (#3184). A tree with no file therefore
-/// reads as its newest folder mtime, so an unpacked tree of only folders still looks old.
+/// Under `MtimeOrCtime` a folder also counts its change time, so an unpacked tree of only folders
+/// reads as used. A child add or remove already moves the folder mtime, so the change time adds no
+/// new reset for a partial delete (#3184).
 pub(crate) fn newest_file_mtime(dir: &Path, age: AgeSource) -> anyhow::Result<SystemTime> {
     let newest = walk_from(dir, age)?;
     Ok(newest.non_dir.unwrap_or(newest.any))
 }
 
 fn walk_from(dir: &Path, age: AgeSource) -> anyhow::Result<Newest> {
-    let any = dir
+    let meta = dir
         .metadata()
-        .and_then(|m| m.modified())
         .with_context(|| format!("stat {}", dir.display()))?;
+    let any = file_stamp(&meta, age).with_context(|| format!("stat {}", dir.display()))?;
     let mut newest = Newest { any, non_dir: None };
     walk_mtime(dir, &mut newest, age)?;
     Ok(newest)
@@ -93,14 +93,11 @@ fn walk_mtime(dir: &Path, newest: &mut Newest, age: AgeSource) -> anyhow::Result
         else {
             continue;
         };
-        let m = meta
-            .modified()
-            .with_context(|| format!("mtime {}", p.display()))?;
-        newest.any = newest.any.max(m);
+        let stamp = file_stamp(&meta, age).with_context(|| format!("mtime {}", p.display()))?;
+        newest.any = newest.any.max(stamp);
         if meta.is_dir() {
             walk_mtime(&p, newest, age)?;
         } else {
-            let stamp = file_stamp(&meta, age).with_context(|| format!("mtime {}", p.display()))?;
             newest.non_dir = Some(newest.non_dir.map_or(stamp, |n| n.max(stamp)));
         }
     }
@@ -169,6 +166,25 @@ mod tests {
         let file = dir.path().join("f");
         std::fs::write(&file, b"x").unwrap();
         set(&file, 1_000_000);
+        let got = newest_file_mtime(dir.path(), AgeSource::MtimeOrCtime).unwrap();
+        assert!(
+            got > SystemTime::now() - Duration::from_secs(60),
+            "got {got:?}"
+        );
+    }
+
+    // An unpack of a tree with only folders keeps the old folder mtimes, but the change time is now.
+    #[test]
+    fn an_unpacked_folder_only_tree_is_fresh_by_its_change_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("a");
+        std::fs::create_dir(&sub).unwrap();
+        let old = set(&sub, 1_000_000);
+        set(dir.path(), 1_000_000);
+        assert_eq!(
+            newest_file_mtime(dir.path(), AgeSource::MtimeOnly).unwrap(),
+            old
+        );
         let got = newest_file_mtime(dir.path(), AgeSource::MtimeOrCtime).unwrap();
         assert!(
             got > SystemTime::now() - Duration::from_secs(60),

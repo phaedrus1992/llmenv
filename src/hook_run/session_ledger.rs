@@ -374,6 +374,9 @@ fn note_save_failure(path: &std::path::Path, err: &std::io::Error) {
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test code")]
+mod lock_timing_tests;
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test code")]
 mod tests;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::expect_fun_call)]
