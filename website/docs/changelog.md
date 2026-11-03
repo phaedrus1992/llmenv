@@ -115,6 +115,8 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 - Stop cache cleanup and bundle file writes from following a link that appears during the write. An unreadable cache folder is now logged and is not repaired during cleanup. [fix:materialize] [#3203]
 - Stop state file copies, state log rotation, and the recall ledger from following a link. A link no longer redirects a copy, a rotation, or a timestamp update to its target. [fix:materialize] [#3139]
 - Show the agent a notice for MCP proxy pidfile and log failures, probe server errors, lock reclaims, dropped scope tags, and hook notices that lacked a fix. Each notice names the path or server and the fix. [fix:agent] [#3217]
+- Show the session-log rotations that a `llmenv doctor` prune removed before it failed, so a partial prune no longer hides them. [fix:doctor] [#3334]
+- Name the slippage stats log and its fix in the Write deny for an unreadable or corrupt log. The deny no longer tells the agent to read the file it tried to write. [fix:hook] [#3332]
 
 ### Security
 
@@ -265,6 +267,8 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 - Tell the agent when slippage stats or a background job checkpoint cannot be read or saved, or when hook output cannot take the resume cache notice. Each notice names the cause and the fix. [fix:hook] [#3320]
 - Keep a rotated session log that was restored with an old mtime, for example by `tar -x` or `cp -p`. Rotation now ages a file by the later of its mtime and its change time, as the cache sweep already did. [fix:cache] [#3321]
 - Fail a merge when two scopes at the same precedence set different values for one key or field, even when a higher-precedence scope also sets it. A config that merged before can now fail with a conflict error that names both scopes. [fix:merge]
+- Show the session-log rotations that a `llmenv doctor` prune removed before it failed, so a partial prune no longer hides them. [fix:doctor] [#3334]
+- Name the slippage stats log and its fix in the Write deny for an unreadable or corrupt log. The deny no longer tells the agent to read the file it tried to write. [fix:hook] [#3332]
 
 ### Security
 
