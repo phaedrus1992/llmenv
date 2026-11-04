@@ -202,7 +202,11 @@ fn a_monitor_started_commit_is_denied_like_a_bash_commit() {
         Some("s1"),
         dir.path(),
     );
-    assert!(denied.starts_with("__DENY__:"), "{denied}");
+    assert!(
+        denied.starts_with("__DENY__:"),
+        "the deny must name the gate; got {} bytes",
+        denied.len()
+    );
 }
 
 #[test]
@@ -210,7 +214,7 @@ fn state_dir_deny_covers_a_monitor_started_commit() {
     let error = anyhow::anyhow!("HOME is not valid UTF-8");
     let on = TaskTracker::default();
     let deny = state_dir_deny(&on, &monitor("git commit -m x"), &error).unwrap();
-    assert!(deny.starts_with("__DENY__:"), "{deny}");
+    assert!(deny.starts_with("__DENY__:"), "got {} bytes", deny.len());
 }
 
 #[test]
