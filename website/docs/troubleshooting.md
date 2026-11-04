@@ -224,6 +224,9 @@ The hook commands in each engine's config name the running llmenv binary by its 
 The bare name `llmenv` is used only when that path is not UTF-8 or the OS cannot report it.
 llmenv then logs an error that names the fix.
 `llmenv doctor` also reports this fallback, with the fix (added in v3.14.0).
+`llmenv doctor` also warns when the hook path is in a cargo `target` folder or a temp folder,
+or names a binary that was removed. Install llmenv, then run `llmenv regenerate` with the
+installed binary (added in v3.14.0).
 
 If a program is installed but reported as not found, run `llmenv doctor`.
 It names the relative `PATH` folders that llmenv skips.

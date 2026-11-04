@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Warn in `llmenv doctor` when hook commands name a binary in a cargo `target` folder or a temp folder, or a binary that was removed after it started. [feat:doctor] [#3119]
 - Show the reset time of the `usage_5h` and `usage_7d` widgets as a local clock time, with `display: clock_24h` or `display: clock_12h`. A 7-day window also shows the weekday. The default is still the countdown. [feat:statusline] [#3022]
 - Warn in `llmenv doctor` when hook commands use the bare `llmenv` name, and name the fix. [feat:doctor] [#3049]
 - Run six more Claude Code hook events on opencode 2.x: `SubagentStart`, `SubagentStop` (foreground subagents only), `Notification`, `PreCompact`, `PostModelSwitch`, and `PostToolBatch`. The events and their opencode sources are in [Hook events on opencode](https://phaedrus1992.github.io/llmenv/docs/engines#hook-events-on-opencode). [feat:opencode]

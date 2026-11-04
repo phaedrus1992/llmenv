@@ -1209,6 +1209,8 @@ active context (active bundles, active MCP servers, etc.). Checks:
   It warns when the path is a symlink, a FIFO, a socket, a device, or a folder, because the sink cannot append to it.
   It also warns when the file does not exist yet and the nearest existing folder above it is not writable.
   See [`session_log:`](configuration.md#session_log)
+- hook commands (added in v3.14.0) — warns when hook commands name a binary in a cargo `target`
+  folder or a temp folder, or a binary that was removed after it started
 - lifecycle hooks (added in v3.11.0) — lists which lifecycle events
   (`session_start`, `session_end`, `post_model_switch`, `turn_start`, `post_tool_batch`,
   `post_tool_use_failure`, `subagent_start`, `stop`) are wired for
