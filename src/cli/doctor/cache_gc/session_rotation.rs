@@ -1,7 +1,7 @@
 //! Removes old session-log rotations from the state folder (#2816).
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crate::cli::doctor::cache_gc::GcOutput;
 use crate::config::Config;
@@ -15,6 +15,7 @@ pub(super) fn prune_session_log(
     state_dir: &Path,
     config: &Config,
     retention: Duration,
+    now: SystemTime,
     out: GcOutput<'_>,
 ) -> usize {
     let (paths, failures) = log_paths(state_dir, config.session_log_resolved().file_path());
@@ -28,7 +29,7 @@ pub(super) fn prune_session_log(
     usize::from(failures.is_some())
         + paths
             .iter()
-            .map(|path| prune_one(path, retention, out))
+            .map(|path| prune_one(path, retention, now, out))
             .sum::<usize>()
 }
 
@@ -49,9 +50,14 @@ fn log_paths(state_dir: &Path, configured: Option<&str>) -> (Vec<PathBuf>, Optio
     }
 }
 
-fn prune_one(path: &Path, retention: Duration, out: GcOutput<'_>) -> usize {
-    match session_log::prune::prune_rotations(path, retention, out.dry_run, AgeSource::MtimeOrCtime)
-    {
+fn prune_one(path: &Path, retention: Duration, now: SystemTime, out: GcOutput<'_>) -> usize {
+    match session_log::prune::prune_rotations_at(
+        path,
+        retention,
+        out.dry_run,
+        AgeSource::MtimeOrCtime,
+        now,
+    ) {
         Ok(removed) => {
             eprintln!(
                 "{} GC: {} {} rotated session-log file(s) of {}",

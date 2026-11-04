@@ -239,3 +239,53 @@ fn a_partial_failure_lists_exactly_the_removed_files() {
         }
     });
 }
+
+// #3351: a rotation whose name is not UTF-8 must still match and be pruned. Its base is not
+// UTF-8 either, because llmenv writes only ASCII digits after the base.
+#[test]
+fn is_rotation_of_matches_a_non_utf8_base_by_its_bytes() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let base = OsStr::from_bytes(b"\xffsession");
+    assert!(is_rotation_of(OsStr::from_bytes(b"\xffsession.3"), base));
+    assert!(!is_rotation_of(OsStr::from_bytes(b"\xffsession.x"), base));
+    assert!(!is_rotation_of(OsStr::from_bytes(b"\xffsession."), base));
+}
+
+// #3335: a rotation is pruned exactly when its mtime is past retention. The offset of half a
+// minute keeps the age off the cutoff, so the comparison's edge does not decide the case.
+#[test]
+fn a_rotation_is_pruned_exactly_when_its_mtime_is_past_retention() {
+    use proptest::prelude::*;
+    proptest!(|(minutes in 0u64..(48 * 60))| {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-log.jsonl");
+        write_bytes(&path, 3);
+        let rotation = rotation_path(&path, 1);
+        write_bytes(&rotation, 3);
+        let now = SystemTime::now();
+        let age = Duration::from_secs(minutes * 60 + 30);
+        let mtime = filetime::FileTime::from_system_time(now - age);
+        filetime::set_file_mtime(&rotation, mtime).unwrap();
+        let retention = Duration::from_secs(24 * 3600);
+
+        let removed =
+            prune_rotations_at(&path, retention, false, AgeSource::MtimeOnly, now).unwrap();
+
+        prop_assert_eq!(removed.contains(&rotation), age > retention);
+    });
+}
+
+// #3335: a name is a rotation only when a dot and digits follow the base. Any other suffix is not.
+#[test]
+fn is_rotation_of_accepts_only_a_dot_and_digits_after_the_base() {
+    use proptest::prelude::*;
+    let base = std::ffi::OsStr::new("session-log.jsonl");
+    proptest!(|(digits in "[0-9]{1,8}", junk in "[a-z0-9._-]{1,8}")| {
+        prop_assume!(!junk.bytes().all(|b| b.is_ascii_digit()));
+        let rotated = format!("session-log.jsonl.{digits}");
+        let suffixed = format!("session-log.jsonl.{digits}{junk}");
+        prop_assert!(is_rotation_of(std::ffi::OsStr::new(&rotated), base));
+        prop_assert!(!is_rotation_of(std::ffi::OsStr::new(&suffixed), base));
+    });
+}

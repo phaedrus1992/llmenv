@@ -18,11 +18,28 @@ use crate::session_log::rotation::rotation_lock;
 /// # Errors
 /// Fails when the directory cannot be read, when a rotated file cannot be checked or removed, or
 /// when the rotation lock cannot be taken. The error keeps the files removed before the failure.
+///
+/// Production calls `prune_rotations_at` with its clock. Tests use this form, so it exists only
+/// in test builds.
+#[cfg(test)]
 pub(crate) fn prune_rotations(
     path: &Path,
     older_than: Duration,
     dry_run: bool,
     age: AgeSource,
+) -> Result<Vec<PathBuf>, PruneError> {
+    prune_rotations_at(path, older_than, dry_run, age, SystemTime::now())
+}
+
+/// `prune_rotations`, judged against `now` instead of the clock. A later `now` makes a file that
+/// was just written look past retention on its mtime and its change time alike, which a test
+/// cannot set on a real file (#3335).
+pub(crate) fn prune_rotations_at(
+    path: &Path,
+    older_than: Duration,
+    dry_run: bool,
+    age: AgeSource,
+    now: SystemTime,
 ) -> Result<Vec<PathBuf>, PruneError> {
     let (Some(dir), Some(base)) = (path.parent(), path.file_name()) else {
         return Err(PruneError {
@@ -42,7 +59,7 @@ pub(crate) fn prune_rotations(
         return Ok(Vec::new());
     };
     let expiry = Expiry {
-        now: SystemTime::now(),
+        now,
         older_than,
         age,
     };
@@ -157,13 +174,14 @@ fn remove_under_lock(
 }
 
 /// Whether `name` is `<base>.<digits>`, the name of a rotated file.
+///
+/// Compares bytes, not `str`: a base that is not UTF-8 would otherwise never match, so its
+/// rotations would never be pruned and never reported (#3351).
 pub(super) fn is_rotation_of(name: &std::ffi::OsStr, base: &std::ffi::OsStr) -> bool {
-    let (Some(name), Some(base)) = (name.to_str(), base.to_str()) else {
-        return false;
-    };
+    let (name, base) = (name.as_encoded_bytes(), base.as_encoded_bytes());
     name.strip_prefix(base)
-        .and_then(|rest| rest.strip_prefix('.'))
-        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|rest| rest.strip_prefix(b"."))
+        .is_some_and(|digits| !digits.is_empty() && digits.iter().all(u8::is_ascii_digit))
 }
 
 #[cfg(test)]
