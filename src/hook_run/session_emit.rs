@@ -119,16 +119,19 @@ mod tests {
     }
 
     #[test]
-    fn file_sink_without_path_warns_with_fix_when_default_fails() {
+    fn file_sink_without_path_notices_the_agent_with_fix_when_default_fails() {
         let cfg = SessionLog::default();
         let mut resolved = None;
-        let logs = crate::test_log_capture::capture_logs(|| {
+        crate::test_log_capture::capture_logs(|| {
             resolved = resolve_file_sink_path(&cfg, || Err(anyhow::anyhow!("HOME is unset")));
         });
         assert!(resolved.is_none(), "no path must resolve");
-        assert!(logs.contains("WARN"), "expected a warning, got: {logs}");
-        assert!(logs.contains("HOME is unset"), "cause missing: {logs}");
-        assert!(logs.contains("Fix: set HOME"), "fix missing: {logs}");
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(
+            notices.contains("HOME is unset"),
+            "cause missing: {notices}"
+        );
+        assert!(notices.contains("Fix: set HOME"), "fix missing: {notices}");
     }
 
     #[test]
