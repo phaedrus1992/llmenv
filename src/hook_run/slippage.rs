@@ -247,13 +247,9 @@ pub(crate) fn handle_post_tool_use(
     ) else {
         return;
     };
-    let records_bash_read =
-        cfg.read_before_edit && crate::hook_run::shell_tool::is_shell_tool(tool);
-    let read_key = if records_bash_read {
-        super::slippage_read::bash_read_key(payload)
-    } else {
-        None
-    };
+    let read_key = (cfg.read_before_edit && crate::hook_run::shell_tool::is_shell_tool(tool))
+        .then(|| super::slippage_read::bash_read_key(payload))
+        .flatten();
     if read_key.is_none() && !cfg.metrics {
         return;
     }
