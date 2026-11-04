@@ -30,6 +30,26 @@ pub(super) fn emit_session_log(ev: SessionLogEvent, cfg: &SessionLog, session_id
     }
 }
 
+/// Reap the session-log file at `SessionStart` when transcript retention is set. A path that cannot
+/// be resolved is noticed, because a warn is hidden and hook stderr is dropped (#3379).
+pub(super) fn reap_at_session_start(cfg: &SessionLog) {
+    let Some(days) = cfg.transcript.as_ref().and_then(|t| t.retention_days) else {
+        return;
+    };
+    let log_path = crate::session_log::resolve_file_path(cfg.file_path())
+        .inspect_err(|e| {
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the session log retention is skipped, because the session log path \
+                 cannot be resolved: {e:#}. Fix: set HOME, or set session_log.file.path to an \
+                 absolute path."
+            ));
+        })
+        .ok();
+    if let Some(p) = log_path.as_ref() {
+        crate::session_log::reap_session_log(p, days);
+    }
+}
+
 /// Whether the transcript sink takes an event: only an agent-session event, at a level the sink
 /// keeps. A process-level event has no transcript session to attach to.
 fn wants_transcript(cfg: &SessionLog, scope: EventScope, level: LogLevel) -> bool {
@@ -132,6 +152,31 @@ mod tests {
         assert_eq!(
             resolved,
             Some(std::path::PathBuf::from("/configured/session.jsonl"))
+        );
+    }
+
+    #[test]
+    fn an_unresolvable_log_path_skips_retention_with_a_notice() {
+        let cfg = SessionLog {
+            file: Some(FileSinkConfig {
+                enabled: true,
+                level: LogLevel::Info,
+                path: Some("relative/session.jsonl".to_owned()),
+            }),
+            transcript: Some(llmenv_config::TranscriptSinkConfig {
+                enabled: true,
+                level: LogLevel::Info,
+                retention_days: Some(1),
+            }),
+            max_content_bytes: None,
+        };
+
+        reap_at_session_start(&cfg);
+
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(
+            notices.contains("the session log retention is skipped"),
+            "the agent must be told that retention did not run: {notices}"
         );
     }
 

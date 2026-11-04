@@ -197,9 +197,17 @@ pub(crate) fn handle_pre_tool_use(
 /// get the layer switched off. Falls back to the literal path when the file
 /// can't be resolved (it may not exist yet, which is the allowed case anyway).
 pub(super) fn path_key(path: &str) -> String {
+    // A literal path can differ from the canonical path of the same file, so a fallback can make a
+    // false deny. The debug log names the fallback when a run is traced (#3379).
     std::fs::canonicalize(path)
         .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| path.to_string())
+        .unwrap_or_else(|e| {
+            tracing::debug!(
+                path,
+                "slippage: cannot canonicalize, so the literal path is the key: {e}"
+            );
+            path.to_string()
+        })
 }
 
 /// Persist `stats` for `session_id`, best-effort.

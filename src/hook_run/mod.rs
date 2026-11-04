@@ -1968,19 +1968,7 @@ async fn handle_session_log(
     let session_id = match (event, claude_session_id) {
         (HookEvent::SessionStart, Some(csid)) => {
             // Best-effort reaping before any session-log activity.
-            if let Some(days) = cfg.transcript.as_ref().and_then(|t| t.retention_days) {
-                let log_path = crate::session_log::resolve_file_path(cfg.file_path())
-                    .inspect_err(|e| {
-                        tracing::warn!(
-                            "session_log reaper: cannot resolve the session log path, so \
-                             retention is skipped: {e:#}. Fix: set HOME or session_log.file.path."
-                        );
-                    })
-                    .ok();
-                if let Some(p) = log_path.as_ref() {
-                    crate::session_log::reap_session_log(p, days);
-                }
-            }
+            session_emit::reap_at_session_start(cfg);
             // SessionStart: once per launch, worth revalidating (#1090).
             ensure_transcript_session(cfg, client, csid, ctx, state_path, true).await
         }
