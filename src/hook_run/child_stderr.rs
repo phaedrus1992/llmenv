@@ -1,15 +1,10 @@
 //! Stderr of llmenv's detached and bounded children, pointed at a size-bounded log.
 
-/// Rotation bound shared by every size-bounded stderr log this module opens —
-/// the indexer's diagnostic log and the detached hook children's shared log
-/// (#1086/#1091 share the "size-bounded" shape and, previously, a
-/// byte-for-byte identical constant under two names; merged under #1141).
-/// Smaller than the mcp-proxy log: these children run often but write
-/// nothing unless they fail, and indexing runs are far less frequent than
-/// proxy restarts.
+/// Size limit of the shared child logs. Children run often but write only when they fail, so
+/// the limit stays small.
 const BOUNDED_LOG_MAX_BYTES: u64 = 1 << 19; // 512 KiB
 
-/// Path of the stderr log shared by llmenv's detached hook children —
+/// Path of the stderr log shared by llmenv's detached hook children,
 /// `<state_dir>/detached-hook.log`.
 ///
 /// # Errors
@@ -18,26 +13,13 @@ pub(crate) fn detached_child_log_path() -> anyhow::Result<std::path::PathBuf> {
     Ok(crate::paths::state_dir()?.join("detached-hook.log"))
 }
 
-/// Point `cmd`'s stderr at `log_path` as a size-bounded diagnostic log.
+/// Point `cmd`'s stderr at `log_path` as a size-bounded log.
 ///
-/// Sets the null baseline first, unconditionally (#1139): `Command`'s default
-/// for an unset stdio is `Stdio::inherit()`, not discarded, so a caller that
-/// only overrode stderr on the `Ok` branch would leave the child holding
-/// whichever fd this process's own stderr happens to be on a log-open
-/// failure — the exact hang/leak this redirect exists to prevent. If the log
-/// can't be opened the child still runs with stderr discarded — a missing
-/// diagnostic is a smaller problem than skipping the work.
+/// The null baseline is set first. A `Command` inherits stderr by default, so a log that fails to
+/// open would otherwise leave the child on this process's stderr, which the engine may drop.
 ///
-/// `harden_dir` is forwarded to `open_bounded_log`, which does the 0700
-/// hardening itself (#1196) — pass `false` when `log_path`'s directory may be
-/// shared with a process running under a different uid (e.g. a
-/// user-configured `index_path`). `context` names the caller in the
-/// debug-level "log unavailable" message, since that message is shared across
-/// callers with different failure consequences (#1141). No `max_bytes`
-/// parameter: every caller bounds to the same [`BOUNDED_LOG_MAX_BYTES`] now
-/// that the two call sites' previously-distinct constants turned out to be
-/// identical (#1141) — a parameter every caller passes the same value for
-/// isn't a real degree of freedom.
+/// `harden_dir` is forwarded to `open_bounded_log`. Pass `false` when the log folder may be
+/// shared with a process under a different uid. `context` names the caller in the notice.
 pub(super) fn redirect_stderr_to_bounded_log(
     cmd: &mut std::process::Command,
     log_path: &std::path::Path,
@@ -51,30 +33,29 @@ pub(super) fn redirect_stderr_to_bounded_log(
         }
         Err(e) => {
             crate::agent_notice::record_logged(format!(
-                "{context}: log unavailable ({e:#}), so the child's stderr is discarded. Fix: make \
-                 the log path a regular file that you own."
+                "{context}: log unavailable ({e:#}), so the child's stderr is discarded. Fix: \
+                 check the log path and the folder that holds it."
             ));
         }
     }
 }
 
-/// Send a detached child's stderr to the shared bounded log instead of discarding it (#1133, the
-/// same remedy as #1091). `log` is the resolved [`detached_child_log_path`].
+/// Send a detached child's stderr to the shared bounded log. `log` is the result of
+/// [`detached_child_log_path`].
 ///
-/// `Stdio::null()` leaves such a child with no report channel whatsoever: its own `tracing`
-/// events go to a fmt layer writing to that same null stderr, so a failure is discarded twice over.
+/// A child with `Stdio::null()` has no report channel, so its `tracing` events are lost too.
 pub(crate) fn redirect_stderr_to_detached_log(
     cmd: &mut std::process::Command,
     log: anyhow::Result<std::path::PathBuf>,
 ) {
     match log {
-        // Always state_dir-rooted, so `harden_dir: true` is safe.
+        // The path is under the state folder, so `harden_dir: true` is safe.
         Ok(path) => redirect_stderr_to_bounded_log(cmd, &path, true, "detached child"),
         Err(e) => {
             cmd.stderr(std::process::Stdio::null());
             crate::agent_notice::record_logged(format!(
                 "detached child: cannot resolve log path ({e:#}), so the child's stderr is \
-                 discarded. Fix: set HOME, so the state folder can be found."
+                 discarded. Fix: set HOME, or set LLMENV_STATE_DIR to a valid absolute path."
             ));
         }
     }

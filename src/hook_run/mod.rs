@@ -12,8 +12,10 @@ pub(crate) mod agent_config;
 mod bundle_names;
 mod bundle_notice;
 mod child_stderr;
+mod dedup_snapshot;
 use child_stderr::redirect_stderr_to_bounded_log;
 pub(crate) use child_stderr::{detached_child_log_path, redirect_stderr_to_detached_log};
+use dedup_snapshot::{dedup_snapshot_path, dedup_write_target};
 pub(crate) mod cbm_index_guard;
 pub(crate) mod cd_guard;
 pub(crate) mod checkpoint;
@@ -685,6 +687,9 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
     if let Err(e) = &result {
         crate::agent_notice::record(memory_skipped_notice(event, e));
     }
+    // The resume fields are parsed before the notices are taken, because a wrong-type field
+    // records a notice as it is read.
+    let resume_message = resume_cache::resume_notice(&hook_event_name, payload);
     // Read after `run_inner`, so every output path below carries it to the agent (#2658).
     let notice = crate::agent_notice::current();
     match result {
@@ -730,7 +735,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
             } else {
                 let notes = join_notes(notice.as_deref(), &text.notes);
                 let out = adapter.emit_hook_context(&hook_event_name, &text.memory, &notes);
-                let out = resume_cache::with_resume_notice(out, &hook_event_name, payload);
+                let out = resume_cache::with_resume_notice(out, resume_message.as_deref());
                 // The omission notice rides in `notes`, so the log must see the joined text (#2764).
                 log_notice_without_channel(&out, Some(notes.as_str()), event);
                 log_memory_without_channel(&out, &text.memory, event);
@@ -2197,41 +2202,15 @@ fn adaptive_state_dir(
         .inspect_err(|e| {
             crate::agent_notice::record_logged(format!(
                 "llmenv: adaptive recall is off for this event, because the state folder cannot \
-                 be found: {e:#}. Fix: set HOME."
+                 be found: {e:#}. Fix: set HOME, or set LLMENV_STATE_DIR to a valid absolute path."
             ));
         })
         .ok()
 }
 
-/// The SessionEnd dedup snapshot path. Other events have none. A missing state directory skips
-/// the snapshot and logs, because an error return would drop the notices built above (#2719).
-fn dedup_snapshot_path(
-    event: HookEvent,
-    state_dir: impl FnOnce() -> anyhow::Result<std::path::PathBuf>,
-) -> Option<std::path::PathBuf> {
-    if event != HookEvent::SessionEnd {
-        return None;
-    }
-    match state_dir() {
-        Ok(dir) => Some(dir.join(crate::paths::HOOK_STORE_CHUNK)),
-        Err(e) => {
-            tracing::error!(
-                "session-end dedup skipped, the state directory is unavailable, so the chunk is stored again: {e}"
-            );
-            None
-        }
-    }
-}
-
 /// Whether a PostToolUse event may store fetched web content in ICM (#579).
 fn stores_web_fetch(event: HookEvent) -> bool {
     event == HookEvent::PostToolUse
-}
-
-/// The dedup snapshot to write after a store. A chunk the store already matched is not written
-/// again, so the snapshot keeps its earlier content.
-fn dedup_write_target(path: Option<&std::path::Path>, unchanged: bool) -> Option<&std::path::Path> {
-    path.filter(|_| !unchanged)
 }
 
 /// Append `section` to `out` on its own line. An empty section adds nothing.
@@ -3692,33 +3671,33 @@ mod tests {
         );
     }
 
-    // #1133: the detached memory children were spawned with
-    // `stderr(Stdio::null())`, so nothing they reported could reach anyone —
-    // including the `tracing` events meant to compensate, whose sink is that
-    // same discarded stderr.
     #[test]
-    fn a_detached_child_log_that_cannot_open_is_noticed_for_the_agent() {
+    fn a_log_that_cannot_open_is_noticed_for_the_agent_with_its_context() {
         let dir = tempfile::tempdir().expect("test");
         let mut cmd = std::process::Command::new("sh");
         cmd.arg("-c").arg("true");
         // A directory is not a log file, so opening it fails.
-        redirect_stderr_to_bounded_log(&mut cmd, dir.path(), true, "detached child");
+        redirect_stderr_to_bounded_log(&mut cmd, dir.path(), true, "probe-context-3387");
 
         let text = crate::agent_notice::current().unwrap_or_default();
-        assert!(text.contains("detached child"), "{text}");
+        assert!(text.contains("probe-context-3387"), "{text}");
         assert!(text.contains("Fix:"), "{text}");
     }
 
     #[test]
     fn an_unavailable_state_folder_is_noticed_for_adaptive_recall() {
-        let got = adaptive_state_dir(|| Err(anyhow::anyhow!("no HOME")));
+        let got = adaptive_state_dir(|| Err(anyhow::anyhow!("probe no HOME")));
         assert_eq!(got, None);
 
         let text = crate::agent_notice::current().unwrap_or_default();
         assert!(text.contains("adaptive recall"), "{text}");
-        assert!(text.contains("no HOME"), "{text}");
+        assert!(text.contains("probe no HOME"), "{text}");
     }
 
+    // #1133: the detached memory children were spawned with
+    // `stderr(Stdio::null())`, so nothing they reported could reach anyone —
+    // including the `tracing` events meant to compensate, whose sink is that
+    // same discarded stderr.
     #[test]
     fn redirect_stderr_to_bounded_log_captures_child_stderr() {
         let dir = tempfile::tempdir().expect("test");

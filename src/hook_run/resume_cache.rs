@@ -64,11 +64,10 @@ fn field<T>(payload: &Value, key: &str, read: fn(&Value) -> Option<T>) -> Option
     let value = payload.get(key)?;
     let parsed = read(value);
     if parsed.is_none() {
-        // The default log filter hides warn, and hook stderr is dropped. A changed engine field
-        // type would otherwise end the notice for good with no trace, so the agent is told.
+        // The default log filter hides warn, and hook stderr is dropped, so the agent is told.
         crate::agent_notice::record_logged(format!(
-            "llmenv: SessionStart field \"{key}\" has the wrong type, so it is treated as absent. \
-             Fix: update llmenv to match the engine's field type."
+            "llmenv: SessionStart field \"{key}\" has the wrong type, so the resume cost notice \
+             is not shown this session. Fix: update llmenv to match the engine's field type."
         ));
     }
     parsed
@@ -113,12 +112,19 @@ fn attach_system_message(out: &str, message: &str) -> String {
 
 /// The hook output for a `SessionStart` event. A resume with an expensive, expired cache adds
 /// the notice as `systemMessage`. Every other event and payload returns `out` unchanged.
-pub(crate) fn with_resume_notice(out: String, hook_event_name: &str, payload: &Value) -> String {
+/// The resume cost notice for this event, or `None`. A wrong-type field is recorded for the agent
+/// as a side effect, so the caller must take the notice list after this call.
+pub(crate) fn resume_notice(hook_event_name: &str, payload: &Value) -> Option<String> {
     if hook_event_name != "SessionStart" {
-        return out;
+        return None;
     }
-    match ResumeCache::from_payload(payload).notice() {
-        Some(message) => attach_system_message(&out, &message),
+    ResumeCache::from_payload(payload).notice()
+}
+
+/// Add `message` as the system message of `out`. A `None` message leaves `out` unchanged.
+pub(crate) fn with_resume_notice(out: String, message: Option<&str>) -> String {
+    match message {
+        Some(message) => attach_system_message(&out, message),
         None => out,
     }
 }
@@ -129,7 +135,9 @@ mod tests {
     use proptest::prelude::*;
     use serde_json::{Value, json};
 
-    use super::{ResumeCache, attach_system_message, field, usd, with_resume_notice};
+    use super::{
+        ResumeCache, attach_system_message, field, resume_notice, usd, with_resume_notice,
+    };
 
     fn expensive_resume() -> Value {
         json!({
@@ -187,13 +195,27 @@ mod tests {
 
     #[test]
     fn a_wrong_type_is_recorded_for_the_agent_with_its_field_name() {
-        let payload = json!({ "estimated_cache_write_usd": "1.14" });
+        let payload = json!({ "probe_cache_cost": "1.14" });
 
-        assert_eq!(field(&payload, "estimated_cache_write_usd", usd), None);
+        assert_eq!(field(&payload, "probe_cache_cost", usd), None);
 
         let text = crate::agent_notice::current().unwrap_or_default();
-        assert!(text.contains("estimated_cache_write_usd"), "{text}");
+        assert!(text.contains("probe_cache_cost"), "{text}");
         assert!(text.contains("Fix:"), "{text}");
+    }
+
+    #[test]
+    fn the_resume_notice_names_a_wrong_type_before_the_notices_are_taken() {
+        let payload = json!({
+            "seconds_since_last_response": "probe-wrong-type-resume",
+            "estimated_cache_write_usd": 1.14
+        });
+
+        let message = resume_notice("SessionStart", &payload);
+
+        let taken = crate::agent_notice::current().unwrap_or_default();
+        assert!(message.is_none(), "{message:?}");
+        assert!(taken.contains("seconds_since_last_response"), "{taken}");
     }
 
     #[test]
@@ -251,18 +273,20 @@ mod tests {
     fn a_startup_without_the_fields_gives_no_notice_and_the_output_is_unchanged() {
         let payload = json!({"source": "startup"});
 
+        let message = resume_notice("SessionStart", &payload);
+
         assert_eq!(
-            with_resume_notice("{\"x\":1}".to_string(), "SessionStart", &payload),
+            with_resume_notice("{\"x\":1}".to_string(), message.as_deref()),
             "{\"x\":1}"
         );
     }
 
     #[test]
     fn the_notice_is_added_to_the_output_as_system_message() {
+        let message = resume_notice("SessionStart", &expensive_resume());
         let out = with_resume_notice(
             "{\"hookSpecificOutput\":{}}".to_string(),
-            "SessionStart",
-            &expensive_resume(),
+            message.as_deref(),
         );
         let parsed: Value = serde_json::from_str(&out).unwrap();
 
@@ -284,10 +308,9 @@ mod tests {
 
     #[test]
     fn other_events_never_get_the_notice() {
-        assert_eq!(
-            with_resume_notice(String::new(), "PreToolUse", &expensive_resume()),
-            ""
-        );
+        let message = resume_notice("PreToolUse", &expensive_resume());
+
+        assert_eq!(with_resume_notice(String::new(), message.as_deref()), "");
     }
 
     #[test]
