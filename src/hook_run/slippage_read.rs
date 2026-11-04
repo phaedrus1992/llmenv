@@ -16,7 +16,7 @@ use crate::hook_run::slippage::{load_stats_for_rewrite, path_key, save_stats};
 /// A relative path resolves against the payload `cwd`. Without a `cwd`, a relative path is
 /// not recorded. A view that is not recorded leaves the file unread, so a later Write to it
 /// is denied. The deny is conservative, and its text says the file was not read.
-pub(super) fn record_bash_read(state_dir: &Path, session_id: &str, payload: &Value) {
+pub(super) fn record_bash_read(state_dir: &Path, session_id: &str, payload: &Value, locked: bool) {
     let Some(command) = payload
         .get("tool_input")
         .and_then(|v| v.get("command"))
@@ -34,15 +34,15 @@ pub(super) fn record_bash_read(state_dir: &Path, session_id: &str, payload: &Val
     // `Path::join` returns the right side unchanged when it is absolute, so one join covers both.
     let Some(cwd) = payload.get("cwd").and_then(Value::as_str) else {
         if Path::new(file).is_absolute() {
-            record_path(state_dir, session_id, Path::new(file));
+            record_path(state_dir, session_id, Path::new(file), locked);
         }
         return;
     };
-    record_path(state_dir, session_id, &Path::new(cwd).join(file));
+    record_path(state_dir, session_id, &Path::new(cwd).join(file), locked);
 }
 
-fn record_path(state_dir: &Path, session_id: &str, path: &Path) {
-    let Some(mut stats) = load_stats_for_rewrite(state_dir, session_id) else {
+fn record_path(state_dir: &Path, session_id: &str, path: &Path, locked: bool) {
+    let Some(mut stats) = load_stats_for_rewrite(state_dir, session_id, locked) else {
         return;
     };
     stats.paths.insert(path_key(&path.to_string_lossy()));
@@ -208,7 +208,7 @@ mod tests {
             "cwd": work.path(),
         });
 
-        record_bash_read(state.path(), "s1", &payload);
+        record_bash_read(state.path(), "s1", &payload, true);
 
         let stats = load_stats(state.path(), "s1");
         assert!(stats.paths.contains(&path_key(&file.to_string_lossy())));
@@ -222,7 +222,7 @@ mod tests {
             "tool_input": { "command": "cat note.md" },
         });
 
-        record_bash_read(state.path(), "s1", &payload);
+        record_bash_read(state.path(), "s1", &payload, true);
 
         assert!(load_stats(state.path(), "s1").paths.is_empty());
     }
@@ -394,7 +394,7 @@ mod tests {
             "cwd": work.path(),
         });
 
-        record_bash_read(state.path(), "s1", &payload);
+        record_bash_read(state.path(), "s1", &payload, true);
 
         assert!(load_stats(state.path(), "s1").paths.is_empty());
     }

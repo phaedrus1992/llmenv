@@ -1,6 +1,7 @@
 use super::*;
 
 mod access;
+mod properties;
 mod reads_and_metrics;
 mod transcript;
 

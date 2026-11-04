@@ -156,8 +156,9 @@ pub(crate) fn handle_pre_tool_use(
     match tool {
         "Read" => {
             // Held for the read-change-save of the stats file (#2678). A Write only reads it.
-            let _lock = stats_lock(state_dir, session_id);
-            let Some(mut stats) = load_stats_for_rewrite(state_dir, session_id) else {
+            let lock = stats_lock(state_dir, session_id);
+            let Some(mut stats) = load_stats_for_rewrite(state_dir, session_id, lock.is_some())
+            else {
                 return String::new();
             };
             stats.paths.insert(path_key(path));
@@ -252,14 +253,14 @@ pub(crate) fn handle_post_tool_use(
         return;
     }
     // One lock covers both read-change-save cycles of the stats file (#2678).
-    let _lock = stats_lock(state_dir, session_id);
+    let lock = stats_lock(state_dir, session_id);
     if records_bash_read {
-        super::slippage_read::record_bash_read(state_dir, session_id, payload);
+        super::slippage_read::record_bash_read(state_dir, session_id, payload, lock.is_some());
     }
     if !cfg.metrics {
         return;
     }
-    let Some(mut stats) = load_stats_for_rewrite(state_dir, session_id) else {
+    let Some(mut stats) = load_stats_for_rewrite(state_dir, session_id, lock.is_some()) else {
         return;
     };
     *stats.tools.entry(tool.to_string()).or_default() += 1;

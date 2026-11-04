@@ -300,10 +300,45 @@ fn a_read_keeps_a_corrupt_stats_log_before_it_rewrites_the_log() {
     assert!(notes.contains(&kept.display().to_string()), "{notes}");
 }
 
-// #3349: when the bad log cannot be moved aside, the Read must not rewrite it. A directory at the
-// `.corrupt` path makes the rename fail for any user, so the bytes must stay in the log.
+// #3349: a second corruption must not replace the copy kept by the first one.
 #[test]
-fn a_read_leaves_a_corrupt_stats_log_it_cannot_move_aside_untouched() {
+fn a_repeat_corruption_keeps_the_earlier_copy() {
+    let state = tempfile::tempdir().unwrap();
+    let log = stats_path(state.path(), "s1");
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    std::fs::write(&log, b"{not json").unwrap();
+    let first = format!("{}.corrupt", log.display());
+    std::fs::write(&first, b"first copy").unwrap();
+
+    let kept = load_stats_for_rewrite(state.path(), "s1", true);
+
+    assert!(kept.is_some());
+    assert_eq!(std::fs::read(&first).unwrap(), b"first copy");
+    assert_eq!(std::fs::read(format!("{first}.1")).unwrap(), b"{not json");
+}
+
+// #3349: a copy name that is taken by a folder is skipped, and the bytes go to the next name.
+#[test]
+fn a_blocked_copy_name_moves_the_bytes_to_the_next_free_copy() {
+    let state = tempfile::tempdir().unwrap();
+    let log = stats_path(state.path(), "s1");
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    std::fs::write(&log, b"{not json").unwrap();
+    let first = format!("{}.corrupt", log.display());
+    std::fs::create_dir(&first).unwrap();
+
+    assert!(load_stats_for_rewrite(state.path(), "s1", true).is_some());
+
+    assert_eq!(std::fs::read(format!("{first}.1")).unwrap(), b"{not json");
+    assert!(std::path::Path::new(&first).is_dir());
+}
+
+// #3349: a file that cannot be read is not corrupt. Its bytes stay in place, and the Read is not
+// recorded.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_stats_log_stays_in_place() {
+    use std::os::unix::fs::PermissionsExt;
     let state = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     let file = work.path().join("existing.txt");
@@ -311,21 +346,32 @@ fn a_read_leaves_a_corrupt_stats_log_it_cannot_move_aside_untouched() {
     let log = stats_path(state.path(), "s1");
     std::fs::create_dir_all(log.parent().unwrap()).unwrap();
     std::fs::write(&log, b"{not json").unwrap();
-    std::fs::create_dir(format!("{}.corrupt", log.display())).unwrap();
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o000)).unwrap();
 
-    handle_pre_tool_use(
+    let out = handle_pre_tool_use(
         Some(&on()),
         &payload("Read", &file),
         Some("s1"),
         state.path(),
     );
 
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o600)).unwrap();
     assert_eq!(std::fs::read(&log).unwrap(), b"{not json");
-    let out = handle_pre_tool_use(
-        Some(&on()),
-        &payload("Write", &file),
-        Some("s1"),
-        state.path(),
-    );
-    assert!(out.starts_with("__DENY__:"), "{out}");
+    assert!(!std::path::Path::new(&format!("{}.corrupt", log.display())).exists());
+    assert_eq!(out, "", "the Read itself is still allowed");
+}
+
+// #3349: without the session's stats lock, another hook can write a new log between the read and
+// the rename. The move is refused, and the rewrite is skipped.
+#[test]
+fn an_unlocked_call_does_not_move_a_corrupt_stats_log() {
+    let state = tempfile::tempdir().unwrap();
+    let log = stats_path(state.path(), "s1");
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    std::fs::write(&log, b"{not json").unwrap();
+
+    assert!(load_stats_for_rewrite(state.path(), "s1", false).is_none());
+
+    assert_eq!(std::fs::read(&log).unwrap(), b"{not json");
+    assert!(!std::path::Path::new(&format!("{}.corrupt", log.display())).exists());
 }
