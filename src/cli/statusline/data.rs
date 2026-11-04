@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use super::session_tasks::SessionTasks;
+
 // `Serialize` is derived alongside `Deserialize` on every type in this module
 // (not just `StatusData`) so `crate::materialize::status_data` — the writer
 // side — can construct and serialize these exact types instead of maintaining
@@ -86,6 +88,9 @@ pub struct TasksData {
     /// an empty or lower count, which would look like no work (#2687).
     #[serde(default)]
     pub unreadable: bool,
+    /// Each open session of the project. Empty in a file from an older llmenv (#3196).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sessions: Vec<SessionTasks>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]

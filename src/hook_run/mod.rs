@@ -10,6 +10,7 @@ pub(crate) mod action;
 mod adaptive;
 pub(crate) mod agent_config;
 mod bundle_names;
+mod bundle_notice;
 pub(crate) mod cbm_index_guard;
 pub(crate) mod cd_guard;
 pub(crate) mod checkpoint;
@@ -18,10 +19,12 @@ pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
 mod engine_rules;
 mod event;
+mod memory_call;
 mod memory_endpoint;
 mod memory_resolve;
 mod memory_target;
-use memory_endpoint::resolve_memory_client;
+use memory_call::MemoryCallContext;
+use memory_endpoint::{apply_memory_config_defaults, resolve_memory_client};
 #[cfg(test)]
 use memory_resolve::classify_missing_memory;
 pub(crate) use memory_resolve::{memory_url, merged_memory, suppressed_memory_bundles};
@@ -1406,8 +1409,17 @@ fn run_inner(
         // cheap — reqwest::Client is internally Arc, and the MCP session_id is
         // shared via Arc so re-initialization is also avoided.
         static MCP_CLIENT_CACHE: OnceLock<Mutex<HashMap<String, McpHttpClient>>> = OnceLock::new();
-        let resolved_client =
-            resolve_memory_client(&config, config_dir, &active, event, &MCP_CLIENT_CACHE);
+        let resolved_client = resolve_memory_client(
+            &config,
+            config_dir,
+            &active,
+            MemoryCallContext {
+                event,
+                state_dir: memory_call::notice_state_dir().as_deref(),
+                session_id: claude_session_id,
+            },
+            &MCP_CLIENT_CACHE,
+        );
         let settings = resolved_client.as_ref().map(|r| r.settings.clone());
         // Default type/importance markers (R1, R3) from the resolved entry, which
         // can be top-level or bundle-declared, when the chunk has none of its own.
@@ -1968,19 +1980,7 @@ async fn handle_session_log(
     let session_id = match (event, claude_session_id) {
         (HookEvent::SessionStart, Some(csid)) => {
             // Best-effort reaping before any session-log activity.
-            if let Some(days) = cfg.transcript.as_ref().and_then(|t| t.retention_days) {
-                let log_path = crate::session_log::resolve_file_path(cfg.file_path())
-                    .inspect_err(|e| {
-                        tracing::warn!(
-                            "session_log reaper: cannot resolve the session log path, so \
-                             retention is skipped: {e:#}. Fix: set HOME or session_log.file.path."
-                        );
-                    })
-                    .ok();
-                if let Some(p) = log_path.as_ref() {
-                    crate::session_log::reap_session_log(p, days);
-                }
-            }
+            session_emit::reap_at_session_start(cfg);
             // SessionStart: once per launch, worth revalidating (#1090).
             ensure_transcript_session(cfg, client, csid, ctx, state_path, true).await
         }
@@ -2123,43 +2123,6 @@ fn resolve_bundle_memory_host(
         .map(|f| f.memory)
         .unwrap_or_default();
     Ok((mem, merged.capabilities.host))
-}
-
-/// Apply default memory type/importance markers from the resolved memory
-/// entry's `settings` (R1, R3). `None` (no backend resolved) leaves the chunk
-/// unchanged.
-///
-/// If the chunk already contains an `<!-- llmenv-type: -->` or
-/// `<!-- llmenv-importance: -->` marker, the inline value takes precedence and
-/// no default is appended. Otherwise the entry's `default_type` /
-/// `default_importance` are appended as markers at the end of the chunk.
-///
-/// ponytail: `type_importance` per-type overrides are not yet applied here —
-/// they will be resolved when the Store action runs against the ICM backend.
-fn apply_memory_config_defaults(
-    mut chunk: String,
-    settings: Option<&MemoryHookSettings>,
-) -> String {
-    let Some(settings) = settings else {
-        return chunk;
-    };
-
-    if !chunk.contains("<!-- llmenv-type:")
-        && let Some(ty) = &settings.default_type
-    {
-        chunk.push_str(&format!("\n<!-- llmenv-type: {} -->", ty.as_marker_str()));
-    }
-
-    if !chunk.contains("<!-- llmenv-importance:")
-        && let Some(imp) = &settings.default_importance
-    {
-        chunk.push_str(&format!(
-            "\n<!-- llmenv-importance: {} -->",
-            imp.as_marker_str()
-        ));
-    }
-
-    chunk
 }
 
 /// Validate a tag to prevent query injection. Tags must be alphanumeric with
@@ -3854,7 +3817,7 @@ mod tests {
     /// `bundle.yaml` is a *directory*, so every read of it fails with something
     /// other than NotFound — the portable stand-in for the unreadable or
     /// permission-denied bundle file whose error used to be swallowed.
-    fn unreadable_bundle_fixture() -> (
+    pub(in crate::hook_run) fn unreadable_bundle_fixture() -> (
         tempfile::TempDir,
         tempfile::TempDir,
         crate::config::Config,
@@ -3923,115 +3886,6 @@ mod tests {
             body.contains("merge signature"),
             "a signature failure must be logged at a level the default EnvFilter \
                  passes, before falling back to a live merge: {body}"
-        );
-    }
-
-    // #1139: `memory_url(...)?.into_url()` at the call site put `?` directly
-    // after `memory_url`, propagating *its* Err (a bundle-merge failure, #1132)
-    // out of the enclosing function before `.into_url()` ever ran — bypassing
-    // the fail-soft handling and aborting the whole hook event (session
-    // logging included) on a merge failure. `resolve_memory_client` returns
-    // `Option`, not `Result`, so it cannot repeat that mistake by construction.
-    #[test]
-    fn resolve_memory_client_does_not_propagate_a_bundle_merge_failure() {
-        let (config_root, _cache, config, active) = unreadable_bundle_fixture();
-        static CACHE: OnceLock<Mutex<HashMap<String, McpHttpClient>>> = OnceLock::new();
-
-        let client =
-            resolve_memory_client(&config, config_root.path(), &active, "test-event", &CACHE);
-
-        assert!(
-            client.is_none(),
-            "a bundle merge failure must degrade to no client, never propagate"
-        );
-    }
-
-    /// #3202: a configured backend that fails to load reaches the agent, with a `Fix:` sentence.
-    /// The marker is unique to this test, because the notice list is shared by the process.
-    #[test]
-    fn resolve_memory_client_notifies_agent_when_configured_backend_fails() {
-        let (config_root, _cache, config, active) = unreadable_bundle_fixture();
-        static CACHE: OnceLock<Mutex<HashMap<String, McpHttpClient>>> = OnceLock::new();
-
-        let client = resolve_memory_client(
-            &config,
-            config_root.path(),
-            &active,
-            "agent-notice-3202-loud",
-            &CACHE,
-        );
-
-        assert!(client.is_none());
-        let notices = crate::agent_notice::current().unwrap_or_default();
-        let line = notices
-            .lines()
-            .find(|l| l.contains("agent-notice-3202-loud"))
-            .expect("a configured backend that fails must reach the agent");
-        assert!(line.contains("Fix:"), "the notice must name a fix: {line}");
-    }
-
-    /// #3202: a scope with no memory backend adds no agent notice, so the notice does not repeat
-    /// on every hook event for a config that never had one.
-    #[test]
-    fn resolve_memory_client_adds_no_notice_when_no_backend_is_configured() {
-        let config_root = tempfile::tempdir().expect("test");
-        let config = crate::config::Config::default();
-        let active = crate::scope::ActiveScopes::default();
-        static CACHE: OnceLock<Mutex<HashMap<String, McpHttpClient>>> = OnceLock::new();
-
-        let client = resolve_memory_client(
-            &config,
-            config_root.path(),
-            &active,
-            "agent-notice-3202-quiet",
-            &CACHE,
-        );
-
-        assert!(client.is_none());
-        let notices = crate::agent_notice::current().unwrap_or_default();
-        assert!(
-            !notices.contains("agent-notice-3202-quiet"),
-            "an unconfigured scope must not reach the agent: {notices}"
-        );
-    }
-
-    /// #3202: a fired bundle with no content directory adds no agent notice, because its
-    /// `features.memory` cannot be read. Only a bundle that loads and fails reaches the agent.
-    #[test]
-    fn resolve_memory_client_adds_no_notice_for_a_bundle_without_content() {
-        let config_root = tempfile::tempdir().expect("test");
-        let cache_dir = tempfile::tempdir().expect("test");
-        let config = crate::config::Config {
-            bundle: vec![crate::config::Bundle {
-                name: "contentless".into(),
-                when: vec!["mytag".into()],
-            }],
-            cache: crate::config::Cache {
-                cache_dir: cache_dir.path().to_string_lossy().into_owned(),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let active = crate::scope::ActiveScopes {
-            scopes: vec![],
-            tags: std::collections::BTreeSet::from(["mytag".to_string()]),
-            extra_tags: std::collections::BTreeSet::new(),
-        };
-        static CACHE: OnceLock<Mutex<HashMap<String, McpHttpClient>>> = OnceLock::new();
-
-        let client = resolve_memory_client(
-            &config,
-            config_root.path(),
-            &active,
-            "agent-notice-3202-contentless",
-            &CACHE,
-        );
-
-        assert!(client.is_none());
-        let notices = crate::agent_notice::current().unwrap_or_default();
-        assert!(
-            !notices.contains("agent-notice-3202-contentless"),
-            "a content-less bundle must not reach the agent: {notices}"
         );
     }
 

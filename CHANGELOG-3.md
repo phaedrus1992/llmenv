@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Warn in `llmenv doctor` when hook commands name a binary in a cargo `target` folder or a temp folder, or a binary that was removed after it started. [feat:doctor] [#3119]
 - Show the reset time of the `usage_5h` and `usage_7d` widgets as a local clock time, with `display: clock_24h` or `display: clock_12h`. A 7-day window also shows the weekday. The default is still the countdown. [feat:statusline] [#3022]
 - Warn in `llmenv doctor` when hook commands use the bare `llmenv` name, and name the fix. [feat:doctor] [#3049]
 - Run six more Claude Code hook events on opencode 2.x: `SubagentStart`, `SubagentStop` (foreground subagents only), `Notification`, `PreCompact`, `PostModelSwitch`, and `PostToolBatch`. The events and their opencode sources are in [Hook events on opencode](https://phaedrus1992.github.io/llmenv/docs/engines#hook-events-on-opencode). [feat:opencode]
@@ -27,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Refuse a session log path that is a symbolic link when the file sink starts, with a notice that names the path. Rotation measured the link target but renamed the link. [fix:session-log] [#3117]
 - Save the repeat-detect counter and the recall health ring without a disk flush. The flush (`fsync`) costs about 5 ms per write on macOS, so a `PreToolUse` hook runs about 5 ms faster. A power loss can leave one of these two files empty, and the next hook replaces it with a fresh one. Other state files keep the flush. [perf:hook-run] [#3127]
 - Scan the repeat-detect state directory for stale files once per session, on the first save, and not on every tool call. [perf:hook-run] [#3127]
 - Skip the project lookup (a git subprocess) at `SessionStart` and `TurnStart` when no memory backend resolved, so `TurnStart` with memory off runs about 25 ms faster. A run with no memory backend no longer shows the notice that memory was skipped because git could not run. [perf:hook-run] [#3127]
@@ -42,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Count and name only this conversation's task sessions in the status line `tasks` widget, plus sessions with no owner. Two conversations in one project no longer see each other's work. [fix:statusline] [#3196]
+- Tell the agent once per session when a bundle fires with no content folder, so a memory backend that it may declare is not silently missing. [fix:hook] [#3218]
+- Tell the agent when session-log retention is skipped, when the reaper cannot remove or read its folder, or when a session log has a future modified time. These failures were logged only at a level the hook hides. [fix:hook] [#3379]
+- Tell the agent when the session-log path cannot be resolved, so the file log is off for that event. [fix:hook] [#3379]
 - Log a corrupt slippage stats log's move-aside error once per Bash call, not twice. [fix:hook] [#3373]
 - Prune corrupt slippage stats-log copies (`*.json.corrupt` and `*.json.corrupt.N`) after 7 days, as the stats log they came from. They were kept on disk forever before. [fix:hook] [#3372]
 - Log the unknown-bundles-folder message at warning level only when a codebase-memory `index_path` is set. Otherwise it stays at debug level. [fix:cli] [#3278]

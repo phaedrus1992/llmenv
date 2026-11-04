@@ -82,18 +82,26 @@ fn reap_session_log_with(log_path: &Path, retention_days: u64, source: AgeSource
         if let Err(e) = std::fs::remove_dir(parent)
             && e.kind() != std::io::ErrorKind::DirectoryNotEmpty
         {
-            tracing::error!("cannot remove session log dir {}: {e}", parent.display());
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the session log reaper could not remove the empty folder {} ({e}). Fix: \
+                 check the permissions of that folder.",
+                parent.display()
+            ));
         }
     }
 }
 
-/// Whether `dir` has no entries. A read error is logged and counts as not empty, so the
+/// Whether `dir` has no entries. A read error is noticed and counts as not empty, so the
 /// folder is kept.
 fn dir_is_empty(dir: &Path) -> bool {
     match dir.read_dir() {
         Ok(mut entries) => entries.next().is_none(),
         Err(e) => {
-            tracing::error!("cannot read session log dir {}: {e}", dir.display());
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the session log reaper cannot read the folder {} ({e}), so it is kept. \
+                 Fix: check the permissions of that folder.",
+                dir.display()
+            ));
             false
         }
     }
@@ -113,11 +121,13 @@ fn log_age(path: &Path, source: AgeSource, now: SystemTime) -> std::io::Result<O
     match now.duration_since(stamp) {
         Ok(age) => Ok(Some(age)),
         Err(_) => {
-            // Hooks keep only ERROR-level logs, so the skew is logged at that level.
-            tracing::error!(
-                path = %path.display(),
-                "session log has a future modified time (clock skew); it is kept"
-            );
+            // The notice repeats on every SessionStart until the clock is fixed. That repeat is the
+            // point: the file is kept until the skew clears, and the agent must see why (#3379).
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the session log {} has a modified time in the future (clock skew), so it is \
+                 kept. Fix: correct the system clock.",
+                path.display()
+            ));
             Ok(None)
         }
     }

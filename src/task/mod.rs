@@ -22,6 +22,7 @@ pub(crate) mod relation;
 pub(crate) mod reopen;
 mod resolve;
 pub(crate) mod resume;
+pub(crate) mod visibility;
 pub(crate) use finish_hints::last_task_hint;
 use finish_hints::session_finish_reminders;
 mod tracking;

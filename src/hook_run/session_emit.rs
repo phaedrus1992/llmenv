@@ -1,11 +1,10 @@
 //! Routes one session-log event to the configured sinks. Fail-soft: a sink
 //! failure logs and never fails the hook.
 
-use tracing::warn;
-
 use llmenv_config::LogLevel;
 
 use crate::config::SessionLog;
+use crate::session_log::SinkPathError;
 use crate::session_log::event::{EventScope, SessionLogEvent};
 
 /// Append `ev` to the configured sinks: the JSONL file (if enabled and
@@ -29,6 +28,26 @@ pub(super) fn emit_session_log(ev: SessionLogEvent, cfg: &SessionLog, session_id
     }
 }
 
+/// Reap the session-log file at `SessionStart` when transcript retention is set. A path that cannot
+/// be resolved is noticed, because a warn is hidden and hook stderr is dropped (#3379).
+pub(super) fn reap_at_session_start(cfg: &SessionLog) {
+    let Some(days) = cfg.transcript.as_ref().and_then(|t| t.retention_days) else {
+        return;
+    };
+    let log_path = crate::session_log::resolve_file_path(cfg.file_path())
+        .inspect_err(|e| {
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the session log retention is skipped, because the session log path \
+                 cannot be resolved: {e:#}. Fix: set HOME, or set session_log.file.path to an \
+                 absolute path."
+            ));
+        })
+        .ok();
+    if let Some(p) = log_path.as_ref() {
+        crate::session_log::reap_session_log(p, days);
+    }
+}
+
 /// Whether the transcript sink takes an event: only an agent-session event, at a level the sink
 /// keeps. A process-level event has no transcript session to attach to.
 fn wants_transcript(cfg: &SessionLog, scope: EventScope, level: LogLevel) -> bool {
@@ -41,11 +60,16 @@ fn resolve_file_sink_path(
     cfg: &SessionLog,
     default: impl FnOnce() -> anyhow::Result<std::path::PathBuf>,
 ) -> Option<std::path::PathBuf> {
-    crate::session_log::file_sink::resolve_file_path_with(cfg.file_path(), default)
-        .inspect_err(|e| {
-            warn!(
-                "session_log: file sink disabled, no path resolved, so events are not written to a file: {e:#}. Fix: set HOME, or set session_log.file.path to an absolute path."
-            );
+    crate::session_log::sink_path::resolve_sink_path_with(cfg.file_path(), default)
+        .inspect_err(|e| match e {
+            // A warn is hidden and hook stderr is dropped, so the agent gets a notice (#3379).
+            SinkPathError::Resolve(_) => crate::agent_notice::record_logged(format!(
+                "llmenv: the session log is off for this event, because no path resolved: {e:#}. Fix: set HOME, or set session_log.file.path to an absolute path."
+            )),
+            // The engine drops hook stderr and hides warn, so a symlink reaches the agent as a notice.
+            SinkPathError::Symlink(_) => crate::agent_notice::record_logged(format!(
+                "llmenv: the session log is off for this event: {e}"
+            )),
         })
         .ok()
 }
@@ -95,16 +119,19 @@ mod tests {
     }
 
     #[test]
-    fn file_sink_without_path_warns_with_fix_when_default_fails() {
+    fn file_sink_without_path_notices_the_agent_with_fix_when_default_fails() {
         let cfg = SessionLog::default();
         let mut resolved = None;
-        let logs = crate::test_log_capture::capture_logs(|| {
+        crate::test_log_capture::capture_logs(|| {
             resolved = resolve_file_sink_path(&cfg, || Err(anyhow::anyhow!("HOME is unset")));
         });
         assert!(resolved.is_none(), "no path must resolve");
-        assert!(logs.contains("WARN"), "expected a warning, got: {logs}");
-        assert!(logs.contains("HOME is unset"), "cause missing: {logs}");
-        assert!(logs.contains("Fix: set HOME"), "fix missing: {logs}");
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(
+            notices.contains("HOME is unset"),
+            "cause missing: {notices}"
+        );
+        assert!(notices.contains("Fix: set HOME"), "fix missing: {notices}");
     }
 
     #[test]
@@ -127,6 +154,61 @@ mod tests {
         assert_eq!(
             resolved,
             Some(std::path::PathBuf::from("/configured/session.jsonl"))
+        );
+    }
+
+    #[test]
+    fn an_unresolvable_log_path_skips_retention_with_a_notice() {
+        let cfg = SessionLog {
+            file: Some(FileSinkConfig {
+                enabled: true,
+                level: LogLevel::Info,
+                path: Some("relative/session.jsonl".to_owned()),
+            }),
+            transcript: Some(llmenv_config::TranscriptSinkConfig {
+                enabled: true,
+                level: LogLevel::Info,
+                retention_days: Some(1),
+            }),
+            max_content_bytes: None,
+        };
+
+        reap_at_session_start(&cfg);
+
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(
+            notices.contains("the session log retention is skipped"),
+            "the agent must be told that retention did not run: {notices}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_symlinked_log_path_turns_the_sink_off_with_a_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.jsonl");
+        std::fs::write(&real, "").unwrap();
+        let link = dir.path().join("log.jsonl");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let cfg = SessionLog {
+            file: Some(FileSinkConfig {
+                enabled: true,
+                level: LogLevel::Info,
+                path: Some(link.to_str().unwrap().to_owned()),
+            }),
+            transcript: None,
+            max_content_bytes: None,
+        };
+
+        let resolved = resolve_file_sink_path(&cfg, || Err(anyhow::anyhow!("unused")));
+
+        assert_eq!(resolved, None, "a symlinked path must turn the sink off");
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(
+            notices.contains("the session log is off for this event")
+                && notices.contains("symbolic link"),
+            "the agent must get the notice: {notices}"
         );
     }
 }
