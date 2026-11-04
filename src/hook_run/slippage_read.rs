@@ -9,14 +9,15 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::hook_run::slippage::{load_stats_for_rewrite, path_key, save_stats};
+use crate::hook_run::slippage::path_key;
 
-/// Record the file a Bash `PostToolUse` read, if the command is one plain single-file view.
+/// The key of the file a Bash `PostToolUse` read views, if the command is one plain single-file view.
 ///
+/// Pure: the caller loads and saves the stats log, so one hook call loads it once (#3373).
 /// A relative path resolves against the payload `cwd`. Without a `cwd`, a relative path is
 /// not recorded. A view that is not recorded leaves the file unread, so a later Write to it
 /// is denied. The deny is conservative, and its text says the file was not read.
-pub(super) fn record_bash_read(state_dir: &Path, session_id: &str, payload: &Value, locked: bool) {
+pub(super) fn bash_read_key(payload: &Value) -> Option<String> {
     let Some(command) = payload
         .get("tool_input")
         .and_then(|v| v.get("command"))
@@ -26,27 +27,14 @@ pub(super) fn record_bash_read(state_dir: &Path, session_id: &str, payload: &Val
         tracing::warn!(
             "slippage read: the Bash call has no string tool_input.command, so no read is recorded"
         );
-        return;
+        return None;
     };
-    let Some(file) = single_file_read(command) else {
-        return;
-    };
+    let file = single_file_read(command)?;
     // `Path::join` returns the right side unchanged when it is absolute, so one join covers both.
     let Some(cwd) = payload.get("cwd").and_then(Value::as_str) else {
-        if Path::new(file).is_absolute() {
-            record_path(state_dir, session_id, Path::new(file), locked);
-        }
-        return;
+        return Path::new(file).is_absolute().then(|| path_key(file));
     };
-    record_path(state_dir, session_id, &Path::new(cwd).join(file), locked);
-}
-
-fn record_path(state_dir: &Path, session_id: &str, path: &Path, locked: bool) {
-    let Some(mut stats) = load_stats_for_rewrite(state_dir, session_id, locked) else {
-        return;
-    };
-    stats.paths.insert(path_key(&path.to_string_lossy()));
-    save_stats(state_dir, session_id, &stats);
+    Some(path_key(&Path::new(cwd).join(file).to_string_lossy()))
 }
 
 /// The file a command views, when the command is one plain single-file view.
@@ -196,6 +184,17 @@ mod tests {
         }
     }
 
+    /// Run a Bash `PostToolUse` with the read-before-edit layer on and metrics off.
+    fn run_bash_post(state_dir: &Path, payload: &Value) {
+        let cfg = crate::config::SlippageControl {
+            enabled: true,
+            read_before_edit: true,
+            metrics: false,
+            ..Default::default()
+        };
+        crate::hook_run::slippage::handle_post_tool_use(Some(&cfg), payload, Some("s1"), state_dir);
+    }
+
     #[test]
     fn a_relative_read_resolves_against_the_payload_cwd() {
         let state = tempfile::tempdir().expect("state dir");
@@ -208,7 +207,7 @@ mod tests {
             "cwd": work.path(),
         });
 
-        record_bash_read(state.path(), "s1", &payload, true);
+        run_bash_post(state.path(), &payload);
 
         let stats = load_stats(state.path(), "s1");
         assert!(stats.paths.contains(&path_key(&file.to_string_lossy())));
@@ -222,7 +221,7 @@ mod tests {
             "tool_input": { "command": "cat note.md" },
         });
 
-        record_bash_read(state.path(), "s1", &payload, true);
+        run_bash_post(state.path(), &payload);
 
         assert!(load_stats(state.path(), "s1").paths.is_empty());
     }
@@ -394,7 +393,7 @@ mod tests {
             "cwd": work.path(),
         });
 
-        record_bash_read(state.path(), "s1", &payload, true);
+        run_bash_post(state.path(), &payload);
 
         assert!(load_stats(state.path(), "s1").paths.is_empty());
     }

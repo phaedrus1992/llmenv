@@ -300,6 +300,45 @@ fn a_read_keeps_a_corrupt_stats_log_before_it_rewrites_the_log() {
     assert!(notes.contains(&kept.display().to_string()), "{notes}");
 }
 
+// #3373: a stuck corrupt log logs one error per Bash call. The read record and the metric share
+// one load, so the move-aside failure is not reported twice.
+#[test]
+fn a_stuck_corrupt_log_logs_once_per_bash_call() {
+    let state = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    std::fs::write(work.path().join("existing.txt"), "important").unwrap();
+    let log = stats_path(state.path(), "s1");
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    std::fs::write(&log, b"{not json").unwrap();
+    // Every copy name is taken, so the move-aside fails and the log stays stuck.
+    let base = format!("{}.corrupt", log.display());
+    std::fs::write(&base, b"copy").unwrap();
+    for n in 1..100 {
+        std::fs::write(format!("{base}.{n}"), b"copy").unwrap();
+    }
+    let cfg = crate::config::SlippageControl {
+        enabled: true,
+        read_before_edit: true,
+        metrics: true,
+        ..Default::default()
+    };
+    let view = serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": { "command": "cat existing.txt" },
+        "cwd": work.path(),
+    });
+
+    let logs = crate::test_log_capture::capture_logs(|| {
+        handle_post_tool_use(Some(&cfg), &view, Some("s1"), state.path());
+    });
+
+    assert_eq!(
+        logs.matches("could not be moved aside").count(),
+        1,
+        "{logs}"
+    );
+}
+
 // #3349: a second corruption must not replace the copy kept by the first one.
 #[test]
 fn a_repeat_corruption_keeps_the_earlier_copy() {
