@@ -5,6 +5,8 @@ pub(crate) mod data;
 mod icons;
 mod llmenv_widget;
 mod peak;
+mod session_tasks;
+mod task_scope;
 mod template;
 mod widget;
 
@@ -156,7 +158,10 @@ pub fn run_statusline(
     let mut stdin_buf = String::new();
     stdin.read_to_string(&mut stdin_buf)?;
     let engine_data: EngineData = serde_json::from_str(&stdin_buf).unwrap_or_default();
-    let status_data = StatusData::load(data_path);
+    let mut status_data = StatusData::load(data_path);
+    if let Some(tasks) = status_data.tasks.as_mut() {
+        task_scope::scope_tasks_to_caller(tasks, engine_data.session_id.as_deref());
+    }
 
     let cfg = config.statusline.clone().unwrap_or_default();
     // Global colour opt-out: `statusline.style.color: false` forces plain text

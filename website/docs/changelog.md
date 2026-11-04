@@ -53,6 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Count and name only this conversation's task sessions in the status line `tasks` widget, plus sessions with no owner. Two conversations in one project no longer see each other's work. [fix:statusline] [#3196]
 - Tell the agent once per session when a bundle fires with no content folder, so a memory backend that it may declare is not silently missing. [fix:hook] [#3218]
 - Tell the agent when session-log retention is skipped, or when the reaper cannot remove or read its folder. These failures were logged only at a level the hook hides. [fix:hook] [#3379]
 - Log a corrupt slippage stats log's move-aside error once per Bash call, not twice. [fix:hook] [#3373]

@@ -1549,7 +1549,7 @@ All nine honor `format:`.
 | `config_stale` | `{stale_icon} stale` | `⚙️ stale` | `stale_icon` (resolves from the icon set, gear emoji by default — a `statusline.icons.config_stale` override applies even without a custom `format`). Config out of date — relaunch to reload. Renders empty when the config isn't stale — there's no "fresh" variant |
 | `throttle` | `{raw}` | `umans: 45s` | `raw` (`"<backend>: <cooldown_secs>s"`), `cooldown_secs`, `reason` (the backend name) |
 | `session_log` | `{icon} {entries}` | `📝 8` | `icon`, `entries` |
-| `tasks` | `☑ {done}/{total}` (summed across the current project's open sessions, #905); renders empty when no session is open for this project | `☑ 2/5` | `done`, `total` (summed across every session open for the current project), `current` (title of the task currently `wip`/`waiting` among those sessions; empty when none). The default doesn't show `current` — combine it yourself, e.g. `format: "{done}/{total} — {current}"` |
+| `tasks` | `☑ {done}/{total}` (summed across the current project's open sessions, #905); renders empty when no session is open for this project. In a project with several conversations, the widget counts only the sessions that the current conversation owns, plus sessions with no owner (changed in v3.14.0) | `☑ 2/5` | `done`, `total` (summed across every session open for the current project), `current` (title of the task currently `wip`/`waiting` among those sessions; empty when none). The default doesn't show `current` — combine it yourself, e.g. `format: "{done}/{total} — {current}"` |
 
 The `tasks` widget shows `tasks: unreadable` in place of its count when a session or task file cannot be read, so a read error never looks like no work (changed in v3.13.0).
 
