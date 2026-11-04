@@ -98,14 +98,14 @@ pub(in crate::hook_run) fn load_stats_for_rewrite(
     };
     if !locked {
         crate::agent_notice::record_logged(format!(
-            "llmenv: {cause}. The log is busy, so it was not moved aside and this call did not rewrite it. Fix: retry the call."
+            "llmenv: {cause}. The log is not locked, so it was not moved aside and this call did not rewrite it. Fix: correct the lock failure noticed above, then retry the call."
         ));
         return None;
     }
     match move_aside(&path) {
         Ok(kept) => {
             crate::agent_notice::record_logged(format!(
-                "llmenv: {cause}. The bad bytes are kept at {}, and a new log starts. Fix: remove {} once you no longer need it.",
+                "llmenv: {cause}. The bad bytes are kept at {}, and a new log starts. llmenv removes the copy after 7 days. Fix: copy {} elsewhere if you need it longer.",
                 kept.display(),
                 kept.display()
             ));

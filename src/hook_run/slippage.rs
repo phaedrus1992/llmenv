@@ -207,7 +207,7 @@ pub(super) fn path_key(path: &str) -> String {
 /// Opportunistically drops session files older than a week, the way
 /// `read_once`'s cache does — without it the directory grows one file per
 /// session forever.
-pub(super) fn save_stats(state_dir: &std::path::Path, session_id: &str, stats: &SessionStats) {
+fn save_stats(state_dir: &std::path::Path, session_id: &str, stats: &SessionStats) {
     super::session_state::prune_stale_json_files(&state_dir.join("slippage"), 7);
     super::session_state::prune_orphan_locks(&state_dir.join("slippage"), 7);
     let Ok(json) = serde_json::to_string(stats) else {
@@ -247,23 +247,24 @@ pub(crate) fn handle_post_tool_use(
     ) else {
         return;
     };
-    let records_bash_read =
-        cfg.read_before_edit && crate::hook_run::shell_tool::is_shell_tool(tool);
-    if !records_bash_read && !cfg.metrics {
+    let read_key = (cfg.read_before_edit && crate::hook_run::shell_tool::is_shell_tool(tool))
+        .then(|| super::slippage_read::bash_read_key(payload))
+        .flatten();
+    if read_key.is_none() && !cfg.metrics {
         return;
     }
-    // One lock covers both read-change-save cycles of the stats file (#2678).
+    // One lock and one load cover the read record and the metric (#2678). A second load of the
+    // same corrupt log would record its notice twice (#3373).
     let lock = stats_lock(state_dir, session_id);
-    if records_bash_read {
-        super::slippage_read::record_bash_read(state_dir, session_id, payload, lock.is_some());
-    }
-    if !cfg.metrics {
-        return;
-    }
     let Some(mut stats) = load_stats_for_rewrite(state_dir, session_id, lock.is_some()) else {
         return;
     };
-    *stats.tools.entry(tool.to_string()).or_default() += 1;
+    if let Some(key) = read_key {
+        stats.paths.insert(key);
+    }
+    if cfg.metrics {
+        *stats.tools.entry(tool.to_string()).or_default() += 1;
+    }
     save_stats(state_dir, session_id, &stats);
 }
 

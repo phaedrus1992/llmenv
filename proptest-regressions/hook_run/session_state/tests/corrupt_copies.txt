@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 2f46b531fb02af33e120648fff38849a0437c8b0f97736a74121d09a1f49cde8 # shrinks to stem = "a", suffix = ".json.corrupt.0"

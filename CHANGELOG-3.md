@@ -42,6 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Log a corrupt slippage stats log's move-aside error once per Bash call, not twice. [fix:hook] [#3373]
+- Prune corrupt slippage stats-log copies (`*.json.corrupt` and `*.json.corrupt.N`) after 7 days, as the stats log they came from. They were kept on disk forever before. [fix:hook] [#3372]
 - Log the unknown-bundles-folder message at warning level only when a codebase-memory `index_path` is set. Otherwise it stays at debug level. [fix:cli] [#3278]
 - Skip a `state/tmp` entry that another process removes during `llmenv clean`, instead of reporting it as unreadable. [fix:materialize] [#3276]
 - Keep state files, locks, and codebase-memory index units that are restored with old mtimes. The state prune and the cbm sweep now judge age by the later of mtime and change time, as `state/tmp` does. [fix:hook] [#3275]

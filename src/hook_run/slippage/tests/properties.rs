@@ -2,6 +2,49 @@ use super::*;
 use proptest::prelude::*;
 
 proptest! {
+    /// Any mix of Bash reads and other Bash calls keeps every read and counts every call. The
+    /// read record and the metric share one load of the stats log (#3373).
+    #[test]
+    fn every_bash_call_is_counted_and_every_read_is_kept(
+        ops in proptest::collection::vec(proptest::option::of(0usize..3), 0..12),
+    ) {
+        let state = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let names = ["a.txt", "b.txt", "c.txt"];
+        for name in names {
+            std::fs::write(work.path().join(name), "x").unwrap();
+        }
+        let cfg = crate::config::SlippageControl {
+            enabled: true,
+            read_before_edit: true,
+            metrics: true,
+            ..Default::default()
+        };
+        let mut expected_paths = std::collections::BTreeSet::new();
+        for op in &ops {
+            let command = match op {
+                Some(i) => {
+                    let file = work.path().join(names[*i]).to_string_lossy().into_owned();
+                    expected_paths.insert(path_key(&file));
+                    format!("cat {}", names[*i])
+                }
+                None => "ls".to_string(),
+            };
+            let payload = serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": { "command": command },
+                "cwd": work.path(),
+            });
+            handle_post_tool_use(Some(&cfg), &payload, Some("s1"), state.path());
+        }
+
+        let stats = load_stats(state.path(), "s1");
+        prop_assert_eq!(stats.paths, expected_paths);
+        prop_assert_eq!(stats.tools.get("Bash").copied().unwrap_or(0), ops.len() as u64);
+    }
+}
+
+proptest! {
     /// Every stats value that `save_stats` writes is read back unchanged by `load_stats`.
     #[test]
     fn saved_stats_load_back_unchanged(
