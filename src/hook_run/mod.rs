@@ -1415,7 +1415,7 @@ fn run_inner(
             &active,
             MemoryCallContext {
                 event,
-                state_dir: crate::paths::state_dir().ok().as_deref(),
+                state_dir: memory_call::notice_state_dir().as_deref(),
                 session_id: claude_session_id,
             },
             &MCP_CLIENT_CACHE,

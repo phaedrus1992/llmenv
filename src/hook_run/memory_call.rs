@@ -1,7 +1,4 @@
-//! What a memory call knows about the hook event that makes it, and the bundles that the endpoint
-//! skipped (#3218).
-
-use super::memory_target::MemoryEndpoint;
+//! What a memory call knows about the hook event that makes it (#3218).
 
 /// What a memory call needs to know about the hook event that makes it.
 pub(super) struct MemoryCallContext<'a, E> {
@@ -13,10 +10,15 @@ pub(super) struct MemoryCallContext<'a, E> {
     pub(super) session_id: Option<&'a str>,
 }
 
-/// The bundles that fired without a content folder, when the endpoint is `NotDeclared`.
-pub(super) fn skipped_bundles(endpoint: &MemoryEndpoint) -> Vec<String> {
-    match endpoint {
-        MemoryEndpoint::NotDeclared { skipped_bundles } => skipped_bundles.clone(),
-        _ => Vec::new(),
-    }
+/// The llmenv state folder for a notice that is kept once per session. A failure is noticed,
+/// because without the folder the notice repeats on every event.
+pub(super) fn notice_state_dir() -> Option<std::path::PathBuf> {
+    crate::paths::state_dir()
+        .inspect_err(|e| {
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the state folder cannot be found, so a bundle notice repeats on every \
+                 event: {e:#}. Fix: set HOME."
+            ));
+        })
+        .ok()
 }

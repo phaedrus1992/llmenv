@@ -121,13 +121,13 @@ fn log_age(path: &Path, source: AgeSource, now: SystemTime) -> std::io::Result<O
     match now.duration_since(stamp) {
         Ok(age) => Ok(Some(age)),
         Err(_) => {
-            // No agent notice: the clock skew is the operator's fault to fix, and the error log is the
-            // channel for it. A notice here would repeat on every SessionStart until the clock is fixed.
-            // Hooks keep only ERROR-level logs, so the skew is logged at that level.
-            tracing::error!(
-                path = %path.display(),
-                "session log has a future modified time (clock skew); it is kept"
-            );
+            // The notice repeats on every SessionStart until the clock is fixed. That repeat is the
+            // point: the file is kept until the skew clears, and the agent must see why (#3379).
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the session log {} has a modified time in the future (clock skew), so it is \
+                 kept. Fix: correct the system clock.",
+                path.display()
+            ));
             Ok(None)
         }
     }

@@ -64,15 +64,20 @@ pub(super) fn unnoticed(
 fn read_record(path: &Path) -> Option<Noticed> {
     match std::fs::read(path) {
         Ok(bytes) => Some(serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-            tracing::error!(
-                "bundle notice: {} does not parse, so it is replaced: {e}",
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the bundle notice record {} does not parse ({e}), so its bundles may be \
+                 noticed again. Fix: delete that file.",
                 path.display()
-            );
+            ));
             Noticed::default()
         })),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Noticed::default()),
         Err(e) => {
-            tracing::error!("bundle notice: cannot read {}: {e}", path.display());
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the bundle notice record {} cannot be read ({e}), so a bundle notice \
+                 repeats on every event. Fix: check the permissions of the state folder.",
+                path.display()
+            ));
             None
         }
     }
@@ -84,12 +89,19 @@ fn save_record(path: &Path, noticed: &Noticed) {
     let json = match serde_json::to_vec(noticed) {
         Ok(json) => json,
         Err(e) => {
-            tracing::error!("bundle notice: cannot encode the record: {e}");
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the bundle notice record cannot be encoded ({e}), so a bundle notice \
+                 repeats on every event. Fix: report this llmenv bug."
+            ));
             return;
         }
     };
     if let Err(e) = crate::paths::write_owner_only_atomic(path, &json) {
-        tracing::error!("bundle notice: cannot write {}: {e}", path.display());
+        crate::agent_notice::record_logged(format!(
+            "llmenv: the bundle notice record {} cannot be saved ({e}), so a bundle notice \
+             repeats on every event. Fix: check the permissions of the state folder.",
+            path.display()
+        ));
     }
 }
 
@@ -108,6 +120,36 @@ fn fresh_names(names: &[String], told: &BTreeSet<String>) -> Vec<String> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// A saved record reads back with the same bundle names, for any set of names.
+        #[test]
+        fn a_saved_record_reads_back_unchanged(
+            names in proptest::collection::btree_set("[a-z0-9-]{1,12}", 0..8),
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("s.json");
+            save_record(&path, &Noticed { bundles: names.clone() });
+            let back = read_record(&path).unwrap();
+            prop_assert_eq!(back.bundles, names);
+        }
+
+        /// `fresh_names` keeps every unseen name once, in input order, and drops every told name.
+        #[test]
+        fn fresh_names_is_the_unseen_names_without_repeats(
+            names in proptest::collection::vec("[a-c]{1,2}", 0..10),
+            told in proptest::collection::btree_set("[a-c]{1,2}", 0..5),
+        ) {
+            let got = fresh_names(&names, &told);
+            prop_assert!(got.iter().all(|g| !told.contains(g)));
+            let unique: BTreeSet<&String> = got.iter().collect();
+            prop_assert_eq!(unique.len(), got.len());
+            for name in names.iter().filter(|n| !told.contains(*n)) {
+                prop_assert!(got.contains(name), "unseen {name} must be returned");
+            }
+        }
+    }
 
     fn names(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_owned()).collect()

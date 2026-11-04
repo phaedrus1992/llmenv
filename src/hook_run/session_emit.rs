@@ -1,8 +1,6 @@
 //! Routes one session-log event to the configured sinks. Fail-soft: a sink
 //! failure logs and never fails the hook.
 
-use tracing::warn;
-
 use llmenv_config::LogLevel;
 
 use crate::config::SessionLog;
@@ -64,9 +62,10 @@ fn resolve_file_sink_path(
 ) -> Option<std::path::PathBuf> {
     crate::session_log::sink_path::resolve_sink_path_with(cfg.file_path(), default)
         .inspect_err(|e| match e {
-            SinkPathError::Resolve(_) => warn!(
-                "session_log: file sink disabled, no path resolved, so events are not written to a file: {e:#}. Fix: set HOME, or set session_log.file.path to an absolute path."
-            ),
+            // A warn is hidden and hook stderr is dropped, so the agent gets a notice (#3379).
+            SinkPathError::Resolve(_) => crate::agent_notice::record_logged(format!(
+                "llmenv: the session log is off for this event, because no path resolved: {e:#}. Fix: set HOME, or set session_log.file.path to an absolute path."
+            )),
             // The engine drops hook stderr and hides warn, so a symlink reaches the agent as a notice.
             SinkPathError::Symlink(_) => crate::agent_notice::record_logged(format!(
                 "llmenv: the session log is off for this event: {e}"

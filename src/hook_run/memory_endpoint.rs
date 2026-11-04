@@ -7,7 +7,7 @@ use std::sync::{Mutex, OnceLock};
 
 use super::bundle_notice;
 use super::mcp_client::McpHttpClient;
-use super::memory_call::{MemoryCallContext, skipped_bundles};
+use super::memory_call::MemoryCallContext;
 use super::{HOOK_TIMEOUT, memory_url};
 use crate::mcp::resolve::MemoryHookSettings;
 
@@ -89,7 +89,7 @@ pub(super) fn resolve_memory_client<E: std::fmt::Display>(
             return None;
         }
     };
-    let skipped = skipped_bundles(&endpoint);
+    let skipped = endpoint.skipped_bundles().to_vec();
     let (url, settings) = match endpoint.into_url_and_settings() {
         Ok(pair) => pair,
         Err(e) => {
@@ -106,6 +106,8 @@ pub(super) fn resolve_memory_client<E: std::fmt::Display>(
                     new.join(", ")
                 ));
             }
+            // Hook stderr is dropped, so a failed write here cannot be reported. The notice above
+            // is the channel the agent reads (#3218).
             let _ = writeln!(std::io::stderr(), "llmenv: memory {event} skipped: {e}");
             return None;
         }
