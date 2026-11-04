@@ -22,3 +22,13 @@ pub(super) fn notice_state_dir() -> Option<std::path::PathBuf> {
         })
         .ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notice_state_dir_is_the_state_folder() {
+        assert_eq!(notice_state_dir(), crate::paths::state_dir().ok());
+    }
+}

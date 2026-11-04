@@ -193,6 +193,16 @@ mod tests {
     }
 
     #[test]
+    fn a_record_that_cannot_be_read_is_noticed_and_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(DIR).join("s1.json")).unwrap();
+        let got = unnoticed(Some(dir.path()), Some("s1"), &names(&["b1"]));
+        assert_eq!(got, names(&["b1"]));
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(notices.contains("cannot be read"), "{notices}");
+    }
+
+    #[test]
     fn a_corrupt_record_is_replaced() {
         let dir = tempfile::tempdir().unwrap();
         let folder = dir.path().join(DIR);
