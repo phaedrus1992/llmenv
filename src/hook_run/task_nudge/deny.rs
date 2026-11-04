@@ -5,6 +5,7 @@ use std::path::Path;
 
 use crate::config::TaskTracker;
 use crate::hook_run::shell_split::runs_commit_or_pr;
+use crate::hook_run::shell_tool::is_shell_tool;
 
 /// A `__DENY__` text of the gate: what went wrong, and the fix before the retry.
 fn gate_deny(problem: &str, fix: &str) -> String {
@@ -39,7 +40,8 @@ pub(crate) fn state_dir_deny(
     payload: &serde_json::Value,
     error: &anyhow::Error,
 ) -> Option<String> {
-    if !tracker.enforce_commit || payload["tool_name"].as_str() != Some("Bash") {
+    let is_shell = payload["tool_name"].as_str().is_some_and(is_shell_tool);
+    if !tracker.enforce_commit || !is_shell {
         return None;
     }
     // A call with no command is denied, as the main path denies it (#2536).

@@ -168,6 +168,18 @@ Compare the two files, copy any key that you need back into your llmenv config, 
 If llmenv cannot move the file, the render stops and names the file. Fix or remove it, and run `llmenv regenerate`.
 When `settings.json` is a symlink, llmenv moves the file that the link points to, and the link stays (changed after v3.12.2).
 
+## A .corrupt file appears in the slippage state folder
+
+(added in v3.14.0)
+
+Each session keeps its `read_before_edit` record in `slippage/<session>.json` under the llmenv state folder.
+When a Read finds that file unparseable, llmenv moves it to `<session>.json.corrupt` and starts a new record.
+A second corruption uses `<session>.json.corrupt.1`, then `.2`, so an earlier copy is never replaced.
+The notice to the agent names the copy.
+Delete the copy when you no longer need it. llmenv does not remove these copies yet.
+llmenv moves the file only for a regular file that it cannot parse, and only while it holds the session lock.
+For any other read failure, such as a permission error, the file stays where it is, and the Read is not recorded.
+
 ## A config file is a symlink to a dotfiles repo
 
 (changed after v3.12.2)
@@ -236,6 +248,7 @@ Each refusal names the fix.
 - `git commit` or `gh pr create` is denied once with no task in progress.
   Run the commands in the message, then run the same command again.
   Set `features.task_tracker.enforce_commit: false` to turn the deny off.
+  A commit that the Monitor tool starts is denied the same way (changed in v3.14.0).
 - `git commit` is denied with "cannot be read" in the message (changed in v3.13.0).
   The message names the file or the task store that cannot be read.
   Fix that file or its permissions, then run the command again.
