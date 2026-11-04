@@ -11,75 +11,39 @@ use serde_json::Value;
 
 use crate::hook_run::slippage::path_key;
 
-/// The key of the file a Bash `PostToolUse` read views, if the command is one plain single-file view.
+mod shape;
+
+use shape::single_file_read;
+
+/// The key of the file that a Bash `PostToolUse` read views, when the command is a plain view.
 ///
-/// Pure: the caller loads and saves the stats log, so one hook call loads it once (#3373).
-/// A relative path resolves against the payload `cwd`. Without a `cwd`, a relative path is
-/// not recorded. A view that is not recorded leaves the file unread, so a later Write to it
-/// is denied. The deny is conservative, and its text says the file was not read.
+/// Loads nothing: the caller loads and saves the stats log, so one hook call loads it once
+/// (#3373). A relative path resolves against the payload `cwd`. A view that is not recorded
+/// leaves the file unread, so a later Write to it is denied. Each such case records a notice,
+/// because the later deny would otherwise name the wrong cause.
 pub(super) fn bash_read_key(payload: &Value) -> Option<String> {
     let Some(command) = payload
         .get("tool_input")
         .and_then(|v| v.get("command"))
         .and_then(Value::as_str)
     else {
-        // The commit gate denies such a call; here the read just goes unrecorded (#2536).
-        tracing::warn!(
-            "slippage read: the Bash call has no string tool_input.command, so no read is recorded"
+        crate::agent_notice::record_logged(
+            "llmenv: the Bash call has no string tool_input.command, so its read was not recorded. Fix: check the hook payload that the engine sends.",
         );
         return None;
     };
     let file = single_file_read(command)?;
     // `Path::join` returns the right side unchanged when it is absolute, so one join covers both.
     let Some(cwd) = payload.get("cwd").and_then(Value::as_str) else {
-        return Path::new(file).is_absolute().then(|| path_key(file));
+        if Path::new(file).is_absolute() {
+            return Some(path_key(file));
+        }
+        crate::agent_notice::record_logged(format!(
+            "llmenv: the Bash read of `{file}` has a relative path and no working directory, so it was not recorded. Fix: read the file with a Read call, or use an absolute path."
+        ));
+        return None;
     };
     Some(path_key(&Path::new(cwd).join(file).to_string_lossy()))
-}
-
-/// The file a command views, when the command is one plain single-file view.
-///
-/// Accepts `cat FILE`, `head [-n N] FILE`, `tail [-n N] FILE`, and `sed -n N[,M]p FILE`, with
-/// `N` and `M` at least 1. Any other shape returns `None`: a pipe, a redirect, a chain, a
-/// substitution, a quote, a glob, a `~` path, or a flag this list does not name. The check is on
-/// the whole command, because a shell feature can hide a second command or a second file.
-///
-/// `grep PATTERN FILE` is not accepted. It prints only the matching lines, so it does not show
-/// the file. A count of zero also shows no lines, so `head -n 0` is not accepted either.
-fn single_file_read(command: &str) -> Option<&str> {
-    const SHELL_SYNTAX: &[char] = &[
-        '|', '>', '<', '&', ';', '`', '$', '\n', '\'', '"', '\\', '*', '?', '(', ')',
-    ];
-    if command.contains(SHELL_SYNTAX) {
-        return None;
-    }
-    let words: Vec<&str> = command.split_whitespace().collect();
-    match words.as_slice() {
-        ["cat", file] | ["head" | "tail", file] => plain_file(file),
-        ["head" | "tail", "-n", count, file] if is_count(count) => plain_file(file),
-        ["sed", "-n", script, file] if is_sed_range(script) => plain_file(file),
-        _ => None,
-    }
-}
-
-/// A file argument. A word that starts with `-` is a flag this module does not understand. A
-/// word that starts with `~` is a path the shell expands, and this module does not expand it.
-fn plain_file(word: &str) -> Option<&str> {
-    (!word.starts_with(['-', '~'])).then_some(word)
-}
-
-/// A positive line count or line number: ASCII digits that are not all zero.
-fn is_count(word: &str) -> bool {
-    !word.is_empty() && word.bytes().all(|b| b.is_ascii_digit()) && word.bytes().any(|b| b != b'0')
-}
-
-/// A `sed` print script such as `10p` or `10,20p`.
-fn is_sed_range(script: &str) -> bool {
-    let Some(range) = script.strip_suffix('p') else {
-        return false;
-    };
-    let bounds: Vec<&str> = range.split(',').collect();
-    (1..=2).contains(&bounds.len()) && bounds.iter().all(|b| is_count(b))
 }
 
 #[cfg(test)]
@@ -87,6 +51,7 @@ fn is_sed_range(script: &str) -> bool {
 mod tests {
     use proptest::prelude::*;
 
+    use super::shape::{is_count, is_sed_range};
     use super::*;
     use crate::hook_run::slippage::load_stats;
 
@@ -97,6 +62,51 @@ mod tests {
                 && word.bytes().all(|b| b.is_ascii_digit())
                 && word.bytes().any(|b| b != b'0');
             prop_assert_eq!(is_count(&word), expected);
+        }
+
+        /// A plain single-file view resolves against the payload `cwd`, for any file name.
+        #[test]
+        fn a_relative_plain_view_resolves_against_the_cwd(
+            file in "[a-z][a-z0-9_.]{0,15}",
+            leaf in "[a-z]{1,8}",
+        ) {
+            let cwd = format!("/no/such/root/{leaf}");
+            let payload = serde_json::json!({
+                "tool_input": { "command": format!("cat {file}") },
+                "cwd": cwd,
+            });
+            let expected = Path::new(&cwd).join(&file).to_string_lossy().into_owned();
+            prop_assert_eq!(bash_read_key(&payload), Some(expected));
+        }
+
+        /// A relative view with no `cwd` is never recorded, because its folder is unknown.
+        #[test]
+        fn a_relative_view_without_a_cwd_is_not_recorded(file in "[a-z][a-z0-9_.]{0,15}") {
+            let payload = serde_json::json!({ "tool_input": { "command": format!("cat {file}") } });
+            prop_assert_eq!(bash_read_key(&payload), None);
+        }
+
+        /// A command with shell syntax beyond one plain view is never recorded as a read.
+        #[test]
+        fn a_compound_command_is_never_a_read(
+            file in "[a-z]{1,8}",
+            op in prop::sample::select(vec!["|", ";", "&&", ">", "`"]),
+        ) {
+            let payload = serde_json::json!({
+                "tool_input": { "command": format!("cat {file} {op} wc") },
+                "cwd": "/no/such/root",
+            });
+            prop_assert_eq!(bash_read_key(&payload), None);
+        }
+
+        /// Any command string, including odd ones, never panics the key lookup.
+        #[test]
+        fn the_key_lookup_never_panics(command in ".*") {
+            let payload = serde_json::json!({
+                "tool_input": { "command": command },
+                "cwd": "/no/such/root",
+            });
+            let _ = bash_read_key(&payload);
         }
 
         #[test]
