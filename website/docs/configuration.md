@@ -1047,6 +1047,9 @@ In the main agent, the Bash tool keeps its working directory between calls, so a
 A `cd` followed by more commands in the same call (`cd /x && cargo test`), or inside `$( )`, a subshell, or a brace group that is followed by another command, changes nothing after the call and gets none.
 Before v3.13.0 any `cd` got it, and the text said that Claude Code resets the working directory, which is not what the main agent does.
 
+(changed in v3.14.0) A command that the Monitor tool starts gets the same advisory.
+Claude Code 2.1.314 and later send such a command to the Bash hooks under the tool name `Monitor`, and the guard matched only `Bash` before.
+
 It splits the command with the same splitter as the task commit gate.
 A command nested more than 32 levels deep gets no advisory.
 It never blocks: a deliberate `cd` still runs, and the model gets a one-line note.
@@ -1256,6 +1259,9 @@ A write inside `$( )`, a subshell, a brace group, or after a single `&` counts a
 A command nested more than 32 levels deep counts as modifying, and the deny names that limit.
 A Bash `cat`, `head`, `tail`, `sed -n`, or `grep` of one file counts as a read for `read_before_edit`.
 
+(changed in v3.14.0) A command that the Monitor tool starts is read the same way.
+The `answer_before_act` and `explain_before_act` checks, the read record, and the task commit gate cover it, because llmenv now registers its shell guards for both `Bash` and `Monitor`.
+
 ## `session_log:`
 
 llmenv records session activity — lifecycle events, the active scope, and
@@ -1289,6 +1295,7 @@ The file sink rotates `session-log.jsonl` when it reaches 64 MiB.
 It keeps three rotated files, `session-log.jsonl.1` to `session-log.jsonl.3`, and drops the oldest at each rotation.
 The first line of the new file names the rotated file that holds the older lines.
 `llmenv clean` removes rotated files older than `cache_retention_hours`.
+(changed in v3.14.0) A rotated file is matched by the bytes of its name, so a rotation of a log path that is not valid UTF-8 is removed too.
 
 (changed in v3.14.0) The sink opens the file without following a symlink.
 A path that is a symlink, a FIFO, or a device fails on each event, so llmenv logs the first failure as an error and later ones at debug level.

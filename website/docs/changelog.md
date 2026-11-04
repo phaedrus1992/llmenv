@@ -139,6 +139,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Fail a merge when two scopes at the same precedence set different values for one key or field, even when a higher-precedence scope also sets it. A config that merged before can now fail with a conflict error that names both scopes. [fix:merge]
 - Show the session-log rotations that a `llmenv doctor` prune removed before it failed, so a partial prune no longer hides them. [fix:doctor] [#3334]
 - Name the slippage stats log and its fix in the Write deny for an unreadable or corrupt log. The deny no longer tells the agent to read the file it tried to write. [fix:hook] [#3332]
+- Run the cd guard, the task commit gate, the task reminders, and the slippage checks on a command that the Monitor tool starts. Claude Code 2.1.314 sends it under the tool name `Monitor`, and these guards matched only `Bash`, so they skipped it. [fix:hook] [#3354]
+- Keep a corrupt slippage stats log as `<log>.corrupt` before a Read starts a new one, and name that copy in the notice. A second corruption takes the next numbered copy, and a log that cannot be read is left in place. See [the troubleshooting page](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#a-corrupt-file-appears-in-the-slippage-state-folder). [fix:hook] [#3349]
+- Remove and report a session-log rotation whose name is not valid UTF-8. Such a rotation was never pruned and never named. [fix:prune] [#3351]
 
 ### Security
 
