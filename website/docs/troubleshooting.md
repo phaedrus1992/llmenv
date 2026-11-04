@@ -176,7 +176,8 @@ Each session keeps its `read_before_edit` record in `slippage/<session>.json` un
 When a Read finds that file unparseable, llmenv moves it to `<session>.json.corrupt` and starts a new record.
 A second corruption uses `<session>.json.corrupt.1`, then `.2`, so an earlier copy is never replaced.
 The notice to the agent names the copy.
-Delete the copy when you no longer need it. llmenv does not remove these copies yet.
+llmenv removes a copy once it is 7 days old, the same age as the stats log it came from.
+Delete the copy sooner when you no longer need it.
 llmenv moves the file only for a regular file that it cannot parse, and only while it holds the session lock.
 For any other read failure, such as a permission error, the file stays where it is, and the Read is not recorded.
 
