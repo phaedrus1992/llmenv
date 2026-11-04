@@ -56,6 +56,18 @@ fn is_symlink(path: &Path) -> bool {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Any configured string gives a result and never a panic. An accepted path is never a
+        /// symbolic link.
+        #[test]
+        fn an_accepted_path_is_never_a_link(raw in "\\PC{0,40}") {
+            if let Ok(path) = resolve_sink_path(Some(&raw)) {
+                prop_assert!(!is_symlink(&path), "accepted a link: {}", path.display());
+            }
+        }
+    }
 
     #[test]
     #[cfg(unix)]
