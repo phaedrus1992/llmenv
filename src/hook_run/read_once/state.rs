@@ -41,7 +41,7 @@ pub fn clear_cache(state_dir: &Path) -> anyhow::Result<()> {
 /// that cannot be resolved even so is keyed by its raw form, and the agent is told (#2818).
 pub(super) fn cache_key(path: &Path) -> String {
     let resolved = std::fs::canonicalize(path)
-        .or_else(|_| canonical_parent_join(path))
+        .or_else(|first| canonical_parent_join(path).map_err(|_| first))
         .inspect_err(|e| {
             // Hook stderr never reaches the agent, so the notice goes to the agent (#2818).
             crate::agent_notice::record(format!(
@@ -60,14 +60,13 @@ pub(super) fn cache_key(path: &Path) -> String {
 }
 
 /// The canonical folder of `path`, joined with its file name. A missing file has no canonical
-/// path of its own, so its folder carries the resolution.
+/// path of its own, so its folder carries the resolution. A dangling link is refused: its folder
+/// does not name the target, and the target may appear later under a second key.
 fn canonical_parent_join(path: &Path) -> std::io::Result<std::path::PathBuf> {
-    let name = path.file_name().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "the path has no file name",
-        )
-    })?;
+    if std::fs::symlink_metadata(path).is_ok() {
+        return Err(std::io::ErrorKind::NotFound.into());
+    }
+    let name = path.file_name().ok_or(std::io::ErrorKind::InvalidInput)?;
     let parent = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
@@ -163,7 +162,19 @@ mod tests {
         let missing = dir.path().join("no-folder").join("nope.txt");
         assert_eq!(cache_key(&missing), missing.to_string_lossy());
         let text = crate::agent_notice::current().unwrap_or_default();
-        assert!(text.contains("read-once could not resolve"), "{text}");
+        assert!(text.contains(&missing.display().to_string()), "{text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_link_is_keyed_by_its_raw_path_and_noticed() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(dir.path().join("target.txt"), &link).unwrap();
+
+        assert_eq!(cache_key(&link), link.to_string_lossy());
+        let text = crate::agent_notice::current().unwrap_or_default();
+        assert!(text.contains(&link.display().to_string()), "{text}");
     }
 
     #[test]
