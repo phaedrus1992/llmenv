@@ -34,6 +34,10 @@ fn prune_rotations(
 /// `prune_rotations`, judged against `now` instead of the clock. A later `now` makes a file that
 /// was just written look past retention on its mtime and its change time alike, which a test
 /// cannot set on a real file (#3335).
+///
+/// # Errors
+/// Fails when the directory cannot be read, when a rotated file cannot be checked or removed, or
+/// when the rotation lock cannot be taken. The error keeps the files removed before the failure.
 pub(crate) fn prune_rotations_at(
     path: &Path,
     older_than: Duration,

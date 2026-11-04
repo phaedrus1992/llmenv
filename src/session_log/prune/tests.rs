@@ -289,3 +289,23 @@ fn is_rotation_of_accepts_only_a_dot_and_digits_after_the_base() {
         prop_assert!(!is_rotation_of(std::ffi::OsStr::new(&suffixed), base));
     });
 }
+
+// #3351 review: the byte comparison holds for any base, not only the bases that a test names.
+#[test]
+fn is_rotation_of_matches_any_byte_base_with_a_digit_suffix() {
+    use proptest::prelude::*;
+    use std::os::unix::ffi::OsStrExt;
+    proptest!(|(
+        base in proptest::collection::vec(any::<u8>(), 1..24),
+        digits in "[0-9]{1,6}",
+        junk in "[a-z]{1,4}",
+    )| {
+        let base_os = std::ffi::OsStr::from_bytes(&base);
+        let mut rotated = base.clone();
+        rotated.extend_from_slice(format!(".{digits}").as_bytes());
+        prop_assert!(is_rotation_of(std::ffi::OsStr::from_bytes(&rotated), base_os));
+        let mut suffixed = base.clone();
+        suffixed.extend_from_slice(format!(".{digits}{junk}").as_bytes());
+        prop_assert!(!is_rotation_of(std::ffi::OsStr::from_bytes(&suffixed), base_os));
+    });
+}
