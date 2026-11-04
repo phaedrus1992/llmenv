@@ -376,8 +376,11 @@ Each notice starts with `llmenv:` and appears once per hook run.
   config file could not be read and was replaced. The model history starts again.
 - `memory <event> skipped: the memory backend failed to load` — (added in v3.14.0) a bundle or
   config that declares `features.memory` failed to load. The notice names the cause. Fix that
-  bundle or config. A bundle with no content directory is not reported here, because its
-  declaration cannot be read.
+  bundle or config.
+- `memory <event> skipped: bundle(s) <names> fired, but each has no content folder` — (added in
+  v3.14.0) a bundle fired, but its content folder is missing, so llmenv cannot read whether it
+  declares a memory backend. The notice shows once per session for each bundle. Fix: add the
+  bundle content folder, or remove the bundle from `config.yaml`.
 - `could not release proxy lockfile <path>` — (added in v3.14.0) the MCP proxy lock stayed on disk,
   so later proxy starts fail. Remove the file by hand.
 - `proxy attribution line not written to <path>` — (added in v3.14.0) the proxy log directory is

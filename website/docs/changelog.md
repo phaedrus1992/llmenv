@@ -52,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Tell the agent once per session when a bundle fires with no content folder, so a memory backend that it may declare is not silently missing. [fix:hook] [#3218]
 - Tell the agent when session-log retention is skipped, or when the reaper cannot remove or read its folder. These failures were logged only at a level the hook hides. [fix:hook] [#3379]
 - Log a corrupt slippage stats log's move-aside error once per Bash call, not twice. [fix:hook] [#3373]
 - Prune corrupt slippage stats-log copies (`*.json.corrupt` and `*.json.corrupt.N`) after 7 days, as the stats log they came from. They were kept on disk forever before. [fix:hook] [#3372]
