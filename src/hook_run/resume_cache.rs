@@ -64,12 +64,12 @@ fn field<T>(payload: &Value, key: &str, read: fn(&Value) -> Option<T>) -> Option
     let value = payload.get(key)?;
     let parsed = read(value);
     if parsed.is_none() {
-        // Visible at the default level: a changed engine field type would otherwise end the
-        // notice for good with no trace.
-        tracing::warn!(
-            field = key,
-            "SessionStart field has the wrong type; treated as absent"
-        );
+        // The default log filter hides warn, and hook stderr is dropped. A changed engine field
+        // type would otherwise end the notice for good with no trace, so the agent is told.
+        crate::agent_notice::record_logged(format!(
+            "llmenv: SessionStart field \"{key}\" has the wrong type, so it is treated as absent. \
+             Fix: update llmenv to match the engine's field type."
+        ));
     }
     parsed
 }
@@ -129,7 +129,7 @@ mod tests {
     use proptest::prelude::*;
     use serde_json::{Value, json};
 
-    use super::{ResumeCache, attach_system_message, with_resume_notice};
+    use super::{ResumeCache, attach_system_message, field, usd, with_resume_notice};
 
     fn expensive_resume() -> Value {
         json!({
@@ -183,6 +183,17 @@ mod tests {
         let cache = ResumeCache::from_payload(&payload);
 
         assert_eq!(cache, ResumeCache::default());
+    }
+
+    #[test]
+    fn a_wrong_type_is_recorded_for_the_agent_with_its_field_name() {
+        let payload = json!({ "estimated_cache_write_usd": "1.14" });
+
+        assert_eq!(field(&payload, "estimated_cache_write_usd", usd), None);
+
+        let text = crate::agent_notice::current().unwrap_or_default();
+        assert!(text.contains("estimated_cache_write_usd"), "{text}");
+        assert!(text.contains("Fix:"), "{text}");
     }
 
     #[test]
