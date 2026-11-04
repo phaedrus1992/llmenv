@@ -22,7 +22,7 @@ use crate::session_log::rotation::rotation_lock;
 /// Production calls `prune_rotations_at` with its clock. Tests use this form, so it exists only
 /// in test builds.
 #[cfg(test)]
-pub(crate) fn prune_rotations(
+fn prune_rotations(
     path: &Path,
     older_than: Duration,
     dry_run: bool,
