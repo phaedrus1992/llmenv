@@ -74,10 +74,11 @@ fn run_cbm_index_with(
                 Some((pending, final_path.to_string()))
             }
             Err(e) => {
-                tracing::error!(
-                    "cannot create the index result file {}, so doctor cannot report the result: {e}",
+                crate::agent_notice::record_logged(format!(
+                    "llmenv: cannot create the index result file {}, so doctor cannot report the \
+                     result: {e}. Fix: check that the state folder is writable.",
                     pending.display()
-                );
+                ));
                 None
             }
         }
@@ -102,7 +103,11 @@ fn pending_result_path(result: &Path) -> std::path::PathBuf {
 fn publish_result(pending: &Path, result: &Path, started: bool) {
     if started {
         if let Err(e) = std::fs::rename(pending, result) {
-            tracing::error!("cannot save the index result to {}: {e}", result.display());
+            crate::agent_notice::record_logged(format!(
+                "llmenv: cannot save the index result to {}, so doctor shows an older result: \
+                 {e}. Fix: check that the state folder is writable.",
+                result.display()
+            ));
         }
     } else if let Err(e) = std::fs::remove_file(pending) {
         crate::agent_notice::record_logged(format!(
@@ -292,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_pending_result_that_cannot_be_removed_is_noticed_with_its_path() {
+    fn a_stale_pending_result_that_cannot_be_removed_is_recorded_in_this_process() {
         let dir = tempfile::tempdir().unwrap();
         let pending = dir.path().join("index.json.123.pending");
         let result = dir.path().join("index.json");
