@@ -6,6 +6,7 @@ use tracing::warn;
 use llmenv_config::LogLevel;
 
 use crate::config::SessionLog;
+use crate::session_log::SinkPathError;
 use crate::session_log::event::{EventScope, SessionLogEvent};
 
 /// Append `ev` to the configured sinks: the JSONL file (if enabled and
@@ -41,11 +42,15 @@ fn resolve_file_sink_path(
     cfg: &SessionLog,
     default: impl FnOnce() -> anyhow::Result<std::path::PathBuf>,
 ) -> Option<std::path::PathBuf> {
-    crate::session_log::file_sink::resolve_file_path_with(cfg.file_path(), default)
-        .inspect_err(|e| {
-            warn!(
+    crate::session_log::sink_path::resolve_sink_path_with(cfg.file_path(), default)
+        .inspect_err(|e| match e {
+            SinkPathError::Resolve(_) => warn!(
                 "session_log: file sink disabled, no path resolved, so events are not written to a file: {e:#}. Fix: set HOME, or set session_log.file.path to an absolute path."
-            );
+            ),
+            // The engine drops hook stderr and hides warn, so a symlink reaches the agent as a notice.
+            SinkPathError::Symlink(_) => crate::agent_notice::record_logged(format!(
+                "llmenv: the session log is off for this event: {e}"
+            )),
         })
         .ok()
 }
@@ -127,6 +132,36 @@ mod tests {
         assert_eq!(
             resolved,
             Some(std::path::PathBuf::from("/configured/session.jsonl"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_symlinked_log_path_turns_the_sink_off_with_a_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.jsonl");
+        std::fs::write(&real, "").unwrap();
+        let link = dir.path().join("log.jsonl");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let cfg = SessionLog {
+            file: Some(FileSinkConfig {
+                enabled: true,
+                level: LogLevel::Info,
+                path: Some(link.to_str().unwrap().to_owned()),
+            }),
+            transcript: None,
+            max_content_bytes: None,
+        };
+
+        let resolved = resolve_file_sink_path(&cfg, || Err(anyhow::anyhow!("unused")));
+
+        assert_eq!(resolved, None, "a symlinked path must turn the sink off");
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(
+            notices.contains("the session log is off for this event")
+                && notices.contains("symbolic link"),
+            "the agent must get the notice: {notices}"
         );
     }
 }

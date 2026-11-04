@@ -1286,7 +1286,7 @@ session_log:
 | `transcript` | no | Record into ICM's transcript store via the ICM MCP; default `true` |
 | `file` | no | Mirror the same event stream to a local JSONL file; default `false` |
 | `verbose` | no | Also capture `UserPromptSubmit`/`PreToolUse`/`PostToolUse`/`Notification`/`Stop`/`SubagentStop`/`PreCompact` events, not just the lifecycle + scope header; default `false` |
-| `path` | no | Override the file sink's path; default `<state_dir>/session-log.jsonl`. A leading `~` is expanded. (changed in v3.14.0) A relative path turns the file sink off with an error, because a hook runs in a repository |
+| `path` | no | Override the file sink's path; default `<state_dir>/session-log.jsonl`. A leading `~` is expanded. (changed in v3.14.0) A symbolic link is refused, and the file log stays off with a notice that names the path (changed in v3.14.0). A relative path turns the file sink off with an error, because a hook runs in a repository |
 | `max_content_bytes` | no | Cap each event's `content` field to this many bytes before it's written/recorded; default `16384` |
 
 (added in v3.13.0)
