@@ -105,10 +105,10 @@ fn publish_result(pending: &Path, result: &Path, started: bool) {
             tracing::error!("cannot save the index result to {}: {e}", result.display());
         }
     } else if let Err(e) = std::fs::remove_file(pending) {
-        tracing::warn!(
-            "cannot remove {}, so a stale pending index result stays: {e}. Fix: remove it by hand.",
+        crate::agent_notice::record_logged(format!(
+            "llmenv: cannot remove the stale pending index result {}: {e}. Fix: remove it by hand.",
             pending.display()
-        );
+        ));
     }
 }
 
@@ -289,6 +289,20 @@ mod tests {
         assert!(run_cbm_index_with(&file, |_, _, _| missing()).is_err());
         assert_eq!(std::fs::read_to_string(&result).unwrap(), "the old result");
         assert!(!pending_result_path(&result).exists());
+    }
+
+    #[test]
+    fn a_stale_pending_result_that_cannot_be_removed_is_noticed_with_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let pending = dir.path().join("index.json.123.pending");
+        let result = dir.path().join("index.json");
+
+        publish_result(&pending, &result, false);
+
+        let text = crate::agent_notice::current().unwrap_or_default();
+        assert!(text.contains("stale pending index result"), "{text}");
+        assert!(text.contains("index.json.123.pending"), "{text}");
+        assert!(text.contains("Fix:"), "{text}");
     }
 
     #[test]
