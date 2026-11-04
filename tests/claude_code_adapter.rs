@@ -687,13 +687,13 @@ fn task_nudge_hooks_do_not_repeat_a_route_that_another_feature_registered() {
             ..Default::default()
         }),
     );
-    // `answer_before_act` registers `^Bash$` and `metrics` registers every PostToolUse.
+    // `answer_before_act` registers the shell-tool matcher, and `metrics` registers every PostToolUse.
     assert_eq!(
         hooks["PreToolUse"]
             .as_array()
             .unwrap()
             .iter()
-            .filter(|e| e["matcher"].as_str() == Some("^Bash$"))
+            .filter(|e| e["matcher"].as_str() == Some("^(Bash|Monitor)$"))
             .count(),
         1
     );
@@ -701,7 +701,7 @@ fn task_nudge_hooks_do_not_repeat_a_route_that_another_feature_registered() {
     assert_eq!(command_count(&hooks, "PostToolUse", "post_tool_use"), 1);
 }
 
-const NUDGE_MATCHER: &str = "^(Skill|Bash|Edit|Write|MultiEdit|AskUserQuestion)$";
+const NUDGE_MATCHER: &str = "^(Skill|Edit|Write|MultiEdit|AskUserQuestion|Bash|Monitor)$";
 
 #[test]
 fn task_nudge_hooks_follow_the_tracker_and_its_switches() {
@@ -713,7 +713,7 @@ fn task_nudge_hooks_follow_the_tracker_and_its_switches() {
         false,
     );
     assert!(has_matcher(&on, "PostToolUse", NUDGE_MATCHER), "{on}");
-    assert!(has_matcher(&on, "PreToolUse", "^Bash$"));
+    assert!(has_matcher(&on, "PreToolUse", "^(Bash|Monitor)$"));
 
     let off = tracker_hooks(
         llmenv::config::TaskTracker {
@@ -725,7 +725,7 @@ fn task_nudge_hooks_follow_the_tracker_and_its_switches() {
         false,
     );
     assert!(!has_matcher(&off, "PostToolUse", NUDGE_MATCHER));
-    assert!(!has_matcher(&off, "PreToolUse", "^Bash$"));
+    assert!(!has_matcher(&off, "PreToolUse", "^(Bash|Monitor)$"));
 
     // Session logging already routes every PostToolUse and PreToolUse to hook-run, so the tracker
     // adds no second entry (a second entry would run the handler twice for each tool call).
@@ -737,12 +737,12 @@ fn task_nudge_hooks_follow_the_tracker_and_its_switches() {
         true,
     );
     assert_eq!(command_count(&logged, "PostToolUse", "post_tool_use"), 1);
-    assert!(!has_matcher(&logged, "PreToolUse", "^Bash$"));
+    assert!(!has_matcher(&logged, "PreToolUse", "^(Bash|Monitor)$"));
     assert!(!has_matcher(&logged, "PostToolUse", NUDGE_MATCHER));
 
     let disabled = tracker_hooks(llmenv::config::TaskTracker::default(), false);
     assert!(!has_matcher(&disabled, "PostToolUse", NUDGE_MATCHER));
-    assert!(!has_matcher(&disabled, "PreToolUse", "^Bash$"));
+    assert!(!has_matcher(&disabled, "PreToolUse", "^(Bash|Monitor)$"));
 }
 
 // Issue #97: native_plugins["claude_code"] is a settings.json fragment that

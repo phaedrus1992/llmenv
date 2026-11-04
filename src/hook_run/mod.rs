@@ -60,7 +60,7 @@ mod session_ledger;
 mod session_notices;
 pub(crate) mod session_state;
 mod shell_split;
-mod shell_tool;
+pub(crate) mod shell_tool;
 pub(crate) mod slippage;
 mod slippage_read;
 pub(crate) mod stop_dedupe;
