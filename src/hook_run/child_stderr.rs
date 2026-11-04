@@ -60,3 +60,13 @@ pub(crate) fn redirect_stderr_to_detached_log(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::BOUNDED_LOG_MAX_BYTES;
+
+    #[test]
+    fn the_child_log_limit_is_512_kib() {
+        assert_eq!(BOUNDED_LOG_MAX_BYTES, 512 * 1024);
+    }
+}

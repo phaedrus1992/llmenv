@@ -165,6 +165,21 @@ mod tests {
         assert!(text.contains(&missing.display().to_string()), "{text}");
     }
 
+    #[test]
+    fn a_missing_bare_name_is_keyed_under_the_working_folder() {
+        let name = "probe-missing-3388.txt";
+        let expected = std::env::current_dir()
+            .unwrap()
+            .canonicalize()
+            .unwrap()
+            .join(name);
+
+        assert_eq!(
+            cache_key(std::path::Path::new(name)),
+            expected.to_string_lossy()
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_dangling_link_is_keyed_by_its_raw_path_and_noticed() {
