@@ -124,6 +124,43 @@ fn log_age(path: &Path, source: AgeSource, now: SystemTime) -> std::io::Result<O
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test code")]
+mod age_property_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// The reaper removes a log exactly when its age reaches the retention, for any age.
+        /// The clock is whole seconds, so the boundary is exact (#3375).
+        #[test]
+        fn a_log_is_removed_exactly_when_its_age_reaches_retention(
+            age_secs in 0u64..(60 * 86_400),
+            retention_days in 1u64..30,
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("session-log.jsonl");
+            std::fs::write(&path, "{}").unwrap();
+            let whole = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let written = SystemTime::UNIX_EPOCH + Duration::from_secs(whole);
+            filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(written)).unwrap();
+
+            reap_session_log_with(
+                &path,
+                retention_days,
+                AgeSource::MtimeOnly,
+                written + Duration::from_secs(age_secs),
+            );
+
+            let expected_removed = age_secs >= retention_days * 86_400;
+            prop_assert_eq!(!path.exists(), expected_removed, "age {}s, retention {}d", age_secs, retention_days);
+        }
+    }
+}
+
+#[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
