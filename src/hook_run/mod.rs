@@ -11,6 +11,9 @@ mod adaptive;
 pub(crate) mod agent_config;
 mod bundle_names;
 mod bundle_notice;
+mod child_stderr;
+use child_stderr::redirect_stderr_to_bounded_log;
+pub(crate) use child_stderr::{detached_child_log_path, redirect_stderr_to_detached_log};
 pub(crate) mod cbm_index_guard;
 pub(crate) mod cd_guard;
 pub(crate) mod checkpoint;
@@ -1598,11 +1601,7 @@ fn run_inner(
                         client,
                         settings: settings.as_ref(),
                         session_id: claude_session_id,
-                        state_dir: crate::paths::state_dir()
-                            .inspect_err(|e| {
-                                tracing::error!("no state dir, adaptive recall falls back: {e}");
-                            })
-                            .ok(),
+                        state_dir: adaptive_state_dir(crate::paths::state_dir),
                         payload: stdin_payload,
                         actions,
                         scope: scope_recall_actions(&tag_queries, &bundle_queries, &tag_ranks),
@@ -2189,82 +2188,19 @@ fn cache_dir_of(index_path: Option<&str>, state_dir: &std::path::Path) -> std::p
         .unwrap_or_else(|| state_dir.join("codebase-memory"))
 }
 
-/// Rotation bound shared by every size-bounded stderr log this module opens —
-/// the indexer's diagnostic log and the detached hook children's shared log
-/// (#1086/#1091 share the "size-bounded" shape and, previously, a
-/// byte-for-byte identical constant under two names; merged under #1141).
-/// Smaller than the mcp-proxy log: these children run often but write
-/// nothing unless they fail, and indexing runs are far less frequent than
-/// proxy restarts.
-const BOUNDED_LOG_MAX_BYTES: u64 = 1 << 19; // 512 KiB
-
-/// Path of the stderr log shared by llmenv's detached hook children —
-/// `<state_dir>/detached-hook.log`.
-///
-/// # Errors
-/// Propagates `state_dir()` resolution failure.
-pub(crate) fn detached_child_log_path() -> anyhow::Result<std::path::PathBuf> {
-    Ok(crate::paths::state_dir()?.join("detached-hook.log"))
-}
-
-/// Point `cmd`'s stderr at `log_path` as a size-bounded diagnostic log.
-///
-/// Sets the null baseline first, unconditionally (#1139): `Command`'s default
-/// for an unset stdio is `Stdio::inherit()`, not discarded, so a caller that
-/// only overrode stderr on the `Ok` branch would leave the child holding
-/// whichever fd this process's own stderr happens to be on a log-open
-/// failure — the exact hang/leak this redirect exists to prevent. If the log
-/// can't be opened the child still runs with stderr discarded — a missing
-/// diagnostic is a smaller problem than skipping the work.
-///
-/// `harden_dir` is forwarded to `open_bounded_log`, which does the 0700
-/// hardening itself (#1196) — pass `false` when `log_path`'s directory may be
-/// shared with a process running under a different uid (e.g. a
-/// user-configured `index_path`). `context` names the caller in the
-/// debug-level "log unavailable" message, since that message is shared across
-/// callers with different failure consequences (#1141). No `max_bytes`
-/// parameter: every caller bounds to the same [`BOUNDED_LOG_MAX_BYTES`] now
-/// that the two call sites' previously-distinct constants turned out to be
-/// identical (#1141) — a parameter every caller passes the same value for
-/// isn't a real degree of freedom.
-fn redirect_stderr_to_bounded_log(
-    cmd: &mut std::process::Command,
-    log_path: &std::path::Path,
-    harden_dir: bool,
-    context: &str,
-) {
-    cmd.stderr(std::process::Stdio::null());
-    match crate::mcp::proxy::open_bounded_log(log_path, BOUNDED_LOG_MAX_BYTES, harden_dir) {
-        Ok(file) => {
-            cmd.stderr(std::process::Stdio::from(file));
-        }
-        Err(e) => {
-            tracing::warn!(
-                "{context}: log unavailable ({e:#}); the child's stderr is discarded. Check that the log path is a regular file owned by you."
-            );
-        }
-    }
-}
-
-/// Send a detached child's stderr to the shared bounded log instead of discarding it (#1133, the
-/// same remedy as #1091). `log` is the resolved [`detached_child_log_path`].
-///
-/// `Stdio::null()` leaves such a child with no report channel whatsoever: its own `tracing`
-/// events go to a fmt layer writing to that same null stderr, so a failure is discarded twice over.
-pub(crate) fn redirect_stderr_to_detached_log(
-    cmd: &mut std::process::Command,
-    log: anyhow::Result<std::path::PathBuf>,
-) {
-    match log {
-        // Always state_dir-rooted, so `harden_dir: true` is safe.
-        Ok(path) => redirect_stderr_to_bounded_log(cmd, &path, true, "detached child"),
-        Err(e) => {
-            cmd.stderr(std::process::Stdio::null());
-            tracing::warn!(
-                "detached child: cannot resolve log path ({e:#}); the child's stderr is discarded"
-            );
-        }
-    }
+/// The state folder for adaptive recall. A failure is noticed, because recall then runs without
+/// adaptive ranking and the agent must be told why.
+fn adaptive_state_dir(
+    resolve: impl FnOnce() -> anyhow::Result<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    resolve()
+        .inspect_err(|e| {
+            crate::agent_notice::record_logged(format!(
+                "llmenv: adaptive recall is off for this event, because the state folder cannot \
+                 be found: {e:#}. Fix: set HOME."
+            ));
+        })
+        .ok()
 }
 
 /// The SessionEnd dedup snapshot path. Other events have none. A missing state directory skips
@@ -3760,6 +3696,29 @@ mod tests {
     // `stderr(Stdio::null())`, so nothing they reported could reach anyone —
     // including the `tracing` events meant to compensate, whose sink is that
     // same discarded stderr.
+    #[test]
+    fn a_detached_child_log_that_cannot_open_is_noticed_for_the_agent() {
+        let dir = tempfile::tempdir().expect("test");
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg("true");
+        // A directory is not a log file, so opening it fails.
+        redirect_stderr_to_bounded_log(&mut cmd, dir.path(), true, "detached child");
+
+        let text = crate::agent_notice::current().unwrap_or_default();
+        assert!(text.contains("detached child"), "{text}");
+        assert!(text.contains("Fix:"), "{text}");
+    }
+
+    #[test]
+    fn an_unavailable_state_folder_is_noticed_for_adaptive_recall() {
+        let got = adaptive_state_dir(|| Err(anyhow::anyhow!("no HOME")));
+        assert_eq!(got, None);
+
+        let text = crate::agent_notice::current().unwrap_or_default();
+        assert!(text.contains("adaptive recall"), "{text}");
+        assert!(text.contains("no HOME"), "{text}");
+    }
+
     #[test]
     fn redirect_stderr_to_bounded_log_captures_child_stderr() {
         let dir = tempfile::tempdir().expect("test");
