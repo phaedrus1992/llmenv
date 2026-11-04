@@ -38,6 +38,18 @@ pub struct EngineData {
     pub session_id: Option<String>,
 }
 
+/// Parse the status line input. Without a conversation id the status line shows every
+/// conversation's sessions, so an unreadable input is logged, not silently widened (#3196).
+pub fn parse_engine_data(input: &str) -> EngineData {
+    serde_json::from_str(input).unwrap_or_else(|e| {
+        tracing::error!(
+            "the status line input is not JSON, so every conversation's sessions are shown: {e}. \
+             Fix: check the engine's status line input."
+        );
+        EngineData::default()
+    })
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct BranchInfo {
     pub name: Option<String>,

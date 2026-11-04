@@ -14,3 +14,14 @@ pub struct SessionTasks {
     /// The title of this session's task in progress, if any.
     pub current: Option<String>,
 }
+
+/// The done and total counts of `items`, summed. Both the writer and the status line use it, so
+/// the two totals cannot drift apart.
+pub(crate) fn sum_progress(items: impl Iterator<Item = SessionProgress>) -> SessionProgress {
+    items.fold(SessionProgress { done: 0, total: 0 }, |acc, p| {
+        SessionProgress {
+            done: acc.done + p.done,
+            total: acc.total + p.total,
+        }
+    })
+}

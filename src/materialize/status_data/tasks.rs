@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use crate::cli::statusline::data::{SessionProgress, SessionTasks, TasksData};
+use crate::cli::statusline::session_tasks::sum_progress;
 
 /// Task-tracker progress, scoped to the sessions open for the current project (mandatory-sessions
 /// design). `session` is `None` when zero sessions are open for this project (the widget renders
@@ -12,7 +13,8 @@ use crate::cli::statusline::data::{SessionProgress, SessionTasks, TasksData};
 pub(super) fn collect_tasks() -> TasksData {
     let unreadable = |what: &str, e: &dyn std::fmt::Display| {
         tracing::error!(
-            "cannot read the tasks, {what} is unknown: {e}; the status line shows unreadable"
+            "cannot read the tasks, {what} is unknown: {e}; the status line shows unreadable. \
+             Fix: check the permissions of that folder."
         );
         unreadable_tasks()
     };
@@ -34,7 +36,11 @@ pub(super) fn collect_tasks_from_state_dir(state_dir: &Path, project: &str) -> T
     match try_tasks_data(state_dir, project) {
         Ok(data) => data,
         Err(e) => {
-            tracing::error!(error = %e, "cannot read the tasks; the status line shows unreadable");
+            tracing::error!(
+                error = %e,
+                "cannot read the tasks; the status line shows unreadable. Fix: check the task and \
+                 session files of this project for permissions and damage."
+            );
             unreadable_tasks()
         }
     }
@@ -56,27 +62,19 @@ fn unreadable_tasks() -> TasksData {
 fn try_tasks_data(state_dir: &Path, project: &str) -> anyhow::Result<TasksData> {
     let mut open_sessions = crate::task::session::open_sessions_strict(state_dir, project)?;
     open_sessions.sort_by(|a, b| a.id.cmp(&b.id));
-    let mut progress = Vec::with_capacity(open_sessions.len());
+    let mut progress: Vec<SessionProgress> = Vec::with_capacity(open_sessions.len());
     for s in &open_sessions {
-        progress.push(crate::task::session::try_session_progress(
-            state_dir, &s.id,
-        )?);
+        let (done, total) = crate::task::session::try_session_progress(state_dir, &s.id)?;
+        progress.push(SessionProgress { done, total });
     }
-    let session = if open_sessions.is_empty() {
-        None
-    } else {
-        let (done, total) = progress
-            .iter()
-            .fold((0, 0), |acc, (d, t)| (acc.0 + d, acc.1 + t));
-        Some(SessionProgress { done, total })
-    };
+    let session = (!open_sessions.is_empty()).then(|| sum_progress(progress.iter().copied()));
     let session_ids: Vec<String> = open_sessions.iter().map(|s| s.id.clone()).collect();
     let current = crate::task::current_wip_title(state_dir, &session_ids)?;
     let mut sessions = Vec::with_capacity(open_sessions.len());
-    for (s, (done, total)) in open_sessions.iter().zip(progress) {
+    for (s, progress) in open_sessions.iter().zip(progress) {
         sessions.push(SessionTasks {
             owner: s.owner_session().map(str::to_owned),
-            progress: SessionProgress { done, total },
+            progress,
             current: crate::task::current_wip_title(state_dir, std::slice::from_ref(&s.id))?,
         });
     }
