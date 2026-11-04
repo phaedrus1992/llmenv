@@ -207,7 +207,7 @@ pub(super) fn path_key(path: &str) -> String {
 /// Opportunistically drops session files older than a week, the way
 /// `read_once`'s cache does — without it the directory grows one file per
 /// session forever.
-pub(super) fn save_stats(state_dir: &std::path::Path, session_id: &str, stats: &SessionStats) {
+fn save_stats(state_dir: &std::path::Path, session_id: &str, stats: &SessionStats) {
     super::session_state::prune_stale_json_files(&state_dir.join("slippage"), 7);
     super::session_state::prune_orphan_locks(&state_dir.join("slippage"), 7);
     let Ok(json) = serde_json::to_string(stats) else {
