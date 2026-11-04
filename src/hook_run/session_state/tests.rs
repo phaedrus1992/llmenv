@@ -40,6 +40,48 @@ fn prunes_only_stale_json_files() {
     assert!(non_json.exists(), "non-json file must never be touched");
 }
 
+// #3372: a corrupt move-aside copy is pruned on the same schedule as the stats log it came from.
+#[test]
+fn prunes_stale_corrupt_copies_and_keeps_fresh_ones() {
+    let dir = TempDir::new().expect("test");
+    let old_ft =
+        filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_secs(10 * 86_400));
+    let stale = ["s1.json.corrupt", "s1.json.corrupt.3"].map(|n| dir.path().join(n));
+    let fresh = dir.path().join("s2.json.corrupt");
+    for path in &stale {
+        std::fs::write(path, "bad").expect("test");
+        filetime::set_file_mtime(path, old_ft).expect("test");
+    }
+    std::fs::write(&fresh, "bad").expect("test");
+
+    prune_stale_json_files_with(dir.path(), 7, AgeSource::MtimeOnly);
+
+    for path in &stale {
+        assert!(
+            !path.exists(),
+            "stale copy must be pruned: {}",
+            path.display()
+        );
+    }
+    assert!(fresh.exists(), "fresh copy must survive pruning");
+}
+
+#[test]
+fn only_json_files_and_numbered_corrupt_copies_are_prunable() {
+    for name in ["a.json", "a.json.corrupt", "a.json.corrupt.12"] {
+        assert!(is_prunable_state_file(Path::new(name)), "{name}");
+    }
+    for name in [
+        "a.txt",
+        "a.json.corrupt.bak",
+        "a.json.corrupt.",
+        ".json.corrupt",
+        "a.json.corruptx",
+    ] {
+        assert!(!is_prunable_state_file(Path::new(name)), "{name}");
+    }
+}
+
 #[test]
 fn file_age_is_none_for_a_missing_file_and_an_error_for_an_unreadable_path() {
     let dir = TempDir::new().expect("test");

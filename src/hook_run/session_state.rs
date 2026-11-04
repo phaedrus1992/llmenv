@@ -116,8 +116,27 @@ fn refresh_lock_age(file: &File, path: &Path) -> Result<(), String> {
         })
 }
 
-/// Scan `dir` and delete `.json` files older than `max_age_days`. Fail-soft:
-/// any stat/read error is logged and skipped, never propagated — pruning is
+/// Whether `path` is a state file the stale sweep may remove: a `.json` file, or a copy that a
+/// corrupt move-aside kept (`<stem>.json.corrupt` or `<stem>.json.corrupt.N`, #3372). A copy is
+/// not a `.json` file by extension, so it needs its own check.
+fn is_prunable_state_file(path: &Path) -> bool {
+    if path.extension().and_then(|e| e.to_str()) == Some("json") {
+        return true;
+    }
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let Some((stem, tail)) = name.split_once(".json.corrupt") else {
+        return false;
+    };
+    let numbered = tail
+        .strip_prefix('.')
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    !stem.is_empty() && (tail.is_empty() || numbered)
+}
+
+/// Scan `dir` and delete the state files of [`is_prunable_state_file`] older than
+/// `max_age_days`. Fail-soft: any stat/read error is logged and skipped, never propagated — pruning is
 /// a best-effort cleanup, not correctness-critical. Each failure is also an agent
 /// notice, because the engine drops a hook's stderr (#2746, #2833).
 pub(crate) fn prune_stale_json_files(dir: &Path, max_age_days: u64) {
@@ -140,7 +159,7 @@ fn prune_stale_json_files_with(dir: &Path, max_age_days: u64, source: AgeSource)
             }
         };
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+        if !is_prunable_state_file(&path) {
             continue;
         }
         match file_age(&path, source) {
