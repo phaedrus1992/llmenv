@@ -6,10 +6,19 @@ use crate::task::visibility::owner_visible;
 
 /// Narrow `tasks` to what `caller` may see. `session` sums the visible sessions in
 /// `tasks.sessions`, and `current` is the title of the first visible session that has one. With no
-/// visible session both are `None`. The aggregate fields are not used: they count every
-/// conversation, so a caller would see other conversations' work (#3196). `unreadable` and
-/// `sessions` are left as they are.
+/// visible session both are `None`. `unreadable` and `sessions` are left as they are.
+///
+/// A file with no session list comes from an older writer, and its aggregate counts every
+/// conversation. A caller with no id sees every session, so that aggregate is kept for it. A caller
+/// with an id must not see other conversations' work, so the aggregate is hidden (#3196).
 pub(crate) fn scope_tasks_to_caller(tasks: &mut TasksData, caller: Option<&str>) {
+    if tasks.sessions.is_empty() {
+        if caller.is_some() {
+            tasks.session = None;
+            tasks.current = None;
+        }
+        return;
+    }
     let kept: Vec<&SessionTasks> = tasks
         .sessions
         .iter()
@@ -93,6 +102,19 @@ mod tests {
         scope_tasks_to_caller(&mut data, Some("conv-a"));
         assert_eq!(data.session, None);
         assert_eq!(data.current, None);
+    }
+
+    #[test]
+    fn a_file_without_sessions_keeps_its_aggregate_for_a_caller_with_no_id() {
+        let mut data = TasksData {
+            session: Some(SessionProgress { done: 2, total: 5 }),
+            current: Some("old".to_owned()),
+            unreadable: false,
+            sessions: Vec::new(),
+        };
+        scope_tasks_to_caller(&mut data, None);
+        assert_eq!(data.session, Some(SessionProgress { done: 2, total: 5 }));
+        assert_eq!(data.current.as_deref(), Some("old"));
     }
 
     #[test]
