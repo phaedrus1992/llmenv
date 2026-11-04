@@ -21,7 +21,15 @@ pub(super) fn sweep_cache(
     retention: Duration,
     out: GcOutput<'_>,
 ) -> usize {
-    match crate::materialize::cache::gc(cache_dir, retention, config.cache.hashing, out.dry_run) {
+    match crate::materialize::cache::gc(
+        cache_dir,
+        crate::materialize::expiry::AgeRule {
+            older_than: retention,
+            source: crate::materialize::cache::AgeSource::MtimeOrCtime,
+        },
+        config.cache.hashing,
+        out.dry_run,
+    ) {
         Ok(report) => {
             out.report("", &report);
             // A dry run deletes nothing, so it drops no credentials and has none to fail (#3073).

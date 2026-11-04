@@ -1,5 +1,5 @@
 //! Local JSONL sink. Append-only, owner-only, best-effort: a write failure logs
-//! once at `error!` and is dropped — session logging never fails a launch.
+//! once as an agent notice and is dropped — session logging never fails a launch.
 
 use std::collections::BTreeSet;
 use std::fs::OpenOptions;
@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
-use llmenv_paths::{create_dir_owner_only, state_dir};
+use llmenv_paths::{create_dir_owner_only_refusing_unreadable, state_dir};
 
 use crate::session_log::rotation::{
     MAX_BYTES, non_regular_path_error, rotate_if_full, rotation_failed_marker, rotation_marker,
@@ -82,19 +82,20 @@ impl FileSink {
     }
 
     /// Append one line (a `\n` is added). Best-effort; errors are logged and
-    /// dropped. The first failure for a path logs at error level, later ones at debug.
+    /// dropped. The first failure for a path records an agent notice, and later ones log at debug.
     pub(crate) fn append(&self, line: &str) {
         let Err(e) = self.try_append(line) else {
             return;
         };
-        // Error level: the lost event leaves no other trace. A persistent failure such as a symlinked path fails on every event, so only the
-        // first one is shown (#3136).
+        // The lost event leaves no other trace, so the first failure is a notice for the agent. A
+        // persistent failure, such as a symlinked path, fails on every event, so only the first one
+        // is shown (#3136).
         if first_failure(&self.path) {
-            tracing::error!(
-                "session_log file append to {} failed: {e}. Later failures for this path are \
-                 logged at debug level only. Run `llmenv doctor` to check the path.",
+            crate::agent_notice::record_logged(format!(
+                "llmenv: session log append to {} failed ({e}). Later failures for this path are \
+                 logged at debug level only. Fix: run `llmenv doctor` to check the path.",
                 self.path.display()
-            );
+            ));
         } else {
             tracing::debug!(
                 "session_log file append to {} failed: {e}",
@@ -105,7 +106,9 @@ impl FileSink {
 
     fn try_append(&self, line: &str) -> std::io::Result<()> {
         if let Some(parent) = self.path.parent() {
-            create_dir_owner_only(parent)?;
+            // The parent is a folder the user chose, so an unreadable one is refused, not
+            // chmod'd by path (#3223).
+            create_dir_owner_only_refusing_unreadable(parent)?;
         }
         // A failed rotation must not stop logging. The event goes to the active file, and the
         // next append tries the rotation again.

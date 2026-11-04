@@ -1,4 +1,5 @@
 mod content_walk;
+mod identity;
 pub(crate) mod marker_file;
 mod marker_link;
 pub mod matcher;

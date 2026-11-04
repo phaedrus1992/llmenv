@@ -277,6 +277,8 @@ proptest! {
         skill_reminded in any::<bool>(),
         commit_denied in any::<bool>(),
         start_reminded in proptest::option::of("[a-z-]{1,12}"),
+        boundary_reminded in proptest::collection::vec("[a-z -]{1,20}", 0..4),
+        stop_quiet_turns in any::<u32>(),
     ) {
         let state = NudgeState {
             calls,
@@ -284,6 +286,8 @@ proptest! {
             skill_reminded,
             commit_denied,
             start_reminded,
+            boundary_reminded,
+            stop_quiet_turns,
         };
         let json = serde_json::to_string(&state).unwrap();
         prop_assert_eq!(serde_json::from_str::<NudgeState>(&json).unwrap(), state);

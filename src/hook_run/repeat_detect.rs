@@ -89,18 +89,12 @@ impl SessionState {
         let path = session_state_path(state_dir, session_id);
         match crate::paths::bounded::state_text_io(&path) {
             Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
-                tracing::error!(
-                    "failed to parse repeat-detect state {}, starting fresh: {e}",
-                    path.display()
-                );
+                crate::agent_notice::record_logged(format!("llmenv: repeat-detect state {} cannot be parsed ({e}), so it starts fresh. Fix: delete that file to clear this error.", path.display()));
                 Self::new(session_id)
             }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::new(session_id),
             Err(e) => {
-                tracing::error!(
-                    "failed to read repeat-detect state {}, saves are skipped: {e}",
-                    path.display()
-                );
+                crate::agent_notice::record_logged(format!("llmenv: repeat-detect state {} cannot be read ({e}), so its saves are skipped. Fix: check the permissions of that file.", path.display()));
                 Self {
                     read_failed: true,
                     ..Self::new(session_id)
@@ -136,7 +130,7 @@ fn repeat_detect_state_dir(state_dir: &Path) -> PathBuf {
 }
 
 /// Lock for one read-change-save of the session's counter file (#2678). When the lock fails,
-/// `lock_state_file` logs it and the update runs unlocked, as it did before the lock existed.
+/// `lock_state_file` records a notice and the update runs unlocked, as it did before the lock existed.
 fn counter_lock(state_dir: &Path, session_id: &str) -> Option<std::fs::File> {
     super::session_state::lock_state_file(
         &repeat_detect_state_dir(state_dir),

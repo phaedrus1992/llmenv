@@ -91,14 +91,15 @@ fn attach_system_message(out: &str, message: &str) -> String {
         match serde_json::from_str::<Value>(out) {
             Ok(Value::Object(object)) => object,
             Ok(_) => {
-                tracing::error!("hook output is not a JSON object; the cache notice is not shown");
+                crate::agent_notice::record_logged(
+                    "llmenv: hook output is not a JSON object, so the cache notice is not shown. Fix: check the hook that prints this output.",
+                );
                 return out.to_string();
             }
             Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    "hook output is not JSON; the cache notice is not shown"
-                );
+                crate::agent_notice::record_logged(format!(
+                    "llmenv: hook output is not JSON ({e}), so the cache notice is not shown. Fix: check the hook that prints this output."
+                ));
                 return out.to_string();
             }
         }
@@ -341,3 +342,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod notice_tests;

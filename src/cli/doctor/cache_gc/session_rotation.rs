@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use crate::cli::doctor::cache_gc::GcOutput;
 use crate::config::Config;
+use crate::materialize::cache::AgeSource;
 use crate::session_log;
 
 /// Remove session-log rotations older than the retention (#2816), for the default path and for a
@@ -49,7 +50,8 @@ fn log_paths(state_dir: &Path, configured: Option<&str>) -> (Vec<PathBuf>, Optio
 }
 
 fn prune_one(path: &Path, retention: Duration, out: GcOutput<'_>) -> usize {
-    match session_log::rotation::prune_rotations(path, retention, out.dry_run) {
+    match session_log::prune::prune_rotations(path, retention, out.dry_run, AgeSource::MtimeOrCtime)
+    {
         Ok(removed) => {
             eprintln!(
                 "{} GC: {} {} rotated session-log file(s) of {}",
@@ -67,6 +69,9 @@ fn prune_one(path: &Path, retention: Duration, out: GcOutput<'_>) -> usize {
                 out.warn,
                 path.display()
             );
+            for removed in &e.removed {
+                eprintln!("  {} before the failure: {}", out.verb(), removed.display());
+            }
             1
         }
     }

@@ -42,6 +42,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Log the unknown-bundles-folder message at warning level only when a codebase-memory `index_path` is set. Otherwise it stays at debug level. [fix:cli] [#3278]
+- Skip a `state/tmp` entry that another process removes during `llmenv clean`, instead of reporting it as unreadable. [fix:materialize] [#3276]
+- Keep state files, locks, and codebase-memory index units that are restored with old mtimes. The state prune and the cbm sweep now judge age by the later of mtime and change time, as `state/tmp` does. [fix:hook] [#3275]
+- Keep a tree unpacked with old file mtimes (`tar -x`, `cp -p`) in `llmenv clean`. The cache and `state/tmp` sweeps now judge a file by the later of its mtime and its change time, so an unpack reads as new. [fix:clean] [#3195]
+- `llmenv clean` now reports an unreadable codebase-memory bundle config when no `state/tmp` entry is old. It used to exit 0 with no message. [fix:clean] [#3195]
+- Export validates every variable before it prints, so one bad value prints no `export` line, and `eval` never sources part of the environment. [fix:cli] [#3268]
+- A failed throttled config pull is a notice for the agent, and export still runs on the config it has. [fix:cli] [#3268]
+- `llmenv sync --dry-run` refuses a file name that is not UTF-8, instead of printing a replaced name. [fix:cli] [#3268]
+- `llmenv init --path` leaves the mode of an existing folder unchanged, and the starter files are owner-only. [fix:cli] [#3268]
+- Tell the agent when scope matching is off because the hostname, `$USER`, or the working directory cannot be read. The failure reached only the error log before, so the agent ran with a different scope and no reason. [fix:scope] [#3224]
+- Refuse an unreadable log folder that you chose, instead of changing its mode. Cache cleanup again restores write access to an unreadable llmenv cache folder, so GC can remove it. A link in place of either folder is never changed. [fix:paths] [#3223]
 - Reject symlink, FIFO, and device session-log paths before rotation or append. The fix hint names `session_log.file.path`; Unix opens also reject link and FIFO substitutions. [fix:session-log] [#3117]
 - Judge a symlink in state-file pruning by the link's own age, and remove the link itself. A fresh link to an old file is no longer pruned, and an old link is pruned without touching its target. [fix:hook] [#3094, #3108]
 - Stop a corrupt session map from replacing the first aside copy when the aside name cannot be checked. The map stays in place and the error names it. [fix:hook] [#3108]
@@ -107,6 +118,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Stop cache cleanup and bundle file writes from following a link that appears during the write. An unreadable cache folder is now logged and is not repaired during cleanup. [fix:materialize] [#3203]
 - Stop state file copies, state log rotation, and the recall ledger from following a link. A link no longer redirects a copy, a rotation, or a timestamp update to its target. [fix:materialize] [#3139]
 - Show the agent a notice for MCP proxy pidfile and log failures, probe server errors, lock reclaims, dropped scope tags, and hook notices that lacked a fix. Each notice names the path or server and the fix. [fix:agent] [#3217]
+- Fail the hook when a session lock's modified time cannot be refreshed, with the lock path and a fix line. The lock used to count as held, so a concurrent prune could remove a live lock. [fix:hook] [#3290]
+- Tell the agent when a read-once or read-before-edit record cannot be removed on session reset. The failure used to reach only the log. [fix:hook] [#3291]
+- Keep a session log that is restored with an old mtime. The reaper now judges age by the later of mtime and change time, as the state sweeps do. [fix:session-log] [#3292]
+- Log the folder and the cause when a `state/tmp` entry cannot be read. The read error does not name the entry, so the log names the folder. [fix:tmp-sweep] [#3291]
+- Remind the agent to finish or close a task after a `git push`, `gh pr create`, `gh pr ready`, or `gh pr merge` when the task stays in progress with tasks queued behind it. The end of a turn repeats the reminder every `stop_nudge_every` turns, default 5. [fix:task] [#3318]
+- Name the cause in `llmenv doctor` when a `state/tmp` entry cannot be read. [fix:tmp-sweep] [#3313]
+- Judge a throttle cache's age by the later of its mtime and change time, so a cache restored with an old mtime is kept. [fix:throttle] [#3314]
+- Show the agent a notice that names the lock and the fix when a busy session lock makes a hook fall back. Before, only the log showed it. [fix:hook] [#3312]
+- Tell the agent when slippage stats or a background job checkpoint cannot be read or saved, or when hook output cannot take the resume cache notice. Each notice names the cause and the fix. [fix:hook] [#3320]
+- Keep a rotated session log that was restored with an old mtime, for example by `tar -x` or `cp -p`. Rotation now ages a file by the later of its mtime and its change time, as the cache sweep already did. [fix:cache] [#3321]
+- Fail a merge when two scopes at the same precedence set different values for one key or field, even when a higher-precedence scope also sets it. A config that merged before can now fail with a conflict error that names both scopes. [fix:merge]
+- Show the session-log rotations that a `llmenv doctor` prune removed before it failed, so a partial prune no longer hides them. [fix:doctor] [#3334]
+- Name the slippage stats log and its fix in the Write deny for an unreadable or corrupt log. The deny no longer tells the agent to read the file it tried to write. [fix:hook] [#3332]
 
 ### Security
 

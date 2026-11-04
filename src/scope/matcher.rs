@@ -2,6 +2,7 @@ use super::network::NetworkNeeds;
 
 pub(crate) use super::content_walk::matches_content_all;
 use crate::config::{HostScope, UserScope};
+use crate::scope::identity::{cwd_or_notice, detect_hostname, hostname_or_notice, user_or_notice};
 use crate::scope::tags::sanitize_tags;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -120,29 +121,13 @@ impl Env {
     /// Fresh env detection. `needs` gates the network probes; the hostname (uname syscall),
     /// user, and cwd probes always run.
     fn detect_fresh(needs: NetworkNeeds) -> anyhow::Result<Self> {
-        // Error level: a scope that is silently disabled changes which bundles load (#2666).
-        let hostname = detect_hostname().unwrap_or_else(|| {
-            tracing::error!("hostname detection failed; host-scope matching disabled");
-            String::new()
-        });
-        let user = match crate::env_var::utf8_var("USER") {
-            Ok(Some(user)) => user,
-            Ok(None) => {
-                tracing::error!("$USER unset; user-scope matching disabled");
-                String::new()
-            }
-            Err(e) => {
-                tracing::error!("{e:#}; user-scope matching disabled");
-                String::new()
-            }
-        };
-        let cwd = std::env::current_dir()
-            .ok()
-            .and_then(|p| p.to_str().map(String::from))
-            .unwrap_or_else(|| {
-                tracing::error!("current_dir() unavailable; project-scope matching disabled");
-                String::new()
-            });
+        let hostname = hostname_or_notice(detect_hostname());
+        let user = user_or_notice(crate::env_var::utf8_var("USER"));
+        let cwd = cwd_or_notice(
+            std::env::current_dir()
+                .ok()
+                .and_then(|p| p.to_str().map(String::from)),
+        );
         let home = std::env::var_os("HOME")
             .filter(|h| !h.is_empty())
             .map(std::path::PathBuf::from);
@@ -195,24 +180,6 @@ fn parse_extra_tags(raw: &str) -> Vec<String> {
         .map(String::from)
         .collect();
     sanitize_tags(tags, "$LLMENV_EXTRA_TAGS")
-}
-
-fn detect_hostname() -> Option<String> {
-    // uname(2) syscall rather than spawning the `hostname` binary: each hook-run
-    // is a fresh process, so the process-static Env cache never helps the hook
-    // path — the subprocess fork/exec ran on every hook and dominated scope
-    // evaluation (~15ms/event). rustix reads the kernel nodename with one
-    // syscall, no subprocess, no unsafe.
-    let nodename = rustix::system::uname()
-        .nodename()
-        .to_string_lossy()
-        .into_owned();
-    let trimmed = nodename.trim();
-    if trimmed.is_empty() {
-        tracing::warn!("uname nodename empty; host-scope matching disabled");
-        return None;
-    }
-    Some(trimmed.to_string())
 }
 
 pub(crate) fn glob_matches(pattern: &str, text: &str) -> bool {

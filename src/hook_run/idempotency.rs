@@ -158,6 +158,18 @@ mod tests {
     use proptest::prelude::*;
 
     #[test]
+    fn a_busy_seen_set_lock_is_an_agent_notice_and_the_call_runs_again() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = dir.path().join("idempotency");
+        let _held = lock_state_file(&store, &state_key("req"), "test holder").unwrap();
+        let guard = Guard::new(Some(dir.path()), "req", "id-1").unwrap();
+        // A busy lock reads as "not seen", so the guarded call runs again.
+        assert!(!guard.already_done());
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(notices.contains(LABEL), "{notices}");
+    }
+
+    #[test]
     fn request_id_is_stable_hex_and_sensitive_to_every_part() {
         let id = request_id(&["s", "icm-store", "t1", "body"]);
         assert_eq!(id, request_id(&["s", "icm-store", "t1", "body"]));

@@ -9,6 +9,15 @@ use std::time::{Duration, SystemTime};
 /// timestamp can put a write slightly ahead of the clock read.
 pub(crate) const CLOCK_SKEW_TOLERANCE: Duration = Duration::from_secs(5);
 
+/// When an entry counts as expired, and which timestamp measures the age of its files (#3195).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AgeRule {
+    /// An entry whose age is more than this is expired.
+    pub older_than: Duration,
+    /// The timestamp that judges the files under the entry.
+    pub source: crate::materialize::cache::AgeSource,
+}
+
 /// The paths whose clock-skew error is already logged in this process. A cache sweep scans a
 /// folder twice, once for its gate and once for the sweep, so one skewed entry would log twice.
 static SKEW_REPORTED: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());

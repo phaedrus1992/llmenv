@@ -109,11 +109,19 @@ fn sweep_state(state_dir: &Path, config: &Config, retention: Duration, out: GcOu
     // With nothing old enough to remove, the tmp and index sweeps are skipped. A sweep that ran
     // now could see an entry that crossed the cutoff after this check, and remove it without
     // the in-use list.
-    let cbm_live = matches!(
-        cbm_use(config, &state_dir.join("codebase-memory")),
-        CacheUse::Live
-    );
-    if !state_may_have_stale_entries(state_dir, retention, cbm_live) {
+    let cbm = cbm_use(config, &state_dir.join("codebase-memory"));
+    let cbm_live = matches!(cbm, CacheUse::Live);
+    // An unreadable config cannot say whether the codebase-memory folder is live. The sweep then
+    // runs, so it reports that the folder could not be checked, and the gate does not hide it.
+    let cbm_unknown = matches!(cbm, CacheUse::Unknown(_));
+    if !cbm_unknown
+        && !state_may_have_stale_entries(
+            state_dir,
+            retention,
+            cbm_live,
+            crate::materialize::cache::AgeSource::MtimeOrCtime,
+        )
+    {
         return prune_session_log(state_dir, config, retention, out);
     }
     let in_use = crate::materialize::open_files::open_paths().map_err(|e| format!("{e:#}"));
@@ -131,8 +139,16 @@ fn sweep_state_tmp(
     out: GcOutput<'_>,
 ) -> usize {
     let swept = in_use.map_err(str::to_string).and_then(|in_use| {
-        tmp_sweep::sweep(&state_dir.join("tmp"), retention, in_use, out.dry_run)
-            .map_err(|e| format!("{e:#}"))
+        tmp_sweep::sweep(
+            &state_dir.join("tmp"),
+            crate::materialize::expiry::AgeRule {
+                older_than: retention,
+                source: crate::materialize::cache::AgeSource::MtimeOrCtime,
+            },
+            in_use,
+            out.dry_run,
+        )
+        .map_err(|e| format!("{e:#}"))
     });
     match swept {
         Ok(report) => {
@@ -189,6 +205,7 @@ fn sweep_cbm_indexes(
             retention,
             in_use,
             out.dry_run,
+            crate::materialize::cache::AgeSource::MtimeOrCtime,
         )
         .map_err(|e| format!("{e:#}"))
     });
@@ -290,7 +307,10 @@ mod tests {
     }
 
     #[test]
-    fn the_state_sweep_removes_an_old_rotation_and_keeps_the_active_log() {
+    // A test cannot set a change time, so removal by age is covered by the prune tests, which use
+    // the mtime only. This test checks the change-time rule: a rotation restored with an old mtime
+    // has a fresh change time, so it stays.
+    fn the_state_sweep_keeps_a_rotation_restored_with_an_old_mtime() {
         let state = tempfile::tempdir().unwrap();
         let active = state.path().join("session-log.jsonl");
         std::fs::write(&active, b"{}").unwrap();
@@ -305,7 +325,7 @@ mod tests {
 
         sweep_state(state.path(), &Config::default(), DAY * 7, OUT);
 
-        assert!(!rotated.exists(), "the old rotation was kept");
+        assert!(rotated.exists(), "a restored rotation was removed");
         assert!(active.exists(), "the active log was removed");
     }
 

@@ -363,7 +363,7 @@ mod tests {
         let logs = crate::test_log_capture::capture_logs(|| {
             assert!(load_stats(state.path(), "s1").paths.is_empty());
         });
-        assert!(logs.contains("read log is corrupt"), "{logs}");
+        assert!(logs.contains("is corrupt"), "{logs}");
     }
 
     #[test]
@@ -375,7 +375,10 @@ mod tests {
         let logs = crate::test_log_capture::capture_logs(|| {
             assert!(load_stats(state.path(), "s1").paths.is_empty());
         });
-        assert!(logs.contains("read log unreadable"), "{logs}");
+        assert!(
+            logs.contains("cannot read the slippage stats log"),
+            "{logs}"
+        );
     }
 
     #[test]

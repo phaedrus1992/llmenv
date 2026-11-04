@@ -146,6 +146,11 @@ capabilities:
     # list small and unambiguous: anything matching these is blocked outright
     # rather than prompt-gated.
     deny:
+      # `--output=<file>` makes git write the named file, even from a read-only command.
+      - { tool: Bash, pattern: "git diff *--output*" }
+      - { tool: Bash, pattern: "git log *--output*" }
+      - { tool: Bash, pattern: "git show *--output*" }
+
       # Destructive system commands.
       - { tool: Bash, pattern: "rm -rf *" }
       - { tool: Bash, pattern: "rm -fr *" }

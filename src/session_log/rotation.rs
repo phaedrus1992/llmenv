@@ -4,9 +4,6 @@
 //! one generation, so `<name>.1` holds the newest rotated lines.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
-
-use crate::materialize::cache::is_expired;
 
 /// Size at which the active file rotates. Each line is one hook event, so the cap bounds how
 /// much busy hooks add to one file (#2816).
@@ -90,7 +87,7 @@ const LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(10);
 ///
 /// # Errors
 /// The lock file cannot be opened, or the lock stays busy for the whole wait.
-fn rotation_lock(path: &Path) -> std::io::Result<std::fs::File> {
+pub(super) fn rotation_lock(path: &Path) -> std::io::Result<std::fs::File> {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(LOCK_SUFFIX);
     let mut opts = std::fs::OpenOptions::new();
@@ -142,123 +139,12 @@ fn ignore_missing(result: std::io::Result<()>) -> std::io::Result<()> {
     }
 }
 
-/// Remove the rotated files of `path` that were last written more than `older_than` ago. The
-/// active file is never removed. Returns the files that were removed (#2816). With `dry_run`, it
-/// returns the files that a real run removes, and removes none (#2917).
-///
-/// A file that cannot be removed does not stop the pass. The error names every file that failed,
-/// with the count of files that were removed.
-///
-/// # Errors
-/// Fails when the directory cannot be read, or when any rotated file could not be removed.
-pub(crate) fn prune_rotations(
-    path: &Path,
-    older_than: Duration,
-    dry_run: bool,
-) -> anyhow::Result<Vec<PathBuf>> {
-    let (Some(dir), Some(base)) = (path.parent(), path.file_name()) else {
-        return Ok(Vec::new());
-    };
-    let Some(entries) = crate::paths::read_dir_optional(dir)? else {
-        return Ok(Vec::new());
-    };
-    let now = SystemTime::now();
-    let mut failures = Vec::new();
-    let mut expired = Vec::new();
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(e) => {
-                failures.push(format!("an entry in {}: {e}", dir.display()));
-                continue;
-            }
-        };
-        if !is_rotation_of(&entry.file_name(), base) {
-            continue;
-        }
-        match is_old(&entry.path(), now, older_than) {
-            Ok(true) => expired.push(entry.path()),
-            Ok(false) => {}
-            Err(e) => failures.push(format!("{}: {e}", entry.path().display())),
-        }
-    }
-    let removed = if dry_run || expired.is_empty() {
-        expired
-    } else {
-        remove_under_lock(path, expired, now, older_than, &mut failures)?
-    };
-    if !failures.is_empty() {
-        anyhow::bail!(
-            "{} rotated session-log file(s) could not be checked or removed, {} removed: {}. \
-             Fix: check the permissions of the state directory",
-            failures.len(),
-            removed.len(),
-            failures.join("; ")
-        );
-    }
-    Ok(removed)
-}
-
-/// Whether the file at `path` was last written more than `older_than` before `now`.
-fn is_old(path: &Path, now: SystemTime, older_than: Duration) -> std::io::Result<bool> {
-    let modified = std::fs::symlink_metadata(path)?.modified()?;
-    Ok(is_expired(now, modified, older_than, path))
-}
-
-/// Remove each candidate under the rotation lock, after a second age check.
-///
-/// A rotation renames each generation up by one. Without the lock, a name judged old can name a
-/// newer file by the time it is removed. A file that is gone, or that is no longer old, stays out
-/// of the result.
-fn remove_under_lock(
-    path: &Path,
-    candidates: Vec<PathBuf>,
-    now: SystemTime,
-    older_than: Duration,
-    failures: &mut Vec<String>,
-) -> anyhow::Result<Vec<PathBuf>> {
-    let _lock = rotation_lock(path).map_err(|e| {
-        anyhow::anyhow!(
-            "cannot lock {} to prune its rotations: {e}. Fix: run llmenv clean again when no \
-             rotation is in progress",
-            path.display()
-        )
-    })?;
-    let mut removed = Vec::new();
-    for candidate in candidates {
-        match is_old(&candidate, now, older_than) {
-            Ok(true) => {}
-            Ok(false) => continue,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => {
-                failures.push(format!("{}: {e}", candidate.display()));
-                continue;
-            }
-        }
-        match std::fs::remove_file(&candidate) {
-            Ok(()) => removed.push(candidate),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => failures.push(format!("{}: {e}", candidate.display())),
-        }
-    }
-    Ok(removed)
-}
-
-/// Whether `name` is `<base>.<digits>`, the name of a rotated file.
-fn is_rotation_of(name: &std::ffi::OsStr, base: &std::ffi::OsStr) -> bool {
-    let (Some(name), Some(base)) = (name.to_str(), base.to_str()) else {
-        return false;
-    };
-    name.strip_prefix(base)
-        .and_then(|rest| rest.strip_prefix('.'))
-        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use std::fs::File;
+
+    use crate::session_log::prune::is_rotation_of;
 
     fn write_bytes(path: &Path, len: u64) {
         std::fs::write(path, vec![b'x'; usize::try_from(len).unwrap()]).unwrap();
@@ -366,136 +252,6 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&marker).unwrap();
         assert_eq!(value["llmenv_log"], "rotated");
         assert_eq!(value["rotated_to"], "session-log.jsonl.1");
-    }
-
-    #[test]
-    fn prune_removes_old_rotations_and_keeps_the_active_file_and_other_names() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session-log.jsonl");
-        write_bytes(&path, 3);
-        let old_rotation = rotation_path(&path, 2);
-        write_bytes(&old_rotation, 3);
-        let old_time = SystemTime::now() - Duration::from_secs(30 * 86_400);
-        File::options()
-            .write(true)
-            .open(&old_rotation)
-            .unwrap()
-            .set_modified(old_time)
-            .unwrap();
-        let unrelated = dir.path().join("session-log.jsonl.bak");
-        write_bytes(&unrelated, 3);
-        File::options()
-            .write(true)
-            .open(&unrelated)
-            .unwrap()
-            .set_modified(old_time)
-            .unwrap();
-
-        let removed = prune_rotations(&path, Duration::from_secs(7 * 86_400), false).unwrap();
-
-        assert_eq!(removed, vec![old_rotation.clone()]);
-        assert!(!old_rotation.exists());
-        assert!(path.exists());
-        assert!(
-            unrelated.exists(),
-            "a name without a numeric suffix is not a rotation"
-        );
-    }
-
-    #[test]
-    fn a_dry_run_lists_an_old_rotation_and_removes_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session-log.jsonl");
-        let old_rotation = rotation_path(&path, 1);
-        write_bytes(&old_rotation, 3);
-        File::options()
-            .write(true)
-            .open(&old_rotation)
-            .unwrap()
-            .set_modified(SystemTime::now() - Duration::from_secs(30 * 86_400))
-            .unwrap();
-
-        let listed = prune_rotations(&path, Duration::from_secs(7 * 86_400), true).unwrap();
-
-        assert_eq!(listed, vec![old_rotation.clone()]);
-        assert!(old_rotation.exists());
-    }
-
-    #[test]
-    fn a_dry_run_lists_exactly_what_a_real_run_removes() {
-        use proptest::prelude::*;
-        proptest!(ProptestConfig::with_cases(24), |(ages in proptest::collection::vec(any::<bool>(), 0..6))| {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("session-log.jsonl");
-            write_bytes(&path, 3);
-            let old = SystemTime::now() - Duration::from_secs(30 * 86_400);
-            for (i, is_old) in ages.iter().enumerate() {
-                let rotation = rotation_path(&path, u32::try_from(i + 1).unwrap());
-                write_bytes(&rotation, 3);
-                if *is_old {
-                    File::options().write(true).open(&rotation).unwrap().set_modified(old).unwrap();
-                }
-            }
-            let week = Duration::from_secs(7 * 86_400);
-
-            let mut listed = prune_rotations(&path, week, true).unwrap();
-            for (i, _) in ages.iter().enumerate() {
-                prop_assert!(rotation_path(&path, u32::try_from(i + 1).unwrap()).exists());
-            }
-            let mut removed = prune_rotations(&path, week, false).unwrap();
-
-            listed.sort();
-            removed.sort();
-            prop_assert_eq!(listed, removed);
-            prop_assert!(path.exists(), "the active file was removed");
-        });
-    }
-
-    #[test]
-    fn the_locked_pass_keeps_a_file_that_a_rotation_made_new_and_skips_a_gone_one() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session-log.jsonl");
-        let renewed = rotation_path(&path, 2);
-        write_bytes(&renewed, 3);
-        let gone = rotation_path(&path, 3);
-        let mut failures = Vec::new();
-
-        let removed = remove_under_lock(
-            &path,
-            vec![renewed.clone(), gone],
-            SystemTime::now(),
-            Duration::from_secs(7 * 86_400),
-            &mut failures,
-        )
-        .unwrap();
-
-        assert!(removed.is_empty(), "{removed:?}");
-        assert!(failures.is_empty(), "{failures:?}");
-        assert!(renewed.exists(), "a file that is no longer old was removed");
-    }
-
-    #[test]
-    fn prune_keeps_a_recent_rotation() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session-log.jsonl");
-        write_bytes(&rotation_path(&path, 1), 3);
-        assert!(
-            prune_rotations(&path, Duration::from_secs(7 * 86_400), false)
-                .unwrap()
-                .is_empty()
-        );
-        assert!(rotation_path(&path, 1).exists());
-    }
-
-    #[test]
-    fn prune_in_a_missing_directory_removes_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("absent").join("session-log.jsonl");
-        assert!(
-            prune_rotations(&path, Duration::ZERO, false)
-                .unwrap()
-                .is_empty()
-        );
     }
 
     #[test]

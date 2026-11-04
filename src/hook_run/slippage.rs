@@ -92,7 +92,9 @@ fn safe_session(session_id: Option<&str>) -> Option<&str> {
     if crate::paths::is_valid_short_name(id) {
         return Some(id);
     }
-    tracing::error!("session_id failed path-safety validation for slippage, rejecting");
+    crate::agent_notice::record_logged(
+        "llmenv: the hook input has a session id that is not a plain file name, so its slippage stats are not kept. Fix: report the engine session id format to the llmenv maintainers.",
+    );
     None
 }
 
@@ -103,33 +105,16 @@ pub(super) fn stats_path(state_dir: &std::path::Path, session_id: &str) -> std::
 }
 
 /// Lock for one read-change-save of the session's stats file (#2678). When the lock fails,
-/// `lock_state_file` logs it and the update runs unlocked, as it did before the lock existed.
+/// `lock_state_file` records a notice and the update runs unlocked, as it did before the lock existed.
 fn stats_lock(state_dir: &std::path::Path, session_id: &str) -> Option<std::fs::File> {
     stats_path(state_dir, session_id)
         .parent()
         .and_then(|dir| super::session_state::lock_state_file(dir, session_id, "slippage stats"))
 }
 
-pub(super) fn load_stats(state_dir: &std::path::Path, session_id: &str) -> SessionStats {
-    // An unreadable or corrupt log means "nothing known to have been read". The
-    // write guard then denies a Write to an existing file until the next Read
-    // rewrites the log. The deny is deliberate: a corrupt log cannot prove a read.
-    // A missing log is the normal first-use case and is not logged.
-    let path = stats_path(state_dir, session_id);
-    let text = match crate::paths::bounded::state_text_io(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return SessionStats::default(),
-        Err(e) => {
-            // Error level: the default log filter is ERROR, so a warn is never shown (#2657).
-            tracing::error!(path = %path.display(), error = %e, "slippage: read log unreadable");
-            return SessionStats::default();
-        }
-    };
-    serde_json::from_str(&text).unwrap_or_else(|e| {
-        tracing::error!(path = %path.display(), error = %e, "slippage: read log is corrupt");
-        SessionStats::default()
-    })
-}
+mod stats_log;
+pub(super) use stats_log::load_stats;
+use stats_log::read_stats;
 
 /// Record a read, or decide a write. Returns the deny text, or empty to allow.
 ///
@@ -178,18 +163,24 @@ pub(crate) fn handle_pre_tool_use(
             String::new()
         }
         "Write" => {
-            if !std::path::Path::new(path).exists() {
+            // Only a path that is absent is new. `exists()` would also allow a path it cannot
+            // stat, so every other error falls through to the read check.
+            if matches!(
+                std::fs::symlink_metadata(path),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound
+            ) {
                 return String::new();
             }
-            if load_stats(state_dir, session_id)
-                .paths
-                .contains(&path_key(path))
-            {
-                return String::new();
+            match read_stats(state_dir, session_id) {
+                Ok(stats) if stats.paths.contains(&path_key(path)) => String::new(),
+                Ok(_) => format!(
+                    "__DENY__:`{path}` already exists and you haven't read it in this session.                      Write replaces the whole file, so read it first and confirm what you'd be                      discarding — this fires most often after a compaction dropped the earlier read."
+                ),
+                // The stats log is the cause, so the reason names it and not the file to write.
+                Err(problem) => {
+                    format!("__DENY__:llmenv cannot confirm that you read `{path}`. {problem}")
+                }
             }
-            format!(
-                "__DENY__:`{path}` already exists and you haven't read it in this session.                  Write replaces the whole file, so read it first and confirm what you'd be                  discarding — this fires most often after a compaction dropped the earlier read."
-            )
         }
         _ => String::new(),
     }
@@ -217,13 +208,18 @@ pub(super) fn save_stats(state_dir: &std::path::Path, session_id: &str, stats: &
     super::session_state::prune_stale_json_files(&state_dir.join("slippage"), 7);
     super::session_state::prune_orphan_locks(&state_dir.join("slippage"), 7);
     let Ok(json) = serde_json::to_string(stats) else {
+        crate::agent_notice::record_logged(format!(
+            "llmenv: cannot encode the slippage stats of session {session_id}. A later Write to a file you read may be denied. Fix: file a bug with this message."
+        ));
         return;
     };
     if let Err(e) =
         crate::paths::write_owner_only_atomic(&stats_path(state_dir, session_id), json.as_bytes())
     {
         // A lost read record makes the next Write to that file deny, so the failure must be visible.
-        tracing::error!("slippage: could not record session stats: {e}");
+        crate::agent_notice::record_logged(format!(
+            "llmenv: cannot save the slippage stats ({e}). A later Write to a file you read may be denied. Fix: check the permissions of the slippage state folder."
+        ));
     }
 }
 
@@ -1202,3 +1198,7 @@ mod tests {
         assert!(!denied.contains("changes something"), "{denied}");
     }
 }
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test code")]
+mod notice_tests;

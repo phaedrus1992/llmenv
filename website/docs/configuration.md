@@ -76,7 +76,8 @@ With `null`, `llmenv clean` (and the deprecated `llmenv doctor --gc`) skips the 
 `llmenv clean` applies the same window to the state temp folder, `state/tmp`, which `TMPDIR` points at, and to session-log rotations (see `session_log` below).
 An entry in `state/tmp` is kept while a process holds a file open in it.
 (changed in v3.14.0) The age of a cache entry and of a `state/tmp` entry comes from the newest file in it, not from folder mtimes.
-So a tree unpacked with its old file mtimes kept (`tar -x`, `cp -p`) looks old as soon as no process holds a file open in it.
+A session-log rotation is aged by the later of its modification time and its change time. A file restored with an old modification time, such as by `tar -x` or `cp -p`, is kept until its change time is past the window.
+A file's age is the later of its mtime and its change time. So a tree unpacked with its old file mtimes kept (`tar -x`, `cp -p`) reads as new, because the unpack sets a new change time. A file reads as old only once its change time is also old.
 That check uses `lsof`, and llmenv runs it only when an entry is old enough to remove.
 When `lsof` cannot run, the sweep stops and names the fix, so no entry is removed on a guess.
 
@@ -1199,7 +1200,14 @@ features:
 (added in v3.12.0) While the tracker is on, SessionStart also injects a short statement of the core tracking rules.
 `nudges: false` removes that text too.
 See [Commands](commands.md#core-task-rules-added-in-v3120).
-`llmenv validate` rejects a `nudge_after` or `nudge_every` of `0`, and a `workflow_skills` entry that is empty.
+`llmenv validate` rejects a `nudge_after`, `nudge_every`, or `stop_nudge_every` of `0`, and a `workflow_skills` entry that is empty.
+
+(added in v3.14.0) Two reminders cover a task that stays in progress while tasks are queued behind it.
+A step boundary is a `git push`, `gh pr create`, `gh pr ready`, or `gh pr merge`.
+When one runs, the agent gets one reminder for that task and that boundary.
+At the end of a turn, the same state repeats its reminder. The first such turn end is reminded at once.
+`stop_nudge_every` (added in v3.14.0) sets how many turn ends pass between two of these Stop reminders.
+Default `5`. Must be 1 or more.
 
 See [Commands](commands.md#task) for the full `llmenv task` CLI reference.
 
@@ -1303,6 +1311,11 @@ session_log:
     enabled: false
     path: "~/custom/path.jsonl"
 ```
+
+(changed in v3.14.0) The reaper judges a transcript's age by the later of its mtime and change time.
+A transcript restored with an old mtime, such as by `cp -p` or `tar -x`, is kept until it is old by its change time too.
+A metadata-only change also resets the change time. Examples are `chmod`, `chown`, an extended attribute write, and a new hard link.
+So a transcript can be kept past `retention_days` after such a change, and no log line records it.
 
 | Sub-field | Required | Notes |
 | --------- | -------- | ----- |

@@ -6,9 +6,10 @@
 //! one, with the same in-use check as the rest of the sweep.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use super::walk::{Scan, judge_entry, record_failure};
+use crate::materialize::expiry::AgeRule;
 
 /// The `cargo hawk` target folder. It holds one build folder per workspace.
 const HAWK_TARGET_ROOT: &str = "cargo-hawk-target";
@@ -21,7 +22,7 @@ pub(super) fn is_split_root(name: &std::ffi::OsStr) -> bool {
 /// Judge the entries one level down inside a split root. The root itself is never a candidate.
 pub(super) fn scan_split_root(
     split_root: &Path,
-    older_than: Duration,
+    rule: AgeRule,
     in_use: &[PathBuf],
     now: SystemTime,
     scan: &mut Scan,
@@ -48,7 +49,7 @@ pub(super) fn scan_split_root(
             continue;
         }
         match entry.file_type() {
-            Ok(file_type) => judge_entry(&path, file_type.is_dir(), older_than, now, scan),
+            Ok(file_type) => judge_entry(&path, file_type.is_dir(), rule, now, scan),
             Err(e) => record_failure(&path, &e, scan),
         }
     }
@@ -67,7 +68,7 @@ mod tests {
     use std::time::SystemTime;
 
     use crate::materialize::tmp_sweep::sweep;
-    use crate::materialize::tmp_sweep::tests::{DAY, age_tree, old};
+    use crate::materialize::tmp_sweep::tests::{DAY, age_tree, mtime_rule, old};
 
     #[test]
     fn a_claude_code_root_is_kept_even_when_old() {
@@ -76,7 +77,7 @@ mod tests {
         fs::create_dir(&claude).unwrap();
         age_tree(&claude, old());
 
-        let report = sweep(root.path(), DAY * 7, &[], false).unwrap();
+        let report = sweep(root.path(), mtime_rule(DAY * 7), &[], false).unwrap();
 
         assert!(report.removed.is_empty());
         assert!(claude.exists(), "the per-user TMPDIR root was removed");
@@ -94,7 +95,7 @@ mod tests {
         let fresh_child = claude.join("shell-fresh");
         fs::create_dir(&fresh_child).unwrap();
 
-        let report = sweep(root.path(), DAY * 7, &[], false).unwrap();
+        let report = sweep(root.path(), mtime_rule(DAY * 7), &[], false).unwrap();
 
         assert_eq!(report.removed.len(), 1, "removed: {:?}", report.removed);
         assert!(
@@ -119,7 +120,13 @@ mod tests {
         fs::write(&cwd_file, b"c").unwrap();
         age_tree(&busy, old());
 
-        let report = sweep(root.path(), DAY * 7, std::slice::from_ref(&cwd_file), false).unwrap();
+        let report = sweep(
+            root.path(),
+            mtime_rule(DAY * 7),
+            std::slice::from_ref(&cwd_file),
+            false,
+        )
+        .unwrap();
 
         assert!(
             report.removed.is_empty(),
@@ -141,7 +148,7 @@ mod tests {
             .set_modified(SystemTime::now() + DAY)
             .unwrap();
 
-        let report = sweep(root.path(), DAY * 7, &[], false).unwrap();
+        let report = sweep(root.path(), mtime_rule(DAY * 7), &[], false).unwrap();
 
         assert!(report.removed.is_empty());
         assert!(future.exists());

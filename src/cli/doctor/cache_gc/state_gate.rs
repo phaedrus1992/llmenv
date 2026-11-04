@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use crate::materialize::cbm_units::{Unit, scan_units};
+use crate::materialize::cbm_units::{Unit, scan_units_with};
 use crate::materialize::tmp_sweep;
 
 /// Whether a sweep of `state/tmp` or `state/codebase-memory` could remove an entry. Both sweeps
@@ -15,13 +15,21 @@ pub(super) fn state_may_have_stale_entries(
     state_dir: &Path,
     retention: Duration,
     cbm_live: bool,
+    source: crate::materialize::cache::AgeSource,
 ) -> bool {
     let tmp = state_dir.join("tmp");
-    let tmp_may_be_stale = match tmp_sweep::stale_summary_in(&tmp, retention, &[]) {
+    let tmp_may_be_stale = match tmp_sweep::stale_summary_in(
+        &tmp,
+        crate::materialize::expiry::AgeRule {
+            older_than: retention,
+            source,
+        },
+        &[],
+    ) {
         Ok(summary) => summary.count > 0 || summary.unreadable > 0,
         Err(e) => {
             tracing::error!(
-                "state GC cannot scan {}, so lsof runs: {e:#}",
+                "state GC cannot scan {}, so lsof runs: {e:#}. Fix: make the folder readable, then run the GC again",
                 tmp.display()
             );
             true
@@ -30,14 +38,19 @@ pub(super) fn state_may_have_stale_entries(
     // A codebase-memory folder that a features.codebase_memory index_path uses is live, and the
     // sweep never removes it, so it needs no in-use list (#3075).
     tmp_may_be_stale
-        || (!cbm_live && cbm_may_have_stale_units(&state_dir.join("codebase-memory"), retention))
+        || (!cbm_live
+            && cbm_may_have_stale_units(&state_dir.join("codebase-memory"), retention, source))
 }
 
 /// Whether the codebase-memory sweep could act on `dir`: a unit past `retention`, or a unit whose
 /// age cannot be read. It uses the sweep's own scan, so the gate and the sweep agree (#3072).
 /// A unit that cannot be scanned counts as possibly stale, and it is logged.
-fn cbm_may_have_stale_units(dir: &Path, retention: Duration) -> bool {
-    match scan_units(dir, retention) {
+fn cbm_may_have_stale_units(
+    dir: &Path,
+    retention: Duration,
+    source: crate::materialize::cache::AgeSource,
+) -> bool {
+    match scan_units_with(dir, retention, source) {
         Ok(None) => false,
         Ok(Some(units)) => !units.iter().all(Unit::is_fresh),
         Err(e) => {
@@ -79,14 +92,24 @@ mod tests {
         std::fs::create_dir(state.path().join("codebase-memory")).unwrap();
         std::fs::write(state.path().join("codebase-memory").join("index.db"), b"x").unwrap();
 
-        assert!(!state_may_have_stale_entries(state.path(), DAY * 7, false));
+        assert!(!state_may_have_stale_entries(
+            state.path(),
+            DAY * 7,
+            false,
+            crate::materialize::cache::AgeSource::MtimeOnly
+        ));
     }
 
     #[test]
     fn a_state_folder_with_no_tmp_and_no_index_needs_no_in_use_list() {
         let state = tempfile::tempdir().unwrap();
 
-        assert!(!state_may_have_stale_entries(state.path(), DAY * 7, false));
+        assert!(!state_may_have_stale_entries(
+            state.path(),
+            DAY * 7,
+            false,
+            crate::materialize::cache::AgeSource::MtimeOnly
+        ));
     }
 
     #[test]
@@ -97,7 +120,12 @@ mod tests {
         std::fs::write(&db, b"x").unwrap();
         age(&db);
 
-        assert!(!state_may_have_stale_entries(state.path(), DAY * 7, true));
+        assert!(!state_may_have_stale_entries(
+            state.path(),
+            DAY * 7,
+            true,
+            crate::materialize::cache::AgeSource::MtimeOnly
+        ));
     }
 
     #[test]
@@ -108,7 +136,12 @@ mod tests {
         std::fs::write(&db, b"x").unwrap();
         age(&db);
 
-        assert!(state_may_have_stale_entries(state.path(), DAY * 7, false));
+        assert!(state_may_have_stale_entries(
+            state.path(),
+            DAY * 7,
+            false,
+            crate::materialize::cache::AgeSource::MtimeOnly
+        ));
     }
 
     #[test]
@@ -122,7 +155,12 @@ mod tests {
         std::fs::write(&wal, b"x").unwrap();
         age(&wal);
 
-        assert!(!state_may_have_stale_entries(state.path(), DAY * 7, false));
+        assert!(!state_may_have_stale_entries(
+            state.path(),
+            DAY * 7,
+            false,
+            crate::materialize::cache::AgeSource::MtimeOnly
+        ));
     }
 
     #[test]
@@ -134,7 +172,12 @@ mod tests {
         std::fs::write(&log, b"x").unwrap();
         age(&log);
 
-        assert!(!state_may_have_stale_entries(state.path(), DAY * 7, false));
+        assert!(!state_may_have_stale_entries(
+            state.path(),
+            DAY * 7,
+            false,
+            crate::materialize::cache::AgeSource::MtimeOnly
+        ));
     }
 
     #[cfg(unix)]
@@ -146,7 +189,12 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
 
-        let needs_lsof = state_may_have_stale_entries(state.path(), DAY * 7, false);
+        let needs_lsof = state_may_have_stale_entries(
+            state.path(),
+            DAY * 7,
+            false,
+            crate::materialize::cache::AgeSource::MtimeOnly,
+        );
 
         // Restore the mode first, so the temporary folder can be removed.
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -161,6 +209,11 @@ mod tests {
         std::fs::write(&old, b"x").unwrap();
         age(&old);
 
-        assert!(state_may_have_stale_entries(state.path(), DAY * 7, false));
+        assert!(state_may_have_stale_entries(
+            state.path(),
+            DAY * 7,
+            false,
+            crate::materialize::cache::AgeSource::MtimeOnly
+        ));
     }
 }

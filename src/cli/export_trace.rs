@@ -8,10 +8,13 @@ use super::{
     build_manifest, ensure_local_memory_proxy, firing_bundles, installed_adapters,
     validate_var_name, validate_var_value, warn_dead_config,
 };
+use crate::config::{Bundle, Config};
 use crate::scope::ActiveScopes;
+use crate::scope::matcher::Env;
 use anyhow::Context;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -43,19 +46,7 @@ pub(crate) fn run_export_core(
         &active,
         crate::mcp::proxy_ops::SpawnSource::Export,
     );
-    // Throttled pull: check sync interval and fetch+pull if enough time has elapsed.
-    // Skipped entirely when remote_sync is disabled (e.g. 1Password locked).
-    if config.cache.remote_sync {
-        let interval_secs = config.cache.sync_interval_minutes * 60;
-        let state_dir = crate::paths::state_dir()?;
-        if let Err(e) = crate::sync::maybe_pull(
-            &config_dir,
-            &state_dir,
-            std::time::Duration::from_secs(interval_secs),
-        ) {
-            tracing::warn!("throttled pull failed (non-fatal): {e}");
-        }
-    }
+    pull_if_due(&config, &config_dir);
 
     // A bundle fires when either:
     //   - one of its tags is in the active tag set (normal tag-based firing), OR
@@ -71,45 +62,8 @@ pub(crate) fn run_export_core(
     // (network gateway/ssid/cidr, host hostname, user user, project path/
     // marker) are already evaluated by evaluate() above — this simply
     // narrows the result to one scope's contribution.
-    let (firing, use_active) = {
-        if let Some(ref scope_id) = scope {
-            let filtered_scopes = active
-                .scopes
-                .iter()
-                .filter(|s| s.id == *scope_id)
-                .cloned()
-                .collect::<Vec<_>>();
-
-            if filtered_scopes.is_empty() {
-                eprintln!(
-                    "warning: scope '{scope_id}' not active in current environment \
-                     — no bundles will fire for this scope"
-                );
-                let firing = firing_bundles(&config.bundle, &active, tag.as_deref());
-                (firing, active.clone())
-            } else {
-                let mut filtered_tags: BTreeSet<String> = filtered_scopes
-                    .iter()
-                    .flat_map(|s| s.tags.iter().cloned())
-                    .collect();
-                if !env.os.is_empty() {
-                    filtered_tags.insert(env.os.clone());
-                }
-                filtered_tags.extend(active.extra_tags.iter().cloned());
-
-                let filtered = ActiveScopes {
-                    scopes: filtered_scopes,
-                    tags: filtered_tags,
-                    extra_tags: active.extra_tags.clone(),
-                };
-                let firing = firing_bundles(&config.bundle, &filtered, tag.as_deref());
-                (firing, filtered)
-            }
-        } else {
-            let firing = firing_bundles(&config.bundle, &active, tag.as_deref());
-            (firing, active.clone())
-        }
-    };
+    let (firing, use_active) =
+        select_firing(&config, &active, &env, scope.as_deref(), tag.as_deref());
 
     // Merge + materialize the agent config directory for each installed adapter
     // and collect env vars. PATH-gating skips adapters whose binary is absent so
@@ -164,24 +118,7 @@ pub(crate) fn run_export_core(
                 }
                 // Auth sync: detect in-session login changes and refresh the
                 // stable cache. Non-fatal — export must not fail on auth errors.
-                let adapter_root = cache_dir_root.join(adapter.name());
-                match crate::materialize::manifest::CacheManifest::read(cache_path) {
-                    Ok(Some(mut manifest)) => {
-                        crate::auth::detect::sync_auth_on_export(
-                            cache_path,
-                            &adapter_root,
-                            &mut manifest,
-                            crate::auth::credentials::Backend::detect(),
-                        );
-                    }
-                    Ok(None) => {} // absent/corrupt: already logged inside CacheManifest::read
-                    Err(e) => {
-                        tracing::warn!(
-                            "auth sync skipped: could not read cache manifest at {}: {e}",
-                            cache_path.display()
-                        );
-                    }
-                }
+                sync_adapter_auth(cache_path, &cache_dir_root.join(adapter.name()));
             }
             Ok(None) => {
                 tracing::debug!(
@@ -207,38 +144,7 @@ pub(crate) fn run_export_core(
 
     let t_adapters = Instant::now();
 
-    if !any_adapter_eligible {
-        eprintln!(
-            "warning: no registered adapter binary found on PATH (expected: {})",
-            crate::adapter::registered_adapters()
-                .iter()
-                .map(|a| a.binary_name())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
-
-    // If every attempted adapter failed and none produced env vars, surface
-    // that loudly instead of exiting 0 with an empty environment — an `eval
-    // "$(llmenv export)"` wrapper only reacts to a non-zero exit, and silently
-    // sourcing nothing looks identical to "no bundles fire" (#543).
-    if vars.is_empty() && !failed_adapters.is_empty() {
-        anyhow::bail!("all adapter materializations failed — no env vars to export");
-    }
-
-    // #1346: unlike `llmenv regenerate`, a *partial* failure here stays exit 0.
-    // This path runs on every prompt through the shell hook, so failing the
-    // command would break the prompt for as long as the config is bad, and the
-    // env vars the other adapters produced are still correct and worth
-    // exporting. Name the failures in one summary line instead, so the reason
-    // is still legible after the per-adapter warnings scroll past.
-    if !failed_adapters.is_empty() {
-        eprintln!(
-            "warning: exported environment is missing output from: {}. Run `llmenv \
-             regenerate` to see the full error.",
-            failed_adapters.join(", ")
-        );
-    }
+    report_adapter_outcome(vars.is_empty(), &failed_adapters, any_adapter_eligible)?;
 
     // Introspection env: comma-separated, deterministic order. Scopes get
     // a `<kind>:<id>` prefix so the kind is visible without re-running
@@ -299,31 +205,12 @@ pub(crate) fn run_export_core(
     // Auto-prune: TTL-based memory retention pass after materialization (#270)
     crate::memory::auto_prune::auto_prune_if_enabled(&config, &config_dir, &use_active);
 
-    if explain {
-        let bundle_list = firing
-            .iter()
-            .map(|b| b.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        for (key, value) in vars {
-            validate_var_name(&key).with_context(|| format!("variable '{key}'"))?;
-            validate_var_value(&value)
-                .with_context(|| format!("variable '{key}': invalid value"))?;
-            if key.starts_with("LLMENV_") {
-                println!("# source: llmenv introspection");
-            } else {
-                println!("# source: adapter (bundles: {bundle_list})");
-            }
-            println!("export {}={}", key, crate::util::single_quote(&value));
-        }
-    } else {
-        for (key, value) in vars {
-            validate_var_name(&key).with_context(|| format!("variable '{key}'"))?;
-            validate_var_value(&value)
-                .with_context(|| format!("variable '{key}': invalid value"))?;
-            println!("export {}={}", key, crate::util::single_quote(&value));
-        }
-    }
+    let bundle_list = firing
+        .iter()
+        .map(|b| b.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    print_exports(&vars, explain.then_some(bundle_list.as_str()))?;
 
     crate::export_trace::emit_phase_trace(
         "export",
@@ -340,3 +227,164 @@ pub(crate) fn run_export_core(
 
     Ok(())
 }
+
+/// The bundles that fire, and the scopes that the materialize step uses. With `--scope`, only that
+/// scope's tags count. An unknown scope id fires nothing for it, and a warning says so.
+fn select_firing<'a>(
+    config: &'a Config,
+    active: &ActiveScopes,
+    env: &Env,
+    scope: Option<&str>,
+    tag: Option<&str>,
+) -> (Vec<&'a Bundle>, ActiveScopes) {
+    let Some(scope_id) = scope else {
+        let firing = firing_bundles(&config.bundle, active, tag);
+        return (firing, active.clone());
+    };
+    let filtered_scopes = active
+        .scopes
+        .iter()
+        .filter(|s| s.id == scope_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    if filtered_scopes.is_empty() {
+        eprintln!(
+            "warning: scope '{scope_id}' not active in current environment \
+             — no bundles will fire for this scope"
+        );
+        let firing = firing_bundles(&config.bundle, active, tag);
+        return (firing, active.clone());
+    }
+    let mut filtered_tags: BTreeSet<String> = filtered_scopes
+        .iter()
+        .flat_map(|s| s.tags.iter().cloned())
+        .collect();
+    if !env.os.is_empty() {
+        filtered_tags.insert(env.os.clone());
+    }
+    filtered_tags.extend(active.extra_tags.iter().cloned());
+
+    let filtered = ActiveScopes {
+        scopes: filtered_scopes,
+        tags: filtered_tags,
+        extra_tags: active.extra_tags.clone(),
+    };
+    let firing = firing_bundles(&config.bundle, &filtered, tag);
+    (firing, filtered)
+}
+
+/// Refresh the stable auth cache from a materialized folder's login state. Non-fatal: export must
+/// not fail on an auth error.
+fn sync_adapter_auth(cache_path: &Path, adapter_root: &Path) {
+    match crate::materialize::manifest::CacheManifest::read(cache_path) {
+        Ok(Some(mut manifest)) => crate::auth::detect::sync_auth_on_export(
+            cache_path,
+            adapter_root,
+            &mut manifest,
+            crate::auth::credentials::Backend::detect(),
+        ),
+        // No manifest yet, so there is no login state to sync. A corrupt manifest is logged
+        // inside CacheManifest::read.
+        Ok(None) => {}
+        Err(e) => tracing::warn!(
+            "auth sync skipped: could not read cache manifest at {}: {e}",
+            cache_path.display()
+        ),
+    }
+}
+
+/// The `export` lines for `vars`. Every variable is validated before any line is returned, so one
+/// bad value fails the whole export and a shell never sources part of it (#543). With `bundle_list`,
+/// each line first names its source, so an explained export shows which bundles fired.
+fn export_lines(
+    vars: &BTreeMap<String, String>,
+    bundle_list: Option<&str>,
+) -> anyhow::Result<Vec<String>> {
+    let mut lines = Vec::with_capacity(vars.len() * 2);
+    for (key, value) in vars {
+        validate_var_name(key).with_context(|| format!("variable '{key}'"))?;
+        validate_var_value(value).with_context(|| format!("variable '{key}': invalid value"))?;
+        if let Some(bundle_list) = bundle_list {
+            if key.starts_with("LLMENV_") {
+                lines.push("# source: llmenv introspection".to_string());
+            } else {
+                lines.push(format!("# source: adapter (bundles: {bundle_list})"));
+            }
+        }
+        lines.push(format!(
+            "export {}={}",
+            key,
+            crate::util::single_quote(value)
+        ));
+    }
+    Ok(lines)
+}
+
+/// Print the `export` lines for `vars`. Nothing prints unless every variable is valid.
+fn print_exports(vars: &BTreeMap<String, String>, bundle_list: Option<&str>) -> anyhow::Result<()> {
+    for line in export_lines(vars, bundle_list)? {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// Throttled pull: fetch and pull the config repository once the sync interval has passed. It is
+/// skipped when remote sync is off, for example while 1Password is locked. A failed pull is a
+/// notice for the agent, and export still runs on the config it has.
+fn pull_if_due(config: &Config, config_dir: &Path) {
+    if !config.cache.remote_sync {
+        return;
+    }
+    let interval_secs = config.cache.sync_interval_minutes * 60;
+    let state_dir = match crate::paths::state_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the throttled pull is skipped, because the state folder is unknown \
+                 ({e:#}). Fix: check $HOME and LLMENV_STATE_DIR."
+            ));
+            return;
+        }
+    };
+    let interval = std::time::Duration::from_secs(interval_secs);
+    if let Err(e) = crate::sync::maybe_pull(config_dir, &state_dir, interval) {
+        crate::agent_notice::record_logged(format!(
+            "llmenv: the throttled pull of the config repository failed, so this export uses the \
+             config it has ({e:#}). Fix: check the remote and the network, then run `llmenv sync`."
+        ));
+    }
+}
+
+/// Report the adapter outcome. A missing adapter binary is a warning. Every adapter failing with no
+/// env vars is an error, so `eval` does not source nothing and exit 0 (#543). A partial failure
+/// stays exit 0, because this runs on every prompt through the shell hook (#1346).
+fn report_adapter_outcome(
+    no_vars: bool,
+    failed: &[&str],
+    any_eligible: bool,
+) -> anyhow::Result<()> {
+    if !any_eligible {
+        eprintln!(
+            "warning: no registered adapter binary found on PATH (expected: {})",
+            crate::adapter::registered_adapters()
+                .iter()
+                .map(|a| a.binary_name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    if no_vars && !failed.is_empty() {
+        anyhow::bail!("all adapter materializations failed — no env vars to export");
+    }
+    if !failed.is_empty() {
+        eprintln!(
+            "warning: exported environment is missing output from: {}. Run `llmenv \
+             regenerate` to see the full error.",
+            failed.join(", ")
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests;
