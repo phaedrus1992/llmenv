@@ -42,3 +42,37 @@ pub(in crate::hook_run) fn load_stats(
         SessionStats::default()
     })
 }
+
+/// Load the stats log before the caller rewrites it. A bad log is moved to `<log>.corrupt` first,
+/// so its bytes survive the rewrite (#3349).
+///
+/// Returns `None` when the move fails. The caller must then skip the rewrite, or the bytes are lost.
+pub(in crate::hook_run) fn load_stats_for_rewrite(
+    state_dir: &std::path::Path,
+    session_id: &str,
+) -> Option<SessionStats> {
+    let problem = match read_stats(state_dir, session_id) {
+        Ok(stats) => return Some(stats),
+        Err(problem) => problem,
+    };
+    let path = stats_path(state_dir, session_id);
+    let mut kept_name = path.as_os_str().to_owned();
+    kept_name.push(".corrupt");
+    let kept = std::path::PathBuf::from(kept_name);
+    match std::fs::rename(&path, &kept) {
+        Ok(()) => {
+            crate::agent_notice::record_logged(format!(
+                "llmenv: {problem} The bad log was moved to {} and a new log starts.",
+                kept.display()
+            ));
+            Some(SessionStats::default())
+        }
+        Err(e) => {
+            crate::agent_notice::record_logged(format!(
+                "llmenv: {problem} The bad log could not be moved to {} ({e}), so this call did not rewrite it. Fix: remove the bad log, or the entry at that path.",
+                kept.display()
+            ));
+            None
+        }
+    }
+}

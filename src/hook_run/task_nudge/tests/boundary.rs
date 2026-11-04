@@ -35,6 +35,18 @@ fn a_push_with_a_stale_wip_task_and_a_queue_is_reminded_once() {
 }
 
 #[test]
+fn a_monitor_started_push_gets_the_boundary_reminder() {
+    let dir = TempDir::new().unwrap();
+    wip_with_queue(dir.path());
+    let payload = serde_json::json!({
+        "tool_name": "Monitor",
+        "tool_input": { "command": "git push origin HEAD" },
+    });
+    let text = handle_post_tool_use(&TaskTracker::default(), &payload, Some("s1"), dir.path());
+    assert!(text.contains("llmenv task done step-one"), "{text}");
+}
+
+#[test]
 fn a_pull_request_step_is_reminded_apart_from_a_push() {
     let dir = TempDir::new().unwrap();
     wip_with_queue(dir.path());

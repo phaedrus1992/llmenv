@@ -12,6 +12,7 @@ use crate::config::CdGuard;
 use crate::hook_run::shell_split::{
     NestingTooDeep, ends_with_substitution, program_words, shell_segments,
 };
+use crate::hook_run::shell_tool::is_shell_tool;
 
 const ADVISORY: &str = "note: this command ends with `cd`, so the next Bash call starts in \
 that directory in the main agent, and a subagent can start elsewhere. Run the commands that need \
@@ -24,9 +25,13 @@ pub fn handle_pre_tool_use(stdin_payload: &serde_json::Value, cfg: &CdGuard) -> 
     if !cfg.enabled {
         return String::new();
     }
-    let Some("Bash") = stdin_payload.get("tool_name").and_then(|v| v.as_str()) else {
+    let is_shell = stdin_payload
+        .get("tool_name")
+        .and_then(|v| v.as_str())
+        .is_some_and(is_shell_tool);
+    if !is_shell {
         return String::new();
-    };
+    }
     let Some(command) = stdin_payload
         .get("tool_input")
         .and_then(|v| v.get("command"))
@@ -277,6 +282,17 @@ mod tests {
     // practice (Claude Code's schema guarantees it), but if the harness's
     // payload shape ever drifts, cd_guard would otherwise stop firing with no
     // trace in the logs.
+    // #3354: Claude Code sends a Monitor-started command with tool_name "Monitor".
+    #[test]
+    fn a_monitor_started_cd_gets_the_advisory() {
+        let payload = serde_json::json!({
+            "tool_name": "Monitor",
+            "tool_input": { "command": "cd /tmp" },
+        });
+        let text = handle_pre_tool_use(&payload, &CdGuard { enabled: true });
+        assert_eq!(text, ADVISORY);
+    }
+
     #[test]
     fn handle_pre_tool_use_records_a_notice_when_bash_command_missing() {
         let payload = serde_json::json!({ "tool_name": "Bash", "tool_input": {} });

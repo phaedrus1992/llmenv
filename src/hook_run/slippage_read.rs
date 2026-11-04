@@ -9,7 +9,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::hook_run::slippage::{load_stats, path_key, save_stats};
+use crate::hook_run::slippage::{load_stats_for_rewrite, path_key, save_stats};
 
 /// Record the file a Bash `PostToolUse` read, if the command is one plain single-file view.
 ///
@@ -42,7 +42,9 @@ pub(super) fn record_bash_read(state_dir: &Path, session_id: &str, payload: &Val
 }
 
 fn record_path(state_dir: &Path, session_id: &str, path: &Path) {
-    let mut stats = load_stats(state_dir, session_id);
+    let Some(mut stats) = load_stats_for_rewrite(state_dir, session_id) else {
+        return;
+    };
     stats.paths.insert(path_key(&path.to_string_lossy()));
     save_stats(state_dir, session_id, &stats);
 }
@@ -98,6 +100,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+    use crate::hook_run::slippage::load_stats;
 
     proptest! {
         #[test]
