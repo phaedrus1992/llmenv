@@ -88,7 +88,7 @@ walkdir = { workspace = true }
 sha2 = { workspace = true }
 hex = "=0.4.3"
 humantime = { workspace = true }
-jiff = { version = "=0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
+jiff = { version = "=0.2.39", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 anstyle = { workspace = true }
 globset = { workspace = true }
 schemars = "=1.2.3"
