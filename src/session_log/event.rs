@@ -91,7 +91,9 @@ impl SessionLogEvent {
     /// Render to a single JSONL line (no trailing newline).
     #[must_use]
     pub(crate) fn to_jsonl(&self) -> String {
-        // Serialize is infallible for this shape; fall back to a minimal line.
+        // Serialize cannot fail for this shape: every field is a string, an integer, an enum, or
+        // a `serde_json::Value`. The round-trip property over arbitrary values proves it (#3390).
+        // The fallback stays so a future field cannot panic or drop the line.
         serde_json::to_string(self)
             .inspect_err(|e| {
                 tracing::error!(
@@ -204,33 +206,65 @@ mod tests {
         prop_oneof![Just(EventScope::AgentSession), Just(EventScope::Process)]
     }
 
+    /// Any JSON value without a float: `serde_json::Value` has only string keys, so it always
+    /// serializes. A float is left out because serde_json can read a long float back one ulp off,
+    /// which is not a lost line.
+    fn arb_json() -> impl Strategy<Value = serde_json::Value> {
+        let leaf = prop_oneof![
+            Just(serde_json::Value::Null),
+            any::<bool>().prop_map(serde_json::Value::from),
+            any::<i64>().prop_map(serde_json::Value::from),
+            ".{0,12}".prop_map(serde_json::Value::from),
+        ];
+        leaf.prop_recursive(3, 24, 4, |inner| {
+            prop_oneof![
+                prop::collection::vec(inner.clone(), 0..4).prop_map(serde_json::Value::from),
+                prop::collection::btree_map(".{0,8}", inner, 0..4)
+                    .prop_map(|m| serde_json::Value::Object(m.into_iter().collect())),
+            ]
+        })
+    }
+
     fn arb_event() -> impl Strategy<Value = SessionLogEvent> {
         (
-            arb_event_kind(),
-            arb_event_scope(),
-            "[a-z]{1,10}",
-            prop::option::of("[a-zA-Z]{1,16}"),
-            prop::option::of(0u64..1_000_000),
-            prop::option::of("[A-Z]{3,5}"),
-            // `.` under regex-syntax matches any Unicode scalar value (incl.
-            // multi-byte UTF-8) except newline, so this exercises char
-            // boundaries beyond plain ASCII.
-            ".{0,40}",
+            (
+                ".{0,30}",
+                arb_json(),
+                // JSON has no `Some(null)`, so it reads back as `None`. Producers never write it.
+                prop::option::of(arb_json().prop_filter("not null", |v| !v.is_null())),
+                arb_event_kind(),
+                arb_event_scope(),
+                "[a-z]{1,10}",
+                prop::option::of("[a-zA-Z]{1,16}"),
+            ),
+            (
+                prop::option::of(0u64..1_000_000),
+                prop::option::of("[A-Z]{3,5}"),
+                // `.` under regex-syntax matches any Unicode scalar value (incl.
+                // multi-byte UTF-8) except newline, so this exercises char
+                // boundaries beyond plain ASCII.
+                ".{0,40}",
+            ),
         )
-            .prop_map(|(kind, scope, role, tool_name, tokens, level, content)| {
-                SessionLogEvent {
-                    ts: "2026-06-30T00:00:00Z".into(),
-                    kind,
-                    scope,
-                    role,
-                    tool_name,
-                    tokens,
-                    level,
-                    content,
-                    fields: serde_json::json!({"k": "v"}),
-                    trace_fields: None,
-                }
-            })
+            .prop_map(
+                |(
+                    (ts, fields, trace_fields, kind, scope, role, tool_name),
+                    (tokens, level, content),
+                )| {
+                    SessionLogEvent {
+                        ts,
+                        kind,
+                        scope,
+                        role,
+                        tool_name,
+                        tokens,
+                        level,
+                        content,
+                        fields,
+                        trace_fields,
+                    }
+                },
+            )
     }
 
     proptest! {
@@ -255,6 +289,8 @@ mod tests {
         /// survive the round-trip silently corrupts a transcript record.
         #[test]
         fn session_log_event_roundtrips_through_jsonl(ev in arb_event()) {
+            // The fallback line has only `ts` and `kind`, so a round trip that matches proves the
+            // fallback was not taken (#3390).
             let json = ev.to_jsonl();
             let back: SessionLogEvent = serde_json::from_str(&json).unwrap();
             prop_assert_eq!(ev, back);
