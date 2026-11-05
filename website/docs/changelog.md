@@ -35,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Extend `LLMENV_TRACE_TIMING` with `[LLMENV_SPAWN]` lines for child processes, `[LLMENV_LEDGER]` lines for recall ledger locking, `[LLMENV_MATERIALIZE]` file counts per adapter, per-widget statusline timing, session-start sub-phases, and one `llmenv-trace` marker each for `export` and `regenerate`. Markers carry `"v": 1`. Set `LLMENV_TRACE_FILE` to append every trace line as JSON Lines. See [Trace telemetry](https://phaedrus1992.github.io/llmenv/docs/trace). [#3009, #3010, #3011, #3012, #3013, #3015, #3016, #3017, #3019, #3020]
 - Emit a `[LLMENV_DETACHED]` trace line when each detached job (consolidation, ICM store, session-log record, CBM index) exits. The line carries job kind, wall time, CPU time (macOS), MCP call count, and exit status. See [Trace telemetry](https://phaedrus1992.github.io/llmenv/docs/trace#llmenvdetached). [#3014]
 - Add `on_failure: block` to a bundle hook handler, so a guard hook that cannot run blocks the action in Claude Code 2.1.295 or later. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration). [feat:adapter] [#3101]
+- Add `llmenv prefill`, which reads a Claude Code transcript and shows the prompt prefill size, the largest tool schemas, the shape changes that miss the cache, and the cache breakpoints. See [`prefill`](https://phaedrus1992.github.io/llmenv/docs/commands#prefill). [feat:cli] [#3102]
 
 ### Changed
 

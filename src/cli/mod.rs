@@ -18,6 +18,7 @@ mod git_repo;
 mod guard;
 mod init_settings;
 mod login;
+mod prefill;
 use env_vars::reject_invalid_var_names;
 use login::{import_auth_from_file, run_login, run_login_capture};
 use sync_cmd::run_sync;
@@ -372,6 +373,8 @@ enum Command {
     /// Remove stale cache folders, old state/tmp entries, old session-log rotations, and old
     /// codebase-memory indexes
     Clean(clean::CleanArgs),
+    /// Show the real prompt prefill of a Claude Code session from its transcript
+    Prefill(prefill::PrefillArgs),
     /// Deprecated: use `llmenv clean`
     Prune(clean::CleanArgs),
     /// Manage the read-once file dedup cache (#318).
@@ -959,6 +962,7 @@ pub fn run() -> anyhow::Result<()> {
         }
         Some(Command::Task { command }) => run_task_command(*command, cli.color.to_mode())?,
         Some(Command::Clean(args)) => clean::run_clean(&args, use_color)?,
+        Some(Command::Prefill(args)) => prefill::run_prefill(&args)?,
         Some(Command::Prune(args)) => clean::run_prune_alias(&args, use_color)?,
         Some(Command::Validate) => {
             run_validate(use_color)?;
