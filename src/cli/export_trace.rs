@@ -230,7 +230,8 @@ pub(crate) fn run_export_core(
 }
 
 /// The bundles that fire, and the scopes that the materialize step uses. With `--scope`, only that
-/// scope's tags count, and a bundle that any active scope disables stays off (#3269). An unknown
+/// scope's tags and `enable_bundles` count, because `--scope` narrows the export. A bundle that any
+/// active scope disables stays off, because narrowing never turns a bundle on (#3269). An unknown
 /// scope id is ignored with a warning, so every matching bundle fires.
 fn select_firing<'a>(
     config: &'a Config,
@@ -243,11 +244,19 @@ fn select_firing<'a>(
         let firing = firing_bundles(&config.bundle, active, tag);
         return (firing, active.clone());
     };
+    // The narrowed scopes carry every active disable, so the firing set and the cache shape,
+    // which both read `disable_bundles`, agree.
+    let mut all_disabled: Vec<String> = marker_disabled_bundle_names(active).into_iter().collect();
+    all_disabled.sort();
     let filtered_scopes = active
         .scopes
         .iter()
         .filter(|s| s.id == scope_id)
-        .cloned()
+        .map(|s| {
+            let mut s = s.clone();
+            s.disable_bundles = all_disabled.clone();
+            s
+        })
         .collect::<Vec<_>>();
     if filtered_scopes.is_empty() {
         eprintln!(
@@ -271,9 +280,7 @@ fn select_firing<'a>(
         tags: filtered_tags,
         extra_tags: active.extra_tags.clone(),
     };
-    let disabled = marker_disabled_bundle_names(active);
-    let mut firing = firing_bundles(&config.bundle, &filtered, tag);
-    firing.retain(|b| !disabled.contains(&b.name));
+    let firing = firing_bundles(&config.bundle, &filtered, tag);
     (firing, filtered)
 }
 

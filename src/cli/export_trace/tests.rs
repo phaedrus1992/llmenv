@@ -70,12 +70,9 @@ mod scope_selection {
             id: format!("s{id}"),
             kind: "project",
             tags: pick(&TAGS, tags),
-            project_root: None,
             enable_bundles: pick(&BUNDLES, enable),
             disable_bundles: pick(&BUNDLES, disable),
-            name: None,
-            description: None,
-            unknown_fields: vec![],
+            ..ActiveScope::default()
         }
     }
 
@@ -129,6 +126,9 @@ mod scope_selection {
             if chosen < raw_scopes.len() {
                 prop_assert!(names(&narrowed).is_subset(&all));
                 prop_assert!(scopes.scopes.iter().all(|s| s.id == id));
+                let disabled = crate::cli::marker_disabled_bundle_names(&active);
+                prop_assert!(names(&narrowed).is_disjoint(&disabled.iter().cloned().collect()));
+                prop_assert_eq!(crate::cli::marker_disabled_bundle_names(&scopes), disabled);
             } else {
                 prop_assert_eq!(names(&narrowed), all);
                 prop_assert_eq!(scopes.scopes.len(), raw_scopes.len());
