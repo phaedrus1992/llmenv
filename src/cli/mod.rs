@@ -923,15 +923,17 @@ pub fn run() -> anyhow::Result<()> {
         Some(Command::SessionLogRecord { checkpoint }) => {
             use std::io::Read;
             let mut payload_json = String::new();
-            std::io::stdin().read_to_string(&mut payload_json)?;
+            // The checkpoint check starts the notice spool, so a stdin error reaches the agent.
             let checkpoint = checked_checkpoint(checkpoint)?;
+            std::io::stdin().read_to_string(&mut payload_json)?;
             crate::session_log::detached::run_record(&payload_json, checkpoint.as_deref())?;
         }
         Some(Command::IcmStore { checkpoint }) => {
             use std::io::Read;
             let mut payload_json = String::new();
-            std::io::stdin().read_to_string(&mut payload_json)?;
+            // The checkpoint check starts the notice spool, so a stdin error reaches the agent.
             let checkpoint = checked_checkpoint(checkpoint)?;
+            std::io::stdin().read_to_string(&mut payload_json)?;
             crate::hook_run::detached_store::run_icm_store(&payload_json, checkpoint.as_deref())?;
         }
         Some(Command::ConsolidationRun { checkpoint }) => {

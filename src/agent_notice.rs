@@ -81,7 +81,7 @@ static NOTICES: Mutex<NoticeList> = Mutex::new(NoticeList::new());
 /// Add a notice for the agent. See `NoticeList::record`. A detached child that spools also writes
 /// the notice to the spool, so the next hook run carries it (#3398).
 pub(crate) fn record(notice: impl Into<String>) {
-    let notice = notice.into();
+    let notice = clean(&notice.into());
     spool::write(&notice);
     NOTICES
         .lock()
@@ -111,9 +111,23 @@ pub(crate) fn current() -> Option<String> {
 pub(crate) fn current_with_children() -> Option<String> {
     match crate::paths::state_dir() {
         Ok(state_dir) => spool::collect(&state_dir),
-        Err(e) => tracing::debug!("detached job notices not read: no state folder: {e:#}"),
+        Err(e) => record_logged(format!(
+            "llmenv: the notices of detached jobs are not read, because the state folder cannot \
+             be found: {e:#}. Fix: set HOME, or set LLMENV_STATE_DIR to a valid absolute path."
+        )),
     }
     current()
+}
+
+/// Record the top-level error of a detached child, so the next hook run shows it (#3398). Does
+/// nothing in a process that does not spool, where `main` prints the error itself.
+pub fn record_detached_job_failure(error: &anyhow::Error) {
+    if spool::active() {
+        record_logged(format!(
+            "llmenv: a detached job failed before it could run: {error:#}. Fix: run `llmenv \
+             doctor` to check the state folder and the config."
+        ));
+    }
 }
 
 #[cfg(test)]

@@ -14,6 +14,7 @@
 
 pub mod adapter;
 pub(crate) mod agent_notice;
+pub use agent_notice::record_detached_job_failure;
 pub mod auth;
 pub(crate) mod cache_trace;
 pub mod cli;

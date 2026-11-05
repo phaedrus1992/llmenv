@@ -115,3 +115,28 @@ fn a_notice_from_a_real_index_child_reaches_the_next_hook() {
     let stdout = stop_hook_stdout(dir.path(), &config);
     assert!(stdout.contains("the code index job failed"), "{stdout}");
 }
+
+#[test]
+fn a_child_that_fails_before_it_runs_reaches_the_next_hook() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_config(dir.path());
+    // A checkpoint outside the checkpoint folder is refused before the job runs.
+    let outside = dir.path().join("elsewhere.json");
+    fs::write(&outside, "{}").unwrap();
+    let child = support::isolated_llmenv_cmd(dir.path())
+        .args(["cbm-index-run", "--checkpoint"])
+        .arg(&outside)
+        .timeout(Duration::from_secs(20))
+        .output()
+        .unwrap();
+    assert!(
+        !child.status.success(),
+        "the child must refuse the checkpoint"
+    );
+
+    let stdout = stop_hook_stdout(dir.path(), &config);
+    assert!(
+        stdout.contains("a detached job failed before it could run"),
+        "{stdout}"
+    );
+}
