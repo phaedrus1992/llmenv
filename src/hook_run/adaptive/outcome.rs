@@ -18,8 +18,8 @@ impl Outcome {
             return;
         };
         self.calls += 1;
-        match result {
-            Ok(reply) => self.records.extend(reply.into_records()),
+        match result.and_then(Reply::into_records) {
+            Ok(records) => self.records.extend(records),
             Err(e) => {
                 self.failed += 1;
                 tracing::error!("adaptive recall call failed, its records are skipped: {e:#}");

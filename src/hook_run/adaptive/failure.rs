@@ -59,7 +59,7 @@ async fn recall(
     let reply = client
         .call_tool(action.tool_name(), action.arguments("", ""))
         .await;
-    Some(reply.and_then(|body| Ok(Reply::Records(related_records(&body, wanted)?))))
+    Some(reply.and_then(|body| related_records(&body, wanted).map(Reply::Records)))
 }
 
 /// The memories of a JSON recall reply that share a token in `wanted`, matched on the summary
@@ -236,11 +236,18 @@ mod tests {
         let wanted = distinctive_tokens("ImportError request_ctx");
         for body in [
             "[errors-resolved] pin mcp for request_ctx",
-            "",
             "No memories found.",
+            "",
         ] {
-            let err = related_records(body, &wanted).unwrap_err().to_string();
-            assert!(err.contains("Fix: upgrade icm to 0.11.5 or later"), "{err}");
+            let Err(err) = related_records(body, &wanted) else {
+                unreachable!("a text reply must be an error: {body:?}");
+            };
+            let fix = if body.is_empty() {
+                "llmenv doctor"
+            } else {
+                "Fix: upgrade icm to 0.11.5 or later"
+            };
+            assert!(err.to_string().contains(fix), "{err}");
         }
     }
 

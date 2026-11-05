@@ -1,5 +1,5 @@
-//! The records of an ICM recall text, and the records that a recall across all projects
-//! leaves out.
+//! The records that a recall across all projects leaves out, and the text record splitter that
+//! test fixtures use.
 
 /// The topic of the scope-context record that SessionEnd stores. The topic names no project, so
 /// only a recall across all projects returns it.
@@ -9,18 +9,19 @@ pub(super) const SCOPE_CONTEXT_TOPIC: &str = "llmenv-scope-context";
 /// (#2911), or a scope-context record, which describes the tags and bundles of the project that
 /// stored it (#2938). A recall across all projects leaves such records out.
 pub(super) fn is_unscoped(record: &super::Recalled) -> bool {
-    record.topic().is_some_and(|topic| {
-        topic == SCOPE_CONTEXT_TOPIC || crate::hook_run::web_fetch::is_web_fetch_topic(topic)
-    })
+    record.topic == SCOPE_CONTEXT_TOPIC
+        || crate::hook_run::web_fetch::is_web_fetch_topic(&record.topic)
 }
 
 /// Longest topic, in characters, that a record's first line may carry.
+#[cfg(test)]
 pub(super) const MAX_TOPIC_CHARS: usize = 200;
 
 /// Whether `line` opens an ICM recall record: `[<topic>] <text>`.
 ///
 /// Phases: the line starts with `[`; the first `]` ends the topic; the topic has 1 to
 /// [`MAX_TOPIC_CHARS`] characters; a space follows the `]`.
+#[cfg(test)]
 pub(super) fn is_record_start(line: &str) -> bool {
     let Some(after_open) = line.strip_prefix('[') else {
         return false;
@@ -39,6 +40,7 @@ pub(super) fn is_record_start(line: &str) -> bool {
 /// line is one record, so a change to ICM's format degrades to per-action
 /// behavior and never loses text. Each record has trailing whitespace removed,
 /// and empty records are dropped.
+#[cfg(test)]
 pub(crate) fn split_recall_records(text: &str) -> Vec<String> {
     let mut records: Vec<Vec<&str>> = Vec::new();
     for line in text.lines() {
@@ -81,7 +83,7 @@ mod tests {
         #[test]
         fn only_scope_context_and_page_records_are_unscoped(records in arb_records()) {
             for (topic, body) in &records {
-                let record = super::super::Recalled { id: None, text: format!("[{topic}] {body}") };
+                let record = super::super::Recalled::from_text(&format!("[{topic}] {body}"));
                 let expected = topic == SCOPE_CONTEXT_TOPIC
                     || topic == "web-fetch"
                     || topic.starts_with("web-fetch-");

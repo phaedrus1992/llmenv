@@ -12,7 +12,7 @@ use super::mcp_health;
 use crate::agent_notice;
 #[cfg(test)]
 use crate::hook_run::HookEvent;
-use crate::hook_run::action::{Action, RecallQuery, Reply, split_recall_records};
+use crate::hook_run::action::{Action, RecallQuery, Reply};
 use crate::hook_run::mcp_client::McpHttpClient;
 use crate::hook_run::recall::{RECALL_BUDGET_BYTES, RecallBudget};
 use crate::hook_run::relevance::{self, TurnSignals};
@@ -137,10 +137,12 @@ async fn project_memories(client: &McpHttpClient, project: &str) -> (String, boo
         project: Some(project.to_string()),
         ..query(project, MAIN_LIMIT)
     };
-    match Action::RecallQuery(q).run(client, "", "").await {
-        Ok(reply) => {
-            let records: Vec<String> = split_recall_records(&reply.into_text())
+    let answered = Action::RecallQuery(q).run(client, "", "").await;
+    match answered.and_then(Reply::into_records) {
+        Ok(records) => {
+            let records: Vec<String> = records
                 .into_iter()
+                .map(|r| r.text)
                 .filter(|r| !r.starts_with(SCOPE_RECORD))
                 .collect();
             let (kept, cut) = drop_cut_items(&records.join("\n"));

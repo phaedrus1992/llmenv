@@ -46,10 +46,11 @@ pub(crate) async fn recall(
     let mut failed = Vec::new();
     for q in queries {
         let topic = q.topic.clone().unwrap_or_default();
-        match Action::RecallQuery(q).run(client, "", "").await {
+        let found = Action::RecallQuery(q).run(client, "", "").await;
+        match found.and_then(Reply::into_records) {
             Ok(found) => {
                 answered += 1;
-                records.extend(found.into_records());
+                records.extend(found);
             }
             Err(e) => {
                 tracing::error!("memory recall of the global topic {topic} failed: {e:#}");

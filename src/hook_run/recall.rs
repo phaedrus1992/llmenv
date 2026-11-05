@@ -90,7 +90,7 @@ impl RecallBudget {
     /// Adds text that did not come from a JSON recall, split into records with no id.
     #[cfg(test)]
     pub(super) fn add_text(&mut self, text: &str) {
-        self.add_records(Reply::Text(text.to_string()).into_records());
+        self.add_records(test_records(text));
     }
 
     /// The keys to add to the ledger's sent set: each kept record, and each record that matched
@@ -98,21 +98,19 @@ impl RecallBudget {
     pub(super) fn kept_keys(&self) -> Vec<String> {
         self.kept
             .iter()
-            .map(Recalled::key)
+            .map(|r| r.id.clone())
             .chain(self.migrated.iter().cloned())
             .collect()
     }
 
-    /// Whether the context already holds `record`. A record with an id also matches the text
-    /// hash that a ledger from before #3369 holds; such a match is noted, so the ledger learns
-    /// the id.
+    /// Whether the context already holds `record`. A record also matches the text hash that a
+    /// ledger from before #3369 holds; such a match is noted, so the ledger learns the id.
     fn already_sent(&mut self, record: &Recalled) -> bool {
-        let key = record.key();
-        if self.sent.contains(&key) {
+        if self.sent.contains(&record.id) {
             return true;
         }
-        if record.id.is_some() && self.sent.contains(&record_hash(&record.text)) {
-            self.migrated.push(key);
+        if self.sent.contains(&record_hash(&record.text)) {
+            self.migrated.push(record.id.clone());
             return true;
         }
         false
@@ -145,11 +143,11 @@ impl RecallBudget {
             self.record_bytes += bytes;
             if self.already_sent(&record) {
                 self.already_sent += 1;
-            } else if self.seen.contains(&record.key()) {
+            } else if self.seen.contains(&record.id) {
                 self.duplicates += 1;
             } else if self.kept_bytes + bytes + SEPARATOR_BYTES <= self.limit {
                 self.kept_bytes += bytes + SEPARATOR_BYTES;
-                self.seen.insert(record.key());
+                self.seen.insert(record.id.clone());
                 self.kept.push(record);
             } else {
                 self.omitted += 1;
@@ -163,7 +161,7 @@ impl RecallBudget {
         self.add_records(
             records
                 .into_iter()
-                .map(|text| Recalled { id: None, text })
+                .map(|text| Recalled::from_text(&text))
                 .collect(),
         );
     }
@@ -256,7 +254,14 @@ where
             budget.skipped_actions += 1;
             continue;
         }
-        let Ok(reply) = run(action).await.inspect_err(|e| {
+        let answered = run(action).await.and_then(|reply| {
+            if recall {
+                reply.into_records().map(Reply::Records)
+            } else {
+                Ok(reply)
+            }
+        });
+        let Ok(reply) = answered.inspect_err(|e| {
             tracing::error!("memory action failed, its text is missing: {e:#}");
             crate::agent_notice::record(format!(
                 "llmenv could not run a memory action, so its text is missing: {e:#}. \
@@ -265,17 +270,26 @@ where
         }) else {
             continue;
         };
-        if recall {
-            budget.add_records(reply.into_records());
-        } else {
-            let text = reply.into_text();
-            if !text.is_empty() && !passthrough.contains(&text) {
-                passthrough.push(text);
+        match reply {
+            Reply::Records(records) => budget.add_records(records),
+            Reply::Text(text) => {
+                if !text.is_empty() && !passthrough.contains(&text) {
+                    passthrough.push(text);
+                }
             }
         }
     }
     let text = budget.render(passthrough);
     (text, budget)
+}
+
+/// One record for each `[<topic>] ` record of `text`, with the text hash as the id.
+#[cfg(test)]
+fn test_records(text: &str) -> Vec<Recalled> {
+    crate::hook_run::action::split_recall_records(text)
+        .iter()
+        .map(|t| Recalled::from_text(t))
+        .collect()
 }
 
 #[cfg(test)]
@@ -351,15 +365,15 @@ mod tests {
         run_with_budget(actions, |_| {
             let text = texts[index.get()].clone();
             index.set(index.get() + 1);
-            async move { Ok(Reply::Text(text)) }
+            async move { Ok(Reply::Records(test_records(&text))) }
         })
         .await
     }
 
     fn with_id(id: &str, text: &str) -> Recalled {
         Recalled {
-            id: Some(id.to_string()),
-            text: text.to_string(),
+            id: id.to_string(),
+            ..Recalled::from_text(text)
         }
     }
 
@@ -480,11 +494,11 @@ mod tests {
         let (text, budget) = run_with_budget(actions, |_| {
             calls.set(calls.get() + 1);
             async {
-                Ok(Reply::Text(format!(
+                Ok(Reply::Records(test_records(&format!(
                     "[t] {}\n[t] {}",
                     "a".repeat(7_900),
                     "b".repeat(500)
-                )))
+                ))))
             }
         })
         .await;
@@ -631,12 +645,12 @@ mod tests {
                 if first {
                     Err(anyhow::anyhow!("boom"))
                 } else {
-                    Ok(Reply::Text("kept record".to_string()))
+                    Ok(Reply::Records(test_records("[t] kept record")))
                 }
             }
         })
         .await;
-        assert_eq!(text, "kept record");
+        assert_eq!(text, "[t] kept record");
     }
 
     /// Run one passthrough action per outcome. `None` is a failed action.
@@ -666,6 +680,38 @@ mod tests {
         ) {
             let kept: Vec<Option<String>> = outcomes.iter().filter(|o| o.is_some()).cloned().collect();
             prop_assert_eq!(run_outcomes(outcomes), run_outcomes(kept));
+        }
+    }
+
+    fn arb_record() -> impl Strategy<Value = Recalled> {
+        ("[a-d]", "[a-z]{1,40}").prop_map(|(id, body)| Recalled {
+            id,
+            ..Recalled::from_text(&format!("[t] {body}"))
+        })
+    }
+
+    proptest! {
+        /// Every record is kept, a duplicate, already sent, or omitted; no kept id was sent; and
+        /// once the kept keys go back to the ledger, the same records keep nothing.
+        #[test]
+        fn the_budget_accounts_for_every_record_and_learns_its_keys(
+            records in prop::collection::vec(arb_record(), 0..12),
+            sent_ids in prop::collection::btree_set("[a-d]", 0..3),
+            limit in 50usize..400,
+        ) {
+            let mut budget = RecallBudget::new(limit, sent_ids.clone());
+            let count = records.len();
+            budget.add_records(records);
+            prop_assert_eq!(
+                budget.kept().len() + budget.duplicates + budget.already_sent + budget.omitted,
+                count
+            );
+            prop_assert!(budget.kept.iter().all(|r| !sent_ids.contains(&r.id)));
+            let mut sent = sent_ids;
+            sent.extend(budget.kept_keys());
+            let mut next = RecallBudget::new(limit, sent);
+            next.add_records(budget.kept.to_vec());
+            prop_assert!(next.kept().is_empty());
         }
     }
 

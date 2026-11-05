@@ -54,7 +54,8 @@ pub(super) async fn waves(
     let topics: Vec<String> = outcome
         .records
         .iter()
-        .filter_map(|r| r.topic().map(str::to_string))
+        .filter(|r| !r.topic.is_empty())
+        .map(|r| r.topic.clone())
         .collect();
     let siblings = relevance::sibling_topics(&topics);
     let keyword = |i: usize| {
@@ -106,7 +107,7 @@ fn push_into(
 ) {
     let before = outcome.records.len();
     results.into_iter().for_each(|r| outcome.push(r));
-    budget.add_records(outcome.records.get(before..).unwrap_or_default().to_vec());
+    budget.add_records(outcome.records.iter().skip(before).cloned().collect());
 }
 
 #[cfg(test)]
@@ -332,6 +333,26 @@ mod tests {
         let (outcome, main_ok) = run(&server, Some("proj-b"), &topics(&["preferences"])).await;
         assert!(!main_ok, "{outcome:?}");
         assert!(outcome.text().contains("be terse"));
+    }
+
+    /// A text reply comes from an icm older than 0.11.5. It is a failed recall, not an empty one,
+    /// so the query is not marked finished (#3369).
+    #[tokio::test]
+    async fn a_text_reply_is_a_failed_recall() {
+        let server = MockServer::start().await;
+        mount(&server, "initialize", "").await;
+        let text = json!({"jsonrpc": "2.0", "id": 1,
+                          "result": {"content": [{"type": "text", "text": "[context-proj-b] fact"}]}});
+        Mock::given(method("POST"))
+            .and(body_string_contains(r#""project":"proj-b""#))
+            .respond_with(ResponseTemplate::new(200).set_body_json(text))
+            .mount(&server)
+            .await;
+
+        let (outcome, main_ok) = run(&server, Some("proj-b"), &topics(&[])).await;
+        assert!(!main_ok, "{outcome:?}");
+        assert_eq!((outcome.calls, outcome.failed), (1, 1));
+        assert!(outcome.records.is_empty());
     }
 
     /// Fanout records only fill the bytes that the main recalls leave, so a full budget skips

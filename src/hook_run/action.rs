@@ -12,6 +12,7 @@ mod records;
 mod reply;
 mod response;
 
+#[cfg(test)]
 pub(crate) use records::split_recall_records;
 #[cfg(test)]
 use records::{MAX_TOPIC_CHARS, is_record_start};
