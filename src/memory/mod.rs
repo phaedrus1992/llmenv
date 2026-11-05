@@ -25,16 +25,9 @@ fn connect() -> anyhow::Result<McpHttpClient> {
 
 /// The scope has no memory backend. Most sessions have none, so a stats poll treats it as
 /// absent and does not warn (#3062).
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
 pub(crate) struct NoBackendForScope(String);
-
-impl std::fmt::Display for NoBackendForScope {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for NoBackendForScope {}
 
 /// True when `err` says the scope has no memory backend, not that a backend failed.
 pub(crate) fn is_no_backend(err: &anyhow::Error) -> bool {
