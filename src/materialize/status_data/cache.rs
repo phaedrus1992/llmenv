@@ -120,8 +120,16 @@ mod tests {
                 proptest::collection::vec(0usize..2048, 0..4),
                 0..5,
             ),
+            normal in proptest::bool::ANY,
         ) {
             let dir = tempfile::tempdir().unwrap();
+            let hashing = if normal { HashingMode::Normal } else { HashingMode::Strict };
+            if normal {
+                // The current generation is never prunable, whatever it holds.
+                let current = dir.path().join(crate::materialize::cache::version_major());
+                std::fs::create_dir_all(&current).unwrap();
+                std::fs::write(current.join("kept"), vec![b'x'; 300]).unwrap();
+            }
             let mut total = 0u64;
             let mut paths = Vec::new();
             for (i, files) in folders.iter().enumerate() {
@@ -135,7 +143,7 @@ mod tests {
                 paths.push(stale);
             }
 
-            let result = collect_cache(dir.path(), HashingMode::Strict);
+            let result = collect_cache(dir.path(), hashing);
 
             proptest::prop_assert_eq!(
                 result,

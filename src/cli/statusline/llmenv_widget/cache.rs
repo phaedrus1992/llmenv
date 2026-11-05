@@ -75,7 +75,15 @@ mod tests {
                 Some(b) if partial => (format!("at least {}", humanize_bytes(b)), b.to_string()),
                 Some(b) => (humanize_bytes(b), b.to_string()),
             };
-            let want = format.replace("{prunable}", &human).replace("{prunable_raw}", &raw);
+            // The oracle maps each generated part, so it does not share the replace chain.
+            let want: String = parts
+                .iter()
+                .map(|part| match part.as_str() {
+                    "{prunable}" => human.as_str(),
+                    "{prunable_raw}" => raw.as_str(),
+                    literal => literal,
+                })
+                .collect();
             prop_assert_eq!(render_cache(&data(bytes, partial), Some(&cfg)), want);
             prop_assert_eq!(render_cache(&data(bytes, partial), None), human);
         }

@@ -538,3 +538,49 @@ proptest::proptest! {
         proptest::prop_assert_eq!(summary.unreadable, full.unreadable);
     }
 }
+
+// The production rule judges by mtime or change time, so a tree with old mtimes that was just
+// written (a restore) is never stale (#3195, #3280).
+#[cfg(unix)]
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(16))]
+    #[test]
+    fn the_production_rule_keeps_a_tree_with_old_mtimes_and_a_fresh_change_time(
+        ages in proptest::collection::vec(8u32..400, 1..5),
+    ) {
+        let state = tempfile::tempdir().unwrap();
+        let tmp = state.path().join("tmp");
+        fs::create_dir_all(&tmp).unwrap();
+        for (i, days) in ages.iter().enumerate() {
+            let entry = tmp.join(format!("e{i}"));
+            fs::create_dir_all(&entry).unwrap();
+            fs::write(entry.join("f"), b"x").unwrap();
+            age_tree(&entry, SystemTime::now() - DAY * *days);
+        }
+        let summary = stale_summary_in(&tmp, AgeRule::new(DAY * 7), &[], SystemTime::now()).unwrap();
+        proptest::prop_assert_eq!(summary.count, 0);
+        let old = stale_summary_in(&tmp, mtime_rule(DAY * 7), &[], SystemTime::now()).unwrap();
+        proptest::prop_assert_eq!(old.count, ages.len());
+    }
+}
+
+/// An unreadable entry in the bound scan also makes the shortcut read the in-use list (#3041).
+#[cfg(unix)]
+#[test]
+fn an_unreadable_entry_makes_the_shortcut_read_lsof() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let state = tempfile::tempdir().unwrap();
+    let locked = state.path().join("tmp").join("locked");
+    fs::create_dir_all(locked.join("inner")).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let calls = std::cell::Cell::new(0);
+    let summary = stale_summary_with(state.path(), mtime_rule(DAY), || {
+        calls.set(calls.get() + 1);
+        Ok(Vec::new())
+    });
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+    let summary = summary.unwrap();
+    assert_eq!(calls.get(), 1);
+    assert_eq!(summary.unreadable, 1);
+    assert_eq!(summary.count, 0);
+}
