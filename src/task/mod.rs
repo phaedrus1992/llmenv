@@ -16,8 +16,10 @@ mod slug;
 pub(crate) use slug::slugify;
 pub(crate) mod core_text;
 mod finish_hints;
+mod note;
 pub(crate) mod ownership;
 pub(crate) mod progress;
+pub(crate) use note::{note_resolved, note_task};
 pub(crate) mod project;
 pub(crate) mod relation;
 mod reminder_store;
@@ -480,6 +482,9 @@ pub(crate) enum SessionChoice<'a> {
     /// No `--session`: the project's only open session, else the one the
     /// caller owns ([`session::pick_open_session`], #2365).
     Resolve(&'a session::EngineIdentity),
+    /// An open session that the caller picked from its own strict read in the same command, so
+    /// the session files are not read again (#3474).
+    Checked(&'a str),
 }
 
 /// Create a new task in `open` state and persist it, tagged to a resolved
@@ -659,6 +664,7 @@ fn resolve_session_for_add(
             return Ok(id.to_string());
         }
         SessionChoice::Resolve(owner) => owner,
+        SessionChoice::Checked(id) => return Ok(id.to_string()),
     };
     let open = session::open_sessions_strict(state_dir, project)?;
     match session::pick_open_session(open, owner) {
@@ -694,7 +700,9 @@ fn resolve_session_for_add(
 /// ordering hint.
 pub(crate) fn start_task(state_dir: &Path, input: &str, force: bool) -> anyhow::Result<Task> {
     let task = with_store_lock(state_dir, || {
-        let slug = resolve_identifier(state_dir, input)?;
+        // One strict read feeds the name lookup, the blocker check, and the queue check (#3474).
+        let all_tasks = list_tasks_strict(state_dir)?;
+        let slug = resolve::resolve_in(state_dir, input, &all_tasks)?;
         let mut task = load_task(state_dir, &slug)?;
         if task.state == TaskState::Done {
             anyhow::bail!(
@@ -703,9 +711,11 @@ pub(crate) fn start_task(state_dir: &Path, input: &str, force: bool) -> anyhow::
             );
         }
         if !force && !task.blocked_on.is_empty() {
-            let all_tasks = read_tasks(state_dir, UnreadablePolicy::Fail)?;
-            let by_slug: HashMap<&str, &Task> =
-                all_tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
+            let by_slug: HashMap<&str, &Task> = all_tasks
+                .as_slice()
+                .iter()
+                .map(|t| (t.slug.as_str(), t))
+                .collect();
             let unmet: Vec<String> = task
                 .blocked_on
                 .iter()
@@ -730,7 +740,10 @@ pub(crate) fn start_task(state_dir: &Path, input: &str, force: bool) -> anyhow::
             && let Some(session_id) = &task.session
             && let Some(block) = relation::queue_block(
                 &task,
-                &session::try_tasks_in_session(state_dir, session_id)?,
+                &session::filter::tasks_in_sessions(
+                    all_tasks.as_slice(),
+                    &std::iter::once(session_id.clone()).collect(),
+                ),
             )
         {
             anyhow::bail!("{block}");
@@ -921,7 +934,9 @@ fn close_task(
     caller: Option<&ownership::Caller>,
 ) -> anyhow::Result<Completed> {
     let completed = with_store_lock(state_dir, || {
-        let slug = resolve_identifier(state_dir, input)?;
+        // One strict read feeds the name lookup and the sub-task check (#3471, #3474).
+        let all_tasks = list_tasks_strict(state_dir)?;
+        let slug = resolve::resolve_in(state_dir, input, &all_tasks)?;
         let mut task = load_task(state_dir, &slug)?;
         let prior = task.state;
         if prior == TaskState::Open && !force {
@@ -930,9 +945,6 @@ fn close_task(
                  the work, or pass --force if it is done."
             );
         }
-        // A strict read: a sub-task whose file cannot be read must not let its parent close
-        // (#3471).
-        let all_tasks = list_tasks_strict(state_dir)?;
         let undone = relation::undone_descendants(&slug, &all_tasks);
         if !force && !undone.is_empty() {
             anyhow::bail!("{}", relation::undone_children_message(&slug, &undone));
@@ -970,23 +982,6 @@ fn forced_close_text(prior: TaskState, caller: &ownership::Caller) -> String {
         "Closed by done --force from {prior} (by {}).",
         caller.describe()
     )
-}
-
-/// Append a timestamped progress note to a task.
-pub(crate) fn note_task(state_dir: &Path, input: &str, text: &str) -> anyhow::Result<Task> {
-    let task = with_store_lock(state_dir, || {
-        let slug = resolve_identifier(state_dir, input)?;
-        let mut task = load_task(state_dir, &slug)?;
-        task.notes.push(TaskNote {
-            at: now_rfc3339(),
-            text: text.to_string(),
-        });
-        task.updated_at = now_rfc3339();
-        save_task(state_dir, &task)?;
-        Ok(task)
-    })?;
-    touch_task_session(state_dir, &task);
-    Ok(task)
 }
 
 /// Mark a task `waiting` — blocked on something outside the agent's control

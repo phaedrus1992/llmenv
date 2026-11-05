@@ -41,7 +41,41 @@ fn resolve_identifier_for(
     // A strict read: an unreadable store or task file must error out here rather than be
     // misread as "no task found" (#1112, #3471). This is the resolution step every mutating
     // task command (and `TaskUpdate`'s hook redirect) runs through.
-    let tasks = list_tasks_strict(state_dir)?.into_vec();
+    resolve_with(
+        state_dir,
+        input,
+        owner,
+        list_tasks_strict(state_dir)?.as_slice(),
+    )
+}
+
+/// [`resolve_identifier`] over a strict read of the store that the caller already made, so one
+/// task command reads the store once (#3474).
+///
+/// # Errors
+/// The same errors as [`resolve_identifier`], except the task store read.
+pub(super) fn resolve_in(
+    state_dir: &Path,
+    input: &str,
+    tasks: &super::StrictTasks,
+) -> anyhow::Result<String> {
+    if !crate::paths::is_valid_short_name(input) {
+        anyhow::bail!("'{input}' is not a valid task identifier");
+    }
+    resolve_with(
+        state_dir,
+        input,
+        &EngineIdentity::from_env()?,
+        tasks.as_slice(),
+    )
+}
+
+fn resolve_with(
+    state_dir: &Path,
+    input: &str,
+    owner: &EngineIdentity,
+    tasks: &[super::Task],
+) -> anyhow::Result<String> {
     let preferred = preferred_sessions(state_dir, owner)
         .with_context(|| format!("listing sessions to resolve task '{input}'"))?;
     if !preferred.is_empty() {
