@@ -2,7 +2,8 @@ use std::fs::File;
 use std::time::{Duration, SystemTime};
 
 use super::cache_sweep::{sweep_cache, sweep_cache_root};
-use super::{GcOutput, sweep_state};
+use super::state_gate::state_may_have_stale_entries;
+use super::{Cutoff, GcOutput, sweep_cbm_indexes, sweep_state, sweep_state_tmp};
 use crate::config::Config;
 
 const DAY: Duration = Duration::from_secs(86_400);
@@ -124,7 +125,8 @@ fn the_state_sweep_removes_a_rotation_old_by_mtime_and_change_time() {
 }
 
 // #3374: the gate, the tmp sweep, and the index sweep judge one clock. With a later clock, a
-// tmp entry and an index written now are old to the gate and to each sweep, so both go.
+// tmp entry and an index written now are old to the gate and to each sweep, so both go. The
+// sweeps get an empty in-use list: a real lsof call can take a minute on a busy host.
 #[test]
 fn a_later_clock_is_one_verdict_for_the_gate_and_every_state_sweep() {
     let state = tempfile::tempdir().unwrap();
@@ -135,19 +137,26 @@ fn a_later_clock_is_one_verdict_for_the_gate_and_every_state_sweep() {
     std::fs::create_dir_all(&cbm).unwrap();
     let db = cbm.join("old-index.db");
     std::fs::write(&db, b"x").unwrap();
-    let later = SystemTime::now() + 30 * DAY;
+    let cutoff = Cutoff {
+        retention: DAY * 7,
+        now: SystemTime::now() + 30 * DAY,
+    };
 
-    let failures = sweep_state(state.path(), &Config::default(), DAY * 7, later, OUT);
+    assert!(
+        state_may_have_stale_entries(
+            state.path(),
+            cutoff,
+            false,
+            crate::materialize::cache::AgeSource::MtimeOrCtime,
+        ),
+        "the gate read the wall clock"
+    );
+    let failures = sweep_state_tmp(state.path(), cutoff, Ok(&[]), OUT)
+        + sweep_cbm_indexes(state.path(), &Config::default(), cutoff, Ok(&[]), OUT);
 
     assert_eq!(failures, 0);
-    assert!(
-        !entry.exists(),
-        "the gate or the tmp sweep read the wall clock"
-    );
-    assert!(
-        !db.exists(),
-        "the gate or the index sweep read the wall clock"
-    );
+    assert!(!entry.exists(), "the tmp sweep read the wall clock");
+    assert!(!db.exists(), "the index sweep read the wall clock");
 }
 
 #[test]
