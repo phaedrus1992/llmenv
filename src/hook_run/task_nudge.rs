@@ -37,6 +37,8 @@ use deny::{
 use notices::{needs_state, note_no_state, note_unlocked_skip};
 use state::{load, read_state, save, state_path};
 pub(crate) use stop::handle_stop;
+#[cfg(test)]
+pub(crate) use stop::handle_stop_read;
 use stop::question_reminder;
 
 /// Skills that start a multi-step workflow, when `workflow_skills` is not set.

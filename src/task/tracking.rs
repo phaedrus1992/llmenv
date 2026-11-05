@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use super::{Task, TaskState, list_tasks_strict, project, queue_order, session};
+use super::{Task, TaskState, project, queue_order, session};
 
 /// How well the current project's work is tracked right now (#2456).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +36,12 @@ pub(crate) enum Tracking {
 /// any of them counts. A session that another conversation owns does not (#3185). A read error is
 /// [`Tracking::Unknown`], so a hook never nudges on a guess.
 pub(crate) fn tracking(state_dir: &Path, caller: Option<&str>) -> Tracking {
+    tracking_in(&super::Stored::read(state_dir), caller)
+}
+
+/// [`tracking`] over a read of the stores that the caller already made, so one Stop run reads
+/// them once (#3472).
+pub(crate) fn tracking_in(stored: &super::Stored, caller: Option<&str>) -> Tracking {
     let project = match project::current_tag() {
         Ok(project) => project,
         Err(e) => {
@@ -45,10 +51,10 @@ pub(crate) fn tracking(state_dir: &Path, caller: Option<&str>) -> Tracking {
     };
     // A store that cannot be read is unknown, not empty: a hook never nudges or denies on a guess.
     let (sessions, tasks) = match (
-        session::open_sessions_strict(state_dir, &project),
-        list_tasks_strict(state_dir),
+        stored.open_sessions_visible_to(&project, None),
+        stored.tasks(),
     ) {
-        (Ok(sessions), Ok(tasks)) => (sessions, tasks.into_vec()),
+        (Ok(sessions), Ok(tasks)) => (sessions, tasks.as_slice()),
         (Err(e), _) | (_, Err(e)) => {
             tracing::error!("task store cannot be read, so tracking is unknown: {e:#}");
             return Tracking::Unknown(format!("{e:#}"));

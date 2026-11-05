@@ -18,7 +18,9 @@ pub(super) fn resolve_stop_reminder(
     if stop_dedupe::is_hook_continuation(stop_payload) {
         return String::new();
     }
-    let mut reminder = crate::task::stop_hook_reminder(state_dir, claude_session_id);
+    // One read of the tasks and the sessions feeds the reminder and the task tracking (#3472).
+    let stored = crate::task::Stored::read(state_dir);
+    let mut reminder = crate::task::stop_hook_reminder(&stored, claude_session_id);
     // #2456: a turn that ends with a question to the user parks the task that waits for it.
     if let Some(tracker) = config
         .features
@@ -30,6 +32,7 @@ pub(super) fn resolve_stop_reminder(
             stop_payload,
             claude_session_id,
             state_dir,
+            &stored,
         );
         if !waiting.is_empty() {
             if !reminder.is_empty() {

@@ -31,7 +31,7 @@ fn a_question_does_not_name_a_task_of_another_conversation() {
     let dir = TempDir::new().unwrap();
     wip_task_owned_by(dir.path(), "other");
     let stop = serde_json::json!({ "last_assistant_message": "Which one do you want?" });
-    let text = handle_stop(&TaskTracker::default(), &stop, Some("s1"), dir.path());
+    let text = handle_stop_read(&TaskTracker::default(), &stop, Some("s1"), dir.path());
     assert_eq!(text, "");
 }
 
@@ -40,7 +40,7 @@ fn a_question_names_a_task_of_this_conversation() {
     let dir = TempDir::new().unwrap();
     let slug = wip_task_owned_by(dir.path(), "s1");
     let stop = serde_json::json!({ "last_assistant_message": "Which one do you want?" });
-    let text = handle_stop(&TaskTracker::default(), &stop, Some("s1"), dir.path());
+    let text = handle_stop_read(&TaskTracker::default(), &stop, Some("s1"), dir.path());
     assert!(text.contains(&format!("llmenv task wait {slug}")), "{text}");
 }
 
@@ -84,9 +84,9 @@ fn an_ownerless_task_is_named_once_per_conversation() {
     let tracker = TaskTracker::default();
     let wait = format!("llmenv task wait {slug}");
 
-    let first = handle_stop(&tracker, &stop, Some("s1"), dir.path());
+    let first = handle_stop_read(&tracker, &stop, Some("s1"), dir.path());
     assert!(first.contains(&wait), "{first}");
-    let second = handle_stop(&tracker, &stop, Some("s1"), dir.path());
+    let second = handle_stop_read(&tracker, &stop, Some("s1"), dir.path());
     assert!(!second.contains(&wait), "{second}");
     let third = handle_post_tool_use(&tracker, &ask, Some("s1"), dir.path());
     assert!(!third.contains(&wait), "{third}");
@@ -106,7 +106,7 @@ fn an_owned_task_is_named_at_each_question() {
     let stop = serde_json::json!({ "last_assistant_message": "Which one do you want?" });
     let wait = format!("llmenv task wait {slug}");
     for _ in 0..2 {
-        let text = handle_stop(&TaskTracker::default(), &stop, Some("s1"), dir.path());
+        let text = handle_stop_read(&TaskTracker::default(), &stop, Some("s1"), dir.path());
         assert!(text.contains(&wait), "{text}");
     }
 }
@@ -149,7 +149,7 @@ proptest::proptest! {
                 handle_post_tool_use(&tracker, &ask, Some(caller), dir.path())
             } else {
                 let stop = serde_json::json!({ "last_assistant_message": "Which one?" });
-                handle_stop(&tracker, &stop, Some(caller), dir.path())
+                handle_stop_read(&tracker, &stop, Some(caller), dir.path())
             };
             let first = !heard.contains_key(caller);
             proptest::prop_assert_eq!(text.contains(&wait), first, "{} {}", caller, text);

@@ -8,7 +8,7 @@ use super::session::{self, Session, filter};
 
 /// The task store and the session files of one hook run, each read once, strictly, and shared by
 /// its reminders (#3466, #3468).
-pub(super) struct Stored {
+pub(crate) struct Stored {
     tasks: anyhow::Result<StrictTasks>,
     sessions: anyhow::Result<Vec<Session>>,
 }
@@ -22,7 +22,7 @@ fn shared<T>(read: &anyhow::Result<T>) -> anyhow::Result<&T> {
 
 impl Stored {
     /// Read the task store and the session files of `state_dir`.
-    pub(super) fn read(state_dir: &Path) -> Self {
+    pub(crate) fn read(state_dir: &Path) -> Self {
         Self {
             tasks: super::list_tasks_strict(state_dir),
             sessions: session::list_sessions_strict(state_dir),

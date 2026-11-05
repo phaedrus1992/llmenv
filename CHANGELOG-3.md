@@ -55,6 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Read each parent task once when `llmenv task reopen` checks several sub-tasks of one parent. An unreadable parent task file is named in the error, and no task changes. [perf:task] [#3463]
 - Read the task store once per Stop and SessionStart hook run and once per status line render, not once for each reminder and each session. [perf:task] [#3466]
 - Read the session files once per Stop and SessionStart hook run, not once for each reminder. [perf:task] [#3468]
+- Share that read with the task tracking check of the Stop hook, which read both stores again. [perf:hook] [#3472]
 
 ### Fixed
 
