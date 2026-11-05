@@ -97,10 +97,30 @@ fn the_state_sweep_keeps_a_rotation_restored_with_an_old_mtime() {
         .set_modified(SystemTime::now() - 30 * DAY)
         .unwrap();
 
-    sweep_state(state.path(), &Config::default(), DAY * 7, OUT);
+    sweep_state(
+        state.path(),
+        &Config::default(),
+        DAY * 7,
+        SystemTime::now(),
+        OUT,
+    );
 
     assert!(rotated.exists(), "a restored rotation was removed");
     assert!(active.exists(), "the active log was removed");
+}
+
+// #3335: a test cannot set a change time on a real file. A later clock makes a rotation whose
+// mtime and change time are both new count as old, so the removal runs through the same sweep.
+#[test]
+fn the_state_sweep_removes_a_rotation_old_by_mtime_and_change_time() {
+    let state = tempfile::tempdir().unwrap();
+    let rotated = state.path().join("session-log.jsonl.1");
+    std::fs::write(&rotated, b"{}").unwrap();
+    let later = SystemTime::now() + 30 * DAY;
+
+    sweep_state(state.path(), &Config::default(), DAY * 7, later, OUT);
+
+    assert!(!rotated.exists(), "an old rotation was kept");
 }
 
 #[test]
@@ -119,7 +139,13 @@ fn a_dry_run_of_the_state_sweep_keeps_an_old_rotation() {
         dry_run: true,
         ..OUT
     };
-    sweep_state(state.path(), &Config::default(), DAY * 7, preview);
+    sweep_state(
+        state.path(),
+        &Config::default(),
+        DAY * 7,
+        SystemTime::now(),
+        preview,
+    );
 
     assert!(rotated.exists(), "a dry run removed an old rotation");
 }
@@ -127,7 +153,13 @@ fn a_dry_run_of_the_state_sweep_keeps_an_old_rotation() {
 #[test]
 fn the_state_sweep_with_no_tmp_folder_and_no_log_changes_nothing() {
     let state = tempfile::tempdir().unwrap();
-    sweep_state(state.path(), &Config::default(), DAY * 7, OUT);
+    sweep_state(
+        state.path(),
+        &Config::default(),
+        DAY * 7,
+        SystemTime::now(),
+        OUT,
+    );
     assert_eq!(std::fs::read_dir(state.path()).unwrap().count(), 0);
 }
 

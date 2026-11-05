@@ -3,7 +3,7 @@
 //! #2917).
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crate::config::Config;
 use crate::materialize::cache::GcReport;
@@ -87,7 +87,9 @@ pub(in crate::cli) fn run(cache_dir: &Path, config: &Config, out: GcOutput<'_>) 
     };
     let mut failures = sweep_cache_root(cache_dir, config, retention, out);
     match paths::state_dir() {
-        Ok(state_dir) => failures += sweep_state(&state_dir, config, retention, out),
+        Ok(state_dir) => {
+            failures += sweep_state(&state_dir, config, retention, SystemTime::now(), out);
+        }
         Err(e) => {
             eprintln!(
                 "{} GC of state/tmp, session-log rotations, and codebase-memory indexes skipped: \
@@ -105,7 +107,15 @@ pub(in crate::cli) fn run(cache_dir: &Path, config: &Config, out: GcOutput<'_>) 
 ///
 /// The in-use list comes from one lsof call, which the two sweeps share. lsof can take up to a
 /// minute on a hung mount, so the call runs only when a sweep may remove something (#3039).
-fn sweep_state(state_dir: &Path, config: &Config, retention: Duration, out: GcOutput<'_>) -> usize {
+/// `now` judges the session-log rotations. Production passes the clock, and a test passes a later
+/// time, so a rotation whose mtime and change time are both new counts as old (#3335).
+fn sweep_state(
+    state_dir: &Path,
+    config: &Config,
+    retention: Duration,
+    now: SystemTime,
+    out: GcOutput<'_>,
+) -> usize {
     // With nothing old enough to remove, the tmp and index sweeps are skipped. A sweep that ran
     // now could see an entry that crossed the cutoff after this check, and remove it without
     // the in-use list.
@@ -122,12 +132,12 @@ fn sweep_state(state_dir: &Path, config: &Config, retention: Duration, out: GcOu
             crate::materialize::cache::AgeSource::MtimeOrCtime,
         )
     {
-        return prune_session_log(state_dir, config, retention, out);
+        return prune_session_log(state_dir, config, retention, now, out);
     }
     let in_use = crate::materialize::open_files::open_paths().map_err(|e| format!("{e:#}"));
     let in_use = in_use.as_ref().map(Vec::as_slice).map_err(String::as_str);
     sweep_state_tmp(state_dir, retention, in_use, out)
-        + prune_session_log(state_dir, config, retention, out)
+        + prune_session_log(state_dir, config, retention, now, out)
         + sweep_cbm_indexes(state_dir, config, retention, in_use, out)
 }
 

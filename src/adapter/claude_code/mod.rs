@@ -16,9 +16,11 @@ use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
 use crate::merge::MergedManifest;
 use crate::plugins::resolve::ResolvedMarketplace;
 use crate::util::{dedup, merge_json};
+use hook_purge::purge_stale_owned_hooks;
 use hooks_sidecar::read_hooks_sidecar;
 use lsp_plugin::write_lsp_plugin;
 
+mod hook_purge;
 mod hooks_sidecar;
 pub(crate) mod retired;
 mod seed;
@@ -1301,7 +1303,10 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         .and_then(|f| f.slippage.as_ref())
         .is_some_and(|s| s.enabled && (s.answer_before_act || s.explain_before_act))
     {
-        pre_tool_use_matchers.push("^Bash$".to_string());
+        pre_tool_use_matchers.push(format!(
+            "^({})$",
+            crate::hook_run::shell_tool::SHELL_TOOLS.join("|")
+        ));
     }
 
     // #317: the write guard needs to see `Write`. `Read` already reaches
@@ -1500,18 +1505,12 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     {
         let post = format!("{} post_tool_use", hook_run_command());
         let pre = format!("{} pre_tool_use", hook_run_command());
-        let post_tools = unrouted_tools(
-            hooks_by_event.get("PostToolUse"),
-            &post,
-            &[
-                "Skill",
-                "Bash",
-                "Edit",
-                "Write",
-                "MultiEdit",
-                "AskUserQuestion",
-            ],
-        );
+        // The shell tools come from one list, so a Monitor command gets the same reminder as Bash.
+        let post_candidates: Vec<&str> = ["Skill", "Edit", "Write", "MultiEdit", "AskUserQuestion"]
+            .into_iter()
+            .chain(crate::hook_run::shell_tool::SHELL_TOOLS)
+            .collect();
+        let post_tools = unrouted_tools(hooks_by_event.get("PostToolUse"), &post, &post_candidates);
         if tracker.nudges && !post_tools.is_empty() {
             hooks_by_event
                 .entry("PostToolUse".to_string())
@@ -1521,7 +1520,11 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
                     "hooks": [{ "type": "command", "command": post }],
                 }));
         }
-        let pre_tools = unrouted_tools(hooks_by_event.get("PreToolUse"), &pre, &["Bash"]);
+        let pre_tools = unrouted_tools(
+            hooks_by_event.get("PreToolUse"),
+            &pre,
+            &crate::hook_run::shell_tool::SHELL_TOOLS,
+        );
         if tracker.enforce_commit && !pre_tools.is_empty() {
             hooks_by_event
                 .entry("PreToolUse".to_string())
@@ -2172,48 +2175,6 @@ fn normalized_hook(entry: &serde_json::Value) -> serde_json::Value {
     let mut clone = entry.clone();
     super::strip_json_nulls(&mut clone);
     clone
-}
-
-/// Drop from the on-disk `existing` hooks doc any entry that llmenv rendered in
-/// the previous round (`prev_owned`) but is not rendering this round (`fresh`).
-///
-/// This is the owned-vs-foreign distinction (#991): an entry present in
-/// `prev_owned` was llmenv's, so if it's gone from `fresh` the user removed it
-/// from config and it must be purged rather than preserved by the union. A hook
-/// never in `prev_owned` is foreign (a plugin self-registered it) and is left
-/// for the union to keep. No-op when there's no sidecar (`prev_owned` is None).
-fn purge_stale_owned_hooks(
-    existing: &mut serde_json::Value,
-    prev_owned: Option<&serde_json::Value>,
-    fresh: &serde_json::Value,
-) {
-    let (Some(prev), Some(existing_obj)) = (
-        prev_owned.and_then(|v| v.as_object()),
-        existing.as_object_mut(),
-    ) else {
-        return;
-    };
-    for (event, prev_entries) in prev {
-        let Some(prev_arr) = prev_entries.as_array() else {
-            continue;
-        };
-        let fresh_norm: Vec<serde_json::Value> = fresh
-            .get(event)
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().map(normalized_hook).collect())
-            .unwrap_or_default();
-        let stale: Vec<serde_json::Value> = prev_arr
-            .iter()
-            .map(normalized_hook)
-            .filter(|e| !fresh_norm.contains(e))
-            .collect();
-        if stale.is_empty() {
-            continue;
-        }
-        if let Some(arr) = existing_obj.get_mut(event).and_then(|v| v.as_array_mut()) {
-            arr.retain(|e| !stale.contains(&normalized_hook(e)));
-        }
-    }
 }
 
 /// Remove a hook a plugin previously self-registered into `settings.json` once
@@ -3871,6 +3832,34 @@ mod tests {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// #3354: the slippage pre-tool guard reaches a Monitor-started command only when its matcher
+    /// names Monitor. The session log is off here, because its sink is the other route to Monitor.
+    #[test]
+    fn slippage_pre_tool_matcher_covers_monitor_commands() {
+        let mut m = crate::merge::MergedManifest::default();
+        m.session_log.file = None;
+        m.session_log.transcript = None;
+        m.capabilities.features = Some(llmenv_config::Features {
+            task_tracker: Some(llmenv_config::TaskTracker {
+                enabled: true,
+                enforce_commit: true,
+                nudges: true,
+                ..Default::default()
+            }),
+            slippage: Some(llmenv_config::SlippageControl {
+                enabled: true,
+                answer_before_act: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let settings = render_settings_for_test(&m);
+
+        let pre = hook_matchers_for(&settings, "PreToolUse");
+
+        assert!(pre.iter().any(|x| x == "^(Bash|Monitor)$"), "{pre:?}");
     }
 
     fn cbm_manifest() -> crate::merge::MergedManifest {

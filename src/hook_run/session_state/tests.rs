@@ -1,5 +1,7 @@
 use super::*;
 
+mod corrupt_copies;
+
 #[test]
 fn the_agent_key_hashes_the_session_and_the_agent_id_as_text() {
     let key = agent_state_key("s1", &serde_json::json!({ "agent_id": "a7" }));

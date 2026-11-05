@@ -1047,6 +1047,9 @@ In the main agent, the Bash tool keeps its working directory between calls, so a
 A `cd` followed by more commands in the same call (`cd /x && cargo test`), or inside `$( )`, a subshell, or a brace group that is followed by another command, changes nothing after the call and gets none.
 Before v3.13.0 any `cd` got it, and the text said that Claude Code resets the working directory, which is not what the main agent does.
 
+(changed in v3.14.0) A command that the Monitor tool starts gets the same advisory.
+Claude Code 2.1.314 and later send such a command to the Bash hooks under the tool name `Monitor`, and the guard matched only `Bash` before.
+
 It splits the command with the same splitter as the task commit gate.
 A command nested more than 32 levels deep gets no advisory.
 It never blocks: a deliberate `cd` still runs, and the model gets a one-line note.
@@ -1256,6 +1259,9 @@ A write inside `$( )`, a subshell, a brace group, or after a single `&` counts a
 A command nested more than 32 levels deep counts as modifying, and the deny names that limit.
 A Bash `cat`, `head`, `tail`, `sed -n`, or `grep` of one file counts as a read for `read_before_edit`.
 
+(changed in v3.14.0) A command that the Monitor tool starts is read the same way.
+The `answer_before_act` and `explain_before_act` checks, the read record, and the task commit gate cover it, because llmenv now registers its shell guards for both `Bash` and `Monitor`.
+
 ### `features.sandbox:`
 
 (added in v4.0.0)
@@ -1323,6 +1329,7 @@ The file sink rotates `session-log.jsonl` when it reaches 64 MiB.
 It keeps three rotated files, `session-log.jsonl.1` to `session-log.jsonl.3`, and drops the oldest at each rotation.
 The first line of the new file names the rotated file that holds the older lines.
 `llmenv clean` removes rotated files older than `cache_retention_hours`.
+(changed in v3.14.0) A rotated file is matched by the bytes of its name, so a rotation of a log path that is not valid UTF-8 is removed too.
 
 Both sinks take the same sub-fields, plus one each of their own:
 
@@ -1335,7 +1342,7 @@ So a transcript can be kept past `retention_days` after such a change, and no lo
 | --------- | -------- | ---------- | ----- |
 | `enabled` | no | both | Turn the sink on or off |
 | `level` | no | both | Minimum event level (`info`, `debug`, `trace`); default `info`. `debug` is what adds tool calls — prompts are already captured at the default `info` level, see [What gets logged](#what-gets-logged) |
-| `path` | no | `file` | Override the file sink's path; default `<state_dir>/session-log.jsonl`. A leading `~` is expanded. (changed in v3.14.0) A relative path turns the file sink off with an error, because a hook runs in a repository |
+| `path` | no | `file` | Override the file sink's path; default `<state_dir>/session-log.jsonl`. A leading `~` is expanded. (changed in v3.14.0) A symbolic link is refused, and the file log stays off with a notice that names the path. A relative path turns the file sink off with an error, because a hook runs in a repository |
 | `retention_days` | no | `transcript` | Stale file-sink transcripts on disk are best-effort removed when older than this many days; `null` = disabled; must be >= 1 |
 
 (changed in v3.14.0) The file sink opens the file without following a symlink.
@@ -1609,7 +1616,7 @@ placeholder renders the count with no staleness indication at all.
 | `config_stale` | `{stale_icon} stale` | `⚙️ stale` | `stale_icon` (resolves from the icon set, gear emoji by default — a `statusline.icons.config_stale` override applies even without a custom `format`). Config out of date — relaunch to reload. Renders empty when the config isn't stale — there's no "fresh" variant |
 | `throttle` | `{raw}{stale_icon}` | `umans: 45s` / `umans: 45s ⚙️` | `raw` (`"<backend>: <cooldown_secs>s"`, snapshot-sourced), `cooldown_secs`, `reason` (the backend name), `stale_icon` (same drift check as `mcps`'s) |
 | `session_log` | `{icon} {entries}` | `📝 8` | `icon`, `entries` |
-| `tasks` | `☑ {done}/{total}` (summed across the current project's open sessions, #905); renders empty when no session is open for this project | `☑ 2/5` | `done`, `total` (summed across every session open for the current project), `current` (title of the task currently `wip`/`waiting` among those sessions; empty when none). The default doesn't show `current` — combine it yourself, e.g. `format: "{done}/{total} — {current}"` |
+| `tasks` | `☑ {done}/{total}` (summed across the current project's open sessions, #905); renders empty when no session is open for this project. In a project with several conversations, the widget counts only the sessions that the current conversation owns, plus sessions with no owner (changed in v3.14.0) | `☑ 2/5` | `done`, `total` (summed across every session open for the current project), `current` (title of the task currently `wip`/`waiting` among those sessions; empty when none). The default doesn't show `current` — combine it yourself, e.g. `format: "{done}/{total} — {current}"` |
 
 The `tasks` widget shows `tasks: unreadable` in place of its count when a session or task file cannot be read, so a read error never looks like no work (changed in v3.13.0).
 
