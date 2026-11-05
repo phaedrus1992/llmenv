@@ -383,7 +383,8 @@ Inspect ICM memory state for the active scope.
   (changed in v3.12.0) It compares the same project-scoped recall as `memory list` and gives the same warning.
 - `memory prune [--dry-run]` — preview or apply forgetting by memory importance.
   It forgets `low` and `medium` importance memories and keeps `high` and `critical` ones.
-  It reads at most 100 memories for each run.
+  It reads at most 200 memories for each run, and fewer when they do not fit in a 32000-token budget.
+  (changed in v3.14.0) Before v3.14.0 ICM returned at most 20 memories for each run, because the request gave no token budget.
   (changed in v3.12.0) It reads only the memories of the project that the current folder belongs to.
   When llmenv cannot tell the project, the command refuses to run and forgets nothing.
   Before v3.12.0 the command had no project filter, so ICM answered with the records of its own working folder.

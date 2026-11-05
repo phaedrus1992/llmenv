@@ -153,6 +153,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Name the folder and the fix when the session-log rotation prune of `llmenv doctor --gc` or `llmenv clean` cannot read the log folder, and keep the operating system error, so a permission failure shows as one. [fix:session-log] [#3350]
 - Judge every age check of the state cleanup in `llmenv doctor --gc` and `llmenv clean` by one clock, so the check that decides to run `lsof` and the sweeps that follow agree on which `state/tmp` entry or old codebase-memory index is old. [fix:doctor] [#3374]
 - Stop the cache and `state/tmp` age checks from reading a file time whose nanosecond part is one second or more. Such a value could overflow the time and stop `llmenv clean`. [fix:materialize] [#3280]
+- Skip a cache entry that another process removes during `llmenv clean` or `llmenv doctor --gc`, instead of counting it as a failure. [fix:materialize] [#3423]
+- Read all the records that `llmenv memory prune` (up to 200) and post-session consolidation (up to 50) ask for. icm returned at most 20, because the request gave no token budget. [fix:mcp] [#3419]
+- Name the cause when the `read_before_edit` guard denies a `Write` to a path it cannot resolve, and remove stray spaces from the deny text. [fix:hook] [#3389]
 
 ### Security
 
