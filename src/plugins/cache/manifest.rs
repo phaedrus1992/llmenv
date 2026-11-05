@@ -1,6 +1,6 @@
 //! Reads the manifest of a marketplace checkout: its plugin entries and its declared name.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -20,21 +20,29 @@ pub struct MarketplacePluginEntry {
 ///
 /// # Errors
 /// Returns an error when the file exists but cannot be read or parsed.
-pub(crate) fn read_marketplace_plugins(
-    marketplace_dir: &Path,
-) -> Result<Vec<MarketplacePluginEntry>> {
+/// The path and the parsed JSON of the marketplace manifest, or `None` when there is none.
+///
+/// One read tells NotFound (no manifest) from other I/O errors, which propagate, instead of an
+/// exists() stat that masked every stat failure as "no manifest" (#893). The marketplace is a
+/// cloned repository, so the read is capped and refuses a FIFO (#2945).
+fn read_manifest(marketplace_dir: &Path) -> Result<Option<(PathBuf, serde_json::Value)>> {
     let manifest_path = marketplace_dir
         .join(".claude-plugin")
         .join("marketplace.json");
-    // #893: a single read that distinguishes NotFound (→ empty) from other I/O
-    // errors (→ propagate), rather than an exists() stat that masked every stat
-    // failure (e.g. EACCES) as "no manifest". The marketplace is a cloned repository, so the
-    // read is capped and refuses a FIFO (#2945).
     let Some(content) = crate::paths::bounded::asset_text_optional(&manifest_path)? else {
+        return Ok(None);
+    };
+    let json = serde_json::from_str(&content)
+        .with_context(|| format!("parsing {}", manifest_path.display()))?;
+    Ok(Some((manifest_path, json)))
+}
+
+pub(crate) fn read_marketplace_plugins(
+    marketplace_dir: &Path,
+) -> Result<Vec<MarketplacePluginEntry>> {
+    let Some((manifest_path, json)) = read_manifest(marketplace_dir)? else {
         return Ok(Vec::new());
     };
-    let json: serde_json::Value = serde_json::from_str(&content)
-        .with_context(|| format!("parsing {}", manifest_path.display()))?;
     let arr = match json.get("plugins") {
         None => return Ok(Vec::new()),
         Some(value) => value.as_array().with_context(|| {
@@ -146,14 +154,9 @@ fn parse_plugin_entry(entry: &serde_json::Value) -> Result<Option<MarketplacePlu
 /// # Errors
 /// Returns an error when the file exists but cannot be read or parsed.
 pub(crate) fn read_marketplace_name(marketplace_dir: &Path) -> Result<Option<String>> {
-    let manifest_path = marketplace_dir
-        .join(".claude-plugin")
-        .join("marketplace.json");
-    let Some(content) = crate::paths::bounded::asset_text_optional(&manifest_path)? else {
+    let Some((manifest_path, json)) = read_manifest(marketplace_dir)? else {
         return Ok(None);
     };
-    let json: serde_json::Value = serde_json::from_str(&content)
-        .with_context(|| format!("parsing {}", manifest_path.display()))?;
     let name = json
         .get("name")
         .and_then(serde_json::Value::as_str)
