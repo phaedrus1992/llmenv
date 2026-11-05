@@ -32,7 +32,7 @@ use link_site::clear_link_site;
 pub(crate) use stranded::migrate_stranded_projects;
 
 /// Subdirectory of the durable state dir holding Claude Code's transcripts.
-const PROJECTS_DIR: &str = "projects";
+pub(crate) const PROJECTS_DIR: &str = "projects";
 /// Subdirectory holding Claude Code's own internal session logs — unlike
 /// `projects/`'s per-session transcripts, these accumulate as one file per
 /// *calendar day* across every session, so a hash-directory change would
