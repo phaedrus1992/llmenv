@@ -131,7 +131,16 @@ pub(crate) fn large_bytes_io(path: &Path) -> std::io::Result<Vec<u8>> {
 /// The errors of [`llmenv_paths::read_file_bounded`], a missing file, and `InvalidData` for
 /// bytes that are not UTF-8 before the end.
 pub(crate) fn state_text_io(path: &Path) -> std::io::Result<String> {
-    match String::from_utf8(state_bytes_io(path)?) {
+    decode_state_text(state_bytes_io(path)?)
+}
+
+/// The text of state bytes by the rule of [`state_text_io`]: an incomplete last character is cut
+/// off, and any other bytes that are not UTF-8 are an error.
+///
+/// # Errors
+/// `InvalidData` for bytes that are not UTF-8 before the end.
+pub(crate) fn decode_state_text(bytes: Vec<u8>) -> std::io::Result<String> {
+    match String::from_utf8(bytes) {
         Ok(text) => Ok(text),
         Err(e) => {
             let error = e.utf8_error();
@@ -180,6 +189,14 @@ pub(crate) fn open_regular(path: &Path) -> std::io::Result<Option<std::fs::File>
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decoded_state_bytes_cut_the_last_character_and_refuse_other_bad_bytes() {
+        assert_eq!(decode_state_text(b"ok \xe2\x82".to_vec()).unwrap(), "ok ");
+        assert_eq!(decode_state_text(b"ok".to_vec()).unwrap(), "ok");
+        let err = decode_state_text(b"a\xffb".to_vec()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
 
     #[test]
     fn a_bad_byte_before_the_end_is_still_an_error() {

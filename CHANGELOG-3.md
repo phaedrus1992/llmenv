@@ -179,6 +179,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Tell the agent when the record of handled hook events cannot be saved, read, or parsed, when a detached store has no state folder, and when a denied tool call drops recalled memory. Each case was a log line only. [fix:hook] [#3399]
 - Tell the agent when a hook skips consolidation, a web page store, a model switch record, the task reminder, or the session-end duplicate check, and when the code index job cannot report its result. Each case was a log line only. [fix:hook] [#3449]
 - Treat any llmenv state file that a crash cut inside a multi-byte character as bad content, which each reader replaces, instead of an unreadable file that blocks later writes. [fix:hook] [#3445]
+- Apply the same cut-character rule to the task nudge state, the session-end duplicate record, the MCP proxy pid and lock files, task files, and the `llmenv doctor` code index result. [fix:hook] [#3457]
+- Tell the agent when the repeat check or the stop reminder check is off for an unsafe session id, when a fetched page cannot be stored, when a transcript cannot be read, and when the recall ledger, agent config, or a detached job checkpoint has no state folder. Each case was a log line only. [fix:hook] [#3457]
 
 ### Security
 

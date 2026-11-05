@@ -175,7 +175,7 @@ pub(crate) fn record_for_event(
         return None;
     };
     let state_dir = state_dir
-        .inspect_err(|e| tracing::error!("no state dir, agent config not written: {e}"))
+        .inspect_err(|e| crate::agent_notice::no_state_folder("the agent config is not written", e))
         .ok()?;
     let hash = booted_hash_in(std::env::var_os("CLAUDE_CONFIG_DIR").as_deref());
     let facts = StartFacts::from_payload(

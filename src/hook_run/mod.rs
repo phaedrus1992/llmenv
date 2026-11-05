@@ -17,7 +17,7 @@ mod child_stderr;
 mod dedup_snapshot;
 use child_stderr::redirect_stderr_to_bounded_log;
 pub(crate) use child_stderr::{detached_child_log_path, redirect_stderr_to_detached_log};
-use dedup_snapshot::{dedup_snapshot_path, dedup_write_target};
+use dedup_snapshot::{dedup_snapshot_path, dedup_write_target, read_dedup_snapshot};
 pub(crate) mod cbm_index_guard;
 pub(crate) mod cd_guard;
 pub(crate) mod checkpoint;
@@ -648,7 +648,10 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
     let claude_code_version = match crate::env_var::utf8_var("CLAUDE_CODE_VERSION") {
         Ok(version) => version.unwrap_or_default(),
         Err(e) => {
-            tracing::error!("{e:#}");
+            crate::agent_notice::record_logged(format!(
+                "llmenv: CLAUDE_CODE_VERSION is read as unset, so version checks such as the \
+                 resume notice use defaults: {e:#}"
+            ));
             String::new()
         }
     };
@@ -1127,8 +1130,9 @@ fn run_inner(
     if records_locally(event)
         && let (Some(session_id), Ok(state_dir)) = (
             claude_session_id,
-            crate::paths::state_dir()
-                .inspect_err(|e| tracing::error!("no state dir, recall ledger skipped: {e}")),
+            crate::paths::state_dir().inspect_err(|e| {
+                crate::agent_notice::no_state_folder("the recall ledger is not updated", e);
+            }),
         )
     {
         adaptive::record_local(
@@ -1808,18 +1812,6 @@ fn recover_from_pipeline_error(
     Ok(HookText::from_notes(recovered))
 }
 
-/// The last stored SessionEnd chunk, or `None`. A missing file is the normal first run, so only
-/// another read error is logged.
-fn read_dedup_snapshot(path: &std::path::Path) -> Option<String> {
-    std::fs::read_to_string(path)
-        .inspect_err(|e| {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::error!("failed to read dedup cache {}: {e}", path.display());
-            }
-        })
-        .ok()
-}
-
 /// The agent notice for a hook run whose memory step failed.
 fn memory_skipped_notice(event: impl std::fmt::Display, err: &anyhow::Error) -> String {
     format!(
@@ -2203,7 +2195,7 @@ fn append_section(out: &mut String, section: &str) {
 #[allow(clippy::expect_used, clippy::expect_fun_call)]
 mod pipeline_recovery_tests {
     use super::{
-        HookEvent, HookText, deny_drops_memory, join_notes, join_precomputed, read_dedup_snapshot,
+        HookEvent, HookText, deny_drops_memory, join_notes, join_precomputed,
         recover_from_pipeline_error,
     };
     use proptest::strategy::Strategy as _;
@@ -2298,19 +2290,6 @@ mod pipeline_recovery_tests {
             None,
         ]);
         assert_eq!(joined.as_deref(), Some("__DENY__:already read\nturn"));
-    }
-
-    #[test]
-    fn the_dedup_snapshot_reads_the_stored_chunk_and_a_missing_file_as_none() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("session_end_dedup");
-        assert_eq!(
-            read_dedup_snapshot(&path),
-            None,
-            "a first run has no snapshot"
-        );
-        std::fs::write(&path, "stored chunk").expect("write snapshot");
-        assert_eq!(read_dedup_snapshot(&path).as_deref(), Some("stored chunk"));
     }
 
     /// A slot value: absent, empty, plain text, or a deny marker.
@@ -2587,7 +2566,10 @@ fn maybe_start_consolidation(
                 spawn();
             }
         }
-        Err(e) => tracing::error!("consolidation: cannot read merged memory entries: {e:#}"),
+        Err(e) => crate::agent_notice::record_logged(format!(
+            "llmenv: memory consolidation is skipped, because the memory settings cannot be \
+             read: {e:#}. Fix: run `llmenv validate`."
+        )),
     }
 }
 

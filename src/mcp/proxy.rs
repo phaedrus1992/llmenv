@@ -920,7 +920,7 @@ pub(super) fn read_pidfile(pid_path: &Path) -> Result<Option<u32>, PidfileError>
     // #893: a single read that distinguishes NotFound (→ absent) from other I/O
     // errors (→ report), rather than an exists() stat that masked every stat
     // failure (e.g. EACCES) as "no pidfile".
-    let s = match std::fs::read_to_string(pid_path) {
+    let s = match crate::paths::bounded::state_text_io(pid_path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(PidfileError::Io(e)),

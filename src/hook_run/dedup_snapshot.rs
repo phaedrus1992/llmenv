@@ -31,3 +31,46 @@ pub(super) fn dedup_write_target(
 ) -> Option<&std::path::Path> {
     path.filter(|_| !unchanged)
 }
+
+/// The last stored SessionEnd chunk, or `None`. A missing file is the normal first run, so only
+/// another read error is logged.
+pub(super) fn read_dedup_snapshot(path: &std::path::Path) -> Option<String> {
+    crate::paths::bounded::state_text_io(path)
+        .inspect_err(|e| {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                crate::agent_notice::record_logged(format!(
+                    "llmenv: the session-end duplicate record {} cannot be read, so the chunk \
+                     can be stored again: {e}. Fix: remove the file.",
+                    path.display()
+                ));
+            }
+        })
+        .ok()
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "test code")]
+mod tests {
+    use super::read_dedup_snapshot;
+
+    #[test]
+    fn a_cut_snapshot_reads_as_the_text_before_the_cut_character() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session_end_dedup");
+        std::fs::write(&path, b"chunk \xe2\x82").expect("write snapshot");
+        assert_eq!(read_dedup_snapshot(&path).as_deref(), Some("chunk "));
+    }
+
+    #[test]
+    fn the_dedup_snapshot_reads_the_stored_chunk_and_a_missing_file_as_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session_end_dedup");
+        assert_eq!(
+            read_dedup_snapshot(&path),
+            None,
+            "a first run has no snapshot"
+        );
+        std::fs::write(&path, "stored chunk").expect("write snapshot");
+        assert_eq!(read_dedup_snapshot(&path).as_deref(), Some("stored chunk"));
+    }
+}

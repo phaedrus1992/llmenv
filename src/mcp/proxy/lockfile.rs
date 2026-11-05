@@ -104,7 +104,7 @@ pub(super) fn release_lock(lock_path: &Path) {
 /// read failure is an error. Reading it as "no holder" would let a peer reclaim
 /// a lock whose holder may still be alive (#2587).
 pub(super) fn lock_holder(lock_path: &Path) -> anyhow::Result<Option<u32>> {
-    match std::fs::read_to_string(lock_path) {
+    match crate::paths::bounded::state_text_io(lock_path) {
         Ok(text) => Ok(text.trim().parse::<u32>().ok()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(anyhow::Error::new(e)

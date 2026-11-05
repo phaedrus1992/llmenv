@@ -124,13 +124,19 @@ pub(super) fn handle_web_fetch_in(
     web_tool(payload)?;
     let args = web_fetch_store_args(payload, session_project(payload).as_deref())?;
     let Ok(payload_json) = serde_json::to_string(&args) else {
-        tracing::error!("icm-store: failed to serialize store args");
+        crate::agent_notice::record_logged(
+            "llmenv: the fetched page is not stored in memory, because its store request \
+             cannot be built.",
+        );
         return None;
     };
     // Spawns this same binary as a detached child. The path is this process's own image, not input.
     // nosemgrep: rust.lang.security.current-exe.current-exe
     let Ok(exe) = std::env::current_exe() else {
-        tracing::error!("icm-store: cannot resolve current_exe for detached store");
+        crate::agent_notice::record_logged(
+            "llmenv: the fetched page is not stored in memory, because llmenv cannot find its \
+             own program. Fix: run `llmenv doctor`.",
+        );
         return None;
     };
     let checkpoint = checkpoint::begin(
