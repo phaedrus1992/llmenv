@@ -53,9 +53,17 @@ pub(super) fn classify_gh_exit(status: std::process::ExitStatus, stderr: &str) -
     let detail = llmenv_git::git_failure_detail(stderr.as_bytes(), &[], status);
     let first_line = detail.lines().next().unwrap_or("");
     let lowered = stderr.to_ascii_lowercase();
-    if status.code() == Some(GH_NO_PR_EXIT) && GH_NO_PR_SIGNS.iter().any(|s| lowered.contains(s)) {
-        tracing::debug!("gh pr view exited {status}, read as no PR: {first_line}");
-        return Ok(None);
+    if GH_NO_PR_SIGNS.iter().any(|s| lowered.contains(s)) {
+        if status.code() == Some(GH_NO_PR_EXIT) {
+            tracing::debug!("gh pr view exited {status}, read as no PR: {first_line}");
+            return Ok(None);
+        }
+        tracing::error!(
+            "gh pr view said there is no PR but exited {status}, not exit {GH_NO_PR_EXIT}, so it \
+             is a failure: {first_line}. Fix: check `gh --version`; the exit was measured on gh \
+             2.103.3."
+        );
+        return Err(GhFailure::Failed);
     }
     if GH_LOGIN_SIGNS.iter().any(|sign| lowered.contains(sign)) {
         tracing::error!("gh pr view: gh is not logged in ({status}): {first_line}");
@@ -133,6 +141,20 @@ mod tests {
             proptest::prop_assert_eq!(classify_gh_exit(by_code, text), Err(GhFailure::Failed));
             let by_signal = std::process::ExitStatus::from_raw(signal);
             proptest::prop_assert_eq!(classify_gh_exit(by_signal, text), Err(GhFailure::Failed));
+        }
+
+        /// The whole rule for any exit and any text: no PR exactly when the exit is 1 and the
+        /// lowered text holds a no-PR sign.
+        #[test]
+        fn no_pr_needs_exit_one_and_a_sign_for_any_exit_and_text(
+            raw in proptest::prop_oneof![proptest::strategy::Strategy::prop_map(0i32..256, |c| c << 8), 1i32..32],
+            text in "\\PC{0,80}|.{0,20}(no pull requests found|not a git repository).{0,20}",
+        ) {
+            let status = std::process::ExitStatus::from_raw(raw);
+            let lowered = text.to_ascii_lowercase();
+            let expected = status.code() == Some(1)
+                && GH_NO_PR_SIGNS.iter().any(|s| lowered.contains(s));
+            proptest::prop_assert_eq!(classify_gh_exit(status, &text) == Ok(None), expected);
         }
 
         #[test]
