@@ -97,7 +97,13 @@ fn run_consolidation_at(
         .enable_all()
         .build()?;
     let state_dir = crate::paths::state_dir()
-        .inspect_err(|e| tracing::error!("consolidation has no state dir: {e:#}"))
+        .inspect_err(|e| {
+            crate::agent_notice::record_logged(format!(
+                "llmenv: memory consolidation has no state folder, so it skips the duplicate \
+                 check and a rule can be stored twice: {e:#}. Fix: set HOME, or set \
+                 LLMENV_STATE_DIR to a valid absolute path."
+            ));
+        })
         .ok();
     let _result = rt.block_on(consolidation::run(
         cc,

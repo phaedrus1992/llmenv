@@ -75,7 +75,11 @@ impl SeenStore {
             .map_err(std::io::Error::other)
             .and_then(|bytes| crate::paths::write_owner_only_atomic(&path, &bytes));
         if let Err(e) = result {
-            tracing::error!("cannot save {LABEL} {}: {e}", path.display());
+            crate::agent_notice::record_logged(format!(
+                "llmenv: cannot save the {LABEL} {}, so a repeated event can run again: {e}. \
+                 Fix: check that the state folder is writable.",
+                path.display()
+            ));
         }
     }
 
@@ -87,14 +91,23 @@ impl SeenStore {
     /// cannot be read.
     fn read(&self, key: &str) -> Option<VecDeque<String>> {
         let path = self.path(key);
-        match crate::paths::bounded::state_text_io(&path) {
-            Ok(text) => Some(serde_json::from_str(&text).unwrap_or_else(|e| {
-                tracing::error!("{LABEL} {} is corrupt, starting empty: {e}", path.display());
+        // Bytes, not text: a write cut inside a UTF-8 character is corrupt, not unreadable (#3445).
+        match crate::paths::bounded::state_bytes_io(&path) {
+            Ok(bytes) => Some(serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+                crate::agent_notice::record_logged(format!(
+                    "llmenv: the {LABEL} {} is corrupt, so it started empty and an event that \
+                     already ran can run again: {e}. Fix: remove the file if this repeats.",
+                    path.display()
+                ));
                 VecDeque::new()
             })),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(VecDeque::new()),
             Err(e) => {
-                tracing::error!("cannot read {LABEL} {}: {e}", path.display());
+                crate::agent_notice::record_logged(format!(
+                    "llmenv: cannot read the {LABEL} {}, so the event id is not recorded: {e}. \
+                     Fix: fix its permissions, or remove the file.",
+                    path.display()
+                ));
                 None
             }
         }
@@ -220,8 +233,24 @@ mod tests {
         store.record("sess", "first");
         std::fs::write(store.path("sess"), "{ not json").unwrap();
         assert!(!store.contains("sess", "first"));
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(
+            notices.contains("is corrupt, so it started empty"),
+            "{notices}"
+        );
         store.record("sess", "second");
         assert!(store.contains("sess", "second"));
+    }
+
+    #[test]
+    fn a_seen_set_cut_inside_a_utf8_character_is_corrupt_and_is_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SeenStore::new(dir.path());
+        store.record("cut", "before");
+        std::fs::write(store.path("cut"), b"[\"\xc3").unwrap();
+        assert_eq!(store.read("cut"), Some(VecDeque::new()));
+        store.record("cut", "after");
+        assert!(store.contains("cut", "after"));
     }
 
     #[test]
@@ -237,6 +266,12 @@ mod tests {
             "an unreadable set is left alone"
         );
         assert!(!store.contains("sess", "abc"));
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(
+            notices.contains("cannot read the idempotency seen-set"),
+            "{notices}"
+        );
+        assert!(notices.contains("Fix:"), "{notices}");
     }
 
     #[test]
