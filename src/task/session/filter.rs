@@ -49,6 +49,28 @@ pub(in crate::task) fn tasks_in_sessions(
         .collect()
 }
 
+/// An open session of `project` for a test, owned by `owner` when it is `Some`.
+#[cfg(test)]
+pub(in crate::task) fn open_session_for_test(
+    id: &str,
+    project: &str,
+    owner: Option<&str>,
+) -> Session {
+    Session {
+        id: id.to_string(),
+        name: None,
+        project: project.to_string(),
+        description: None,
+        started_at: "2026-10-02T00:00:00Z".to_string(),
+        last_activity: "2026-10-02T00:00:00Z".to_string(),
+        finished_at: None,
+        abandoned_at: None,
+        owner_session: owner.map(str::to_string),
+        owner_pid: None,
+        resume: crate::task::resume::ResumeContext::default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ids_visible, open_visible};

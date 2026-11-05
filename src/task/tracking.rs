@@ -64,6 +64,12 @@ pub(crate) fn tracking_in(stored: &super::Stored, caller: Option<&str>) -> Track
         .into_iter()
         .filter(|s| s.visible_to(caller))
         .collect();
+    tracking_of(&visible, tasks, caller)
+}
+
+/// The tracking state over the open sessions of the project that `caller` sees, and every task
+/// of the store. Pure, so a property can drive it with no project or files (#3475).
+fn tracking_of(visible: &[session::Session], tasks: &[Task], caller: Option<&str>) -> Tracking {
     let ids: Vec<String> = visible.iter().map(|s| s.id.clone()).collect();
     if ids.is_empty() {
         return Tracking::NoSession;
