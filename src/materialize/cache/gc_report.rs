@@ -73,8 +73,9 @@ fn gc_remove(
         report.removed.push(p.to_path_buf());
         return;
     }
-    match remove(p) {
-        Ok(()) => report.removed.push(p.to_path_buf()),
+    // An entry that another process removed first is gone, which is the goal (#3423).
+    match super::skip_vanished(remove(p)) {
+        Ok(_) => report.removed.push(p.to_path_buf()),
         Err(e) => {
             let cause = super::owner::removal_cause(p, &e);
             tracing::error!(
@@ -98,12 +99,29 @@ mod tests {
     #[test]
     fn a_failed_removal_keeps_its_cause_with_its_path() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let missing = dir.path().join("absent");
+        // A path under a regular file fails with "not a directory", not "not found".
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"x").expect("write fixture");
+        let blocked = file.join("child");
         let mut report = GcReport::new(false);
 
-        gc_remove_link(&missing, &mut report);
+        gc_remove_link(&blocked, &mut report);
 
-        assert_eq!(report.failed, vec![missing.clone()]);
-        assert!(report.causes.get(&missing).is_some_and(|c| !c.is_empty()));
+        assert_eq!(report.failed, vec![blocked.clone()]);
+        assert!(report.causes.get(&blocked).is_some_and(|c| !c.is_empty()));
+    }
+
+    // An entry that another process removed first is gone, not a failure (#3423).
+    #[test]
+    fn an_entry_removed_by_another_process_is_not_a_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gone = dir.path().join("absent");
+        let mut report = GcReport::new(false);
+
+        gc_remove_link(&gone, &mut report);
+        gc_remove_dir(&gone, &mut report);
+
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert_eq!(report.removed, vec![gone.clone(), gone]);
     }
 }

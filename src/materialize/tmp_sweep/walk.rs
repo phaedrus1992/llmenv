@@ -54,6 +54,8 @@ pub(super) fn scan(
         }
         let is_dir = match entry.file_type() {
             Ok(file_type) => file_type.is_dir(),
+            // Another process removed the entry after the listing (#2835, #3423).
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
                 record_failure(&path, &e, &mut scan);
                 continue;
