@@ -93,7 +93,9 @@ fn run_cbm_index_with(
     }
     let status = status.context("cannot start codebase-memory-mcp")?;
     anyhow::ensure!(status.success(), "codebase-memory-mcp exited with {status}");
-    checkpoint::complete(checkpoint_path)
+    // The index is built, so a checkpoint that stays is a notice, not a failed job (#3465).
+    checkpoint::finish(Some(checkpoint_path));
+    Ok(())
 }
 
 /// The file one run writes before it replaces the result: unique to this process.

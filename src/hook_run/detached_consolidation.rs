@@ -49,12 +49,9 @@ pub fn run_consolidation(
 }
 
 /// Delete the checkpoint of a run that has nothing to do, such as consolidation switched off.
+/// A checkpoint that stays is a notice, because a later session runs the job again (#3465).
 fn settle(checkpoint: Option<&std::path::Path>) {
-    if let Some(path) = checkpoint
-        && let Err(e) = crate::hook_run::checkpoint::complete(path)
-    {
-        tracing::error!("consolidation-run: {e:#}");
-    }
+    crate::hook_run::checkpoint::finish(checkpoint);
 }
 
 fn run_consolidation_at(
@@ -119,6 +116,16 @@ fn run_consolidation_at(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_settled_checkpoint_that_stays_is_a_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let stuck = dir.path().join("consolidation-3465");
+        std::fs::create_dir_all(stuck.join("inner")).unwrap();
+        settle(Some(&stuck));
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(notices.contains("its checkpoint stays"), "{notices}");
+    }
 
     #[test]
     fn run_consolidation_reports_a_missing_config() {

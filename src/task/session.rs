@@ -252,8 +252,10 @@ pub enum StartOutcome {
 }
 
 mod checkpoint;
+mod context_reminder;
 pub(crate) use checkpoint::idle_display;
 use checkpoint::{checkpoint_error, engine_start, only_own_session, resume};
+pub(crate) use context_reminder::missing_context_reminders;
 
 fn sessions_dir(state_dir: &Path) -> PathBuf {
     tasks_dir(state_dir).join("sessions")
@@ -758,9 +760,10 @@ pub(crate) fn try_session_progress(
     state_dir: &Path,
     session_id: &str,
 ) -> anyhow::Result<(u64, u64)> {
-    let tasks = try_tasks_in_session(state_dir, session_id)?;
-    let done = tasks.iter().filter(|t| t.state == TaskState::Done).count() as u64;
-    Ok((done, tasks.len() as u64))
+    Ok(super::progress_in(
+        &super::list_tasks_strict(state_dir)?,
+        session_id,
+    ))
 }
 
 /// Build a [`SessionSummary`] for `session_id`.
@@ -811,53 +814,6 @@ pub(crate) fn session_summary(
         resume: session.resume,
         agent,
     })
-}
-
-/// Stop text for each open session in `project` that has unfinished tasks and nothing recorded
-/// that tells a fresh agent what the work is (#2339). Does not presume the session is the
-/// reader's own (#1028).
-#[must_use]
-pub(crate) fn missing_context_reminders(
-    state_dir: &Path,
-    project: &str,
-    caller: Option<&str>,
-) -> String {
-    let sessions = match try_open_sessions_visible_to(state_dir, project, caller) {
-        Ok(sessions) => sessions,
-        Err(e) => return super::store_warning_text(&e),
-    };
-    sessions
-        .iter()
-        .filter(|session| session.resume.needs_nudge())
-        .filter_map(|session| match try_tasks_in_session(state_dir, &session.id) {
-            Ok(tasks) if tasks.iter().any(|task| task.state != TaskState::Done) => {
-                Some(missing_context_line(session))
-            }
-            Ok(_) => None,
-            // The unfinished check needs the whole session. A partial read cannot clear it, so the
-            // line says the session was not checked (#2608).
-            Err(e) => Some(format!(
-                "Session '{label}' ({id}) was not checked for resume context: the task store cannot \
-                 be read ({err:#}). Fix the task store, then run `llmenv task ls --all` to confirm.",
-                label = session.name.as_deref().unwrap_or(session.id.as_str()),
-                id = session.id,
-                err = e,
-            )),
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
-/// The reminder for one open session that has no resume context.
-fn missing_context_line(session: &Session) -> String {
-    let id = &session.id;
-    format!(
-        "Session '{label}' ({id}) has no resume context. If you recognize it as your \
-         own, run `llmenv task session edit {id} --context \"...\" --issue N` so a \
-         fresh agent can pick it up after /clear. If you don't recognize it, it \
-         belongs to a different session — leave it alone.",
-        label = session.name.as_deref().unwrap_or(id.as_str()),
-    )
 }
 
 /// The most characters of one session's resume text that the SessionStart reminder carries.

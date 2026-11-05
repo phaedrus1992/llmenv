@@ -202,6 +202,20 @@ fn completing_a_path_that_cannot_be_removed_is_an_error() {
 }
 
 #[test]
+fn a_checkpoint_that_stays_after_its_job_finished_is_a_notice() {
+    let dir = tempfile::tempdir().unwrap();
+    let stuck = dir.path().join("stuck-3465");
+    std::fs::create_dir_all(stuck.join("inner")).unwrap();
+    super::finish(Some(&stuck));
+    let notices = crate::agent_notice::current().unwrap_or_default();
+    assert!(
+        notices.contains("its checkpoint stays")
+            && notices.contains(&format!("Fix: remove {}", stuck.display())),
+        "{notices}"
+    );
+}
+
+#[test]
 fn inputs_above_the_cap_are_not_checkpointed() {
     let dir = tempfile::tempdir().unwrap();
     let big = Checkpoint::new(
