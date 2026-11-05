@@ -14,11 +14,11 @@ use crate::materialize::tmp_sweep;
 /// clock of the sweep that follows, so the gate and the sweep agree (#3374).
 pub(super) fn state_may_have_stale_entries(
     state_dir: &Path,
-    retention: Duration,
+    cutoff: super::Cutoff,
     cbm_live: bool,
     source: crate::materialize::cache::AgeSource,
-    now: SystemTime,
 ) -> bool {
+    let super::Cutoff { retention, now } = cutoff;
     let tmp = state_dir.join("tmp");
     let tmp_may_be_stale = match tmp_sweep::stale_summary_in(
         &tmp,
@@ -98,10 +98,12 @@ mod tests {
 
         assert!(!state_may_have_stale_entries(
             state.path(),
-            DAY * 7,
+            super::super::Cutoff {
+                retention: DAY * 7,
+                now: SystemTime::now()
+            },
             false,
-            crate::materialize::cache::AgeSource::MtimeOnly,
-            SystemTime::now()
+            crate::materialize::cache::AgeSource::MtimeOnly
         ));
     }
 
@@ -111,10 +113,12 @@ mod tests {
 
         assert!(!state_may_have_stale_entries(
             state.path(),
-            DAY * 7,
+            super::super::Cutoff {
+                retention: DAY * 7,
+                now: SystemTime::now()
+            },
             false,
-            crate::materialize::cache::AgeSource::MtimeOnly,
-            SystemTime::now()
+            crate::materialize::cache::AgeSource::MtimeOnly
         ));
     }
 
@@ -128,10 +132,12 @@ mod tests {
 
         assert!(!state_may_have_stale_entries(
             state.path(),
-            DAY * 7,
+            super::super::Cutoff {
+                retention: DAY * 7,
+                now: SystemTime::now()
+            },
             true,
-            crate::materialize::cache::AgeSource::MtimeOnly,
-            SystemTime::now()
+            crate::materialize::cache::AgeSource::MtimeOnly
         ));
     }
 
@@ -145,10 +151,12 @@ mod tests {
 
         assert!(state_may_have_stale_entries(
             state.path(),
-            DAY * 7,
+            super::super::Cutoff {
+                retention: DAY * 7,
+                now: SystemTime::now()
+            },
             false,
-            crate::materialize::cache::AgeSource::MtimeOnly,
-            SystemTime::now()
+            crate::materialize::cache::AgeSource::MtimeOnly
         ));
     }
 
@@ -165,10 +173,12 @@ mod tests {
 
         assert!(!state_may_have_stale_entries(
             state.path(),
-            DAY * 7,
+            super::super::Cutoff {
+                retention: DAY * 7,
+                now: SystemTime::now()
+            },
             false,
-            crate::materialize::cache::AgeSource::MtimeOnly,
-            SystemTime::now()
+            crate::materialize::cache::AgeSource::MtimeOnly
         ));
     }
 
@@ -183,10 +193,12 @@ mod tests {
 
         assert!(!state_may_have_stale_entries(
             state.path(),
-            DAY * 7,
+            super::super::Cutoff {
+                retention: DAY * 7,
+                now: SystemTime::now()
+            },
             false,
-            crate::materialize::cache::AgeSource::MtimeOnly,
-            SystemTime::now()
+            crate::materialize::cache::AgeSource::MtimeOnly
         ));
     }
 
@@ -201,10 +213,12 @@ mod tests {
 
         let needs_lsof = state_may_have_stale_entries(
             state.path(),
-            DAY * 7,
+            super::super::Cutoff {
+                retention: DAY * 7,
+                now: SystemTime::now(),
+            },
             false,
             crate::materialize::cache::AgeSource::MtimeOnly,
-            SystemTime::now(),
         );
 
         // Restore the mode first, so the temporary folder can be removed.
@@ -222,10 +236,12 @@ mod tests {
 
         assert!(state_may_have_stale_entries(
             state.path(),
-            DAY * 7,
+            super::super::Cutoff {
+                retention: DAY * 7,
+                now: SystemTime::now()
+            },
             false,
-            crate::materialize::cache::AgeSource::MtimeOnly,
-            SystemTime::now()
+            crate::materialize::cache::AgeSource::MtimeOnly
         ));
     }
 }

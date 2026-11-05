@@ -124,20 +124,19 @@ fn sweep_state(
     // An unreadable config cannot say whether the codebase-memory folder is live. The sweep then
     // runs, so it reports that the folder could not be checked, and the gate does not hide it.
     let cbm_unknown = matches!(cbm, CacheUse::Unknown(_));
+    let cutoff = Cutoff { retention, now };
     if !cbm_unknown
         && !state_may_have_stale_entries(
             state_dir,
-            retention,
+            cutoff,
             cbm_live,
             crate::materialize::cache::AgeSource::MtimeOrCtime,
-            now,
         )
     {
         return prune_session_log(state_dir, config, retention, now, out);
     }
     let in_use = crate::materialize::open_files::open_paths().map_err(|e| format!("{e:#}"));
     let in_use = in_use.as_ref().map(Vec::as_slice).map_err(String::as_str);
-    let cutoff = Cutoff { retention, now };
     sweep_state_tmp(state_dir, cutoff, in_use, out)
         + prune_session_log(state_dir, config, retention, now, out)
         + sweep_cbm_indexes(state_dir, config, cutoff, in_use, out)
@@ -151,6 +150,17 @@ struct Cutoff {
     now: SystemTime,
 }
 
+impl Cutoff {
+    /// The age rule of the state sweeps: the retention, judged by mtime or change time, so a
+    /// restored entry is kept (#3275).
+    fn rule(self) -> crate::materialize::expiry::AgeRule {
+        crate::materialize::expiry::AgeRule {
+            older_than: self.retention,
+            source: crate::materialize::cache::AgeSource::MtimeOrCtime,
+        }
+    }
+}
+
 /// Sweep `state/tmp`, which `TMPDIR` points at, with the same retention as the cache (#2814).
 fn sweep_state_tmp(
     state_dir: &Path,
@@ -161,10 +171,7 @@ fn sweep_state_tmp(
     let swept = in_use.map_err(str::to_string).and_then(|in_use| {
         tmp_sweep::sweep(
             &state_dir.join("tmp"),
-            crate::materialize::expiry::AgeRule {
-                older_than: cutoff.retention,
-                source: crate::materialize::cache::AgeSource::MtimeOrCtime,
-            },
+            cutoff.rule(),
             in_use,
             out.dry_run,
             cutoff.now,
@@ -223,10 +230,7 @@ fn sweep_cbm_indexes(
     let swept = in_use.map_err(str::to_string).and_then(|in_use| {
         crate::materialize::cbm_sweep::sweep_legacy_indexes(
             &resolved,
-            crate::materialize::expiry::AgeRule {
-                older_than: cutoff.retention,
-                source: crate::materialize::cache::AgeSource::MtimeOrCtime,
-            },
+            cutoff.rule(),
             in_use,
             out.dry_run,
             cutoff.now,

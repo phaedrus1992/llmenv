@@ -360,3 +360,21 @@ fn an_unreadable_folder_keeps_the_io_error_as_the_source() {
     assert!(text.contains("Fix:"), "{text}");
     assert!(err.removed.is_empty());
 }
+
+// A lock failure is its own error, not one more file that could not be checked.
+#[test]
+fn a_lock_failure_names_the_lock_and_the_kept_rotations() {
+    let err = lock_failure(
+        &anyhow::anyhow!("cannot lock x.log to prune its rotations: busy"),
+        2,
+        &["x.log.3: Permission denied".to_string()],
+    );
+    assert_eq!(
+        err.to_string(),
+        "cannot lock x.log to prune its rotations: busy. 2 expired rotation(s) were kept. 1 \
+         rotated session-log file(s) could not be checked: x.log.3: Permission denied"
+    );
+    assert!(err.removed.is_empty());
+    let alone = lock_failure(&anyhow::anyhow!("busy"), 1, &[]);
+    assert_eq!(alone.to_string(), "busy. 1 expired rotation(s) were kept");
+}

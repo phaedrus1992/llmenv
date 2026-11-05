@@ -11,6 +11,11 @@ pub(super) const DAY: Duration = Duration::from_secs(86_400);
 
 // Tests age a tree with `set_modified`, which cannot move the change time back. The mtime-only
 // rule is the one that sees that age, so these tests use it (#3195).
+/// A real or dry sweep of `root` with a one-week mtime rule, judged by the clock.
+fn sweep_week(root: &Path, dry_run: bool) -> anyhow::Result<crate::materialize::cache::GcReport> {
+    sweep(root, mtime_rule(DAY * 7), &[], dry_run, SystemTime::now())
+}
+
 pub(super) fn mtime_rule(older_than: Duration) -> AgeRule {
     AgeRule {
         older_than,
@@ -75,14 +80,7 @@ fn the_mtime_only_rule_removes_an_unpacked_tree_with_old_mtimes() {
     fs::create_dir(&unpacked).unwrap();
     fs::write(unpacked.join("artifact"), b"x").unwrap();
     age_tree(&unpacked, old());
-    let report = sweep(
-        root.path(),
-        mtime_rule(DAY * 7),
-        &[],
-        false,
-        SystemTime::now(),
-    )
-    .unwrap();
+    let report = sweep_week(root.path(), false).unwrap();
     assert_eq!(report.removed, vec![unpacked.clone()]);
     assert!(!unpacked.exists());
 }
@@ -164,14 +162,7 @@ fn a_dry_run_lists_the_old_entries_and_removes_none() {
     age_tree(&old_file, old());
     fs::create_dir(root.path().join("fresh")).unwrap();
 
-    let report = sweep(
-        root.path(),
-        mtime_rule(DAY * 7),
-        &[],
-        true,
-        SystemTime::now(),
-    )
-    .unwrap();
+    let report = sweep_week(root.path(), true).unwrap();
 
     let mut listed = report.removed.clone();
     listed.sort();
@@ -195,14 +186,7 @@ fn an_old_directory_and_an_old_file_are_removed_and_a_fresh_one_is_kept() {
     let fresh = root.path().join("fresh");
     fs::create_dir(&fresh).unwrap();
 
-    let report = sweep(
-        root.path(),
-        mtime_rule(DAY * 7),
-        &[],
-        false,
-        SystemTime::now(),
-    )
-    .unwrap();
+    let report = sweep_week(root.path(), false).unwrap();
 
     assert_eq!(report.removed.len(), 2, "removed: {:?}", report.removed);
     assert_eq!(report.kept, 1);
@@ -279,14 +263,7 @@ fn an_entry_with_a_future_mtime_is_kept() {
         .set_modified(SystemTime::now() + DAY)
         .unwrap();
 
-    let report = sweep(
-        root.path(),
-        mtime_rule(DAY * 7),
-        &[],
-        false,
-        SystemTime::now(),
-    )
-    .unwrap();
+    let report = sweep_week(root.path(), false).unwrap();
 
     assert!(report.removed.is_empty());
     assert!(future.exists());
@@ -305,14 +282,7 @@ fn an_unreadable_entry_is_recorded_and_the_rest_are_still_swept() {
     fs::write(&old_file, b"o").unwrap();
     age_tree(&old_file, old());
 
-    let report = sweep(
-        root.path(),
-        mtime_rule(DAY * 7),
-        &[],
-        false,
-        SystemTime::now(),
-    )
-    .unwrap();
+    let report = sweep_week(root.path(), false).unwrap();
 
     // Restore the mode before any assertion, so the tempdir can be removed.
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
@@ -457,14 +427,7 @@ fn an_entry_with_old_files_and_fresh_folders_is_removed() {
     age_tree(&entry, old());
     touch_dirs(&entry);
 
-    let report = sweep(
-        root.path(),
-        mtime_rule(DAY * 7),
-        &[],
-        false,
-        SystemTime::now(),
-    )
-    .unwrap();
+    let report = sweep_week(root.path(), false).unwrap();
 
     assert_eq!(
         report.removed,
@@ -481,14 +444,7 @@ fn an_entry_with_a_fresh_file_is_kept() {
     age_tree(&entry, old());
     fs::write(entry.join("deep").join("new"), b"x").unwrap();
 
-    let report = sweep(
-        root.path(),
-        mtime_rule(DAY * 7),
-        &[],
-        false,
-        SystemTime::now(),
-    )
-    .unwrap();
+    let report = sweep_week(root.path(), false).unwrap();
 
     assert!(report.removed.is_empty(), "{:?}", report.removed);
 }
@@ -498,14 +454,7 @@ fn a_fresh_folder_tree_with_no_file_is_kept() {
     let root = tempfile::tempdir().unwrap();
     fs::create_dir_all(root.path().join("empty").join("sub")).unwrap();
 
-    let report = sweep(
-        root.path(),
-        mtime_rule(DAY * 7),
-        &[],
-        false,
-        SystemTime::now(),
-    )
-    .unwrap();
+    let report = sweep_week(root.path(), false).unwrap();
 
     assert!(report.removed.is_empty(), "{:?}", report.removed);
 }
@@ -517,14 +466,7 @@ fn an_old_folder_tree_with_no_file_is_removed() {
     fs::create_dir_all(entry.join("sub")).unwrap();
     age_tree(&entry, old());
 
-    let report = sweep(
-        root.path(),
-        mtime_rule(DAY * 7),
-        &[],
-        false,
-        SystemTime::now(),
-    )
-    .unwrap();
+    let report = sweep_week(root.path(), false).unwrap();
 
     assert_eq!(report.removed.len(), 1);
 }
@@ -541,14 +483,7 @@ fn each_build_in_the_hawk_target_root_is_judged_alone() {
     age_tree(&hawk, old());
     fs::write(hawk.join("fresh-build").join("g"), b"x").unwrap();
 
-    let report = sweep(
-        root.path(),
-        mtime_rule(DAY * 7),
-        &[],
-        false,
-        SystemTime::now(),
-    )
-    .unwrap();
+    let report = sweep_week(root.path(), false).unwrap();
 
     let resolved = fs::canonicalize(&hawk).unwrap();
     assert_eq!(report.removed, vec![resolved.join("old-build")]);
@@ -562,14 +497,7 @@ fn an_old_hawk_target_root_is_kept_when_empty() {
     fs::create_dir(&hawk).unwrap();
     age_tree(&hawk, old());
 
-    let report = sweep(
-        root.path(),
-        mtime_rule(DAY * 7),
-        &[],
-        false,
-        SystemTime::now(),
-    )
-    .unwrap();
+    let report = sweep_week(root.path(), false).unwrap();
 
     assert!(report.removed.is_empty());
     assert!(hawk.exists());

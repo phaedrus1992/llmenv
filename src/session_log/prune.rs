@@ -47,8 +47,8 @@ pub(crate) fn prune_rotations_at(
             return Err(PruneError {
                 removed: Vec::new(),
                 message: format!(
-                    "cannot read {} to prune the rotations of {}: {e}. Fix: check the \
-                     permissions of the folder",
+                    "cannot read {} to prune the rotations of {}: {e}. Fix: check that the \
+                     folder exists, is a folder, and is readable by this user",
                     dir.display(),
                     path.display()
                 ),
@@ -87,12 +87,11 @@ pub(crate) fn prune_rotations_at(
     let removed = if dry_run || expired.is_empty() {
         expired
     } else {
+        let candidates = expired.len();
         match remove_under_lock(path, expired, expiry, &mut failures) {
             Ok(removed) => removed,
-            Err(lock_err) => {
-                failures.push(format!("{lock_err:#}"));
-                Vec::new()
-            }
+            // A lock failure is not a file failure, so it is not counted with them.
+            Err(lock_err) => return Err(lock_failure(&lock_err, candidates, &failures)),
         }
     };
     if !failures.is_empty() {
@@ -112,6 +111,24 @@ pub(crate) fn prune_rotations_at(
         });
     }
     Ok(removed)
+}
+
+/// The error of a pass that could not take the rotation lock, so it removed nothing. Files that
+/// the scan could not check are listed after the lock cause.
+fn lock_failure(lock_err: &anyhow::Error, candidates: usize, failures: &[String]) -> PruneError {
+    let mut message = format!("{lock_err:#}. {candidates} expired rotation(s) were kept");
+    if !failures.is_empty() {
+        message.push_str(&format!(
+            ". {} rotated session-log file(s) could not be checked: {}",
+            failures.len(),
+            failures.join("; ")
+        ));
+    }
+    PruneError {
+        removed: Vec::new(),
+        message,
+        source: None,
+    }
 }
 
 /// A prune pass that failed. It keeps the files it removed before the failure, so a caller can
