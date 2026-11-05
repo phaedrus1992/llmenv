@@ -62,6 +62,15 @@ fn unreadable_tasks() -> TasksData {
 fn try_tasks_data(state_dir: &Path, project: &str) -> anyhow::Result<TasksData> {
     let mut open_sessions = crate::task::session::open_sessions_strict(state_dir, project)?;
     open_sessions.sort_by(|a, b| a.id.cmp(&b.id));
+    // With no open session there is nothing to count, so the task files are not read.
+    if open_sessions.is_empty() {
+        return Ok(TasksData {
+            session: None,
+            current: None,
+            unreadable: false,
+            sessions: Vec::new(),
+        });
+    }
     // One strict read of the task store feeds every count and title of the render (#3466).
     let tasks = crate::task::list_tasks_strict(state_dir)?;
     let progress: Vec<SessionProgress> = open_sessions

@@ -179,4 +179,15 @@ mod tests {
         let stored = super::super::list_tasks_strict(dir.path());
         assert_eq!(session_finish_reminders(dir.path(), None, &stored), "");
     }
+
+    #[test]
+    fn an_unreadable_store_gives_the_store_warning_not_a_finish_line() {
+        let dir = TempDir::new().expect("test");
+        let stored = Err(anyhow::anyhow!("broken task file"));
+        let reminder = session_finish_reminders(dir.path(), None, &stored);
+        assert!(
+            reminder.contains("the task store cannot be read: broken task file"),
+            "{reminder}"
+        );
+    }
 }

@@ -19,6 +19,8 @@ pub(super) fn store_for_reminder(
     ) {
         (Ok(_), Ok(tasks)) => Ok(tasks.to_vec()),
         (Err(e), _) => Err(store_warning_text(&e.context(context))),
+        // `stored` is shared by every reminder, so its error is borrowed and only its text can
+        // be carried on. The text is the same as a `context` on the owned error.
         (_, Err(e)) => Err(store_warning_text(&anyhow::anyhow!("{context}: {e:#}"))),
     }
 }

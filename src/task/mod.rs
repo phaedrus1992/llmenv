@@ -1466,6 +1466,7 @@ fn tasks_visible_to(
     // Strict session reads: a corrupt session file must reach the Stop reminder as an error,
     // not drop its tasks silently (#2628).
     let project_ids = session::try_session_ids_for_project(state_dir, &project)?;
+    // The shared error is borrowed, so its text is carried on (see reminder_store.rs).
     let stored = stored
         .as_ref()
         .map_err(|e| anyhow::anyhow!("the task store cannot be read: {e:#}"))?;

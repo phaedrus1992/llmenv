@@ -761,7 +761,7 @@ pub(crate) fn try_session_progress(
     session_id: &str,
 ) -> anyhow::Result<(u64, u64)> {
     Ok(super::progress_in(
-        &super::read_tasks(state_dir, super::UnreadablePolicy::Fail)?,
+        &super::list_tasks_strict(state_dir)?,
         session_id,
     ))
 }

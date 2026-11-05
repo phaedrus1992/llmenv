@@ -5,13 +5,12 @@ use super::{Task, TaskState, most_recently_updated};
 
 /// The done and total task counts of `session_id` among tasks that the caller already read.
 pub(crate) fn progress_in(tasks: &[Task], session_id: &str) -> (u64, u64) {
-    let (done, total) = tasks
+    let mine: Vec<&Task> = tasks
         .iter()
         .filter(|t| t.session.as_deref() == Some(session_id))
-        .fold((0u64, 0u64), |(done, total), t| {
-            (done + u64::from(t.state == TaskState::Done), total + 1)
-        });
-    (done, total)
+        .collect();
+    let done = mine.iter().filter(|t| t.state == TaskState::Done).count();
+    (done as u64, mine.len() as u64)
 }
 
 /// The title of the most recently updated `wip` or `waiting` task in `session_ids`, for the
@@ -30,7 +29,7 @@ pub(crate) fn wip_title_in(tasks: &[Task], session_ids: &[String]) -> Option<Str
 
 #[cfg(test)]
 mod tests {
-    use super::progress_in;
+    use super::{progress_in, wip_title_in};
     use crate::task::{Task, TaskState};
 
     fn task(session: Option<&str>, state: TaskState) -> Task {
@@ -61,6 +60,47 @@ mod tests {
             let mine: Vec<&(u8, bool)> = rows.iter().filter(|(s, _)| *s == 0).collect();
             let done = mine.iter().filter(|(_, d)| *d).count() as u64;
             proptest::prop_assert_eq!(progress_in(&tasks, "a"), (done, mine.len() as u64));
+        }
+
+        /// The title is from a `wip` or `waiting` task of the named sessions, and no such task
+        /// has a later `updated_at`. With no such task there is no title.
+        #[test]
+        fn the_title_is_the_latest_active_task_of_the_sessions(
+            rows in proptest::collection::vec((0u8..3, 0u8..4, 0u8..10), 0..12),
+        ) {
+            let ids = ["a", "b", "c"];
+            let states = [TaskState::Open, TaskState::Wip, TaskState::Waiting, TaskState::Done];
+            let tasks: Vec<Task> = rows
+                .iter()
+                .enumerate()
+                .map(|(i, (s, state, at))| {
+                    let mut t = task(ids.get(usize::from(*s)).copied(), states[usize::from(*state)]);
+                    t.title = format!("t{i}");
+                    t.updated_at = format!("2026-01-0{at}");
+                    t
+                })
+                .collect();
+            let wanted = vec!["a".to_string(), "b".to_string()];
+            let active: Vec<&Task> = tasks
+                .iter()
+                .filter(|t| {
+                    matches!(t.state, TaskState::Wip | TaskState::Waiting)
+                        && t.session.as_deref().is_some_and(|s| s == "a" || s == "b")
+                })
+                .collect();
+            match wip_title_in(&tasks, &wanted) {
+                None => proptest::prop_assert!(active.is_empty()),
+                Some(title) => {
+                    let chosen = active.iter().find(|t| t.title == title);
+                    proptest::prop_assert!(chosen.is_some(), "{title} is not an active task");
+                    let latest = active.iter().map(|t| t.updated_at.as_str()).max();
+                    proptest::prop_assert_eq!(
+                        chosen.map(|t| t.updated_at.as_str()),
+                        latest
+                    );
+                }
+            }
+            proptest::prop_assert_eq!(wip_title_in(&tasks, &[]), None);
         }
     }
 }
