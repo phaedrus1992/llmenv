@@ -691,7 +691,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
     }
     // The resume fields are parsed before the notices are taken, because a wrong-type field
     // records a notice as it is read.
-    let resume_message = resume_cache::resume_notice(&hook_event_name, payload);
+    let resume_message = resume_cache::session_resume_notice(&hook_event_name, payload);
     // Read after `run_inner`, so every output path below carries it to the agent (#2658).
     let notice = crate::agent_notice::current();
     match result {

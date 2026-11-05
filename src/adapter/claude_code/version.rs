@@ -46,10 +46,7 @@ pub(crate) fn env_vars() -> Vec<(String, String)> {
 /// a version number. A pre-release of 2.1.295, such as `2.1.295-beta`, sorts before the release,
 /// so it does not count (#3101).
 pub(crate) fn supports_on_failure(version: &str) -> Option<bool> {
-    let triple = crate::util::semver::parse_semver_triple(version)?;
-    let prerelease_of_since =
-        triple == ON_FAILURE_SINCE && crate::util::semver::is_prerelease(version);
-    Some(triple >= ON_FAILURE_SINCE && !prerelease_of_since)
+    crate::util::semver::is_release_at_least(version, ON_FAILURE_SINCE)
 }
 
 /// Run `claude --version`. Each failure is logged, and gives `None`.

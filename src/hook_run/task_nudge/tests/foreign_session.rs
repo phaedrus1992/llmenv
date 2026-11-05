@@ -65,6 +65,7 @@ fn a_task_of_another_conversation_does_not_count_as_tracked_work() {
         crate::task::tracking(dir.path(), Some("other")),
         Tracking::Tracked {
             wip: Some(slug),
+            wip_ownerless: false,
             waiting: Vec::new(),
             next: None,
             queued: 0,
@@ -126,4 +127,33 @@ fn wip_task_owned_by_nobody(dir: &Path) -> String {
     let slug = add(dir, &s.id, "Ownerless step");
     start_task(dir, &slug, false).unwrap();
     slug
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(16))]
+    /// Over any order of questions from two conversations, each conversation hears about an
+    /// ownerless task once: at its first question, and never after it (#3187).
+    #[test]
+    fn each_conversation_hears_once_in_any_order(
+        events in proptest::collection::vec((proptest::bool::ANY, proptest::bool::ANY), 1..8),
+    ) {
+        let dir = TempDir::new().unwrap();
+        let slug = wip_task_owned_by_nobody(dir.path());
+        let wait = format!("llmenv task wait {slug}");
+        let tracker = TaskTracker::default();
+        let mut heard = std::collections::BTreeMap::new();
+        for (second, by_tool) in &events {
+            let caller = if *second { "s2" } else { "s1" };
+            let text = if *by_tool {
+                let ask = serde_json::json!({ "tool_name": "AskUserQuestion" });
+                handle_post_tool_use(&tracker, &ask, Some(caller), dir.path())
+            } else {
+                let stop = serde_json::json!({ "last_assistant_message": "Which one?" });
+                handle_stop(&tracker, &stop, Some(caller), dir.path())
+            };
+            let first = !heard.contains_key(caller);
+            proptest::prop_assert_eq!(text.contains(&wait), first, "{} {}", caller, text);
+            heard.insert(caller, ());
+        }
+    }
 }

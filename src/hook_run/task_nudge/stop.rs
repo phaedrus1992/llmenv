@@ -36,14 +36,13 @@ pub(super) fn question_reminder(
 ) -> String {
     let text = waiting_reminder(tracking);
     let Tracking::Tracked {
-        wip: Some(slug), ..
+        wip: Some(slug),
+        wip_ownerless: true,
+        ..
     } = tracking
     else {
         return text;
     };
-    if text.is_empty() || !crate::task::wip_session_is_ownerless(state_dir, caller, slug) {
-        return text;
-    }
     let first = with_stop_state(caller, state_dir, |state| {
         let first = !state.ownerless_question_reminded.contains(slug);
         if first {
@@ -51,7 +50,8 @@ pub(super) fn question_reminder(
         }
         first
     });
-    // A state that cannot be read or locked keeps the reminder, and its helper notes why.
+    // No usable session id, or a state that cannot be read or locked, keeps the reminder. A failed
+    // lock or read records its own agent notice.
     if first == Some(false) {
         String::new()
     } else {
