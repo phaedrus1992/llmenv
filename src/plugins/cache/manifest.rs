@@ -1,6 +1,6 @@
 //! Reads the manifest of a marketplace checkout: its plugin entries and its declared name.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -15,6 +15,28 @@ pub struct MarketplacePluginEntry {
     pub(crate) subdir: Option<String>,
 }
 
+/// The path and the parsed JSON of the marketplace manifest, or `None` when there is none.
+///
+/// One read tells NotFound (no manifest) from other I/O errors, which propagate, instead of an
+/// exists() stat that masked every stat failure as "no manifest" (#893). The marketplace is a
+/// cloned repository, so the read is capped and refuses a FIFO (#2945).
+///
+/// # Errors
+/// The file exists but cannot be read or is not JSON.
+pub(crate) fn read_manifest(
+    marketplace_dir: &Path,
+) -> Result<Option<(PathBuf, serde_json::Value)>> {
+    let manifest_path = marketplace_dir
+        .join(".claude-plugin")
+        .join("marketplace.json");
+    let Some(content) = crate::paths::bounded::asset_text_optional(&manifest_path)? else {
+        return Ok(None);
+    };
+    let json = serde_json::from_str(&content)
+        .with_context(|| format!("parsing {}", manifest_path.display()))?;
+    Ok(Some((manifest_path, json)))
+}
+
 /// Parse plugin entries from a marketplace clone's `.claude-plugin/marketplace.json`.
 /// Returns an empty vec when the file is absent (bundles without a manifest are valid).
 ///
@@ -23,18 +45,20 @@ pub struct MarketplacePluginEntry {
 pub(crate) fn read_marketplace_plugins(
     marketplace_dir: &Path,
 ) -> Result<Vec<MarketplacePluginEntry>> {
-    let manifest_path = marketplace_dir
-        .join(".claude-plugin")
-        .join("marketplace.json");
-    // #893: a single read that distinguishes NotFound (→ empty) from other I/O
-    // errors (→ propagate), rather than an exists() stat that masked every stat
-    // failure (e.g. EACCES) as "no manifest". The marketplace is a cloned repository, so the
-    // read is capped and refuses a FIFO (#2945).
-    let Some(content) = crate::paths::bounded::asset_text_optional(&manifest_path)? else {
-        return Ok(Vec::new());
-    };
-    let json: serde_json::Value = serde_json::from_str(&content)
-        .with_context(|| format!("parsing {}", manifest_path.display()))?;
+    match read_manifest(marketplace_dir)? {
+        Some((manifest_path, json)) => manifest_plugins(&manifest_path, &json),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// The plugin entries of a manifest that [`read_manifest`] read.
+///
+/// # Errors
+/// `plugins` is present and is not a list.
+pub(crate) fn manifest_plugins(
+    manifest_path: &Path,
+    json: &serde_json::Value,
+) -> Result<Vec<MarketplacePluginEntry>> {
     let arr = match json.get("plugins") {
         None => return Ok(Vec::new()),
         Some(value) => value.as_array().with_context(|| {
@@ -146,14 +170,16 @@ fn parse_plugin_entry(entry: &serde_json::Value) -> Result<Option<MarketplacePlu
 /// # Errors
 /// Returns an error when the file exists but cannot be read or parsed.
 pub(crate) fn read_marketplace_name(marketplace_dir: &Path) -> Result<Option<String>> {
-    let manifest_path = marketplace_dir
-        .join(".claude-plugin")
-        .join("marketplace.json");
-    let Some(content) = crate::paths::bounded::asset_text_optional(&manifest_path)? else {
-        return Ok(None);
-    };
-    let json: serde_json::Value = serde_json::from_str(&content)
-        .with_context(|| format!("parsing {}", manifest_path.display()))?;
+    read_manifest(marketplace_dir)?
+        .map(|(manifest_path, json)| manifest_name(&manifest_path, &json))
+        .transpose()
+}
+
+/// The declared name of a manifest that [`read_manifest`] read.
+///
+/// # Errors
+/// The manifest has no string `name`.
+pub(crate) fn manifest_name(manifest_path: &Path, json: &serde_json::Value) -> Result<String> {
     let name = json
         .get("name")
         .and_then(serde_json::Value::as_str)
@@ -163,7 +189,7 @@ pub(crate) fn read_marketplace_name(marketplace_dir: &Path) -> Result<Option<Str
                 manifest_path.display()
             )
         })?;
-    Ok(Some(name.to_owned()))
+    Ok(name.to_owned())
 }
 
 #[cfg(test)]
@@ -231,6 +257,29 @@ mod error_tests {
     }
 
     proptest! {
+        /// Any string name, with quotes, backslashes, newlines, or non-ASCII text, reads back
+        /// unchanged.
+        #[test]
+        fn any_string_name_reads_back_unchanged(name in "\\PC{0,24}|[\"\\\\\n\t]{0,6}") {
+            let dir = write_manifest(&serde_json::json!({ "name": name }).to_string());
+            prop_assert_eq!(read_marketplace_name(dir.path()).expect("read"), Some(name));
+        }
+
+        /// A name that is not a string is an error, never a name or an absent manifest.
+        #[test]
+        fn a_name_of_another_type_is_an_error(
+            value in prop_oneof![
+                Just(serde_json::Value::Null),
+                any::<bool>().prop_map(serde_json::Value::from),
+                any::<i64>().prop_map(serde_json::Value::from),
+                Just(serde_json::json!([])),
+                Just(serde_json::json!({})),
+            ],
+        ) {
+            let dir = write_manifest(&serde_json::json!({ "name": value }).to_string());
+            prop_assert!(read_marketplace_name(dir.path()).is_err());
+        }
+
         /// Untrusted manifest entries never panic, and an accepted entry always has a name.
         #[test]
         fn parse_plugin_entry_never_panics_and_accepts_only_named_entries(

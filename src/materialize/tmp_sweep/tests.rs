@@ -287,10 +287,10 @@ fn an_unreadable_entry_is_recorded_and_the_rest_are_still_swept() {
     // Restore the mode before any assertion, so the tempdir can be removed.
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
     let locked_path = root.path().canonicalize().unwrap().join("locked");
-    assert_eq!(report.failed, vec![locked_path.clone()]);
+    assert_eq!(report.failed.keys().collect::<Vec<_>>(), vec![&locked_path]);
     // The doctor line names the cause, so the report must carry one for each failed path.
     let cause = report
-        .causes
+        .failed
         .get(&locked_path)
         .expect("a cause for the failed entry");
     assert!(!cause.is_empty(), "cause: {cause:?}");

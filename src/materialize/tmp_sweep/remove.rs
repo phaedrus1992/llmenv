@@ -28,8 +28,7 @@ pub fn sweep(
     let scan = scan(tmp_root, rule, in_use, now)?;
     let mut report = GcReport {
         kept: scan.kept,
-        failed: scan.failed.keys().cloned().collect(),
-        causes: scan.failed,
+        failed: scan.failed,
         ..GcReport::new(dry_run)
     };
     for stale in &scan.stale {

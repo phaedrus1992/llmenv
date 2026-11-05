@@ -28,32 +28,23 @@ pub(super) fn sync_plugin_payloads(
         .into_iter()
         .filter_map(|mut p| {
             let mkt_path = crate::plugins::cache::marketplace_path(cache_root, &p.marketplace);
-            let entries = match crate::plugins::cache::read_marketplace_plugins(&mkt_path) {
-                Ok(entries) => entries,
+            // One read feeds the entry list and the name check, so both see one file. A missing
+            // manifest has no entries and no name; a read error surfaces its cause (#893).
+            let parsed = crate::plugins::cache::read_manifest(&mkt_path).and_then(|manifest| {
+                let Some((path, json)) = manifest else {
+                    return Ok((Vec::new(), None));
+                };
+                let entries = crate::plugins::cache::manifest_plugins(&path, &json)?;
+                // Claude Code names the marketplace from the manifest, not from the config key,
+                // so a mismatch means the plugin never loads (#3048).
+                let declared = crate::plugins::cache::manifest_name(&path, &json)?;
+                Ok((entries, Some(declared)))
+            });
+            let (entries, declared) = match parsed {
+                Ok(parsed) => parsed,
                 Err(e) => {
-                    // #893: read_marketplace_plugins now propagates real read
-                    // errors (a missing manifest is Ok(empty)), so surface the
-                    // cause rather than a fixed plugin-sync hint that won't fix
-                    // a permission error or a corrupt manifest.
                     tracing::warn!(
                         "cannot read marketplace manifest for '{}': {e:#}",
-                        p.marketplace
-                    );
-                    note_unloaded_plugin(
-                        &p.plugin,
-                        &p.marketplace,
-                        "its marketplace manifest is unreadable",
-                    );
-                    return None;
-                }
-            };
-            // Claude Code names the marketplace from the manifest, not from the config key, so a
-            // mismatch means the plugin never loads. Refuse it here, with the fix (#3048).
-            let declared = match crate::plugins::cache::read_marketplace_name(&mkt_path) {
-                Ok(declared) => declared,
-                Err(e) => {
-                    tracing::warn!(
-                        "cannot read the name of marketplace '{}': {e:#}",
                         p.marketplace
                     );
                     note_unloaded_plugin(

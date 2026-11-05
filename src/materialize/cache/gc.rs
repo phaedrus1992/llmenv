@@ -44,7 +44,9 @@ pub fn gc(
         _ => None,
     };
     for entry in entries {
-        let Some((p, ft)) = entry_and_type(cache_root, entry, &mut report.failed) else {
+        let Some((p, ft)) = entry_and_type(cache_root, entry, |p, cause| {
+            report.record_failure(p, cause)
+        }) else {
             continue;
         };
         // Use `file_type()` (lstat-equivalent) — a symlink at the top level
@@ -157,7 +159,9 @@ fn gc_normal_shapes(
                 .context(format!("reading version dir {}", version_dir.display())));
         }
     } {
-        let Some((p, ft)) = entry_and_type(version_dir, entry, &mut report.failed) else {
+        let Some((p, ft)) = entry_and_type(version_dir, entry, |p, cause| {
+            report.record_failure(p, cause)
+        }) else {
             continue;
         };
         // A file or a link inside a generation is not a shape. It is kept and counted, so the
