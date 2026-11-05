@@ -463,6 +463,8 @@ llmenv status mcps
 (added in v3.12.0) On the host that serves memory, `llmenv doctor` also reports the ICM server version.
 It warns below 0.10.60, where adaptive recall returns little, and below 0.10.64, where the ranking is weaker.
 (changed in v3.13.0) It also warns below 0.11.3, where recall cannot answer in JSON, so the tool-failure recall matches the memory summary only.
+(changed in v3.14.0) It also warns below 0.11.5, where JSON recall has no record ids, takes one query per call, and has no `icm_memory_related`. The fix line reads `Fix: upgrade icm to 0.11.5 or later`.
+When this host serves memory and `icm` is not on `PATH`, the warning names the fix: install icm 0.11.5 or later.
 
 ```bash
 llmenv doctor

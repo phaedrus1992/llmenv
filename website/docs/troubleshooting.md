@@ -326,7 +326,9 @@ See [`memory`](commands.md#memory).
   keyword and topic after the limit, so adaptive recall returns little or nothing. It warns again
   below 0.10.64, where recall ranking is weaker. (changed in v3.13.0) It warns below 0.11.3, where
   recall cannot answer in JSON, so the tool-failure recall matches the memory summary only, not its
-  keywords. Run `icm upgrade --apply` on that host. On a
+  keywords. (changed in v3.14.0) It warns below 0.11.5, where JSON recall has no record ids
+  and no multi-query form, so memory dedup and consolidation cannot read the records.
+  Run `icm upgrade --apply` on that host. On a
   memory client, doctor cannot read the server version, because `mcp-proxy` does not forward it;
   run `icm --version` on the server host.
 - **`mcp-proxy` missing** — the server host needs `mcp-proxy` or `uvx` on

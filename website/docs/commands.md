@@ -1323,8 +1323,8 @@ active context (active bundles, active MCP servers, etc.). Checks:
   A server that is down gets the reason and the fix. Nothing prints when the scope has no managed server.
   See [Session-start health check](mcp.md#session-start-health-check-added-in-v3120).
 - ICM server version (added in v3.12.0) — on the host that serves memory, reads the version of the local
-  `icm` binary and warns below 0.10.60, below 0.10.64, and (changed in v3.13.0) below 0.11.3. On a memory
-  client the version is unknown, and
+  `icm` binary and warns below 0.10.60, below 0.10.64, (changed in v3.13.0) below 0.11.3, and
+  (changed in v3.14.0) below 0.11.5. On a memory client the version is unknown, and
   doctor says to run `icm --version` on the server host. See
   [Troubleshooting](troubleshooting.md#memory-backend-issues).
 - codebase-memory index (added in v3.12.0) — with one active `features.codebase_memory` entry, reports the
