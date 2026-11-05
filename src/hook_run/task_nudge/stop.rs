@@ -66,6 +66,7 @@ pub(crate) fn handle_stop(
     payload: &serde_json::Value,
     caller: Option<&str>,
     state_dir: &Path,
+    stored: &crate::task::Stored,
 ) -> String {
     if !tracker.nudges {
         return String::new();
@@ -73,7 +74,7 @@ pub(crate) fn handle_stop(
     let asks = payload["last_assistant_message"]
         .as_str()
         .is_some_and(|m| m.trim_end().ends_with('?'));
-    let tracking = crate::task::tracking(state_dir, caller);
+    let tracking = crate::task::tracking_in(stored, caller);
     let stalled = matches!(
         &tracking,
         Tracking::Tracked { wip: Some(_), queued, .. } if *queued > 0
@@ -183,4 +184,21 @@ fn with_stop_state<T>(
         save(&path, &state);
     }
     Some(out)
+}
+
+/// [`handle_stop`] with its own read of the stores, for the tests that drive one turn end.
+#[cfg(test)]
+pub(crate) fn handle_stop_read(
+    tracker: &TaskTracker,
+    payload: &serde_json::Value,
+    caller: Option<&str>,
+    state_dir: &Path,
+) -> String {
+    handle_stop(
+        tracker,
+        payload,
+        caller,
+        state_dir,
+        &crate::task::Stored::read(state_dir),
+    )
 }

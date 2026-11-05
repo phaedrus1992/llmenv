@@ -302,33 +302,21 @@ mod tests {
         }
     }
 
+    /// The strict read of the store names a corrupt parent file before any task changes
+    /// (#3463, #3471).
     #[test]
-    fn an_unreadable_parent_names_the_parent_and_the_sub_task() {
+    fn an_unreadable_parent_file_is_named_and_nothing_changes() {
         let dir = TempDir::new().unwrap();
         let parent = open(dir.path(), "Parent task");
         let child = sub_task(dir.path(), "Child task", &parent.slug);
         complete_task(dir.path(), &child.slug, true).unwrap();
-        std::fs::write(
-            super::super::task_path(dir.path(), &parent.slug),
-            "not json",
-        )
-        .unwrap();
+        let path = super::super::task_path(dir.path(), &parent.slug);
+        std::fs::write(&path, "not json").unwrap();
 
         let err = reopen_tasks(dir.path(), std::slice::from_ref(&child.slug)).unwrap_err();
 
         let text = format!("{err:#}");
-        assert!(
-            text.contains(&format!(
-                "'{}', the parent of '{}'",
-                parent.slug, child.slug
-            )),
-            "{text}"
-        );
-        let path = super::super::task_path(dir.path(), &parent.slug);
-        assert!(
-            text.contains(&format!("repair or remove {}", path.display())),
-            "{text}"
-        );
+        assert!(text.contains(&path.display().to_string()), "{text}");
         assert_eq!(
             load_task(dir.path(), &child.slug).unwrap().state,
             TaskState::Done

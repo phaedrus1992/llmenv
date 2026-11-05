@@ -9,7 +9,7 @@ use std::path::Path;
 use anyhow::Context as _;
 
 use super::session::{self, EngineIdentity};
-use super::{task_path, try_list_tasks};
+use super::{list_tasks_strict, task_path};
 
 /// Resolve a user-supplied identifier (exact slug or unambiguous prefix) to the exact slug of
 /// an existing task. The caller's open session is searched first, so a bare slug does not
@@ -38,11 +38,10 @@ fn resolve_identifier_for(
     if !crate::paths::is_valid_short_name(input) {
         anyhow::bail!("'{input}' is not a valid task identifier");
     }
-    // Fallible `try_list_tasks` rather than the tolerant `list_tasks`: an unreadable store
-    // must error out here rather than be misread as "no task found" (#1112) — this is the
-    // resolution step every mutating task command (and `TaskUpdate`'s hook redirect) runs
-    // through.
-    let tasks = try_list_tasks(state_dir)?;
+    // A strict read: an unreadable store or task file must error out here rather than be
+    // misread as "no task found" (#1112, #3471). This is the resolution step every mutating
+    // task command (and `TaskUpdate`'s hook redirect) runs through.
+    let tasks = list_tasks_strict(state_dir)?.into_vec();
     let preferred = preferred_sessions(state_dir, owner)
         .with_context(|| format!("listing sessions to resolve task '{input}'"))?;
     if !preferred.is_empty() {
@@ -280,5 +279,32 @@ mod tests {
                 proptest::prop_assert_eq!(pick(&forward, &input).unwrap(), Some(input));
             }
         }
+    }
+
+    fn break_one_task_file(dir: &Path) {
+        std::fs::write(crate::task::tasks_dir(dir).join("broken.json"), "not json").unwrap();
+    }
+
+    /// A corrupt task file is a read error, not "no task found" (#1112, #3471).
+    #[test]
+    fn one_corrupt_task_file_is_a_read_error_not_a_missing_task() {
+        let dir = TempDir::new().unwrap();
+        let session = open_session(dir.path(), StartDecision::Auto);
+        let slug = add(dir.path(), "Step", &session);
+        break_one_task_file(dir.path());
+        let err = resolve_identifier_for(dir.path(), &slug, &NOBODY).unwrap_err();
+        assert!(format!("{err:#}").contains("broken.json"), "{err:#}");
+    }
+
+    /// A corrupt task file can be an open sub-task, so it stops the parent from closing (#3471).
+    #[test]
+    fn one_corrupt_task_file_stops_a_task_from_closing() {
+        let dir = TempDir::new().unwrap();
+        let session = open_session(dir.path(), StartDecision::Auto);
+        let slug = add(dir.path(), "Step", &session);
+        crate::task::start_task(dir.path(), &slug, false).unwrap();
+        break_one_task_file(dir.path());
+        let err = crate::task::complete_task(dir.path(), &slug, false).unwrap_err();
+        assert!(format!("{err:#}").contains("broken.json"), "{err:#}");
     }
 }

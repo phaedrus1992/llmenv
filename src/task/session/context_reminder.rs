@@ -34,7 +34,7 @@ pub(in crate::task) fn missing_context_reminders(
             // line says the session was not checked (#2608).
             Err(e) => Some(format!(
                 "Session '{label}' ({id}) was not checked for resume context: the task store cannot \
-                 be read ({err:#}). Fix the task store, then run `llmenv task ls --all` to confirm.",
+                 be read ({err:#}). Fix: repair or remove the file named in the error.",
                 label = session.name.as_deref().unwrap_or(session.id.as_str()),
                 id = session.id,
                 err = e,
