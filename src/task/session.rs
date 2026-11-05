@@ -532,10 +532,7 @@ fn create_session(state_dir: &Path, request: &StartRequest<'_>) -> anyhow::Resul
 /// [`tasks_in_session`], but a read error on the tasks directory or on any task file is an error
 /// instead of an empty list or a skipped file. Finishing, abandoning, or guarding a session on a
 /// store it cannot fully read would skip the unfinished check (#2416, #2598).
-pub(super) fn try_tasks_in_session(
-    state_dir: &Path,
-    session_id: &str,
-) -> anyhow::Result<Vec<Task>> {
+fn try_tasks_in_session(state_dir: &Path, session_id: &str) -> anyhow::Result<Vec<Task>> {
     Ok(super::read_tasks(state_dir, super::UnreadablePolicy::Fail)?
         .into_iter()
         .filter(|t| t.session.as_deref() == Some(session_id))
