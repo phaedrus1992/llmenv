@@ -11,6 +11,15 @@ pub(crate) use error::RecallJsonError;
 /// The value of the recall `format` argument that asks icm for the JSON form.
 pub(crate) const FORMAT: &str = "json";
 
+/// The recall `max_tokens` budget for a call that reads a whole set of records. icm clamps
+/// `limit` to 20 without a budget. With a budget it returns as many records as fit, and allows a
+/// `limit` of up to [`BUDGET_MAX_LIMIT`] (icm-v0.11.5, `crates/icm-mcp/src/tools.rs`, #3419).
+/// 32000 is the largest budget icm accepts.
+pub(crate) const MAX_TOKENS: u32 = 32_000;
+
+/// The largest recall `limit` that icm honors when the call gives [`MAX_TOKENS`].
+pub(crate) const BUDGET_MAX_LIMIT: u32 = 200;
+
 /// One record of a JSON recall reply. icm adds more fields, such as `score`, `bm25`, and
 /// `related_ids`; a reader that does not need them ignores them.
 #[derive(Debug, Clone, PartialEq, Deserialize)]

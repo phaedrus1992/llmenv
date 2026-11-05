@@ -34,14 +34,13 @@ use crate::hook_run::checkpoint;
 use crate::hook_run::idempotency;
 use crate::hook_run::mcp_client::McpHttpClient;
 
+mod bullets;
 mod dedup;
 
 /// Hard timeout for the LLM backend call.
 const LLM_TIMEOUT: Duration = Duration::from_secs(120);
 /// Minimum episodic records needed to trigger consolidation.
 const MIN_RECORDS: usize = 3;
-/// Maximum character length for a single rule bullet.
-const MAX_RULE_LENGTH: usize = 500;
 /// Default model for the `anthropic-api` backend.
 const DEFAULT_MODEL: &str = "claude-sonnet-5";
 
@@ -446,30 +445,6 @@ async fn post_messages(
     answer_text(&json)
 }
 
-/// Parse bullet-point rules from the model's text output.
-///
-/// Returns lines that start with `- ` (dash-space), trimming whitespace.
-/// Empty output → no rules → no store calls (success, not an error).
-fn parse_bullets(text: &str) -> Vec<String> {
-    text.lines()
-        .map(|l| l.trim())
-        .filter(|l| l.starts_with("- ") && l.len() > 2)
-        .map(|l| {
-            let rule = l[2..].trim();
-            if rule.chars().count() > MAX_RULE_LENGTH {
-                // Ponytail: truncate overlong rules with a marker. Truncates
-                // by character count, not byte length — MAX_RULE_LENGTH is a
-                // character bound, and byte-slicing panics when a multi-byte
-                // char straddles the cut point (#1166).
-                let truncated: String = rule.chars().take(MAX_RULE_LENGTH).collect();
-                format!("{truncated}… (truncated)")
-            } else {
-                rule.to_string()
-            }
-        })
-        .collect()
-}
-
 /// What names one consolidation run: the project, and the id of the run that started it.
 struct RunScope<'a> {
     project: &'a str,
@@ -589,6 +564,10 @@ enum Distilled {
     Stop { msg: String, settled: bool },
 }
 
+/// The most recent memories one consolidation reads. icm honors more than 20 only with a
+/// `max_tokens` budget, and returns fewer when they do not fit in it (#3419).
+const CONSOLIDATION_RECALL_LIMIT: u32 = 50;
+
 /// Steps 1-4: recall recent memories, check the precondition, and ask the model for rules. On a
 /// model success the summary goes into the checkpoint, so a resume after a failed store never
 /// pays for the model again (#2396).
@@ -606,7 +585,9 @@ async fn distill(
                     serde_json::json!({
                         "query": "",
                         "project": project,
-                        "limit": 50,
+                        "limit": CONSOLIDATION_RECALL_LIMIT,
+                        // Without a budget icm clamps the limit to 20 (#3419).
+                        "max_tokens": crate::memory::recall_json::MAX_TOKENS,
                         "format": crate::memory::recall_json::FORMAT,
                     }),
                 )
@@ -762,7 +743,7 @@ pub(crate) async fn run(
     };
 
     // Step 5: Parse bullet points
-    let rules = parse_bullets(&llm_output);
+    let rules = bullets::parse_bullets(&llm_output);
 
     if rules.is_empty() {
         let msg = format!("consolidation: LLM returned no rules (parsed {records} records)");
@@ -1060,66 +1041,6 @@ mod tests {
         assert!(msg.contains("overloaded"), "{msg}");
     }
 
-    #[test]
-    fn parse_bullets_empty_text() {
-        assert!(parse_bullets("").is_empty());
-    }
-
-    #[test]
-    fn parse_bullets_only_prose() {
-        let text = "This is just a paragraph of text.\nNo bullet points here.";
-        assert!(parse_bullets(text).is_empty());
-    }
-
-    #[test]
-    fn parse_bullets_single() {
-        let text = "- Use Rust for all new projects";
-        let bullets = parse_bullets(text);
-        assert_eq!(bullets, vec!["Use Rust for all new projects"]);
-    }
-
-    #[test]
-    fn parse_bullets_multiple() {
-        let text = "- First rule\n- Second rule\nSome prose in between\n- Third rule";
-        let bullets = parse_bullets(text);
-        assert_eq!(bullets, vec!["First rule", "Second rule", "Third rule"]);
-    }
-
-    #[test]
-    fn parse_bullets_respects_max_rule_length() {
-        let long = "x".repeat(MAX_RULE_LENGTH + 10);
-        let text = format!("- {long}");
-        let bullets = parse_bullets(&text);
-        assert_eq!(bullets.len(), 1);
-        assert!(bullets[0].ends_with("… (truncated)"));
-        assert!(bullets[0].len() <= MAX_RULE_LENGTH + "… (truncated)".len());
-    }
-
-    // #1166: MAX_RULE_LENGTH is documented as a *character* bound, but the
-    // truncation sliced by *byte* index — a multi-byte char straddling byte
-    // index MAX_RULE_LENGTH panics ("byte index is not a char boundary").
-    // "x" (1 byte) then "é" (2 bytes) repeated puts the boundary mid-char.
-    #[test]
-    fn parse_bullets_truncates_multibyte_rule_without_panicking() {
-        let long = "x".to_string() + &"é".repeat(MAX_RULE_LENGTH);
-        let text = format!("- {long}");
-        let bullets = parse_bullets(&text);
-        assert_eq!(bullets.len(), 1);
-        assert!(bullets[0].ends_with("… (truncated)"));
-        assert_eq!(
-            bullets[0].chars().count(),
-            MAX_RULE_LENGTH + "… (truncated)".chars().count(),
-            "truncation must count characters, not bytes"
-        );
-    }
-
-    #[test]
-    fn parse_bullets_strips_leading_dash_space() {
-        let text = "-  hello world";
-        let bullets = parse_bullets(text);
-        assert_eq!(bullets, vec!["hello world"]);
-    }
-
     // -- isolated claude -p child (#2355) --
 
     #[test]
@@ -1365,6 +1286,7 @@ mod tests {
             .filter(|b| {
                 b["params"]["name"] == "icm_memory_recall"
                     && b["params"]["arguments"]["limit"] == 50
+                    && b["params"]["arguments"]["max_tokens"] == 32_000
             })
             .count()
     }
@@ -1571,39 +1493,6 @@ mod tests {
                 out.contains(&joined),
                 "joined summaries {joined:?} missing from {out:?}"
             );
-        }
-    }
-
-    // ===== #1166: property-test coverage for parse_bullets =====
-
-    proptest! {
-        /// The model's raw text response is arbitrary as far as `parse_bullets`
-        /// is concerned — no input should panic. Multi-line, multi-byte
-        /// content is exactly the case #1166 found panicking.
-        #[test]
-        fn parse_bullets_never_panics(
-            lines in proptest::collection::vec(".{0,600}", 0..10),
-        ) {
-            let text = lines.join("\n");
-            let _ = parse_bullets(&text);
-        }
-
-        /// Every returned bullet is bounded by MAX_RULE_LENGTH characters
-        /// (plus the truncation marker) regardless of the input's byte/char
-        /// composition — the invariant the byte/char confusion violated.
-        #[test]
-        fn parse_bullets_never_exceeds_max_length(
-            rule in ".{0,600}",
-        ) {
-            let text = format!("- {rule}");
-            let bullets = parse_bullets(&text);
-            let marker_len = "… (truncated)".chars().count();
-            for bullet in &bullets {
-                prop_assert!(
-                    bullet.chars().count() <= MAX_RULE_LENGTH + marker_len,
-                    "bullet {bullet:?} exceeds the length bound"
-                );
-            }
         }
     }
 }
