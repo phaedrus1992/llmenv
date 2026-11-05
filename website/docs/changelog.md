@@ -179,6 +179,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Show a status line PR lookup that `gh` ends with an unexpected exit or a signal as a failure, even when its message says there is no PR. Only exit 1 with that message means no PR. [fix:statusline] [#3442]
 - Keep a bundle off under `llmenv export --scope` when another active scope disables it. The warning for a scope that is not active now says that every matching bundle fires. [fix:cli] [#3269]
 - Treat a recall ledger or a session map that a crash cut inside a multi-byte character as corrupt. The ledger starts fresh and the map moves aside on the next write; before, every update was skipped. [fix:hook] [#3130]
+- Name the cause of each cache entry that `llmenv doctor --gc` and `llmenv clean` could not read, and list each failed path once. An unreadable entry used to show with no reason. [fix:materialize] [#3441]
 
 ### Security
 

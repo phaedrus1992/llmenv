@@ -11,11 +11,10 @@ use super::remove_dir_all_forcing_writable;
 pub struct GcReport {
     pub removed: Vec<PathBuf>,
     pub kept: usize,
-    /// Entries gc tried to remove but couldn't. Same contract as
-    /// [`super::PruneReport::failed`] — never counted as `removed` (#1372).
-    pub(crate) failed: Vec<PathBuf>,
-    /// The reason for each entry in `failed`, keyed by path, so the summary can name it (#3077).
-    pub(crate) causes: BTreeMap<PathBuf, String>,
+    /// Entries gc tried to remove but couldn't, each with the reason the summary names (#3077).
+    /// Same contract as [`super::PruneReport::failed`]: never counted as `removed` (#1372). A map,
+    /// so a path is listed once and always has a cause (#3441).
+    pub(crate) failed: BTreeMap<PathBuf, String>,
     /// When set, the sweep records each removal in `removed` and deletes nothing (#2917).
     pub(crate) dry_run: bool,
 }
@@ -26,16 +25,15 @@ impl GcReport {
         Self {
             removed: Vec::new(),
             kept: 0,
-            failed: Vec::new(),
-            causes: BTreeMap::new(),
+            failed: BTreeMap::new(),
             dry_run,
         }
     }
 
-    /// Record `path` as failed, with the reason the sweep gave (#3077).
+    /// Record `path` as failed, with the reason the sweep gave (#3077). A second failure of the
+    /// same path keeps the first cause.
     pub(crate) fn record_failure(&mut self, path: PathBuf, cause: String) {
-        self.causes.insert(path.clone(), cause);
-        self.failed.push(path);
+        self.failed.entry(path).or_insert(cause);
     }
 }
 
@@ -107,8 +105,8 @@ mod tests {
 
         gc_remove_link(&blocked, &mut report);
 
-        assert_eq!(report.failed, vec![blocked.clone()]);
-        assert!(report.causes.get(&blocked).is_some_and(|c| !c.is_empty()));
+        assert_eq!(report.failed.keys().collect::<Vec<_>>(), vec![&blocked]);
+        assert!(report.failed.get(&blocked).is_some_and(|c| !c.is_empty()));
     }
 
     // An entry that another process removed first is gone, not a failure (#3423).
@@ -123,5 +121,24 @@ mod tests {
 
         assert!(report.failed.is_empty(), "{:?}", report.failed);
         assert_eq!(report.removed, vec![gone.clone(), gone]);
+    }
+
+    proptest::proptest! {
+        /// Over any series of recordings, each path is listed once, with the first cause given
+        /// for it (#3441).
+        #[test]
+        fn each_failed_path_is_listed_once_with_its_first_cause(
+            records in proptest::collection::vec(("[a-c]", "[a-z]{1,4}"), 0..12),
+        ) {
+            let mut report = GcReport::new(false);
+            for (name, cause) in &records {
+                report.record_failure(PathBuf::from(name), cause.to_string());
+            }
+            let mut first: BTreeMap<PathBuf, String> = BTreeMap::new();
+            for (name, cause) in records {
+                first.entry(PathBuf::from(name)).or_insert(cause);
+            }
+            proptest::prop_assert_eq!(report.failed, first);
+        }
     }
 }

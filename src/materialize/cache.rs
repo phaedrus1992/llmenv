@@ -10,12 +10,15 @@ use sha2::{Digest, Sha256};
 use crate::config::HashingMode;
 use crate::merge::MergedManifest;
 
+mod entries;
 mod gc;
 mod gc_report;
 pub use gc::gc;
 mod mtime;
 mod owner;
 mod write_bits;
+pub(crate) use entries::is_vanished;
+use entries::{entry_and_type, skip_vanished};
 use write_bits::remove_dir_all_forcing_writable;
 
 pub use crate::materialize::expiry::AgeRule;
@@ -297,7 +300,7 @@ pub(crate) fn prune(
     };
     let now = SystemTime::now();
     for entry in entries {
-        let Some((p, ft)) = entry_and_type(cache_root, entry, &mut report.failed) else {
+        let Some((p, ft)) = entry_and_type(cache_root, entry, |p, _| report.failed.push(p)) else {
             continue;
         };
         // lstat-equivalent: a symlink at the top level is never followed. We
@@ -432,56 +435,6 @@ fn is_current_name(
         HashingMode::Strict => name
             .as_encoded_bytes()
             .starts_with(format!("{VERSION_TAG}-").as_bytes()),
-    }
-}
-
-/// The path and type of a cache entry, read without following a symlink. An entry that cannot
-/// be read is logged, recorded in `failed` (by `dir` when it has no path), and skipped, so the
-/// pass goes on.
-fn entry_and_type(
-    dir: &Path,
-    entry: std::io::Result<std::fs::DirEntry>,
-    failed: &mut Vec<PathBuf>,
-) -> Option<(PathBuf, std::fs::FileType)> {
-    let Some(entry) = crate::paths::readable_entry(dir, "cache gc", entry) else {
-        failed.push(dir.to_path_buf());
-        return None;
-    };
-    let p = entry.path();
-    match entry.file_type() {
-        Ok(ft) => Some((p, ft)),
-        // Another process removed the entry after the listing (#3423).
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            tracing::debug!(path = %p.display(), "cache gc: entry removed during the walk");
-            None
-        }
-        Err(e) => {
-            tracing::error!(
-                "cache gc cannot read the type of {}, so it is kept: {e}",
-                p.display()
-            );
-            failed.push(p);
-            None
-        }
-    }
-}
-
-/// Whether `error` is a missing entry, anywhere in its chain. A `NotFound` is the entry being
-/// removed while a walk runs. Other errors stay failures (#2835, #3423).
-pub(crate) fn is_vanished(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
-    })
-}
-
-/// `None` for a path that no longer exists. Any other error stays an error.
-pub(super) fn skip_vanished<T>(result: std::io::Result<T>) -> std::io::Result<Option<T>> {
-    match result {
-        Ok(value) => Ok(Some(value)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
     }
 }
 
@@ -1023,9 +976,7 @@ mod tests {
         let report = result.expect("an unremovable entry is reported, not propagated");
 
         assert!(report.removed.is_empty());
-        let mut failed = report.failed;
-        failed.sort();
-        assert_eq!(failed, vec![a, b]);
+        assert_eq!(report.failed.into_keys().collect::<Vec<_>>(), vec![a, b]);
     }
 
     #[cfg(unix)]
@@ -1088,7 +1039,7 @@ mod tests {
 
         chmod(&unreadable, 0o755);
         let report = result.expect("one unreadable folder is not fatal");
-        assert_eq!(report.failed, vec![bad.clone()]);
+        assert_eq!(report.failed.keys().collect::<Vec<_>>(), vec![&bad]);
         assert!(bad.exists());
         assert_eq!(report.removed, vec![good.clone()]);
     }
@@ -1116,7 +1067,7 @@ mod tests {
 
         chmod(&unreadable, 0o755);
         let report = result.expect("one unreadable leaf is not fatal");
-        assert_eq!(report.failed, vec![bad.clone()]);
+        assert_eq!(report.failed.keys().collect::<Vec<_>>(), vec![&bad]);
         assert!(bad.exists());
     }
 
