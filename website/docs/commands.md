@@ -35,6 +35,7 @@ and emits the introspection env vars (`LLMENV_ACTIVE_*`, `LLMENV_PROJECT_ROOT`,
   when the scope is active in the current environment. If the requested scope
   isn't active, a warning is printed and all matching tags are exported
   instead.
+  A bundle that any active scope disables stays off with `--scope` (changed in v3.14.0).
 - `--explain` annotates each exported variable with a `# source:` comment line
   showing whether it comes from the adapter (with the firing bundle names) or
   from llmenv introspection.

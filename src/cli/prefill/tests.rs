@@ -213,3 +213,21 @@ proptest! {
         prop_assert_eq!(breakpoint_path(&Value::Array(parts)).unwrap(), expected);
     }
 }
+
+#[test]
+fn the_command_reads_a_transcript_and_fails_on_a_missing_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.jsonl");
+    std::fs::write(&path, [shape("a", &[]), request("a")].join("\n")).unwrap();
+    assert!(
+        run_prefill(&PrefillArgs {
+            transcript: Some(path)
+        })
+        .is_ok()
+    );
+    let missing = PrefillArgs {
+        transcript: Some(dir.path().join("absent.jsonl")),
+    };
+    let err = format!("{:#}", run_prefill(&missing).unwrap_err());
+    assert!(err.contains("absent.jsonl"), "{err}");
+}
