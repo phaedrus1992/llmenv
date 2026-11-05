@@ -18,6 +18,7 @@ fn a_database_restored_with_an_old_mtime_is_fresh_under_the_change_time_rule() {
         dir.path(),
         Duration::from_secs(86_400),
         AgeSource::MtimeOrCtime,
+        SystemTime::now(),
     )
     .unwrap()
     .unwrap();

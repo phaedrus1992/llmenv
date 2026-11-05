@@ -16,14 +16,16 @@ use super::walk::scan;
 /// A failure on one entry is recorded and the sweep goes on, so one unreadable entry does not
 /// block the others (#1372).
 ///
-/// With `dry_run`, the report lists the same entries and nothing is removed (#2917).
+/// With `dry_run`, the report lists the same entries and nothing is removed (#2917). Each entry is
+/// judged against `now`, so a caller can judge several sweeps by one clock (#3374).
 pub fn sweep(
     tmp_root: &Path,
     rule: AgeRule,
     in_use: &[PathBuf],
     dry_run: bool,
+    now: std::time::SystemTime,
 ) -> anyhow::Result<GcReport> {
-    let scan = scan(tmp_root, rule, in_use)?;
+    let scan = scan(tmp_root, rule, in_use, now)?;
     let mut report = GcReport {
         kept: scan.kept,
         failed: scan.failed.keys().cloned().collect(),

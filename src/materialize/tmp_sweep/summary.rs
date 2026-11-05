@@ -29,14 +29,16 @@ pub(super) fn stale_summary_with(
     in_use: impl FnOnce() -> anyhow::Result<Vec<PathBuf>>,
 ) -> anyhow::Result<StaleSummary> {
     let tmp_root = state_dir.join("tmp");
-    let bound = stale_summary_in(&tmp_root, rule, &[])?;
+    // One clock for both scans, so the bound and the answer judge the same ages.
+    let now = std::time::SystemTime::now();
+    let bound = stale_summary_in(&tmp_root, rule, &[], now)?;
     if bound.count == 0 && bound.unreadable == 0 {
         return Ok(bound);
     }
-    stale_summary_in(&tmp_root, rule, &in_use()?)
+    stale_summary_in(&tmp_root, rule, &in_use()?, now)
 }
 
-/// The summary for `tmp_root`, with the in-use list given by the caller.
+/// The summary for `tmp_root`, with the in-use list given by the caller, judged against `now`.
 ///
 /// # Errors
 /// Fails when `tmp_root` cannot be read or resolved.
@@ -44,8 +46,9 @@ pub fn stale_summary_in(
     tmp_root: &Path,
     rule: AgeRule,
     in_use: &[PathBuf],
+    now: std::time::SystemTime,
 ) -> anyhow::Result<StaleSummary> {
-    let scan = scan(tmp_root, rule, in_use)?;
+    let scan = scan(tmp_root, rule, in_use, now)?;
     let sizes = scan
         .stale
         .iter()

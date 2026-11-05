@@ -26,15 +26,20 @@ pub(super) struct Scan {
     pub(super) failed: BTreeMap<PathBuf, String>,
 }
 
-/// Walk `tmp_root` and sort every entry into stale, kept, or failed. The walk changes nothing.
-pub(super) fn scan(tmp_root: &Path, rule: AgeRule, in_use: &[PathBuf]) -> anyhow::Result<Scan> {
+/// Walk `tmp_root` and sort every entry into stale, kept, or failed, judged against `now`. The
+/// walk changes nothing.
+pub(super) fn scan(
+    tmp_root: &Path,
+    rule: AgeRule,
+    in_use: &[PathBuf],
+    now: SystemTime,
+) -> anyhow::Result<Scan> {
     let mut scan = Scan::default();
     let Some(entries) = crate::paths::read_dir_optional(tmp_root)? else {
         return Ok(scan);
     };
     let root = std::fs::canonicalize(tmp_root)
         .with_context(|| format!("resolving {}", tmp_root.display()))?;
-    let now = SystemTime::now();
     for entry in entries {
         let Some(entry) = entry_or_failure(&root, entry, &mut scan) else {
             continue;
@@ -194,7 +199,7 @@ mod tests {
                 filetime::set_file_mtime(&file, filetime::FileTime::from_system_time(mtime)).unwrap();
             }
             let rule = mtime_rule(std::time::Duration::from_secs(7 * 86_400));
-            let result = scan(dir.path(), rule, &[]).unwrap();
+            let result = scan(dir.path(), rule, &[], SystemTime::now()).unwrap();
             proptest::prop_assert_eq!(result.stale.len() + result.kept + result.failed.len(), ages.len());
         }
     }

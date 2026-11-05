@@ -36,39 +36,42 @@ fn first_skew_report(path: &Path) -> bool {
 /// measured normally. A clock that moved backward must not delete live data, and the `state/tmp`
 /// sweep keeps such an entry too (#2860).
 ///
-/// `now` is read once before a walk, so a write made during the walk can be ahead of it. When
-/// `now` is behind the mtime, the wall clock is read again before the mtime is called skew (#2954).
+/// `now` is the only clock of the verdict, so a gate and the sweep that follows agree (#3374).
+/// `now` is read once before a walk, so a write made during the walk can be ahead of it. Such an
+/// entry is kept, and the wall clock decides only whether its mtime is logged as skew (#2954).
 pub(crate) fn is_expired(
     now: SystemTime,
     mtime: SystemTime,
     older_than: Duration,
     path: &Path,
 ) -> bool {
-    let age = now
-        .duration_since(mtime)
-        .or_else(|_| SystemTime::now().duration_since(mtime));
-    match age {
+    match now.duration_since(mtime) {
         Ok(elapsed) => elapsed > older_than,
-        Err(e) if e.duration() <= CLOCK_SKEW_TOLERANCE => {
-            tracing::debug!(
-                "{} has an mtime {}ms ahead of the clock, within tolerance, so it is kept",
-                path.display(),
-                e.duration().as_millis()
-            );
+        Err(_) => {
+            let ahead = mtime.duration_since(SystemTime::now()).unwrap_or_default();
+            report_future_mtime(path, ahead);
             false
         }
-        Err(e) => {
-            // Error level: an entry with a future mtime is kept, so the cause must show.
-            if first_skew_report(path) {
-                tracing::error!(
-                    skew_secs = e.duration().as_secs(),
-                    "clock skew: {} has an mtime {}s in the future; keeping the entry",
-                    path.display(),
-                    e.duration().as_secs()
-                );
-            }
-            false
-        }
+    }
+}
+
+/// Log an entry whose mtime is `ahead` of the wall clock. A small gap is a write during the walk
+/// or a coarse clock; a larger gap is clock skew, logged once for each path.
+fn report_future_mtime(path: &Path, ahead: Duration) {
+    if ahead <= CLOCK_SKEW_TOLERANCE {
+        tracing::debug!(
+            "{} has an mtime {}ms ahead of the clock, within tolerance, so it is kept",
+            path.display(),
+            ahead.as_millis()
+        );
+    } else if first_skew_report(path) {
+        // Error level: an entry with a future mtime is kept, so the cause must show.
+        tracing::error!(
+            skew_secs = ahead.as_secs(),
+            "clock skew: {} has an mtime {}s in the future; keeping the entry",
+            path.display(),
+            ahead.as_secs()
+        );
     }
 }
 
@@ -85,6 +88,15 @@ mod tests {
     }
 
     const OLDER_THAN: Duration = Duration::from_secs(60);
+
+    /// The given clock is the only clock of the verdict (#3374). An mtime after it is kept, even
+    /// when the wall clock calls the entry old.
+    #[test]
+    fn an_mtime_after_the_given_clock_is_kept_whatever_the_wall_clock_says() {
+        let now = std::time::UNIX_EPOCH + Duration::from_secs(1_000);
+        let mtime = std::time::UNIX_EPOCH + Duration::from_secs(2_000);
+        assert!(!is_expired(now, mtime, OLDER_THAN, Path::new("/ahead")));
+    }
 
     #[test]
     fn an_entry_older_than_the_threshold_is_expired() {
