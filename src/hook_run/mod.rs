@@ -6,6 +6,8 @@
 //! one-line stderr warning and exit 0 — lifecycle hooks run on the agent's hot
 //! path and must never block it.
 
+mod name_check;
+use name_check::{validate_bundle, validate_tag};
 pub(crate) mod action;
 mod adaptive;
 pub(crate) mod agent_config;
@@ -1270,7 +1272,10 @@ fn run_inner(
                 session_state::unix_now(),
             ),
             (None, _) => tracing::debug!("post_model_switch has no session id, skipped"),
-            (_, Err(e)) => tracing::error!("no state dir, model switch not recorded: {e}"),
+            (_, Err(e)) => crate::agent_notice::record_logged(format!(
+                "llmenv: the model switch is not recorded, because the state folder cannot be \
+                 found: {e}. Fix: set HOME, or set LLMENV_STATE_DIR."
+            )),
         }
         crate::trace::emit_trace_timing(crate::trace::HookTiming::new(t0, t_config));
         return Ok(HookText::default());
@@ -1678,10 +1683,12 @@ fn run_inner(
                     if let Err(e) =
                         crate::paths::write_owner_only_atomic(dedup_path, storage_chunk.as_bytes())
                     {
-                        tracing::error!(
-                            "session-end dedup snapshot not saved to {}, the next SessionEnd may store the chunk again: {e:#}",
+                        crate::agent_notice::record_logged(format!(
+                            "llmenv: the session-end duplicate record {} is not saved, so the \
+                             next session end can store the chunk again: {e:#}. Fix: check that \
+                             the state folder is writable.",
                             dedup_path.display()
-                        );
+                        ));
                     }
                 }
 
@@ -1696,9 +1703,10 @@ fn run_inner(
                 {
                     Some(Ok(dir)) => Some(dir),
                     Some(Err(e)) => {
-                        tracing::error!(
-                            "stop reminder skipped, the state directory is unavailable: {e}"
-                        );
+                        crate::agent_notice::record_logged(format!(
+                            "llmenv: the task reminder is skipped, because the state folder \
+                             cannot be found: {e}. Fix: set HOME, or set LLMENV_STATE_DIR."
+                        ));
                         None
                     }
                     None => None,
@@ -2133,36 +2141,6 @@ fn resolve_bundle_memory_host(
     Ok((mem, merged.capabilities.host))
 }
 
-/// Validate a tag to prevent query injection. Tags must be alphanumeric with
-/// hyphens and underscores only (same as bundle/scope naming).
-fn validate_tag(tag: &str) -> anyhow::Result<()> {
-    if tag.is_empty() {
-        return Err(anyhow::anyhow!("empty tag in recall query"));
-    }
-    if !crate::scope::tags::is_valid_tag_charset(tag) {
-        return Err(anyhow::anyhow!(
-            "tag '{}' contains invalid characters (only alphanumeric, -, _ allowed)",
-            tag
-        ));
-    }
-    Ok(())
-}
-
-/// Validate a bundle name to prevent query injection. Bundle names follow the
-/// same character rules as tags: alphanumeric, hyphens, and underscores only.
-fn validate_bundle(bundle: &str) -> anyhow::Result<()> {
-    if bundle.is_empty() {
-        return Err(anyhow::anyhow!("empty bundle name in recall query"));
-    }
-    if !crate::scope::tags::is_valid_tag_charset(bundle) {
-        return Err(anyhow::anyhow!(
-            "bundle '{}' contains invalid characters (only alphanumeric, -, _ allowed)",
-            bundle
-        ));
-    }
-    Ok(())
-}
-
 /// Where codebase-memory-mcp's index cache lives for `cm`/`state_dir`: the
 /// configured `index_path` override, or `state_dir/codebase-memory` by
 /// default. Single source of truth for both the spawned child's
@@ -2484,6 +2462,12 @@ fn trigger_index_with(
     let checkpoint = begin_index_checkpoint(state_dir, &inputs, exe.is_some());
     // The wrapper is used only with both a checkpoint and an executable (`index_job_command`).
     let wrapped = uses_wrapper(checkpoint.as_deref(), exe.as_deref());
+    if !wrapped {
+        crate::agent_notice::record_logged(
+            "llmenv: the code index job runs without its wrapper, so a failure of the indexer is \
+             not reported. Fix: run `llmenv doctor` to check the state folder.",
+        );
+    }
     let mut cmd = index_job_command(checkpoint.as_deref(), exe, || {
         index_command(
             &program,

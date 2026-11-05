@@ -404,9 +404,11 @@ pub(crate) fn begin(
             }
             Err(_) if !earlier_path.exists() => {}
             // A count that restarts at 1 hides an indexer that always fails.
-            Err(e) => {
-                tracing::error!("earlier index checkpoint unreadable, attempts restart: {e:#}")
-            }
+            Err(e) => crate::agent_notice::record_logged(format!(
+                "llmenv: the earlier code index checkpoint {} cannot be read, so its attempt count \
+                 restarts at 1: {e:#}. Fix: remove the file.",
+                earlier_path.display()
+            )),
         }
     }
     write(state_dir, &checkpoint)
@@ -418,6 +420,10 @@ pub(crate) fn begin(
         .flatten()
 }
 
+mod describe;
+pub(crate) use describe::describe;
+#[cfg(test)]
+use describe::format_age;
 mod inputs;
 mod unrunnable;
 pub(crate) use inputs::{InputsError, inputs_or_checkpoint};
@@ -445,24 +451,6 @@ pub(crate) fn checkpoint_entries_for_test(
             Entry::Unreadable(..) => None,
         })
         .collect()
-}
-
-/// Doctor's description of one checkpoint: kind, age, attempts, phase, and what to read.
-#[must_use]
-pub(crate) fn describe(checkpoint: &Checkpoint, now: u64, log: &Path) -> String {
-    let age = now.saturating_sub(checkpoint.started_at);
-    format!(
-        "{} started {} ago, {}/{MAX_ATTEMPTS} attempts, phase {}; log: {}",
-        checkpoint.kind.as_str(),
-        format_age(age),
-        checkpoint.attempts,
-        checkpoint.phase,
-        log.display()
-    )
-}
-
-fn format_age(secs: u64) -> String {
-    humantime::format_duration(std::time::Duration::from_secs(secs)).to_string()
 }
 
 #[cfg(test)]

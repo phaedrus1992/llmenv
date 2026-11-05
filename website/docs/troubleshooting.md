@@ -427,6 +427,12 @@ These notices come from the hook itself (added in v3.14.0):
   Check the state directory, or remove the named file.
 - `recalled memory was not shown, because the tool call was denied` — a deny replaces the whole
   hook output. The memory comes back on the next prompt.
+- `memory consolidation is skipped`, `the fetched page is not stored in memory`, `the model switch is
+  not recorded`, `the task reminder is skipped`, and `the session-end duplicate check is skipped` —
+  a hook step could not run. The notice names the cause and the fix.
+- `cannot create the index result file`, `cannot remove the old index result file`, `the earlier code
+  index checkpoint ... cannot be read`, and `the code index job runs without its wrapper` — the code
+  index job cannot report its result. Check the state directory, or remove the named file.
 
 ## Profiling hook-run latency
 

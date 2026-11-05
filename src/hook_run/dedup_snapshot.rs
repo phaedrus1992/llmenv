@@ -14,9 +14,11 @@ pub(super) fn dedup_snapshot_path(
     match state_dir() {
         Ok(dir) => Some(dir.join(crate::paths::HOOK_STORE_CHUNK)),
         Err(e) => {
-            tracing::error!(
-                "session-end dedup skipped, the state directory is unavailable, so the chunk is stored again: {e}"
-            );
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the session-end duplicate check is skipped, because the state folder \
+                 cannot be found, so the context chunk is stored again: {e}. Fix: set HOME, or \
+                 set LLMENV_STATE_DIR to a valid absolute path."
+            ));
             None
         }
     }
