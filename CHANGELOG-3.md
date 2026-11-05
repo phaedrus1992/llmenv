@@ -145,6 +145,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Run the cd guard, the task commit gate, the task reminders, and the slippage checks on a command that the Monitor tool starts. Claude Code 2.1.314 sends it under the tool name `Monitor`, and these guards matched only `Bash`, so they skipped it. [fix:hook] [#3354]
 - Keep a corrupt slippage stats log as `<log>.corrupt` before a Read starts a new one, and name that copy in the notice. A second corruption takes the next numbered copy, and a log that cannot be read is left in place. See [the troubleshooting page](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#a-corrupt-file-appears-in-the-slippage-state-folder). [fix:hook] [#3349]
 - Remove and report a session-log rotation whose name is not valid UTF-8. Such a rotation was never pruned and never named. [fix:prune] [#3351]
+- Name the folder and the fix when the session-log rotation prune of `llmenv doctor --gc` or `llmenv clean` cannot read the log folder, and keep the operating system error, so a permission failure shows as one. [fix:session-log] [#3350]
+- Judge every age check of the state cleanup in `llmenv doctor --gc` and `llmenv clean` by one clock, so the check that decides to run `lsof` and the sweeps that follow agree on which `state/tmp` entry or old codebase-memory index is old. [fix:doctor] [#3374]
 
 ### Security
 
