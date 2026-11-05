@@ -62,20 +62,24 @@ fn unreadable_tasks() -> TasksData {
 fn try_tasks_data(state_dir: &Path, project: &str) -> anyhow::Result<TasksData> {
     let mut open_sessions = crate::task::session::open_sessions_strict(state_dir, project)?;
     open_sessions.sort_by(|a, b| a.id.cmp(&b.id));
-    let mut progress: Vec<SessionProgress> = Vec::with_capacity(open_sessions.len());
-    for s in &open_sessions {
-        let (done, total) = crate::task::session::try_session_progress(state_dir, &s.id)?;
-        progress.push(SessionProgress { done, total });
-    }
+    // One strict read of the task store feeds every count and title of the render (#3466).
+    let tasks = crate::task::list_tasks_strict(state_dir)?;
+    let progress: Vec<SessionProgress> = open_sessions
+        .iter()
+        .map(|s| {
+            let (done, total) = crate::task::progress_in(&tasks, &s.id);
+            SessionProgress { done, total }
+        })
+        .collect();
     let session = (!open_sessions.is_empty()).then(|| sum_progress(progress.iter().copied()));
     let session_ids: Vec<String> = open_sessions.iter().map(|s| s.id.clone()).collect();
-    let current = crate::task::current_wip_title(state_dir, &session_ids)?;
+    let current = crate::task::wip_title_in(&tasks, &session_ids);
     let mut sessions = Vec::with_capacity(open_sessions.len());
     for (s, progress) in open_sessions.iter().zip(progress) {
         sessions.push(SessionTasks {
             owner: s.owner_session().map(str::to_owned),
             progress,
-            current: crate::task::current_wip_title(state_dir, std::slice::from_ref(&s.id))?,
+            current: crate::task::wip_title_in(&tasks, std::slice::from_ref(&s.id)),
         });
     }
     Ok(TasksData {

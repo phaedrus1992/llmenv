@@ -62,6 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Print the OAuth credential drop lines of `llmenv clean` with the same words as `llmenv doctor --gc`. [refactor:cli] [#3087]
 - Read each marketplace manifest once per `llmenv export` and `llmenv plugin-sync`, not once for each selected plugin of that marketplace. The notice for a plugin that an unreadable manifest drops now names the cause. [perf:cli] [#3447]
 - Read each parent task once when `llmenv task reopen` checks several sub-tasks of one parent. An unreadable parent now names the sub-task too. [perf:task] [#3463]
+- Read the task store once per Stop and SessionStart hook run and once per status line render, not once for each reminder and each session. [perf:task] [#3466]
 
 ### Fixed
 

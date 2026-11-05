@@ -17,8 +17,11 @@ pub(crate) use slug::slugify;
 pub(crate) mod core_text;
 mod finish_hints;
 pub(crate) mod ownership;
+pub(crate) mod progress;
 pub(crate) mod project;
 pub(crate) mod relation;
+mod reminder_store;
+use reminder_store::{Stored, store_for_reminder, store_warning_text};
 pub(crate) mod reopen;
 mod resolve;
 pub(crate) mod resume;
@@ -28,6 +31,7 @@ use finish_hints::session_finish_reminders;
 mod tracking;
 pub(crate) use tracking::{Tracking, tracking};
 pub mod session;
+pub(crate) use progress::{progress_in, wip_title_in};
 pub(crate) use reopen::{reopen_task, reopen_tasks};
 pub(crate) use resolve::resolve_identifier;
 
@@ -37,7 +41,6 @@ use session::Session;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
 /// Lifecycle state of a tracked task.
@@ -227,7 +230,7 @@ pub(crate) fn try_list_tasks(state_dir: &Path) -> anyhow::Result<Vec<Task>> {
 /// [`try_list_tasks`], but a task file that cannot be read is an error and not a skipped entry.
 /// A decision or a reminder that reads the store uses this, so it never sees a partial view
 /// (#2608).
-fn list_tasks_strict(state_dir: &Path) -> anyhow::Result<Vec<Task>> {
+pub(crate) fn list_tasks_strict(state_dir: &Path) -> anyhow::Result<Vec<Task>> {
     read_tasks(state_dir, UnreadablePolicy::Fail)
 }
 
@@ -446,30 +449,6 @@ fn visit<'a>(
             visit(child, depth + 1, children, visited, rows);
         }
     }
-}
-
-/// The title of the most recently updated `wip` or `waiting` task in `session_ids`, for the
-/// statusline's "what's in progress right now" fill-in (#905). `None` when nothing matching is
-/// currently `wip`/`waiting`, or when `session_ids` is empty. A task file that cannot be read is
-/// an error, not a skipped task, so a corrupt file never removes the title without a sign (#2687).
-///
-/// # Errors
-/// The task store cannot be read.
-pub(crate) fn current_wip_title(
-    state_dir: &Path,
-    session_ids: &[String],
-) -> anyhow::Result<Option<String>> {
-    if session_ids.is_empty() {
-        return Ok(None);
-    }
-    let tasks = list_tasks_strict(state_dir)?;
-    Ok(most_recently_updated(tasks.iter().filter(|t| {
-        matches!(t.state, TaskState::Wip | TaskState::Waiting)
-            && t.session
-                .as_deref()
-                .is_some_and(|sid| session_ids.iter().any(|s| s == sid))
-    }))
-    .map(|t| t.title.clone()))
 }
 
 /// The most recently updated of `tasks`, by `updated_at` string comparison
@@ -1233,8 +1212,9 @@ pub(crate) fn session_start_reminder(state_dir: &Path) -> String {
     // A session file that cannot be read is named here, the same way the Stop reminder names it,
     // so its tasks are not dropped without a word (#2665).
     let mut read_warning = String::new();
-    let tasks = match list_tasks_strict(state_dir) {
-        Ok(tasks) => match tasks_for_current_project(state_dir, tasks) {
+    let stored = list_tasks_strict(state_dir);
+    let tasks = match &stored {
+        Ok(tasks) => match tasks_for_current_project(state_dir, tasks.to_vec()) {
             Ok(tasks) => tasks,
             Err(e) => {
                 read_warning = store_warning_text(&e);
@@ -1255,11 +1235,13 @@ pub(crate) fn session_start_reminder(state_dir: &Path) -> String {
              different, possibly still-active session owns it — leave it alone.",
         ),
         waiting_reminder(&tasks),
-        session_finish_reminders(state_dir, None),
-        for_current_project(|project| match store_for_reminder(state_dir, project) {
-            Ok(tasks) => empty_session_lines(state_dir, &tasks, project, None).join("\n\n"),
-            Err(warning) => warning,
-        }),
+        session_finish_reminders(state_dir, None, &stored),
+        for_current_project(
+            |project| match store_for_reminder(state_dir, project, &stored) {
+                Ok(tasks) => empty_session_lines(state_dir, &tasks, project, None).join("\n\n"),
+                Err(warning) => warning,
+            },
+        ),
     ])
 }
 
@@ -1284,7 +1266,9 @@ pub(crate) fn session_start_reminder(state_dir: &Path) -> String {
 /// surface here. See [`wip_reminder`] for why, within the project, the
 /// footer never presumes a listed task belongs to this conversation (#1028).
 pub(crate) fn stop_hook_reminder(state_dir: &Path, caller: Option<&str>) -> String {
-    let (tasks, store_warning) = match tasks_visible_to(state_dir, caller) {
+    // One read of the task store feeds every reminder of this hook run (#3466).
+    let stored = list_tasks_strict(state_dir);
+    let (tasks, store_warning) = match tasks_visible_to(state_dir, caller, &stored) {
         Ok(tasks) => (tasks, String::new()),
         Err(e) => (Vec::new(), store_warning_text(&e)),
     };
@@ -1302,10 +1286,10 @@ pub(crate) fn stop_hook_reminder(state_dir: &Path, caller: Option<&str>) -> Stri
              only then ask the user once with a specific actionable question, and \
              `llmenv task note <slug> \"...\"` the blocker instead of repeating status.",
         ),
-        session_finish_reminders(state_dir, caller),
-        idle_session_reminders(state_dir, caller),
+        session_finish_reminders(state_dir, caller, &stored),
+        idle_session_reminders(state_dir, caller, &stored),
         for_current_project(|project| {
-            session::missing_context_reminders(state_dir, project, caller)
+            session::missing_context_reminders(state_dir, project, caller, &stored)
         }),
         store_warning,
     ])
@@ -1363,33 +1347,17 @@ fn idle_sessions(open: Vec<Session>, all_tasks: &[Task]) -> Vec<IdleSession> {
 /// The Stop reminder for each [`IdleSession`] in the current project. Like
 /// [`session_finish_reminders`], it cannot tell whose session it names
 /// (#1028), so the nudge is conditioned on the agent recognizing it.
-fn idle_session_reminders(state_dir: &Path, caller: Option<&str>) -> String {
-    for_current_project(|project| idle_reminder_lines(state_dir, project, caller))
+fn idle_session_reminders(state_dir: &Path, caller: Option<&str>, stored: &Stored) -> String {
+    for_current_project(|project| idle_reminder_lines(state_dir, project, caller, stored))
 }
 
-/// The tasks of `project` for a reminder. A session list or a task file that cannot be read is an
-/// error, and the caller prints its text in place of the reminder. A silent skip would tell the
-/// agent that nothing is open (#2608).
-fn store_for_reminder(state_dir: &Path, project: &str) -> Result<Vec<Task>, String> {
-    let sessions = session::open_sessions_strict(state_dir, project);
-    match (sessions, list_tasks_strict(state_dir)) {
-        (Ok(_), Ok(tasks)) => Ok(tasks),
-        (Err(e), _) | (_, Err(e)) => Err(store_warning_text(
-            &e.context("the task store cannot be read"),
-        )),
-    }
-}
-
-/// The reminder text for a store that cannot be read.
-fn store_warning_text(error: &anyhow::Error) -> String {
-    format!(
-        "The task reminders were not checked ({error:#}). \
-         Fix the task store, then run `llmenv task ls --all` to confirm."
-    )
-}
-
-fn idle_reminder_lines(state_dir: &Path, project: &str, caller: Option<&str>) -> String {
-    let tasks = match store_for_reminder(state_dir, project) {
+fn idle_reminder_lines(
+    state_dir: &Path,
+    project: &str,
+    caller: Option<&str>,
+    stored: &Stored,
+) -> String {
+    let tasks = match store_for_reminder(state_dir, project, stored) {
         Ok(tasks) => tasks,
         Err(warning) => return warning,
     };
@@ -1486,7 +1454,11 @@ fn tasks_for_current_project(state_dir: &Path, tasks: Vec<Task>) -> anyhow::Resu
 /// The tasks of the current project that `caller` may be told about: all of them without a
 /// conversation id, else those of sessions that [`session::Session`] does not hide from it
 /// (#2511).
-fn tasks_visible_to(state_dir: &Path, caller: Option<&str>) -> anyhow::Result<Vec<Task>> {
+fn tasks_visible_to(
+    state_dir: &Path,
+    caller: Option<&str>,
+    stored: &Stored,
+) -> anyhow::Result<Vec<Task>> {
     // An unresolved project must reach the Stop reminder as an error, not as an empty list
     // that looks like "no wip tasks" (#2658 review).
     let project = project::current_tag()
@@ -1494,8 +1466,10 @@ fn tasks_visible_to(state_dir: &Path, caller: Option<&str>) -> anyhow::Result<Ve
     // Strict session reads: a corrupt session file must reach the Stop reminder as an error,
     // not drop its tasks silently (#2628).
     let project_ids = session::try_session_ids_for_project(state_dir, &project)?;
-    let stored = list_tasks_strict(state_dir).context("the task store cannot be read")?;
-    let mut tasks = keep_tasks_in_sessions(stored, &project_ids);
+    let stored = stored
+        .as_ref()
+        .map_err(|e| anyhow::anyhow!("the task store cannot be read: {e:#}"))?;
+    let mut tasks = keep_tasks_in_sessions(stored.to_vec(), &project_ids);
     if caller.is_some() {
         let visible = session::try_session_ids_visible_to(state_dir, &project, caller)?;
         tasks.retain(|t| t.session.as_ref().is_some_and(|id| visible.contains(id)));
@@ -2982,7 +2956,8 @@ mod tests {
     fn unreadable_store_reminder_warns_instead_of_reporting_no_work() {
         let dir = TempDir::new().expect("test");
         std::fs::write(dir.path().join("tasks"), "x").expect("test");
-        let reminder = idle_reminder_lines(dir.path(), &current_project(), None);
+        let stored = list_tasks_strict(dir.path());
+        let reminder = idle_reminder_lines(dir.path(), &current_project(), None, &stored);
         assert!(reminder.contains("task store cannot be read"), "{reminder}");
         assert!(!reminder.contains("has no tasks"), "{reminder}");
     }

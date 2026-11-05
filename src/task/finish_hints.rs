@@ -17,28 +17,34 @@ use super::{Task, for_current_project, session, store_for_reminder, store_warnin
 /// one (#1028) — closing out someone else's session is a real mutation of
 /// their bookkeeping, so the nudge is conditioned on recognizing the session
 /// rather than issued as a bare command.
-pub(super) fn session_finish_reminders(state_dir: &Path, caller: Option<&str>) -> String {
-    for_current_project(|project| match store_for_reminder(state_dir, project) {
-        Ok(_) => finish_reminder_lines(state_dir, project, caller),
-        Err(warning) => warning,
-    })
+pub(super) fn session_finish_reminders(
+    state_dir: &Path,
+    caller: Option<&str>,
+    stored: &anyhow::Result<Vec<Task>>,
+) -> String {
+    for_current_project(
+        |project| match store_for_reminder(state_dir, project, stored) {
+            Ok(tasks) => finish_reminder_lines(state_dir, project, caller, &tasks),
+            Err(warning) => warning,
+        },
+    )
 }
 
-fn finish_reminder_lines(state_dir: &Path, project: &str, caller: Option<&str>) -> String {
+fn finish_reminder_lines(
+    state_dir: &Path,
+    project: &str,
+    caller: Option<&str>,
+    tasks: &[Task],
+) -> String {
     let open = match session::try_open_sessions_visible_to(state_dir, project, caller) {
         Ok(open) => open,
         Err(e) => return store_warning_text(&e),
     };
     let mut lines = Vec::new();
     for session in open {
-        // A task file that cannot be read must not make a session look finished.
-        let (done, total) = match session::try_session_progress(state_dir, &session.id) {
-            Ok(progress) => progress,
-            Err(e) => {
-                lines.push(store_warning_text(&e));
-                continue;
-            }
-        };
+        // The store was read strictly, so a task file that cannot be read never makes a
+        // session look finished here.
+        let (done, total) = super::progress_in(tasks, &session.id);
         if total == 0 || done < total {
             continue;
         }
@@ -151,7 +157,8 @@ mod tests {
             .expect("test");
         complete_task(dir.path(), &only.slug, true).expect("test");
 
-        let reminder = session_finish_reminders(dir.path(), None);
+        let stored = super::super::list_tasks_strict(dir.path());
+        let reminder = session_finish_reminders(dir.path(), None, &stored);
         assert!(
             reminder.contains(&session_id),
             "must name the session: {reminder}"
@@ -169,6 +176,7 @@ mod tests {
     fn all_done_reminder_is_empty_for_a_session_with_no_tasks() {
         let dir = TempDir::new().expect("test");
         new_session(dir.path());
-        assert_eq!(session_finish_reminders(dir.path(), None), "");
+        let stored = super::super::list_tasks_strict(dir.path());
+        assert_eq!(session_finish_reminders(dir.path(), None, &stored), "");
     }
 }
