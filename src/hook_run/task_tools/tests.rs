@@ -313,3 +313,62 @@ fn list_denies_on_one_corrupt_task_file() {
         "{out}"
     );
 }
+
+/// An id with no task names the id, through the one lookup of the task command (#3474).
+#[test]
+fn update_of_an_unknown_id_names_it() {
+    let dir = tmp();
+    handle_inner(
+        "TaskCreate",
+        Some(&json!({ "subject": "seed" })),
+        dir.path(),
+        PROJECT,
+    );
+    let out = handle_inner(
+        "TaskUpdate",
+        Some(&json!({ "taskId": "nope-3474", "status": "in_progress" })),
+        dir.path(),
+        PROJECT,
+    );
+    assert!(out.contains("couldn't update task 'nope-3474'"), "{out}");
+}
+
+/// A start with a description saves the note to the slug that the start resolved (#3474).
+#[test]
+fn update_with_a_note_saves_it_on_the_resolved_task() {
+    let dir = tmp();
+    handle_inner(
+        "TaskCreate",
+        Some(&json!({ "subject": "first step" })),
+        dir.path(),
+        PROJECT,
+    );
+    let out = handle_inner(
+        "TaskUpdate",
+        Some(&json!({ "taskId": "first", "status": "in_progress", "description": "begun" })),
+        dir.path(),
+        PROJECT,
+    );
+    assert!(out.contains("started 'first-step'"), "{out}");
+    assert!(!out.contains("note not saved"), "{out}");
+}
+
+/// A refused update still keeps its note, and the deny says where the note went (#3474).
+#[test]
+fn a_refused_update_says_where_its_note_went() {
+    let dir = tmp();
+    handle_inner(
+        "TaskCreate",
+        Some(&json!({ "subject": "never begun" })),
+        dir.path(),
+        PROJECT,
+    );
+    let out = handle_inner(
+        "TaskUpdate",
+        Some(&json!({ "taskId": "never-begun", "status": "completed", "description": "why" })),
+        dir.path(),
+        PROJECT,
+    );
+    assert!(out.contains("couldn't update task 'never-begun'"), "{out}");
+    assert!(out.contains("note saved to 'never-begun'"), "{out}");
+}

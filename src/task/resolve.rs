@@ -35,13 +35,54 @@ fn resolve_identifier_for(
     input: &str,
     owner: &EngineIdentity,
 ) -> anyhow::Result<String> {
-    if !crate::paths::is_valid_short_name(input) {
-        anyhow::bail!("'{input}' is not a valid task identifier");
-    }
+    check_identifier(input)?;
     // A strict read: an unreadable store or task file must error out here rather than be
     // misread as "no task found" (#1112, #3471). This is the resolution step every mutating
     // task command (and `TaskUpdate`'s hook redirect) runs through.
-    let tasks = list_tasks_strict(state_dir)?.into_vec();
+    resolve_with(
+        state_dir,
+        input,
+        owner,
+        list_tasks_strict(state_dir)?.as_slice(),
+    )
+}
+
+/// Refuse a name that cannot be a task slug, before any read of the store, so a bad name gets
+/// its own error even when the store is unreadable.
+///
+/// # Errors
+/// `input` is not a valid task identifier.
+pub(super) fn check_identifier(input: &str) -> anyhow::Result<()> {
+    if !crate::paths::is_valid_short_name(input) {
+        anyhow::bail!("'{input}' is not a valid task identifier");
+    }
+    Ok(())
+}
+
+/// [`resolve_identifier`] over a strict read of the store that the caller already made, so one
+/// task command reads the store once (#3474). The caller runs [`check_identifier`] first.
+///
+/// # Errors
+/// The session files cannot be read, or no task, or more than one, matches `input`.
+pub(super) fn resolve_in(
+    state_dir: &Path,
+    input: &str,
+    tasks: &super::StrictTasks,
+) -> anyhow::Result<String> {
+    resolve_with(
+        state_dir,
+        input,
+        &EngineIdentity::from_env()?,
+        tasks.as_slice(),
+    )
+}
+
+fn resolve_with(
+    state_dir: &Path,
+    input: &str,
+    owner: &EngineIdentity,
+    tasks: &[super::Task],
+) -> anyhow::Result<String> {
     let preferred = preferred_sessions(state_dir, owner)
         .with_context(|| format!("listing sessions to resolve task '{input}'"))?;
     if !preferred.is_empty() {
@@ -306,5 +347,45 @@ mod tests {
         break_one_task_file(dir.path());
         let err = crate::task::complete_task(dir.path(), &slug, false).unwrap_err();
         assert!(format!("{err:#}").contains("broken.json"), "{err:#}");
+    }
+
+    /// A bad name gets its own error before the store is read, even when the store is broken.
+    #[test]
+    fn a_bad_name_is_refused_before_a_broken_store_is_read() {
+        let dir = TempDir::new().unwrap();
+        let session = open_session(dir.path(), StartDecision::Auto);
+        add(dir.path(), "Step", &session);
+        break_one_task_file(dir.path());
+        let err = crate::task::start_task(dir.path(), "../x", false).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not a valid task identifier"),
+            "{err:#}"
+        );
+    }
+
+    /// A checked session that is no longer open is refused, not written to (#3474).
+    #[test]
+    fn a_checked_session_that_closed_is_refused() {
+        let dir = TempDir::new().unwrap();
+        let id = open_session(dir.path(), StartDecision::Auto);
+        let read = session::list_sessions_strict(dir.path()).unwrap();
+        let checked = read.iter().find(|s| s.id == id).unwrap();
+        session::finish_session(dir.path(), &id, true).unwrap();
+        let closed = session::list_sessions_strict(dir.path()).unwrap();
+        let closed = closed.iter().find(|s| s.id == id).unwrap();
+        let err = crate::task::add_task(
+            dir.path(),
+            "Late",
+            crate::task::ParentSpec::Detached,
+            crate::task::SessionChoice::Checked(closed),
+            PROJECT,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not an open session"),
+            "{err:#}"
+        );
+        // The read from before the close still names an open session of the project.
+        assert!(checked.is_open());
     }
 }
