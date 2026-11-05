@@ -559,6 +559,27 @@ async fn store_new_rules(
     (stored, duplicates)
 }
 
+/// The line that a consolidation run logs. A rule whose duplicate check or store failed is
+/// counted, so the log says that the next run tries it again.
+fn summary(
+    records: usize,
+    rules: usize,
+    backend: impl std::fmt::Debug,
+    (stored, duplicates, failed): (usize, usize, usize),
+) -> String {
+    let mut msg = format!(
+        "consolidation: distilled {records} memory records into {rules} semantic rule(s) \
+         (backend: {backend:?}, rules stored: {stored}, duplicates skipped: {duplicates}"
+    );
+    if failed > 0 {
+        msg.push_str(&format!(
+            ", failed: {failed}, tried again on the next run; the log above names each cause"
+        ));
+    }
+    msg.push(')');
+    msg
+}
+
 /// How far the first half of a consolidation run got.
 enum Distilled {
     /// The model returned a summary; `records` is the number of memories it read, 0 on a resume.
@@ -762,13 +783,14 @@ pub(crate) async fn run(
     };
     let (stored, duplicates) = store_new_rules(client, state_dir, &scope, &rules).await;
 
-    let msg = format!(
-        "consolidation: distilled {records} memory records into {} semantic rule(s) \
-         (backend: {:?}, rules stored: {stored}, duplicates skipped: {duplicates})",
+    let failed = rules.len().saturating_sub(stored + duplicates);
+    let msg = summary(
+        records,
         rules.len(),
-        cc.backend,
+        &cc.backend,
+        (stored, duplicates, failed),
     );
-    if stored + duplicates < rules.len() {
+    if failed > 0 {
         tracing::error!("{msg}");
     } else {
         tracing::info!("{msg}");
@@ -1293,6 +1315,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_summary_counts_failed_rules_only_when_some_failed() {
+        let ok = summary(9, 2, "Claude", (1, 1, 0));
+        assert_eq!(
+            ok,
+            "consolidation: distilled 9 memory records into 2 semantic rule(s) (backend: \
+             \"Claude\", rules stored: 1, duplicates skipped: 1)"
+        );
+        let failed = summary(9, 3, "Claude", (1, 1, 1));
+        assert!(
+            failed.ends_with("duplicates skipped: 1, failed: 1, tried again on the next run; the log above names each cause)"),
+            "{failed}"
+        );
+    }
+
     #[tokio::test]
     async fn distill_asks_for_json_and_stops_fail_soft_on_a_text_reply() {
         use wiremock::matchers::method;
@@ -1304,7 +1341,7 @@ mod tests {
             .await;
         let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("client");
         let Distilled::Stop { msg, settled } = distill(&cc(), &client, "proj", None).await else {
-            panic!("a text reply must stop the run");
+            unreachable!("a text reply must stop the run");
         };
         assert!(!settled, "an unreadable reply is retried on a later run");
         assert!(msg.contains("recall reply unreadable"), "{msg}");
