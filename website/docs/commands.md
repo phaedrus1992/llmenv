@@ -1212,8 +1212,10 @@ active context (active bundles, active MCP servers, etc.). Checks:
   See [`session_log:`](configuration.md#session_log)
 - hook commands (added in v3.14.0) — warns when hook commands name a binary in a cargo `target`
   folder or a temp folder, or a binary that was removed after it started.
-  It reads the program from the rendered Claude Code `settings.json`, so an old render that names
-  another binary is found; with no rendered hooks, it checks the running binary and says so.
+  It reads the program of each llmenv hook from the rendered Claude Code `settings.json`, so an old
+  render that names another binary is found, and a program that is not an absolute path is a
+  warning. A hook command whose program cannot be read is named. It then checks the running
+  binary, which the next export writes into the hooks of every engine.
   It also reports a binary path that cannot be named in a hook command
 - lifecycle hooks (added in v3.11.0) — lists which lifecycle events
   (`session_start`, `session_end`, `post_model_switch`, `turn_start`, `post_tool_batch`,

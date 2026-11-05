@@ -6,7 +6,8 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-/// The llmenv subcommands that a built-in hook or the status line runs.
+/// The llmenv subcommands that a built-in hook or the status line runs. A test reads every
+/// `hook_command("...")` call in the adapters, so a new subcommand cannot be left out.
 const LLMENV_SUBCOMMANDS: [&str; 6] = [
     "hook-run",
     "config-guard",
@@ -16,44 +17,47 @@ const LLMENV_SUBCOMMANDS: [&str; 6] = [
     "statusline",
 ];
 
-/// The first shell word of `command` and the text after it, in the two forms that
-/// `util::shell_word` writes: plain text, or single-quoted parts with `'\''` for a quote.
-/// `None` when the word is empty or a quote is not closed.
-fn first_word(command: &str) -> Option<(String, &str)> {
-    let mut word = String::new();
-    let mut rest = command.trim_start();
-    loop {
-        if let Some(quoted) = rest.strip_prefix('\'') {
-            let end = quoted.find('\'')?;
-            word.push_str(quoted.get(..end)?);
-            rest = quoted.get(end + 1..)?;
-        } else if let Some(after) = rest.strip_prefix("\\'") {
-            word.push('\'');
-            rest = after;
-        } else {
-            let end = rest
-                .find(|c: char| c.is_whitespace() || c == '\'' || c == '\\')
-                .unwrap_or(rest.len());
-            if end == 0 {
-                break;
-            }
-            word.push_str(rest.get(..end)?);
-            rest = rest.get(end..)?;
-        }
-        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            break;
-        }
-    }
-    (!word.is_empty()).then_some((word, rest))
+/// What the llmenv commands in a rendered config name.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct RenderedPrograms {
+    /// The distinct programs of the llmenv commands.
+    pub(super) programs: BTreeSet<PathBuf>,
+    /// llmenv commands whose program cannot be read as one shell word, as written.
+    pub(super) unreadable: Vec<String>,
 }
 
-/// The program of `command` when the command runs an llmenv subcommand, else `None`.
-fn llmenv_program_of(command: &str) -> Option<PathBuf> {
-    let (program, rest) = first_word(command)?;
-    let subcommand = rest.split_whitespace().next()?;
-    LLMENV_SUBCOMMANDS
-        .contains(&subcommand)
-        .then(|| PathBuf::from(program))
+/// One command: an llmenv command with its program, an llmenv command that cannot be read, or
+/// another command.
+#[derive(Debug, PartialEq, Eq)]
+enum Command {
+    Llmenv(PathBuf),
+    Unreadable,
+    Other,
+}
+
+fn classify(command: &str) -> Command {
+    let Ok(words) = shell_words::split(command) else {
+        // A command that does not split still counts when it names an llmenv subcommand, so a
+        // risky path cannot hide behind a broken quote.
+        let names_llmenv = command
+            .split_whitespace()
+            .any(|w| LLMENV_SUBCOMMANDS.contains(&w));
+        return if names_llmenv {
+            Command::Unreadable
+        } else {
+            Command::Other
+        };
+    };
+    match words.as_slice() {
+        [program, subcommand, ..] if LLMENV_SUBCOMMANDS.contains(&subcommand.as_str()) => {
+            if program.is_empty() {
+                Command::Unreadable
+            } else {
+                Command::Llmenv(PathBuf::from(program))
+            }
+        }
+        _ => Command::Other,
+    }
 }
 
 /// Every hook command and the status line command in a rendered `settings.json`.
@@ -75,12 +79,19 @@ fn commands(settings: &serde_json::Value) -> Vec<&str> {
     hooks.chain(status).collect()
 }
 
-/// The distinct llmenv programs that the commands in `settings` name.
-pub(super) fn rendered_programs(settings: &serde_json::Value) -> BTreeSet<PathBuf> {
-    commands(settings)
-        .into_iter()
-        .filter_map(llmenv_program_of)
-        .collect()
+/// The programs and the unreadable llmenv commands in `settings`.
+pub(super) fn rendered_programs(settings: &serde_json::Value) -> RenderedPrograms {
+    let mut out = RenderedPrograms::default();
+    for command in commands(settings) {
+        match classify(command) {
+            Command::Llmenv(program) => {
+                out.programs.insert(program);
+            }
+            Command::Unreadable => out.unreadable.push(command.to_string()),
+            Command::Other => {}
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -99,47 +110,103 @@ mod tests {
                     {"type": "command", "command": "/opt/bin/llmenv hook-run --engine claude_code pre_tool_use"},
                     {"type": "command", "command": "'/my dir/target/debug/llmenv' config-guard --engine claude_code"},
                     {"type": "command", "command": "bash ~/hooks/guard.sh"},
+                    {"type": "command", "command": "'/broken hook-run"},
                 ]}],
-                "Stop": [{"hooks": [{"type": "command", "command": "/opt/bin/llmenv hook-run --engine claude_code stop"}]}],
+                "Stop": [{"hooks": [{"type": "command", "command": "llmenv hook-run --engine claude_code stop"}]}],
             },
-            "statusLine": {"type": "command", "command": "/tmp/x/llmenv statusline --color always"},
+            "statusLine": {"type": "command", "command": "\"/tmp/x/llmenv\" statusline --color always"},
         });
-        let programs: Vec<PathBuf> = rendered_programs(&settings).into_iter().collect();
+        let found = rendered_programs(&settings);
+        let programs: Vec<PathBuf> = found.programs.into_iter().collect();
         assert_eq!(
             programs,
             [
                 PathBuf::from("/my dir/target/debug/llmenv"),
                 PathBuf::from("/opt/bin/llmenv"),
                 PathBuf::from("/tmp/x/llmenv"),
+                PathBuf::from("llmenv"),
             ]
         );
+        assert_eq!(found.unreadable, ["'/broken hook-run"]);
     }
 
     #[test]
     fn a_settings_file_with_no_hooks_names_no_program() {
-        assert!(rendered_programs(&serde_json::json!({})).is_empty());
-        assert!(rendered_programs(&serde_json::json!({"hooks": "x"})).is_empty());
+        assert_eq!(
+            rendered_programs(&serde_json::json!({})),
+            RenderedPrograms::default()
+        );
+        assert_eq!(
+            rendered_programs(&serde_json::json!({"hooks": "x"})),
+            RenderedPrograms::default()
+        );
     }
 
+    /// Each llmenv subcommand that the adapters write into a hook command is in the list.
     #[test]
-    fn an_unclosed_quote_is_not_a_word() {
-        assert_eq!(first_word("'/a b hook-run"), None);
-        assert_eq!(first_word("   "), None);
+    fn every_adapter_hook_command_uses_a_listed_subcommand() {
+        let sources = [
+            include_str!("../../adapter/claude_code/mod.rs"),
+            include_str!("../../adapter/claude_code/seed.rs"),
+            include_str!("../../adapter/crush.rs"),
+            include_str!("../../adapter/opencode/hook_bridge.rs"),
+        ];
+        let mut seen = 0;
+        for source in sources {
+            for call in source.split("hook_command(\"").skip(1) {
+                let subcommand = call.split([' ', '"']).next().unwrap();
+                assert!(
+                    LLMENV_SUBCOMMANDS.contains(&subcommand),
+                    "hook_command(\"{subcommand} ...\") is not in LLMENV_SUBCOMMANDS"
+                );
+                seen += 1;
+            }
+        }
+        assert!(seen >= 8, "found only {seen} hook_command calls");
     }
 
     proptest! {
         /// Any path written by `shell_word` reads back as the same path.
         #[test]
-        fn a_shell_word_reads_back(path in "[^\\x00\\n]{1,40}", sub in prop::sample::select(LLMENV_SUBCOMMANDS.to_vec())) {
+        fn a_shell_word_reads_back(
+            path in "[^\\x00]{1,40}",
+            sub in prop::sample::select(LLMENV_SUBCOMMANDS.to_vec()),
+        ) {
             let command = format!("{} {sub} --engine claude_code", shell_word(std::path::Path::new(&path)));
-            prop_assert_eq!(llmenv_program_of(&command), Some(PathBuf::from(&path)));
+            prop_assert_eq!(classify(&command), Command::Llmenv(PathBuf::from(&path)));
         }
-    }
 
-    #[test]
-    fn a_quote_inside_a_path_reads_back() {
-        let path = "/a'b/llmenv";
-        let command = format!("{} hook-run", shell_word(std::path::Path::new(path)));
-        assert_eq!(llmenv_program_of(&command).unwrap(), PathBuf::from(path));
+        /// Any text classifies without a panic, and a command that names no llmenv subcommand
+        /// never yields a program.
+        #[test]
+        fn any_command_classifies_and_others_name_no_program(command in "\\PC{0,60}") {
+            let class = classify(&command);
+            let names_llmenv = command.split_whitespace().any(|w| LLMENV_SUBCOMMANDS.contains(&w))
+                || shell_words::split(&command)
+                    .is_ok_and(|w| w.iter().any(|w| LLMENV_SUBCOMMANDS.contains(&w.as_str())));
+            if !names_llmenv {
+                prop_assert_eq!(class, Command::Other);
+            }
+        }
+
+        /// Other commands mixed in do not change the programs that the llmenv commands name.
+        #[test]
+        fn other_commands_do_not_change_the_programs(
+            others in prop::collection::vec("[a-z]{1,8}( [0-9/.]{1,8}){0,3}", 0..4),
+            programs in prop::collection::vec("/[a-z]{1,8}/llmenv", 1..4),
+        ) {
+            let llmenv: Vec<serde_json::Value> = programs
+                .iter()
+                .map(|p| serde_json::json!({"command": format!("{p} hook-run --engine claude_code stop")}))
+                .collect();
+            let mixed: Vec<serde_json::Value> = llmenv
+                .iter()
+                .cloned()
+                .chain(others.iter().map(|c| serde_json::json!({"command": c})))
+                .collect();
+            let only = rendered_programs(&serde_json::json!({"hooks": {"Stop": [{"hooks": llmenv}]}}));
+            let with = rendered_programs(&serde_json::json!({"hooks": {"Stop": [{"hooks": mixed}]}}));
+            prop_assert_eq!(only, with);
+        }
     }
 }

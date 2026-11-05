@@ -22,39 +22,34 @@ pub(crate) fn hook_command(args: &str) -> anyhow::Result<String> {
 /// The OS cannot report the binary's path, or the path is not UTF-8. A bare `llmenv` would let a
 /// `PATH` entry shadow llmenv, so no fallback is used and the export fails (#3060).
 pub(crate) fn llmenv_program() -> anyhow::Result<String> {
-    program_in(std::env::current_exe())
+    program_name(std::env::current_exe())
 }
 
-/// Pick how hook commands name llmenv, from the running binary's path in `exe`.
+/// The shell-quoted path in `exe`, the running binary's path.
 ///
-/// `Ok` holds the shell-quoted path. `Err` holds the reason the path cannot be used.
-pub(crate) fn program_name(exe: std::io::Result<PathBuf>) -> Result<String, String> {
+/// # Errors
+/// The path is not UTF-8, or `exe` holds the error of an OS that cannot report the path. Each
+/// error names its own fix.
+fn program_name(exe: std::io::Result<PathBuf>) -> anyhow::Result<String> {
+    // A bare `llmenv` would let a PATH entry run another program, so no fallback is used.
+    let cannot = "so llmenv cannot write its hook commands";
     match exe {
         Ok(path) if path.to_str().is_some() => Ok(shell_word(&path)),
         // A lossy conversion would name a file that does not exist, so no path is used.
-        Ok(path) => Err(format!(
-            "llmenv is at {}, which is not valid UTF-8",
+        Ok(path) => Err(anyhow::anyhow!(
+            "llmenv is at {}, which is not valid UTF-8, {cannot}. Fix: move the llmenv binary to \
+             a path that is valid UTF-8, then run `llmenv regenerate`",
             path.display()
         )),
-        Err(e) => Err(format!("the path of the running llmenv is unknown ({e})")),
+        Err(e) => Err(anyhow::anyhow!(
+            "the OS cannot report the path of the running llmenv ({e}), {cannot}. Fix: run llmenv \
+             by its full path from a mounted file system, then run `llmenv regenerate`"
+        )),
     }
 }
 
-/// The error for a binary path that hook commands cannot name. It names the reason and the fix.
-fn unusable_program(reason: &str) -> anyhow::Error {
-    anyhow::anyhow!(
-        "{reason}, so llmenv cannot write its hook commands: a bare `llmenv` would let a PATH \
-         entry run another program. Fix: install llmenv at a path that is valid UTF-8, then run \
-         `llmenv regenerate`"
-    )
-}
-
-fn program_in(exe: std::io::Result<PathBuf>) -> anyhow::Result<String> {
-    program_name(exe).map_err(|reason| unusable_program(&reason))
-}
-
 fn hook_command_in(exe: std::io::Result<PathBuf>, args: &str) -> anyhow::Result<String> {
-    Ok(format!("{} {args}", program_in(exe)?))
+    Ok(format!("{} {args}", program_name(exe)?))
 }
 
 #[cfg(test)]
@@ -78,18 +73,12 @@ mod tests {
     }
 
     #[test]
-    fn a_known_binary_path_is_used() {
-        let program = program_name(Ok(PathBuf::from("/opt/llmenv/bin/llmenv")));
-        assert_eq!(program, Ok("/opt/llmenv/bin/llmenv".to_string()));
-    }
-
-    #[test]
     fn an_unknown_binary_path_is_an_error_that_names_the_cause_and_the_fix() {
         let err = hook_command_in(Err(std::io::Error::other("no such file")), "throttle")
             .expect_err("an unknown path writes no hook command");
         let text = err.to_string();
         assert!(text.contains("no such file"), "{text}");
-        assert!(text.contains("Fix: install llmenv at a path"), "{text}");
+        assert!(text.contains("Fix: run llmenv by its full path"), "{text}");
     }
 
     #[cfg(unix)]
@@ -101,7 +90,7 @@ mod tests {
         let err = hook_command_in(Ok(exe), "throttle").expect_err("a non-UTF-8 path is refused");
         let text = err.to_string();
         assert!(text.contains("not valid UTF-8"), "{text}");
-        assert!(text.contains("llmenv regenerate"), "{text}");
+        assert!(text.contains("Fix: move the llmenv binary"), "{text}");
     }
 
     #[test]
@@ -112,6 +101,17 @@ mod tests {
     }
 
     proptest! {
+        /// A hook command is the shell-quoted program, a space, and the arguments.
+        #[test]
+        fn a_hook_command_is_the_quoted_program_and_the_args(
+            path in "/[^\u{0}]{0,30}",
+            args in "[a-z -]{0,40}",
+        ) {
+            let exe = PathBuf::from(&path);
+            let command = hook_command_in(Ok(exe.clone()), &args).expect("a UTF-8 path is used");
+            prop_assert_eq!(command, format!("{} {args}", shell_word(&exe)));
+        }
+
         /// The quoted program is one shell word: a shell that reads it back gets the same text.
         #[cfg(unix)]
         #[test]
