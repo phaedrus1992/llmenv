@@ -34,6 +34,11 @@ pub(super) const GH_NO_PR_SIGNS: [&str; 3] = [
     "not a git repository",
 ];
 
+/// The exit code of `gh pr view` for each no-PR answer. Measured on gh 2.103.3: all three signs
+/// exit 1, gh's code for a plain error. A no-PR sign with another exit, or a kill by a signal, is
+/// a failure, because the text alone does not prove the answer (#3442).
+const GH_NO_PR_EXIT: i32 = 1;
+
 /// The `gh` errors that mean the login is missing or expired. Lowercase, like the no-PR list,
 /// because the same case rule applies to both.
 pub(super) const GH_LOGIN_SIGNS: [&str; 3] =
@@ -48,7 +53,7 @@ pub(super) fn classify_gh_exit(status: std::process::ExitStatus, stderr: &str) -
     let detail = llmenv_git::git_failure_detail(stderr.as_bytes(), &[], status);
     let first_line = detail.lines().next().unwrap_or("");
     let lowered = stderr.to_ascii_lowercase();
-    if GH_NO_PR_SIGNS.iter().any(|sign| lowered.contains(sign)) {
+    if status.code() == Some(GH_NO_PR_EXIT) && GH_NO_PR_SIGNS.iter().any(|s| lowered.contains(s)) {
         tracing::debug!("gh pr view exited {status}, read as no PR: {first_line}");
         return Ok(None);
     }
@@ -114,6 +119,20 @@ mod tests {
         ) {
             let text = format!("{prefix}{}{suffix}", capitalized(GH_NO_PR_SIGNS[pick]));
             proptest::prop_assert_eq!(classify_gh_exit(exit_one(), &text), Ok(None));
+        }
+
+        /// A no-PR sign with any other exit, or with a kill by a signal, is a failure (#3442).
+        #[test]
+        fn a_no_pr_sign_with_another_exit_is_a_failure(
+            pick in 0..GH_NO_PR_SIGNS.len(),
+            code in 2i32..256,
+            signal in 1i32..32,
+        ) {
+            let text = GH_NO_PR_SIGNS[pick];
+            let by_code = std::process::ExitStatus::from_raw(code << 8);
+            proptest::prop_assert_eq!(classify_gh_exit(by_code, text), Err(GhFailure::Failed));
+            let by_signal = std::process::ExitStatus::from_raw(signal);
+            proptest::prop_assert_eq!(classify_gh_exit(by_signal, text), Err(GhFailure::Failed));
         }
 
         #[test]

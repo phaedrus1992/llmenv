@@ -1582,6 +1582,8 @@ The `pr` widget shows `pr: unreadable` when the branch cannot be read, instead o
 When `gh` gives no answer, the `pr` widget names the cause: `pr: gh missing` when `gh` is not installed, `pr: gh not logged in` when its login failed or expired, and `pr: gh failed` for a timeout or another error (changed in v3.13.0).
 The cause stays cached for the same 60 seconds as a PR answer.
 A branch with no open PR shows nothing in the `pr` widget, and it does not show `pr: gh failed` (fixed in v3.14.0).
+The "no PR" answer needs `gh` exit code 1 with its no-PR message, as gh 2.103.3 writes it.
+The same message with another exit, or a `gh` killed by a signal, shows `pr: gh failed` (changed in v3.14.0).
 A branch with no open PR, or a repository with no GitHub remote, still shows nothing.
 
 An unrecognized placeholder inside a custom `format` string (e.g. `{title}`

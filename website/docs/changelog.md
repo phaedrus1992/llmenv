@@ -176,6 +176,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Count a file or a link inside a cache generation as kept in the `llmenv doctor --gc` and `llmenv clean` report, so the counts cover every entry. One stale `state/tmp` entry whose size cannot be read is counted as unreadable instead of failing the whole stale summary. [refactor:materialize] [#3277]
 - Name the variable and the fix when `llmenv export` rejects an env var from an adapter. A NUL byte in a value used to fail with no variable name. [fix:cli]
 - Log a transcript that the turn checks cannot stat or read, not only one they cannot open, so a check that passes for that reason is visible. [fix:hook]
+- Show a status line PR lookup that `gh` ends with an unexpected exit or a signal as a failure, even when its message says there is no PR. Only exit 1 with that message means no PR. [fix:statusline] [#3442]
 
 ### Security
 
