@@ -1,9 +1,9 @@
 use super::*;
 use proptest::{prop_assert, prop_assert_eq};
 
-const CACHE: &str = "/cache";
+pub(super) const CACHE: &str = "/cache";
 
-fn tokens(command: &str) -> Vec<String> {
+pub(super) fn tokens(command: &str) -> Vec<String> {
     unresolved_path_tokens(command, Path::new(CACHE))
 }
 

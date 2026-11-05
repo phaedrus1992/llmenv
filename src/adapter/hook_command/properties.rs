@@ -1,11 +1,9 @@
+#![expect(clippy::unwrap_used, reason = "test code: an error must stop the test")]
+
 use super::*;
 use proptest::prelude::*;
 
-const CACHE: &str = "/cache";
-
-fn tokens(command: &str) -> Vec<String> {
-    unresolved_path_tokens(command, Path::new(CACHE))
-}
+use super::tests::{CACHE, tokens};
 
 proptest::proptest! {
     /// A key with `..` in any segment is never joined into the cache path, whatever the command.
@@ -55,6 +53,28 @@ proptest::proptest! {
         let joined = format!("bash {root}{glue}{key}");
         let got = resolve_command_paths_against_files(&joined, cache, &only_long);
         prop_assert_eq!(got.ok().flatten(), None);
+    }
+
+    /// A command that already points into the cache does not change on a second pass.
+    #[test]
+    fn a_second_rewrite_changes_nothing(
+        root in "/[a-z]{1,5}",
+        dirs in proptest::collection::vec("[a-z]{1,5}", 0..3),
+        file in "[a-z]{1,5}\\.sh",
+        tail in "( [a-z]{1,5}){0,2}",
+    ) {
+        let key = dirs.iter().map(String::as_str).chain([file.as_str()]).collect::<Vec<_>>().join("/");
+        let mut files = BTreeMap::new();
+        files.insert(PathBuf::from(&key), PathBuf::from("/src/tool.sh"));
+        let cache = Path::new(CACHE);
+        let command = format!("bash {root}/{key}{tail}");
+        let once = resolve_command_paths_against_files(&command, cache, &files)
+            .unwrap()
+            .unwrap_or(command);
+        let twice = resolve_command_paths_against_files(&once, cache, &files)
+            .unwrap()
+            .unwrap_or_else(|| once.clone());
+        prop_assert_eq!(twice, once);
     }
 
     /// Each token named as unresolved is a script path, is outside the cache, and holds no `//`.
