@@ -51,9 +51,10 @@ pub(crate) fn redirect_stderr_to_bounded_log(
             cmd.stderr(std::process::Stdio::from(file));
         }
         Err(e) => {
-            tracing::warn!(
-                "{context}: log unavailable ({e:#}); the child's stderr is discarded. Check that the log path is a regular file owned by you."
-            );
+            crate::agent_notice::record_logged(format!(
+                "{context}: log unavailable ({e:#}), so the child's stderr is discarded. Fix: \
+                 check the log path and the folder that holds it."
+            ));
         }
     }
 }
@@ -84,9 +85,10 @@ pub(crate) fn redirect_stderr_to_detached_log(
         ),
         Err(e) => {
             cmd.stderr(std::process::Stdio::null());
-            tracing::warn!(
-                "detached child: cannot resolve log path ({e:#}); the child's stderr is discarded"
-            );
+            crate::agent_notice::record_logged(format!(
+                "detached child: cannot resolve log path ({e:#}), so the child's stderr is \
+                 discarded. Fix: set HOME, or set LLMENV_STATE_DIR to a valid absolute path."
+            ));
         }
     }
 }
@@ -95,6 +97,29 @@ pub(crate) fn redirect_stderr_to_detached_log(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_child_log_limit_is_512_kib() {
+        assert_eq!(BOUNDED_LOG_MAX_BYTES, 512 * 1024);
+    }
+
+    #[test]
+    fn a_log_that_cannot_open_is_noticed_for_the_agent_with_its_context() {
+        let dir = tempfile::tempdir().expect("test");
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg("true");
+        // A directory is not a log file, so opening it fails.
+        redirect_stderr_to_bounded_log(
+            &mut cmd,
+            dir.path(),
+            llmenv_mcp::proxy::LogDirMode::OwnerOnly,
+            "probe-context-3387",
+        );
+
+        let text = crate::agent_notice::current().unwrap_or_default();
+        assert!(text.contains("probe-context-3387"), "{text}");
+        assert!(text.contains("Fix:"), "{text}");
+    }
 
     // #1133: the detached memory children were spawned with
     // `stderr(Stdio::null())`, so nothing they reported could reach anyone —

@@ -2,7 +2,8 @@
 
 use std::path::Path;
 
-use super::{SessionProgress, TasksData};
+use super::session_tasks::sum_progress;
+use super::{SessionProgress, SessionTasks, TasksData};
 
 /// Task-tracker progress, scoped to the sessions open for the current project (mandatory-sessions
 /// design). `session` is `None` when zero sessions are open for this project (the widget renders
@@ -12,13 +13,10 @@ use super::{SessionProgress, TasksData};
 pub(super) fn collect_tasks() -> TasksData {
     let unreadable = |what: &str, e: &dyn std::fmt::Display| {
         tracing::error!(
-            "cannot read the tasks, {what} is unknown: {e}; the status line shows unreadable"
+            "cannot read the tasks, {what} is unknown: {e}; the status line shows unreadable. \
+             Fix: check the permissions of that folder."
         );
-        TasksData {
-            session: None,
-            current: None,
-            unreadable: true,
-        }
+        unreadable_tasks()
     };
     let state_dir = match crate::paths::state_dir() {
         Ok(dir) => dir,
@@ -38,38 +36,52 @@ pub(super) fn collect_tasks_from_state_dir(state_dir: &Path, project: &str) -> T
     match try_tasks_data(state_dir, project) {
         Ok(data) => data,
         Err(e) => {
-            tracing::error!(error = %e, "cannot read the tasks; the status line shows unreadable");
-            TasksData {
-                session: None,
-                current: None,
-                unreadable: true,
-            }
+            tracing::error!(
+                error = %e,
+                "cannot read the tasks; the status line shows unreadable. Fix: check the task and \
+                 session files of this project for permissions and damage."
+            );
+            unreadable_tasks()
         }
     }
 }
 
+/// The marker the status line shows when the tasks cannot be read.
+fn unreadable_tasks() -> TasksData {
+    TasksData {
+        session: None,
+        current: None,
+        unreadable: true,
+        sessions: Vec::new(),
+    }
+}
+
 /// The task fields of the status line, read strictly: any unreadable session or task file is an
-/// error.
+/// error. `sessions` lists each open session, in session-id order, so the status line can narrow
+/// the counts to the conversation that reads it (#3196).
 fn try_tasks_data(state_dir: &Path, project: &str) -> anyhow::Result<TasksData> {
-    let open_sessions = crate::task::session::open_sessions_strict(state_dir, project)?;
-    let session = if open_sessions.is_empty() {
-        None
-    } else {
-        let mut total_progress = (0, 0);
-        for s in &open_sessions {
-            let (d, t) = crate::task::session::try_session_progress(state_dir, &s.id)?;
-            total_progress = (total_progress.0 + d, total_progress.1 + t);
-        }
-        Some(SessionProgress {
-            done: total_progress.0,
-            total: total_progress.1,
-        })
-    };
-    let session_ids: Vec<String> = open_sessions.into_iter().map(|s| s.id).collect();
+    let mut open_sessions = crate::task::session::open_sessions_strict(state_dir, project)?;
+    open_sessions.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut progress: Vec<SessionProgress> = Vec::with_capacity(open_sessions.len());
+    for s in &open_sessions {
+        let (done, total) = crate::task::session::try_session_progress(state_dir, &s.id)?;
+        progress.push(SessionProgress { done, total });
+    }
+    let session = (!open_sessions.is_empty()).then(|| sum_progress(progress.iter().copied()));
+    let session_ids: Vec<String> = open_sessions.iter().map(|s| s.id.clone()).collect();
     let current = crate::task::current_wip_title(state_dir, &session_ids)?;
+    let mut sessions = Vec::with_capacity(open_sessions.len());
+    for (s, progress) in open_sessions.iter().zip(progress) {
+        sessions.push(SessionTasks {
+            owner: s.owner_session().map(str::to_owned),
+            progress,
+            current: crate::task::current_wip_title(state_dir, std::slice::from_ref(&s.id))?,
+        });
+    }
     Ok(TasksData {
         session,
         current,
         unreadable: false,
+        sessions,
     })
 }

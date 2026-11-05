@@ -173,7 +173,7 @@ fn assert_fail_soft(mut cmd: Command, stderr_needle: &str) {
     cmd.timeout(Duration::from_secs(10))
         .assert()
         .success()
-        .stdout(predicate::str::is_empty())
+        .stdout(predicate::str::is_empty().or(predicate::str::contains("content folder")))
         .stderr(predicate::str::contains(stderr_needle));
 }
 
@@ -331,11 +331,12 @@ fn all_events_fail_soft_without_backend() {
         "subagent_start",
         "subagent_task",
     ] {
+        // The only stdout allowed is a content-less bundle notice, which is shown once (#3218).
         hook_cmd(dir.path(), &config_path, event)
             .timeout(Duration::from_secs(10))
             .assert()
             .success()
-            .stdout(predicate::str::is_empty());
+            .stdout(predicate::str::is_empty().or(predicate::str::contains("no content folder")));
     }
 }
 
@@ -405,7 +406,7 @@ fn pre_tool_use_without_read_once_config_passes_through() {
         .timeout(Duration::from_secs(10))
         .assert()
         .success()
-        .stdout(predicate::str::is_empty());
+        .stdout(predicate::str::is_empty().or(predicate::str::contains("content folder")));
 }
 
 #[test]
@@ -415,7 +416,7 @@ fn pre_tool_use_with_read_once_warn_config_passes_through() {
         .timeout(Duration::from_secs(10))
         .assert()
         .success()
-        .stdout(predicate::str::is_empty());
+        .stdout(predicate::str::is_empty().or(predicate::str::contains("content folder")));
 }
 
 #[test]
@@ -425,7 +426,7 @@ fn pre_tool_use_with_read_once_deny_config_passes_through() {
         .timeout(Duration::from_secs(10))
         .assert()
         .success()
-        .stdout(predicate::str::is_empty());
+        .stdout(predicate::str::is_empty().or(predicate::str::contains("content folder")));
 }
 
 /// Helper: a synthetic PreToolUse payload for a Read tool call.
@@ -459,7 +460,7 @@ fn pre_tool_use_read_twice_warn_mode() {
         .timeout(Duration::from_secs(10))
         .assert()
         .success()
-        .stdout(predicate::str::is_empty());
+        .stdout(predicate::str::is_empty().or(predicate::str::contains("content folder")));
 
     // Second read — warns, non-empty stdout with advisory JSON
     let output = hook_cmd(dir.path(), &config_path, "pre_tool_use")
@@ -504,7 +505,7 @@ fn pre_tool_use_read_twice_deny_mode() {
         .timeout(Duration::from_secs(10))
         .assert()
         .success()
-        .stdout(predicate::str::is_empty());
+        .stdout(predicate::str::is_empty().or(predicate::str::contains("content folder")));
 
     // Second read — denied, stdout should be a deny JSON envelope
     let output = hook_cmd(dir.path(), &config_path, "pre_tool_use")
@@ -609,7 +610,7 @@ fn pre_tool_use_read_twice_warn_with_debug_session_log_writes_log_and_advisory()
         .timeout(Duration::from_secs(10))
         .assert()
         .success()
-        .stdout(predicate::str::is_empty());
+        .stdout(predicate::str::is_empty().or(predicate::str::contains("content folder")));
 
     // Second read — warns, non-empty stdout with advisory JSON, AND still logged.
     let output = hook_cmd(dir.path(), &config_path, "pre_tool_use")

@@ -50,6 +50,14 @@ pub enum MemoryEndpoint {
 }
 
 impl MemoryEndpoint {
+    /// The bundles that fired without a content folder. Empty for every other endpoint (#3218).
+    pub(crate) fn skipped_bundles(&self) -> &[String] {
+        match self {
+            Self::NotDeclared { skipped_bundles } => skipped_bundles,
+            _ => &[],
+        }
+    }
+
     /// The resolved URL, or an error naming why no backend is active.
     ///
     /// # Errors

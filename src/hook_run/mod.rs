@@ -10,6 +10,9 @@ pub(crate) mod action;
 mod adaptive;
 pub(crate) mod agent_config;
 mod bundle_names;
+mod bundle_notice;
+mod dedup_snapshot;
+use dedup_snapshot::{dedup_snapshot_path, dedup_write_target};
 pub(crate) mod cbm_index_guard;
 pub(crate) mod cd_guard;
 pub(crate) mod checkpoint;
@@ -18,7 +21,9 @@ pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
 mod engine_rules;
 mod event;
+mod memory_call;
 mod memory_client;
+use memory_call::MemoryCallContext;
 mod notice;
 use bundle_names::recall_bundle_names;
 use engine_rules::blocks_by_exit_code;
@@ -53,6 +58,7 @@ mod session_ledger;
 mod session_notices;
 pub(crate) mod session_state;
 mod shell_split;
+pub(crate) mod shell_tool;
 pub(crate) mod slippage;
 mod slippage_read;
 pub(crate) mod stop_dedupe;
@@ -688,6 +694,9 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
     if let Err(e) = &result {
         crate::agent_notice::record(memory_skipped_notice(event, e));
     }
+    // The resume fields are parsed before the notices are taken, because a wrong-type field
+    // records a notice as it is read.
+    let resume_message = resume_cache::resume_notice(&hook_event_name, payload);
     // Read after `run_inner`, so every output path below carries it to the agent (#2658).
     let notice = crate::agent_notice::current();
     match result {
@@ -736,7 +745,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
                     append_pending_notice(text.notes, launch_client::check_pending_notice());
                 let notes = join_notes(notice.as_deref(), &notes);
                 let out = adapter.emit_hook_context(&hook_event_name, &text.memory, &notes);
-                let out = resume_cache::with_resume_notice(out, &hook_event_name, payload);
+                let out = resume_cache::with_resume_notice(out, resume_message.as_deref());
                 // The omission notice rides in `notes`, so the log must see the joined text (#2764).
                 log_notice_without_channel(&out, Some(notes.as_str()), event);
                 log_memory_without_channel(&out, &text.memory, event);
@@ -1418,8 +1427,17 @@ fn run_inner(
         // cheap — reqwest::Client is internally Arc, and the MCP session_id is
         // shared via Arc so re-initialization is also avoided.
         static MCP_CLIENT_CACHE: OnceLock<Mutex<HashMap<String, McpHttpClient>>> = OnceLock::new();
-        let resolved_client =
-            resolve_memory_client(&config, config_dir, &active, event, &MCP_CLIENT_CACHE);
+        let resolved_client = resolve_memory_client(
+            &config,
+            config_dir,
+            &active,
+            MemoryCallContext {
+                event,
+                state_dir: memory_call::notice_state_dir().as_deref(),
+                session_id: claude_session_id,
+            },
+            &MCP_CLIENT_CACHE,
+        );
         let settings = resolved_client.as_ref().map(|r| r.settings.clone());
         // Default type/importance markers (R1, R3) from the resolved entry, which
         // can be top-level or bundle-declared, when the chunk has none of its own.
@@ -1598,11 +1616,7 @@ fn run_inner(
                         client,
                         settings: settings.as_ref(),
                         session_id: claude_session_id,
-                        state_dir: crate::paths::state_dir()
-                            .inspect_err(|e| {
-                                tracing::error!("no state dir, adaptive recall falls back: {e}");
-                            })
-                            .ok(),
+                        state_dir: adaptive_state_dir(crate::paths::state_dir),
                         payload: stdin_payload,
                         actions,
                         scope: scope_recall_actions(&tag_queries, &bundle_queries, &tag_ranks),
@@ -1980,19 +1994,7 @@ async fn handle_session_log(
     let session_id = match (event, claude_session_id) {
         (HookEvent::SessionStart, Some(csid)) => {
             // Best-effort reaping before any session-log activity.
-            if let Some(days) = cfg.transcript.as_ref().and_then(|t| t.retention_days) {
-                let log_path = crate::session_log::resolve_file_path(cfg.file_path())
-                    .inspect_err(|e| {
-                        tracing::warn!(
-                            "session_log reaper: cannot resolve the session log path, so \
-                             retention is skipped: {e:#}. Fix: set HOME or session_log.file.path."
-                        );
-                    })
-                    .ok();
-                if let Some(p) = log_path.as_ref() {
-                    crate::session_log::reap_session_log(p, days);
-                }
-            }
+            session_emit::reap_at_session_start(cfg);
             // SessionStart: once per launch, worth revalidating (#1090).
             ensure_transcript_session(cfg, client, csid, ctx, state_path, true).await
         }
@@ -2176,35 +2178,24 @@ fn cache_dir_of(index_path: Option<&str>, state_dir: &std::path::Path) -> std::p
         .unwrap_or_else(|| state_dir.join("codebase-memory"))
 }
 
-/// The SessionEnd dedup snapshot path. Other events have none. A missing state directory skips
-/// the snapshot and logs, because an error return would drop the notices built above (#2719).
-fn dedup_snapshot_path(
-    event: HookEvent,
-    state_dir: impl FnOnce() -> anyhow::Result<std::path::PathBuf>,
+/// The state folder for adaptive recall. A failure is noticed, because recall then runs without
+/// adaptive ranking and the agent must be told why.
+fn adaptive_state_dir(
+    resolve: impl FnOnce() -> anyhow::Result<std::path::PathBuf>,
 ) -> Option<std::path::PathBuf> {
-    if event != HookEvent::SessionEnd {
-        return None;
-    }
-    match state_dir() {
-        Ok(dir) => Some(dir.join(crate::paths::HOOK_STORE_CHUNK)),
-        Err(e) => {
-            tracing::error!(
-                "session-end dedup skipped, the state directory is unavailable, so the chunk is stored again: {e}"
-            );
-            None
-        }
-    }
+    resolve()
+        .inspect_err(|e| {
+            crate::agent_notice::record_logged(format!(
+                "llmenv: adaptive recall is off for this event, because the state folder cannot \
+                 be found: {e:#}. Fix: set HOME, or set LLMENV_STATE_DIR to a valid absolute path."
+            ));
+        })
+        .ok()
 }
 
 /// Whether a PostToolUse event may store fetched web content in ICM (#579).
 fn stores_web_fetch(event: HookEvent) -> bool {
     event == HookEvent::PostToolUse
-}
-
-/// The dedup snapshot to write after a store. A chunk the store already matched is not written
-/// again, so the snapshot keeps its earlier content.
-fn dedup_write_target(path: Option<&std::path::Path>, unchanged: bool) -> Option<&std::path::Path> {
-    path.filter(|_| !unchanged)
 }
 
 /// Append `section` to `out` on its own line. An empty section adds nothing.
@@ -3693,6 +3684,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_unavailable_state_folder_is_noticed_for_adaptive_recall() {
+        let got = adaptive_state_dir(|| Err(anyhow::anyhow!("probe no HOME")));
+        assert_eq!(got, None);
+
+        let text = crate::agent_notice::current().unwrap_or_default();
+        assert!(text.contains("adaptive recall"), "{text}");
+        assert!(text.contains("probe no HOME"), "{text}");
+    }
+
     /// Fixture for the two #1132 failure modes: a firing bundle whose
     /// `bundle.yaml` is a *directory*, so every read of it fails with something
     /// other than NotFound — the portable stand-in for the unreadable or
@@ -3780,8 +3781,17 @@ mod tests {
         let (config_root, _cache, config, active) = unreadable_bundle_fixture();
         static CACHE: OnceLock<Mutex<HashMap<String, McpHttpClient>>> = OnceLock::new();
 
-        let client =
-            resolve_memory_client(&config, config_root.path(), &active, "test-event", &CACHE);
+        let client = resolve_memory_client(
+            &config,
+            config_root.path(),
+            &active,
+            MemoryCallContext {
+                event: "test-event",
+                state_dir: None,
+                session_id: None,
+            },
+            &CACHE,
+        );
 
         assert!(
             client.is_none(),
@@ -5708,521 +5718,7 @@ mod tests {
 }
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
-mod session_log_tests {
-    use super::*;
-    use std::time::Duration;
-    use wiremock::matchers::{body_string_contains, method};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    fn ctx() -> ScopeContext {
-        ScopeContext {
-            tags: vec!["rust".into()],
-            bundles: vec![],
-            project: Some("llmenv".into()),
-            cwd: "/tmp".into(),
-            adapter: "claude-code".into(),
-            llmenv_version: "3.0.0".into(),
-            claude_code_version: String::new(),
-        }
-    }
-
-    fn file_only_cfg(path: &std::path::Path) -> SessionLog {
-        SessionLog {
-            file: Some(llmenv_config::FileSinkConfig {
-                enabled: true,
-                level: LogLevel::Info,
-                path: Some(path.to_string_lossy().into_owned()),
-            }),
-            transcript: Some(llmenv_config::TranscriptSinkConfig {
-                enabled: false,
-                level: LogLevel::Info,
-                retention_days: None,
-            }),
-            max_content_bytes: None,
-        }
-    }
-
-    fn jsonl_lines(path: &std::path::Path) -> Vec<serde_json::Value> {
-        std::fs::read_to_string(path)
-            .unwrap()
-            .lines()
-            .map(|l| serde_json::from_str(l).unwrap())
-            .collect()
-    }
-
-    #[tokio::test]
-    async fn session_start_file_only_writes_lifecycle_and_scope() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session-log.jsonl");
-        handle_session_log(
-            HookEvent::SessionStart,
-            &file_only_cfg(&path),
-            None,
-            None,
-            &ctx(),
-            None,
-        )
-        .await;
-        let lines = jsonl_lines(&path);
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0]["kind"], "lifecycle_start");
-        assert_eq!(lines[1]["kind"], "scope");
-        assert!(
-            lines[1]["content"]
-                .as_str()
-                .unwrap()
-                .contains("llmenv-tag:rust")
-        );
-    }
-
-    #[tokio::test]
-    async fn session_end_file_only_writes_lifecycle_end() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session-log.jsonl");
-        handle_session_log(
-            HookEvent::SessionEnd,
-            &file_only_cfg(&path),
-            None,
-            None,
-            &ctx(),
-            None,
-        )
-        .await;
-        let lines = jsonl_lines(&path);
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0]["kind"], "lifecycle_end");
-    }
-
-    #[tokio::test]
-    async fn disabled_sinks_write_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session-log.jsonl");
-        let cfg = SessionLog {
-            file: Some(llmenv_config::FileSinkConfig {
-                enabled: false,
-                level: LogLevel::Info,
-                path: Some(path.to_string_lossy().into_owned()),
-            }),
-            transcript: Some(llmenv_config::TranscriptSinkConfig {
-                enabled: false,
-                level: LogLevel::Info,
-                retention_days: None,
-            }),
-            max_content_bytes: None,
-        };
-        handle_session_log(HookEvent::SessionStart, &cfg, None, None, &ctx(), None).await;
-        assert!(!path.exists());
-    }
-
-    fn mock_text_response(text: &str) -> serde_json::Value {
-        serde_json::json!({"jsonrpc":"2.0","id":1,
-            "result":{"content":[{"type":"text","text":text}]}})
-    }
-
-    // These two test `ensure_transcript_session` directly rather than through
-    // `handle_session_log`/`emit_session_log`: since T11, the transcript
-    // *record* path dispatches via a detached child process
-    // (`session_log::detached::spawn_record`), which a unit test must not
-    // trigger (the test binary is not the `llmenv` binary `spawn_record`
-    // expects to re-invoke). `start_session` stays synchronous/inline
-    // (`ensure_transcript_session`), so it remains directly unit-testable.
-
-    #[tokio::test]
-    async fn ensure_transcript_session_starts_no_second_transcript_while_one_is_pending() {
-        // A start whose link was not recorded leaves its pending marker. A later event must not
-        // start another transcript, which would be a second orphan (#2834).
-        let state_dir = tempfile::tempdir().unwrap();
-        let state_path = state_dir.path().join("transcript-sessions.json");
-        let seen = state::Link::Missing;
-        let now = super::session_state::unix_now();
-        assert!(state::claim_pending_at(&state_path, "claude-p", &seen, now).unwrap());
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(mock_text_response("icm-new")))
-            .expect(0)
-            .mount(&server)
-            .await;
-        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
-        let cfg = SessionLog {
-            transcript: Some(llmenv_config::TranscriptSinkConfig {
-                enabled: true,
-                level: LogLevel::Info,
-                retention_days: None,
-            }),
-            ..file_only_cfg(&state_dir.path().join("unused.jsonl"))
-        };
-
-        let id = ensure_transcript_session(
-            &cfg,
-            Some(&client),
-            "claude-p",
-            &ctx(),
-            Some(&state_path),
-            true,
-        )
-        .await;
-
-        assert_eq!(id, None);
-        server.verify().await;
-    }
-
-    #[tokio::test]
-    async fn ensure_transcript_session_creates_and_correlates_when_none_recorded() {
-        let state_dir = tempfile::tempdir().unwrap();
-        let state_path = state_dir.path().join("transcript-sessions.json");
-        let _guard = llmenv_util::testkit::port_guard();
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(mock_text_response("icm-sess-1")),
-            )
-            .mount(&server)
-            .await;
-        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
-        let cfg = SessionLog {
-            transcript: Some(llmenv_config::TranscriptSinkConfig {
-                enabled: true,
-                level: LogLevel::Info,
-                retention_days: None,
-            }),
-            ..file_only_cfg(&state_dir.path().join("unused.jsonl"))
-        };
-
-        let id = ensure_transcript_session(
-            &cfg,
-            Some(&client),
-            "claude-1",
-            &ctx(),
-            Some(&state_path),
-            true,
-        )
-        .await;
-
-        assert_eq!(id.as_deref(), Some("icm-sess-1"));
-        assert_eq!(
-            state::lookup_session_at(&state_path, "claude-1")
-                .unwrap()
-                .as_deref(),
-            Some("icm-sess-1")
-        );
-    }
-
-    #[tokio::test]
-    async fn ensure_transcript_session_reuses_existing_after_verifying_it_is_live() {
-        let state_dir = tempfile::tempdir().unwrap();
-        let state_path = state_dir.path().join("transcript-sessions.json");
-        state::record_session_at(&state_path, "claude-2", "icm-sess-2").unwrap();
-        let _guard = llmenv_util::testkit::port_guard();
-        let server = MockServer::start().await;
-        // Only `initialize` and the `icm_transcript_show` verification call
-        // are mocked. If `ensure_transcript_session` fell through to
-        // `start_session` instead of trusting a verified cached id, that
-        // call would hit an unmocked request and the id assertion below
-        // would fail.
-        Mock::given(method("POST"))
-            .and(body_string_contains("initialize"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(mock_text_response("")))
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(body_string_contains(
-                crate::session_log::transcript::SHOW_TOOL,
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(mock_text_response("[]")))
-            .mount(&server)
-            .await;
-        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
-        let cfg = SessionLog {
-            transcript: Some(llmenv_config::TranscriptSinkConfig {
-                enabled: true,
-                level: LogLevel::Info,
-                retention_days: None,
-            }),
-            ..file_only_cfg(&state_dir.path().join("unused.jsonl"))
-        };
-
-        let id = ensure_transcript_session(
-            &cfg,
-            Some(&client),
-            "claude-2",
-            &ctx(),
-            Some(&state_path),
-            true,
-        )
-        .await;
-
-        assert_eq!(id.as_deref(), Some("icm-sess-2"));
-    }
-
-    /// #1090 regression: `run_session_log`'s per-event path calls
-    /// `ensure_transcript_session` for every mapped hook event, not just
-    /// `SessionStart` — verifying on every one of those would turn each
-    /// logged tool call into an `icm_transcript_show` round trip that grows
-    /// with the transcript itself (`icm_transcript_show` has no cheap
-    /// existence-only form). `verify: false` must reuse a cached id without
-    /// ever calling ICM.
-    #[tokio::test]
-    async fn ensure_transcript_session_notices_a_map_it_cannot_read() {
-        // #2658: a map that cannot be read must not start a transcript that cannot be linked.
-        // The agent is told, because stderr from a hook never reaches it (#2818).
-        let state_dir = tempfile::tempdir().unwrap();
-        let state_path = state_dir.path().join("transcript-sessions.json");
-        std::fs::write(&state_path, "{not json").unwrap();
-        let cfg = SessionLog {
-            transcript: Some(llmenv_config::TranscriptSinkConfig {
-                enabled: true,
-                level: LogLevel::Info,
-                retention_days: None,
-            }),
-            ..file_only_cfg(&state_dir.path().join("unused.jsonl"))
-        };
-
-        let id =
-            ensure_transcript_session(&cfg, None, "claude-6", &ctx(), Some(&state_path), false)
-                .await;
-
-        assert!(id.is_none());
-        let notice = crate::agent_notice::current().unwrap_or_default();
-        assert!(
-            notice.contains("no ICM transcript started for this session"),
-            "{notice}"
-        );
-        assert!(notice.contains("Fix: run `llmenv doctor`"), "{notice}");
-    }
-
-    #[tokio::test]
-    async fn ensure_transcript_session_with_verify_false_skips_the_network_call() {
-        let state_dir = tempfile::tempdir().unwrap();
-        let state_path = state_dir.path().join("transcript-sessions.json");
-        state::record_session_at(&state_path, "claude-5", "icm-sess-5").unwrap();
-        // No mock mounted at all: any HTTP call here would fail the request.
-        let _guard = llmenv_util::testkit::port_guard();
-        let server = MockServer::start().await;
-        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
-        let cfg = SessionLog {
-            transcript: Some(llmenv_config::TranscriptSinkConfig {
-                enabled: true,
-                level: LogLevel::Info,
-                retention_days: None,
-            }),
-            ..file_only_cfg(&state_dir.path().join("unused.jsonl"))
-        };
-
-        let id = ensure_transcript_session(
-            &cfg,
-            Some(&client),
-            "claude-5",
-            &ctx(),
-            Some(&state_path),
-            false,
-        )
-        .await;
-
-        assert_eq!(id.as_deref(), Some("icm-sess-5"));
-        assert!(
-            server.received_requests().await.unwrap().is_empty(),
-            "verify: false must not make any ICM call"
-        );
-    }
-
-    #[tokio::test]
-    async fn ensure_transcript_session_reestablishes_when_cached_id_fails_verification() {
-        // #1090: a cached icm_session_id must be revalidated against ICM, not
-        // trusted forever — a stale one is cleared and replaced.
-        let state_dir = tempfile::tempdir().unwrap();
-        let state_path = state_dir.path().join("transcript-sessions.json");
-        state::record_session_at(&state_path, "claude-4", "icm-stale").unwrap();
-        let _guard = llmenv_util::testkit::port_guard();
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(body_string_contains("initialize"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(mock_text_response("")))
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(body_string_contains(
-                crate::session_log::transcript::SHOW_TOOL,
-            ))
-            // The text icm-mcp sends for an unknown session: `session <id> not found`.
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "jsonrpc":"2.0","id":1,
-                "result":{"isError":true,"content":[
-                    {"type":"text","text":"session icm-stale not found"}
-                ]}
-            })))
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(body_string_contains(
-                crate::session_log::transcript::START_TOOL,
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(mock_text_response("icm-fresh")))
-            .mount(&server)
-            .await;
-        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
-        let cfg = SessionLog {
-            transcript: Some(llmenv_config::TranscriptSinkConfig {
-                enabled: true,
-                level: LogLevel::Info,
-                retention_days: None,
-            }),
-            ..file_only_cfg(&state_dir.path().join("unused.jsonl"))
-        };
-
-        let id = ensure_transcript_session(
-            &cfg,
-            Some(&client),
-            "claude-4",
-            &ctx(),
-            Some(&state_path),
-            true,
-        )
-        .await;
-
-        assert_eq!(
-            id.as_deref(),
-            Some("icm-fresh"),
-            "a cached id that fails verification must be replaced"
-        );
-        assert_eq!(
-            state::lookup_session_at(&state_path, "claude-4")
-                .unwrap()
-                .as_deref(),
-            Some("icm-fresh"),
-            "the correlation map must be updated to the fresh id"
-        );
-    }
-
-    #[tokio::test]
-    async fn ensure_transcript_session_keeps_link_when_icm_is_unreachable() {
-        // #2667: a transient ICM outage must not orphan a valid transcript.
-        let state_dir = tempfile::tempdir().unwrap();
-        let state_path = state_dir.path().join("transcript-sessions.json");
-        state::record_session_at(&state_path, "claude-5", "icm-live").unwrap();
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(body_string_contains("initialize"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(mock_text_response("")))
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(body_string_contains(
-                crate::session_log::transcript::SHOW_TOOL,
-            ))
-            .respond_with(ResponseTemplate::new(500))
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(body_string_contains(
-                crate::session_log::transcript::START_TOOL,
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(mock_text_response("icm-new")))
-            .expect(0)
-            .mount(&server)
-            .await;
-        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
-        let cfg = SessionLog {
-            transcript: Some(llmenv_config::TranscriptSinkConfig {
-                enabled: true,
-                level: LogLevel::Info,
-                retention_days: None,
-            }),
-            ..file_only_cfg(&state_dir.path().join("unused.jsonl"))
-        };
-
-        let id = ensure_transcript_session(
-            &cfg,
-            Some(&client),
-            "claude-5",
-            &ctx(),
-            Some(&state_path),
-            true,
-        )
-        .await;
-
-        assert_eq!(id.as_deref(), Some("icm-live"));
-        assert_eq!(
-            state::lookup_session_at(&state_path, "claude-5")
-                .unwrap()
-                .as_deref(),
-            Some("icm-live"),
-            "the link must survive an unreachable ICM"
-        );
-    }
-
-    #[tokio::test]
-    async fn ensure_transcript_session_starts_nothing_when_the_map_is_unwritable() {
-        // #2667: a transcript that cannot be linked is an orphan, so none is started.
-        let state_dir = tempfile::tempdir().unwrap();
-        let state_path = state_dir.path().join("transcript-sessions.json");
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(body_string_contains("initialize"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(mock_text_response("")))
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(body_string_contains(
-                crate::session_log::transcript::START_TOOL,
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(mock_text_response("icm-new")))
-            .expect(0)
-            .mount(&server)
-            .await;
-        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
-        let cfg = SessionLog {
-            transcript: Some(llmenv_config::TranscriptSinkConfig {
-                enabled: true,
-                level: LogLevel::Info,
-                retention_days: None,
-            }),
-            ..file_only_cfg(&state_dir.path().join("unused.jsonl"))
-        };
-        // A directory where the lock file belongs makes the map unwritable. The lock step
-        // resets the state dir mode, so a read-only dir would not stop the write.
-        std::fs::create_dir(state_dir.path().join("transcript-sessions.lock")).unwrap();
-
-        let id = ensure_transcript_session(
-            &cfg,
-            Some(&client),
-            "claude-6",
-            &ctx(),
-            Some(&state_path),
-            true,
-        )
-        .await;
-
-        assert_eq!(id, None);
-    }
-
-    #[tokio::test]
-    async fn handle_session_log_session_end_reuses_correlated_session_id() {
-        let state_dir = tempfile::tempdir().unwrap();
-        let state_path = state_dir.path().join("transcript-sessions.json");
-        state::record_session_at(&state_path, "claude-3", "icm-sess-3").unwrap();
-        let log_dir = tempfile::tempdir().unwrap();
-        let path = log_dir.path().join("session-log.jsonl");
-        // transcript: false here only to avoid the detached-spawn side effect
-        // in emit_session_log; the lookup itself (asserted via the return
-        // value) doesn't depend on cfg.transcript.
-        let cfg = file_only_cfg(&path);
-
-        let id = handle_session_log(
-            HookEvent::SessionEnd,
-            &cfg,
-            None,
-            Some("claude-3"),
-            &ctx(),
-            Some(&state_path),
-        )
-        .await;
-
-        assert_eq!(id.as_deref(), Some("icm-sess-3"));
-        let lines = jsonl_lines(&path);
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0]["kind"], "lifecycle_end");
-    }
-}
+mod session_log_tests;
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test code")]

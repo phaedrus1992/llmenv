@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Warn in `llmenv doctor` when hook commands name a binary in a cargo `target` folder or a temp folder, or a binary that was removed after it started. [feat:doctor] [#3119]
 - Show the reset time of the `usage_5h` and `usage_7d` widgets as a local clock time, with `display: clock_24h` or `display: clock_12h`. A 7-day window also shows the weekday. The default is still the countdown. [feat:statusline] [#3022]
 - Warn in `llmenv doctor` when hook commands use the bare `llmenv` name, and name the fix. [feat:doctor] [#3049]
 - Run six more Claude Code hook events on opencode 2.x: `SubagentStart`, `SubagentStop` (foreground subagents only), `Notification`, `PreCompact`, `PostModelSwitch`, and `PostToolBatch`. The events and their opencode sources are in [Hook events on opencode](https://phaedrus1992.github.io/llmenv/docs/engines#hook-events-on-opencode). [feat:opencode]
@@ -27,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Refuse a session log path that is a symbolic link when the file sink starts, with a notice that names the path. Rotation measured the link target but renamed the link. [fix:session-log] [#3117]
 - Save the repeat-detect counter and the recall health ring without a disk flush. The flush (`fsync`) costs about 5 ms per write on macOS, so a `PreToolUse` hook runs about 5 ms faster. A power loss can leave one of these two files empty, and the next hook replaces it with a fresh one. Other state files keep the flush. [perf:hook-run] [#3127]
 - Scan the repeat-detect state directory for stale files once per session, on the first save, and not on every tool call. [perf:hook-run] [#3127]
 - Skip the project lookup (a git subprocess) at `SessionStart` and `TurnStart` when no memory backend resolved, so `TurnStart` with memory off runs about 25 ms faster. A run with no memory backend no longer shows the notice that memory was skipped because git could not run. [perf:hook-run] [#3127]
@@ -42,6 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Count and name only this conversation's task sessions in the status line `tasks` widget, plus sessions with no owner. Two conversations in one project no longer see each other's work. [fix:statusline] [#3196]
+- Tell the agent once per session when a bundle fires with no content folder, so a memory backend that it may declare is not silently missing. [fix:hook] [#3218]
+- Tell the agent when session-log retention is skipped, when the reaper cannot remove or read its folder, or when a session log has a future modified time. These failures were logged only at a level the hook hides. [fix:hook] [#3379]
+- Tell the agent when the session-log path cannot be resolved, so the file log is off for that event. [fix:hook] [#3379]
+- Log a corrupt slippage stats log's move-aside error once per Bash call, not twice. [fix:hook] [#3373]
+- Prune corrupt slippage stats-log copies (`*.json.corrupt` and `*.json.corrupt.N`) after 7 days, as the stats log they came from. They were kept on disk forever before. [fix:hook] [#3372]
 - Log the unknown-bundles-folder message at warning level only when a codebase-memory `index_path` is set. Otherwise it stays at debug level. [fix:cli] [#3278]
 - Skip a `state/tmp` entry that another process removes during `llmenv clean`, instead of reporting it as unreadable. [fix:materialize] [#3276]
 - Keep state files, locks, and codebase-memory index units that are restored with old mtimes. The state prune and the cbm sweep now judge age by the later of mtime and change time, as `state/tmp` does. [fix:hook] [#3275]
@@ -125,11 +133,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Name the cause in `llmenv doctor` when a `state/tmp` entry cannot be read. [fix:tmp-sweep] [#3313]
 - Judge a throttle cache's age by the later of its mtime and change time, so a cache restored with an old mtime is kept. [fix:throttle] [#3314]
 - Show the agent a notice that names the lock and the fix when a busy session lock makes a hook fall back. Before, only the log showed it. [fix:hook] [#3312]
+- Tell the agent when a SessionStart field has the wrong type, and say that the resume cost notice is not shown this session. The notice used to be recorded too late to be sent. [fix:hook] [#3385]
+- Key a missing read-once file by its folder, so two spellings of one path share one cache key. A dangling link is keyed by its raw path, and the agent is told. [fix:hook] [#3388]
+- Tell the agent when a background hook child's log cannot open or its path cannot resolve, and when adaptive recall has no state folder. Each notice names the fix. [fix:hook] [#3387] [#3395]
+- Log a failed save of the codebase-memory index result. The agent is not told yet, because the indexer runs in its own process. Partial fix: see #3398. [fix:hook] [#3386]
 - Tell the agent when slippage stats or a background job checkpoint cannot be read or saved, or when hook output cannot take the resume cache notice. Each notice names the cause and the fix. [fix:hook] [#3320]
 - Keep a rotated session log that was restored with an old mtime, for example by `tar -x` or `cp -p`. Rotation now ages a file by the later of its mtime and its change time, as the cache sweep already did. [fix:cache] [#3321]
 - Fail a merge when two scopes at the same precedence set different values for one key or field, even when a higher-precedence scope also sets it. A config that merged before can now fail with a conflict error that names both scopes. [fix:merge]
 - Show the session-log rotations that a `llmenv doctor` prune removed before it failed, so a partial prune no longer hides them. [fix:doctor] [#3334]
 - Name the slippage stats log and its fix in the Write deny for an unreadable or corrupt log. The deny no longer tells the agent to read the file it tried to write. [fix:hook] [#3332]
+- Run the cd guard, the task commit gate, the task reminders, and the slippage checks on a command that the Monitor tool starts. Claude Code 2.1.314 sends it under the tool name `Monitor`, and these guards matched only `Bash`, so they skipped it. [fix:hook] [#3354]
+- Keep a corrupt slippage stats log as `<log>.corrupt` before a Read starts a new one, and name that copy in the notice. A second corruption takes the next numbered copy, and a log that cannot be read is left in place. See [the troubleshooting page](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#a-corrupt-file-appears-in-the-slippage-state-folder). [fix:hook] [#3349]
+- Remove and report a session-log rotation whose name is not valid UTF-8. Such a rotation was never pruned and never named. [fix:prune] [#3351]
 
 ### Security
 

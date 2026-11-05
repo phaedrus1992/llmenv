@@ -244,5 +244,40 @@ mod tests {
             let both = newest_file_mtime(dir.path(), AgeSource::MtimeOrCtime).unwrap();
             prop_assert!(both >= only, "ctime rule {both:?} is older than mtime rule {only:?}");
         }
+
+        /// A symlink counts by its own mtime and is never descended. A target's mtime, and any file
+        /// under a linked folder, never moves the result (#3076).
+        #[test]
+        fn a_symlink_counts_by_its_own_mtime_never_its_target(
+            links in proptest::collection::vec((1u64..1_000_000, 1u64..2_000_000_000), 1..6),
+        ) {
+            let root = tempfile::tempdir().unwrap();
+            let tree = root.path().join("tree");
+            let outside = root.path().join("outside");
+            std::fs::create_dir_all(&tree).unwrap();
+            std::fs::create_dir_all(&outside).unwrap();
+            let far = outside.join("far.txt");
+            std::fs::write(&far, b"x").unwrap();
+            set(&far, 2_000_000_000);
+            let folder_link = tree.join("linked-folder");
+            std::os::unix::fs::symlink(&outside, &folder_link).unwrap();
+            let epoch = filetime::FileTime::from_unix_time(0, 0);
+            filetime::set_symlink_file_times(&folder_link, epoch, epoch).unwrap();
+            let mut expected = 0;
+            for (i, (own, target)) in links.iter().enumerate() {
+                let target_path = outside.join(format!("t{i}"));
+                std::fs::write(&target_path, b"x").unwrap();
+                set(&target_path, *target);
+                let link = tree.join(format!("l{i}"));
+                std::os::unix::fs::symlink(&target_path, &link).unwrap();
+                let at = filetime::FileTime::from_unix_time(i64::try_from(*own).unwrap(), 0);
+                filetime::set_symlink_file_times(&link, at, at).unwrap();
+                expected = expected.max(*own);
+            }
+
+            let got = newest_file_mtime(&tree, AgeSource::MtimeOnly).unwrap();
+
+            prop_assert_eq!(got, std::time::UNIX_EPOCH + std::time::Duration::from_secs(expected));
+        }
     }
 }
