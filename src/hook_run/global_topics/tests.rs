@@ -49,10 +49,7 @@ async fn a_failed_topic_beside_an_answer_is_noticed() {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let server = MockServer::start().await;
-    let reply = |body: &str| {
-        ResponseTemplate::new(200).set_body_json(serde_json::json!({"jsonrpc": "2.0", "id": 1,
-            "result": {"content": [{"type": "text", "text": body}]}}))
-    };
+    let reply = |body: &str| crate::hook_run::test_recall::ToolReply(body.to_string());
     Mock::given(method("POST"))
         .and(body_string_contains("initialize"))
         .respond_with(reply(""))
@@ -78,7 +75,8 @@ async fn a_failed_topic_beside_an_answer_is_noticed() {
     )
     .await
     .unwrap()
-    .unwrap();
+    .unwrap()
+    .into_text();
     assert!(found.contains("be terse"), "{found}");
     let notice = crate::agent_notice::current().unwrap_or_default();
     assert!(notice.contains("`errors-resolved`"), "{notice}");

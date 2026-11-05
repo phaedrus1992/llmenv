@@ -4,7 +4,7 @@
 use std::time::Instant;
 
 use super::{AdaptiveCtx, FANOUT_LIMIT, MAIN_LIMIT, Outcome, WAVE2_CUTOFF, query, recall};
-use crate::hook_run::action::{RecallQuery, split_recall_records};
+use crate::hook_run::action::{RecallQuery, Reply};
 use crate::hook_run::recall::RecallBudget;
 use crate::hook_run::relevance;
 
@@ -52,10 +52,10 @@ pub(super) async fn waves(
     let mut outcome = Outcome::default();
     push_into(&mut outcome, budget, [own, main]);
     let topics: Vec<String> = outcome
-        .texts
+        .records
         .iter()
-        .flat_map(|t| split_recall_records(t))
-        .filter_map(|r| relevance::record_topic(&r).map(str::to_string))
+        .filter(|r| !r.topic.is_empty())
+        .map(|r| r.topic.clone())
         .collect();
     let siblings = relevance::sibling_topics(&topics);
     let keyword = |i: usize| {
@@ -99,17 +99,15 @@ pub(super) async fn waves(
     (outcome, main_ok)
 }
 
-/// Records each result in `outcome`, and adds the text of each new one to `budget`.
+/// Records each result in `outcome`, and adds each new record to `budget`.
 fn push_into(
     outcome: &mut Outcome,
     budget: &mut RecallBudget,
-    results: impl IntoIterator<Item = Option<anyhow::Result<String>>>,
+    results: impl IntoIterator<Item = Option<anyhow::Result<Reply>>>,
 ) {
-    let before = outcome.texts.len();
+    let before = outcome.records.len();
     results.into_iter().for_each(|r| outcome.push(r));
-    outcome.texts[before..]
-        .iter()
-        .for_each(|t| budget.add_text(t));
+    budget.add_records(outcome.records.iter().skip(before).cloned().collect());
 }
 
 #[cfg(test)]
@@ -167,11 +165,9 @@ mod tests {
     }
 
     async fn mount(server: &MockServer, needle: &str, body: &str) {
-        let reply = json!({"jsonrpc": "2.0", "id": 1,
-                           "result": {"content": [{"type": "text", "text": body}]}});
         Mock::given(method("POST"))
             .and(body_string_contains(needle))
-            .respond_with(ResponseTemplate::new(200).set_body_json(reply))
+            .respond_with(crate::hook_run::test_recall::ToolReply(body.to_string()))
             .mount(server)
             .await;
     }
@@ -195,7 +191,7 @@ mod tests {
         .await;
         let (outcome, main_ok) = run(&server, Some("proj-b"), &topics(&["preferences"])).await;
         assert!(main_ok);
-        let all = outcome.texts.join("\n");
+        let all = outcome.text();
         assert!(all.contains("https://own.example"), "{all}");
         assert!(all.contains("a fact"), "{all}");
         assert!(!all.contains("https://other.example"), "{all}");
@@ -214,7 +210,7 @@ mod tests {
         .await;
         let (outcome, main_ok) = run(&server, None, &topics(&["preferences"])).await;
         assert!(main_ok);
-        let all = outcome.texts.join("\n");
+        let all = outcome.text();
         assert!(all.contains("a fact"), "{all}");
         assert!(!all.contains("lang-go"), "{all}");
     }
@@ -225,22 +221,22 @@ mod tests {
     async fn only_the_global_topics_are_read_across_projects() {
         let server = MockServer::start().await;
         mount(&server, "initialize", "").await;
-        let reply = json!({"jsonrpc": "2.0", "id": 1,
-                           "result": {"content": [{"type": "text", "text": "[preferences] be terse"}]}});
+        let reply = crate::hook_run::test_recall::ToolReply("[preferences] be terse".to_string());
         Mock::given(method("POST"))
             .and(body_string_contains(r#""topic":"preferences""#))
-            .respond_with(ResponseTemplate::new(200).set_body_json(reply))
+            .respond_with(reply)
             .with_priority(1)
             .mount(&server)
             .await;
         // An untopiced recall across every project is the leak, so only it answers with a record
         // of another project. A topic recall reads one topic, which the mock cannot filter.
-        let reply = json!({"jsonrpc": "2.0", "id": 1,
-                           "result": {"content": [{"type": "text", "text": "[context-proj-a] other project fact"}]}});
+        let reply = crate::hook_run::test_recall::ToolReply(
+            "[context-proj-a] other project fact".to_string(),
+        );
         Mock::given(method("POST"))
             .and(body_string_contains(r#""project":"""#))
             .and(NoTopic)
-            .respond_with(ResponseTemplate::new(200).set_body_json(reply))
+            .respond_with(reply)
             .mount(&server)
             .await;
         mount(
@@ -252,7 +248,7 @@ mod tests {
 
         let (outcome, main_ok) = run(&server, Some("proj-b"), &topics(&["preferences", " "])).await;
         assert!(main_ok);
-        let all = outcome.texts.join("\n");
+        let all = outcome.text();
         assert!(
             all.contains("own fact") && all.contains("be terse"),
             "{all}"
@@ -260,7 +256,7 @@ mod tests {
         assert!(!all.contains("other project fact"), "{all}");
 
         let (outcome, _) = run(&server, Some("proj-b"), &[]).await;
-        let all = outcome.texts.join("\n");
+        let all = outcome.text();
         assert!(
             all.contains("own fact") && !all.contains("other project fact"),
             "{all}"
@@ -290,7 +286,7 @@ mod tests {
         let (outcome, main_ok, _) =
             run_with_keywords(&server, Some("proj-b"), &[], &keywords).await;
         assert!(main_ok);
-        let all = outcome.texts.join("\n");
+        let all = outcome.text();
         assert!(all.contains("own fact"), "{all}");
         assert!(!all.contains("other project fact"), "{all}");
         // The main recall, two keyword fanouts, and two sibling-topic fanouts.
@@ -314,7 +310,7 @@ mod tests {
             run_with_keywords(&server, None, &topics(&["preferences"]), &keywords).await;
         assert!(main_ok);
         assert_eq!(outcome.calls, 1, "{outcome:?}");
-        assert!(outcome.texts.join("\n").contains("be terse"));
+        assert!(outcome.text().contains("be terse"));
     }
 
     /// A failed project recall is not a finished query, even when a global topic answered.
@@ -336,7 +332,27 @@ mod tests {
 
         let (outcome, main_ok) = run(&server, Some("proj-b"), &topics(&["preferences"])).await;
         assert!(!main_ok, "{outcome:?}");
-        assert!(outcome.texts.join("\n").contains("be terse"));
+        assert!(outcome.text().contains("be terse"));
+    }
+
+    /// A text reply comes from an icm older than 0.11.5. It is a failed recall, not an empty one,
+    /// so the query is not marked finished (#3369).
+    #[tokio::test]
+    async fn a_text_reply_is_a_failed_recall() {
+        let server = MockServer::start().await;
+        mount(&server, "initialize", "").await;
+        let text = json!({"jsonrpc": "2.0", "id": 1,
+                          "result": {"content": [{"type": "text", "text": "[context-proj-b] fact"}]}});
+        Mock::given(method("POST"))
+            .and(body_string_contains(r#""project":"proj-b""#))
+            .respond_with(ResponseTemplate::new(200).set_body_json(text))
+            .mount(&server)
+            .await;
+
+        let (outcome, main_ok) = run(&server, Some("proj-b"), &topics(&[])).await;
+        assert!(!main_ok, "{outcome:?}");
+        assert_eq!((outcome.calls, outcome.failed), (1, 1));
+        assert!(outcome.records.is_empty());
     }
 
     /// Fanout records only fill the bytes that the main recalls leave, so a full budget skips

@@ -79,7 +79,7 @@ pub(in crate::hook_run) async fn subagent_start(ctx: &AdaptiveCtx<'_>) -> anyhow
         .await;
     }
     report(ctx, "subagent_start", &outcome, &budget);
-    let kept = budget.kept_hashes();
+    let kept = budget.kept_keys();
     let (updated, timing) = ctx
         .store
         .update_timed(ctx.session_id, |l| l.mark_sent(&key, kept));

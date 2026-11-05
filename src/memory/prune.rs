@@ -4,24 +4,17 @@
 //! memories, evaluates each against the active retention policy, and forgets
 //! expired records.
 //!
-//! ## Limitation: no creation timestamps in MCP output
+//! ## Importance, not age
 //!
-//! The ICM MCP `format_memory_output()` (the text representation returned by
-//! `icm_memory_recall`) does not include `created_at` / `updated_at` fields.
-//! The ICM [`Memory`] struct has these, but the MCP formatting function
-//! omits them. Without per-memory timestamps the prune cannot implement true
-//! age-based TTL filtering, so it uses **importance as a proxy**: low- and
-//! medium-importance memories are pruned by default, while high/critical
-//! memories are always preserved. This is conservative (never discards high-
-//! signal data) and mirrors the intent of an age-based policy (recent
-//! important data → kept, old noise → removed) without needing absolute
-//! dates.
+//! Prune reads the JSON recall reply (#3368). It uses **importance as a proxy**
+//! for age: low- and medium-importance memories are pruned, while high and
+//! critical memories are always kept. This never discards high-signal data.
 //!
-//! The same output also omits the memory type, so the per-type durations of
-//! `memory.retention` cannot be applied either. When `retention` is set, prune
-//! refuses to run and forgets nothing (#2386). It never falls back to the
-//! importance proxy for a user who configured durations. Add age-based pruning
-//! when ICM's MCP output includes `created_at` and the type.
+//! The JSON reply has `created_at`, but no memory type, so the per-type
+//! durations of `memory.retention` cannot be applied. When `retention` is set,
+//! prune refuses to run and forgets nothing (#2386). It never falls back to the
+//! importance proxy for a user who configured durations. Age-based pruning is
+//! #3420.
 
 use std::time::Duration;
 
@@ -32,7 +25,7 @@ const CLI_TIMEOUT: Duration = Duration::from_secs(10);
 
 mod records;
 mod report;
-use records::{Importance, MemoryRecord, count_headers, parse_recall_output};
+use records::{Importance, MemoryRecord, read_records};
 
 /// Result of a single prune run.
 #[derive(Debug, Default, PartialEq)]
@@ -49,8 +42,6 @@ pub struct PruneResult {
     low: usize,
     /// Records with an importance that prune does not know (always kept).
     unknown: usize,
-    /// Record headers with no importance or weight, which prune cannot read (kept).
-    unread: usize,
     /// Records that the pass forgets, or would forget in a dry run.
     candidates: usize,
     /// Number of records actually forgotten (non-dry-run only).
@@ -124,7 +115,12 @@ fn recall_args(project: Option<&str>) -> anyhow::Result<serde_json::Value> {
              Run it inside a git repository or a project folder. Nothing was forgotten."
         )
     })?;
-    Ok(serde_json::json!({ "query": "", "limit": RECALL_LIMIT, "project": project }))
+    Ok(serde_json::json!({
+        "query": "",
+        "limit": RECALL_LIMIT,
+        "project": project,
+        "format": crate::memory::recall_json::FORMAT,
+    }))
 }
 
 /// The most records one prune pass reads.
@@ -191,10 +187,11 @@ pub(super) fn run_with(
         recall_args(Some(project.as_str()))?,
     )?;
 
-    let records = parse_recall_output(&output);
+    let records = read_records(&output).map_err(|e| {
+        anyhow::anyhow!("memory prune cannot read the recall reply: {e}. Nothing was forgotten.")
+    })?;
     let mut result = PruneResult {
         total: records.len(),
-        unread: count_headers(&output).saturating_sub(records.len()),
         dry_run,
         ..Default::default()
     };
@@ -236,6 +233,7 @@ mod tests {
         let args = recall_args(Some("llmenv")).unwrap();
         assert_eq!(args["project"], "llmenv");
         assert_eq!(args["limit"], 100);
+        assert_eq!(args["format"], "json");
         let err = recall_args(None).unwrap_err().to_string();
         assert!(err.contains("Nothing was forgotten"), "{err}");
     }
@@ -265,40 +263,56 @@ mod tests {
         ensure_retention_unset(&[], &tags(&["t"])).unwrap();
     }
 
-    #[test]
-    fn parse_recall_output_empty() {
-        assert!(parse_recall_output("").is_empty());
+    fn rec(id: &str, importance: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","topic":"t","summary":"s","importance":"{importance}","weight":0.5}}"#
+        )
     }
 
     #[test]
-    fn parse_recall_output_single_record() {
-        let text = "--- abc123 ---\n  topic: test\n  importance: high\n  weight: 0.85\n  summary: a test\n  keywords: test,example\n  raw:\n  score: 0.9\n";
-        let records = parse_recall_output(text);
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].id, "abc123");
-        assert_eq!(records[0].importance, Importance::High);
-    }
-
-    #[test]
-    fn parse_recall_output_multiple_records() {
-        let text = "--- id-1 ---\n  importance: low\n  weight: 0.1\n  summary: first\n--- id-2 ---\n  importance: critical\n  weight: 0.99\n  summary: second\n";
-        let records = parse_recall_output(text);
-        assert_eq!(records.len(), 2);
-        assert_eq!(records[0].id, "id-1");
-        assert_eq!(records[0].importance, Importance::Low);
-        assert_eq!(records[1].id, "id-2");
-        assert_eq!(records[1].importance, Importance::Critical);
-    }
-
-    #[test]
-    fn an_unknown_importance_is_kept_and_a_record_without_weight_is_unread() {
-        let text =
-            "--- a ---\n  importance: Critical\n  weight: 0.5\n--- b ---\n  importance: low\n";
-        let records = parse_recall_output(text);
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].importance, Importance::Unknown);
+    fn read_records_maps_each_importance() {
+        let body = format!(
+            "[{},{},{},{},{}]",
+            rec("a", "critical"),
+            rec("b", "high"),
+            rec("c", "medium"),
+            rec("d", "low"),
+            rec("e", "Critical")
+        );
+        let got: Vec<(String, Importance)> = read_records(&body)
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.id, r.importance))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("a".into(), Importance::Critical),
+                ("b".into(), Importance::High),
+                ("c".into(), Importance::Medium),
+                ("d".into(), Importance::Low),
+                ("e".into(), Importance::Unknown),
+            ]
+        );
         assert!(!Importance::Unknown.should_prune());
-        assert_eq!(count_headers(text), 2);
+    }
+
+    #[test]
+    fn read_records_refuses_a_text_reply_so_nothing_is_forgotten() {
+        let text = "--- id-1 ---\n  importance: low\n  weight: 0.1\n";
+        let err = read_records(text).unwrap_err().to_string();
+        assert!(err.contains("Fix: upgrade icm to 0.11.5 or later"), "{err}");
+    }
+
+    #[test]
+    fn read_records_refuses_the_whole_reply_when_one_record_is_bad() {
+        let body = format!(r#"[{},{{"topic":"t"}}]"#, rec("a", "low"));
+        assert!(read_records(&body).is_err());
+    }
+
+    #[test]
+    fn read_records_reads_an_empty_reply_as_no_records() {
+        assert!(read_records("[]").unwrap().is_empty());
     }
 
     #[test]
@@ -307,91 +321,5 @@ mod tests {
         assert!(!Importance::High.should_prune());
         assert!(Importance::Medium.should_prune());
         assert!(Importance::Low.should_prune());
-    }
-
-    #[test]
-    fn parse_recall_output_partial_record_omitted() {
-        // A record without weight should be skipped (missing required fields)
-        let text = "--- id-1 ---\n  importance: low\n  topic: test\n";
-        let records = parse_recall_output(text);
-        assert_eq!(records.len(), 0);
-    }
-
-    #[test]
-    fn parse_recall_output_non_finite_weight_omitted() {
-        for weight in ["nan", "inf", "-inf", "infinity"] {
-            let text = format!("--- id-1 ---\n  importance: low\n  weight: {weight}\n");
-            assert!(parse_recall_output(&text).is_empty(), "{weight}");
-        }
-    }
-
-    #[test]
-    fn parse_recall_output_unparseable_weight_omitted() {
-        let text = "--- id-1 ---\n  importance: low\n  weight: not-a-number\n  topic: test\n";
-        let records = parse_recall_output(text);
-        assert_eq!(records.len(), 0);
-    }
-
-    #[test]
-    fn a_line_in_the_summary_cannot_forge_a_record() {
-        let text = "--- real ---\n  importance: high\n  weight: 0.9\n  summary: x\n  --- victim ---\n  importance: low\n  weight: 0.1\n";
-        let records = parse_recall_output(text);
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].id, "real");
-        assert_eq!(records[0].importance, Importance::High);
-    }
-
-    #[test]
-    fn the_first_importance_and_weight_of_a_record_win() {
-        let text = "--- r ---\n  importance: critical\n  weight: 0.9\n  summary: s\n  importance: low\n  weight: nope\n";
-        let records = parse_recall_output(text);
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].importance, Importance::Critical);
-    }
-
-    mod props {
-        use super::super::parse_recall_output;
-        use proptest::prelude::*;
-
-        proptest! {
-            #[test]
-            fn parsing_arbitrary_text_never_panics_and_yields_ids_from_the_text(
-                text in "[ -~\n]{0,300}",
-            ) {
-                let records = parse_recall_output(&text);
-                let starts = text.lines().filter(|l| l.trim().starts_with("--- ")).count();
-                prop_assert!(records.len() <= starts);
-                for record in &records {
-                    prop_assert!(text.contains(&record.id));
-                }
-            }
-
-            #[test]
-            fn a_record_with_a_non_finite_weight_is_dropped(
-                id in "[a-z0-9]{1,12}",
-                weight in prop_oneof!["nan", "NaN", "inf", "-inf", "infinity", "-Infinity"],
-            ) {
-                let text = format!("--- {id} ---\nimportance: high\nweight: {weight}\n");
-                prop_assert!(parse_recall_output(&text).is_empty());
-            }
-
-            #[test]
-            fn a_record_with_a_finite_weight_is_kept(
-                id in "[a-z0-9]{1,12}",
-                weight in -1.0e6f64..1.0e6,
-            ) {
-                let text = format!("--- {id} ---\nimportance: high\nweight: {weight}\n");
-                prop_assert_eq!(parse_recall_output(&text).len(), 1);
-            }
-
-            #[test]
-            fn a_record_without_a_numeric_weight_is_dropped(
-                id in "[a-z0-9]{1,12}",
-                weight in "[a-z]{1,6}",
-            ) {
-                let text = format!("--- {id} ---\nimportance: high\nweight: {weight}\n");
-                prop_assert!(parse_recall_output(&text).is_empty());
-            }
-        }
     }
 }

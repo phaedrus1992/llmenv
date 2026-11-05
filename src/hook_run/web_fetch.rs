@@ -18,17 +18,8 @@ const TOOL_NAME_WEBSEARCH: &str = "WebSearch";
 const WEB_FETCH_TOPIC: &str = "web-fetch";
 
 /// Whether `topic` holds fetched pages, with or without a project.
-fn is_web_fetch_topic(topic: &str) -> bool {
+pub(super) fn is_web_fetch_topic(topic: &str) -> bool {
     topic == WEB_FETCH_TOPIC || topic.starts_with("web-fetch-")
-}
-
-/// `text` without its web-fetch records, for a recall across all projects (#2911).
-pub(super) fn without_web_pages(text: &str) -> String {
-    super::action::split_recall_records(text)
-        .into_iter()
-        .filter(|record| !super::relevance::record_topic(record).is_some_and(is_web_fetch_topic))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 fn web_fetch_topic(project: Option<&str>) -> String {

@@ -9,6 +9,7 @@
 pub(crate) mod auto_prune;
 pub(crate) mod project;
 pub mod prune;
+pub(crate) mod recall_json;
 
 use std::path::Path;
 use std::time::Duration;

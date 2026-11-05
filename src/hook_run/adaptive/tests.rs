@@ -64,22 +64,17 @@ mod project_memories;
 mod session_start;
 mod turn_start;
 
-fn text(body: &str) -> serde_json::Value {
-    json!({"jsonrpc": "2.0", "id": 1,
-               "result": {"content": [{"type": "text", "text": body}]}})
-}
-
 async fn server_with(pairs: &[(&str, &str)]) -> MockServer {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(body_string_contains("initialize"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(text("")))
+        .respond_with(crate::hook_run::test_recall::ToolReply(("").to_string()))
         .mount(&server)
         .await;
     for (needle, body) in pairs {
         Mock::given(method("POST"))
             .and(body_string_contains(*needle))
-            .respond_with(ResponseTemplate::new(200).set_body_json(text(body)))
+            .respond_with(crate::hook_run::test_recall::ToolReply((*body).to_string()))
             .mount(&server)
             .await;
     }
@@ -125,7 +120,7 @@ async fn failing_server() -> MockServer {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(body_string_contains("initialize"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(text("")))
+        .respond_with(crate::hook_run::test_recall::ToolReply(("").to_string()))
         .mount(&server)
         .await;
     Mock::given(method("POST"))
@@ -137,14 +132,24 @@ async fn failing_server() -> MockServer {
 
 #[test]
 fn outcome_merge_adds_counts_and_texts() {
+    use crate::hook_run::action::Recalled;
     let mut a = Outcome::default();
-    a.push(Some(Ok("one".to_string())));
+    a.push(Some(Ok(Reply::Records(vec![Recalled::from_text(
+        "[t] one",
+    )]))));
     a.push(Some(Err(anyhow::anyhow!("down"))));
     let mut b = Outcome::default();
-    b.push(Some(Ok("two".to_string())));
+    b.push(Some(Ok(Reply::Records(vec![Recalled::from_text(
+        "[t] two",
+    )]))));
+    b.push(Some(Ok(Reply::Text("[t] not a recall".to_string()))));
     b.push(Some(Err(anyhow::anyhow!("down"))));
     b.push(Some(Err(anyhow::anyhow!("down"))));
     a.merge(b);
-    assert_eq!((a.calls, a.failed), (5, 3));
-    assert_eq!(a.texts, ["one", "two"]);
+    assert_eq!(
+        (a.calls, a.failed),
+        (6, 4),
+        "a text reply is a failed recall"
+    );
+    assert_eq!(a.text(), "[t] one\n[t] two");
 }
