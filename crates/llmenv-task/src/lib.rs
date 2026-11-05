@@ -23,6 +23,7 @@ pub mod reopen;
 mod resolve;
 pub mod resume;
 pub mod session;
+pub mod visibility;
 pub use finish_hints::last_task_hint;
 use finish_hints::session_finish_reminders;
 mod tracking;

@@ -74,10 +74,11 @@ fn run_cbm_index_with(
                 Some((pending, final_path.to_string()))
             }
             Err(e) => {
-                tracing::error!(
-                    "cannot create the index result file {}, so doctor cannot report the result: {e}",
+                crate::agent_notice::record_logged(format!(
+                    "llmenv: cannot create the index result file {}, so doctor cannot report the \
+                     result: {e}. Fix: check that the state folder is writable.",
                     pending.display()
-                );
+                ));
                 None
             }
         }
@@ -102,13 +103,17 @@ fn pending_result_path(result: &Path) -> std::path::PathBuf {
 fn publish_result(pending: &Path, result: &Path, started: bool) {
     if started {
         if let Err(e) = std::fs::rename(pending, result) {
-            tracing::error!("cannot save the index result to {}: {e}", result.display());
+            crate::agent_notice::record_logged(format!(
+                "llmenv: cannot save the index result to {}, so doctor shows an older result: \
+                 {e}. Fix: check that the state folder is writable.",
+                result.display()
+            ));
         }
     } else if let Err(e) = std::fs::remove_file(pending) {
-        tracing::warn!(
-            "cannot remove {}, so a stale pending index result stays: {e}. Fix: remove it by hand.",
+        crate::agent_notice::record_logged(format!(
+            "llmenv: cannot remove the stale pending index result {}: {e}. Fix: remove it by hand.",
             pending.display()
-        );
+        ));
     }
 }
 
@@ -289,6 +294,20 @@ mod tests {
         assert!(run_cbm_index_with(&file, |_, _, _| missing()).is_err());
         assert_eq!(std::fs::read_to_string(&result).unwrap(), "the old result");
         assert!(!pending_result_path(&result).exists());
+    }
+
+    #[test]
+    fn a_stale_pending_result_that_cannot_be_removed_is_recorded_in_this_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let pending = dir.path().join("index.json.123.pending");
+        let result = dir.path().join("index.json");
+
+        publish_result(&pending, &result, false);
+
+        let text = crate::agent_notice::current().unwrap_or_default();
+        assert!(text.contains("stale pending index result"), "{text}");
+        assert!(text.contains("index.json.123.pending"), "{text}");
+        assert!(text.contains("Fix:"), "{text}");
     }
 
     #[test]

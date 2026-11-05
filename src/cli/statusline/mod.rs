@@ -5,6 +5,7 @@ pub(crate) mod data;
 mod icons;
 mod llmenv_widget;
 mod peak;
+mod task_scope;
 mod template;
 mod widget;
 
@@ -15,7 +16,7 @@ pub use data::StatusData;
 pub use icons::resolve_icons;
 pub use llmenv_widget::render_llmenv_widget;
 pub use template::{TemplateToken, parse_template};
-pub use widget::{EngineData, render_engine_widget};
+pub use widget::render_engine_widget;
 
 const DEFAULT_ROW: &str = "{model} │ {folder} │ {branch} │ {context} │ {budget}";
 
@@ -163,8 +164,11 @@ pub fn run_statusline(
 ) -> anyhow::Result<String> {
     let mut stdin_buf = String::new();
     stdin.read_to_string(&mut stdin_buf)?;
-    let engine_data: EngineData = serde_json::from_str(&stdin_buf).unwrap_or_default();
+    let engine_data = widget::parse_engine_data(&stdin_buf);
     let mut status_data = StatusData::load(data_path);
+    if let Some(tasks) = status_data.tasks.as_mut() {
+        task_scope::scope_tasks_to_caller(tasks, engine_data.session_id.as_deref());
+    }
     // The snapshot file is only rewritten by `llmenv regenerate`, so its
     // `scopes` field goes stale the moment `$LLMENV_EXTRA_TAGS` changes
     // mid-session (#1538). Every other tag source (host/user/os/network/

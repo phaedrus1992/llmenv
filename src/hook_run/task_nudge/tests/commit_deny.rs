@@ -187,6 +187,36 @@ fn unsaved_state_deny_names_the_path_and_denies() {
     assert!(deny.contains("/state/task_nudge/one.json cannot be saved"));
 }
 
+// #3354: a Monitor-started command arrives with tool_name "Monitor", not "Bash".
+fn monitor(command: &str) -> serde_json::Value {
+    serde_json::json!({ "tool_name": "Monitor", "tool_input": { "command": command } })
+}
+
+#[test]
+fn a_monitor_started_commit_is_denied_like_a_bash_commit() {
+    let dir = TempDir::new().unwrap();
+    let tracker = TaskTracker::default();
+    let denied = handle_pre_tool_use(
+        &tracker,
+        &monitor("git commit -m x"),
+        Some("s1"),
+        dir.path(),
+    );
+    assert!(
+        denied.starts_with("__DENY__:"),
+        "the deny must name the gate; got {} bytes",
+        denied.len()
+    );
+}
+
+#[test]
+fn state_dir_deny_covers_a_monitor_started_commit() {
+    let error = anyhow::anyhow!("HOME is not valid UTF-8");
+    let on = TaskTracker::default();
+    let deny = state_dir_deny(&on, &monitor("git commit -m x"), &error).unwrap();
+    assert!(deny.starts_with("__DENY__:"), "got {} bytes", deny.len());
+}
+
 #[test]
 fn state_dir_deny_covers_only_a_commit_with_the_gate_on() {
     let error = anyhow::anyhow!("HOME is not valid UTF-8");

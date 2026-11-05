@@ -36,19 +36,19 @@ pub fn clear_cache(state_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The cache key of `path`: its canonical path. A path that cannot be resolved is keyed by its
-/// raw form, and the agent is told (#2818).
+/// The cache key of `path`: its canonical path. A file that does not exist yet is keyed by its
+/// canonical parent joined with its name, so every spelling of its folder gives one key. A path
+/// that cannot be resolved even so is keyed by its raw form, and the agent is told (#2818).
 pub(super) fn cache_key(path: &Path) -> String {
-    let canonical = std::fs::canonicalize(path)
+    let resolved = std::fs::canonicalize(path)
+        .or_else(|first| canonical_parent_join(path).map_err(|_| first))
         .inspect_err(|e| {
             // Hook stderr never reaches the agent, so the notice goes to the agent (#2818).
             crate::agent_notice::record(format!(
                 "llmenv: read-once could not resolve {}: {e}. Repeat reads use the raw path as the \
-             key. Fix: check the file path and its parent directory.",
+                 key. Fix: check the file path and its parent directory.",
                 path.display()
             ));
-            // A path that does not exist yet is valid input, and the notice above already tells
-            // the agent, so the log is debug only.
             tracing::debug!(
                 error = %e,
                 path = %path.display(),
@@ -56,7 +56,22 @@ pub(super) fn cache_key(path: &Path) -> String {
             )
         })
         .unwrap_or_else(|_| path.to_path_buf());
-    canonical.to_string_lossy().to_string()
+    resolved.to_string_lossy().to_string()
+}
+
+/// The canonical folder of `path`, joined with its file name. A missing file has no canonical
+/// path of its own, so its folder carries the resolution. A dangling link is refused: its folder
+/// does not name the target, and the target may appear later under a second key.
+fn canonical_parent_join(path: &Path) -> std::io::Result<std::path::PathBuf> {
+    if std::fs::symlink_metadata(path).is_ok() {
+        return Err(std::io::ErrorKind::NotFound.into());
+    }
+    let name = path.file_name().ok_or(std::io::ErrorKind::InvalidInput)?;
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    Ok(std::fs::canonicalize(parent)?.join(name))
 }
 
 #[cfg(test)]
@@ -124,10 +139,57 @@ mod tests {
     }
 
     #[test]
-    fn the_cache_key_of_a_missing_path_is_the_raw_path() {
+    fn the_cache_key_of_a_missing_file_in_an_existing_folder_is_the_canonical_parent_and_name() {
         let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("nope.txt");
+        // The dotted spelling differs from its canonical form on every machine, so the test
+        // cannot pass by accident when the raw path equals the canonical one.
+        let dotted = dir.path().join(".").join("nope.txt");
+        let expected = dir.path().canonicalize().unwrap().join("nope.txt");
+        assert_eq!(cache_key(&dotted), expected.to_string_lossy());
+    }
+
+    #[test]
+    fn two_spellings_of_a_missing_file_share_one_cache_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = dir.path().join("nope.txt");
+        let dotted = dir.path().join(".").join("nope.txt");
+        assert_eq!(cache_key(&plain), cache_key(&dotted));
+    }
+
+    #[test]
+    fn a_missing_file_in_a_missing_folder_is_noticed_and_keyed_by_the_raw_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-folder").join("nope.txt");
         assert_eq!(cache_key(&missing), missing.to_string_lossy());
+        let text = crate::agent_notice::current().unwrap_or_default();
+        assert!(text.contains(&missing.display().to_string()), "{text}");
+    }
+
+    #[test]
+    fn a_missing_bare_name_is_keyed_under_the_working_folder() {
+        let name = "probe-missing-3388.txt";
+        let expected = std::env::current_dir()
+            .unwrap()
+            .canonicalize()
+            .unwrap()
+            .join(name);
+
+        assert_eq!(
+            cache_key(std::path::Path::new(name)),
+            expected.to_string_lossy()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_link_is_keyed_by_its_raw_path_and_noticed() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(dir.path().join("target.txt"), &link).unwrap();
+
+        assert_eq!(cache_key(&link), link.to_string_lossy());
+        let text = crate::agent_notice::current().unwrap_or_default();
+        assert!(text.contains(&link.display().to_string()), "{text}");
     }
 
     #[test]

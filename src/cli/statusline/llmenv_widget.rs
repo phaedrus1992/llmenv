@@ -626,6 +626,7 @@ mod tests {
                 session: None,
                 current: None,
                 unreadable: true,
+                sessions: Vec::new(),
             }),
             ..Default::default()
         };
@@ -640,6 +641,7 @@ mod tests {
                 session: None,
                 current: None,
                 unreadable: false,
+                sessions: Vec::new(),
             }),
             ..Default::default()
         };
@@ -654,6 +656,7 @@ mod tests {
                 session: Some(SessionProgress { done: 2, total: 5 }),
                 current: None,
                 unreadable: false,
+                sessions: Vec::new(),
             }),
             ..Default::default()
         };
@@ -668,6 +671,7 @@ mod tests {
                 session: Some(SessionProgress { done: 2, total: 5 }),
                 current: Some("Ship the release".to_string()),
                 unreadable: false,
+                sessions: Vec::new(),
             }),
             ..Default::default()
         };
@@ -686,6 +690,7 @@ mod tests {
                 session: Some(SessionProgress { done: 0, total: 0 }),
                 current: None,
                 unreadable: false,
+                sessions: Vec::new(),
             }),
             ..Default::default()
         };
@@ -704,6 +709,7 @@ mod tests {
                 session: Some(SessionProgress { done: 0, total: 1 }),
                 current: Some("evil\x1b[31mtitle".to_string()),
                 unreadable: false,
+                sessions: Vec::new(),
             }),
             ..Default::default()
         };
@@ -785,6 +791,7 @@ mod tests {
                 session: Some(SessionProgress { done: 2, total: 5 }),
                 current: Some("Do the thing".to_string()),
                 unreadable: false,
+                sessions: Vec::new(),
             }),
             unreadable: false,
         }

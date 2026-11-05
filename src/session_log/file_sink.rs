@@ -26,7 +26,7 @@ pub(crate) fn default_file_path() -> anyhow::Result<PathBuf> {
 ///
 /// # Errors
 /// Fails when `HOME` or the state folder cannot be resolved, or when the path is relative.
-pub fn resolve_file_path(configured: Option<&str>) -> anyhow::Result<PathBuf> {
+pub(crate) fn resolve_file_path(configured: Option<&str>) -> anyhow::Result<PathBuf> {
     resolve_file_path_with(configured, default_file_path)
 }
 

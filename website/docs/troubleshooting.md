@@ -165,6 +165,19 @@ Compare the two files, copy any key that you need back into your llmenv config, 
 If llmenv cannot move the file, the render stops and names the file. Fix or remove it, and run `llmenv regenerate`.
 When `settings.json` is a symlink, llmenv moves the file that the link points to, and the link stays (changed after v3.12.2).
 
+## A .corrupt file appears in the slippage state folder
+
+(added in v3.14.0)
+
+Each session keeps its `read_before_edit` record in `slippage/<session>.json` under the llmenv state folder.
+When a Read finds that file unparseable, llmenv moves it to `<session>.json.corrupt` and starts a new record.
+A second corruption uses `<session>.json.corrupt.1`, then `.2`, so an earlier copy is never replaced.
+The notice to the agent names the copy.
+llmenv removes a copy once it is 7 days old, the same age as the stats log it came from.
+Delete the copy sooner when you no longer need it.
+llmenv moves the file only for a regular file that it cannot parse, and only while it holds the session lock.
+For any other read failure, such as a permission error, the file stays where it is, and the Read is not recorded.
+
 ## A config file is a symlink to a dotfiles repo
 
 (changed after v3.12.2)
@@ -208,6 +221,9 @@ The hook commands in each engine's config name the running llmenv binary by its 
 The bare name `llmenv` is used only when that path is not UTF-8 or the OS cannot report it.
 llmenv then logs an error that names the fix.
 `llmenv doctor` also reports this fallback, with the fix (added in v3.14.0).
+`llmenv doctor` also warns when the hook path is in a cargo `target` folder or a temp folder,
+or names a binary that was removed. Install llmenv, then run `llmenv regenerate` with the
+installed binary (added in v3.14.0).
 
 If a program is installed but reported as not found, run `llmenv doctor`.
 It names the relative `PATH` folders that llmenv skips.
@@ -233,6 +249,7 @@ Each refusal names the fix.
 - `git commit` or `gh pr create` is denied once with no task in progress.
   Run the commands in the message, then run the same command again.
   Set `features.task_tracker.enforce_commit: false` to turn the deny off.
+  A commit that the Monitor tool starts is denied the same way (changed in v3.14.0).
 - `git commit` is denied with "cannot be read" in the message (changed in v3.13.0).
   The message names the file or the task store that cannot be read.
   Fix that file or its permissions, then run the command again.
@@ -359,8 +376,11 @@ Each notice starts with `llmenv:` and appears once per hook run.
   config file could not be read and was replaced. The model history starts again.
 - `memory <event> skipped: the memory backend failed to load` — (added in v3.14.0) a bundle or
   config that declares `features.memory` failed to load. The notice names the cause. Fix that
-  bundle or config. A bundle with no content directory is not reported here, because its
-  declaration cannot be read.
+  bundle or config.
+- `memory <event> skipped: bundle(s) <names> fired, but each has no content folder` — (added in
+  v3.14.0) a bundle fired, but its content folder is missing, so llmenv cannot read whether it
+  declares a memory backend. The notice shows once per session for each bundle. Fix: add the
+  bundle content folder, or remove the bundle from `config.yaml`.
 - `could not release proxy lockfile <path>` — (added in v3.14.0) the MCP proxy lock stayed on disk,
   so later proxy starts fail. Remove the file by hand.
 - `proxy attribution line not written to <path>` — (added in v3.14.0) the proxy log directory is
