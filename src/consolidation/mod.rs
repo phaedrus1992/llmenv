@@ -564,10 +564,6 @@ enum Distilled {
     Stop { msg: String, settled: bool },
 }
 
-/// The most recent memories one consolidation reads. icm honors more than 20 only with a
-/// `max_tokens` budget, and returns fewer when they do not fit in it (#3419).
-const CONSOLIDATION_RECALL_LIMIT: u32 = 50;
-
 /// Steps 1-4: recall recent memories, check the precondition, and ask the model for rules. On a
 /// model success the summary goes into the checkpoint, so a resume after a failed store never
 /// pays for the model again (#2396).
@@ -585,7 +581,7 @@ async fn distill(
                     serde_json::json!({
                         "query": "",
                         "project": project,
-                        "limit": CONSOLIDATION_RECALL_LIMIT,
+                        "limit": 50,
                         // Without a budget icm clamps the limit to 20 (#3419).
                         "max_tokens": crate::memory::recall_json::MAX_TOKENS,
                         "format": crate::memory::recall_json::FORMAT,

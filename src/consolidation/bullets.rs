@@ -123,5 +123,27 @@ mod tests {
                 );
             }
         }
+
+        /// A rule within the bound, with no edge space, comes back unchanged.
+        #[test]
+        fn a_rule_within_the_bound_round_trips(rule in "[a-zA-Z0-9é]([a-zA-Z0-9é ,.]{0,498}[a-zA-Z0-9é])?") {
+            prop_assert_eq!(parse_bullets(&format!("- {rule}")), vec![rule]);
+        }
+
+        /// A rule past the bound keeps its first MAX_RULE_LENGTH characters and the marker.
+        #[test]
+        fn a_rule_past_the_bound_keeps_its_head(rule in "[a-zA-Zé]{501,700}") {
+            let head: String = rule.chars().take(MAX_RULE_LENGTH).collect();
+            prop_assert_eq!(
+                parse_bullets(&format!("- {rule}")),
+                vec![format!("{head}… (truncated)")]
+            );
+        }
+    }
+
+    #[test]
+    fn a_rule_of_exactly_the_bound_is_not_truncated() {
+        let rule = "é".repeat(MAX_RULE_LENGTH);
+        assert_eq!(parse_bullets(&format!("- {rule}")), vec![rule]);
     }
 }

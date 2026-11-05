@@ -166,12 +166,7 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
-/// A test stand-in for the in-use list, so no test runs a system-wide `lsof` (#3428).
-#[cfg(test)]
-fn no_lsof() -> anyhow::Result<Vec<std::path::PathBuf>> {
-    Ok(Vec::new())
-}
-
+// The tests pass an empty in-use list, so no test runs a system-wide `lsof` (#3428).
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -245,7 +240,7 @@ mod tests {
             168,
             now,
             crate::materialize::cache::AgeSource::MtimeOnly,
-            crate::hook_run::session_notices::no_lsof,
+            || Ok(Vec::new()),
         )
         .expect("a stale entry gives a hint");
         assert!(first.contains("1 state/tmp entries"), "{first}");
@@ -255,7 +250,7 @@ mod tests {
                 168,
                 now,
                 crate::materialize::cache::AgeSource::MtimeOnly,
-                crate::hook_run::session_notices::no_lsof,
+                || Ok(Vec::new()),
             )
             .is_none(),
             "the hint repeated on the same day"
@@ -266,7 +261,7 @@ mod tests {
                 168,
                 now + DAY,
                 crate::materialize::cache::AgeSource::MtimeOnly,
-                crate::hook_run::session_notices::no_lsof,
+                || Ok(Vec::new()),
             )
             .is_some(),
             "the hint did not return on the next day"
@@ -285,7 +280,7 @@ mod tests {
                 168,
                 SystemTime::now(),
                 crate::materialize::cache::AgeSource::MtimeOnly,
-                crate::hook_run::session_notices::no_lsof,
+                || Ok(Vec::new()),
             )
             .is_none()
         );
@@ -340,7 +335,7 @@ mod failure_tests {
             168,
             SystemTime::now(),
             crate::materialize::cache::AgeSource::MtimeOnly,
-            crate::hook_run::session_notices::no_lsof,
+            || Ok(Vec::new()),
         )
         .expect("an unreadable marker is shown, not skipped");
 
@@ -361,7 +356,7 @@ mod failure_tests {
             168,
             SystemTime::now(),
             crate::materialize::cache::AgeSource::MtimeOnly,
-            crate::hook_run::session_notices::no_lsof,
+            || Ok(Vec::new()),
         );
 
         // Restore the mode before any assertion, so the tempdir can be removed.

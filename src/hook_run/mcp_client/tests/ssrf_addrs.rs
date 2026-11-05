@@ -258,7 +258,10 @@ fn validate_url_rejects_domain_resolving_to_loopback() {
     // DNS-rebinding TOCTOU: a hostname that resolves to a blocked address must
     // be rejected at validation time, before any request is sent. localhost is
     // the always-available stand-in for an attacker-controlled rebind (#191).
-    assert!(validate("http://localhost:8080").is_err());
+    // localhost resolves from the hosts file, with no DNS server. The error must name the
+    // blocked address, so a resolver failure cannot pass this test (#3428).
+    let err = validate("http://localhost:8080").unwrap_err().to_string();
+    assert!(err.contains("not allowed (SSRF)"), "{err}");
 }
 
 #[test]
