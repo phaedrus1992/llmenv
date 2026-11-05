@@ -283,9 +283,15 @@ fn newest_jsonl_in(dir: &Path, fix: &str) -> anyhow::Result<PathBuf> {
         if path.extension().is_none_or(|x| x != "jsonl") {
             continue;
         }
-        let modified = entry
+        let meta = entry
             .metadata()
-            .and_then(|m| m.modified())
+            .with_context(|| format!("cannot read the change time of {}. {fix}", path.display()))?;
+        // A folder or a link named `*.jsonl` is not a transcript.
+        if !meta.is_file() {
+            continue;
+        }
+        let modified = meta
+            .modified()
             .with_context(|| format!("cannot read the change time of {}. {fix}", path.display()))?;
         if newest.as_ref().is_none_or(|(time, _)| modified > *time) {
             newest = Some((modified, path));

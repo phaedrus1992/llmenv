@@ -266,3 +266,35 @@ fn a_folder_with_no_transcript_or_no_folder_is_an_error_with_the_fix() {
         "{err}"
     );
 }
+
+#[test]
+fn a_folder_named_like_a_transcript_is_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("newer.jsonl")).unwrap();
+    let file = dir.path().join("real.jsonl");
+    std::fs::File::create(&file)
+        .unwrap()
+        .set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(5))
+        .unwrap();
+    assert_eq!(newest_jsonl_in(dir.path(), "Fix: x.").unwrap(), file);
+}
+
+proptest! {
+    /// For any set of transcripts with distinct change times, the newest one is chosen.
+    #[test]
+    fn the_newest_of_any_set_of_transcripts_is_chosen(
+        secs in proptest::collection::btree_set(1u64..100_000, 1..6),
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        for (i, s) in secs.iter().enumerate() {
+            let time = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(*s);
+            std::fs::File::create(dir.path().join(format!("t{i}.jsonl")))
+                .unwrap()
+                .set_modified(time)
+                .unwrap();
+        }
+        let newest_index = secs.len() - 1;
+        let want = dir.path().join(format!("t{newest_index}.jsonl"));
+        prop_assert_eq!(newest_jsonl_in(dir.path(), "Fix: x.").unwrap(), want);
+    }
+}

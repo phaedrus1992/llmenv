@@ -406,7 +406,9 @@ Each notice starts with `llmenv:` and appears once per hook run.
 The memory store, the session log record, memory consolidation, and the code index run as detached jobs after the hook returns.
 A notice from such a job is written to `notice_spool/` in the state directory.
 The next hook run prints it and removes the file, so the agent sees it one hook later.
-One hook run prints at most 32 of these notices, and the rest wait for the next run.
+The state directory is shared by all sessions, so that hook run can belong to another session.
+One hook run prints at most 32 of these notices, oldest first, and the rest wait for the next run.
+A link or a folder in `notice_spool/` is removed unread.
 
 - `a memory was not stored in ICM` — a detached memory store failed. Run `llmenv doctor` to check the memory server.
 - `a session log record was not written` — a detached session log write failed.
