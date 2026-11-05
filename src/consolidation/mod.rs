@@ -23,7 +23,7 @@
 //! 6. Store each rule as `type: semantic`, `importance: high`, in the project's
 //!    rule topic, unless a matching rule is already stored there (#2387).
 //!
-//! All failures are fail-soft: `tracing::error!`, return `Ok(summary)`. The
+//! All failures are fail-soft: an agent notice, then `Ok(summary)`. The
 //! detached child's log filter is ERROR-only by default, so a `warn!` here
 //! would leave no trace (#2355).
 
@@ -35,6 +35,8 @@ use crate::hook_run::idempotency;
 use crate::hook_run::mcp_client::McpHttpClient;
 
 mod bullets;
+mod phase;
+use phase::{note_phase, notice, saved_summary, settle};
 mod dedup;
 
 /// Hard timeout for the LLM backend call.
@@ -269,6 +271,9 @@ fn kill_process_group(pid: u32) {
         match rustix::process::kill_process_group(pid, rustix::process::Signal::KILL) {
             Ok(()) | Err(rustix::io::Errno::SRCH) => {}
             Err(e) => {
+                notice(&format!(
+                    "consolidation: cannot kill the process group {pid_i32}, so it can still run: {e}"
+                ));
                 tracing::error!(
                     pid = pid_i32,
                     error = %e,
@@ -595,7 +600,7 @@ async fn distill(
         Ok(out) => out,
         Err(e) => {
             let msg = format!("consolidation: recall failed (fail-soft): {e}");
-            tracing::error!("{msg}");
+            notice(&msg);
             return Distilled::Stop {
                 msg,
                 settled: false,
@@ -607,7 +612,7 @@ async fn distill(
         Ok(records) => records,
         Err(e) => {
             let msg = format!("consolidation: recall reply unreadable (fail-soft): {e}");
-            tracing::error!("{msg}");
+            notice(&msg);
             return Distilled::Stop {
                 msg,
                 settled: false,
@@ -650,52 +655,12 @@ async fn distill(
         }
         Err(e) => {
             let msg = format!("consolidation: LLM call failed (fail-soft): {e}");
-            tracing::error!("{msg}");
+            notice(&msg);
             Distilled::Stop {
                 msg,
                 settled: false,
             }
         }
-    }
-}
-
-/// Record the phase (and the model summary, once there is one) in the checkpoint. Fail-soft.
-fn note_phase(checkpoint: Option<&std::path::Path>, phase: &str, summary: Option<&str>) {
-    let Some(path) = checkpoint else {
-        return;
-    };
-    let result = checkpoint::update(path, |c| {
-        c.phase = phase.to_string();
-        if let Some(summary) = summary {
-            c.inputs["summary"] = serde_json::json!(summary);
-        }
-    });
-    if let Err(e) = result {
-        tracing::error!("consolidation: cannot update the checkpoint: {e:#}");
-    }
-}
-
-/// The model summary a previous run saved, when this run resumes after the model step.
-fn saved_summary(checkpoint: Option<&std::path::Path>) -> Option<String> {
-    let loaded = checkpoint::load(checkpoint?)
-        .inspect_err(|e| {
-            tracing::error!(
-                "consolidation: the model summary is lost, so the run asks again: {e:#}"
-            );
-        })
-        .ok()?;
-    if loaded.phase != "summarized" {
-        return None;
-    }
-    loaded.inputs["summary"].as_str().map(str::to_string)
-}
-
-/// Delete the checkpoint of a run with nothing left to retry. Fail-soft.
-fn settle(checkpoint: Option<&std::path::Path>) {
-    if let Some(path) = checkpoint
-        && let Err(e) = checkpoint::complete(path)
-    {
-        tracing::error!("consolidation: {e:#}");
     }
 }
 
@@ -710,7 +675,7 @@ fn settle(checkpoint: Option<&std::path::Path>) {
 /// from storing a rule twice (#2397).
 ///
 /// # Errors
-/// All errors are caught and logged via `tracing::error!` — this function
+/// All errors are caught and recorded as agent notices — this function
 /// always returns `Ok(summary)` to match the fail-soft contract.
 pub(crate) async fn run(
     cc: &crate::config::ConsolidationConfig,
@@ -768,7 +733,7 @@ pub(crate) async fn run(
         (stored, duplicates, failed),
     );
     if failed > 0 {
-        tracing::error!("{msg}");
+        notice(&msg);
     } else {
         tracing::info!("{msg}");
         settle(checkpoint);
@@ -1263,6 +1228,11 @@ mod tests {
         assert!(!settled, "an unreadable reply is retried on a later run");
         assert!(msg.contains("recall reply unreadable"), "{msg}");
         assert!(msg.contains("Fix: upgrade icm to 0.11.5 or later"), "{msg}");
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(
+            notices.contains("recall reply unreadable"),
+            "the agent is told: {notices}"
+        );
         let asked = server.received_requests().await.expect("recorded");
         assert!(
             asked
@@ -1322,6 +1292,11 @@ mod tests {
             .expect("run");
         let kept = crate::hook_run::checkpoint::load(&file).expect("kept");
         assert_eq!(kept.phase, "summarized");
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(
+            notices.contains("llmenv: consolidation"),
+            "the agent is told: {notices}"
+        );
         assert!(
             kept.inputs["summary"]
                 .as_str()
