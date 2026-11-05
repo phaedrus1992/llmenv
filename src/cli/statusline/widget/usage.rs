@@ -211,6 +211,25 @@ mod tests {
         }
     }
 
+    proptest::proptest! {
+        /// A display that names no clock style is the countdown, for any reset time, clock, and
+        /// window. A clock style never panics and never gives an empty label (#3064).
+        #[test]
+        fn reset_label_is_the_countdown_unless_a_clock_is_named(
+            resets_at in proptest::prelude::any::<i64>(),
+            now in proptest::prelude::any::<i64>(),
+            window in proptest::prelude::any::<i64>(),
+            display in proptest::option::of("[a-z_0-9]{0,10}"),
+        ) {
+            let cfg = display.as_deref().map(display_cfg);
+            let label = reset_label(resets_at, now, window, cfg.as_ref());
+            match display.as_deref() {
+                Some("clock_24h" | "clock_12h") => proptest::prop_assert!(!label.is_empty()),
+                _ => proptest::prop_assert_eq!(label, humanize_until(resets_at, now)),
+            }
+        }
+    }
+
     #[test]
     fn reset_label_defaults_to_countdown() {
         assert_eq!(reset_label(NOW + 1380, NOW, FIVE_HOUR_SECS, None), "23m");
