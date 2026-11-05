@@ -89,6 +89,12 @@ It is shown at most once per UTC day, and not at all when no entry is stale.
 The notice gives the idle time, the context size, and the estimated cost.
 It goes to you, not to the agent.
 Claude Code sends these values on a `resume` or `fork` start, and no notice is shown when a value is missing.
+(changed in v3.14.0) On subscription auth with Claude Code 2.1.304 or later, llmenv shows no notice, because Claude Code warns itself when a resume would use a noticeable share of the 5-hour limit on a Pro or Max plan.
+llmenv counts a session as subscription auth when none of `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, or `CLAUDE_CODE_USE_FOUNDRY` is set.
+It cannot see the plan, so a Team or Enterprise plan on subscription auth also gets no llmenv notice.
+An API key, gateway, or cloud provider session keeps the notice, as does a session whose Claude Code version llmenv cannot read.
+Claude Code 2.1.299 and later also compact a conversation of 200K or more tokens that stays idle for about 54 minutes, before its one-hour cache expires, so an expensive resume after a long idle time is rarer.
+Turn that off with `"idleCompaction": false` in Claude Code's settings, or change its token floor with `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS`; llmenv has no config key for either.
 
 ### `remote_sync` — toggle background remote git operations
 

@@ -47,6 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Send each memory once by its ICM record id, so two memories with the same text are both sent. A session state from an older llmenv still skips the memories it sent. See [Adaptive recall](https://phaedrus1992.github.io/llmenv/docs/mcp#adaptive-recall-added-in-v3120). [feat:hook] [#3369]
 - Fail `llmenv export` and `llmenv regenerate` with the path and the fix when the llmenv binary path is not UTF-8 or unknown, in place of writing hook commands with a bare `llmenv` that a `PATH` entry could shadow. `llmenv doctor` uses the same lookup. [feat:adapter] [#3060]
 - Check the llmenv binary that the rendered hook commands name in `llmenv doctor`, not only the binary that runs doctor, so an old render that names a cargo `target` or temp binary, or a bare `llmenv`, is reported. [feat:adapter] [#3392]
+- Skip the resume cost notice on subscription auth with Claude Code 2.1.304 or later, which warns about an expensive resume itself. API key, gateway, and cloud provider sessions keep it. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration). [feat:hook] [#3103]
 
 ### Fixed
 

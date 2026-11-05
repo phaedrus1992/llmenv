@@ -115,10 +115,51 @@ fn attach_system_message(out: &str, message: &str) -> String {
 /// The resume cost notice for this event, or `None`. A wrong-type field is recorded for the agent
 /// as a side effect, so the caller must take the notice list after this call.
 pub(crate) fn resume_notice(hook_event_name: &str, payload: &Value) -> Option<String> {
+    resume_notice_with(hook_event_name, payload, |name| std::env::var(name).ok())
+}
+
+/// [`resume_notice`] with the environment read through `env`.
+fn resume_notice_with(
+    hook_event_name: &str,
+    payload: &Value,
+    env: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
     if hook_event_name != "SessionStart" {
         return None;
     }
-    ResumeCache::from_payload(payload).notice()
+    let notice = ResumeCache::from_payload(payload).notice()?;
+    // Claude Code warns about an expensive resume itself on a subscription, so a second notice
+    // would repeat it (#3103).
+    (!native_warning_covers(&env)).then_some(notice)
+}
+
+/// The first Claude Code release with its own warning when a resume would use a noticeable share
+/// of the 5-hour limit on a Pro or Max plan (changelog entry for 2.1.304, #3103).
+const NATIVE_RESUME_WARNING_SINCE: (u64, u64, u64) = (2, 1, 304);
+
+/// The variables that put a session on metered or third-party auth: an API key, a gateway, or a
+/// cloud provider. Claude Code gives such a session no resume warning of its own.
+const METERED_AUTH_VARS: [&str; 6] = [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+];
+
+/// Whether Claude Code shows its own resume warning for this session: subscription auth (no
+/// metered auth variable is set) on 2.1.304 or later. llmenv cannot see the plan, so a Team plan
+/// on subscription auth also counts. An unknown version keeps the llmenv notice.
+fn native_warning_covers(env: &impl Fn(&str) -> Option<String>) -> bool {
+    let is_set = |name: &str| env(name).is_some_and(|v| !v.is_empty() && v != "0");
+    if METERED_AUTH_VARS.iter().any(|name| is_set(name)) {
+        return false;
+    }
+    env("CLAUDE_CODE_VERSION")
+        .as_deref()
+        .and_then(crate::util::semver::parse_semver_triple)
+        .is_some_and(|v| v >= NATIVE_RESUME_WARNING_SINCE)
 }
 
 /// Add `message` as the system message of `out`. A `None` message leaves `out` unchanged.
@@ -136,7 +177,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        ResumeCache, attach_system_message, field, resume_notice, usd, with_resume_notice,
+        ResumeCache, attach_system_message, field, resume_notice_with, usd, with_resume_notice,
     };
 
     fn expensive_resume() -> Value {
@@ -211,7 +252,7 @@ mod tests {
             "estimated_cache_write_usd": 1.14
         });
 
-        let message = resume_notice("SessionStart", &payload);
+        let message = resume_notice_with("SessionStart", &payload, |_| None);
 
         let taken = crate::agent_notice::current().unwrap_or_default();
         assert!(message.is_none(), "{message:?}");
@@ -273,7 +314,7 @@ mod tests {
     fn a_startup_without_the_fields_gives_no_notice_and_the_output_is_unchanged() {
         let payload = json!({"source": "startup"});
 
-        let message = resume_notice("SessionStart", &payload);
+        let message = resume_notice_with("SessionStart", &payload, |_| None);
 
         assert_eq!(
             with_resume_notice("{\"x\":1}".to_string(), message.as_deref()),
@@ -283,7 +324,7 @@ mod tests {
 
     #[test]
     fn the_notice_is_added_to_the_output_as_system_message() {
-        let message = resume_notice("SessionStart", &expensive_resume());
+        let message = resume_notice_with("SessionStart", &expensive_resume(), |_| None);
         let out = with_resume_notice(
             "{\"hookSpecificOutput\":{}}".to_string(),
             message.as_deref(),
@@ -308,7 +349,7 @@ mod tests {
 
     #[test]
     fn other_events_never_get_the_notice() {
-        let message = resume_notice("PreToolUse", &expensive_resume());
+        let message = resume_notice_with("PreToolUse", &expensive_resume(), |_| None);
 
         assert_eq!(with_resume_notice(String::new(), message.as_deref()), "");
     }
@@ -374,6 +415,69 @@ mod tests {
             prop_assert_eq!(&parsed["systemMessage"], &Value::String(message));
             prop_assert_eq!(&parsed[&key], &json!(value));
         }
+    }
+
+    fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + use<> {
+        let pairs: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        move |name| {
+            pairs
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    // #3103: Claude Code 2.1.304 warns on a subscription itself, so llmenv stays quiet there.
+    #[test]
+    fn a_subscription_on_a_new_engine_gets_no_llmenv_notice() {
+        let env = env_of(&[("CLAUDE_CODE_VERSION", "2.1.304")]);
+        assert_eq!(
+            resume_notice_with("SessionStart", &expensive_resume(), env),
+            None
+        );
+    }
+
+    // #3103: an API key, a gateway, or a cloud provider gets no native warning.
+    #[test]
+    fn metered_auth_keeps_the_llmenv_notice() {
+        for var in [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_FOUNDRY",
+        ] {
+            let env = env_of(&[("CLAUDE_CODE_VERSION", "2.1.318"), (var, "1")]);
+            assert!(
+                resume_notice_with("SessionStart", &expensive_resume(), env).is_some(),
+                "{var}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_old_or_unknown_engine_or_an_off_flag_keeps_the_llmenv_notice() {
+        for env in [
+            env_of(&[("CLAUDE_CODE_VERSION", "2.1.303")]),
+            env_of(&[("CLAUDE_CODE_VERSION", "not a version")]),
+            env_of(&[]),
+        ] {
+            assert!(resume_notice_with("SessionStart", &expensive_resume(), env).is_some());
+        }
+        // A provider flag set to 0 or empty is off, so the session is still a subscription.
+        let env = env_of(&[
+            ("CLAUDE_CODE_VERSION", "2.1.304"),
+            ("CLAUDE_CODE_USE_BEDROCK", "0"),
+            ("ANTHROPIC_API_KEY", ""),
+        ]);
+        assert_eq!(
+            resume_notice_with("SessionStart", &expensive_resume(), env),
+            None
+        );
     }
 }
 
