@@ -47,6 +47,7 @@ fn hook(event: &str, matcher: Option<&str>, command: &str) -> crate::config::Hoo
             kind: crate::config::HookHandlerKind::Command,
             command: Some(command.into()),
             tool: None,
+            on_failure: None,
         },
         bundle_origin: None,
     }

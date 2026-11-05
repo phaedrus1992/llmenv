@@ -4,7 +4,6 @@ use anyhow::Context;
 use serde_json::json;
 
 use super::AgentAdapter;
-use super::hook_program::hook_command;
 use super::mcp_tiers::{
     CBM_DESTRUCTIVE, CBM_MUTATION, CBM_READ_ONLY, CTX_DESTRUCTIVE, CTX_MUTATION, CTX_READ_ONLY,
     ICM_DESTRUCTIVE, ICM_MUTATION, ICM_READ_ONLY, McpTier, tier_action,
@@ -16,6 +15,7 @@ use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
 use crate::merge::MergedManifest;
 use crate::plugins::resolve::ResolvedMarketplace;
 use crate::util::{dedup, merge_json};
+use commands::{config_context_command, config_guard_command, hook_run_command, throttle_command};
 use hook_purge::purge_stale_owned_hooks;
 use hooks_sidecar::read_hooks_sidecar;
 use lsp_plugin::write_lsp_plugin;
@@ -29,41 +29,11 @@ pub(crate) mod version;
 
 #[cfg(test)]
 use seed::classify_claude_path;
+mod commands;
 mod hook_json;
 mod lsp_plugin;
 pub(crate) use seed::{apply_seeded_settings, seed_install_method, seed_status_line};
 pub(crate) use skill_copy::copy_dir_owner_only;
-
-/// Command the auto-emitted SessionStart hook runs to inject source config paths
-/// into agent context (#289). Outputs `hookSpecificOutput.additionalContext` JSON
-/// so the agent always knows where to edit config rather than touching the cache.
-fn config_context_command() -> anyhow::Result<String> {
-    hook_command("config-context --engine claude_code")
-}
-
-/// Command the auto-emitted PreToolUse hook runs to guard against writes to the
-/// managed cache directory (#289). Reads the Write/Edit/MultiEdit tool call from
-/// stdin and prints a redirection hint if the target is a cache path. Exits 0
-/// (fail-soft) so the write still proceeds; the hint keeps agents oriented.
-fn config_guard_command() -> anyhow::Result<String> {
-    hook_command("config-guard --engine claude_code")
-}
-
-/// Command the auto-emitted throttle hooks run. Throttle hooks fire on
-/// PreToolUse and UserPromptSubmit to poll the usage backend and sleep a
-/// capped adaptive delay to avoid rate limits.
-fn throttle_command() -> anyhow::Result<String> {
-    hook_command("throttle")
-}
-
-/// Prefix of the auto-emitted lifecycle/session-log hook commands. The full
-/// command is `HOOK_RUN_COMMAND <neutral_event>`, e.g.
-/// `llmenv hook-run --engine claude_code session_start`. Dispatches ICM memory
-/// wake-up/store (#197/#228) and, per `session_log` config, the session-log
-/// file/transcript sinks (#382). Always fail-soft (exit 0).
-fn hook_run_command() -> anyhow::Result<String> {
-    hook_command("hook-run --engine claude_code")
-}
 
 /// #317: fragment appended to CLAUDE.md when slippage control is enabled with
 /// compact_survival. Guides agent behavior after context compaction.
@@ -1107,6 +1077,8 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         std::collections::BTreeMap::new();
 
     let mut warned_hook_paths = std::collections::BTreeSet::new();
+    let write_on_failure =
+        hook_json::on_failure_allowed(&manifest.capabilities.hooks, version::detected);
     for hook in &manifest.capabilities.hooks {
         // Resolve bundle-relative paths against the cache directory so hook
         // commands reference the materialized files, not the source bundle
@@ -1134,7 +1106,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             })
             .transpose()?;
 
-        let handler = hook_json::hook_handler_value(hook, resolved_command);
+        let handler = hook_json::hook_handler_value(hook, resolved_command, write_on_failure);
 
         let mut hook_entry = serde_json::Map::new();
         if let Some(matcher) = &hook.matcher {

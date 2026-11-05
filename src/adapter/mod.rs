@@ -2,6 +2,7 @@ pub mod claude_code;
 pub mod crush;
 pub(crate) mod hook_command;
 pub(crate) mod hook_program;
+pub(crate) mod hook_support;
 mod json_nulls;
 pub(crate) mod llmenv_skill;
 pub(crate) mod mcp_tiers;

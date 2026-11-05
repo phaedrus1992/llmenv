@@ -258,6 +258,7 @@ mod tests {
                 kind: HookHandlerKind::Command,
                 command: Some(cmd.into()),
                 tool: None,
+                on_failure: None,
             },
             bundle_origin: None,
         }

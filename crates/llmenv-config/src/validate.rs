@@ -3,6 +3,7 @@ use super::Config;
 use super::PermissionRule;
 use llmenv_paths::has_parent_component;
 
+mod hooks;
 mod permissions;
 mod scope_match;
 mod servers;
@@ -266,6 +267,11 @@ pub enum ValidateError {
     #[error("hook '{event}' has type: mcp_tool but no tool")]
     HookMcpToolMissingTool { event: String },
     #[error(
+        "hook '{event}' sets on_failure but has type: mcp_tool, and only a command hook can block \
+         on failure. Fix: remove on_failure, or use type: command."
+    )]
+    HookOnFailureNeedsCommand { event: String },
+    #[error(
         "widget {widget}: display \"{value}\" is not one of {allowed}. Fix: set display to one of \
          those values, or remove it."
     )]
@@ -365,7 +371,7 @@ impl Config {
         self.validate_bundles()?;
         self.validate_capability_env()?;
         self.validate_mcps()?;
-        self.validate_hooks()?;
+        hooks::validate_hooks(&self.capabilities.hooks)?;
         self.validate_lsp()?;
         self.validate_skills()?;
         self.validate_output_styles()?;
@@ -599,34 +605,6 @@ impl Config {
         self.features
             .as_ref()
             .map_or(Ok(()), |f| servers::validate_features(f, &self.host))
-    }
-
-    /// A hook whose `kind` doesn't match its `command`/`tool` field is
-    /// schema-valid but produces a silent no-op in the generated engine
-    /// config (Claude Code emits `{"type":"command"}` with no command key
-    /// and runs nothing; Crush rejects it at load time). Fail fast here
-    /// instead, mirroring the `McpStdioMissingCommand` check of
-    /// `servers::validate_transport`.
-    fn validate_hooks(&self) -> Result<(), ValidateError> {
-        use super::HookHandlerKind;
-
-        let is_missing = |field: &Option<String>| field.as_deref().unwrap_or("").is_empty();
-        for hook in &self.capabilities.hooks {
-            match hook.handler.kind {
-                HookHandlerKind::Command if is_missing(&hook.handler.command) => {
-                    return Err(ValidateError::HookCommandMissingCommand {
-                        event: hook.event.clone(),
-                    });
-                }
-                HookHandlerKind::McpTool if is_missing(&hook.handler.tool) => {
-                    return Err(ValidateError::HookMcpToolMissingTool {
-                        event: hook.event.clone(),
-                    });
-                }
-                HookHandlerKind::Command | HookHandlerKind::McpTool => {}
-            }
-        }
-        Ok(())
     }
 
     fn validate_lsp(&self) -> Result<(), ValidateError> {
