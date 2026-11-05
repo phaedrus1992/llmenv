@@ -2,7 +2,7 @@
 //! when a sweep might need it (#3039).
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crate::materialize::cbm_units::{Unit, scan_units_with};
 use crate::materialize::tmp_sweep;
@@ -10,12 +10,14 @@ use crate::materialize::tmp_sweep;
 /// Whether a sweep of `state/tmp` or `state/codebase-memory` could remove an entry. Both sweeps
 /// remove only entries older than `retention`, so `false` means the in-use list is not needed.
 /// `cbm_live` says the codebase-memory folder is in use by config, which the sweep skips.
-/// An entry that cannot be read counts as possibly stale.
+/// An entry that cannot be read counts as possibly stale. Every age is judged against `now`, the
+/// clock of the sweep that follows, so the gate and the sweep agree (#3374).
 pub(super) fn state_may_have_stale_entries(
     state_dir: &Path,
     retention: Duration,
     cbm_live: bool,
     source: crate::materialize::cache::AgeSource,
+    now: SystemTime,
 ) -> bool {
     let tmp = state_dir.join("tmp");
     let tmp_may_be_stale = match tmp_sweep::stale_summary_in(
@@ -25,6 +27,7 @@ pub(super) fn state_may_have_stale_entries(
             source,
         },
         &[],
+        now,
     ) {
         Ok(summary) => summary.count > 0 || summary.unreadable > 0,
         Err(e) => {
@@ -39,7 +42,7 @@ pub(super) fn state_may_have_stale_entries(
     // sweep never removes it, so it needs no in-use list (#3075).
     tmp_may_be_stale
         || (!cbm_live
-            && cbm_may_have_stale_units(&state_dir.join("codebase-memory"), retention, source))
+            && cbm_may_have_stale_units(&state_dir.join("codebase-memory"), retention, source, now))
 }
 
 /// Whether the codebase-memory sweep could act on `dir`: a unit past `retention`, or a unit whose
@@ -49,8 +52,9 @@ fn cbm_may_have_stale_units(
     dir: &Path,
     retention: Duration,
     source: crate::materialize::cache::AgeSource,
+    now: SystemTime,
 ) -> bool {
-    match scan_units_with(dir, retention, source) {
+    match scan_units_with(dir, retention, source, now) {
         Ok(None) => false,
         Ok(Some(units)) => !units.iter().all(Unit::is_fresh),
         Err(e) => {
@@ -96,7 +100,8 @@ mod tests {
             state.path(),
             DAY * 7,
             false,
-            crate::materialize::cache::AgeSource::MtimeOnly
+            crate::materialize::cache::AgeSource::MtimeOnly,
+            SystemTime::now()
         ));
     }
 
@@ -108,7 +113,8 @@ mod tests {
             state.path(),
             DAY * 7,
             false,
-            crate::materialize::cache::AgeSource::MtimeOnly
+            crate::materialize::cache::AgeSource::MtimeOnly,
+            SystemTime::now()
         ));
     }
 
@@ -124,7 +130,8 @@ mod tests {
             state.path(),
             DAY * 7,
             true,
-            crate::materialize::cache::AgeSource::MtimeOnly
+            crate::materialize::cache::AgeSource::MtimeOnly,
+            SystemTime::now()
         ));
     }
 
@@ -140,7 +147,8 @@ mod tests {
             state.path(),
             DAY * 7,
             false,
-            crate::materialize::cache::AgeSource::MtimeOnly
+            crate::materialize::cache::AgeSource::MtimeOnly,
+            SystemTime::now()
         ));
     }
 
@@ -159,7 +167,8 @@ mod tests {
             state.path(),
             DAY * 7,
             false,
-            crate::materialize::cache::AgeSource::MtimeOnly
+            crate::materialize::cache::AgeSource::MtimeOnly,
+            SystemTime::now()
         ));
     }
 
@@ -176,7 +185,8 @@ mod tests {
             state.path(),
             DAY * 7,
             false,
-            crate::materialize::cache::AgeSource::MtimeOnly
+            crate::materialize::cache::AgeSource::MtimeOnly,
+            SystemTime::now()
         ));
     }
 
@@ -194,6 +204,7 @@ mod tests {
             DAY * 7,
             false,
             crate::materialize::cache::AgeSource::MtimeOnly,
+            SystemTime::now(),
         );
 
         // Restore the mode first, so the temporary folder can be removed.
@@ -213,7 +224,8 @@ mod tests {
             state.path(),
             DAY * 7,
             false,
-            crate::materialize::cache::AgeSource::MtimeOnly
+            crate::materialize::cache::AgeSource::MtimeOnly,
+            SystemTime::now()
         ));
     }
 }

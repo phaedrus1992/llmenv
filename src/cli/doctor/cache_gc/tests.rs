@@ -123,6 +123,33 @@ fn the_state_sweep_removes_a_rotation_old_by_mtime_and_change_time() {
     assert!(!rotated.exists(), "an old rotation was kept");
 }
 
+// #3374: the gate, the tmp sweep, and the index sweep judge one clock. With a later clock, a
+// tmp entry and an index written now are old to the gate and to each sweep, so both go.
+#[test]
+fn a_later_clock_is_one_verdict_for_the_gate_and_every_state_sweep() {
+    let state = tempfile::tempdir().unwrap();
+    let entry = state.path().join("tmp").join("old-entry");
+    std::fs::create_dir_all(&entry).unwrap();
+    std::fs::write(entry.join("f"), b"x").unwrap();
+    let cbm = state.path().join("codebase-memory");
+    std::fs::create_dir_all(&cbm).unwrap();
+    let db = cbm.join("old-index.db");
+    std::fs::write(&db, b"x").unwrap();
+    let later = SystemTime::now() + 30 * DAY;
+
+    let failures = sweep_state(state.path(), &Config::default(), DAY * 7, later, OUT);
+
+    assert_eq!(failures, 0);
+    assert!(
+        !entry.exists(),
+        "the gate or the tmp sweep read the wall clock"
+    );
+    assert!(
+        !db.exists(),
+        "the gate or the index sweep read the wall clock"
+    );
+}
+
 #[test]
 fn a_dry_run_of_the_state_sweep_keeps_an_old_rotation() {
     let state = tempfile::tempdir().unwrap();
