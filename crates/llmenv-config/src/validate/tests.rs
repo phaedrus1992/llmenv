@@ -159,18 +159,22 @@ fn arb_hook() -> impl Strategy<Value = Hook> {
         arb_string(),
         prop::option::of(llmenv_util::testkit::arb_hook_matcher()),
         prop_oneof![
-            prop::option::of(llmenv_util::testkit::arb_hook_command_str()).prop_map(|command| {
-                HookHandler {
+            (
+                prop::option::of(llmenv_util::testkit::arb_hook_command_str()),
+                any::<bool>(),
+            )
+                .prop_map(|(command, block)| HookHandler {
                     kind: HookHandlerKind::Command,
                     command,
                     tool: None,
-                }
-            }),
+                    on_failure: block.then_some(crate::HookOnFailure::Block),
+                }),
             prop::option::of(llmenv_util::testkit::arb_hook_tool_str()).prop_map(|tool| {
                 HookHandler {
                     kind: HookHandlerKind::McpTool,
                     command: None,
                     tool,
+                    on_failure: None,
                 }
             }),
         ],
@@ -3530,6 +3534,7 @@ fn hook_command_missing_command_rejected() {
             kind: HookHandlerKind::Command,
             command: None,
             tool: None,
+            on_failure: None,
         },
         bundle_origin: None,
     });
@@ -3550,6 +3555,7 @@ fn hook_mcp_tool_missing_tool_rejected() {
             kind: HookHandlerKind::McpTool,
             command: None,
             tool: None,
+            on_failure: None,
         },
         bundle_origin: None,
     });
@@ -3570,6 +3576,7 @@ fn hook_command_empty_string_rejected() {
             kind: HookHandlerKind::Command,
             command: Some(String::new()),
             tool: None,
+            on_failure: None,
         },
         bundle_origin: None,
     });
@@ -3590,6 +3597,7 @@ fn hook_mcp_tool_empty_string_rejected() {
             kind: HookHandlerKind::McpTool,
             command: None,
             tool: Some(String::new()),
+            on_failure: None,
         },
         bundle_origin: None,
     });
@@ -3610,6 +3618,7 @@ fn hook_command_with_command_is_accepted() {
             kind: HookHandlerKind::Command,
             command: Some("echo hi".into()),
             tool: None,
+            on_failure: None,
         },
         bundle_origin: None,
     });
@@ -3626,6 +3635,7 @@ fn hook_mcp_tool_with_tool_is_accepted() {
             kind: HookHandlerKind::McpTool,
             command: None,
             tool: Some("some_tool".into()),
+            on_failure: None,
         },
         bundle_origin: None,
     });
@@ -3747,4 +3757,79 @@ fn a_memory_listen_host_that_is_not_an_ip_is_rejected() {
         config_with_memory_and_host(vec![mem], host).validate(),
         Err(ValidateError::MemoryInvalidListenHost(h)) if h == "localhost"
     ));
+}
+
+// #3101: only a command hook can block on failure.
+#[test]
+fn an_mcp_tool_hook_with_on_failure_is_rejected() {
+    let mut cfg = Config::default();
+    cfg.capabilities.hooks.push(Hook {
+        event: "PreToolUse".into(),
+        matcher: None,
+        handler: HookHandler {
+            kind: HookHandlerKind::McpTool,
+            command: None,
+            tool: Some("guard".into()),
+            on_failure: Some(crate::HookOnFailure::Block),
+        },
+        bundle_origin: None,
+    });
+    let err = cfg.validate().unwrap_err();
+    assert!(matches!(
+        err,
+        ValidateError::HookOnFailureNeedsCommand { ref event } if event == "PreToolUse"
+    ));
+    assert!(err.to_string().contains("Fix: remove on_failure"), "{err}");
+}
+
+// #3101: a command hook reads `on_failure: block` from YAML, and a missing key stays unset.
+#[test]
+fn a_command_hook_reads_on_failure_block() {
+    let hook: Hook = serde_yaml::from_str(
+        "event: PreToolUse\nhandler:\n  type: command\n  command: g.sh\n  on_failure: block\n",
+    )
+    .unwrap();
+    assert_eq!(hook.handler.on_failure, Some(crate::HookOnFailure::Block));
+    let plain: Hook =
+        serde_yaml::from_str("event: PreToolUse\nhandler:\n  type: command\n  command: g.sh\n")
+            .unwrap();
+    assert_eq!(plain.handler.on_failure, None);
+    let bad = serde_yaml::from_str::<Hook>(
+        "event: PreToolUse\nhandler:\n  type: command\n  command: g.sh\n  on_failure: allow\n",
+    );
+    assert!(bad.is_err(), "only block is a valid value");
+    let mut cfg = Config::default();
+    cfg.capabilities.hooks.push(hook);
+    cfg.validate().unwrap();
+}
+
+proptest! {
+    /// `on_failure` decides validation only for an `mcp_tool` hook with a tool: there it is
+    /// always an error, and on a command hook with a command it is never one (#3101).
+    #[test]
+    fn on_failure_is_an_error_only_on_an_mcp_tool_hook(
+        is_command in any::<bool>(),
+        name in "[a-z]{1,8}",
+        block in any::<bool>(),
+    ) {
+        let mut cfg = Config::default();
+        cfg.capabilities.hooks.push(Hook {
+            event: "PreToolUse".into(),
+            matcher: None,
+            handler: HookHandler {
+                kind: if is_command { HookHandlerKind::Command } else { HookHandlerKind::McpTool },
+                command: is_command.then(|| name.clone()),
+                tool: (!is_command).then(|| name.clone()),
+                on_failure: block.then_some(crate::HookOnFailure::Block),
+            },
+            bundle_origin: None,
+        });
+        let result = cfg.validate();
+        if !is_command && block {
+            let is_needs_command = matches!(result, Err(ValidateError::HookOnFailureNeedsCommand { .. }));
+            prop_assert!(is_needs_command, "{:?}", result);
+        } else {
+            prop_assert!(result.is_ok(), "{:?}", result);
+        }
+    }
 }

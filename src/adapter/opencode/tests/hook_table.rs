@@ -14,6 +14,7 @@ fn materialize_hook_unsupported_event_skipped() {
             kind: crate::config::HookHandlerKind::Command,
             command: Some("echo n".into()),
             tool: None,
+            on_failure: None,
         },
         bundle_origin: None,
     });
@@ -45,6 +46,7 @@ fn materialize_hook_with_supported_event_rendered_in_shim() {
             kind: crate::config::HookHandlerKind::Command,
             command: Some("echo hi".into()),
             tool: None,
+            on_failure: None,
         },
         bundle_origin: None,
     });
@@ -102,6 +104,7 @@ fn materialize_manifest_hook_mcp_tool_kind_skipped() {
             kind: crate::config::HookHandlerKind::McpTool,
             command: None,
             tool: Some("some_tool".into()),
+            on_failure: None,
         },
         bundle_origin: None,
     });

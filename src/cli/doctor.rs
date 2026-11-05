@@ -2544,6 +2544,7 @@ mod tests {
                 kind: crate::config::HookHandlerKind::Command,
                 command: Some("echo hi".into()),
                 tool: None,
+                on_failure: None,
             },
             bundle_origin: None,
         }

@@ -739,27 +739,11 @@ impl AgentAdapter for OpencodeAdapter {
             .hooks
             .iter()
             .filter(|hook| {
-                if !SUPPORTED_HOOK_EVENTS.contains(&hook.event.as_str()) {
-                    eprintln!(
-                        "warning: opencode adapter does not support hook event '{}' — \
-                         skipping this hook. Supported events: {}. Remove or move \
-                         this hook to a claude_code-only bundle to silence this warning.",
-                        hook.event,
-                        SUPPORTED_HOOK_EVENTS.join(", ")
-                    );
-                    return false;
-                }
-                if matches!(hook.handler.kind, crate::config::HookHandlerKind::McpTool) {
-                    eprintln!(
-                        "warning: opencode adapter does not support mcp_tool hooks \
-                         (hook event '{}', tool '{}') — skipping this hook. \
-                         Use a command hook instead.",
-                        hook.event,
-                        hook.handler.tool.as_deref().unwrap_or("<unknown>")
-                    );
-                    return false;
-                }
-                true
+                crate::adapter::hook_support::engine_can_run_hook(
+                    "opencode",
+                    SUPPORTED_HOOK_EVENTS,
+                    hook,
+                )
             })
             .cloned()
             .collect();
@@ -3126,6 +3110,7 @@ mod tests {
                 kind: crate::config::HookHandlerKind::McpTool,
                 command: None,
                 tool: Some("x".into()),
+                on_failure: None,
             },
             bundle_origin: None,
         }];
@@ -3148,6 +3133,7 @@ mod tests {
                 kind: crate::config::HookHandlerKind::Command,
                 command: Some("echo hello".into()),
                 tool: None,
+                on_failure: None,
             },
             bundle_origin: Some(PathBuf::from("/bundles/foo")),
         }];

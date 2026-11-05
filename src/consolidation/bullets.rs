@@ -141,6 +141,14 @@ mod tests {
         }
     }
 
+    // A bare `- ` line holds no rule, so it gives no empty rule.
+    #[test]
+    fn a_bare_dash_line_is_not_a_rule() {
+        assert!(parse_bullets("- ").is_empty());
+        assert!(parse_bullets("  -  ").is_empty());
+        assert_eq!(parse_bullets("- x"), vec!["x"]);
+    }
+
     #[test]
     fn a_rule_of_exactly_the_bound_is_not_truncated() {
         let rule = "é".repeat(MAX_RULE_LENGTH);

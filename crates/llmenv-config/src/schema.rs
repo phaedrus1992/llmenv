@@ -1,9 +1,11 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
+mod hooks;
 mod memory_defaults;
 mod task_tracker;
 mod throttle;
 
+pub use hooks::{Hook, HookHandler, HookHandlerKind, HookOnFailure, dedup_hooks};
 use memory_defaults::{default_adaptive_recall, default_global_topics};
 pub use task_tracker::TaskTracker;
 pub use throttle::Throttle;
@@ -799,43 +801,6 @@ pub struct PermissionRule {
 pub struct EnvVar {
     name: String,
     value: String,
-}
-
-/// A hook registration. `command` paths in `handler` are bundle-relative when
-/// declared in a `bundle.yaml`, resolved at materialize time.
-#[derive(Debug, Clone, Deserialize, Serialize, Eq)]
-pub struct Hook {
-    pub event: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub matcher: Option<String>,
-    pub handler: HookHandler,
-    #[serde(skip)]
-    pub bundle_origin: Option<std::path::PathBuf>,
-}
-
-impl PartialEq for Hook {
-    fn eq(&self, other: &Self) -> bool {
-        self.event == other.event && self.matcher == other.matcher && self.handler == other.handler
-    }
-}
-
-/// A hook handler. `type` selects the mechanism; `command` is set for
-/// `command`-type handlers, `tool` for `mcp_tool`-type.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct HookHandler {
-    #[serde(rename = "type")]
-    pub kind: HookHandlerKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum HookHandlerKind {
-    Command,
-    McpTool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]

@@ -107,6 +107,8 @@ pub(crate) fn read_bundle_yaml(
         crate::config::validate_capabilities_env_key(&context, key)?;
     }
     llmenv_config::validate_effort(&context, &caps)?;
+    // A bundle hook never reaches `Config::validate`, which reads config.yaml only (#3101).
+    llmenv_config::validate_hooks(&caps.hooks).map_err(|e| anyhow::anyhow!("{context}: {e}"))?;
     llmenv_config::validate_advisor(&context, &caps)?;
     let permission_rules = caps
         .permissions
@@ -212,6 +214,22 @@ mod tests {
         assert!(made.success());
         let err = read_bundle_text(&fifo).unwrap_err();
         assert!(err.to_string().contains("not a regular file"), "{err}");
+    }
+
+    // #3101: a bundle hook is checked as a config hook is, with the bundle named.
+    #[test]
+    fn a_bundle_hook_with_on_failure_on_an_mcp_tool_names_the_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = "hooks:\n  - event: PreToolUse\n    handler: { type: mcp_tool, tool: srv:check, on_failure: block }\n";
+        std::fs::write(dir.path().join("bundle.yaml"), yaml).unwrap();
+        let err = read_bundle_yaml(dir.path(), "guards")
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("bundle 'guards':"), "{err}");
+        assert!(err.contains("only a command hook can block"), "{err}");
+        let ok = "hooks:\n  - event: PreToolUse\n    handler: { type: command, command: g.sh, on_failure: block }\n";
+        std::fs::write(dir.path().join("bundle.yaml"), ok).unwrap();
+        assert!(read_bundle_yaml(dir.path(), "guards").unwrap().is_some());
     }
 
     #[test]

@@ -379,8 +379,17 @@ Inspect ICM memory state for the active scope.
   used` and lists every project.
   Before v3.12.0 ICM filtered by the working directory of the ICM server, which is unrelated to your project when ICM
   runs on another host.
-- `memory diff` — show what changed since the last session.
+  (changed in v3.14.0) It prints one line for each memory, `[topic] summary (importance, id)`, then the count.
+  It asks ICM for at most 200 memories, and fewer come back when they do not fit in a 32000-token budget.
+  Before v3.14.0 it printed ICM's text reply, which held at most 5 memories.
+- `memory diff` — show the memories that changed since the last `memory diff` run.
   (changed in v3.12.0) It compares the same project-scoped recall as `memory list` and gives the same warning.
+  (changed in v3.14.0) It matches memories by ICM id: `+` marks a new memory, `-` a removed one,
+  and a `-` then `+` pair a changed one.
+  It keeps its own snapshot in `memory_diff_snapshot.json` in the state folder,
+  so an ICM upgrade that changes the text form shows no change.
+  The first run after an upgrade saves a new baseline.
+  Before v3.14.0 it compared ICM's text reply line by line, in the file that the session end hook also writes.
 - `memory prune [--dry-run]` — preview or apply forgetting by memory importance.
   It forgets `low` and `medium` importance memories and keeps `high` and `critical` ones.
   It reads at most 200 memories for each run, and fewer when they do not fit in a 32000-token budget.
