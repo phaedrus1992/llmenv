@@ -1,6 +1,11 @@
 //! Checks on the env vars that `llmenv export` emits, so the `export NAME=...` contract holds
 //! for every emission path.
 
+use anyhow::Context as _;
+
+const NAME_FIX: &str =
+    "Fix: use only ASCII letters, digits, and `_`, and do not start with a digit.";
+
 /// Reject any var in `env` whose name isn't a valid shell identifier, or whose value holds NUL.
 /// Applied to adapter-returned env vars before they propagate.
 ///
@@ -9,7 +14,7 @@
 pub(super) fn reject_invalid_var_names(env: &[(String, String)]) -> anyhow::Result<()> {
     for (name, value) in env {
         validate_var_name(name)?;
-        validate_var_value(value)?;
+        validate_var_value(value).with_context(|| format!("variable {name}"))?;
     }
     Ok(())
 }
@@ -20,22 +25,16 @@ pub(super) fn reject_invalid_var_names(env: &[(String, String)]) -> anyhow::Resu
 /// The name is empty, starts with a digit, or holds another character.
 pub(super) fn validate_var_name(name: &str) -> anyhow::Result<()> {
     let Some(first) = name.chars().next() else {
-        anyhow::bail!("Variable name cannot be empty");
+        anyhow::bail!("Variable name cannot be empty. {NAME_FIX}");
     };
     if !first.is_ascii_alphabetic() && first != '_' {
-        anyhow::bail!(
-            "Variable name '{}' must start with letter or underscore",
-            name
-        );
+        anyhow::bail!("Variable name {name:?} must start with letter or underscore. {NAME_FIX}");
     }
-    for ch in name.chars() {
-        if !ch.is_ascii_alphanumeric() && ch != '_' {
-            anyhow::bail!(
-                "Variable name '{}' contains invalid character '{}'",
-                name,
-                ch
-            );
-        }
+    if let Some(ch) = name
+        .chars()
+        .find(|c| !c.is_ascii_alphanumeric() && *c != '_')
+    {
+        anyhow::bail!("Variable name {name:?} contains invalid character {ch:?}. {NAME_FIX}");
     }
     Ok(())
 }
@@ -48,7 +47,9 @@ pub(super) fn validate_var_value(value: &str) -> anyhow::Result<()> {
     // single-quotes the value (`util::single_quote`), and values like
     // LLMENV_ICM_CONTEXT are legitimately multiline. (#469)
     if value.contains('\0') {
-        anyhow::bail!("variable value contains forbidden NUL byte");
+        anyhow::bail!(
+            "variable value contains forbidden NUL byte. Fix: remove the NUL byte from the value."
+        );
     }
     Ok(())
 }
@@ -105,5 +106,41 @@ mod tests {
 
         let with_cr = vec![("VALID_NAME".to_string(), "value\rmore".to_string())];
         assert!(reject_invalid_var_names(&with_cr).is_ok());
+    }
+
+    #[test]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "the input is invalid, so the call fails"
+    )]
+    fn a_bad_value_error_names_the_variable_and_the_fix() {
+        let env = vec![("MY_VAR".to_string(), "a\0b".to_string())];
+        let err = format!("{:#}", reject_invalid_var_names(&env).unwrap_err());
+        assert!(err.contains("MY_VAR"), "{err}");
+        assert!(err.contains("Fix:"), "{err}");
+        let err = validate_var_name("bad\u{1b}name").unwrap_err().to_string();
+        assert!(!err.contains('\u{1b}'), "{err:?}");
+        assert!(err.contains("Fix:"), "{err}");
+    }
+
+    proptest::proptest! {
+        /// A name passes exactly when it matches `[A-Za-z_][A-Za-z0-9_]*`, for any string.
+        #[test]
+        fn a_name_passes_only_when_it_is_a_shell_identifier(
+            name in "\\PC{0,8}|[A-Za-z0-9_\\x00-\\x1f\\-]{0,8}"
+        ) {
+            let mut chars = name.chars();
+            let oracle = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+            proptest::prop_assert_eq!(validate_var_name(&name).is_ok(), oracle);
+        }
+
+        /// A value with a valid name passes exactly when it holds no NUL byte, newlines included.
+        #[test]
+        fn a_value_passes_only_without_a_nul_byte(value in "\\PC{0,8}|[a\\x00\\n\\r]{0,8}") {
+            let has_nul = value.contains('\0');
+            let env = vec![("NAME".to_string(), value)];
+            proptest::prop_assert_eq!(reject_invalid_var_names(&env).is_ok(), !has_nul);
+        }
     }
 }
