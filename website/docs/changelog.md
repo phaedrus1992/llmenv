@@ -174,6 +174,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Check the hooks of a bundle when llmenv loads it. A bundle hook with no command, no tool, or `on_failure` on an `mcp_tool` handler used to be accepted and rendered as a hook that runs nothing. [feat:adapter] [#3101]
 - Report a failed branch lookup in the task tracker when git is killed by a signal or exits with an unexpected code, even when its stderr says "not a git repository". Only git's fatal exit 128 with that message is a folder outside git; the repository check and the project name lookup use the same rule, and a silent exit 1 is the only detached HEAD. [fix:task] [#3433]
 - Count a file or a link inside a cache generation as kept in the `llmenv doctor --gc` and `llmenv clean` report, so the counts cover every entry. One stale `state/tmp` entry whose size cannot be read is counted as unreadable instead of failing the whole stale summary. [refactor:materialize] [#3277]
+- Name the variable and the fix when `llmenv export` rejects an env var from an adapter. A NUL byte in a value used to fail with no variable name. [fix:cli]
+- Log a transcript that the turn checks cannot stat or read, not only one they cannot open, so a check that passes for that reason is visible. [fix:hook]
 
 ### Security
 
