@@ -32,7 +32,7 @@ pub(super) fn icm_version_verdict(version: Result<String, String>) -> (CheckLeve
 }
 
 /// Doctor's verdict on the version of the `icm` binary that serves memory (#2261).
-pub(super) fn icm_server_check(version: &str) -> (CheckLevel, String) {
+fn icm_server_check(version: &str) -> (CheckLevel, String) {
     let upgrade = "Run `icm upgrade --apply`.";
     match parse_semver_triple(version) {
         None => (
