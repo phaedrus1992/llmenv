@@ -5,7 +5,10 @@ fn memories(items: &[(&str, &str, &[&str])]) -> String {
     let list: Vec<serde_json::Value> = items
         .iter()
         .map(|(topic, summary, keywords)| {
-            json!({"topic": topic, "summary": summary, "keywords": keywords, "score": 1.0})
+            json!({
+                "id": format!("{topic}/{summary}"), "topic": topic, "summary": summary,
+                "keywords": keywords, "importance": "medium", "score": 1.0,
+            })
         })
         .collect();
     serde_json::Value::Array(list).to_string()

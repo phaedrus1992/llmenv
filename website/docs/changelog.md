@@ -50,6 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Show warnings on stderr by default. `RUST_LOG` still overrides the level. [fix:cli] [#3061]
 - Name the running llmenv binary in hook commands, not the first `llmenv` on `PATH`. A project folder on `PATH` can no longer put its own `llmenv` into an engine config. [fix:hook] [#3081]
 - Log a warning on a hook or statusline path only for a degraded result. A stale MCP session, a read-once path that does not exist yet, and a pipeline failure that is already shown on stderr now log at debug level. [#3082]
+- Warn in `llmenv doctor` below icm 0.11.5, and name the fix `Fix: upgrade icm to 0.11.5 or later`. A memory host with no `icm` on `PATH` gets the install fix too. See [Troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#memory-backend-issues). [feat:doctor] [#3371]
+- Read the ICM recall as JSON in `llmenv memory prune` and post-session consolidation, so they need icm 0.11.5 or later. A reply that is not a JSON list of records fails with a named error and the fix, and prune forgets nothing. The prune summary no longer has the `unread` line. See [`memory prune`](https://phaedrus1992.github.io/llmenv/docs/commands#memory). [feat:mcp] [#3368]
+- Send each memory once by its ICM record id, so two memories with the same text are both sent. A session state from an older llmenv still skips the memories it sent. See [Adaptive recall](https://phaedrus1992.github.io/llmenv/docs/mcp#adaptive-recall-added-in-v3120). [feat:hook] [#3369]
 
 ### Fixed
 

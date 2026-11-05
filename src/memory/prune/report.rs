@@ -34,12 +34,6 @@ pub(super) fn print(result: &PruneResult) {
             result.unknown
         );
     }
-    if result.unread > 0 {
-        println!(
-            "  unread (kept):       {} (a record with no importance or weight)",
-            result.unread
-        );
-    }
     if result.dry_run {
         print_dry_run(result);
     } else {
@@ -75,24 +69,18 @@ fn print_dry_run(result: &PruneResult) {
     let pct = result.candidates as f64 / result.total as f64 * 100.0;
     println!("  ({pct:.1}% of records are prune candidates)");
     println!();
-    println!("  ponytail: age-based TTL unavailable because ICM's MCP output");
-    println!("  omits `created_at` timestamps. This pass uses importance as a");
-    println!("  heuristic: low and medium importance memories are candidates;");
-    println!("  high and critical are always kept. Add date-based pruning once");
-    println!("  ICM exposes timestamps through the MCP interface.");
+    println!("  This pass uses importance, not age: low and medium importance");
+    println!("  memories are candidates; high and critical are always kept.");
 }
 
 impl PruneResult {
     /// The records that prune kept because it cannot place them, as a sentence, or `None`.
     pub(crate) fn kept_unplaced(&self) -> Option<String> {
-        (self.unknown + self.unread > 0).then(|| {
+        (self.unknown > 0).then(|| {
             format!(
-                "{} record(s) that prune cannot place: {} with an importance it does not know, {} \
-                 with no importance or weight. Fix: check the icm version, or run `llmenv memory \
-                 prune --dry-run` to see the counts",
-                self.unknown + self.unread,
-                self.unknown,
-                self.unread
+                "{} record(s) that prune cannot place, with an importance it does not know. Fix: \
+                 check the icm version, or run `llmenv memory prune --dry-run` to see the counts",
+                self.unknown
             )
         })
     }
@@ -107,11 +95,12 @@ mod tests {
         assert_eq!(PruneResult::default().kept_unplaced(), None);
         let result = PruneResult {
             unknown: 2,
-            unread: 1,
             ..Default::default()
         };
         let text = result.kept_unplaced().unwrap_or_default();
-        assert!(text.starts_with("3 record(s)"), "{text}");
-        assert!(text.contains("2 with an importance"), "{text}");
+        assert!(
+            text.starts_with("2 record(s) that prune cannot place"),
+            "{text}"
+        );
     }
 }

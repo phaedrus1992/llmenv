@@ -62,7 +62,7 @@ async fn one_failed_call_keeps_the_others() {
     ] {
         Mock::given(method("POST"))
             .and(body_string_contains(needle))
-            .respond_with(ResponseTemplate::new(200).set_body_json(text(body)))
+            .respond_with(crate::hook_run::test_recall::ToolReply((body).to_string()))
             .mount(&server)
             .await;
     }

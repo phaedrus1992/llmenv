@@ -80,14 +80,13 @@ pub(super) async fn is_stored(
         "topic": topic,
         "project": project,
         "limit": RECALL_LIMIT,
+        "format": crate::memory::recall_json::FORMAT,
     });
     let output = client.call_tool("icm_memory_recall", args).await?;
-    let stored = super::parse_recall_output(&output);
-    let in_topic = stored.iter().filter(|r| {
-        r.topic
-            .as_deref()
-            .is_some_and(|t| t.eq_ignore_ascii_case(&topic))
-    });
+    let stored = crate::memory::recall_json::parse(&output)?;
+    let in_topic = stored
+        .iter()
+        .filter(|r| r.topic.eq_ignore_ascii_case(&topic));
     Ok(matches_any(rule, in_topic.map(|r| r.summary.as_str())))
 }
 
@@ -173,11 +172,19 @@ mod tests {
         server
     }
 
+    /// A JSON recall reply with one stored rule in `topic`.
+    fn stored_rule(topic: &str) -> String {
+        serde_json::json!([{
+            "id": "r1", "topic": topic, "summary": "Always run cargo fmt before commit",
+            "importance": "high", "weight": 1.0, "score": 0.9,
+        }])
+        .to_string()
+    }
+
     #[tokio::test]
     async fn is_stored_compares_against_the_recalled_rules() {
-        let hit = "--- r1 [score: 0.9] ---\n  topic: llmenv-consolidation-p\n  importance: high\n  weight: 1.0\n  \
-                   summary: Always run cargo fmt before commit\n";
-        for (body, expected) in [(hit, true), ("", false)] {
+        let hit = stored_rule("llmenv-consolidation-p");
+        for (body, expected) in [(hit.as_str(), true), ("[]", false)] {
             let server = server(body).await;
             let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
             let got = is_stored(&client, "p", "Always run cargo fmt before commit")
@@ -188,11 +195,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn is_stored_asks_for_json_and_fails_on_a_text_reply() {
+        let text = "--- r1 ---\n  topic: llmenv-consolidation-p\n  summary: Always run cargo fmt\n";
+        let server = server(text).await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
+        let err = is_stored(&client, "p", "Always run cargo fmt")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Fix: upgrade icm to 0.11.5 or later"), "{err}");
+        let asked = server.received_requests().await.unwrap();
+        assert!(
+            asked
+                .iter()
+                .any(|r| String::from_utf8_lossy(&r.body).contains(r#""format":"json""#)),
+            "the recall must ask for JSON"
+        );
+    }
+
+    #[tokio::test]
     async fn a_rule_in_another_topic_is_not_a_duplicate() {
         // ICM matches a topic filter as a substring, so a longer project name can leak in.
-        let other = "--- r1 ---\n  topic: llmenv-consolidation-p-core\n  importance: high\n  \
-                     weight: 1.0\n  summary: Always run cargo fmt before commit\n";
-        let server = server(other).await;
+        let server = server(&stored_rule("llmenv-consolidation-p-core")).await;
         let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
         let got = is_stored(&client, "p", "Always run cargo fmt before commit")
             .await
@@ -202,9 +226,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_legacy_topic_rule_of_any_project_is_not_a_duplicate() {
-        let legacy = "--- r1 ---\n  topic: llmenv-consolidation\n  importance: high\n  \
-                      weight: 1.0\n  summary: Always run cargo fmt before commit\n";
-        let server = server(legacy).await;
+        let server = server(&stored_rule("llmenv-consolidation")).await;
         let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
         let got = is_stored(&client, "p", "Always run cargo fmt before commit")
             .await
