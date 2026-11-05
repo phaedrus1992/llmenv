@@ -45,12 +45,9 @@ pub fn stale_summary_in(
     now: std::time::SystemTime,
 ) -> anyhow::Result<StaleSummary> {
     let scan = scan(tmp_root, rule, in_use, now)?;
-    let sizes = scan
-        .stale
-        .iter()
-        .map(|s| dir_size(&s.path))
-        .collect::<anyhow::Result<Vec<DirSize>>>()?;
-    let total = sizes.into_iter().fold(DirSize::default(), DirSize::combine);
+    let total = scan.stale.iter().try_fold(DirSize::default(), |total, s| {
+        Ok::<_, anyhow::Error>(total.combine(dir_size(&s.path)?))
+    })?;
     Ok(StaleSummary {
         count: scan.stale.len(),
         bytes: total.bytes,

@@ -57,31 +57,18 @@ pub fn gc(
         if !ft.is_dir() {
             continue;
         }
-        if p.extension().is_some_and(|e| e == "tmp") {
-            gc_remove_dir(&p, &mut report);
+        // A path from `read_dir` always ends in a name; a missing one is a failure, not a match.
+        let Some(name) = p.file_name() else {
+            report.record_failure(p.clone(), "the entry has no file name".into());
             continue;
-        }
-        // The durable state dir (#175) is a stable sibling of the hashed config
-        // folders and must outlive every materialization. It is never an age-based
-        // collection candidate — cache invalidation must not wipe tool state.
-        if p.file_name()
-            == Some(std::ffi::OsStr::new(
-                crate::materialize::state::STATE_DIR_NAME,
-            ))
-        {
-            report.kept += 1;
-            continue;
-        }
+        };
         // In Normal mode, a top-level dir matching the current generation version
         // is a container for per-shape leaf dirs. Walk into it and age-check each
         // shape individually instead of treating the whole generation as a unit.
-        if hashing == HashingMode::Normal
-            && is_current_name(
-                p.file_name().unwrap_or_default(),
-                hashing,
-                current_version.as_deref(),
-            )
-        {
+        let is_generation = !is_staging_or_state(&p)
+            && hashing == HashingMode::Normal
+            && is_current_name(name, hashing, current_version.as_deref());
+        if is_generation {
             if let Err(e) = gc_normal_shapes(&p, rule, &now, &mut report) {
                 tracing::error!(
                     "cache gc cannot sweep the generation {}, so it is kept: {e:#}. Fix: check the permissions of that folder.",
@@ -91,19 +78,55 @@ pub fn gc(
             }
             continue;
         }
-        let Some(m) = newest_file_mtime_or_record(&p, rule.source, |path, cause| {
-            report.record_failure(path, cause)
-        }) else {
-            continue;
-        };
-        let expired = is_expired(now, m, rule.older_than, &p);
-        if expired {
-            gc_remove_dir(&p, &mut report);
-        } else {
-            report.kept += 1;
-        }
+        collect_if_expired(&p, rule, now, &mut report);
     }
     Ok(report)
+}
+
+/// Whether `p` is an orphaned `.tmp` staging folder or the durable state folder, which
+/// [`collect_if_expired`] handles before any age check.
+fn is_staging_or_state(p: &Path) -> bool {
+    p.extension().is_some_and(|e| e == "tmp")
+        || p.file_name()
+            == Some(std::ffi::OsStr::new(
+                crate::materialize::state::STATE_DIR_NAME,
+            ))
+}
+
+/// Collect one cache folder: an orphaned `.tmp` staging folder always, the durable state folder
+/// never, and any other folder when it is older than `rule`. One helper serves the top level and
+/// the shapes of a generation, so the two cannot drift (#3277).
+fn collect_if_expired(
+    p: &Path,
+    rule: crate::materialize::expiry::AgeRule,
+    now: SystemTime,
+    report: &mut GcReport,
+) {
+    // A `.tmp` folder is a partial write from a materialize that crashed.
+    if p.extension().is_some_and(|e| e == "tmp") {
+        gc_remove_dir(p, report);
+        return;
+    }
+    // The durable state folder (#175) must outlive every materialization, at the top level and
+    // nested under a generation alike, so it is never an age-based candidate.
+    if p.file_name()
+        == Some(std::ffi::OsStr::new(
+            crate::materialize::state::STATE_DIR_NAME,
+        ))
+    {
+        report.kept += 1;
+        return;
+    }
+    let Some(m) = newest_file_mtime_or_record(p, rule.source, |path, cause| {
+        report.record_failure(path, cause)
+    }) else {
+        return;
+    };
+    if is_expired(now, m, rule.older_than, p) {
+        gc_remove_dir(p, report);
+    } else {
+        report.kept += 1;
+    }
 }
 
 /// Age-check each per-shape leaf directory under a `<version_major>` generation
@@ -136,40 +159,48 @@ fn gc_normal_shapes(
         let Some((p, ft)) = entry_and_type(version_dir, entry, &mut report.failed) else {
             continue;
         };
+        // A file or a link inside a generation is not a shape. It is kept and counted, so the
+        // report adds up to every entry (#3277).
         if ft.is_symlink() || !ft.is_dir() {
-            tracing::trace!(
-                "gc_normal_shapes: skipping unexpected entry: {}",
-                p.display()
-            );
-            continue;
-        }
-        // Unconditionally remove .tmp staging directories — they represent
-        // orphaned partial writes from a previous crashed materialize call.
-        if p.extension().is_some_and(|e| e == "tmp") {
-            gc_remove_dir(&p, report);
-            continue;
-        }
-        // The durable state dir (#175) may appear nested under a version dir
-        // in some layouts; protect it from age-based collection regardless.
-        if p.file_name()
-            == Some(std::ffi::OsStr::new(
-                crate::materialize::state::STATE_DIR_NAME,
-            ))
-        {
+            tracing::debug!("cache gc keeps a non-shape entry: {}", p.display());
             report.kept += 1;
             continue;
         }
-        let Some(m) = newest_file_mtime_or_record(&p, rule.source, |path, cause| {
-            report.record_failure(path, cause)
-        }) else {
-            continue;
-        };
-        let expired = is_expired(*now, m, rule.older_than, &p);
-        if expired {
-            gc_remove_dir(&p, report);
-        } else {
-            report.kept += 1;
-        }
+        collect_if_expired(&p, rule, *now, report);
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "a test fails loudly when its fixture cannot be set up"
+)]
+mod tests {
+    use super::*;
+    use crate::materialize::expiry::AgeRule;
+    use std::time::Duration;
+
+    // #3277: every entry of a generation is in the report, a file or a link as kept.
+    #[test]
+    fn a_file_and_a_link_in_a_generation_are_kept_and_counted() {
+        let root = tempfile::tempdir().unwrap();
+        let generation = root.path().join(version_major());
+        std::fs::create_dir_all(generation.join("shape-a")).unwrap();
+        std::fs::write(generation.join("shape-a/f"), b"x").unwrap();
+        std::fs::write(generation.join("stray.txt"), b"x").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.path(), generation.join("link")).unwrap();
+        let report = gc(
+            root.path(),
+            AgeRule::new(Duration::from_secs(3600)),
+            HashingMode::Normal,
+            true,
+        )
+        .unwrap();
+        let entries = if cfg!(unix) { 3 } else { 2 };
+        assert_eq!(report.kept, entries, "{report:?}");
+        assert!(report.removed.is_empty(), "{report:?}");
+        assert!(report.failed.is_empty(), "{report:?}");
+    }
 }
