@@ -86,9 +86,10 @@ pub(super) async fn waves(
             recall(client, t1),
         );
         push_into(&mut outcome, budget, [k0, k1, t0, t1]);
-    } else {
+    } else if fanouts.iter().any(Option::is_some) {
         // A slow server would push the prompt past the latency it tolerates. The skip is not a
-        // budget skip, so it gets its own notice, not a line in the budget notice.
+        // budget skip, so it gets its own notice, not a line in the budget notice. With no
+        // fanout to run, nothing is skipped, so there is no notice.
         crate::agent_notice::record_logged(format!(
             "llmenv: {} extra memory recall(s) were skipped, because the main recalls took \
              {:?} (limit {:?}). Fix: run `llmenv doctor` to check the memory server.",

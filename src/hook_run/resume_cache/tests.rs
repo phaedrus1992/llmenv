@@ -291,9 +291,17 @@ fn a_version_that_is_not_a_version_keeps_the_notice_and_says_why() {
     assert!(resume_notice("SessionStart", &expensive_resume(), env, || false).is_some());
     let notices = crate::agent_notice::current().unwrap_or_default();
     assert!(
-        notices.contains("CLAUDE_CODE_VERSION \"nightly-3462\" is not a version"),
+        notices.contains("CLAUDE_CODE_VERSION is not a version (\"nightly-3462\")"),
         "{notices}"
     );
+}
+
+#[test]
+fn an_empty_version_keeps_the_notice_like_an_unset_one() {
+    let env = env_of(&[("CLAUDE_CODE_VERSION", "")]);
+    assert!(resume_notice("SessionStart", &expensive_resume(), env, || false).is_some());
+    let notices = crate::agent_notice::current().unwrap_or_default();
+    assert!(!notices.contains("is not a version"), "{notices}");
 }
 
 #[test]

@@ -112,6 +112,30 @@ fn a_declared_root_that_cannot_be_read_is_left_out_with_a_notice() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_recorded_root_that_cannot_be_resolved_names_the_cause() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let locked = dir.path().join("locked-recorded-3462");
+    let root = locked.join("root");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let resolvable_anyway = std::fs::canonicalize(&root).is_ok();
+    let undeclared = undeclared_roots(std::slice::from_ref(&root), &[]);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if resolvable_anyway {
+        return; // root ignores permissions, so the error cannot happen here
+    }
+    assert!(undeclared.is_empty(), "{undeclared:?}");
+    let notices = crate::agent_notice::current().unwrap_or_default();
+    assert!(
+        notices.contains(&format!("{} cannot be resolved", root.display()))
+            && notices.contains("check its permissions"),
+        "{notices}"
+    );
+}
+
 #[test]
 fn a_recorded_root_that_no_declared_root_covers_is_undeclared() {
     let dir = tempfile::tempdir().unwrap();

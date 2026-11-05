@@ -290,3 +290,26 @@ async fn slow_main_recalls_skip_the_fanouts_and_tell_the_agent() {
         "{notices}"
     );
 }
+
+#[tokio::test]
+async fn slow_main_recalls_with_no_fanout_give_no_skip_notice() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("initialize"))
+        .respond_with(crate::hook_run::test_recall::ToolReply(String::new()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(SlowReply(crate::hook_run::test_recall::ToolReply(
+            String::new(),
+        )))
+        .mount(&server)
+        .await;
+    let f = fixture(&server);
+    // No project means no fanout, so the slow recalls skip nothing.
+    f.store.update("s1", |l| l.set_scope_sent(MAIN_AGENT));
+    let turn = json!({"prompt": "slow"});
+    turn_start(&ctx(&f, &turn), vec![]).await.unwrap();
+    let notices = crate::agent_notice::current().unwrap_or_default();
+    assert!(!notices.contains("extra memory recall"), "{notices}");
+}

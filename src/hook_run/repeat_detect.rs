@@ -183,7 +183,7 @@ pub(crate) fn handle_pre_tool_use(
         // Every PreToolUse payload has a tool name, so this is an engine fault (#1209, #3462).
         crate::agent_notice::record_logged(
             "llmenv: the repeat check is off for this event, because the PreToolUse payload has \
-             no tool name. Fix: report this as a Claude Code payload bug.",
+             no tool name. Fix: update Claude Code. If this repeats, report the payload to llmenv.",
         );
         return String::new();
     };

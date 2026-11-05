@@ -215,16 +215,16 @@ fn native_warning_covers(
     if metered || provider {
         return false;
     }
-    let Some(version) = env("CLAUDE_CODE_VERSION") else {
-        tracing::debug!("resume notice kept: CLAUDE_CODE_VERSION is not set");
+    let Some(version) = env("CLAUDE_CODE_VERSION").filter(|v| !v.is_empty()) else {
+        tracing::debug!("resume notice kept: CLAUDE_CODE_VERSION is not set or empty");
         return false;
     };
     match crate::util::semver::is_release_at_least(&version, NATIVE_RESUME_WARNING_SINCE) {
         Some(newer) => newer && !api_key_helper(),
         None => {
             crate::agent_notice::record_logged(format!(
-                "llmenv: the resume cost notice stays on, because CLAUDE_CODE_VERSION \
-                 {version:?} is not a version. Fix: none is needed."
+                "llmenv: the resume cost notice stays on, because CLAUDE_CODE_VERSION is \
+                 not a version ({version:?}). Fix: none is needed."
             ));
             false
         }

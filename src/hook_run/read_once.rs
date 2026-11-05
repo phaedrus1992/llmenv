@@ -70,7 +70,7 @@ pub(crate) fn handle_pre_tool_use(
             // The Read tool schema makes tool_input an object, so this is an engine fault (#3462).
             crate::agent_notice::record_logged(
                 "llmenv: the read cache is off for this Read call, because its tool_input is \
-                 not an object. Fix: report this as a Claude Code payload bug.",
+                 not an object. Fix: update Claude Code. If this repeats, report the payload to llmenv.",
             );
             return String::new();
         }
@@ -96,7 +96,7 @@ pub(crate) fn handle_pre_tool_use(
         // The Read tool schema requires file_path, so this is an engine fault (#1207, #3462).
         crate::agent_notice::record_logged(
             "llmenv: the read cache is off for this Read call, because its tool_input has no \
-             file_path text. Fix: report this as a Claude Code payload bug.",
+             file_path text. Fix: update Claude Code. If this repeats, report the payload to llmenv.",
         );
         return String::new();
     };

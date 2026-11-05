@@ -138,9 +138,20 @@ pub(crate) struct RootsReport {
     pub cache_dir: PathBuf,
 }
 
-/// The canonical form of `path`, or `None` when it does not resolve.
+/// The canonical form of `path`, or `None` when it does not resolve. A cause other than a
+/// missing path is a notice, because the root check then leaves the root out (#3462).
 fn canonical(path: &Path) -> Option<PathBuf> {
-    std::fs::canonicalize(path).ok()
+    std::fs::canonicalize(path)
+        .inspect_err(|e| {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                crate::agent_notice::record_logged(format!(
+                    "llmenv: the code index root {} cannot be resolved, so the root check leaves \
+                     it out: {e}. Fix: check its permissions.",
+                    path.display()
+                ));
+            }
+        })
+        .ok()
 }
 
 /// Whether `path` is one of `roots` or sits under one. Both sides resolve links first, so a
