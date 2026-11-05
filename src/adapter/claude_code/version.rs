@@ -42,17 +42,14 @@ pub(crate) fn env_vars() -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-/// Whether Claude Code `version` reads `onFailure` on a hook. An unknown or unreadable version
-/// does not, so llmenv never writes a key that an older engine may reject (#3101).
-pub(crate) fn supports_on_failure(version: Option<&str>) -> bool {
-    version.and_then(numeric_triple) >= Some(ON_FAILURE_SINCE)
-}
-
-/// The first three numbers of a version such as `2.1.295` or `2.1.295-beta`.
-fn numeric_triple(version: &str) -> Option<(u64, u64, u64)> {
-    let core = version.split(['-', '+']).next()?;
-    let mut parts = core.split('.').map(|p| p.parse::<u64>().ok());
-    Some((parts.next()??, parts.next()??, parts.next()??))
+/// Whether Claude Code `version` reads `onFailure` on a hook, or `None` when the version is not
+/// a version number. A pre-release of 2.1.295, such as `2.1.295-beta`, sorts before the release,
+/// so it does not count (#3101).
+pub(crate) fn supports_on_failure(version: &str) -> Option<bool> {
+    let triple = crate::util::semver::parse_semver_triple(version)?;
+    let prerelease_of_since =
+        triple == ON_FAILURE_SINCE && crate::util::semver::is_prerelease(version);
+    Some(triple >= ON_FAILURE_SINCE && !prerelease_of_since)
 }
 
 /// Run `claude --version`. Each failure is logged, and gives `None`.
@@ -108,31 +105,41 @@ mod tests {
     use proptest::prelude::*;
 
     #[test]
-    fn on_failure_starts_at_2_1_295() {
-        assert!(supports_on_failure(Some("2.1.295")));
-        assert!(supports_on_failure(Some("2.1.318")));
-        assert!(supports_on_failure(Some("2.2.0")));
-        assert!(supports_on_failure(Some("3.0.0")));
-        assert!(supports_on_failure(Some("2.1.295-beta")));
-        assert!(!supports_on_failure(Some("2.1.294")));
-        assert!(!supports_on_failure(Some("2.0.999")));
-        assert!(!supports_on_failure(Some("1.9.999")));
-        assert!(!supports_on_failure(Some("2.1")));
-        assert!(!supports_on_failure(Some("2.x.300")));
-        assert!(!supports_on_failure(None));
+    fn on_failure_starts_at_the_2_1_295_release() {
+        for yes in [
+            "2.1.295",
+            "2.1.295+build",
+            "2.1.296-beta",
+            "2.1.318",
+            "2.2.0",
+            "3.0.0",
+        ] {
+            assert_eq!(supports_on_failure(yes), Some(true), "{yes}");
+        }
+        for no in [
+            "2.1.295-beta",
+            "2.1.295-rc.1",
+            "2.1.294",
+            "2.0.999",
+            "1.9.999",
+        ] {
+            assert_eq!(supports_on_failure(no), Some(false), "{no}");
+        }
+        for unknown in ["2.1", "2.x.300", "", "beta"] {
+            assert_eq!(supports_on_failure(unknown), None, "{unknown}");
+        }
     }
 
     proptest! {
-        /// The support check is the numeric order of the first three parts, at any version.
+        /// A release is supported exactly when it is not older than a release known to read the
+        /// key: every release after 2.1.295 is, and every release before 2.1.295 is not.
         #[test]
-        fn on_failure_support_follows_the_numeric_order(
-            major in 0u64..5, minor in 0u64..5, patch in 0u64..1000,
+        fn a_release_after_the_first_is_supported_and_one_before_is_not(
+            minor in 0u64..4, patch in 0u64..2000, suffix in prop::sample::select(vec!["", "+b.1"]),
         ) {
-            let version = format!("{major}.{minor}.{patch}");
-            prop_assert_eq!(
-                supports_on_failure(Some(&version)),
-                (major, minor, patch) >= (2, 1, 295)
-            );
+            let version = format!("2.{minor}.{patch}{suffix}");
+            let newer = minor > 1 || (minor == 1 && patch >= 295);
+            prop_assert_eq!(supports_on_failure(&version), Some(newer));
         }
     }
 

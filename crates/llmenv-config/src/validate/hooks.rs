@@ -10,7 +10,11 @@ use crate::{Hook, HookHandlerKind};
 ///
 /// `on_failure` is read for a command hook only, so an `mcp_tool` hook that sets it is an error
 /// instead of a key the engine ignores (#3101).
-pub(super) fn validate_hooks(hooks: &[Hook]) -> Result<(), ValidateError> {
+///
+/// # Errors
+/// The first hook whose handler lacks the field its type needs, or that sets `on_failure` on a
+/// hook that is not a command.
+pub fn validate_hooks(hooks: &[Hook]) -> Result<(), ValidateError> {
     let is_missing = |field: &Option<String>| field.as_deref().unwrap_or("").is_empty();
     for hook in hooks {
         let event = || hook.event.clone();

@@ -158,7 +158,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Read all the records that `llmenv memory prune` (up to 200) and post-session consolidation (up to 50) ask for. icm returned at most 20, because the request gave no token budget. [fix:mcp] [#3419]
 - Name the cause when the `read_before_edit` guard denies a `Write` to a path it cannot resolve, and remove stray spaces from the deny text. [fix:hook] [#3389]
 - Write a session log line that a reader can parse when an event cannot be serialized. The line used to hold only the timestamp. [fix:session-log] [#3390]
-- Read `llmenv memory list` and `llmenv memory diff` from the JSON form of ICM recall. `list` shows up to 200 memories and their count, where it showed ICM's first 5. `diff` matches memories by id in its own snapshot, so an ICM upgrade no longer shows every line as changed and the session end dedup file is no longer overwritten. [fix:mcp] [#3421]
+- Read `llmenv memory list` and `llmenv memory diff` from the JSON form of ICM recall. `list` shows up to 200 memories and their count, where it showed ICM's first 5, and strips control characters from each field. `diff` matches memories by id in its own snapshot, so an ICM upgrade no longer shows every line as changed and the session end dedup file is no longer overwritten. [fix:mcp] [#3421]
+- Check the hooks of a bundle when llmenv loads it. A bundle hook with no command, no tool, or `on_failure` on an `mcp_tool` handler used to be accepted and rendered as a hook that runs nothing. [feat:adapter] [#3101]
 
 ### Security
 

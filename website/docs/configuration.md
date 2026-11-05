@@ -310,8 +310,12 @@ capabilities:
 - `handler.on_failure: block` (added in v3.14.0) makes a guard hook fail closed.
   Claude Code then blocks the action when the hook cannot start, times out, or exits with an unexpected code, instead of letting it through.
   Only a `command` hook can set it, and only `block` is a valid value.
-  llmenv writes it as `onFailure` only when it detects Claude Code 2.1.295 or later, the first release that reads the key.
-  With an older or unknown version, llmenv leaves the key out and logs a warning that names the hooks, so they fail open as before.
+  llmenv reads `claude --version` to decide whether to write it as `onFailure`.
+  For 2.1.295 or later, the first release that reads the key, llmenv writes it.
+  For an older release, or a pre-release of 2.1.295, llmenv leaves it out and logs an error that names the hooks, because they then fail open.
+  When llmenv cannot read the version, it writes the key as asked and logs a warning.
+  When two bundles add the same hook and one of them sets `on_failure: block`, the one merged hook blocks.
+  llmenv checks the hooks of a bundle when it loads the bundle, so a bundle hook that sets `on_failure` on an `mcp_tool` handler is an error that names the bundle.
   Crush and opencode do not read it: the hook still runs there, and llmenv warns that it fails open.
   llmenv sets it on none of its own hooks: a broken llmenv binary would then block every matched tool call.
   Use it on a deny-only guard, such as a script that refuses a commit on the main branch, where a failure that lets the action through is worse than a blocked action.

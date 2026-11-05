@@ -40,13 +40,13 @@ pub use schema::{
     RESERVED_OFFICIAL_MARKETPLACES, ReadOnce, ReadOnceMode, RepeatDetect, Scopes, SessionLog,
     SkillSource, SlippageControl, StateConfig, StateTool, StatuslineConfig, StatuslineStyle,
     TaskTracker, Throttle, TranscriptSinkConfig, UpgradeConfig, UpgradeTrack, UserMatch, UserScope,
-    WAKEUP_MAX_TOKENS_RANGE, WidgetConfig, classify_source, github_owner_repo,
+    WAKEUP_MAX_TOKENS_RANGE, WidgetConfig, classify_source, dedup_hooks, github_owner_repo,
     is_reserved_official_marketplace, split_plugin_ref,
 };
 pub use template::generate_template;
 pub use unknown_keys::{unknown_key_message, unknown_top_level_keys};
 pub use validate::{
-    ValidateError, validate_capabilities_env_key, validate_permission_rule,
+    ValidateError, validate_capabilities_env_key, validate_hooks, validate_permission_rule,
     validate_permission_string,
 };
 

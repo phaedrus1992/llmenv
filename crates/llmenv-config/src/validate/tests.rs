@@ -159,14 +159,16 @@ fn arb_hook() -> impl Strategy<Value = Hook> {
         arb_string(),
         prop::option::of(llmenv_util::testkit::arb_hook_matcher()),
         prop_oneof![
-            prop::option::of(llmenv_util::testkit::arb_hook_command_str()).prop_map(|command| {
-                HookHandler {
+            (
+                prop::option::of(llmenv_util::testkit::arb_hook_command_str()),
+                any::<bool>(),
+            )
+                .prop_map(|(command, block)| HookHandler {
                     kind: HookHandlerKind::Command,
                     command,
                     tool: None,
-                    on_failure: None,
-                }
-            }),
+                    on_failure: block.then_some(crate::HookOnFailure::Block),
+                }),
             prop::option::of(llmenv_util::testkit::arb_hook_tool_str()).prop_map(|tool| {
                 HookHandler {
                     kind: HookHandlerKind::McpTool,
@@ -3799,4 +3801,35 @@ fn a_command_hook_reads_on_failure_block() {
     let mut cfg = Config::default();
     cfg.capabilities.hooks.push(hook);
     cfg.validate().unwrap();
+}
+
+proptest! {
+    /// `on_failure` decides validation only for an `mcp_tool` hook with a tool: there it is
+    /// always an error, and on a command hook with a command it is never one (#3101).
+    #[test]
+    fn on_failure_is_an_error_only_on_an_mcp_tool_hook(
+        is_command in any::<bool>(),
+        name in "[a-z]{1,8}",
+        block in any::<bool>(),
+    ) {
+        let mut cfg = Config::default();
+        cfg.capabilities.hooks.push(Hook {
+            event: "PreToolUse".into(),
+            matcher: None,
+            handler: HookHandler {
+                kind: if is_command { HookHandlerKind::Command } else { HookHandlerKind::McpTool },
+                command: is_command.then(|| name.clone()),
+                tool: (!is_command).then(|| name.clone()),
+                on_failure: block.then_some(crate::HookOnFailure::Block),
+            },
+            bundle_origin: None,
+        });
+        let result = cfg.validate();
+        if !is_command && block {
+            let is_needs_command = matches!(result, Err(ValidateError::HookOnFailureNeedsCommand { .. }));
+            prop_assert!(is_needs_command, "{:?}", result);
+        } else {
+            prop_assert!(result.is_ok(), "{:?}", result);
+        }
+    }
 }

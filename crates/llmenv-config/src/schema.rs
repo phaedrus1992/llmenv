@@ -5,7 +5,7 @@ mod memory_defaults;
 mod task_tracker;
 mod throttle;
 
-pub use hooks::{Hook, HookHandler, HookHandlerKind, HookOnFailure};
+pub use hooks::{Hook, HookHandler, HookHandlerKind, HookOnFailure, dedup_hooks};
 use memory_defaults::{default_adaptive_recall, default_global_topics};
 pub use task_tracker::TaskTracker;
 pub use throttle::Throttle;

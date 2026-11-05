@@ -4,6 +4,7 @@ use super::PermissionRule;
 use llmenv_paths::has_parent_component;
 
 mod hooks;
+pub use hooks::validate_hooks;
 mod permissions;
 mod scope_match;
 mod servers;

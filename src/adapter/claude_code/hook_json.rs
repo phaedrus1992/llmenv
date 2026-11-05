@@ -12,7 +12,11 @@ pub(super) fn hook_handler_value(
     write_on_failure: bool,
 ) -> serde_json::Value {
     let mut m = serde_json::Map::new();
-    if write_on_failure && hook.handler.on_failure == Some(crate::config::HookOnFailure::Block) {
+    let blocks = hook.handler.on_failure == Some(crate::config::HookOnFailure::Block);
+    // Claude Code reads `onFailure` on a command hook only. Validation refuses it on another
+    // kind, and this check keeps the render in line with it.
+    let is_command = hook.handler.kind == crate::config::HookHandlerKind::Command;
+    if write_on_failure && blocks && is_command {
         m.insert(
             "onFailure".into(),
             serde_json::Value::String("block".into()),
@@ -38,33 +42,56 @@ pub(super) fn hook_handler_value(
 }
 
 /// Whether the render writes `onFailure` for the hooks that set `on_failure`. Claude Code reads
-/// the key from 2.1.295. With an older or unknown version the key is left out, so the engine never
-/// sees a key that it may reject, and a warning names the hooks that then fail open (#3101).
-/// `version` runs only when a hook sets `on_failure`, so most renders never run `claude`.
+/// the key from 2.1.295 (#3101).
+///
+/// - A known older version gets no key, and an error names the hooks that then fail open.
+/// - An unknown version gets the key, because the user asked the hook to fail closed. A warning
+///   says that the version was not read.
+///
+/// `version` runs only when a hook sets `on_failure`, so a render with no such hook, such as each
+/// test render, never runs `claude --version`.
 pub(super) fn on_failure_allowed(
     hooks: &[crate::config::Hook],
     version: impl FnOnce() -> Option<String>,
 ) -> bool {
-    let events: Vec<&str> = hooks
+    let named: Vec<String> = hooks
         .iter()
         .filter(|h| h.handler.on_failure.is_some())
-        .map(|h| h.event.as_str())
+        .map(|h| {
+            let what = h.handler.command.as_deref().or(h.handler.tool.as_deref());
+            format!("{} ({})", h.event, what.unwrap_or("no command"))
+        })
         .collect();
-    if events.is_empty() {
+    if named.is_empty() {
         return false;
     }
     let version = version();
-    if super::version::supports_on_failure(version.as_deref()) {
-        return true;
+    match version
+        .as_deref()
+        .and_then(super::version::supports_on_failure)
+    {
+        Some(true) => true,
+        Some(false) => {
+            tracing::error!(
+                "the hooks {} set on_failure: block, but Claude Code {} does not read onFailure \
+                 before 2.1.295, so llmenv leaves it out and these hooks fail open. Fix: upgrade \
+                 Claude Code, then run `llmenv regenerate`.",
+                named.join(", "),
+                version.as_deref().unwrap_or_default()
+            );
+            false
+        }
+        None => {
+            tracing::warn!(
+                "llmenv cannot read the Claude Code version ({}), so it writes onFailure for the \
+                 hooks {} as asked. Claude Code before 2.1.295 does not read the key. Fix: check \
+                 that `claude --version` runs from this shell.",
+                version.as_deref().unwrap_or("no version"),
+                named.join(", ")
+            );
+            true
+        }
     }
-    tracing::warn!(
-        "the hooks for {} set on_failure: block, but Claude Code {} does not read onFailure \
-         before 2.1.295, so llmenv leaves it out and these hooks fail open. Fix: upgrade Claude \
-         Code, then run `llmenv regenerate`.",
-        events.join(", "),
-        version.as_deref().unwrap_or("(version unknown)")
-    );
-    false
 }
 
 #[cfg(test)]
@@ -119,18 +146,44 @@ mod tests {
     }
 
     #[test]
-    fn an_old_or_unknown_engine_gets_no_on_failure_and_a_warning() {
+    fn an_old_engine_gets_no_on_failure_and_an_error_that_names_the_hook() {
         let hooks = [hook(Some(HookOnFailure::Block))];
         let logs = crate::test_log_capture::capture_logs(|| {
             assert!(!on_failure_allowed(&hooks, || Some("2.1.294".into())));
-            assert!(!on_failure_allowed(&hooks, || None));
+            assert!(!on_failure_allowed(&hooks, || Some("2.1.295-beta".into())));
         });
         assert!(
             logs.contains("Claude Code 2.1.294 does not read onFailure"),
             "{logs}"
         );
-        assert!(logs.contains("(version unknown)"), "{logs}");
+        assert!(logs.contains("PreToolUse (guard.sh)"), "{logs}");
         assert!(logs.contains("Fix: upgrade Claude Code"), "{logs}");
+    }
+
+    // The user asked the hook to fail closed, so an unknown version keeps the key (#3101).
+    #[test]
+    fn an_unknown_engine_version_keeps_on_failure_and_warns() {
+        let hooks = [hook(Some(HookOnFailure::Block))];
+        let logs = crate::test_log_capture::capture_logs(|| {
+            assert!(on_failure_allowed(&hooks, || None));
+            assert!(on_failure_allowed(&hooks, || Some("2.x".into())));
+        });
+        assert!(
+            logs.contains("cannot read the Claude Code version (no version)"),
+            "{logs}"
+        );
+        assert!(
+            logs.contains("Fix: check that `claude --version` runs"),
+            "{logs}"
+        );
+    }
+
+    #[test]
+    fn an_mcp_tool_hook_never_gets_on_failure() {
+        let mut tool = hook(Some(HookOnFailure::Block));
+        tool.handler.kind = HookHandlerKind::McpTool;
+        let value = hook_handler_value(&tool, None, true);
+        assert!(value.get("onFailure").is_none(), "{value}");
     }
 
     /// The render reads the engine version and writes `onFailure` for a new enough engine.
@@ -164,5 +217,29 @@ mod tests {
         };
         assert_eq!(render("2.1.295"), vec![Some(serde_json::json!("block"))]);
         assert_eq!(render("2.1.294"), vec![None]);
+    }
+
+    proptest::proptest! {
+        /// For any hook, the handler object holds no null, passes command and tool through, and
+        /// has `onFailure` exactly when the render allows it and the hook is a blocking command.
+        #[test]
+        fn the_handler_object_follows_its_hook(
+            is_command in proptest::bool::ANY,
+            command in proptest::option::of("[a-z./ ]{1,12}"),
+            tool in proptest::option::of("[a-z:]{1,12}"),
+            block in proptest::bool::ANY,
+            write in proptest::bool::ANY,
+        ) {
+            let mut h = hook(block.then_some(HookOnFailure::Block));
+            h.handler.kind = if is_command { HookHandlerKind::Command } else { HookHandlerKind::McpTool };
+            h.handler.command = command.clone();
+            h.handler.tool = tool.clone();
+            let value = hook_handler_value(&h, command.clone(), write);
+            let object = value.as_object().unwrap();
+            proptest::prop_assert!(object.values().all(|v| !v.is_null()), "{}", value);
+            proptest::prop_assert_eq!(object.get("command").and_then(|v| v.as_str()), command.as_deref());
+            proptest::prop_assert_eq!(object.get("tool").and_then(|v| v.as_str()), tool.as_deref());
+            proptest::prop_assert_eq!(object.contains_key("onFailure"), write && block && is_command);
+        }
     }
 }
