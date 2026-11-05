@@ -302,4 +302,8 @@ fn a_stat_time_out_of_range_is_unknown() {
     assert_eq!(stat_time(-1i64, 0i64), None);
     assert_eq!(stat_time(10i64, -1i64), None);
     assert_eq!(stat_time(i64::MAX, 1_000_000_000i64), None);
+    assert_eq!(
+        stat_time(i64::MAX, 999_999_999i64),
+        at(u64::try_from(i64::MAX).unwrap(), 999_999_999)
+    );
 }

@@ -1,7 +1,7 @@
 //! The newest mtime under a cache folder, for the cache GC age check.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use anyhow::Context as _;
 
@@ -130,18 +130,13 @@ fn change_time(meta: &std::fs::Metadata) -> SystemTime {
 ///
 /// The kernel sets the change time from its clock, so a pre-1970 value is not a real case. It
 /// maps to the epoch, the oldest value, so it never keeps a tree alive by accident. A nanosecond
-/// part outside one second is read as zero, so it cannot carry into the seconds and overflow.
+/// part outside one second is read as zero.
 #[cfg(unix)]
 fn ctime_to_system_time(secs: i64, nanos: i64) -> SystemTime {
-    let Ok(secs) = u64::try_from(secs) else {
-        return SystemTime::UNIX_EPOCH;
-    };
-    let nanos = u32::try_from(nanos)
-        .ok()
-        .filter(|n| *n < 1_000_000_000)
-        .unwrap_or(0);
-    // Seconds up to `i64::MAX` with nanoseconds under one second fit in a Unix `SystemTime`.
-    SystemTime::UNIX_EPOCH + Duration::new(secs, nanos)
+    use crate::paths::dirfd::stat_time;
+    stat_time(secs, nanos)
+        .or_else(|| stat_time(secs, 0))
+        .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
 /// Windows has no status-change time in `std`. The epoch is the oldest value, so the `max` in
@@ -273,12 +268,15 @@ mod tests {
             nanos in prop_oneof![any::<i64>(), -10i64..1_000_000_010, 999_999_990i64..1_000_000_010],
         ) {
             let got = ctime_to_system_time(secs, nanos);
-            let want = match (u64::try_from(secs), u32::try_from(nanos)) {
-                (Err(_), _) => UNIX_EPOCH,
-                (Ok(s), Ok(n)) if n < 1_000_000_000 => UNIX_EPOCH + Duration::new(s, n),
-                (Ok(s), _) => UNIX_EPOCH + Duration::from_secs(s),
-            };
-            prop_assert_eq!(got, want);
+            prop_assert!(got >= UNIX_EPOCH);
+            if secs < 0 {
+                prop_assert_eq!(got, UNIX_EPOCH);
+            } else if (0..1_000_000_000).contains(&nanos) {
+                prop_assert_eq!(i64::from(got.duration_since(UNIX_EPOCH).unwrap().subsec_nanos()), nanos);
+                prop_assert_eq!(i64::try_from(got.duration_since(UNIX_EPOCH).unwrap().as_secs()).unwrap(), secs);
+            } else {
+                prop_assert_eq!(got, ctime_to_system_time(secs, 0));
+            }
         }
 
         /// With any file in the tree, the answer is the newest file mtime, whatever the folder
