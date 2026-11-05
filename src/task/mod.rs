@@ -26,7 +26,7 @@ pub(crate) mod visibility;
 pub(crate) use finish_hints::last_task_hint;
 use finish_hints::session_finish_reminders;
 mod tracking;
-pub(crate) use tracking::{Tracking, tracking};
+pub(crate) use tracking::{Tracking, tracking, wip_session_is_ownerless};
 pub mod session;
 pub(crate) use reopen::{reopen_task, reopen_tasks};
 pub(crate) use resolve::resolve_identifier;

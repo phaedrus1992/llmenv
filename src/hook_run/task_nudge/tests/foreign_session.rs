@@ -71,3 +71,59 @@ fn a_task_of_another_conversation_does_not_count_as_tracked_work() {
         }
     );
 }
+
+/// #3187: a task of a session with no recorded owner is named once per conversation, at its first
+/// question, by the Stop reminder and the AskUserQuestion reminder alike.
+#[test]
+fn an_ownerless_task_is_named_once_per_conversation() {
+    let dir = TempDir::new().unwrap();
+    let slug = wip_task_owned_by_nobody(dir.path());
+    let stop = serde_json::json!({ "last_assistant_message": "Which one do you want?" });
+    let ask = serde_json::json!({ "tool_name": "AskUserQuestion" });
+    let tracker = TaskTracker::default();
+    let wait = format!("llmenv task wait {slug}");
+
+    let first = handle_stop(&tracker, &stop, Some("s1"), dir.path());
+    assert!(first.contains(&wait), "{first}");
+    let second = handle_stop(&tracker, &stop, Some("s1"), dir.path());
+    assert!(!second.contains(&wait), "{second}");
+    let third = handle_post_tool_use(&tracker, &ask, Some("s1"), dir.path());
+    assert!(!third.contains(&wait), "{third}");
+
+    let other = handle_post_tool_use(&tracker, &ask, Some("s2"), dir.path());
+    assert!(
+        other.contains(&wait),
+        "a second conversation still hears once: {other}"
+    );
+}
+
+/// A task of this conversation's own session keeps the reminder at each question.
+#[test]
+fn an_owned_task_is_named_at_each_question() {
+    let dir = TempDir::new().unwrap();
+    let slug = wip_task_owned_by(dir.path(), "s1");
+    let stop = serde_json::json!({ "last_assistant_message": "Which one do you want?" });
+    let wait = format!("llmenv task wait {slug}");
+    for _ in 0..2 {
+        let text = handle_stop(&TaskTracker::default(), &stop, Some("s1"), dir.path());
+        assert!(text.contains(&wait), "{text}");
+    }
+}
+
+fn wip_task_owned_by_nobody(dir: &Path) -> String {
+    let owner = EngineIdentity::from_session_id(None);
+    let request = StartRequest {
+        name: Some("ownerless"),
+        description: None,
+        project: &project(),
+        owner: &owner,
+        resume: &crate::task::resume::ResumeContext::default(),
+    };
+    let StartOutcome::Created(s) = start_session_as(dir, &request, StartDecision::Auto).unwrap()
+    else {
+        panic!("expected Created");
+    };
+    let slug = add(dir, &s.id, "Ownerless step");
+    start_task(dir, &slug, false).unwrap();
+    slug
+}

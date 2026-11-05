@@ -854,6 +854,8 @@ Nothing turns off the third item.
   (changed in v3.14.0) The reminder names only tasks of sessions that this conversation owns, or that have no owner.
   A task of a session that another conversation owns is not named.
   It does not count as tracked work for the commit gate.
+  (changed in v3.14.0) A task of a session with no owner, such as one started outside an engine, is named once per
+  conversation, at its first question, and not at each question after that.
 - The first `git commit` or `gh pr create` of a session with no task in progress is denied once, with the commands to
   run. A `llmenv task done` or `llmenv task wait` earlier in the same command does not count as a task in
   progress. The same command runs on the next try.

@@ -91,3 +91,29 @@ pub(crate) fn tracking(state_dir: &Path, caller: Option<&str>) -> Tracking {
         queued,
     }
 }
+
+/// Whether the task `slug` belongs to an open session with no recorded owner, for a caller with a
+/// conversation id. Such a session stays visible to every conversation (see
+/// [`session::Session::visible_to`]), so the question reminder names its task once per
+/// conversation instead of at each question (#3187). Any read error, or no caller id, gives
+/// `false`, which keeps the reminder at each question.
+pub(crate) fn wip_session_is_ownerless(state_dir: &Path, caller: Option<&str>, slug: &str) -> bool {
+    if caller.is_none() {
+        return false;
+    }
+    let (Ok(project), Ok(tasks)) = (project::current_tag(), list_tasks_strict(state_dir)) else {
+        return false;
+    };
+    let Some(session_id) = tasks
+        .iter()
+        .find(|t| t.slug == slug)
+        .and_then(|t| t.session.as_ref())
+    else {
+        return false;
+    };
+    session::open_sessions_strict(state_dir, &project).is_ok_and(|sessions| {
+        sessions
+            .iter()
+            .any(|s| &s.id == session_id && s.owner_session().is_none())
+    })
+}
