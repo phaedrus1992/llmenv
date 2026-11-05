@@ -12,7 +12,7 @@ use crate::task::Tracking;
 const DEFAULT_STOP_NUDGE_EVERY: u32 = 5;
 
 /// The reminder to park the task that waits for the user's answer.
-pub(super) fn waiting_reminder(tracking: &Tracking) -> String {
+fn waiting_reminder(tracking: &Tracking) -> String {
     match tracking {
         Tracking::Tracked {
             wip: Some(slug), ..

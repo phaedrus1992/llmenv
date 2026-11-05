@@ -32,7 +32,7 @@ pub(crate) fn is_release_at_least(version: &str, since: (u64, u64, u64)) -> Opti
 
 /// Whether `text` is a pre-release, such as `2.1.295-beta`. Semver sorts a pre-release before
 /// the release of the same three numbers. A `+build` suffix is not a pre-release.
-pub(crate) fn is_prerelease(text: &str) -> bool {
+fn is_prerelease(text: &str) -> bool {
     text.split('+')
         .next()
         .is_some_and(|core| core.contains('-'))
