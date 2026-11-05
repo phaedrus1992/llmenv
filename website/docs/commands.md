@@ -389,11 +389,12 @@ Inspect ICM memory state for the active scope.
   Before v3.12.0 the command had no project filter, so ICM answered with the records of its own working folder.
   `--dry-run` prints the counts and forgets nothing.
   (changed in v3.12.0) The command refuses to run, and forgets nothing, while the active `features.memory` entry sets `retention`.
-  ICM's recall output has no record age or type, so llmenv cannot apply the per-type durations.
+  ICM's recall output has no memory type, so llmenv cannot apply the per-type durations.
   Remove `retention` from that entry to use the importance-based prune.
   A `retention` on an entry that is not active does not block the prune.
-  (changed in v3.13.0) It keeps a memory whose importance it does not know, and a record with no importance or weight.
-  Its summary counts both.
+  (changed in v3.13.0) It keeps a memory whose importance it does not know, and its summary counts it.
+  (changed in v3.14.0) It reads the JSON form of the ICM recall, so it needs icm 0.11.5 or later.
+  When the reply is not a JSON list of records, or one record has no id, the command fails and forgets nothing.
   The `auto_prune` pass prints no summary, because the shell evaluates the output of `llmenv export`.
   It prints a warning when it keeps such records, or when two active entries stop it from running.
 

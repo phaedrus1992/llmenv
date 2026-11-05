@@ -693,6 +693,8 @@ To remove the pages of one project, run `icm_memory_forget_topic` with its `web-
 
 Consolidation runs from the `session_end` hook.
 It reads only the memories of the current project and stores each new rule under `llmenv-consolidation-<project>`.
+(changed in v3.14.0) It reads the JSON form of the ICM recall, so it needs icm 0.11.5 or later.
+When the reply is not a JSON list of records, the run stops, logs the reason with the fix, and tries again at the next session end.
 See [Post-session consolidation](configuration.md#post-session-consolidation).
 
 ### Session logging

@@ -78,42 +78,6 @@ Output nothing if no new rules emerge.
 Session observations:
 {summaries}";
 
-/// A parsed memory record from the ICM recall output.
-#[derive(Debug)]
-struct MemoryRecord {
-    summary: String,
-    topic: Option<String>,
-}
-
-/// Parse the non-compact `icm_memory_recall` output into structured records.
-/// Extracts the `summary` field from each record.
-fn parse_recall_output(text: &str) -> Vec<MemoryRecord> {
-    let mut records = Vec::new();
-    // A record counts only when it carries a `summary:` line.
-    let mut summary: Option<String> = None;
-    let mut topic: Option<String> = None;
-    let mut in_record = false;
-
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("--- ") && trimmed.ends_with(" ---") {
-            records.extend(summary.take().map(|summary| MemoryRecord {
-                summary,
-                topic: topic.take(),
-            }));
-            topic = None;
-            in_record = true;
-        } else if in_record && let Some(rest) = trimmed.strip_prefix("summary:") {
-            summary = Some(rest.trim().to_string());
-        } else if in_record && let Some(rest) = trimmed.strip_prefix("topic:") {
-            topic = Some(rest.trim().to_string());
-        }
-    }
-
-    records.extend(summary.map(|summary| MemoryRecord { summary, topic }));
-    records
-}
-
 /// Build the prompt body for the Anthropic API call.
 fn build_prompt(max_rules: u32, summaries: &[String]) -> String {
     let summaries_text = summaries.join("\n---\n");
@@ -622,6 +586,7 @@ async fn distill(
                         "query": "",
                         "project": project,
                         "limit": 50,
+                        "format": crate::memory::recall_json::FORMAT,
                     }),
                 )
                 .await
@@ -640,7 +605,17 @@ async fn distill(
         }
     };
 
-    let records = parse_recall_output(&output);
+    let records = match crate::memory::recall_json::parse(&output) {
+        Ok(records) => records,
+        Err(e) => {
+            let msg = format!("consolidation: recall reply unreadable (fail-soft): {e}");
+            tracing::error!("{msg}");
+            return Distilled::Stop {
+                msg,
+                settled: false,
+            };
+        }
+    };
     if records.len() < MIN_RECORDS {
         let msg = format!(
             "consolidation: skipping — only {} record(s) found, need at least {MIN_RECORDS}",
@@ -1064,28 +1039,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_recall_output_empty() {
-        assert!(parse_recall_output("").is_empty());
-    }
-
-    #[test]
-    fn parse_recall_output_single_record() {
-        let text = "--- abc123 ---\n  topic: test\n  importance: high\n  weight: 0.85\n  summary: observed that the project uses Rust\n  keywords: test\n  score: 0.9\n";
-        let records = parse_recall_output(text);
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].summary, "observed that the project uses Rust");
-    }
-
-    #[test]
-    fn parse_recall_output_multiple_records() {
-        let text = "--- id-1 ---\n  summary: first observation\n  weight: 0.1\n--- id-2 ---\n  summary: second observation\n  weight: 0.99\n";
-        let records = parse_recall_output(text);
-        assert_eq!(records.len(), 2);
-        assert_eq!(records[0].summary, "first observation");
-        assert_eq!(records[1].summary, "second observation");
-    }
-
-    #[test]
     fn parse_bullets_empty_text() {
         assert!(parse_bullets("").is_empty());
     }
@@ -1143,38 +1096,6 @@ mod tests {
         let text = "-  hello world";
         let bullets = parse_bullets(text);
         assert_eq!(bullets, vec!["hello world"]);
-    }
-
-    #[test]
-    fn parse_recall_output_missing_summary_skipped() {
-        let text = "--- id-1 ---\n  importance: high\n  weight: 0.5\n";
-        let records = parse_recall_output(text);
-        assert_eq!(records.len(), 0);
-    }
-
-    #[test]
-    fn parse_recall_output_keeps_each_record_topic() {
-        let text =
-            "--- a ---\n  topic: t1\n  summary: one\n--- b ---\n  summary: two\n  topic: t2\n";
-        let got: Vec<_> = parse_recall_output(text)
-            .into_iter()
-            .map(|r| (r.summary, r.topic))
-            .collect();
-        assert_eq!(
-            got,
-            [
-                ("one".to_string(), Some("t1".to_string())),
-                ("two".to_string(), Some("t2".to_string()))
-            ]
-        );
-    }
-
-    #[test]
-    fn parse_recall_output_empty_summary_creates_record() {
-        let text = "--- id-1 ---\n  summary:\n  weight: 0.5\n";
-        let records = parse_recall_output(text);
-        assert_eq!(records.len(), 1);
-        assert!(records[0].summary.is_empty());
     }
 
     // -- isolated claude -p child (#2355) --
@@ -1291,7 +1212,7 @@ mod tests {
         use wiremock::{Mock, MockServer, ResponseTemplate};
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body("")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body("[]")))
             .mount(&server)
             .await;
         let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("client");
@@ -1359,7 +1280,7 @@ mod tests {
         use wiremock::matchers::{body_string_contains, method};
         use wiremock::{Mock, ResponseTemplate};
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body("")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body("[]")))
             .mount(server)
             .await;
         if !store_ok {
@@ -1370,6 +1291,31 @@ mod tests {
                 .mount(server)
                 .await;
         }
+    }
+
+    #[tokio::test]
+    async fn distill_asks_for_json_and_stops_fail_soft_on_a_text_reply() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, ResponseTemplate};
+        let server = wiremock::MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body("--- a ---\n")))
+            .mount(&server)
+            .await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("client");
+        let Distilled::Stop { msg, settled } = distill(&cc(), &client, "proj", None).await else {
+            panic!("a text reply must stop the run");
+        };
+        assert!(!settled, "an unreadable reply is retried on a later run");
+        assert!(msg.contains("recall reply unreadable"), "{msg}");
+        assert!(msg.contains("Fix: upgrade icm to 0.11.5 or later"), "{msg}");
+        let asked = server.received_requests().await.expect("recorded");
+        assert!(
+            asked
+                .iter()
+                .any(|r| String::from_utf8_lossy(&r.body).contains(r#""format":"json""#)),
+            "the recall must ask for JSON"
+        );
     }
 
     async fn recalls_of_fifty(server: &wiremock::MockServer) -> usize {
@@ -1591,16 +1537,7 @@ mod tests {
         }
     }
 
-    // ===== #1166: property-test coverage for parse_bullets and parse_recall_output =====
-
-    /// A single simulated line of `icm_memory_recall` output.
-    fn arb_recall_line() -> impl Strategy<Value = String> {
-        prop_oneof![
-            Just("--- record ---".to_string()),
-            "summary: .{0,20}".prop_map(|s| s),
-            ".{0,20}".prop_map(|s| s),
-        ]
-    }
+    // ===== #1166: property-test coverage for parse_bullets =====
 
     proptest! {
         /// The model's raw text response is arbitrary as far as `parse_bullets`
@@ -1630,40 +1567,6 @@ mod tests {
                     "bullet {bullet:?} exceeds the length bound"
                 );
             }
-        }
-
-        /// Arbitrary recall-output text — including delimiter lines with no
-        /// `summary:` field, and `summary:` lines outside any delimiter —
-        /// must never panic.
-        #[test]
-        fn parse_recall_output_never_panics(
-            lines in proptest::collection::vec(arb_recall_line(), 0..10),
-        ) {
-            let text = lines.join("\n");
-            let _ = parse_recall_output(&text);
-        }
-
-        /// A record can only be produced once a `--- ... ---` delimiter has
-        /// opened it, so the output can never contain more records than
-        /// there are delimiter lines in the input — true regardless of how
-        /// many (or few) `summary:` lines follow each one.
-        #[test]
-        fn parse_recall_output_never_exceeds_delimiter_count(
-            lines in proptest::collection::vec(arb_recall_line(), 0..10),
-        ) {
-            // Match parse_recall_output's own delimiter predicate, not the
-            // literal synthetic delimiter string — a random ".{0,20}" junk
-            // line could otherwise coincidentally match "--- ... ---" too.
-            let delimiter_count = lines
-                .iter()
-                .filter(|l| {
-                    let t = l.trim();
-                    t.starts_with("--- ") && t.ends_with(" ---")
-                })
-                .count();
-            let text = lines.join("\n");
-            let records = parse_recall_output(&text);
-            prop_assert!(records.len() <= delimiter_count);
         }
     }
 }
