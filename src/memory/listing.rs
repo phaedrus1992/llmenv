@@ -27,14 +27,19 @@ pub(crate) fn render_list(records: &[RecallRecord]) -> String {
         .iter()
         .map(|r| format!("{}\n", line(&SnapshotRecord::from(r))))
         .collect();
-    out.push_str(&format!(
-        "{} memories. llmenv asks icm for at most {}, and fewer come back when they do not fit \
-         in a {}-token budget.",
-        records.len(),
+    out.push_str(&count_note(records.len()));
+    out
+}
+
+/// The count of records, and the cap of one recall. `memory diff` prints it too, because a record
+/// that does not fit in the budget is missing from the reply and reads as removed.
+pub(crate) fn count_note(count: usize) -> String {
+    format!(
+        "{count} memories. llmenv asks icm for at most {}, and fewer come back when they do not \
+         fit in a {}-token budget.",
         recall_json::BUDGET_MAX_LIMIT,
         recall_json::MAX_TOKENS
-    ));
-    out
+    )
 }
 
 /// One record as `memory diff` stores and compares it. Other recall fields, such as the score,
@@ -58,15 +63,31 @@ impl From<&RecallRecord> for SnapshotRecord {
     }
 }
 
-/// One record on one line. The summary is cut at its first line break, so a summary cannot forge
-/// a second diff line.
+/// One record on one line. The summary is cut at its first line break, with ` …` when more
+/// follows, so two records that differ after that break do not print the same line. Each field
+/// loses its control and bidirectional characters, so a stored memory cannot forge a diff line
+/// or send a terminal escape.
 fn line(r: &SnapshotRecord) -> String {
-    let summary = r.summary.lines().next().unwrap_or_default();
-    format!("[{}] {summary} ({}, {})", r.topic, r.importance, r.id)
+    use crate::util::strip_unsafe_chars;
+    let mut summary_lines = r.summary.lines();
+    let first = summary_lines.next().unwrap_or_default();
+    let more = if summary_lines.next().is_some() {
+        " …"
+    } else {
+        ""
+    };
+    format!(
+        "[{}] {}{more} ({}, {})",
+        strip_unsafe_chars(&r.topic),
+        strip_unsafe_chars(first),
+        strip_unsafe_chars(&r.importance),
+        strip_unsafe_chars(&r.id)
+    )
 }
 
 /// The diff lines from `previous` to `current`, matched by record id: `+` for a new record, `-`
-/// for a gone one, and a `-` then `+` pair for a changed one. Empty when nothing changed.
+/// for a gone one, and a `-` then `+` pair for a changed one. Empty when nothing changed. icm sends
+/// each id once; if an id repeats, its last record is the one compared.
 pub(crate) fn diff_lines(previous: &[SnapshotRecord], current: &[SnapshotRecord]) -> Vec<String> {
     let before: BTreeMap<&str, &SnapshotRecord> =
         previous.iter().map(|r| (r.id.as_str(), r)).collect();
@@ -158,7 +179,7 @@ mod tests {
         )
         .unwrap();
         let text = render_list(&records);
-        assert!(text.starts_with("[t] one (high, a1)\n"), "{text}");
+        assert!(text.starts_with("[t] one … (high, a1)\n"), "{text}");
         assert!(!text.contains("two"), "{text}");
         assert!(
             text.contains("1 memories. llmenv asks icm for at most 200"),
@@ -220,33 +241,114 @@ mod tests {
         );
     }
 
+    // A stored memory cannot send a terminal escape or a second line through any field.
+    #[test]
+    fn a_record_line_has_no_control_character_in_any_field() {
+        let hostile = SnapshotRecord {
+            id: "i\r\x1b]52;c;x\x07".into(),
+            topic: "t\nforged".into(),
+            summary: "s\u{202e}x\rmore".into(),
+            importance: "high\x1b[2J".into(),
+        };
+        let text = line(&hostile);
+        assert!(!text.chars().any(char::is_control), "{text:?}");
+        assert!(!text.contains('\u{202e}'), "{text:?}");
+    }
+
+    #[test]
+    fn records_that_differ_after_the_first_line_print_different_lines() {
+        let one = rec("a", "same\nfirst");
+        let two = rec("a", "same");
+        assert_ne!(line(&one), line(&two));
+    }
+
     fn arb_records() -> impl Strategy<Value = Vec<SnapshotRecord>> {
-        proptest::collection::btree_map("[a-e]", "[a-z ]{0,6}", 0..5).prop_map(|m| {
+        proptest::collection::btree_map("[a-e]", "\\PC{0,8}", 0..5).prop_map(|m| {
             m.into_iter()
                 .map(|(id, summary)| rec(&id, &summary))
                 .collect()
         })
     }
 
+    /// The ids that the diff marks with `sign`, read from the end of each line.
+    fn ids(lines: &[String], sign: char) -> std::collections::BTreeSet<String> {
+        lines
+            .iter()
+            .filter(|l| l.starts_with(sign))
+            .filter_map(|l| l.rsplit(", ").next())
+            .map(|tail| tail.trim_end_matches(')').to_string())
+            .collect()
+    }
+
     proptest! {
-        /// A snapshot compared with itself, in any order, shows no change. Each id that is only
-        /// on one side gives exactly one line.
+        /// A snapshot compared with itself, in any order, shows no change. A removed id is only
+        /// on `-` lines, an added id only on `+` lines, a changed id on both, and an equal id on
+        /// none.
         #[test]
-        fn the_diff_depends_on_ids_and_content_not_order(
+        fn the_diff_names_each_added_removed_and_changed_id(
             previous in arb_records(),
             current in arb_records(),
         ) {
-            let mut shuffled = previous.clone();
-            shuffled.reverse();
-            prop_assert!(diff_lines(&previous, &shuffled).is_empty());
+            let mut reversed = previous.clone();
+            reversed.reverse();
+            prop_assert!(diff_lines(&previous, &reversed).is_empty());
             let lines = diff_lines(&previous, &current);
-            let only_one_side = previous.iter().filter(|p| !current.iter().any(|c| c.id == p.id)).count()
-                + current.iter().filter(|c| !previous.iter().any(|p| p.id == c.id)).count();
-            let changed = previous
-                .iter()
-                .filter(|p| current.iter().any(|c| c.id == p.id && c != *p))
-                .count();
-            prop_assert_eq!(lines.len(), only_one_side + 2 * changed);
+            prop_assert!(lines.iter().all(|l| !l.contains('\n')));
+            let minus = ids(&lines, '-');
+            let plus = ids(&lines, '+');
+            for p in &previous {
+                match current.iter().find(|c| c.id == p.id) {
+                    None => prop_assert!(minus.contains(&p.id) && !plus.contains(&p.id)),
+                    Some(c) if c != p => prop_assert!(minus.contains(&p.id) && plus.contains(&p.id)),
+                    Some(_) => prop_assert!(!minus.contains(&p.id) && !plus.contains(&p.id)),
+                }
+            }
+            for c in current.iter().filter(|c| previous.iter().all(|p| p.id != c.id)) {
+                prop_assert!(plus.contains(&c.id) && !minus.contains(&c.id));
+            }
         }
+
+        /// A snapshot reads back exactly as written, whatever its summaries hold.
+        #[test]
+        fn a_snapshot_round_trips(records in proptest::collection::vec(
+            ("[a-z0-9]{1,6}", "\\PC{0,4}", "(?s).{0,20}", "[a-z]{0,6}"), 0..5,
+        )) {
+            let records: Vec<SnapshotRecord> = records
+                .into_iter()
+                .map(|(id, topic, summary, importance)| SnapshotRecord { id, topic, summary, importance })
+                .collect();
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(DIFF_SNAPSHOT);
+            write_snapshot(&path, &records).unwrap();
+            prop_assert_eq!(read_snapshot(&path).unwrap(), Some(records));
+        }
+
+        /// The list has one line for each record, each line starts with its topic, and the count
+        /// line comes last.
+        #[test]
+        fn the_list_has_one_line_per_record(records in arb_records()) {
+            let parsed: Vec<RecallRecord> = records
+                .iter()
+                .map(|r| RecallRecord {
+                    id: r.id.clone(),
+                    topic: r.topic.clone(),
+                    summary: r.summary.clone(),
+                    importance: r.importance.clone(),
+                    keywords: Vec::new(),
+                })
+                .collect();
+            let text = render_list(&parsed);
+            let lines: Vec<&str> = text.lines().collect();
+            prop_assert_eq!(lines.len(), records.len() + 1);
+            let count_line = format!("{} memories.", records.len());
+            prop_assert!(lines.last().is_some_and(|l| l.starts_with(&count_line)));
+        }
+    }
+
+    // icm sends each id once. If an id repeats, the last record for it is the one compared.
+    #[test]
+    fn a_repeated_id_compares_its_last_record() {
+        let previous = [rec("a", "first"), rec("a", "second")];
+        assert!(diff_lines(&previous, &[rec("a", "second")]).is_empty());
     }
 }

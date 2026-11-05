@@ -154,6 +154,8 @@ pub(crate) fn diff() -> anyhow::Result<()> {
         for line in lines {
             println!("{line}");
         }
+        println!();
+        println!("{}", listing::count_note(current.len()));
     }
     listing::write_snapshot(&snapshot_path, &current)
 }
