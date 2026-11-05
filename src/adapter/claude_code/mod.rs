@@ -37,7 +37,7 @@ pub(crate) use skill_copy::copy_dir_owner_only;
 /// Command the auto-emitted SessionStart hook runs to inject source config paths
 /// into agent context (#289). Outputs `hookSpecificOutput.additionalContext` JSON
 /// so the agent always knows where to edit config rather than touching the cache.
-fn config_context_command() -> String {
+fn config_context_command() -> anyhow::Result<String> {
     hook_command("config-context --engine claude_code")
 }
 
@@ -45,14 +45,14 @@ fn config_context_command() -> String {
 /// managed cache directory (#289). Reads the Write/Edit/MultiEdit tool call from
 /// stdin and prints a redirection hint if the target is a cache path. Exits 0
 /// (fail-soft) so the write still proceeds; the hint keeps agents oriented.
-fn config_guard_command() -> String {
+fn config_guard_command() -> anyhow::Result<String> {
     hook_command("config-guard --engine claude_code")
 }
 
 /// Command the auto-emitted throttle hooks run. Throttle hooks fire on
 /// PreToolUse and UserPromptSubmit to poll the usage backend and sleep a
 /// capped adaptive delay to avoid rate limits.
-fn throttle_command() -> String {
+fn throttle_command() -> anyhow::Result<String> {
     hook_command("throttle")
 }
 
@@ -61,7 +61,7 @@ fn throttle_command() -> String {
 /// `llmenv hook-run --engine claude_code session_start`. Dispatches ICM memory
 /// wake-up/store (#197/#228) and, per `session_log` config, the session-log
 /// file/transcript sinks (#382). Always fail-soft (exit 0).
-fn hook_run_command() -> String {
+fn hook_run_command() -> anyhow::Result<String> {
     hook_command("hook-run --engine claude_code")
 }
 
@@ -1160,7 +1160,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         .entry("SessionStart".to_string())
         .or_default()
         .push(json!({
-            "hooks": [{ "type": "command", "command": config_context_command() }],
+            "hooks": [{ "type": "command", "command": config_context_command()? }],
         }));
 
     // #289: warn the agent when it tries to write inside the managed cache dir.
@@ -1171,7 +1171,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         .or_default()
         .push(json!({
             "matcher": "^(Write|Edit|MultiEdit)$",
-            "hooks": [{ "type": "command", "command": config_guard_command() }],
+            "hooks": [{ "type": "command", "command": config_guard_command()? }],
         }));
 
     // #318: read-once file dedup hook — warn or deny repeated file reads.
@@ -1184,7 +1184,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         .or_default()
         .push(json!({
             "matcher": "^Read$",
-            "hooks": [{ "type": "command", "command": format!("{} pre_tool_use", hook_run_command()) }],
+            "hooks": [{ "type": "command", "command": format!("{} pre_tool_use", hook_run_command()?) }],
         }));
 
     // #317: the metrics layer counts on PostToolUse, which only session
@@ -1202,7 +1202,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             .entry("PostToolUse".to_string())
             .or_default()
             .push(json!({
-                "hooks": [{ "type": "command", "command": format!("{} post_tool_use", hook_run_command()) }],
+                "hooks": [{ "type": "command", "command": format!("{} post_tool_use", hook_run_command()?) }],
             }));
     }
 
@@ -1220,7 +1220,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             .or_default()
             .push(json!({
                 "matcher": format!("^({})$", crate::hook_run::shell_tool::SHELL_TOOLS.join("|")),
-                "hooks": [{ "type": "command", "command": format!("{} pre_tool_use", hook_run_command()) }],
+                "hooks": [{ "type": "command", "command": format!("{} pre_tool_use", hook_run_command()?) }],
             }));
     }
 
@@ -1241,7 +1241,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             .or_default()
             .push(json!({
                 "matcher": "^Write$",
-                "hooks": [{ "type": "command", "command": format!("{} pre_tool_use", hook_run_command()) }],
+                "hooks": [{ "type": "command", "command": format!("{} pre_tool_use", hook_run_command()?) }],
             }));
     }
 
@@ -1259,7 +1259,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             .or_default()
             .push(json!({
                 "matcher": format!("^{}$", crate::hook_run::cbm_index_guard::INDEX_REPOSITORY_TOOL),
-                "hooks": [{ "type": "command", "command": format!("{} pre_tool_use", hook_run_command()) }],
+                "hooks": [{ "type": "command", "command": format!("{} pre_tool_use", hook_run_command()?) }],
             }));
     }
 
@@ -1287,7 +1287,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             .or_default()
             .push(json!({
                 "matcher": "^(TaskCreate|TaskList|TaskUpdate)$",
-                "hooks": [{ "type": "command", "command": format!("{} pre_tool_use", hook_run_command()) }],
+                "hooks": [{ "type": "command", "command": format!("{} pre_tool_use", hook_run_command()?) }],
             }));
     }
 
@@ -1297,13 +1297,13 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             .entry("PreToolUse".to_string())
             .or_default()
             .push(json!({
-                "hooks": [{ "type": "command", "command": format!("{} pre-tool", throttle_command()) }],
+                "hooks": [{ "type": "command", "command": format!("{} pre-tool", throttle_command()?) }],
             }));
         hooks_by_event
             .entry("UserPromptSubmit".to_string())
             .or_default()
             .push(json!({
-                "hooks": [{ "type": "command", "command": format!("{} prompt", throttle_command()) }],
+                "hooks": [{ "type": "command", "command": format!("{} prompt", throttle_command()?) }],
             }));
     }
 
@@ -1315,7 +1315,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             .entry((*native_event).to_string())
             .or_default()
             .push(json!({
-                "hooks": [{ "type": "command", "command": format!("{} {neutral_event}", hook_run_command()) }],
+                "hooks": [{ "type": "command", "command": format!("{} {neutral_event}", hook_run_command()?) }],
             }));
     }
 
@@ -1339,7 +1339,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             .entry("UserPromptSubmit".to_string())
             .or_default()
             .push(json!({
-                "hooks": [{ "type": "command", "command": format!("{} user_prompt_submit", hook_run_command()) }],
+                "hooks": [{ "type": "command", "command": format!("{} user_prompt_submit", hook_run_command()?) }],
             }));
     }
 
@@ -1358,7 +1358,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             .entry("UserPromptSubmit".to_string())
             .or_default()
             .push(json!({
-                "hooks": [{ "type": "command", "command": format!("{} turn_start", hook_run_command()) }],
+                "hooks": [{ "type": "command", "command": format!("{} turn_start", hook_run_command()?) }],
             }));
     }
 
@@ -1376,7 +1376,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
                 .entry((*native_event).to_string())
                 .or_default()
                 .push(json!({
-                    "hooks": [{ "type": "command", "command": format!("{} {neutral_event}", hook_run_command()) }],
+                    "hooks": [{ "type": "command", "command": format!("{} {neutral_event}", hook_run_command()?) }],
                 }));
         }
     }
@@ -1386,7 +1386,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             .or_default()
             .push(json!({
                 "matcher": "^Agent$",
-                "hooks": [{ "type": "command", "command": format!("{} subagent_task", hook_run_command()) }],
+                "hooks": [{ "type": "command", "command": format!("{} subagent_task", hook_run_command()?) }],
             }));
     }
 
@@ -1398,7 +1398,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
                 .entry((*native_event).to_string())
                 .or_default()
                 .push(json!({
-                    "hooks": [{ "type": "command", "command": format!("{} {neutral_event}", hook_run_command()) }],
+                    "hooks": [{ "type": "command", "command": format!("{} {neutral_event}", hook_run_command()?) }],
                 }));
         }
     } else if lifecycle_hook_registrations(manifest)
@@ -1416,7 +1416,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             .entry("Stop".to_string())
             .or_default()
             .push(json!({
-                "hooks": [{ "type": "command", "command": format!("{} stop", hook_run_command()) }],
+                "hooks": [{ "type": "command", "command": format!("{} stop", hook_run_command()?) }],
             }));
     }
 
@@ -1430,8 +1430,8 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         .and_then(|f| f.task_tracker.as_ref())
         .filter(|t| t.enabled)
     {
-        let post = format!("{} post_tool_use", hook_run_command());
-        let pre = format!("{} pre_tool_use", hook_run_command());
+        let post = format!("{} post_tool_use", hook_run_command()?);
+        let pre = format!("{} pre_tool_use", hook_run_command()?);
         // The shell tools come from one list, so a Monitor command gets the same reminder as Bash.
         let post_candidates: Vec<&str> = ["Skill", "Edit", "Write", "MultiEdit", "AskUserQuestion"]
             .into_iter()
@@ -3473,18 +3473,18 @@ mod tests {
 
         assert!(
             hook_commands_for(&settings, "SessionStart")
-                .contains(&format!("{} session_start", hook_run_command()))
+                .contains(&format!("{} session_start", hook_run_command().unwrap()))
         );
         assert!(
             hook_commands_for(&settings, "SessionEnd")
-                .contains(&format!("{} session_end", hook_run_command()))
+                .contains(&format!("{} session_end", hook_run_command().unwrap()))
         );
         // PreToolUse now always has a hook-run command for the read-once hook
         // (#318 unconditional registration).
         assert!(
             hook_commands_for(&settings, "PreToolUse")
                 .iter()
-                .any(|c| c.starts_with(&hook_run_command())),
+                .any(|c| c.starts_with(&hook_run_command().unwrap())),
             "PreToolUse must carry a hook-run command for read-once"
         );
         for event in [
@@ -3498,7 +3498,7 @@ mod tests {
             assert!(
                 hook_commands_for(&settings, event)
                     .iter()
-                    .all(|c| !c.starts_with(&hook_run_command())),
+                    .all(|c| !c.starts_with(&hook_run_command().unwrap())),
                 "{event} must not carry a hook-run command when all sinks are disabled; got {:?}",
                 hook_commands_for(&settings, event)
             );
@@ -3533,7 +3533,7 @@ mod tests {
         ] {
             assert_eq!(
                 hook_commands_for(&settings, event),
-                [format!("{} {neutral}", hook_run_command())],
+                [format!("{} {neutral}", hook_run_command().unwrap())],
                 "{event}"
             );
         }
@@ -3544,7 +3544,7 @@ mod tests {
             .any(|entry| {
                 entry["matcher"] == "^Agent$"
                     && entry["hooks"][0]["command"]
-                        == format!("{} subagent_task", hook_run_command())
+                        == format!("{} subagent_task", hook_run_command().unwrap())
             });
         assert!(
             agent_matcher,
@@ -3585,11 +3585,11 @@ mod tests {
         }
         assert!(
             !hook_commands_for(&settings, "PreToolUse")
-                .contains(&format!("{} subagent_task", hook_run_command()))
+                .contains(&format!("{} subagent_task", hook_run_command().unwrap()))
         );
         assert!(
             hook_commands_for(&settings, "UserPromptSubmit")
-                .contains(&format!("{} turn_start", hook_run_command())),
+                .contains(&format!("{} turn_start", hook_run_command().unwrap())),
             "stateless recall still runs"
         );
     }
@@ -3618,7 +3618,7 @@ mod tests {
         let settings = render_settings_for_test(&manifest);
         assert!(
             hook_commands_for(&settings, "UserPromptSubmit")
-                .contains(&format!("{} turn_start", hook_run_command()))
+                .contains(&format!("{} turn_start", hook_run_command().unwrap()))
         );
     }
 
@@ -3659,7 +3659,7 @@ mod tests {
             ("SubagentStop", "subagent_stop"),
             ("PreCompact", "pre_compact"),
         ] {
-            let expected = format!("{} {neutral}", hook_run_command());
+            let expected = format!("{} {neutral}", hook_run_command().unwrap());
             assert!(
                 hook_commands_for(&settings, event).contains(&expected),
                 "{event} missing {expected:?}; got {:?}",
@@ -3669,7 +3669,7 @@ mod tests {
         // Baseline hooks remain present too.
         assert!(
             hook_commands_for(&settings, "SessionStart")
-                .contains(&format!("{} session_start", hook_run_command()))
+                .contains(&format!("{} session_start", hook_run_command().unwrap()))
         );
     }
 
@@ -5927,7 +5927,7 @@ mod tests {
         assert_eq!(json["statusLine"]["type"], "command");
         assert_eq!(
             json["statusLine"]["command"],
-            hook_command("statusline --color always")
+            hook_command("statusline --color always").unwrap()
         );
         assert_eq!(json["otherKey"], "value");
     }
@@ -6567,7 +6567,7 @@ mod tests {
         assert!(entries[0].get("matcher").is_none());
         assert_eq!(
             hook_commands_for(&settings, "PostModelSwitch"),
-            [format!("{} post_model_switch", hook_run_command())]
+            [format!("{} post_model_switch", hook_run_command().unwrap())]
         );
         assert!(
             ClaudeCodeAdapter
@@ -6703,27 +6703,31 @@ mod tests {
     #[test]
     fn config_context_command_carries_engine_flag() {
         assert!(
-            config_context_command().contains("--engine claude_code"),
-            "config_context_command must carry --engine flag: {:?}",
             config_context_command()
+                .unwrap()
+                .contains("--engine claude_code"),
+            "config_context_command must carry --engine flag: {:?}",
+            config_context_command().unwrap()
         );
     }
 
     #[test]
     fn config_guard_command_carries_engine_flag() {
         assert!(
-            config_guard_command().contains("--engine claude_code"),
-            "config_guard_command must carry --engine flag: {:?}",
             config_guard_command()
+                .unwrap()
+                .contains("--engine claude_code"),
+            "config_guard_command must carry --engine flag: {:?}",
+            config_guard_command().unwrap()
         );
     }
 
     #[test]
     fn hook_run_command_carries_engine_flag() {
         assert!(
-            hook_run_command().contains("--engine claude_code"),
+            hook_run_command().unwrap().contains("--engine claude_code"),
             "hook_run_command must carry --engine flag: {:?}",
-            hook_run_command()
+            hook_run_command().unwrap()
         );
     }
 

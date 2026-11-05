@@ -127,7 +127,9 @@ fn the_commit_gate_runs_pre_tool_use_for_bash() {
             .as_array()
             .unwrap()
             .iter()
-            .find(|h| h["command"] == hook_command("hook-run pre_tool_use --engine opencode"))
+            .find(|h| {
+                h["command"] == hook_command("hook-run pre_tool_use --engine opencode").unwrap()
+            })
             .cloned()
     };
     let on = table("task_tracker: {enabled: true}");

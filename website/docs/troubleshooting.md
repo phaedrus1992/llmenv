@@ -221,9 +221,10 @@ They are `route`, `arp`, `ip`, `networksetup`, `ipconfig`, `iw`, `nmcli`, and `n
 When one of them is not found, its scopes do not match.
 llmenv also gives `mcp-proxy` the absolute path of `icm`, because `mcp-proxy` would otherwise do its own `PATH` search.
 The hook commands in each engine's config name the running llmenv binary by its absolute path (changed in v3.14.0).
-The bare name `llmenv` is used only when that path is not UTF-8 or the OS cannot report it.
-llmenv then logs an error that names the fix.
-`llmenv doctor` also reports this fallback, with the fix (added in v3.14.0).
+When that path is not UTF-8, or the OS cannot report it, `llmenv export` and `llmenv regenerate` fail.
+The error names the path and the fix.
+A bare `llmenv` would let a `PATH` entry run another program, so no fallback is used.
+`llmenv doctor` uses the same lookup and reports the same error (added in v3.14.0).
 `llmenv doctor` also warns when the hook path is in a cargo `target` folder or a temp folder,
 or names a binary that was removed. Install llmenv, then run `llmenv regenerate` with the
 installed binary (added in v3.14.0).
