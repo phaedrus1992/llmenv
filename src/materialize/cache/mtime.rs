@@ -25,7 +25,8 @@ pub enum AgeSource {
 /// The newest file mtime under `p`, as the `state/tmp` sweep judges age: a folder mtime changes
 /// when a child is removed, so a partial delete would reset the age (#3184). On failure, the
 /// error is logged with its path, `p` is recorded in `failed`, and `None` is returned, so one
-/// unreadable folder does not stop the rest of the pass (#2859).
+/// unreadable folder does not stop the rest of the pass (#2859). An entry that another process
+/// removes during the walk is gone, not a failure, so it is not recorded (#3423).
 pub(crate) fn newest_file_mtime_or_record(
     p: &Path,
     source: AgeSource,
@@ -33,6 +34,10 @@ pub(crate) fn newest_file_mtime_or_record(
 ) -> Option<SystemTime> {
     match newest_file_mtime(p, source) {
         Ok(m) => Some(m),
+        Err(e) if super::is_vanished(&e) => {
+            tracing::debug!(path = %p.display(), "cache gc: entry removed during the walk");
+            None
+        }
         Err(e) => {
             tracing::error!(
                 "cache gc cannot scan the mtimes under {}, so it is kept: {e:#}. Fix: check \
@@ -207,6 +212,36 @@ mod tests {
             got > SystemTime::now() - Duration::from_secs(60),
             "got {got:?}"
         );
+    }
+
+    // An entry listed by the gc and removed before its walk is gone, not a failure (#3423).
+    #[test]
+    fn an_entry_removed_before_its_walk_is_not_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("removed-after-listing");
+        let mut recorded = Vec::new();
+        let got = newest_file_mtime_or_record(&gone, AgeSource::MtimeOrCtime, |path, cause| {
+            recorded.push((path, cause));
+        });
+        assert_eq!(got, None);
+        assert!(recorded.is_empty(), "{recorded:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_entry_is_still_recorded() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let mut recorded = Vec::new();
+        let got = newest_file_mtime_or_record(&locked, AgeSource::MtimeOrCtime, |path, _| {
+            recorded.push(path);
+        });
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(got, None);
+        assert_eq!(recorded, vec![locked]);
     }
 
     #[cfg(unix)]

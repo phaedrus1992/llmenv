@@ -452,6 +452,16 @@ fn entry_and_type(
     }
 }
 
+/// Whether `error` is a missing entry, anywhere in its chain. A `NotFound` is the entry being
+/// removed while a walk runs. Other errors stay failures (#2835, #3423).
+pub(crate) fn is_vanished(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+    })
+}
+
 /// `None` for a path that no longer exists. Any other error stays an error.
 pub(super) fn skip_vanished<T>(result: std::io::Result<T>) -> std::io::Result<Option<T>> {
     match result {
