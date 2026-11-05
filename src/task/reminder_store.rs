@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use super::StrictTasks;
-use super::session::{self, Session};
+use super::session::{self, Session, filter};
 
 /// The task store and the session files of one hook run, each read once, strictly, and shared by
 /// its reminders (#3466, #3468).
@@ -14,7 +14,8 @@ pub(super) struct Stored {
 }
 
 /// The error of a shared read. The error is borrowed by every reminder, so only its text can be
-/// carried on; the text is the same as the owned error shows.
+/// carried on: the text is the `{:#}` form of the owned error, which is how every reminder
+/// prints it. The source chain is not kept.
 fn shared<T>(read: &anyhow::Result<T>) -> anyhow::Result<&T> {
     read.as_ref().map_err(|e| anyhow::anyhow!("{e:#}"))
 }
@@ -36,7 +37,8 @@ impl Stored {
         shared(&self.tasks)
     }
 
-    /// The open sessions of `project` that are not hidden from `caller`.
+    /// The open sessions of `project` that are not hidden from `caller`. `None` hides no
+    /// session.
     ///
     /// # Errors
     /// The session files cannot be read.
@@ -45,14 +47,15 @@ impl Stored {
         project: &str,
         caller: Option<&str>,
     ) -> anyhow::Result<Vec<Session>> {
-        Ok(shared(&self.sessions)?
-            .iter()
-            .filter(|s| s.is_open() && s.project == project && s.visible_to(caller))
-            .cloned()
-            .collect())
+        Ok(filter::open_visible(
+            shared(&self.sessions)?,
+            project,
+            caller,
+        ))
     }
 
     /// The id of every session of `project`, open or closed, that is not hidden from `caller`.
+    /// `None` gives every session of the project, so a caller always says which it means.
     ///
     /// # Errors
     /// The session files cannot be read.
@@ -61,23 +64,11 @@ impl Stored {
         project: &str,
         caller: Option<&str>,
     ) -> anyhow::Result<HashSet<String>> {
-        Ok(shared(&self.sessions)?
-            .iter()
-            .filter(|s| s.project == project && s.visible_to(caller))
-            .map(|s| s.id.clone())
-            .collect())
-    }
-
-    /// The id of every session of `project`, open or closed.
-    ///
-    /// # Errors
-    /// The session files cannot be read.
-    pub(super) fn session_ids_for_project(&self, project: &str) -> anyhow::Result<HashSet<String>> {
-        Ok(shared(&self.sessions)?
-            .iter()
-            .filter(|s| s.project == project)
-            .map(|s| s.id.clone())
-            .collect())
+        Ok(filter::ids_visible(
+            shared(&self.sessions)?,
+            project,
+            caller,
+        ))
     }
 
     /// A store from reads that a test made, such as a task read that failed.
@@ -139,7 +130,7 @@ mod tests {
         let ids: Vec<&str> = open.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, [mine.as_str()]);
         let all = stored
-            .session_ids_for_project("proj-3468")
+            .session_ids_visible_to("proj-3468", None)
             .expect("readable");
         assert_eq!(all.len(), 1);
     }
@@ -153,5 +144,57 @@ mod tests {
             err.contains("the task store cannot be read: bad session file"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn a_session_error_wins_over_a_task_error() {
+        let stored = Stored::from_parts(
+            Err(anyhow::anyhow!("bad task file")),
+            Err(anyhow::anyhow!("bad session file")),
+        );
+        let err = store_for_reminder("proj-3468", &stored).expect_err("both reads failed");
+        assert!(
+            err.contains("bad session file") && !err.contains("bad task file"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_task_error_alone_names_the_task_store() {
+        let stored = Stored::from_parts(Err(anyhow::anyhow!("bad task file")), Ok(Vec::new()));
+        let err = store_for_reminder("proj-3468", &stored).expect_err("tasks are unreadable");
+        assert!(
+            err.contains("the task store cannot be read: bad task file"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn session_start_names_a_task_file_that_cannot_be_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tasks = crate::task::tasks_dir(dir.path());
+        std::fs::create_dir_all(&tasks).expect("tasks dir");
+        std::fs::write(tasks.join("broken.json"), "not json").expect("write");
+        let text = crate::task::session_start_reminder(dir.path());
+        assert!(text.contains("the task store cannot be read"), "{text}");
+    }
+
+    proptest::proptest! {
+        /// A session read error reaches every session accessor with its text, for any caller.
+        #[test]
+        fn a_session_error_reaches_every_accessor(
+            msg in "[a-z]{1,12}",
+            caller in proptest::option::of("[a-z]{1,4}"),
+        ) {
+            let tasks = Ok(crate::task::StrictTasks::from_vec_for_test(Vec::new()));
+            let stored = Stored::from_parts(tasks, Err(anyhow::anyhow!("{msg}")));
+            let caller = caller.as_deref();
+            let open = stored.open_sessions_visible_to("p", caller).expect_err("unreadable");
+            let ids = stored.session_ids_visible_to("p", caller).expect_err("unreadable");
+            let open = format!("{open:#}");
+            proptest::prop_assert!(open.contains(&msg));
+            let ids = format!("{ids:#}");
+            proptest::prop_assert!(ids.contains(&msg));
+        }
     }
 }

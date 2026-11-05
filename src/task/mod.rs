@@ -1216,14 +1216,20 @@ pub(crate) fn session_start_reminder(state_dir: &Path) -> String {
     // One read of the tasks and the sessions feeds every reminder of this hook run (#3468).
     let stored = Stored::read(state_dir);
     let tasks = match stored.tasks() {
-        Ok(tasks) => match tasks_for_current_project(&stored, tasks.as_slice().to_vec()) {
+        Ok(tasks) => match tasks_for_current_project(&stored, tasks.as_slice()) {
             Ok(tasks) => tasks,
             Err(e) => {
                 read_warning = store_warning_text(&e);
                 Vec::new()
             }
         },
-        Err(_) => Vec::new(),
+        // The reminders below repeat this text when the project resolves, and
+        // `combine_reminders` drops the copy. Without a project they do not run, so the text
+        // must come from here.
+        Err(e) => {
+            read_warning = store_warning_text(&e.context("the task store cannot be read"));
+            Vec::new()
+        }
     };
     combine_reminders([
         read_warning,
@@ -1435,7 +1441,7 @@ fn empty_session_lines(
 /// may no longer be "open" — whose `project` matches. Mirrors
 /// [`session_finish_reminders`]'s own project resolution. Empty when the
 /// project can't be resolved (degrades silently — hooks must never error).
-fn tasks_for_current_project(stored: &Stored, tasks: Vec<Task>) -> anyhow::Result<Vec<Task>> {
+fn tasks_for_current_project(stored: &Stored, tasks: &[Task]) -> anyhow::Result<Vec<Task>> {
     let project = match project::current_tag() {
         Ok(project) => project,
         Err(e) => {
@@ -1444,9 +1450,9 @@ fn tasks_for_current_project(stored: &Stored, tasks: Vec<Task>) -> anyhow::Resul
             return Ok(Vec::new());
         }
     };
-    Ok(keep_tasks_in_sessions(
+    Ok(session::filter::tasks_in_sessions(
         tasks,
-        &stored.session_ids_for_project(&project)?,
+        &stored.session_ids_visible_to(&project, None)?,
     ))
 }
 
@@ -1460,9 +1466,9 @@ fn tasks_visible_to(caller: Option<&str>, stored: &Stored) -> anyhow::Result<Vec
         .map_err(|e| anyhow::Error::new(e).context("cannot resolve the project tag"))?;
     // Strict session reads: a corrupt session file must reach the Stop reminder as an error,
     // not drop its tasks silently (#2628).
-    let project_ids = stored.session_ids_for_project(&project)?;
+    let project_ids = stored.session_ids_visible_to(&project, None)?;
     let all = stored.tasks().context("the task store cannot be read")?;
-    let mut tasks = keep_tasks_in_sessions(all.as_slice().to_vec(), &project_ids);
+    let mut tasks = session::filter::tasks_in_sessions(all.as_slice(), &project_ids);
     if caller.is_some() {
         let visible = stored.session_ids_visible_to(&project, caller)?;
         tasks.retain(|t| t.session.as_ref().is_some_and(|id| visible.contains(id)));
@@ -1472,8 +1478,8 @@ fn tasks_visible_to(caller: Option<&str>, stored: &Stored) -> anyhow::Result<Vec
 
 /// Keep only tasks whose session is tagged to `project` — any session ever
 /// tagged to it, open or closed — the shared filter behind `task ls
-/// --current-project` (#1117) and the SessionStart/Stop hook reminders
-/// ([`tasks_for_current_project`]). Legacy tasks with no `session` (predate
+/// --current-project` (#1117). The SessionStart/Stop hook reminders apply the same rule to
+/// their shared read ([`tasks_for_current_project`]). Legacy tasks with no `session` (predate
 /// mandatory sessions) are dropped: they can't be attributed to any
 /// project, and the conservative default is to never surface a task we
 /// can't attribute.
@@ -1487,22 +1493,7 @@ pub(crate) fn filter_tasks_for_project(
     tasks: Vec<Task>,
 ) -> anyhow::Result<Vec<Task>> {
     let session_ids = session::try_session_ids_for_project(state_dir, project)?;
-    Ok(keep_tasks_in_sessions(tasks, &session_ids))
-}
-
-/// Keep the tasks whose session is in `session_ids`. A task with no session is dropped.
-fn keep_tasks_in_sessions(
-    tasks: Vec<Task>,
-    session_ids: &std::collections::HashSet<String>,
-) -> Vec<Task> {
-    tasks
-        .into_iter()
-        .filter(|t| {
-            t.session
-                .as_deref()
-                .is_some_and(|sid| session_ids.contains(sid))
-        })
-        .collect()
+    Ok(session::filter::tasks_in_sessions(&tasks, &session_ids))
 }
 
 /// Resolve the "current" task for `task show --current`/`--next` (#1117):
