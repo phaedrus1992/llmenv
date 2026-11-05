@@ -173,7 +173,11 @@ pub(crate) fn run_record(
         exit: i32::from(result.is_err()),
     });
     result.inspect_err(|e| {
-        tracing::error!("session_log: detached record failed: {e}");
+        // The child runs alone, so the notice reaches the agent through the spool (#3398).
+        crate::agent_notice::record_logged(format!(
+            "llmenv: a session log record was not written: {e:#}. Fix: run `llmenv doctor` to \
+             check session_log.file.path."
+        ));
     })
 }
 
@@ -356,20 +360,14 @@ mod tests {
     // sibling test reaching this `error!` outside any subscriber would make the
     // capture order-dependent.
     #[test]
-    fn run_record_rejects_malformed_payload_json_and_logs_at_error_level() {
-        let dir = tempfile::tempdir().unwrap();
-        let log = dir.path().join("events.jsonl");
-        let err = crate::session_log::tracing_layer::capture_file_logs_at(
-            &log,
-            tracing_subscriber::filter::LevelFilter::ERROR,
-            || run_record("not json", None).unwrap_err(),
-        );
+    fn run_record_rejects_malformed_payload_json_with_a_notice() {
+        let err = run_record("not json", None).unwrap_err();
 
         assert!(err.to_string().to_lowercase().contains("expected"));
-        let body = std::fs::read_to_string(&log).unwrap_or_default();
+        let notices = crate::agent_notice::current().unwrap_or_default();
         assert!(
-            body.contains("detached record failed"),
-            "the failure must log at a level the default EnvFilter passes: {body}"
+            notices.contains("a session log record was not written") && notices.contains("Fix:"),
+            "the failure must reach the agent as a notice: {notices}"
         );
     }
 

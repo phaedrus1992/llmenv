@@ -175,6 +175,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Stop the stale index result notice when the pending result file is already gone. [fix:hook] [#3386]
 - Read a marketplace manifest once for each plugin at export, so the marketplace name check and the plugin list come from the same file. [fix:plugins] [#3087]
 - Count a stale config link that another process removed first as replaced, instead of failing `llmenv export`, and give no notice for a proxy pidfile temp that is already gone. [fix]
+- Show the agent a notice from a detached job (memory store, session log record, consolidation, code index) on the next hook output. Before, a failed job only wrote a log line that the agent never saw. See [Notices from detached jobs](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#notices-from-detached-jobs). [feat:hook] [#3398]
 
 ### Security
 

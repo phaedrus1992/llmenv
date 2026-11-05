@@ -399,6 +399,23 @@ Each notice starts with `llmenv:` and appears once per hook run.
   dropped` — (added in v3.14.0) a trace line was lost. Fix `LLMENV_TRACE_FILE`, or unset
   `LLMENV_TRACE_TIMING`, as the notice says.
 
+### Notices from detached jobs
+
+(added in v3.14.0)
+
+The memory store, the session log record, memory consolidation, and the code index run as detached jobs after the hook returns.
+A notice from such a job is written to `notice_spool/` in the state directory.
+The next hook run prints it and removes the file, so the agent sees it one hook later.
+One hook run prints at most 32 of these notices, and the rest wait for the next run.
+
+- `a memory was not stored in ICM` — a detached memory store failed. Run `llmenv doctor` to check the memory server.
+- `a session log record was not written` — a detached session log write failed.
+  Run `llmenv doctor` to check `session_log.file.path`.
+- `memory consolidation failed` — the consolidation job at session end failed. Run `llmenv doctor`.
+- `the code index job failed` — the codebase-memory-mcp index job failed, for example because the indexer is not installed.
+- `cannot read the detached job notice <path>` or `cannot remove the detached job notice <path>` —
+  a file in `notice_spool/` is broken. Remove the file.
+
 ## Profiling hook-run latency
 
 Lifecycle hooks run on the agent's hot path, so a slow `hook-run` shows up as

@@ -5,6 +5,9 @@
 
 use std::sync::{Mutex, PoisonError};
 
+mod spool;
+pub(crate) use spool::start as start_spool;
+
 /// The most characters of one notice. A notice can carry an error chain, so the cap keeps one
 /// failure from filling the agent's context.
 const MAX_NOTICE_CHARS: usize = 1000;
@@ -75,8 +78,11 @@ impl NoticeList {
 /// Notices raised in this process.
 static NOTICES: Mutex<NoticeList> = Mutex::new(NoticeList::new());
 
-/// Add a notice for the agent. See `NoticeList::record`.
+/// Add a notice for the agent. See `NoticeList::record`. A detached child that spools also writes
+/// the notice to the spool, so the next hook run carries it (#3398).
 pub(crate) fn record(notice: impl Into<String>) {
+    let notice = notice.into();
+    spool::write(&notice);
     NOTICES
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -98,6 +104,16 @@ pub(crate) fn current() -> Option<String> {
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .current()
+}
+
+/// [`current`] after the notices that detached children spooled under the state folder are read
+/// in, for the hook output (#3398). A state folder that cannot be found leaves the spool unread.
+pub(crate) fn current_with_children() -> Option<String> {
+    match crate::paths::state_dir() {
+        Ok(state_dir) => spool::collect(&state_dir),
+        Err(e) => tracing::debug!("detached job notices not read: no state folder: {e:#}"),
+    }
+    current()
 }
 
 #[cfg(test)]

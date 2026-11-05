@@ -40,7 +40,11 @@ pub fn run_consolidation(
         exit: i32::from(result.is_err()),
     });
     result.inspect_err(|e| {
-        tracing::error!("consolidation-run: detached consolidation failed: {e:#}");
+        // The child runs alone, so the notice reaches the agent through the spool (#3398).
+        crate::agent_notice::record_logged(format!(
+            "llmenv: memory consolidation failed: {e:#}. Fix: run `llmenv doctor` to check the \
+             memory server and the consolidation backend."
+        ));
     })
 }
 

@@ -44,7 +44,11 @@ pub fn run_cbm_index(checkpoint_path: &Path) -> anyhow::Result<()> {
         exit: i32::from(result.is_err()),
     });
     result.inspect_err(|e| {
-        tracing::error!("cbm-index-run: indexing failed: {e:#}");
+        // The child runs alone, so the notice reaches the agent through the spool (#3398).
+        crate::agent_notice::record_logged(format!(
+            "llmenv: the code index job failed: {e:#}. Fix: run `llmenv doctor` to check \
+             codebase-memory-mcp."
+        ));
     })
 }
 

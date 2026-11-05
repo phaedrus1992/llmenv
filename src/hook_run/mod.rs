@@ -693,7 +693,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
     // records a notice as it is read.
     let resume_message = resume_cache::session_resume_notice(&hook_event_name, payload);
     // Read after `run_inner`, so every output path below carries it to the agent (#2658).
-    let notice = crate::agent_notice::current();
+    let notice = crate::agent_notice::current_with_children();
     match result {
         Ok(text) => {
             // #318: deny envelope detected — write a proper deny JSON envelope
