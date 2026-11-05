@@ -48,7 +48,7 @@ pub(crate) fn tracking(state_dir: &Path, caller: Option<&str>) -> Tracking {
         session::open_sessions_strict(state_dir, &project),
         list_tasks_strict(state_dir),
     ) {
-        (Ok(sessions), Ok(tasks)) => (sessions, tasks),
+        (Ok(sessions), Ok(tasks)) => (sessions, tasks.into_vec()),
         (Err(e), _) | (_, Err(e)) => {
             tracing::error!("task store cannot be read, so tracking is unknown: {e:#}");
             return Tracking::Unknown(format!("{e:#}"));

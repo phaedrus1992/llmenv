@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use super::{Task, for_current_project, session, store_for_reminder, store_warning_text};
+use super::{Stored, Task, for_current_project, session, store_for_reminder, store_warning_text};
 
 /// For every session open for the current project (resolved from the
 /// process's actual cwd — hooks run with cwd set to the project directory)
@@ -17,26 +17,20 @@ use super::{Task, for_current_project, session, store_for_reminder, store_warnin
 /// one (#1028) — closing out someone else's session is a real mutation of
 /// their bookkeeping, so the nudge is conditioned on recognizing the session
 /// rather than issued as a bare command.
-pub(super) fn session_finish_reminders(
-    state_dir: &Path,
-    caller: Option<&str>,
-    stored: &anyhow::Result<Vec<Task>>,
-) -> String {
-    for_current_project(
-        |project| match store_for_reminder(state_dir, project, stored) {
-            Ok(tasks) => finish_reminder_lines(state_dir, project, caller, &tasks),
-            Err(warning) => warning,
-        },
-    )
+pub(super) fn session_finish_reminders(caller: Option<&str>, stored: &Stored) -> String {
+    for_current_project(|project| match store_for_reminder(project, stored) {
+        Ok(tasks) => finish_reminder_lines(project, caller, tasks, stored),
+        Err(warning) => warning,
+    })
 }
 
 fn finish_reminder_lines(
-    state_dir: &Path,
     project: &str,
     caller: Option<&str>,
-    tasks: &[Task],
+    tasks: &super::StrictTasks,
+    stored: &Stored,
 ) -> String {
-    let open = match session::try_open_sessions_visible_to(state_dir, project, caller) {
+    let open = match stored.open_sessions_visible_to(project, caller) {
         Ok(open) => open,
         Err(e) => return store_warning_text(&e),
     };
@@ -157,8 +151,8 @@ mod tests {
             .expect("test");
         complete_task(dir.path(), &only.slug, true).expect("test");
 
-        let stored = super::super::list_tasks_strict(dir.path());
-        let reminder = session_finish_reminders(dir.path(), None, &stored);
+        let stored = Stored::read(dir.path());
+        let reminder = session_finish_reminders(None, &stored);
         assert!(
             reminder.contains(&session_id),
             "must name the session: {reminder}"
@@ -176,15 +170,14 @@ mod tests {
     fn all_done_reminder_is_empty_for_a_session_with_no_tasks() {
         let dir = TempDir::new().expect("test");
         new_session(dir.path());
-        let stored = super::super::list_tasks_strict(dir.path());
-        assert_eq!(session_finish_reminders(dir.path(), None, &stored), "");
+        let stored = Stored::read(dir.path());
+        assert_eq!(session_finish_reminders(None, &stored), "");
     }
 
     #[test]
     fn an_unreadable_store_gives_the_store_warning_not_a_finish_line() {
-        let dir = TempDir::new().expect("test");
-        let stored = Err(anyhow::anyhow!("broken task file"));
-        let reminder = session_finish_reminders(dir.path(), None, &stored);
+        let stored = Stored::from_parts(Err(anyhow::anyhow!("broken task file")), Ok(Vec::new()));
+        let reminder = session_finish_reminders(None, &stored);
         assert!(
             reminder.contains("the task store cannot be read: broken task file"),
             "{reminder}"

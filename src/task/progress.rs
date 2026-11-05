@@ -1,11 +1,46 @@
 //! Counts and titles over tasks that the caller already read, so one read of the task store
 //! feeds a whole hook run or status line render (#3466).
 
-use super::{Task, TaskState, most_recently_updated};
+use std::path::Path;
 
-/// The done and total task counts of `session_id` among tasks that the caller already read.
-pub(crate) fn progress_in(tasks: &[Task], session_id: &str) -> (u64, u64) {
+use super::{Task, TaskState, UnreadablePolicy, most_recently_updated, read_tasks};
+
+/// Every task of the store, read so that a task file that cannot be read is an error, not a
+/// skipped entry. The field is private and [`StrictTasks::read`] is the one constructor, so a
+/// count over this type can never see a partial store (#2608, #2687, #3469).
+#[derive(Debug)]
+pub(crate) struct StrictTasks(Vec<Task>);
+
+impl StrictTasks {
+    /// Read every task of the store at `state_dir`.
+    ///
+    /// # Errors
+    /// The task directory or a task file cannot be read or parsed.
+    pub(crate) fn read(state_dir: &Path) -> anyhow::Result<Self> {
+        Ok(Self(read_tasks(state_dir, UnreadablePolicy::Fail)?))
+    }
+
+    /// The tasks, for a caller that only reads them.
+    pub(crate) fn as_slice(&self) -> &[Task] {
+        &self.0
+    }
+
+    /// The tasks, for a caller that keeps or filters them.
+    pub(crate) fn into_vec(self) -> Vec<Task> {
+        self.0
+    }
+
+    /// A store that a test builds from tasks it made.
+    #[cfg(test)]
+    pub(crate) fn from_vec_for_test(tasks: Vec<Task>) -> Self {
+        Self(tasks)
+    }
+}
+
+/// The done and total task counts of `session_id` in a strict read of the store.
+pub(crate) fn progress_in(tasks: &StrictTasks, session_id: &str) -> (u64, u64) {
     let mine: Vec<&Task> = tasks
+        .as_slice()
         .iter()
         .filter(|t| t.session.as_deref() == Some(session_id))
         .collect();
@@ -15,10 +50,10 @@ pub(crate) fn progress_in(tasks: &[Task], session_id: &str) -> (u64, u64) {
 
 /// The title of the most recently updated `wip` or `waiting` task in `session_ids`, for the
 /// statusline's "what's in progress right now" fill-in (#905). `None` when nothing matching is
-/// currently `wip`/`waiting`, or when `session_ids` is empty. The caller reads `tasks` strictly,
-/// so a corrupt file never removes the title without a sign (#2687).
-pub(crate) fn wip_title_in(tasks: &[Task], session_ids: &[String]) -> Option<String> {
-    most_recently_updated(tasks.iter().filter(|t| {
+/// currently `wip`/`waiting`, or when `session_ids` is empty. `tasks` is a strict read, so a
+/// corrupt file never removes the title without a sign (#2687).
+pub(crate) fn wip_title_in(tasks: &StrictTasks, session_ids: &[String]) -> Option<String> {
+    most_recently_updated(tasks.as_slice().iter().filter(|t| {
         matches!(t.state, TaskState::Wip | TaskState::Waiting)
             && t.session
                 .as_deref()
@@ -59,6 +94,7 @@ mod tests {
                 .collect();
             let mine: Vec<&(u8, bool)> = rows.iter().filter(|(s, _)| *s == 0).collect();
             let done = mine.iter().filter(|(_, d)| *d).count() as u64;
+            let tasks = super::StrictTasks::from_vec_for_test(tasks);
             proptest::prop_assert_eq!(progress_in(&tasks, "a"), (done, mine.len() as u64));
         }
 
@@ -88,7 +124,8 @@ mod tests {
                         && t.session.as_deref().is_some_and(|s| s == "a" || s == "b")
                 })
                 .collect();
-            match wip_title_in(&tasks, &wanted) {
+            let strict = super::StrictTasks::from_vec_for_test(tasks.to_vec());
+            match wip_title_in(&strict, &wanted) {
                 None => proptest::prop_assert!(active.is_empty()),
                 Some(title) => {
                     let chosen = active.iter().find(|t| t.title == title);
@@ -100,7 +137,7 @@ mod tests {
                     );
                 }
             }
-            proptest::prop_assert_eq!(wip_title_in(&tasks, &[]), None);
+            proptest::prop_assert_eq!(wip_title_in(&strict, &[]), None);
         }
     }
 }
