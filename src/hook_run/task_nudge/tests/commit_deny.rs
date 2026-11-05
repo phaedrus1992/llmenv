@@ -130,7 +130,9 @@ fn a_question_to_the_user_parks_the_task_in_progress() {
         "{text}"
     );
     let stop = serde_json::json!({ "last_assistant_message": "Which one do you want?" });
-    assert!(handle_stop(&tracker, &stop, Some("s1"), dir.path()).contains("llmenv task wait"));
+    // The session has no owner, so each conversation hears about its task once (#3187): the
+    // first question of a second conversation still names it.
+    assert!(handle_stop(&tracker, &stop, Some("s2"), dir.path()).contains("llmenv task wait"));
     let no_question = serde_json::json!({ "last_assistant_message": "Done." });
     assert_eq!(
         handle_stop(&tracker, &no_question, Some("s1"), dir.path()),

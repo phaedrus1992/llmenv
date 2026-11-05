@@ -18,8 +18,13 @@ pub(crate) enum Tracking {
     /// A session has unfinished tasks. `wip` is the slug of one task in progress, if any,
     /// `waiting` lists the slugs of the tasks that wait on the user, and `next` is the first
     /// task still `open`, the one to start next. `queued` counts every task still `open`.
+    ///
+    /// `wip_ownerless` is true when `wip` belongs to a session with no recorded owner and the
+    /// caller has a conversation id. The question reminder then names it once per conversation
+    /// (#3187).
     Tracked {
         wip: Option<String>,
+        wip_ownerless: bool,
         waiting: Vec<String>,
         next: Option<String>,
         queued: usize,
@@ -49,11 +54,11 @@ pub(crate) fn tracking(state_dir: &Path, caller: Option<&str>) -> Tracking {
             return Tracking::Unknown(format!("{e:#}"));
         }
     };
-    let ids: Vec<String> = sessions
+    let visible: Vec<session::Session> = sessions
         .into_iter()
         .filter(|s| s.visible_to(caller))
-        .map(|s| s.id)
         .collect();
+    let ids: Vec<String> = visible.iter().map(|s| s.id.clone()).collect();
     if ids.is_empty() {
         return Tracking::NoSession;
     }
@@ -65,10 +70,14 @@ pub(crate) fn tracking(state_dir: &Path, caller: Option<&str>) -> Tracking {
     if unfinished.is_empty() {
         return Tracking::NoTasks;
     }
-    let wip = unfinished
-        .iter()
-        .find(|t| t.state == TaskState::Wip)
-        .map(|t| t.slug.clone());
+    let wip_task = unfinished.iter().find(|t| t.state == TaskState::Wip);
+    let wip = wip_task.map(|t| t.slug.clone());
+    let wip_ownerless = caller.is_some()
+        && wip_task.and_then(|t| t.session.as_ref()).is_some_and(|id| {
+            visible
+                .iter()
+                .any(|s| &s.id == id && s.owner_session().is_none())
+        });
     let waiting = unfinished
         .iter()
         .filter(|t| t.state == TaskState::Waiting)
@@ -86,6 +95,7 @@ pub(crate) fn tracking(state_dir: &Path, caller: Option<&str>) -> Tracking {
         .count();
     Tracking::Tracked {
         wip,
+        wip_ownerless,
         waiting,
         next,
         queued,

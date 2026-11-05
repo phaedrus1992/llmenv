@@ -22,9 +22,17 @@ pub(crate) fn parse_semver_triple(text: &str) -> Option<(u64, u64, u64)> {
     parts.next().is_none().then_some(triple)
 }
 
+/// Whether `version` is a release at or after `since`, or `None` when it is not a version. A
+/// pre-release of `since` itself, such as `2.1.295-beta` for 2.1.295, sorts before the release,
+/// so it is `false`.
+pub(crate) fn is_release_at_least(version: &str, since: (u64, u64, u64)) -> Option<bool> {
+    let triple = parse_semver_triple(version)?;
+    Some(triple > since || (triple == since && !is_prerelease(version)))
+}
+
 /// Whether `text` is a pre-release, such as `2.1.295-beta`. Semver sorts a pre-release before
 /// the release of the same three numbers. A `+build` suffix is not a pre-release.
-pub(crate) fn is_prerelease(text: &str) -> bool {
+fn is_prerelease(text: &str) -> bool {
     text.split('+')
         .next()
         .is_some_and(|core| core.contains('-'))
@@ -86,6 +94,22 @@ mod tests {
             if parse_semver_triple(&text).is_some() {
                 prop_assert!(text.starts_with(|c: char| c.is_ascii_digit() || c == 'v'));
             }
+        }
+    }
+
+    proptest! {
+        /// A release is at least `since` exactly when its numbers are, and a pre-release of
+        /// `since` itself is not.
+        #[test]
+        fn a_release_gate_orders_by_numbers_and_puts_a_prerelease_first(
+            a in 0u64..4, b in 0u64..12, c in 0u64..400,
+            pre in any::<bool>(),
+        ) {
+            let since = (2, 1, 304);
+            let text = if pre { format!("{a}.{b}.{c}-beta") } else { format!("{a}.{b}.{c}") };
+            let after = a > 2 || (a == 2 && (b > 1 || (b == 1 && c > 304)));
+            let at = (a, b, c) == since;
+            prop_assert_eq!(is_release_at_least(&text, since), Some(after || (at && !pre)));
         }
     }
 }

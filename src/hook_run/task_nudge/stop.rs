@@ -12,7 +12,7 @@ use crate::task::Tracking;
 const DEFAULT_STOP_NUDGE_EVERY: u32 = 5;
 
 /// The reminder to park the task that waits for the user's answer.
-pub(super) fn waiting_reminder(tracking: &Tracking) -> String {
+fn waiting_reminder(tracking: &Tracking) -> String {
     match tracking {
         Tracking::Tracked {
             wip: Some(slug), ..
@@ -22,6 +22,40 @@ pub(super) fn waiting_reminder(tracking: &Tracking) -> String {
              the user answers, run `llmenv task start {slug}`."
         ),
         _ => String::new(),
+    }
+}
+
+/// The question reminder for the conversation `caller`. A task of a session with no recorded
+/// owner is visible to every conversation, so each conversation hears about it once, at its first
+/// question, and not at each question after that (#3187). This is an exception to the
+/// `visible_to` rule for the question reminder only.
+pub(super) fn question_reminder(
+    tracking: &Tracking,
+    caller: Option<&str>,
+    state_dir: &Path,
+) -> String {
+    let text = waiting_reminder(tracking);
+    let Tracking::Tracked {
+        wip: Some(slug),
+        wip_ownerless: true,
+        ..
+    } = tracking
+    else {
+        return text;
+    };
+    let first = with_stop_state(caller, state_dir, |state| {
+        let first = !state.ownerless_question_reminded.contains(slug);
+        if first {
+            state.ownerless_question_reminded.push(slug.clone());
+        }
+        first
+    });
+    // No usable session id, or a state that cannot be read or locked, keeps the reminder. A failed
+    // lock or read records its own agent notice.
+    if first == Some(false) {
+        String::new()
+    } else {
+        text
     }
 }
 
@@ -49,7 +83,9 @@ pub(crate) fn handle_stop(
         clear_stop_turns(caller, state_dir);
     }
     match &tracking {
-        Tracking::Tracked { wip: Some(_), .. } if asks => waiting_reminder(&tracking),
+        Tracking::Tracked { wip: Some(_), .. } if asks => {
+            question_reminder(&tracking, caller, state_dir)
+        }
         Tracking::Tracked { waiting, .. } if asks && !waiting.is_empty() => format!(
             "llmenv task tracker: waiting on the user: {}. After the user answers, run `llmenv \
              task start <slug>`.",

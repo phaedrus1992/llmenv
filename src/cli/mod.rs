@@ -5159,6 +5159,9 @@ mod tests {
 
     #[test]
     fn build_and_materialize_only_claude_code_emits_llmenv_state_dir() {
+        // A fixed engine version, so the test never runs the host's `claude --version`.
+        crate::adapter::claude_code::version::TEST_VERSION
+            .with(|v| *v.borrow_mut() = Some(Some("2.1.318".into())));
         // Regression test for the #543 follow-up: state_env_vars() always emits
         // the literal key "LLMENV_STATE_DIR", so calling it once per adapter in
         // the export/regenerate loop made whichever adapter materialized last
