@@ -34,11 +34,12 @@ fn prune_removes_old_rotations_and_keeps_the_active_file_and_other_names() {
         .set_modified(old_time)
         .unwrap();
 
-    let removed = prune_rotations(
+    let removed = prune_rotations_at(
         &path,
         Duration::from_secs(7 * 86_400),
         false,
         AgeSource::MtimeOnly,
+        SystemTime::now(),
     )
     .unwrap();
 
@@ -64,11 +65,12 @@ fn a_dry_run_lists_an_old_rotation_and_removes_none() {
         .set_modified(SystemTime::now() - Duration::from_secs(30 * 86_400))
         .unwrap();
 
-    let listed = prune_rotations(
+    let listed = prune_rotations_at(
         &path,
         Duration::from_secs(7 * 86_400),
         true,
         AgeSource::MtimeOnly,
+        SystemTime::now(),
     )
     .unwrap();
 
@@ -93,11 +95,11 @@ fn a_dry_run_lists_exactly_what_a_real_run_removes() {
         }
         let week = Duration::from_secs(7 * 86_400);
 
-        let mut listed = prune_rotations(&path, week, true, AgeSource::MtimeOnly).unwrap();
+        let mut listed = prune_rotations_at(&path, week, true, AgeSource::MtimeOnly, SystemTime::now()).unwrap();
         for (i, _) in ages.iter().enumerate() {
             prop_assert!(rotation_path(&path, u32::try_from(i + 1).unwrap()).exists());
         }
-        let mut removed = prune_rotations(&path, week, false, AgeSource::MtimeOnly).unwrap();
+        let mut removed = prune_rotations_at(&path, week, false, AgeSource::MtimeOnly, SystemTime::now()).unwrap();
 
         listed.sort();
         removed.sort();
@@ -138,11 +140,12 @@ fn prune_keeps_a_recent_rotation() {
     let path = dir.path().join("session-log.jsonl");
     write_bytes(&rotation_path(&path, 1), 3);
     assert!(
-        prune_rotations(
+        prune_rotations_at(
             &path,
             Duration::from_secs(7 * 86_400),
             false,
-            AgeSource::MtimeOnly
+            AgeSource::MtimeOnly,
+            SystemTime::now()
         )
         .unwrap()
         .is_empty()
@@ -165,11 +168,12 @@ fn a_restored_rotation_is_kept_by_its_change_time() {
         .set_modified(SystemTime::now() - Duration::from_secs(30 * 86_400))
         .unwrap();
 
-    let removed = prune_rotations(
+    let removed = prune_rotations_at(
         &path,
         Duration::from_secs(7 * 86_400),
         false,
         AgeSource::MtimeOrCtime,
+        SystemTime::now(),
     )
     .unwrap();
 
@@ -187,7 +191,14 @@ fn a_partial_prune_error_keeps_the_files_it_removed() {
     write_bytes(&removable, 3);
     std::fs::create_dir(rotation_path(&path, 2)).unwrap();
 
-    let err = prune_rotations(&path, Duration::ZERO, false, AgeSource::MtimeOnly).unwrap_err();
+    let err = prune_rotations_at(
+        &path,
+        Duration::ZERO,
+        false,
+        AgeSource::MtimeOnly,
+        SystemTime::now(),
+    )
+    .unwrap_err();
 
     assert_eq!(err.removed, vec![removable.clone()]);
     assert!(!removable.exists());
@@ -199,9 +210,15 @@ fn prune_in_a_missing_directory_removes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("absent").join("session-log.jsonl");
     assert!(
-        prune_rotations(&path, Duration::ZERO, false, AgeSource::MtimeOnly)
-            .unwrap()
-            .is_empty()
+        prune_rotations_at(
+            &path,
+            Duration::ZERO,
+            false,
+            AgeSource::MtimeOnly,
+            SystemTime::now()
+        )
+        .unwrap()
+        .is_empty()
     );
 }
 
@@ -224,7 +241,7 @@ fn a_partial_failure_lists_exactly_the_removed_files() {
             std::fs::create_dir(rotation_path(&path, n)).unwrap();
         }
 
-        let result = prune_rotations(&path, Duration::ZERO, false, AgeSource::MtimeOnly);
+        let result = prune_rotations_at(&path, Duration::ZERO, false, AgeSource::MtimeOnly, SystemTime::now());
 
         prop_assert_eq!(result.is_err(), dirs > 0);
         let mut removed = match result {
@@ -308,4 +325,38 @@ fn is_rotation_of_matches_any_byte_base_with_a_digit_suffix() {
         suffixed.extend_from_slice(format!(".{digits}{junk}").as_bytes());
         prop_assert!(!is_rotation_of(std::ffi::OsStr::from_bytes(&suffixed), base_os));
     });
+}
+
+// #3350: a scan that cannot read the folder keeps the io error, so a caller can tell a
+// permission failure from another cause.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_folder_keeps_the_io_error_as_the_source() {
+    use std::error::Error as _;
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("logs");
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("session.log");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let result = prune_rotations_at(
+        &path,
+        Duration::ZERO,
+        true,
+        AgeSource::MtimeOnly,
+        SystemTime::now(),
+    );
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let err = result.unwrap_err();
+    let source = err
+        .source()
+        .and_then(|s| s.downcast_ref::<std::io::Error>())
+        .map(std::io::Error::kind);
+    assert_eq!(source, Some(std::io::ErrorKind::PermissionDenied), "{err}");
+    let text = err.to_string();
+    assert!(text.contains(&dir.display().to_string()), "{text}");
+    assert!(text.contains("Fix:"), "{text}");
+    assert!(err.removed.is_empty());
 }

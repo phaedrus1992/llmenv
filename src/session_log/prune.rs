@@ -15,25 +15,9 @@ use crate::session_log::rotation::rotation_lock;
 /// A file that cannot be removed does not stop the pass. The error names every file that failed,
 /// with the count of files that were removed, and it carries the files that were removed.
 ///
-/// # Errors
-/// Fails when the directory cannot be read, when a rotated file cannot be checked or removed, or
-/// when the rotation lock cannot be taken. The error keeps the files removed before the failure.
-///
-/// Production calls `prune_rotations_at` with its clock. Tests use this form, so it exists only
-/// in test builds.
-#[cfg(test)]
-fn prune_rotations(
-    path: &Path,
-    older_than: Duration,
-    dry_run: bool,
-    age: AgeSource,
-) -> Result<Vec<PathBuf>, PruneError> {
-    prune_rotations_at(path, older_than, dry_run, age, SystemTime::now())
-}
-
-/// `prune_rotations`, judged against `now` instead of the clock. A later `now` makes a file that
-/// was just written look past retention on its mtime and its change time alike, which a test
-/// cannot set on a real file (#3335).
+/// The pass judges each file against `now`, not the clock. A later `now` makes a file that was
+/// just written look past retention on its mtime and its change time alike, which a test cannot
+/// set on a real file (#3335).
 ///
 /// # Errors
 /// Fails when the directory cannot be read, when a rotated file cannot be checked or removed, or
@@ -53,14 +37,24 @@ pub(crate) fn prune_rotations_at(
                  Fix: pass the session log file, not a folder.",
                 path.display()
             ),
+            source: None,
         });
     };
-    let entries = crate::paths::read_dir_optional(dir).map_err(|e| PruneError {
-        removed: Vec::new(),
-        message: format!("{e:#}"),
-    })?;
-    let Some(entries) = entries else {
-        return Ok(Vec::new());
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(PruneError {
+                removed: Vec::new(),
+                message: format!(
+                    "cannot read {} to prune the rotations of {}: {e}. Fix: check the \
+                     permissions of the folder",
+                    dir.display(),
+                    path.display()
+                ),
+                source: Some(e),
+            });
+        }
     };
     let expiry = Expiry {
         now,
@@ -72,8 +66,9 @@ pub(crate) fn prune_rotations_at(
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
+            // The folder listing failed at this entry, so the entry has no name to report.
             Err(e) => {
-                failures.push(format!("an entry in {}: {e}", dir.display()));
+                failures.push(format!("an unnamed entry of {}: {e}", dir.display()));
                 continue;
             }
         };
@@ -110,7 +105,11 @@ pub(crate) fn prune_rotations_at(
             removed.len(),
             failures.join("; ")
         );
-        return Err(PruneError { removed, message });
+        return Err(PruneError {
+            removed,
+            message,
+            source: None,
+        });
     }
     Ok(removed)
 }
@@ -123,6 +122,9 @@ pub(crate) struct PruneError {
     /// The files that the pass removed, or would remove in a dry run.
     pub(crate) removed: Vec<PathBuf>,
     message: String,
+    /// The io error of a folder that could not be read, so a caller can read its kind (#3350).
+    #[source]
+    source: Option<std::io::Error>,
 }
 
 /// The clock, the retention, and the timestamp that judges one rotated file.
