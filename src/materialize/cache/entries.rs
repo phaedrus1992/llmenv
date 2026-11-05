@@ -32,7 +32,7 @@ pub(super) fn entry_and_type(
                 "cannot read the type of {}, so it is kept: {e}",
                 p.display()
             );
-            tracing::error!("cache gc {cause}");
+            tracing::error!("cache gc: {cause}");
             fail(p, cause);
             None
         }

@@ -109,14 +109,19 @@ fn publish_result(pending: &Path, result: &Path, started: bool) {
                 result.display()
             ));
         }
-    } else if let Err(e) = std::fs::remove_file(pending)
-        // A pending file that is already gone needs no removal (#3386).
-        && e.kind() != std::io::ErrorKind::NotFound
-    {
-        crate::agent_notice::record_logged(format!(
-            "llmenv: cannot remove the stale pending index result {}: {e}. Fix: remove it by hand.",
-            pending.display()
-        ));
+    } else {
+        match std::fs::remove_file(pending) {
+            Ok(()) => {}
+            // A pending file that is already gone needs no removal (#3386).
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::debug!(path = %pending.display(), "pending index result already gone");
+            }
+            Err(e) => crate::agent_notice::record_logged(format!(
+                "llmenv: cannot remove the stale pending index result {}: {e}. Fix: remove it by \
+                 hand.",
+                pending.display()
+            )),
+        }
     }
 }
 

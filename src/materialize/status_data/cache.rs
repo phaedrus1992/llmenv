@@ -35,7 +35,7 @@ pub(super) fn collect_cache(cache_root: &Path, hashing: HashingMode) -> CacheDat
         }
     };
     // An entry the scan could not read would make the total too small, so the total is unknown.
-    if let Some(first) = report.failed.first() {
+    if let Some((first, _)) = report.failed.first_key_value() {
         tracing::warn!(
             "cache stat: {} entries could not be read (first: {}), so the size shows as unknown",
             report.failed.len(),
@@ -47,7 +47,7 @@ pub(super) fn collect_cache(cache_root: &Path, hashing: HashingMode) -> CacheDat
         .removed
         .iter()
         .try_fold(DirSize::default(), |total, p| {
-            Ok::<_, anyhow::Error>(total.combine(dir_size(p)?))
+            dir_size(p).map(|s| total.combine(s))
         });
     match total {
         Ok(total) => CacheData {

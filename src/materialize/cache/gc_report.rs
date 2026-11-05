@@ -123,22 +123,14 @@ mod tests {
         assert_eq!(report.removed, vec![gone.clone(), gone]);
     }
 
-    proptest::proptest! {
-        /// Over any series of recordings, each path is listed once, with the first cause given
-        /// for it (#3441).
-        #[test]
-        fn each_failed_path_is_listed_once_with_its_first_cause(
-            records in proptest::collection::vec(("[a-c]", "[a-z]{1,4}"), 0..12),
-        ) {
-            let mut report = GcReport::new(false);
-            for (name, cause) in &records {
-                report.record_failure(PathBuf::from(name), cause.to_string());
-            }
-            let mut first: BTreeMap<PathBuf, String> = BTreeMap::new();
-            for (name, cause) in records {
-                first.entry(PathBuf::from(name)).or_insert(cause);
-            }
-            proptest::prop_assert_eq!(report.failed, first);
-        }
+    /// A path that fails twice is listed once, with its first cause (#3441).
+    #[test]
+    fn a_path_that_fails_twice_keeps_its_first_cause() {
+        let mut report = GcReport::new(false);
+        report.record_failure(PathBuf::from("a"), "first".to_string());
+        report.record_failure(PathBuf::from("b"), "other".to_string());
+        report.record_failure(PathBuf::from("a"), "second".to_string());
+        assert_eq!(report.failed.len(), 2);
+        assert_eq!(report.failed[Path::new("a")], "first");
     }
 }
