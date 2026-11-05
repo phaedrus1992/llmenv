@@ -30,6 +30,40 @@ mod tests {
         ));
     }
 
+    proptest::proptest! {
+        /// A "not a git repository" message in any case, at any place in stderr, is never
+        /// unexpected, whatever the exit code (#3055).
+        #[test]
+        fn a_non_repo_message_in_any_case_is_never_unexpected(
+            code in proptest::option::of(proptest::prelude::any::<i32>()),
+            before in ".{0,40}",
+            after in ".{0,40}",
+            upper in proptest::collection::vec(proptest::bool::ANY, 20),
+        ) {
+            let message: String = "not a git repository"
+                .chars()
+                .zip(&upper)
+                .map(|(c, up)| if *up { c.to_ascii_uppercase() } else { c })
+                .collect();
+            let stderr = format!("{before}{message}{after}");
+            proptest::prop_assert!(!branch_failure_is_unexpected(code, &stderr), "{stderr}");
+        }
+
+        /// Exit 1 is never unexpected. Any other exit is unexpected exactly when stderr does not
+        /// name a directory outside git.
+        #[test]
+        fn only_a_detached_head_or_a_non_repo_is_expected(
+            code in proptest::option::of(proptest::prelude::any::<i32>()),
+            stderr in "[a-zA-Z :'/.]{0,60}",
+        ) {
+            let non_repo = stderr.to_ascii_lowercase().contains("not a git repository");
+            proptest::prop_assert_eq!(
+                branch_failure_is_unexpected(code, &stderr),
+                code != Some(1) && !non_repo
+            );
+        }
+    }
+
     #[test]
     fn branch_failure_is_unexpected_flags_ownership_and_signal_failures() {
         assert!(branch_failure_is_unexpected(
