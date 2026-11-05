@@ -180,13 +180,11 @@ pub(crate) fn handle_pre_tool_use(
         return String::new();
     }
     let Some(tool_name) = stdin_payload.get("tool_name").and_then(|v| v.as_str()) else {
-        // tool_name is required on every PreToolUse payload -- this should
-        // never fire in practice. `error!`, not `warn!`/`debug!`: the default
-        // `EnvFilter` (`RUST_LOG` unset) is ERROR-only and drops anything
-        // weaker before it reaches a default-configured user's log (#1133
-        // precedent). Found during #1209's pre-pr-review as the same
-        // "required field missing" category cd_guard/read_once already fix.
-        tracing::error!("tool_name missing or not a string for PreToolUse payload");
+        // Every PreToolUse payload has a tool name, so this is an engine fault (#1209, #3462).
+        crate::agent_notice::record_logged(
+            "llmenv: the repeat check is off for this event, because the PreToolUse payload has \
+             no tool name. Fix: update Claude Code. If this repeats, report the payload to llmenv.",
+        );
         return String::new();
     };
     let state_key = super::session_state::agent_state_key(session_id, stdin_payload);

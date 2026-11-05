@@ -435,6 +435,16 @@ These notices come from the hook itself (added in v3.14.0):
   index job cannot report its result. Check the state directory, or remove the named file.
 - `the repeat check is off for this event` and `the stop reminder can repeat` — the session id is
   not safe in a file name, so the check that keeps state per session does not run.
+- `the repeat check is off for this event, because the PreToolUse payload has no tool name`, and
+  `the read cache is off for this Read call` — the engine sent a payload without a required field.
+  Report it as a Claude Code payload bug.
+- `the cd check is off for this command` — the command nests too deep to check.
+- `extra memory recall(s) were skipped` — the main recalls were slow, so the extra recalls did not
+  run for this prompt. Run `llmenv doctor` to check the memory server.
+- `the resume cost notice stays on` — `CLAUDE_CODE_VERSION` is not a version, so llmenv keeps its
+  own resume notice.
+- `the declared code index root <path> cannot be read` and `the recorded code index root <path>
+  does not resolve` — the code index root check leaves that root out.
 - `CLAUDE_CODE_VERSION is read as unset` — the variable is not valid text, so the version checks
   use their defaults.
 - `the transcript <path> cannot be opened` (or `examined`, or `read`) — the checks that read the transcript pass

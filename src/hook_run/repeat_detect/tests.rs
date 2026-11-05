@@ -100,27 +100,21 @@ fn no_tool_name_passes_through() {
     });
 }
 
-// Found during #1209's pre-pr-review: the same "required field missing,
-// should never happen" category cd_guard/read_once already log for.
+// A payload with no tool name turns the check off, and the agent is told (#1209, #3462).
 #[test]
-fn no_tool_name_logs_error() {
+fn no_tool_name_tells_the_agent_the_check_is_off() {
     let dir = TempDir::new().expect("test");
-    let logs = crate::test_log_capture::capture_logs(|| {
-        let result = handle_pre_tool_use(
-            &json!({ "tool_input": {} }),
-            Some("s1"),
-            &config(3),
-            dir.path(),
-        );
-        assert!(result.is_empty());
-    });
-    assert!(
-        logs.contains("tool_name missing"),
-        "expected an error log when tool_name is absent, got: {logs}"
+    let result = handle_pre_tool_use(
+        &json!({ "tool_input": {} }),
+        Some("s1"),
+        &config(3),
+        dir.path(),
     );
+    assert!(result.is_empty());
+    let notice = crate::agent_notice::current().unwrap_or_default();
     assert!(
-        logs.contains("ERROR"),
-        "must log at error level, got: {logs}"
+        notice.contains("payload has no tool name"),
+        "the agent must see the skipped check: {notice}"
     );
 }
 
