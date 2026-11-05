@@ -116,10 +116,11 @@ pub(crate) fn current_with_children() -> Option<String> {
     current()
 }
 
-/// Tell the agent that `skipped` did not happen because the state folder cannot be found.
+/// Tell the agent that `skipped` did not happen because the state folder is missing or not
+/// valid. The error says which.
 pub(crate) fn no_state_folder(skipped: &str, error: &anyhow::Error) {
     record_logged(format!(
-        "llmenv: {skipped}, because the state folder cannot be found: {error:#}. Fix: set HOME, or \
+        "llmenv: {skipped}, because the state folder is not usable: {error:#}. Fix: set HOME, or \
          set LLMENV_STATE_DIR to a valid absolute path."
     ));
 }

@@ -123,12 +123,15 @@ pub(super) fn handle_web_fetch_in(
     // The project lookup runs git, so it waits until the call is known to be a web fetch.
     web_tool(payload)?;
     let args = web_fetch_store_args(payload, session_project(payload).as_deref())?;
-    let Ok(payload_json) = serde_json::to_string(&args) else {
-        crate::agent_notice::record_logged(
-            "llmenv: the fetched page is not stored in memory, because its store request \
-             cannot be built.",
-        );
-        return None;
+    let payload_json = match serde_json::to_string(&args) {
+        Ok(json) => json,
+        Err(e) => {
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the fetched page is not stored in memory, because its store request \
+                 cannot be built: {e}. Fix: report this as an llmenv bug."
+            ));
+            return None;
+        }
     };
     // Spawns this same binary as a detached child. The path is this process's own image, not input.
     // nosemgrep: rust.lang.security.current-exe.current-exe

@@ -131,7 +131,18 @@ pub(crate) fn large_bytes_io(path: &Path) -> std::io::Result<Vec<u8>> {
 /// The errors of [`llmenv_paths::read_file_bounded`], a missing file, and `InvalidData` for
 /// bytes that are not UTF-8 before the end.
 pub(crate) fn state_text_io(path: &Path) -> std::io::Result<String> {
-    decode_state_text(state_bytes_io(path)?)
+    let bytes = state_bytes_io(path)?;
+    let len = bytes.len();
+    let text = decode_state_text(bytes)?;
+    if text.len() < len {
+        // The reader gets the text before the cut, so the log is the one trace of the repair.
+        tracing::error!(
+            "state file {} ends inside a character, so its last {} byte(s) are ignored",
+            path.display(),
+            len.saturating_sub(text.len())
+        );
+    }
+    Ok(text)
 }
 
 /// The text of state bytes by the rule of [`state_text_io`]: an incomplete last character is cut
@@ -208,6 +219,29 @@ mod tests {
     }
 
     proptest::proptest! {
+        /// For any bytes, the decode equals the std UTF-8 check: valid text is kept whole, an
+        /// incomplete sequence at the very end is cut off, and any other bad byte is
+        /// `InvalidData`.
+        #[test]
+        fn decoded_bytes_follow_the_std_utf8_check(
+            bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..64),
+        ) {
+            match std::str::from_utf8(&bytes) {
+                Ok(text) => {
+                    proptest::prop_assert_eq!(decode_state_text(bytes.clone()).unwrap(), text);
+                }
+                Err(e) if e.error_len().is_none() => {
+                    let valid = &bytes[..e.valid_up_to()];
+                    let decoded = decode_state_text(bytes.clone()).unwrap();
+                    proptest::prop_assert_eq!(decoded.as_bytes(), valid);
+                }
+                Err(_) => {
+                    let err = decode_state_text(bytes.clone()).unwrap_err();
+                    proptest::prop_assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+                }
+            }
+        }
+
         /// Any cut of a saved JSON state file, inside a character or not, reads as the text
         /// before the cut, and that text never parses as a different value (#3445).
         #[test]

@@ -118,6 +118,18 @@ mod lock_notice_tests {
     use super::{lock_holder, release_lock, write_staging};
     use proptest::prelude::*;
 
+    /// A dangling link at the lock path is an error, not "no holder": a peer must not reclaim a
+    /// lock that it cannot read (#2587, #3457).
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_link_at_the_lock_path_is_an_error() {
+        let dir = tempfile::tempdir().expect("test");
+        let lock = dir.path().join("proxy.lock");
+        std::os::unix::fs::symlink(dir.path().join("gone"), &lock).expect("test");
+        let err = lock_holder(&lock).expect_err("a dangling link is not an empty lock");
+        assert!(format!("{err:#}").contains("link"), "{err:#}");
+    }
+
     /// #3204: a lockfile that cannot be removed is named for the agent. A directory at the
     /// lock path makes `remove_file` fail for a real reason.
     #[test]

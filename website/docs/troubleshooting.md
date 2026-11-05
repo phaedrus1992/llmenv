@@ -442,7 +442,7 @@ These notices come from the hook itself (added in v3.14.0):
 - `the session-end duplicate record <path> cannot be read` — the context chunk can be stored again.
   Remove the file.
 - `the recall ledger is not updated`, `the agent config is not written`, and `a detached job runs
-  with no checkpoint` — the state folder cannot be found. Set `HOME` or `LLMENV_STATE_DIR`.
+  with no checkpoint` — the state folder is missing or not valid. Set `HOME` or `LLMENV_STATE_DIR`.
 - `the activity time of session <id> is not` saved — the task change is saved, but the session can
   look idle. Run `llmenv task session show`.
 
