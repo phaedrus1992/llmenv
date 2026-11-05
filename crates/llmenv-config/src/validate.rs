@@ -5,6 +5,7 @@ use llmenv_paths::has_parent_component;
 
 mod permissions;
 mod scope_match;
+mod servers;
 mod widgets;
 #[cfg(test)]
 use permissions::has_balanced_parens;
@@ -593,134 +594,12 @@ impl Config {
     }
 
     fn validate_mcps(&self) -> Result<(), ValidateError> {
-        use super::McpTransport;
-
-        let mut seen_mcp_names = std::collections::HashSet::new();
-        for m in &self.mcp {
-            if m.when.is_empty() {
-                return Err(ValidateError::McpNoTags(m.name.clone()));
-            }
-            if m.name == crate::MEMORY_MCP_NAME {
-                return Err(ValidateError::McpReservedName(m.name.clone()));
-            }
-            if !seen_mcp_names.insert(&m.name) {
-                return Err(ValidateError::DuplicateMcpName(m.name.clone()));
-            }
-            match m.transport {
-                McpTransport::Stdio => {
-                    if m.command.is_none() {
-                        return Err(ValidateError::McpStdioMissingCommand(m.name.clone()));
-                    }
-                }
-                McpTransport::Http | McpTransport::Sse => {
-                    if m.url.is_none() {
-                        return Err(ValidateError::McpRemoteMissingUrl(
-                            m.name.clone(),
-                            format!("{:?}", m.transport).to_lowercase(),
-                        ));
-                    }
-                }
-            }
-            for key in m.env.keys() {
-                if crate::RESERVED_STATE_ENV_VARS.contains(&key.as_str()) {
-                    return Err(ValidateError::McpReservedEnvKey {
-                        mcp: m.name.clone(),
-                        key: key.clone(),
-                    });
-                }
-                if key.starts_with("LLMENV_") {
-                    return Err(ValidateError::McpLlmenvPrefixEnvKey {
-                        mcp: m.name.clone(),
-                        key: key.clone(),
-                    });
-                }
-                if !is_valid_var_name(key) {
-                    return Err(ValidateError::McpInvalidEnvKey {
-                        mcp: m.name.clone(),
-                        key: key.clone(),
-                    });
-                }
-            }
+        servers::validate_mcp_servers(&self.mcp)?;
+        servers::validate_hosts(&self.host)?;
+        match &self.features {
+            Some(features) => servers::validate_features(features, &self.host),
+            None => Ok(()),
         }
-        // Validate the host address table: each addr must be a valid hostname or IP literal.
-        for (name, entry) in &self.host {
-            let is_valid =
-                entry.addr.parse::<std::net::IpAddr>().is_ok() || is_valid_hostname(&entry.addr);
-            if !is_valid {
-                return Err(ValidateError::InvalidHostAddr(
-                    name.clone(),
-                    entry.addr.clone(),
-                ));
-            }
-        }
-        if let Some(features) = &self.features {
-            for mem in &features.memory {
-                if mem.when.is_empty() {
-                    return Err(ValidateError::MemoryNoTags);
-                }
-                if !self.host.contains_key(&mem.server_host) {
-                    return Err(ValidateError::MemoryUnknownServerHost(
-                        mem.server_host.clone(),
-                    ));
-                }
-                if mem.listen_host.parse::<std::net::IpAddr>().is_err() {
-                    return Err(ValidateError::MemoryInvalidListenHost(
-                        mem.listen_host.clone(),
-                    ));
-                }
-                if let Some(n) = mem.wakeup_max_tokens
-                    && !crate::WAKEUP_MAX_TOKENS_RANGE.contains(&n)
-                {
-                    return Err(ValidateError::MemoryWakeupMaxTokensInvalid(n));
-                }
-            }
-            for th in &features.throttle {
-                if th.when.is_empty() {
-                    return Err(ValidateError::ThrottleNoTags(th.backend.clone()));
-                }
-                if th.backend.is_empty() {
-                    return Err(ValidateError::ThrottleEmptyBackend);
-                }
-            }
-            if let Some(tracker) = &features.task_tracker {
-                for (name, value) in [
-                    ("nudge_after", tracker.nudge_after),
-                    ("nudge_every", tracker.nudge_every),
-                    ("stop_nudge_every", tracker.stop_nudge_every),
-                ] {
-                    if value == Some(0) {
-                        return Err(ValidateError::TaskTrackerNudgeCountInvalid(name));
-                    }
-                }
-                if tracker
-                    .workflow_skills
-                    .iter()
-                    .flatten()
-                    .any(|s| s.trim().is_empty())
-                {
-                    return Err(ValidateError::TaskTrackerSkillEmpty);
-                }
-            }
-            for cm in &features.codebase_memory {
-                if cm.when.is_empty() {
-                    return Err(ValidateError::CodebaseMemoryNoTags);
-                }
-                if let Some(budget) = cm.mem_budget_mb
-                    && !(1..=1_048_576).contains(&budget)
-                {
-                    return Err(ValidateError::CodebaseMemoryBudgetInvalid(budget));
-                }
-                // The shape only: a variable may expand to an absolute path at session start.
-                if let Some(bad) = cm
-                    .allowed_roots
-                    .iter()
-                    .find(|r| !allowed_root_shape_is_valid(r))
-                {
-                    return Err(ValidateError::CodebaseMemoryRootInvalid(bad.clone()));
-                }
-            }
-        }
-        Ok(())
     }
 
     /// A hook whose `kind` doesn't match its `command`/`tool` field is

@@ -3631,3 +3631,120 @@ fn hook_mcp_tool_with_tool_is_accepted() {
     });
     assert!(cfg.validate().is_ok());
 }
+
+// #3322: each check of `validate_mcps` has a test of its own, so the split cannot drop one.
+fn stdio_mcp(name: &str) -> crate::McpServer {
+    crate::McpServer {
+        name: name.to_string(),
+        when: vec!["t".to_string()],
+        transport: crate::McpTransport::Stdio,
+        command: Some("echo".to_string()),
+        ..Default::default()
+    }
+}
+
+fn with_mcps(mcp: Vec<crate::McpServer>) -> Config {
+    Config {
+        mcp,
+        ..Config::default()
+    }
+}
+
+#[test]
+fn an_mcp_without_tags_is_rejected() {
+    let mut mcp = stdio_mcp("a");
+    mcp.when.clear();
+    assert!(matches!(
+        with_mcps(vec![mcp]).validate(),
+        Err(ValidateError::McpNoTags(n)) if n == "a"
+    ));
+}
+
+#[test]
+fn a_second_mcp_with_the_same_name_is_rejected() {
+    assert!(matches!(
+        with_mcps(vec![stdio_mcp("a"), stdio_mcp("a")]).validate(),
+        Err(ValidateError::DuplicateMcpName(n)) if n == "a"
+    ));
+}
+
+#[test]
+fn a_stdio_mcp_without_a_command_is_rejected() {
+    let mut mcp = stdio_mcp("a");
+    mcp.command = None;
+    assert!(matches!(
+        with_mcps(vec![mcp]).validate(),
+        Err(ValidateError::McpStdioMissingCommand(n)) if n == "a"
+    ));
+}
+
+#[test]
+fn a_remote_mcp_without_a_url_names_its_transport() {
+    for (transport, name) in [
+        (crate::McpTransport::Http, "http"),
+        (crate::McpTransport::Sse, "sse"),
+    ] {
+        let mcp = crate::McpServer {
+            transport,
+            command: None,
+            ..stdio_mcp("a")
+        };
+        assert!(matches!(
+            with_mcps(vec![mcp]).validate(),
+            Err(ValidateError::McpRemoteMissingUrl(n, t)) if n == "a" && t == name
+        ));
+    }
+}
+
+#[test]
+fn a_remote_mcp_with_a_url_is_accepted() {
+    let mcp = crate::McpServer {
+        transport: crate::McpTransport::Http,
+        command: None,
+        url: Some("https://example.com/mcp".to_string()),
+        ..stdio_mcp("a")
+    };
+    assert!(with_mcps(vec![mcp]).validate().is_ok());
+}
+
+#[test]
+fn an_mcp_env_key_that_is_not_a_variable_name_is_rejected() {
+    let mut mcp = stdio_mcp("a");
+    mcp.env.insert("1BAD".to_string(), "x".to_string());
+    assert!(matches!(
+        with_mcps(vec![mcp]).validate(),
+        Err(ValidateError::McpInvalidEnvKey { mcp, key }) if mcp == "a" && key == "1BAD"
+    ));
+}
+
+#[test]
+fn a_host_address_that_is_neither_a_name_nor_an_ip_is_rejected() {
+    let mut config = Config::default();
+    config.host.insert(
+        "h".to_string(),
+        crate::HostEntry {
+            addr: "not a host!".to_string(),
+        },
+    );
+    assert!(matches!(
+        config.validate(),
+        Err(ValidateError::InvalidHostAddr(n, a)) if n == "h" && a == "not a host!"
+    ));
+}
+
+#[test]
+fn a_memory_listen_host_that_is_not_an_ip_is_rejected() {
+    let mut host = std::collections::BTreeMap::new();
+    host.insert(
+        "h".to_string(),
+        crate::HostEntry {
+            addr: "127.0.0.1".to_string(),
+        },
+    );
+    let mut mem = arb_memory_entry("h", vec!["t".to_string()]);
+    mem.listen_host = "localhost".to_string();
+    assert!(matches!(
+        config_with_memory_and_host(vec![mem], host).validate(),
+        Err(ValidateError::MemoryInvalidListenHost(h)) if h == "localhost"
+    ));
+}
