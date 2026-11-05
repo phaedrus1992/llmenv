@@ -107,3 +107,6 @@ pub(crate) fn tracking_in(stored: &super::Stored, caller: Option<&str>) -> Track
         queued,
     }
 }
+
+#[cfg(test)]
+mod tests;

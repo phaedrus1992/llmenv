@@ -34,6 +34,9 @@ mod doctor;
 mod init_cmd;
 #[cfg(test)]
 mod init_run_tests;
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "test code")]
+mod task_show_tests;
 use init_cmd::run_init;
 mod init_templates;
 mod proxy_restart;
@@ -3187,7 +3190,9 @@ fn run_task_show_current_or_next(state_dir: &Path, target: ShowTarget) -> anyhow
     if open_sessions.is_empty() {
         anyhow::bail!("no open session for this project");
     }
-    let all_tasks = crate::task::try_list_tasks(state_dir)?;
+    // A strict read, as task name lookup does: a corrupt task file must fail the command, not
+    // turn into "No current task." or a different next task (#3471).
+    let all_tasks = crate::task::list_tasks_strict(state_dir)?.into_vec();
     let multi = open_sessions.len() > 1;
     for (i, session) in open_sessions.iter().enumerate() {
         if multi {
@@ -5753,40 +5758,4 @@ mod tests {
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::expect_fun_call)]
-mod git_remote_tests {
-    use super::check_git_remote;
-
-    #[test]
-    fn a_directory_outside_git_is_not_a_repo() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        assert!(!super::git_repo::is_git_repo(dir.path()).expect("git runs"));
-    }
-
-    #[test]
-    fn an_initialized_directory_is_a_repo() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let init = std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(dir.path())
-            .status()
-            .expect("run git init");
-        assert!(init.success());
-        assert!(super::git_repo::is_git_repo(dir.path()).expect("git runs"));
-    }
-
-    #[test]
-    fn a_git_failure_is_not_reported_as_no_remote() {
-        // A `.git` file that names a missing gitdir makes git exit 128 (#2710).
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            dir.path().join(".git"),
-            "gitdir: /nonexistent/llmenv-2710\n",
-        )
-        .expect("write");
-        let err = check_git_remote(dir.path()).expect_err("a broken checkout has no remote");
-        assert!(
-            !err.to_string().contains("no remote configured"),
-            "got: {err}"
-        );
-    }
-}
+mod git_remote_tests;

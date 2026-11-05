@@ -99,7 +99,7 @@ pub(super) fn store_for_reminder<'a>(
 pub(super) fn store_warning_text(error: &anyhow::Error) -> String {
     format!(
         "The task reminders were not checked ({error:#}). \
-         Fix the task store, then run `llmenv task ls --all` to confirm."
+         Fix: repair or remove the file named in the error, then check that this text is gone."
     )
 }
 

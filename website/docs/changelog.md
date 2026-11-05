@@ -197,7 +197,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Tell the agent when the repeat check or the stop reminder check is off for an unsafe session id, when a fetched page cannot be stored, when a transcript cannot be read, and when the recall ledger, agent config, or a detached job checkpoint has no state folder. Each case was a log line only. [fix:hook] [#3457]
 - Tell the agent when the repeat check, the read cache, or the cd check is off for one call, when slow main recalls skip the extra memory recalls, when the resume notice stays on for an unknown engine version, and when the code index root check leaves a root out. Each case was a log line only. [fix:hook] [#3462]
 - Tell the agent when a finished background job (memory store, session log record, consolidation, or code index) keeps its checkpoint, which makes a later session run the job again and then report that it gave up. [fix:hook] [#3465]
-- Fail the TaskList redirect, `llmenv task done`, and task name lookup with the read error when one task file is corrupt. Before, the corrupt task was left out, so the list could read as empty, a parent could close over an open sub-task, and a task could read as not found. [fix:task] [#3471]
+- Fail the TaskList redirect, `llmenv task done`, `llmenv task show --current` and `--next`, and task name lookup with the read error when one task file is corrupt. Before, the corrupt task was left out, so the list could read as empty, a parent could close over an open sub-task, and a task could read as not found. [fix:task] [#3471]
 
 ### Security
 
