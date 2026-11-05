@@ -1,16 +1,14 @@
 //! Classifies a failed `git symbolic-ref` run for the task tracker (#3040).
 
 /// Whether a failed `git symbolic-ref --quiet --short HEAD` is worth telling the user about.
-/// Exit 1 is a detached HEAD, and exit 128 with "not a git repository" is a directory outside
-/// git. Both are normal. Anything else, such as "dubious ownership", a kill by signal, or the
-/// phrase from another exit code, hides the branch for a reason the user can fix (#3433).
+/// A silent exit 1 is a detached HEAD (`--quiet` prints nothing for it), and exit 128 with "not
+/// a git repository" is a directory outside git. Both are normal. Anything else, such as
+/// "dubious ownership", a kill by signal, an exit 1 with an error text, or the phrase from
+/// another exit code, hides the branch for a reason the user can fix (#3433).
 pub(super) fn branch_failure_is_unexpected(code: Option<i32>, stderr: &str) -> bool {
-    let outside_git = code == Some(GIT_FATAL_EXIT) && crate::git::is_not_a_repo_message(stderr);
-    code != Some(1) && !outside_git
+    let detached = code == Some(1) && stderr.trim().is_empty();
+    !detached && !crate::git::is_outside_repo(code, stderr)
 }
-
-/// The exit code of a git command that stops on a fatal error, such as a folder outside git.
-const GIT_FATAL_EXIT: i32 = 128;
 
 #[cfg(test)]
 mod tests {
@@ -48,10 +46,24 @@ mod tests {
             proptest::prop_assert!(!branch_failure_is_unexpected(code, &stderr), "{stderr}");
         }
 
-        /// Exit 1 is a detached HEAD, which is never unexpected, whatever stderr holds.
+        /// Over every exit code and stderr: a silent exit 1 and exit 128 with the phrase are
+        /// expected, and every other failure is unexpected.
         #[test]
-        fn exit_one_is_never_unexpected(stderr in ".{0,80}") {
-            proptest::prop_assert!(!branch_failure_is_unexpected(Some(1), &stderr));
+        fn only_a_silent_exit_1_or_a_folder_outside_git_is_expected(
+            code in proptest::option::of(-1i32..300),
+            stderr in proptest::prop_oneof![
+                proptest::strategy::Just(String::new()),
+                proptest::strategy::Just(" \n".to_string()),
+                proptest::strategy::Just("fatal: not a git repository".to_string()),
+                "[a-z :]{1,30}",
+            ],
+        ) {
+            let silent_detached = code == Some(1) && stderr.trim().is_empty();
+            let outside = code == Some(128) && stderr.contains("not a git repository");
+            proptest::prop_assert_eq!(
+                branch_failure_is_unexpected(code, &stderr),
+                !silent_detached && !outside
+            );
         }
     }
 
@@ -62,6 +74,11 @@ mod tests {
         assert!(!branch_failure_is_unexpected(Some(128), phrase));
         assert!(branch_failure_is_unexpected(None, phrase));
         assert!(branch_failure_is_unexpected(Some(2), phrase));
+        assert!(branch_failure_is_unexpected(
+            Some(1),
+            "error: cannot lock ref"
+        ));
+        assert!(!branch_failure_is_unexpected(Some(1), ""));
     }
 
     #[test]

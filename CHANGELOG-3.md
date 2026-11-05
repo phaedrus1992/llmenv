@@ -162,8 +162,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Write a session log line that a reader can parse when an event cannot be serialized. The line used to hold only the timestamp. [fix:session-log] [#3390]
 - Read `llmenv memory list` and `llmenv memory diff` from the JSON form of ICM recall. `list` shows up to 200 memories and their count, where it showed ICM's first 5, and strips control characters from each field. `diff` matches memories by id in its own snapshot, so an ICM upgrade no longer shows every line as changed and the session end dedup file is no longer overwritten. [fix:mcp] [#3421]
 - Check the hooks of a bundle when llmenv loads it. A bundle hook with no command, no tool, or `on_failure` on an `mcp_tool` handler used to be accepted and rendered as a hook that runs nothing. [feat:adapter] [#3101]
-- Report a failed branch lookup in the task tracker when git is killed by a signal or exits with an unexpected code, even when its stderr says "not a git repository". Only git's fatal exit 128 with that message is a folder outside git. [fix:task] [#3433]
-- Count a file or a link inside a cache generation as kept in the `llmenv doctor --gc` and `llmenv clean` report, so the counts cover every entry. [refactor:materialize] [#3277]
+- Report a failed branch lookup in the task tracker when git is killed by a signal or exits with an unexpected code, even when its stderr says "not a git repository". Only git's fatal exit 128 with that message is a folder outside git; the repository check and the project name lookup use the same rule, and a silent exit 1 is the only detached HEAD. [fix:task] [#3433]
+- Count a file or a link inside a cache generation as kept in the `llmenv doctor --gc` and `llmenv clean` report, so the counts cover every entry. One stale `state/tmp` entry whose size cannot be read is counted as unreadable instead of failing the whole stale summary. [refactor:materialize] [#3277]
 
 ### Security
 

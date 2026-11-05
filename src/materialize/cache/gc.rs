@@ -54,19 +54,30 @@ pub fn gc(
             gc_remove_link(&p, &mut report);
             continue;
         }
+        // A file at the top level is not a cache folder. It is kept and counted, so the report
+        // covers every entry (#3277).
         if !ft.is_dir() {
+            tracing::debug!(
+                "cache gc keeps a file that is not a cache folder: {}",
+                p.display()
+            );
+            report.kept += 1;
             continue;
         }
         // A path from `read_dir` always ends in a name; a missing one is a failure, not a match.
         let Some(name) = p.file_name() else {
+            tracing::error!(
+                "cache gc: the entry {} has no file name, so it is kept",
+                p.display()
+            );
             report.record_failure(p.clone(), "the entry has no file name".into());
             continue;
         };
         // In Normal mode, a top-level dir matching the current generation version
         // is a container for per-shape leaf dirs. Walk into it and age-check each
         // shape individually instead of treating the whole generation as a unit.
-        let is_generation = !is_staging_or_state(&p)
-            && hashing == HashingMode::Normal
+        // A generation name is a version number, so it is never a `.tmp` or the state folder.
+        let is_generation = hashing == HashingMode::Normal
             && is_current_name(name, hashing, current_version.as_deref());
         if is_generation {
             if let Err(e) = gc_normal_shapes(&p, rule, &now, &mut report) {
@@ -81,16 +92,6 @@ pub fn gc(
         collect_if_expired(&p, rule, now, &mut report);
     }
     Ok(report)
-}
-
-/// Whether `p` is an orphaned `.tmp` staging folder or the durable state folder, which
-/// [`collect_if_expired`] handles before any age check.
-fn is_staging_or_state(p: &Path) -> bool {
-    p.extension().is_some_and(|e| e == "tmp")
-        || p.file_name()
-            == Some(std::ffi::OsStr::new(
-                crate::materialize::state::STATE_DIR_NAME,
-            ))
 }
 
 /// Collect one cache folder: an orphaned `.tmp` staging folder always, the durable state folder
@@ -202,5 +203,50 @@ mod tests {
         assert_eq!(report.kept, entries, "{report:?}");
         assert!(report.removed.is_empty(), "{report:?}");
         assert!(report.failed.is_empty(), "{report:?}");
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(24))]
+        /// Each top-level entry lands in exactly one of removed, kept, or failed: a `.tmp` folder
+        /// is removed, the state folder and a file are kept, and a folder is removed exactly when
+        /// it is older than the rule (#3277).
+        #[test]
+        fn every_entry_is_removed_kept_or_failed_once(
+            kinds in proptest::collection::vec(0u8..5, 0..8),
+        ) {
+            let root = tempfile::tempdir().unwrap();
+            let old = SystemTime::now() - Duration::from_secs(10 * 86_400);
+            let mut want_removed = 0usize;
+            for (i, kind) in kinds.iter().enumerate() {
+                match kind {
+                    0 => {
+                        std::fs::create_dir(root.path().join(format!("s{i}.tmp"))).unwrap();
+                        want_removed += 1;
+                    }
+                    1 => std::fs::write(root.path().join(format!("f{i}")), b"x").unwrap(),
+                    2 | 3 => {
+                        let dir = root.path().join(format!("d{i}"));
+                        std::fs::create_dir(&dir).unwrap();
+                        std::fs::write(dir.join("f"), b"x").unwrap();
+                        if *kind == 2 {
+                            std::fs::File::open(dir.join("f")).unwrap().set_modified(old).unwrap();
+                            want_removed += 1;
+                        }
+                    }
+                    _ => {
+                        let state = root.path().join(crate::materialize::state::STATE_DIR_NAME);
+                        std::fs::create_dir_all(&state).unwrap();
+                    }
+                }
+            }
+            let entries = std::fs::read_dir(root.path()).unwrap().count();
+            let rule = AgeRule {
+                older_than: Duration::from_secs(86_400),
+                source: crate::materialize::cache::AgeSource::MtimeOnly,
+            };
+            let report = gc(root.path(), rule, HashingMode::Strict, true).unwrap();
+            proptest::prop_assert_eq!(report.removed.len() + report.kept + report.failed.len(), entries);
+            proptest::prop_assert_eq!(report.removed.len(), want_removed);
+        }
     }
 }

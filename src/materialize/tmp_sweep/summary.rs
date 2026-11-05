@@ -45,13 +45,24 @@ pub fn stale_summary_in(
     now: std::time::SystemTime,
 ) -> anyhow::Result<StaleSummary> {
     let scan = scan(tmp_root, rule, in_use, now)?;
-    let total = scan.stale.iter().try_fold(DirSize::default(), |total, s| {
-        Ok::<_, anyhow::Error>(total.combine(dir_size(&s.path)?))
-    })?;
+    // A stale entry whose size cannot be read is counted as unreadable, and the other entries
+    // keep their sizes, so one bad folder does not hide the whole summary (#3277).
+    let mut unsized_entries = 0usize;
+    let total = scan
+        .stale
+        .iter()
+        .fold(DirSize::default(), |total, s| match dir_size(&s.path) {
+            Ok(size) => total.combine(size),
+            Err(e) => {
+                tracing::error!("cannot size the stale entry {}: {e:#}", s.path.display());
+                unsized_entries += 1;
+                total
+            }
+        });
     Ok(StaleSummary {
         count: scan.stale.len(),
         bytes: total.bytes,
-        bytes_partial: total.skipped > 0,
-        unreadable: scan.failed.len(),
+        bytes_partial: total.skipped > 0 || unsized_entries > 0,
+        unreadable: scan.failed.len() + unsized_entries,
     })
 }

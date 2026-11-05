@@ -2390,12 +2390,10 @@ mod tests {
         // A directory where the sidecar file belongs makes the read fail, not miss.
         let unreadable = dir.path().join("unreadable.json");
         std::fs::create_dir(&unreadable).unwrap();
-        let mut result = None;
-        let logs = crate::test_log_capture::capture_logs(|| {
-            result = super::read_hooks_sidecar(&unreadable);
-        });
-        assert!(result.is_none());
-        assert!(logs.contains("cannot read hooks sidecar"), "{logs}");
+        assert!(super::read_hooks_sidecar(&unreadable).is_none());
+        // The agent notice is the result; a captured log can miss the line under parallel tests (#3394).
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(notices.contains("cannot read hooks sidecar"), "{notices}");
     }
 
     use super::super::AgentAdapter;
