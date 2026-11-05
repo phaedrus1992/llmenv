@@ -12,7 +12,11 @@ pub(super) const TAIL_BYTES: u64 = 1024 * 1024;
 pub(super) fn read_tail(path: &Path) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     let logged = |step: &str, e: std::io::Error| {
-        tracing::error!("transcript {} cannot be {step}: {e}", path.display());
+        crate::agent_notice::record_logged(format!(
+            "llmenv: the transcript {} cannot be {step}, so the checks that read it pass \
+             unchecked: {e}. Fix: check its permissions.",
+            path.display()
+        ));
     };
     let mut file = match std::fs::File::open(path) {
         Ok(file) => file,

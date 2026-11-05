@@ -65,28 +65,21 @@ fn unsafe_session_id_passes_through_without_escaping_state_dir() {
     assert!(!std::path::Path::new("/tmp/llmenv-abs-escape").exists());
 }
 
-// Found during #1209's pre-pr-review (security-audit): read_once.rs's
-// identical check already logs this rejection; repeat_detect's own copy
-// of the same check didn't.
+// The agent must see that the check is off, not only the log (#1209, #3457).
 #[test]
-fn unsafe_session_id_logs_error() {
+fn unsafe_session_id_tells_the_agent_the_check_is_off() {
     let dir = TempDir::new().expect("test");
-    let logs = crate::test_log_capture::capture_logs(|| {
-        let out = handle_pre_tool_use(
-            &bash_payload("ls"),
-            Some("../escape"),
-            &config(1),
-            dir.path(),
-        );
-        assert!(out.is_empty());
-    });
-    assert!(
-        logs.contains("session_id failed path-safety validation"),
-        "expected an error log when session_id is rejected, got: {logs}"
+    let out = handle_pre_tool_use(
+        &bash_payload("ls"),
+        Some("../escape"),
+        &config(1),
+        dir.path(),
     );
+    assert!(out.is_empty());
+    let notice = crate::agent_notice::current().unwrap_or_default();
     assert!(
-        logs.contains("ERROR"),
-        "must log at error level, got: {logs}"
+        notice.contains("the repeat check is off for this event"),
+        "the agent must see the rejected session id: {notice}"
     );
 }
 

@@ -373,7 +373,9 @@ pub(crate) fn spawner_state_dir() -> Option<PathBuf> {
         return None;
     }
     crate::paths::state_dir()
-        .inspect_err(|e| tracing::error!("spawned job has no state dir, so no checkpoint: {e:#}"))
+        .inspect_err(|e| {
+            crate::agent_notice::no_state_folder("a detached job runs with no checkpoint", e);
+        })
         .ok()
 }
 

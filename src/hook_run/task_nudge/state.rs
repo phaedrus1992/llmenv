@@ -17,7 +17,7 @@ pub(super) fn state_path(state_dir: &Path, session_id: &str) -> Option<PathBuf> 
 /// file is reset, and the caller saves the reset so the next call does not report it again. A
 /// file that exists but cannot be read is an error, and the message names the path.
 pub(super) fn read_state(path: &Path) -> Result<(NudgeState, bool), String> {
-    let text = match std::fs::read_to_string(path) {
+    let text = match crate::paths::bounded::state_text_io(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok((NudgeState::default(), false));
@@ -70,4 +70,79 @@ pub(super) fn save(path: &Path, state: &NudgeState) -> bool {
         ));
     }
     written.is_ok()
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test code")]
+mod tests {
+    use super::*;
+
+    /// A state file cut inside its last character is reset like a corrupt file, not refused as
+    /// unreadable, so the commit gate does not deny on it (#3457).
+    #[test]
+    fn a_state_file_cut_inside_its_last_character_is_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.json");
+        std::fs::write(&path, b"{\"note\": \"caf\xc3").unwrap();
+        let (state, reset) = read_state(&path).unwrap();
+        assert!(reset, "the cut file is reset");
+        assert_eq!(state, NudgeState::default());
+    }
+
+    fn nudge_state() -> impl proptest::strategy::Strategy<Value = NudgeState> {
+        use proptest::prelude::*;
+        let texts = || proptest::collection::vec("[a-zé€😀 -]{0,6}", 0..3);
+        (
+            (any::<u32>(), any::<u32>(), any::<bool>(), any::<bool>()),
+            proptest::option::of("[a-zé€😀-]{0,8}"),
+            texts(),
+            any::<u32>(),
+            texts(),
+        )
+            .prop_map(
+                |(
+                    (calls, last_nudge, skill_reminded, commit_denied),
+                    start,
+                    boundary,
+                    quiet,
+                    asked,
+                )| {
+                    NudgeState {
+                        calls,
+                        last_nudge,
+                        skill_reminded,
+                        commit_denied,
+                        start_reminded: start,
+                        boundary_reminded: boundary,
+                        stop_quiet_turns: quiet,
+                        ownerless_question_reminded: asked,
+                    }
+                },
+            )
+    }
+
+    proptest::proptest! {
+        /// A saved state reads back unchanged, with no reset.
+        #[test]
+        fn a_saved_state_reads_back_unchanged(state in nudge_state()) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("task_nudge").join("s.json");
+            proptest::prop_assert!(save(&path, &state));
+            proptest::prop_assert_eq!(read_state(&path).unwrap(), (state, false));
+        }
+
+        /// Any cut of a saved state, inside a character or not, resets to the default state and
+        /// never reads as a partial state (#3457).
+        #[test]
+        fn any_cut_of_a_saved_state_resets(
+            state in nudge_state(),
+            cut in proptest::prelude::any::<proptest::sample::Index>(),
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("s.json");
+            let saved = serde_json::to_vec(&state).unwrap();
+            std::fs::write(&path, &saved[..cut.index(saved.len())]).unwrap();
+            proptest::prop_assert_eq!(read_state(&path).unwrap(), (NudgeState::default(), true));
+        }
+    }
 }

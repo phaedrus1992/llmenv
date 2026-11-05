@@ -188,7 +188,7 @@ pub(crate) fn save_task(state_dir: &Path, task: &Task) -> anyhow::Result<()> {
 pub(crate) fn load_task(state_dir: &Path, slug: &str) -> anyhow::Result<Task> {
     use anyhow::Context as _;
     let path = task_path(state_dir, slug);
-    let content = std::fs::read_to_string(&path)
+    let content = crate::paths::bounded::state_text_io(&path)
         .with_context(|| format!("cannot read task '{slug}' at {}", path.display()))?;
     serde_json::from_str(&content)
         .with_context(|| format!("task '{slug}' at {} is not valid task JSON", path.display()))
@@ -836,10 +836,10 @@ fn touch_task_session(state_dir: &Path, task: &Task) {
     {
         // error level, because the default log filter drops warnings. A session that cannot load
         // is a real fault, even though the task change is already saved.
-        tracing::error!(
-            error = %e, session_id = %session_id,
-            "failed to update last_activity after a task change (task change itself is already saved)"
-        );
+        crate::agent_notice::record_logged(format!(
+            "llmenv: the task change is saved, but the activity time of session {session_id} is \
+             not, so the session can look idle: {e:#}. Fix: run `llmenv task session show`."
+        ));
     }
 }
 

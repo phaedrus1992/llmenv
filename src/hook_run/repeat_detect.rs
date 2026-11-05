@@ -173,7 +173,10 @@ pub(crate) fn handle_pre_tool_use(
         // value -- worth surfacing even though the rejection itself is safe.
         // `error!`, not `warn!`: see the #1133 precedent below. Found during
         // #1209's pre-pr-review: read_once.rs's identical check already logs.
-        tracing::error!("session_id failed path-safety validation for repeat_detect, rejecting");
+        crate::agent_notice::record_logged(
+            "llmenv: the repeat check is off for this event, because the session id is not \
+             safe in a file name.",
+        );
         return String::new();
     }
     let Some(tool_name) = stdin_payload.get("tool_name").and_then(|v| v.as_str()) else {

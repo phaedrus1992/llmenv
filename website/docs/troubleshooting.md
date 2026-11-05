@@ -433,6 +433,18 @@ These notices come from the hook itself (added in v3.14.0):
 - `cannot create the index result file`, `cannot remove the old index result file`, `the earlier code
   index checkpoint ... cannot be read`, and `the code index job runs without its wrapper` — the code
   index job cannot report its result. Check the state directory, or remove the named file.
+- `the repeat check is off for this event` and `the stop reminder can repeat` — the session id is
+  not safe in a file name, so the check that keeps state per session does not run.
+- `CLAUDE_CODE_VERSION is read as unset` — the variable is not valid text, so the version checks
+  use their defaults.
+- `the transcript <path> cannot be opened` (or `examined`, or `read`) — the checks that read the transcript pass
+  without a check. Check the permissions of the file.
+- `the session-end duplicate record <path> cannot be read` — the context chunk can be stored again.
+  Remove the file.
+- `the recall ledger is not updated`, `the agent config is not written`, and `a detached job runs
+  with no checkpoint` — the state folder is missing or not valid. Set `HOME` or `LLMENV_STATE_DIR`.
+- `the activity time of session <id> is not` saved — the task change is saved, but the session can
+  look idle. Run `llmenv task session show`.
 
 ## Profiling hook-run latency
 
