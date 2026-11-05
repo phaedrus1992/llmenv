@@ -692,17 +692,19 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
     // The resume fields are parsed before the notices are taken, because a wrong-type field
     // records a notice as it is read.
     let resume_message = resume_cache::session_resume_notice(&hook_event_name, payload);
+    // A deny envelope replaces the whole output, so recalled memory is not sent (#3399).
+    if result.as_ref().is_ok_and(deny_drops_memory) {
+        crate::agent_notice::record_logged(
+            "llmenv: recalled memory was not shown, because the tool call was denied.",
+        );
+    }
     // Read after `run_inner`, so every output path below carries it to the agent (#2658).
-    let notice = crate::agent_notice::current();
+    let notice = crate::agent_notice::current_with_children();
     match result {
         Ok(text) => {
             // #318: deny envelope detected — write a proper deny JSON envelope
             // to stdout so the Claude Code engine blocks the tool call.
             if text.notes.starts_with("__DENY__:") {
-                if deny_drops_memory(&text) {
-                    // The deny envelope replaces the whole output, so this memory is not sent.
-                    tracing::error!("hook-run: memory text dropped for a deny envelope");
-                }
                 let reason = text.notes.trim_start_matches("__DENY__:");
                 let reason = match notice {
                     Some(notice) => format!("{notice}\n\n{reason}"),
@@ -1064,7 +1066,7 @@ impl HookText {
 
 /// Whether a deny envelope would replace memory text that was computed in the same run.
 fn deny_drops_memory(text: &HookText) -> bool {
-    !text.memory.is_empty()
+    text.notes.starts_with("__DENY__:") && !text.memory.is_empty()
 }
 
 /// Puts the agent notice in front of the llmenv notes, with no empty separator.
@@ -2281,6 +2283,14 @@ mod pipeline_recovery_tests {
         assert!(!deny_drops_memory(&HookText::from_notes(
             "__DENY__:why".to_string()
         )));
+        let allowed = HookText {
+            memory: "recalled".to_string(),
+            notes: "a note".to_string(),
+        };
+        assert!(
+            !deny_drops_memory(&allowed),
+            "no deny, so nothing is dropped"
+        );
     }
 
     #[test]

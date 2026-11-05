@@ -19,8 +19,10 @@ mod guard;
 mod init_settings;
 mod login;
 mod prefill;
+mod shell_names;
 use env_vars::reject_invalid_var_names;
 use login::{import_auth_from_file, run_login, run_login_capture};
+use shell_names::{completion_filename, detect_shell};
 use sync_cmd::run_sync;
 mod plugin_payloads;
 mod post_materialize;
@@ -921,15 +923,17 @@ pub fn run() -> anyhow::Result<()> {
         Some(Command::SessionLogRecord { checkpoint }) => {
             use std::io::Read;
             let mut payload_json = String::new();
-            std::io::stdin().read_to_string(&mut payload_json)?;
+            // The checkpoint check starts the notice spool, so a stdin error reaches the agent.
             let checkpoint = checked_checkpoint(checkpoint)?;
+            std::io::stdin().read_to_string(&mut payload_json)?;
             crate::session_log::detached::run_record(&payload_json, checkpoint.as_deref())?;
         }
         Some(Command::IcmStore { checkpoint }) => {
             use std::io::Read;
             let mut payload_json = String::new();
-            std::io::stdin().read_to_string(&mut payload_json)?;
+            // The checkpoint check starts the notice spool, so a stdin error reaches the agent.
             let checkpoint = checked_checkpoint(checkpoint)?;
+            std::io::stdin().read_to_string(&mut payload_json)?;
             crate::hook_run::detached_store::run_icm_store(&payload_json, checkpoint.as_deref())?;
         }
         Some(Command::ConsolidationRun { checkpoint }) => {
@@ -2814,11 +2818,14 @@ fn render_task_session_summary_human(
     out
 }
 
-/// Handle `llmenv task <subcommand>` (#231). Thin formatting layer over
-/// `crate::task`, which owns the store logic.
 /// The `--checkpoint` path of a detached child, checked to be a checkpoint file under the state
 /// dir (#2396). The child deletes and trusts the file, so it must not take an arbitrary path.
+/// Every detached child calls this first, so it also spools the child's notices for the next
+/// hook run (#3398).
 fn checked_checkpoint(path: Option<PathBuf>) -> anyhow::Result<Option<PathBuf>> {
+    if let Ok(state_dir) = paths::state_dir() {
+        crate::agent_notice::start_spool(&state_dir);
+    }
     let Some(path) = path else {
         return Ok(None);
     };
@@ -2826,6 +2833,8 @@ fn checked_checkpoint(path: Option<PathBuf>) -> anyhow::Result<Option<PathBuf>> 
     crate::hook_run::checkpoint::validated_path(&state_dir, &path).map(Some)
 }
 
+/// Handle `llmenv task <subcommand>` (#231). Thin formatting layer over
+/// `crate::task`, which owns the store logic.
 fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()> {
     let state_dir = crate::paths::state_dir()?;
     match command {
@@ -4123,40 +4132,6 @@ fn run_completions(shell: clap_complete::Shell) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Map `$SHELL`'s basename to a [`clap_complete::Shell`]. `shell_env` is the
-/// raw `$SHELL` value (injected so this is unit-testable without mutating
-/// process env) — typically a path like `/bin/zsh`.
-fn detect_shell(shell_env: Option<&str>) -> anyhow::Result<clap_complete::Shell> {
-    let shell_path = shell_env.ok_or_else(|| {
-        anyhow::anyhow!("--shell not given and $SHELL is not set; pass --shell explicitly")
-    })?;
-    let name = Path::new(shell_path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| {
-            anyhow::anyhow!("could not determine shell name from $SHELL={shell_path}")
-        })?;
-    match name {
-        "bash" => Ok(clap_complete::Shell::Bash),
-        "zsh" => Ok(clap_complete::Shell::Zsh),
-        "fish" => Ok(clap_complete::Shell::Fish),
-        other => anyhow::bail!(
-            "unrecognized shell '{other}' from $SHELL={shell_path}; pass --shell explicitly \
-             (bash, zsh, or fish)"
-        ),
-    }
-}
-
-/// The file name a completion script is conventionally installed under.
-/// zsh's autoload-based completion system requires the leading underscore.
-fn completion_filename(shell: clap_complete::Shell) -> &'static str {
-    match shell {
-        clap_complete::Shell::Zsh => "_llmenv",
-        clap_complete::Shell::Fish => "llmenv.fish",
-        _ => "llmenv",
-    }
-}
-
 /// The shell's standard per-user completion directory. `bash_completion_user_dir`
 /// and `zsh_custom` are `$BASH_COMPLETION_USER_DIR`/`$ZSH_CUSTOM` (injected for
 /// testability); when unset, falls back to the vanilla per-shell convention.
@@ -4321,46 +4296,6 @@ mod tests {
         let input = "line1  \nline2   \nline3";
         let expected = "line1\nline2\nline3";
         assert_eq!(compress_agents_md(input), expected);
-    }
-
-    // #756: shell autocomplete install support.
-
-    #[test]
-    fn detect_shell_maps_shell_env_basename() {
-        assert_eq!(
-            detect_shell(Some("/bin/bash")).expect("test"),
-            clap_complete::Shell::Bash
-        );
-        assert_eq!(
-            detect_shell(Some("/usr/bin/zsh")).expect("test"),
-            clap_complete::Shell::Zsh
-        );
-        assert_eq!(
-            detect_shell(Some("/usr/local/bin/fish")).expect("test"),
-            clap_complete::Shell::Fish
-        );
-    }
-
-    #[test]
-    fn detect_shell_errors_when_shell_env_unset() {
-        let err = detect_shell(None).expect_err("test");
-        assert!(err.to_string().contains("SHELL"));
-    }
-
-    #[test]
-    fn detect_shell_errors_on_unrecognized_shell() {
-        let err = detect_shell(Some("/bin/csh")).expect_err("test");
-        assert!(err.to_string().contains("csh"));
-    }
-
-    #[test]
-    fn completion_filename_prefixes_zsh_with_underscore() {
-        assert_eq!(completion_filename(clap_complete::Shell::Zsh), "_llmenv");
-        assert_eq!(completion_filename(clap_complete::Shell::Bash), "llmenv");
-        assert_eq!(
-            completion_filename(clap_complete::Shell::Fish),
-            "llmenv.fish"
-        );
     }
 
     #[test]
