@@ -98,7 +98,7 @@ fn prune_mode(args: &CleanArgs) -> anyhow::Result<PruneMode> {
 #[derive(Debug, Default)]
 struct Removals {
     removed: Vec<PathBuf>,
-    failed: Vec<PathBuf>,
+    failed: std::collections::BTreeMap<PathBuf, String>,
     kept: usize,
 }
 
@@ -119,11 +119,8 @@ fn run_prune(
     for p in &folders.removed {
         eprintln!("  {verb}: {}", p.display());
     }
-    for p in &folders.failed {
-        eprintln!(
-            "  could not check or remove (cause logged above): {}",
-            p.display()
-        );
+    for (p, cause) in &folders.failed {
+        eprintln!("  could not check or remove {}: {cause}", p.display());
     }
     eprintln!(
         "prune complete: {verb} {} entry(ies), kept {}",
@@ -146,8 +143,8 @@ fn run_prune(
     for p in &plugins.removed {
         eprintln!("  {verb} plugin cache: {}", p.display());
     }
-    for p in &plugins.failed {
-        eprintln!("  failed to remove plugin cache: {}", p.display());
+    for (p, cause) in &plugins.failed {
+        eprintln!("  failed to remove plugin cache {}: {cause}", p.display());
     }
     if args.plugin_cache {
         eprintln!(
@@ -248,7 +245,8 @@ fn remove_plugin_caches(cache_dir: &Path, dry_run: bool) -> Removals {
                     error = %e,
                     "failed to remove plugin cache"
                 );
-                out.failed.push(plugins_dir);
+                out.failed
+                    .insert(plugins_dir, format!("cannot remove the folder: {e}"));
             }
         }
     }
