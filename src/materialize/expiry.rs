@@ -21,7 +21,7 @@ pub struct AgeRule {
 impl AgeRule {
     /// The production rule: entries older than `older_than`, judged by mtime or change time, so a
     /// restored tree is kept (#3195). Only tests build a rule with `AgeSource::MtimeOnly` (#3280).
-    pub fn new(older_than: Duration) -> Self {
+    pub(crate) fn new(older_than: Duration) -> Self {
         Self {
             older_than,
             source: crate::materialize::cache::AgeSource::MtimeOrCtime,
