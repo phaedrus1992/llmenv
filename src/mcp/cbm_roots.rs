@@ -169,14 +169,18 @@ fn missing_roots(wanted: &[PathBuf], listed: &[PathBuf]) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Whether `path` is a folder. A stat error other than "not found" is logged, because it
-/// would otherwise drop a declared root from the report without a word (#2916).
+/// Whether `path` is a folder. A stat error other than "not found" is a notice, because it
+/// would otherwise drop a declared root from the report without a word (#2916, #3462).
 fn is_folder(path: &Path) -> bool {
     match std::fs::metadata(path) {
         Ok(meta) => meta.is_dir(),
         Err(e) => {
             if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::error!("cannot read the declared root {}: {e}", path.display());
+                crate::agent_notice::record_logged(format!(
+                    "llmenv: the declared code index root {} cannot be read, so the root \
+                     check leaves it out: {e}. Fix: check its permissions.",
+                    path.display()
+                ));
             }
             false
         }
@@ -190,10 +194,11 @@ fn undeclared_roots(listed: &[PathBuf], wanted: &[PathBuf]) -> Vec<PathBuf> {
         .iter()
         .filter(|root| {
             if canonical(root).is_none() {
-                tracing::error!(
-                    "recorded root {} does not resolve, so it is not reported",
+                crate::agent_notice::record_logged(format!(
+                    "llmenv: the recorded code index root {} does not resolve, so the root \
+                     check leaves it out. Fix: run `llmenv doctor`.",
                     root.display()
-                );
+                ));
                 return false;
             }
             !is_within_any(root, wanted)

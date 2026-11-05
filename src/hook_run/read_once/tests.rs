@@ -166,25 +166,20 @@ fn unsafe_session_id_passes_through_without_escaping_state_dir() {
 // schema, so this should never fire in practice — but if it ever does,
 // read_once would otherwise stop deduplicating with no trace in the logs.
 #[test]
-fn logs_error_when_file_path_missing() {
+fn notice_when_file_path_missing() {
     let dir = TempDir::new().expect("test");
     let payload = serde_json::json!({ "tool_name": "Read", "tool_input": {} });
-    let logs = crate::test_log_capture::capture_logs(|| {
-        let result = handle_pre_tool_use(
-            &payload,
-            Some("test-session"),
-            &test_config_warn(),
-            dir.path(),
-        );
-        assert!(result.is_empty());
-    });
-    assert!(
-        logs.contains("tool_input.file_path missing"),
-        "expected an error log when tool_input.file_path is absent, got: {logs}"
+    let result = handle_pre_tool_use(
+        &payload,
+        Some("test-session"),
+        &test_config_warn(),
+        dir.path(),
     );
+    assert!(result.is_empty());
+    let notice = crate::agent_notice::current().unwrap_or_default();
     assert!(
-        logs.contains("ERROR"),
-        "must log at error level so it survives the default (RUST_LOG-unset) filter, got: {logs}"
+        notice.contains("file_path text"),
+        "the agent must see the skipped read cache: {notice}"
     );
 }
 
@@ -192,25 +187,20 @@ fn logs_error_when_file_path_missing() {
 // missing, should never happen" category as file_path above, just one
 // level up (tool_input itself missing/not-an-object) — was left unlogged.
 #[test]
-fn logs_error_when_tool_input_not_an_object() {
+fn notice_when_tool_input_not_an_object() {
     let dir = TempDir::new().expect("test");
     let payload = serde_json::json!({ "tool_name": "Read", "tool_input": "not-an-object" });
-    let logs = crate::test_log_capture::capture_logs(|| {
-        let result = handle_pre_tool_use(
-            &payload,
-            Some("test-session"),
-            &test_config_warn(),
-            dir.path(),
-        );
-        assert!(result.is_empty());
-    });
-    assert!(
-        logs.contains("tool_input missing or not an object"),
-        "expected an error log when tool_input isn't an object, got: {logs}"
+    let result = handle_pre_tool_use(
+        &payload,
+        Some("test-session"),
+        &test_config_warn(),
+        dir.path(),
     );
+    assert!(result.is_empty());
+    let notice = crate::agent_notice::current().unwrap_or_default();
     assert!(
-        logs.contains("ERROR"),
-        "must log at error level, got: {logs}"
+        notice.contains("tool_input is not an object"),
+        "the agent must see the skipped read cache: {notice}"
     );
 }
 

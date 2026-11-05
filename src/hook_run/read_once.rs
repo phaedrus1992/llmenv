@@ -67,11 +67,11 @@ pub(crate) fn handle_pre_tool_use(
     let tool_input = match stdin_payload["tool_input"].as_object() {
         Some(obj) => obj,
         None => {
-            // tool_input is required and always an object per Claude Code's
-            // Read tool schema — this should never fire in practice. `error!`,
-            // not `warn!`: the default `EnvFilter` (`RUST_LOG` unset) is
-            // ERROR-only and drops anything weaker (#1133 precedent).
-            tracing::error!("tool_input missing or not an object for Read PreToolUse payload");
+            // The Read tool schema makes tool_input an object, so this is an engine fault (#3462).
+            crate::agent_notice::record_logged(
+                "llmenv: the read cache is off for this Read call, because its tool_input is \
+                 not an object. Fix: report this as a Claude Code payload bug.",
+            );
             return String::new();
         }
     };
@@ -93,12 +93,11 @@ pub(crate) fn handle_pre_tool_use(
         })
         .and_then(|v| v.as_str())
     else {
-        // file_path is required per Claude Code's Read tool schema — this
-        // should never fire in practice. `error!`, not `warn!`/`debug!`: the
-        // default `EnvFilter` (`RUST_LOG` unset) is ERROR-only and drops
-        // anything weaker before it reaches a default-configured user's log
-        // (#1133 precedent).
-        tracing::error!("tool_input.file_path missing or not a string for Read PreToolUse payload");
+        // The Read tool schema requires file_path, so this is an engine fault (#1207, #3462).
+        crate::agent_notice::record_logged(
+            "llmenv: the read cache is off for this Read call, because its tool_input has no \
+             file_path text. Fix: report this as a Claude Code payload bug.",
+        );
         return String::new();
     };
     // Partial read bypass: if offset or limit are present, never cache
