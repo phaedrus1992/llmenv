@@ -810,3 +810,49 @@ fn the_session_log_count_reads_the_configured_path() {
     let config: Config = serde_yaml::from_str(&yaml).unwrap();
     assert_eq!(collect_session_log(&config), Some(3));
 }
+
+// #3393: the summed progress equals the sum of the per-session progress, and it is `None`
+// exactly when no session is open.
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(16))]
+    #[test]
+    fn the_session_total_is_the_sum_of_each_open_session(
+        sessions in prop::collection::vec((0usize..4, 0usize..4), 0..4),
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut expected = Vec::new();
+        for (i, (total, done)) in sessions.iter().enumerate() {
+            let done = (*done).min(*total);
+            let decision = if i == 0 { StartDecision::Auto } else { StartDecision::New };
+            let session = created(
+                start_session(dir.path(), Some(&format!("s{i}")), None, PROJECT, decision).unwrap(),
+            );
+            for t in 0..*total {
+                let task = crate::task::add_task_for_session(
+                    dir.path(),
+                    &format!("task {t}"),
+                    crate::task::ParentSpec::Detached,
+                    &session.id,
+                )
+                .unwrap();
+                if t < done {
+                    crate::task::done_task(dir.path(), &task.slug).unwrap();
+                }
+            }
+            expected.push((session.id, SessionProgress { done: u64::try_from(done).unwrap(), total: u64::try_from(*total).unwrap() }));
+        }
+        expected.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let data = collect_tasks_from_state_dir(dir.path(), PROJECT);
+
+        prop_assert!(!data.unreadable);
+        let per_session: Vec<SessionProgress> = data.sessions.iter().map(|s| s.progress).collect();
+        let want: Vec<SessionProgress> = expected.iter().map(|(_, p)| *p).collect();
+        prop_assert_eq!(&per_session, &want);
+        let summed = want.iter().fold(SessionProgress { done: 0, total: 0 }, |a, p| SessionProgress {
+            done: a.done + p.done,
+            total: a.total + p.total,
+        });
+        prop_assert_eq!(data.session, (!sessions.is_empty()).then_some(summed));
+    }
+}
