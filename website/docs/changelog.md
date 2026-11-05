@@ -35,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Extend `LLMENV_TRACE_TIMING` with `[LLMENV_SPAWN]` lines for child processes, `[LLMENV_LEDGER]` lines for recall ledger locking, `[LLMENV_MATERIALIZE]` file counts per adapter, per-widget statusline timing, session-start sub-phases, and one `llmenv-trace` marker each for `export` and `regenerate`. Markers carry `"v": 1`. Set `LLMENV_TRACE_FILE` to append every trace line as JSON Lines. See [Trace telemetry](https://phaedrus1992.github.io/llmenv/docs/trace). [#3009, #3010, #3011, #3012, #3013, #3015, #3016, #3017, #3019, #3020]
 - Emit a `[LLMENV_DETACHED]` trace line when each detached job (consolidation, ICM store, session-log record, CBM index) exits. The line carries job kind, wall time, CPU time (macOS), MCP call count, and exit status. See [Trace telemetry](https://phaedrus1992.github.io/llmenv/docs/trace#llmenvdetached). [#3014]
 - Add `on_failure: block` to a bundle hook handler, so a guard hook that cannot run blocks the action in Claude Code 2.1.295 or later. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration). [feat:adapter] [#3101]
+- Add `llmenv prefill`, which reads a Claude Code transcript and shows the prompt prefill size, the largest tool schemas, the shape changes that miss the cache, and the cache breakpoints. See [`prefill`](https://phaedrus1992.github.io/llmenv/docs/commands#prefill). [feat:cli] [#3102]
 
 ### Changed
 
@@ -173,6 +174,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Check the hooks of a bundle when llmenv loads it. A bundle hook with no command, no tool, or `on_failure` on an `mcp_tool` handler used to be accepted and rendered as a hook that runs nothing. [feat:adapter] [#3101]
 - Report a failed branch lookup in the task tracker when git is killed by a signal or exits with an unexpected code, even when its stderr says "not a git repository". Only git's fatal exit 128 with that message is a folder outside git; the repository check and the project name lookup use the same rule, and a silent exit 1 is the only detached HEAD. [fix:task] [#3433]
 - Count a file or a link inside a cache generation as kept in the `llmenv doctor --gc` and `llmenv clean` report, so the counts cover every entry. One stale `state/tmp` entry whose size cannot be read is counted as unreadable instead of failing the whole stale summary. [refactor:materialize] [#3277]
+- Name the variable and the fix when `llmenv export` rejects an env var from an adapter. A NUL byte in a value used to fail with no variable name. [fix:cli]
+- Log a transcript that the turn checks cannot stat or read, not only one they cannot open, so a check that passes for that reason is visible. [fix:hook]
 
 ### Security
 

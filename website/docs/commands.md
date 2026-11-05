@@ -477,6 +477,38 @@ The failures are printed above the summary, and every other removal still runs f
 The codebase-memory sweep reads the `index_path` of the top-level config and of every bundle.
 A bundle counts whether or not it is active in the current folder.
 
+## `prefill`
+
+(added in v3.14.0)
+
+`llmenv prefill [TRANSCRIPT]` shows the real prompt prefill of a Claude Code session.
+It reads the `api-request-shape` and `api-request` records of the session transcript (`.jsonl`).
+Claude Code 2.1.300 and later write these records.
+With no argument, it reads the newest transcript of the current folder under `$CLAUDE_CONFIG_DIR/projects`.
+
+The report holds:
+
+- The number of requests, and the number of request shapes that they use.
+  A shape is the `system` blocks and the `tools` array of a request.
+- The number of shape changes. Each change is a full prompt cache miss.
+- The size of the `system` blocks and of the tool schemas of the last shape, in characters of their JSON text.
+- The ten largest tool schemas.
+- The cache breakpoints of the last request, such as `system[1], messages[10].content[0]`.
+
+The record format is not documented.
+When a request record lacks a field that the report needs, the command fails and names the transcript line.
+It also fails in these cases:
+
+- A request record is not complete JSON.
+- A request names a shape that no shape record holds.
+- Two shape records with the same hash differ.
+
+It never reports a zero in place of a missing value.
+Other record kinds, and lines that are not JSON, are skipped.
+With no argument, the folder under `projects` is the current folder.
+Each character in it that is not an ASCII letter or digit is written as `-`.
+A transcript with no `api-request` record also fails, because an older Claude Code wrote it.
+
 ## `read-once`
 
 ```text

@@ -4,9 +4,9 @@
 //! adapters, and emit environment variables. The `run_export` entry point in
 //! `src/cli/mod.rs` handles CLI setup and delegates here.
 
+use super::env_vars::{validate_var_name, validate_var_value};
 use super::{
-    build_manifest, ensure_local_memory_proxy, firing_bundles, installed_adapters,
-    validate_var_name, validate_var_value, warn_dead_config,
+    build_manifest, ensure_local_memory_proxy, firing_bundles, installed_adapters, warn_dead_config,
 };
 use crate::config::{Bundle, Config};
 use crate::scope::ActiveScopes;

@@ -12,11 +12,14 @@ use std::path::{Path, PathBuf};
 
 mod clean;
 mod config_guard;
+mod env_vars;
 mod export_trace;
 mod git_repo;
 mod guard;
 mod init_settings;
 mod login;
+mod prefill;
+use env_vars::reject_invalid_var_names;
 use login::{import_auth_from_file, run_login, run_login_capture};
 use sync_cmd::run_sync;
 mod plugin_payloads;
@@ -370,6 +373,8 @@ enum Command {
     /// Remove stale cache folders, old state/tmp entries, old session-log rotations, and old
     /// codebase-memory indexes
     Clean(clean::CleanArgs),
+    /// Show the real prompt prefill of a Claude Code session from its transcript
+    Prefill(prefill::PrefillArgs),
     /// Deprecated: use `llmenv clean`
     Prune(clean::CleanArgs),
     /// Manage the read-once file dedup cache (#318).
@@ -957,6 +962,7 @@ pub fn run() -> anyhow::Result<()> {
         }
         Some(Command::Task { command }) => run_task_command(*command, cli.color.to_mode())?,
         Some(Command::Clean(args)) => clean::run_clean(&args, use_color)?,
+        Some(Command::Prefill(args)) => prefill::run_prefill(&args)?,
         Some(Command::Prune(args)) => clean::run_prune_alias(&args, use_color)?,
         Some(Command::Validate) => {
             run_validate(use_color)?;
@@ -1009,52 +1015,6 @@ fn check_git_remote(dir: &Path) -> anyhow::Result<String> {
 
     let remote = String::from_utf8(output.stdout)?.trim().to_string();
     Ok(remote)
-}
-
-/// Reject any var in `vars` whose name isn't a valid shell identifier.
-/// Applied to adapter-returned env vars before they propagate, so the
-/// `export NAME=...` contract holds regardless of which emission path runs.
-fn reject_invalid_var_names(env: &[(String, String)]) -> anyhow::Result<()> {
-    for (name, value) in env {
-        validate_var_name(name)?;
-        validate_var_value(value)?;
-    }
-    Ok(())
-}
-
-fn validate_var_name(name: &str) -> anyhow::Result<()> {
-    // Shell variable names must match [A-Za-z_][A-Za-z0-9_]*
-    if name.is_empty() {
-        anyhow::bail!("Variable name cannot be empty");
-    }
-    let first = name.as_bytes()[0] as char;
-    if !first.is_ascii_alphabetic() && first != '_' {
-        anyhow::bail!(
-            "Variable name '{}' must start with letter or underscore",
-            name
-        );
-    }
-    for ch in name.chars() {
-        if !ch.is_ascii_alphanumeric() && ch != '_' {
-            anyhow::bail!(
-                "Variable name '{}' contains invalid character '{}'",
-                name,
-                ch
-            );
-        }
-    }
-    Ok(())
-}
-
-fn validate_var_value(value: &str) -> anyhow::Result<()> {
-    // Only NUL is rejected: it can't survive in a C-string env var and would
-    // truncate the export. Newlines/CR are safe because every emission path
-    // single-quotes the value (`util::single_quote`), and values like
-    // LLMENV_ICM_CONTEXT are legitimately multiline. (#469)
-    if value.contains('\0') {
-        anyhow::bail!("variable value contains forbidden NUL byte");
-    }
-    Ok(())
 }
 
 /// Case-insensitive check: true if any item in `list` matches `target` ignoring case.
@@ -5500,55 +5460,6 @@ mod tests {
         // Newlines/CR stay inside the single-quoted string — inert at shell source time.
         assert_eq!(crate::util::single_quote("line1\nline2"), "'line1\nline2'");
         assert_eq!(crate::util::single_quote("line1\rline2"), "'line1\rline2'");
-    }
-
-    #[test]
-    fn validate_var_name_accepts_valid_names() {
-        assert!(validate_var_name("MY_VAR").is_ok());
-        assert!(validate_var_name("_private").is_ok());
-        assert!(validate_var_name("var123").is_ok());
-        assert!(validate_var_name("x").is_ok());
-    }
-
-    #[test]
-    fn validate_var_name_rejects_invalid_names() {
-        assert!(validate_var_name("").is_err());
-        assert!(validate_var_name("123var").is_err());
-        assert!(validate_var_name("my-var").is_err());
-        assert!(validate_var_name("my var").is_err());
-        assert!(validate_var_name("my$var").is_err());
-    }
-
-    #[test]
-    fn reject_invalid_var_names_passes_valid_and_fails_invalid() {
-        let ok = vec![
-            ("CLAUDE_CONFIG_DIR".to_string(), "/x".to_string()),
-            ("_PRIVATE".to_string(), "y".to_string()),
-        ];
-        assert!(reject_invalid_var_names(&ok).is_ok());
-
-        let bad = vec![("bad-name".to_string(), "v".to_string())];
-        assert!(reject_invalid_var_names(&bad).is_err());
-
-        let bad_leading_digit = vec![("1ABC".to_string(), "v".to_string())];
-        assert!(reject_invalid_var_names(&bad_leading_digit).is_err());
-    }
-
-    #[test]
-    fn reject_invalid_var_names_allows_multiline_values() {
-        // NUL truncates the C-string env var — still rejected.
-        let with_nul = vec![("VALID_NAME".to_string(), "value\0malicious".to_string())];
-        assert!(reject_invalid_var_names(&with_nul).is_err());
-
-        // Newlines/CR are safe — emission always single-quotes via shell_escape. (#469)
-        let with_newline = vec![(
-            "VALID_NAME".to_string(),
-            "## context\nActive tags: `foo`".to_string(),
-        )];
-        assert!(reject_invalid_var_names(&with_newline).is_ok());
-
-        let with_cr = vec![("VALID_NAME".to_string(), "value\rmore".to_string())];
-        assert!(reject_invalid_var_names(&with_cr).is_ok());
     }
 
     #[test]
