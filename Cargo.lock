@@ -1315,6 +1315,7 @@ dependencies = [
  "insta",
  "ipnet",
  "jiff",
+ "llmenv",
  "llmenv-config",
  "llmenv-git",
  "llmenv-paths",

@@ -14,10 +14,12 @@ use super::skip_vanished;
 /// `MtimeOnly` trusts the modification time alone. A tree unpacked with its old mtimes kept
 /// (`tar -x`, `cp -p`) then looks old at once. `MtimeOrCtime` also counts the status-change time,
 /// which an unpack sets to now, so the tree reads as used (#3195). Production code builds its
-/// rule with `AgeRule::new`, which picks `MtimeOrCtime`. `MtimeOnly` is for tests, which can only
-/// age a tree by its mtime (#3280).
+/// rule with `AgeRule::new`, which picks `MtimeOrCtime`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgeSource {
+    /// Tests age a tree with `set_modified`, which cannot move the change time back, so only they
+    /// can name this rule: a release build has no such variant (#3432).
+    #[cfg(any(test, feature = "test-support"))]
     MtimeOnly,
     MtimeOrCtime,
 }
@@ -115,6 +117,7 @@ fn walk_mtime(dir: &Path, newest: &mut Newest, age: AgeSource) -> anyhow::Result
 pub(crate) fn file_stamp(meta: &std::fs::Metadata, age: AgeSource) -> std::io::Result<SystemTime> {
     let modified = meta.modified()?;
     Ok(match age {
+        #[cfg(any(test, feature = "test-support"))]
         AgeSource::MtimeOnly => modified,
         AgeSource::MtimeOrCtime => modified.max(change_time(meta)),
     })

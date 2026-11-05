@@ -328,8 +328,16 @@ pub(crate) fn prune(
             continue;
         }
 
-        let is_current =
-            is_current_name(p.file_name().unwrap_or_default(), hashing, current_version);
+        // A path from `read_dir` always ends in a name; a missing one is a failure, not a match.
+        let Some(name) = p.file_name() else {
+            tracing::error!(
+                "cache prune: the entry {} has no file name, so it is kept",
+                p.display()
+            );
+            report.failed.push(p);
+            continue;
+        };
+        let is_current = is_current_name(name, hashing, current_version);
 
         let should_remove = match mode {
             PruneMode::All => true,

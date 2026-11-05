@@ -106,8 +106,13 @@ dialoguer = "=0.12.0"
 # Test seam for #3030. It lets a measurement point the keychain read and delete at a stub
 # `security` binary through LLMENV_SECURITY_BIN. Never enable it in a release build.
 keychain-stub = []
+# Test seam for #3432. It makes AgeSource::MtimeOnly, the age rule that ignores the change
+# time, nameable outside the crate's own tests. Never enable it in a release build.
+test-support = []
 
 [dev-dependencies]
+# The integration tests age a tree with set_modified, which only the mtime-only rule sees (#3432).
+llmenv = { path = ".", version = "3.13.0", features = ["test-support"] }
 assert_cmd = "=2.2.2"
 insta = { version = "=1.49.0", features = ["yaml"] }
 predicates = "=3.1.4"
