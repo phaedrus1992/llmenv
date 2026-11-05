@@ -3698,7 +3698,7 @@ mod tests {
     /// `bundle.yaml` is a *directory*, so every read of it fails with something
     /// other than NotFound — the portable stand-in for the unreadable or
     /// permission-denied bundle file whose error used to be swallowed.
-    pub(in crate::hook_run) fn unreadable_bundle_fixture() -> (
+    fn unreadable_bundle_fixture() -> (
         tempfile::TempDir,
         tempfile::TempDir,
         crate::config::Config,
