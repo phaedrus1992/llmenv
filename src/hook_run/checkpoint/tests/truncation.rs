@@ -26,3 +26,28 @@ fn every_cut_off_checkpoint_lists_as_unreadable() {
         assert!(listed, "prefix of {len} bytes listed as {entries:?}");
     }
 }
+
+proptest::proptest! {
+    /// For any saved checkpoint, any strict prefix fails to load and lists as unreadable.
+    #[test]
+    fn any_cut_off_checkpoint_lists_as_unreadable(
+        index_job in proptest::prelude::any::<bool>(),
+        n in proptest::num::u32::ANY,
+        cut in proptest::prelude::any::<proptest::sample::Index>(),
+    ) {
+        let kind = if index_job { JobKind::CbmIndex } else { JobKind::IcmStore };
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), &cp(kind, n)).unwrap().unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        let saved = saved.trim_end();
+        let len = cut.index(saved.len());
+        std::fs::write(&path, &saved.as_bytes()[..len]).unwrap();
+        proptest::prop_assert!(load(&path).is_err());
+        let entries = list(dir.path());
+        proptest::prop_assert!(
+            matches!(entries.as_slice(), [Entry::Unreadable(listed, _)] if *listed == path),
+            "{:?}",
+            entries
+        );
+    }
+}

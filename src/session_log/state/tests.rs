@@ -267,3 +267,23 @@ fn every_cut_off_map_is_an_error_until_the_next_write() {
         );
     }
 }
+
+proptest::proptest! {
+    /// For any saved map, any strict prefix is an error, never a smaller map.
+    #[test]
+    fn any_cut_off_map_is_an_error(
+        entries in proptest::collection::btree_map("[a-z0-9-]{1,8}", "\\PC{1,8}", 1..4),
+        cut in proptest::prelude::any::<proptest::sample::Index>(),
+    ) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("transcript-sessions.json");
+        for (claude, icm) in &entries {
+            record_at(&path, claude, icm).expect("write");
+        }
+        let saved = std::fs::read_to_string(&path).expect("saved map");
+        let saved = saved.trim_end();
+        let len = cut.index(saved.len());
+        std::fs::write(&path, &saved.as_bytes()[..len]).expect("cut-off map");
+        proptest::prop_assert!(load_at(&path).is_err());
+    }
+}

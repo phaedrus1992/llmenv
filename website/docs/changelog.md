@@ -178,6 +178,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Log a transcript that the turn checks cannot stat or read, not only one they cannot open, so a check that passes for that reason is visible. [fix:hook]
 - Show a status line PR lookup that `gh` ends with an unexpected exit or a signal as a failure, even when its message says there is no PR. Only exit 1 with that message means no PR. [fix:statusline] [#3442]
 - Keep a bundle off under `llmenv export --scope` when another active scope disables it. The warning for a scope that is not active now says that every matching bundle fires. [fix:cli] [#3269]
+- Treat a recall ledger or a session map that a crash cut inside a multi-byte character as corrupt. The ledger starts fresh and the map moves aside on the next write; before, every update was skipped. [fix:hook] [#3130]
 
 ### Security
 
