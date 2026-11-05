@@ -244,3 +244,26 @@ proptest::proptest! {
         proptest::prop_assert_eq!(std::fs::metadata(&aside).expect("test").len(), 0);
     }
 }
+
+/// Each strict prefix of a saved map, the empty file included, is the shape a crash leaves. The
+/// read is a hard error that names the file, and the next write moves it aside and works (#3130).
+#[test]
+fn every_cut_off_map_is_an_error_until_the_next_write() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("transcript-sessions.json");
+    record_at(&path, "claude-1", "icm-aaa").expect("first write");
+    record_at(&path, "claude-2", "icm-bbb").expect("second write");
+    let saved = std::fs::read(&path).expect("saved map");
+    for len in 0..saved.len() {
+        std::fs::write(&path, &saved[..len]).expect("cut-off map");
+        let err = format!("{:#}", load_at(&path).expect_err("a cut-off map must fail"));
+        assert!(err.contains("is corrupt"), "{len}: {err}");
+        record_at(&path, "claude-3", "icm-ccc").expect("the next write moves the map aside");
+        let map = load_at(&path).expect("the new map reads");
+        assert_eq!(
+            map.get("claude-3").map(String::as_str),
+            Some("icm-ccc"),
+            "{len}"
+        );
+    }
+}

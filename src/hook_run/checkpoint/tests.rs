@@ -330,3 +330,6 @@ proptest! {
         prop_assert!(load(&path).unwrap().attempts >= attempts);
     }
 }
+
+#[expect(clippy::unwrap_used, reason = "test code")]
+mod truncation;

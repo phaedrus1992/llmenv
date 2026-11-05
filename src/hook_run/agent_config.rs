@@ -778,21 +778,4 @@ mod tests {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "test code")]
-mod reset_notice_tests {
-    use super::{DIR, write_session_start};
-
-    #[test]
-    fn a_session_start_over_a_corrupt_config_tells_the_agent() {
-        let dir = tempfile::tempdir().unwrap();
-        let config_dir = dir.path().join(DIR);
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(config_dir.join("s1.json"), "not json").unwrap();
-        write_session_start(dir.path(), "s1", super::tests::doc());
-        let text = crate::agent_notice::current().unwrap_or_default();
-        assert!(
-            text.contains("agent config could not be read"),
-            "got: {text}"
-        );
-    }
-}
+mod reset_notice_tests;
