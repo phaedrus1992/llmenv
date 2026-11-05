@@ -123,9 +123,9 @@ fn change_time(meta: &std::fs::Metadata) -> SystemTime {
 
 /// The change time in `secs` and `nanos`, as the file system reports it.
 ///
-/// A pre-1970 ctime, or one past the range of `SystemTime`, is not a real case for a file this
-/// walk reads. It maps to the epoch, which is the oldest value, so it never keeps a tree alive by
-/// accident. A nanosecond part outside one second is read as zero.
+/// The kernel sets the change time from its clock, so a pre-1970 value is not a real case. It
+/// maps to the epoch, the oldest value, so it never keeps a tree alive by accident. A nanosecond
+/// part outside one second is read as zero, so it cannot carry into the seconds and overflow.
 #[cfg(unix)]
 fn ctime_to_system_time(secs: i64, nanos: i64) -> SystemTime {
     let Ok(secs) = u64::try_from(secs) else {
@@ -135,12 +135,12 @@ fn ctime_to_system_time(secs: i64, nanos: i64) -> SystemTime {
         .ok()
         .filter(|n| *n < 1_000_000_000)
         .unwrap_or(0);
-    SystemTime::UNIX_EPOCH
-        .checked_add(Duration::new(secs, nanos))
-        .unwrap_or(SystemTime::UNIX_EPOCH)
+    // Seconds up to `i64::MAX` with nanoseconds under one second fit in a Unix `SystemTime`.
+    SystemTime::UNIX_EPOCH + Duration::new(secs, nanos)
 }
 
-/// Windows has no status-change time in `std`. The source then falls back to the mtime.
+/// Windows has no status-change time in `std`. The epoch is the oldest value, so the `max` in
+/// `file_stamp` then gives the mtime.
 #[cfg(not(unix))]
 fn change_time(_meta: &std::fs::Metadata) -> SystemTime {
     SystemTime::UNIX_EPOCH
@@ -217,25 +217,21 @@ mod tests {
             ctime_to_system_time(10, 2_000_000_000),
             UNIX_EPOCH + Duration::from_secs(10)
         );
-        assert_eq!(
-            ctime_to_system_time(10, 7),
-            UNIX_EPOCH + Duration::new(10, 7)
-        );
     }
 
     proptest! {
-        /// Any ctime maps to a time, never a panic. A time in range keeps its value (#3280).
+        /// Any ctime maps to a time, never a panic (#3280). A negative ctime is the epoch, and a
+        /// nanosecond part outside one second is read as zero.
         #[cfg(unix)]
         #[test]
-        fn a_ctime_never_panics_and_keeps_a_value_in_range(secs in any::<i64>(), nanos in any::<i64>()) {
+        fn a_ctime_never_panics_and_maps_by_its_parts(secs in any::<i64>(), nanos in any::<i64>()) {
             let got = ctime_to_system_time(secs, nanos);
-            let valid = (0..=4_000_000_000).contains(&secs) && (0..1_000_000_000).contains(&nanos);
-            if valid {
-                let want = UNIX_EPOCH
-                    + Duration::new(u64::try_from(secs).unwrap(), u32::try_from(nanos).unwrap());
-                prop_assert_eq!(got, want);
-            }
-            prop_assert!(got >= UNIX_EPOCH);
+            let want = match (u64::try_from(secs), u32::try_from(nanos)) {
+                (Err(_), _) => UNIX_EPOCH,
+                (Ok(s), Ok(n)) if n < 1_000_000_000 => UNIX_EPOCH + Duration::new(s, n),
+                (Ok(s), _) => UNIX_EPOCH + Duration::from_secs(s),
+            };
+            prop_assert_eq!(got, want);
         }
 
         /// With any file in the tree, the answer is the newest file mtime, whatever the folder
