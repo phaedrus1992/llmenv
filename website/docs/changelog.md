@@ -59,6 +59,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Check the llmenv binary that the rendered hook commands name in `llmenv doctor`, not only the binary that runs doctor, so an old render that names a cargo `target` or temp binary, or a bare `llmenv`, is reported. [feat:adapter] [#3392]
 - Skip the resume cost notice on subscription auth with Claude Code 2.1.304 or later, which warns about an expensive resume itself. API key, gateway, and cloud provider sessions keep it. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration). [feat:hook] [#3103]
 - Name the task of a session with no owner once per conversation in the question reminder, instead of at each question. [feat:hook] [#3187]
+- Print the OAuth credential drop lines of `llmenv clean` with the same words as `llmenv doctor --gc`. [refactor:cli] [#3087]
 
 ### Fixed
 
@@ -180,6 +181,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Keep a bundle off under `llmenv export --scope` when another active scope disables it. The warning for a scope that is not active now says that every matching bundle fires. [fix:cli] [#3269]
 - Treat a recall ledger or a session map that a crash cut inside a multi-byte character as corrupt. The ledger starts fresh and the map moves aside on the next write; before, every update was skipped. [fix:hook] [#3130]
 - Name the cause of each cache entry that `llmenv doctor --gc` and `llmenv clean` could not read, and list each failed path once. An unreadable entry used to show with no reason. [fix:materialize] [#3441]
+- Stop the stale index result notice when the pending result file is already gone. [fix:hook] [#3386]
 
 ### Security
 
