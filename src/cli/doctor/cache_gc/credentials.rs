@@ -51,19 +51,35 @@ fn tally(results: impl IntoIterator<Item = anyhow::Result<bool>>) -> CredentialD
 /// failed drops, so the sweep counts them as failures (#3073).
 pub(super) fn report_credential_drops(removed: &[PathBuf], out: GcOutput<'_>) -> usize {
     let drops = forget_credentials_for(removed);
-    if drops.removed > 0 {
-        eprintln!(
-            "{} GC: dropped {} orphaned OAuth credential entries",
-            out.pass, drops.removed
-        );
-    }
-    if drops.failed > 0 {
-        eprintln!(
-            "{} GC: could not drop {} OAuth credential entries; see the error above",
-            out.warn, drops.failed
-        );
-    }
+    drops.print(&format!("{} GC: ", out.pass), &format!("{} GC: ", out.warn));
     drops.failed
+}
+
+impl CredentialDrops {
+    /// The summary lines of a drop run: the dropped count, then the failed count. A zero count
+    /// has no line. `doctor --gc` and `llmenv clean` share these lines (#3087).
+    pub(in crate::cli) fn lines(&self) -> (Option<String>, Option<String>) {
+        let dropped = (self.removed > 0)
+            .then(|| format!("dropped {} orphaned OAuth credential entries", self.removed));
+        let failed = (self.failed > 0).then(|| {
+            format!(
+                "could not drop {} OAuth credential entries; see the error above",
+                self.failed
+            )
+        });
+        (dropped, failed)
+    }
+
+    /// Print [`Self::lines`] to stderr, each after its prefix.
+    pub(in crate::cli) fn print(&self, pass_prefix: &str, warn_prefix: &str) {
+        let (dropped, failed) = self.lines();
+        if let Some(line) = dropped {
+            eprintln!("{pass_prefix}{line}");
+        }
+        if let Some(line) = failed {
+            eprintln!("{warn_prefix}{line}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -109,5 +125,26 @@ mod tests {
                 CredentialDrops { removed, failed }
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod line_tests {
+    use super::CredentialDrops;
+
+    #[test]
+    fn a_zero_count_has_no_line_and_each_count_names_its_number() {
+        let none = CredentialDrops::default();
+        assert_eq!(none.lines(), (None, None));
+        let both = CredentialDrops {
+            removed: 2,
+            failed: 3,
+        };
+        let (dropped, failed) = both.lines();
+        assert_eq!(
+            dropped.as_deref(),
+            Some("dropped 2 orphaned OAuth credential entries")
+        );
+        assert!(failed.is_some_and(|l| l.starts_with("could not drop 3 ")));
     }
 }

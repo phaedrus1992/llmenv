@@ -135,18 +135,7 @@ fn run_prune(
     let mut credentials_failed = 0;
     if !args.dry_run && !folders.removed.is_empty() {
         let drops = cache_gc::forget_credentials_for(&folders.removed);
-        if drops.removed > 0 {
-            eprintln!(
-                "  dropped {} orphaned OAuth credential entry(ies)",
-                drops.removed
-            );
-        }
-        if drops.failed > 0 {
-            eprintln!(
-                "  could not drop {} OAuth credential entry(ies); see the error above",
-                drops.failed
-            );
-        }
+        drops.print("  ", "  ");
         credentials_failed = drops.failed;
     }
     let plugins = if args.plugin_cache {
