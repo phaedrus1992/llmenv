@@ -182,6 +182,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Treat a recall ledger or a session map that a crash cut inside a multi-byte character as corrupt. The ledger starts fresh and the map moves aside on the next write; before, every update was skipped. [fix:hook] [#3130]
 - Name the cause of each cache entry that `llmenv doctor --gc` and `llmenv clean` could not read, and list each failed path once. An unreadable entry used to show with no reason. [fix:materialize] [#3441]
 - Stop the stale index result notice when the pending result file is already gone. [fix:hook] [#3386]
+- Read a marketplace manifest once for each plugin at export, so the marketplace name check and the plugin list come from the same file. [fix:plugins] [#3087]
+- Count a stale config link that another process removed first as replaced, instead of failing `llmenv export`, and give no notice for a proxy pidfile temp that is already gone. [fix]
 
 ### Security
 
