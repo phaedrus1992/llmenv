@@ -6,7 +6,8 @@
 
 use super::env_vars::{validate_var_name, validate_var_value};
 use super::{
-    build_manifest, ensure_local_memory_proxy, firing_bundles, installed_adapters, warn_dead_config,
+    build_manifest, ensure_local_memory_proxy, firing_bundles, installed_adapters,
+    marker_disabled_bundle_names, warn_dead_config,
 };
 use crate::config::{Bundle, Config};
 use crate::scope::ActiveScopes;
@@ -229,7 +230,8 @@ pub(crate) fn run_export_core(
 }
 
 /// The bundles that fire, and the scopes that the materialize step uses. With `--scope`, only that
-/// scope's tags count. An unknown scope id fires nothing for it, and a warning says so.
+/// scope's tags count, and a bundle that any active scope disables stays off (#3269). An unknown
+/// scope id is ignored with a warning, so every matching bundle fires.
 fn select_firing<'a>(
     config: &'a Config,
     active: &ActiveScopes,
@@ -249,8 +251,8 @@ fn select_firing<'a>(
         .collect::<Vec<_>>();
     if filtered_scopes.is_empty() {
         eprintln!(
-            "warning: scope '{scope_id}' not active in current environment \
-             — no bundles will fire for this scope"
+            "warning: scope '{scope_id}' is not active in the current environment, so --scope \
+             is ignored and every matching bundle fires"
         );
         let firing = firing_bundles(&config.bundle, active, tag);
         return (firing, active.clone());
@@ -269,7 +271,9 @@ fn select_firing<'a>(
         tags: filtered_tags,
         extra_tags: active.extra_tags.clone(),
     };
-    let firing = firing_bundles(&config.bundle, &filtered, tag);
+    let disabled = marker_disabled_bundle_names(active);
+    let mut firing = firing_bundles(&config.bundle, &filtered, tag);
+    firing.retain(|b| !disabled.contains(&b.name));
     (firing, filtered)
 }
 

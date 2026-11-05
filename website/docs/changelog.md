@@ -177,6 +177,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Name the variable and the fix when `llmenv export` rejects an env var from an adapter. A NUL byte in a value used to fail with no variable name. [fix:cli]
 - Log a transcript that the turn checks cannot stat or read, not only one they cannot open, so a check that passes for that reason is visible. [fix:hook]
 - Show a status line PR lookup that `gh` ends with an unexpected exit or a signal as a failure, even when its message says there is no PR. Only exit 1 with that message means no PR. [fix:statusline] [#3442]
+- Keep a bundle off under `llmenv export --scope` when another active scope disables it. The warning for a scope that is not active now says that every matching bundle fires. [fix:cli] [#3269]
 
 ### Security
 
