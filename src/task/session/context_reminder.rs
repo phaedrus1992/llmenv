@@ -1,28 +1,26 @@
 //! The Stop reminder for an open session with unfinished tasks and no resume context (#2339).
 
-use std::path::Path;
-
-use super::{Session, try_open_sessions_visible_to};
-use crate::task::{Task, TaskState};
+use super::Session;
+use crate::task::TaskState;
+use crate::task::reminder_store::Stored;
 
 /// Stop text for each open session in `project` that has unfinished tasks and nothing recorded
 /// that tells a fresh agent what the work is (#2339). Does not presume the session is the
 /// reader's own (#1028).
 #[must_use]
-pub(crate) fn missing_context_reminders(
-    state_dir: &Path,
+pub(in crate::task) fn missing_context_reminders(
     project: &str,
     caller: Option<&str>,
-    stored: &anyhow::Result<Vec<Task>>,
+    stored: &Stored,
 ) -> String {
-    let sessions = match try_open_sessions_visible_to(state_dir, project, caller) {
+    let sessions = match stored.open_sessions_visible_to(project, caller) {
         Ok(sessions) => sessions,
         Err(e) => return crate::task::store_warning_text(&e),
     };
     sessions
         .iter()
         .filter(|session| session.resume.needs_nudge())
-        .filter_map(|session| match stored {
+        .filter_map(|session| match stored.tasks() {
             Ok(tasks)
                 if tasks.iter().any(|task| {
                     task.session.as_deref() == Some(session.id.as_str())
@@ -62,8 +60,9 @@ fn missing_context_line(session: &Session) -> String {
 #[expect(clippy::expect_used, clippy::panic, reason = "test code")]
 mod tests {
     use super::missing_context_reminders;
+    use crate::task::reminder_store::Stored;
     use crate::task::session::{StartDecision, StartOutcome, start_session};
-    use crate::task::{ParentSpec, add_task_for_session, complete_task, list_tasks_strict};
+    use crate::task::{ParentSpec, add_task_for_session, complete_task};
 
     fn session_in(dir: &std::path::Path, project: &str) -> String {
         let outcome = start_session(dir, None, None, project, StartDecision::New).expect("start");
@@ -78,8 +77,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let id = session_in(dir.path(), "proj-3466");
         add_task_for_session(dir.path(), "Step", ParentSpec::Detached, &id).expect("add");
-        let stored = list_tasks_strict(dir.path());
-        let text = missing_context_reminders(dir.path(), "proj-3466", None, &stored);
+        let stored = Stored::read(dir.path());
+        let text = missing_context_reminders("proj-3466", None, &stored);
         assert!(
             text.contains(&format!("({id}) has no resume context")),
             "{text}"
@@ -93,19 +92,17 @@ mod tests {
         let task =
             add_task_for_session(dir.path(), "Step", ParentSpec::Detached, &id).expect("add");
         complete_task(dir.path(), &task.slug, true).expect("done");
-        let stored = list_tasks_strict(dir.path());
-        assert_eq!(
-            missing_context_reminders(dir.path(), "proj-3466", None, &stored),
-            ""
-        );
+        let stored = Stored::read(dir.path());
+        assert_eq!(missing_context_reminders("proj-3466", None, &stored), "");
     }
 
     #[test]
     fn an_unreadable_store_says_the_session_was_not_checked() {
         let dir = tempfile::tempdir().expect("tempdir");
         let id = session_in(dir.path(), "proj-3466");
-        let stored = Err(anyhow::anyhow!("bad task file"));
-        let text = missing_context_reminders(dir.path(), "proj-3466", None, &stored);
+        let sessions = crate::task::session::list_sessions_strict(dir.path());
+        let stored = Stored::from_parts(Err(anyhow::anyhow!("bad task file")), sessions);
+        let text = missing_context_reminders("proj-3466", None, &stored);
         assert!(
             text.contains(&format!("({id}) was not checked for resume context"))
                 && text.contains("bad task file"),

@@ -255,7 +255,7 @@ mod checkpoint;
 mod context_reminder;
 pub(crate) use checkpoint::idle_display;
 use checkpoint::{checkpoint_error, engine_start, only_own_session, resume};
-pub(crate) use context_reminder::missing_context_reminders;
+pub(in crate::task) use context_reminder::missing_context_reminders;
 
 fn sessions_dir(state_dir: &Path) -> PathBuf {
     tasks_dir(state_dir).join("sessions")
@@ -363,20 +363,6 @@ pub(crate) fn open_sessions_strict(
         .collect())
 }
 
-/// [`open_sessions_strict`], cut to the sessions that [`Session::visible_to`] `caller` (#2665).
-///
-/// # Errors
-/// Returns an error if the sessions directory cannot be read or a session file is corrupt.
-pub(crate) fn try_open_sessions_visible_to(
-    state_dir: &Path,
-    project: &str,
-    caller: Option<&str>,
-) -> anyhow::Result<Vec<Session>> {
-    let mut sessions = open_sessions_strict(state_dir, project)?;
-    sessions.retain(|s| s.visible_to(caller));
-    Ok(sessions)
-}
-
 /// The id of every session ever tagged with `project`, over [`list_sessions_strict`]. A corrupt file is
 /// an error, so the caller can report it instead of losing that file's tasks (#2628).
 ///
@@ -389,23 +375,6 @@ pub(crate) fn try_session_ids_for_project(
     Ok(list_sessions_strict(state_dir)?
         .into_iter()
         .filter(|s| s.project == project)
-        .map(|s| s.id)
-        .collect())
-}
-
-/// [`try_session_ids_for_project`], cut to the sessions that [`Session::visible_to`] `caller`.
-/// Open and closed sessions both count, because a task of a closed session can still be `wip`.
-///
-/// # Errors
-/// Returns an error if any session file cannot be read or parsed.
-pub(crate) fn try_session_ids_visible_to(
-    state_dir: &Path,
-    project: &str,
-    caller: Option<&str>,
-) -> anyhow::Result<std::collections::HashSet<String>> {
-    Ok(list_sessions_strict(state_dir)?
-        .into_iter()
-        .filter(|s| s.project == project && s.visible_to(caller))
         .map(|s| s.id)
         .collect())
 }
@@ -824,8 +793,8 @@ const MAX_REMINDER_CONTEXT_CHARS: usize = 2_000;
 /// SessionStart text for each open session in `project` that has resume context (#2339).
 /// Like the other reminders it does not presume the session is the reader's own (#1028).
 #[must_use]
-pub(crate) fn resume_reminders(state_dir: &Path, project: &str) -> String {
-    let sessions = match open_sessions_strict(state_dir, project) {
+pub(crate) fn resume_reminder_lines(open: anyhow::Result<Vec<Session>>) -> String {
+    let sessions = match open {
         Ok(sessions) => sessions,
         Err(e) => return super::store_warning_text(&e),
     };
@@ -886,7 +855,7 @@ mod tests {
         let dir = TempDir::new().expect("test");
         std::fs::create_dir_all(sessions_dir(dir.path())).expect("test");
         std::fs::write(session_path(dir.path(), "bad-session"), "{ not json").expect("test");
-        let text = resume_reminders(dir.path(), PROJECT_A);
+        let text = resume_reminder_lines(open_sessions_strict(dir.path(), PROJECT_A));
         assert!(
             text.contains("were not checked"),
             "a corrupt file must be reported: {text}"
@@ -1088,7 +1057,7 @@ mod tests {
     fn resume_reminders_list_context_and_refs_for_open_sessions_of_the_project() {
         let dir = TempDir::new().expect("tempdir");
         start_with_resume(dir.path(), &full_resume_context(), StartDecision::Auto);
-        let text = resume_reminders(dir.path(), PROJECT_A);
+        let text = resume_reminder_lines(open_sessions_strict(dir.path(), PROJECT_A));
         for needle in [
             "line one",
             "gh issue view 2337",
@@ -1107,7 +1076,7 @@ mod tests {
     fn resume_reminders_frame_the_notes_as_data_not_instructions() {
         let dir = TempDir::new().expect("tempdir");
         start_with_resume(dir.path(), &full_resume_context(), StartDecision::Auto);
-        let text = resume_reminders(dir.path(), PROJECT_A);
+        let text = resume_reminder_lines(open_sessions_strict(dir.path(), PROJECT_A));
         assert!(text.contains("not instructions"), "{text}");
     }
 
@@ -1119,7 +1088,7 @@ mod tests {
             ..ResumeContext::default()
         };
         start_with_resume(dir.path(), &resume, StartDecision::Auto);
-        let text = resume_reminders(dir.path(), PROJECT_A);
+        let text = resume_reminder_lines(open_sessions_strict(dir.path(), PROJECT_A));
         assert!(
             text.chars().count() < MAX_REMINDER_CONTEXT_CHARS + 600,
             "{}",
@@ -1145,7 +1114,7 @@ mod tests {
             resume: &resume,
         };
         start_session_as(dir.path(), &request, StartDecision::Auto).expect("start");
-        let label_line = resume_reminders(dir.path(), PROJECT_A)
+        let label_line = resume_reminder_lines(open_sessions_strict(dir.path(), PROJECT_A))
             .lines()
             .next()
             .unwrap_or_default()
@@ -1160,17 +1129,23 @@ mod tests {
     fn resume_reminders_skip_other_projects_closed_sessions_and_empty_context() {
         let dir = TempDir::new().expect("tempdir");
         start_with_resume(dir.path(), &full_resume_context(), StartDecision::Auto);
-        assert_eq!(resume_reminders(dir.path(), "other-project"), "");
+        assert_eq!(
+            resume_reminder_lines(open_sessions_strict(dir.path(), "other-project")),
+            ""
+        );
         let empty_dir = TempDir::new().expect("tempdir");
         start_with_resume(
             empty_dir.path(),
             &ResumeContext::default(),
             StartDecision::Auto,
         );
-        assert_eq!(resume_reminders(empty_dir.path(), PROJECT_A), "");
+        assert_eq!(
+            resume_reminder_lines(open_sessions_strict(empty_dir.path(), PROJECT_A)),
+            ""
+        );
         let closed = start_with_resume(dir.path(), &full_resume_context(), StartDecision::New);
         finish_session(dir.path(), &closed.id, false).expect("finish");
-        let both = resume_reminders(dir.path(), PROJECT_A);
+        let both = resume_reminder_lines(open_sessions_strict(dir.path(), PROJECT_A));
         assert_eq!(both.matches("has resume context").count(), 1, "{both}");
     }
 
