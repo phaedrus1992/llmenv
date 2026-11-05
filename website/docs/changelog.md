@@ -60,6 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Skip the resume cost notice on subscription auth with Claude Code 2.1.304 or later, which warns about an expensive resume itself. API key, gateway, and cloud provider sessions keep it. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration). [feat:hook] [#3103]
 - Name the task of a session with no owner once per conversation in the question reminder, instead of at each question. [feat:hook] [#3187]
 - Print the OAuth credential drop lines of `llmenv clean` with the same words as `llmenv doctor --gc`. [refactor:cli] [#3087]
+- Read each marketplace manifest once per `llmenv export` and `llmenv plugin-sync`, not once for each selected plugin of that marketplace. [perf:cli] [#3447]
 
 ### Fixed
 

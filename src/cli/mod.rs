@@ -24,8 +24,10 @@ use env_vars::reject_invalid_var_names;
 use login::{import_auth_from_file, run_login, run_login_capture};
 use shell_names::{completion_filename, detect_shell};
 use sync_cmd::run_sync;
+mod plugin_check;
 mod plugin_payloads;
 mod post_materialize;
+use plugin_check::check_selected_plugins;
 use plugin_payloads::sync_plugin_payloads;
 
 mod doctor;
@@ -3909,69 +3911,6 @@ fn sync_selected_marketplaces(
         );
     }
     Ok(out)
-}
-
-/// Check that each selected plugin exists in its synced marketplace manifest, and sync the
-/// payload of each external plugin (a git URL source, not a path in the clone). A plugin of a
-/// skipped marketplace is noted and not counted as missing.
-fn check_selected_plugins(
-    cache_root: &Path,
-    sync: &MarketplaceSync,
-    selected: &[crate::plugins::resolve::ResolvedPlugin],
-) -> anyhow::Result<()> {
-    let mut missing_plugins: Vec<String> = Vec::new();
-    for p in selected {
-        if sync.skipped.contains(&p.marketplace) {
-            eprintln!(
-                "- {}@{}: skipped, its marketplace is not on this host",
-                p.plugin, p.marketplace
-            );
-            continue;
-        }
-        let Some(dir) = sync.locations.get(&p.marketplace) else {
-            anyhow::bail!(
-                "marketplace '{}' was neither synced nor skipped",
-                p.marketplace
-            );
-        };
-        let plugins = crate::plugins::cache::read_marketplace_plugins(dir)
-            .with_context(|| format!("reading marketplace manifest for '{}'", p.marketplace))?;
-        let Some(entry) = plugins.iter().find(|e| e.name == p.plugin) else {
-            eprintln!(
-                "✗ {}@{}: not found in the manifest under {} — check that the plugin name \
-                 matches an entry in that manifest",
-                p.plugin,
-                p.marketplace,
-                dir.display()
-            );
-            missing_plugins.push(format!("{}@{}", p.plugin, p.marketplace));
-            continue;
-        };
-        if !crate::plugins::cache::is_external_plugin_source(&entry.source) {
-            continue;
-        }
-        let state =
-            crate::plugins::cache::sync_plugin_entry(cache_root, &p.marketplace, entry, true)
-                .with_context(|| {
-                    format!("syncing external plugin '{}@{}'", p.plugin, p.marketplace)
-                })?;
-        let head = state.head.as_deref().unwrap_or("(unknown)");
-        println!(
-            "✓ {}@{} (external) → {} [{}]",
-            p.plugin,
-            p.marketplace,
-            state.install_location.display(),
-            head
-        );
-    }
-    if !missing_plugins.is_empty() {
-        anyhow::bail!(
-            "{} plugin(s) not found after sync: {}",
-            missing_plugins.len(),
-            missing_plugins.join(", ")
-        );
-    }
-    Ok(())
 }
 
 /// Print one advisory line for each top-level config key that llmenv does not read (#2669).
