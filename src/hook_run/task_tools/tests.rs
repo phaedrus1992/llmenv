@@ -352,3 +352,23 @@ fn update_with_a_note_saves_it_on_the_resolved_task() {
     assert!(out.contains("started 'first-step'"), "{out}");
     assert!(!out.contains("note not saved"), "{out}");
 }
+
+/// A refused update still keeps its note, and the deny says where the note went (#3474).
+#[test]
+fn a_refused_update_says_where_its_note_went() {
+    let dir = tmp();
+    handle_inner(
+        "TaskCreate",
+        Some(&json!({ "subject": "never begun" })),
+        dir.path(),
+        PROJECT,
+    );
+    let out = handle_inner(
+        "TaskUpdate",
+        Some(&json!({ "taskId": "never-begun", "status": "completed", "description": "why" })),
+        dir.path(),
+        PROJECT,
+    );
+    assert!(out.contains("couldn't update task 'never-begun'"), "{out}");
+    assert!(out.contains("note saved to 'never-begun'"), "{out}");
+}

@@ -123,15 +123,15 @@ fn create(
     else {
         return deny("TaskCreate carried no `subject`; use `llmenv task add \"<title>\"`.");
     };
-    let session_id = match ensure_session(state_dir, project, owner) {
-        Ok(id) => id,
+    let session = match ensure_session(state_dir, project, owner) {
+        Ok(session) => session,
         Err(msg) => return msg,
     };
     match task::add_task(
         state_dir,
         subject,
         task::ParentSpec::Detached,
-        task::SessionChoice::Checked(&session_id),
+        task::SessionChoice::Checked(&session),
         project,
     ) {
         Ok(t) => {
@@ -150,14 +150,14 @@ fn create(
             if let Some(desc) = str_field(input, "description")
                 .map(str::trim)
                 .filter(|d| !d.is_empty())
-                && let Err(e) = task::note_task(state_dir, &t.slug, desc)
+                && let Err(e) = task::note_resolved(state_dir, &t.slug, desc)
             {
                 tracing::error!(
                     error = %e,
                     slug = %t.slug,
                     "task redirect: description note not saved"
                 );
-                msg.push_str(&format!(" (note: the description wasn't saved — {e})"));
+                msg.push_str(&format!(" (note: the description wasn't saved — {e:#})"));
             }
             deny(&msg)
         }
@@ -185,7 +185,7 @@ fn ensure_session(
     state_dir: &Path,
     project: &str,
     owner: &session::EngineIdentity,
-) -> Result<String, String> {
+) -> Result<session::Session, String> {
     let open_sessions = match session::open_sessions_strict(state_dir, project) {
         Ok(sessions) => sessions,
         Err(e) => {
@@ -207,16 +207,15 @@ fn ensure_session(
         })?;
     if !open_sessions.is_empty() {
         // The one read of the session files picks the session the task goes to (#3474).
-        return session::pick_open_session(open_sessions, owner)
-            .map(|s| s.id)
-            .map_err(|e| {
-                deny(&format!(
-                    "couldn't pick the task session ({}); track this with `llmenv task` \
-                     manually.",
-                    e.ambiguity_message("pass --session <id>, or see `llmenv task session ls`")
-                        .unwrap_or_default()
-                ))
-            });
+        return session::pick_open_session(open_sessions, owner).map_err(|e| {
+            let cause = e
+                .ambiguity_message("pass --session <id>, or see `llmenv task session ls`")
+                .unwrap_or_else(|| "no open session for this project".to_string());
+            tracing::error!(cause = %cause, "task redirect: couldn't pick the task session");
+            deny(&format!(
+                "couldn't pick the task session ({cause}); track this with `llmenv task` manually."
+            ))
+        });
     }
     match session::start_session_as(
         state_dir,
@@ -233,7 +232,7 @@ fn ensure_session(
             session::StartOutcome::Created(s)
             | session::StartOutcome::Resumed(s)
             | session::StartOutcome::Replaced { session: s, .. },
-        ) => Ok(s.id),
+        ) => Ok(s),
         Err(e) => {
             tracing::error!(error = %e, "task redirect: couldn't auto-start a session");
             Err(deny(&format!(
@@ -321,32 +320,36 @@ fn update(input: Option<&Value>, state_dir: &Path) -> String {
         .filter(|s| !s.is_empty() && status != Some("deleted"));
     match outcome {
         Ok((msg, slug)) => {
-            let mut note_warning = String::new();
-            if let Some(note) = note
-                && let Err(e) = task::note_resolved(state_dir, &slug, note)
-            {
-                tracing::error!(error = %e, slug = %slug, "task redirect: progress note not saved");
-                note_warning = format!(" (note not saved: {e})");
-            }
+            let note_text = note.map_or_else(String::new, |note| {
+                note_outcome(task::note_resolved(state_dir, &slug, note), &slug)
+            });
             deny(&format!(
-                "{msg}{note_warning} — llmenv task tracker (TaskUpdate redirected)."
+                "{msg}{note_text} — llmenv task tracker (TaskUpdate redirected)."
             ))
         }
         // Preserve the real reason (invalid id, no match, an ambiguous prefix, or a refused
         // transition) — flattening them would misreport the case. The note is kept on the
-        // failure path too, as it was, through its own lookup of `id`.
+        // failure path too, through its own lookup of `id`, and the deny says where it went.
         Err(e) => {
-            tracing::error!(error = %e, id = %id, "task redirect: couldn't update task");
-            let mut note_warning = String::new();
-            if let Some(note) = note
-                && let Err(note_err) = task::note_task(state_dir, id, note)
-            {
-                note_warning = format!(" (note not saved: {note_err})");
-            }
+            tracing::error!(error = %format!("{e:#}"), id = %id, "task redirect: couldn't update task");
+            let note_text = note.map_or_else(String::new, |note| {
+                note_outcome(task::note_task(state_dir, id, note), id)
+            });
             deny(&format!(
-                "couldn't update task '{id}' ({e}){note_warning}; run `llmenv task ls --all` for \
-                 the current ids."
+                "couldn't update task '{id}' ({e:#}){note_text}. If the id is wrong, run \
+                 `llmenv task ls --all` for the current ids."
             ))
+        }
+    }
+}
+
+/// The text that tells the agent what happened to the note of a TaskUpdate.
+fn note_outcome(saved: anyhow::Result<task::Task>, target: &str) -> String {
+    match saved {
+        Ok(task) => format!(" (note saved to '{}')", task.slug),
+        Err(e) => {
+            tracing::error!(error = %format!("{e:#}"), target = %target, "task redirect: progress note not saved");
+            format!(" (note not saved: {e:#})")
         }
     }
 }

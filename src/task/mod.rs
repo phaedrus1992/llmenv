@@ -14,8 +14,10 @@
 mod branch_failure;
 mod slug;
 pub(crate) use slug::slugify;
+mod ancestors;
 pub(crate) mod core_text;
 mod finish_hints;
+use ancestors::ancestors_to_start;
 mod note;
 pub(crate) mod ownership;
 pub(crate) mod progress;
@@ -482,9 +484,11 @@ pub(crate) enum SessionChoice<'a> {
     /// No `--session`: the project's only open session, else the one the
     /// caller owns ([`session::pick_open_session`], #2365).
     Resolve(&'a session::EngineIdentity),
-    /// An open session that the caller picked from its own strict read in the same command, so
-    /// the session files are not read again (#3474).
-    Checked(&'a str),
+    /// An open session of the project that the caller read in the same command, so the session
+    /// files are not read again (#3474). A `Session` comes only from a read or a start, so a
+    /// caller cannot name an arbitrary id here. The session can close between that read and the
+    /// write, as with `Resolve`, which also reads before the store lock.
+    Checked(&'a session::Session),
 }
 
 /// Create a new task in `open` state and persist it, tagged to a resolved
@@ -664,7 +668,15 @@ fn resolve_session_for_add(
             return Ok(id.to_string());
         }
         SessionChoice::Resolve(owner) => owner,
-        SessionChoice::Checked(id) => return Ok(id.to_string()),
+        SessionChoice::Checked(session) => {
+            if !session.is_open() || session.project != project {
+                anyhow::bail!(
+                    "session '{}' is not an open session of this project",
+                    session.id
+                );
+            }
+            return Ok(session.id.clone());
+        }
     };
     let open = session::open_sessions_strict(state_dir, project)?;
     match session::pick_open_session(open, owner) {
@@ -701,6 +713,7 @@ fn resolve_session_for_add(
 pub(crate) fn start_task(state_dir: &Path, input: &str, force: bool) -> anyhow::Result<Task> {
     let task = with_store_lock(state_dir, || {
         // One strict read feeds the name lookup, the blocker check, and the queue check (#3474).
+        resolve::check_identifier(input)?;
         let all_tasks = list_tasks_strict(state_dir)?;
         let slug = resolve::resolve_in(state_dir, input, &all_tasks)?;
         let mut task = load_task(state_dir, &slug)?;
@@ -749,7 +762,7 @@ pub(crate) fn start_task(state_dir: &Path, input: &str, force: bool) -> anyhow::
             anyhow::bail!("{block}");
         }
         // The ancestors go first: if one cannot start, the sub-task stays `open`.
-        let promoted = ancestors_to_start(state_dir, &task, force)?;
+        let promoted = ancestors_to_start(state_dir, &task, force, &all_tasks)?;
         let now = now_rfc3339();
         for mut ancestor in promoted {
             ancestor.state = TaskState::Wip;
@@ -763,58 +776,6 @@ pub(crate) fn start_task(state_dir: &Path, input: &str, force: bool) -> anyhow::
     })?;
     touch_task_session(state_dir, &task);
     Ok(task)
-}
-
-/// The `open` ancestors that starting the sub-task `child` puts in progress (#2455). A queued
-/// ancestor is held by the queue like any task, and a `done` ancestor refuses unless `force`.
-/// A top-level task has no ancestors to start.
-fn ancestors_to_start(state_dir: &Path, child: &Task, force: bool) -> anyhow::Result<Vec<Task>> {
-    let mut promoted = Vec::new();
-    let mut seen = vec![child.slug.clone()];
-    let mut current = child.clone();
-    while current.relation == Relation::Child {
-        let Some(parent_slug) = current.parent.clone() else {
-            break;
-        };
-        if seen.contains(&parent_slug) {
-            break;
-        }
-        // A deleted parent leaves a dangling link, which the rest of the store tolerates. Any
-        // other read error fails the start, so the done and queue checks never run blind.
-        let parent = match load_task(state_dir, &parent_slug) {
-            Ok(parent) => parent,
-            Err(e) if is_not_found(&e) => break,
-            Err(e) => {
-                return Err(e.context(format!(
-                    "cannot start '{}': ancestor '{parent_slug}' is unreadable. Repair or \
-                     remove its task file, then start again",
-                    child.slug
-                )));
-            }
-        };
-        if parent.state == TaskState::Done && !force {
-            anyhow::bail!(
-                "the parent '{parent_slug}' of '{}' is done. Reopen it with `llmenv task start \
-                 --reopen {parent_slug}`, or pass --force.",
-                child.slug
-            );
-        }
-        if parent.state == TaskState::Open {
-            if !force
-                && let Some(session_id) = &parent.session
-                && let Some(block) = relation::queue_block(
-                    &parent,
-                    &session::try_tasks_in_session(state_dir, session_id)?,
-                )
-            {
-                anyhow::bail!("the parent of '{}' cannot start: {block}", child.slug);
-            }
-            promoted.push(parent.clone());
-        }
-        seen.push(parent_slug);
-        current = parent;
-    }
-    Ok(promoted)
 }
 
 /// Bump the `last_activity` of the session a task is tagged to, if any — so a
@@ -935,6 +896,7 @@ fn close_task(
 ) -> anyhow::Result<Completed> {
     let completed = with_store_lock(state_dir, || {
         // One strict read feeds the name lookup and the sub-task check (#3471, #3474).
+        resolve::check_identifier(input)?;
         let all_tasks = list_tasks_strict(state_dir)?;
         let slug = resolve::resolve_in(state_dir, input, &all_tasks)?;
         let mut task = load_task(state_dir, &slug)?;

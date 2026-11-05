@@ -64,8 +64,8 @@ proptest::proptest! {
     ) {
         // Sessions s0 and s1 are visible; s2 is not in the list, like a hidden or closed one.
         let visible = [
-            open_session_for_test("s0", "p", None),
-            open_session_for_test("s1", "p", None),
+            open_session_for_test("s0"),
+            open_session_for_test("s1"),
         ];
         let tasks: Vec<Task> = rows
             .iter()
