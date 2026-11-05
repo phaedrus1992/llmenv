@@ -33,10 +33,7 @@ pub(super) async fn run_scope(
             break;
         };
         outcome.push(Some(action.run(ctx.client, "", "").await));
-        if let Some(text) = outcome.texts.last() {
-            budget.add_text(text);
-        }
-        outcome.texts.clear();
+        budget.add_records(std::mem::take(&mut outcome.records));
     }
     let notice = unrun_notice(actions.len(), outcome.failed > 0, budget.is_full());
     (outcome, notice)

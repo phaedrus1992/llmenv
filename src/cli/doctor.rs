@@ -29,7 +29,7 @@ mod task_text;
 mod token_env;
 use token_env::effective_token_efficiency_var;
 mod icm_server;
-use icm_server::icm_server_check;
+use icm_server::{ICM_SERVER_MIN, icm_version_verdict};
 mod recall_health;
 mod session_log_path;
 mod tool_availability;
@@ -521,14 +521,16 @@ fn run_doctor_icm_server(
         eprintln!(
             "{info} ICM server version unknown: the memory server is another host, and \
              mcp-proxy does not forward the icm version (#2161). Run `icm --version` on that \
-             host; recall needs 0.10.64 or later."
+             host; llmenv needs {ICM_SERVER_MIN} or later."
         );
         return;
     }
-    match local_icm_version() {
-        Ok(version) => print_check(icm_server_check(&version), &pass, &warn, &info),
-        Err(reason) => eprintln!("{warn} {reason}"),
-    }
+    print_check(
+        icm_version_verdict(local_icm_version()),
+        &pass,
+        &warn,
+        &info,
+    );
 }
 
 /// Claude Code field-prefix patterns: a bare `<field>:<value>` filter, as

@@ -1,13 +1,13 @@
-//! The records of the non-compact `icm_memory_recall` output that prune reads.
+//! The records of the JSON `icm_memory_recall` reply that prune reads (#3368).
 
-/// A parsed memory record from the non-compact `icm_memory_recall` output.
+/// One record of a recall reply, as prune needs it.
 #[derive(Debug, Clone)]
 pub(super) struct MemoryRecord {
     pub(super) id: String,
     pub(super) importance: Importance,
 }
 
-/// Parsed importance levels from the MCP output.
+/// The importance levels of an icm record.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Importance {
     Critical,
@@ -35,76 +35,19 @@ impl Importance {
     }
 }
 
-/// The record headers in `text`, read or not. A header with no importance or weight is not a
-/// record that [`parse_recall_output`] returns, so prune reports the difference.
-pub(super) fn count_headers(text: &str) -> usize {
-    text.lines()
-        .filter_map(|line| line.strip_prefix("--- "))
-        .filter(|rest| rest.ends_with(" ---"))
-        .count()
-}
-
-/// Parse the non-compact `icm_memory_recall` output into structured records.
+/// The records of a JSON recall reply, in icm's rank order.
 ///
-/// The format (per ICM's `format_memory_output` with compact=false):
-///
-/// ```text
-/// --- <id> ---
-///   topic: ...
-///   importance: ...
-///   weight: ...
-///   summary: ...
-///   keywords: ...
-///   raw: ...
-///   score: ...
-/// ```
-pub(super) fn parse_recall_output(text: &str) -> Vec<MemoryRecord> {
-    let mut records = Vec::new();
-    let mut current_id: Option<String> = None;
-    let mut current_importance: Option<Importance> = None;
-    // `has_weight` guards against partial records: we only finalize a record
-    // once both importance and weight have been seen.
-    let mut has_weight = false;
-    let mut weight_seen = false;
-
-    // A record header starts at column 0, and the fields of a record are indented. Memory
-    // content is free text, so a line inside it must not forge a header: only an unindented
-    // header counts. The first `importance` and `weight` of a record win, so a later line in
-    // the summary cannot change them.
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = line.strip_prefix("--- ") {
-            // new record start: "--- <id> ---"
-            if let Some(id) = rest.strip_suffix(" ---") {
-                // Finalize previous record
-                if let (Some(id), Some(importance)) = (current_id.take(), current_importance.take())
-                    && has_weight
-                {
-                    records.push(MemoryRecord { id, importance });
-                }
-                has_weight = false;
-                weight_seen = false;
-                current_id = Some(id.to_string());
-            }
-        } else if let Some(rest) = trimmed.strip_prefix("importance:") {
-            if current_importance.is_none() {
-                current_importance = Some(Importance::from_str(rest));
-            }
-        } else if let Some(rest) = trimmed.strip_prefix("weight:")
-            && !weight_seen
-        {
-            weight_seen = true;
-            // `f64::from_str` also accepts `nan` and `inf`, which are not weights.
-            has_weight = rest.trim().parse::<f64>().is_ok_and(f64::is_finite);
-        }
-    }
-
-    // Finalize the last record
-    if let (Some(id), Some(importance)) = (current_id, current_importance)
-        && has_weight
-    {
-        records.push(MemoryRecord { id, importance });
-    }
-
-    records
+/// # Errors
+/// The reply is not a JSON list of icm records. Prune forgets for good, so it reads nothing from
+/// a reply that it cannot read in full.
+pub(super) fn read_records(
+    body: &str,
+) -> Result<Vec<MemoryRecord>, crate::memory::recall_json::RecallJsonError> {
+    Ok(crate::memory::recall_json::parse(body)?
+        .into_iter()
+        .map(|r| MemoryRecord {
+            importance: Importance::from_str(&r.importance),
+            id: r.id,
+        })
+        .collect())
 }

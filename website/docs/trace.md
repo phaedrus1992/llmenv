@@ -184,7 +184,7 @@ Fields:
 - `recall_bytes=<n>` — total bytes of recalled records.
 - `injected_entries=<n>` — records injected into the prompt.
 - `injected_bytes=<n>` — bytes of injected records.
-- `duplicate_records=<n>` — records dropped as duplicates.
+- `duplicate_records=<n>` — records dropped as duplicates: (changed in v3.14.0) a second record with the same ICM record id.
 - `already_sent=<n>` — records skipped because the context already holds them.
 - `omitted=<n>` — records dropped for the byte budget.
 - `skipped_actions=<n>` — recall queries not run because the budget was full.
