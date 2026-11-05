@@ -5,18 +5,13 @@
 /// only a recall across all projects returns it.
 pub(super) const SCOPE_CONTEXT_TOPIC: &str = "llmenv-scope-context";
 
-/// `text` without the records that belong to one project but carry no project in their topic:
-/// fetched pages (#2911), and scope-context records, which describe the tags and bundles of the
-/// project that stored them (#2938).
-pub(super) fn without_unscoped_records(text: &str) -> String {
-    let pages_dropped = crate::hook_run::web_fetch::without_web_pages(text);
-    split_recall_records(&pages_dropped)
-        .into_iter()
-        .filter(|record| {
-            crate::hook_run::relevance::record_topic(record) != Some(SCOPE_CONTEXT_TOPIC)
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+/// Whether `record` belongs to one project but carries no project in its topic: a fetched page
+/// (#2911), or a scope-context record, which describes the tags and bundles of the project that
+/// stored it (#2938). A recall across all projects leaves such records out.
+pub(super) fn is_unscoped(record: &super::Recalled) -> bool {
+    record.topic().is_some_and(|topic| {
+        topic == SCOPE_CONTEXT_TOPIC || crate::hook_run::web_fetch::is_web_fetch_topic(topic)
+    })
 }
 
 /// Longest topic, in characters, that a record's first line may carry.
@@ -70,6 +65,8 @@ mod tests {
             (
                 prop_oneof![
                     Just(SCOPE_CONTEXT_TOPIC.to_string()),
+                    Just("web-fetch".to_string()),
+                    Just("web-fetch-proj".to_string()),
                     "[a-z]{1,8}",
                     "[a-zé日]{1,4}",
                 ],
@@ -80,19 +77,16 @@ mod tests {
     }
 
     proptest! {
-        /// The filter drops the scope-context records and keeps every other record, in order.
+        /// Only a scope-context record or a fetched page is unscoped.
         #[test]
-        fn only_the_scope_context_records_are_dropped(records in arb_records()) {
-            let text: Vec<String> = records.iter().map(|(t, b)| format!("[{t}] {b}")).collect();
-            let expected: Vec<&String> = records
-                .iter()
-                .zip(&text)
-                .filter(|((t, _), _)| t != SCOPE_CONTEXT_TOPIC)
-                .map(|(_, line)| line)
-                .collect();
-            let kept = without_unscoped_records(&text.join("\n"));
-            let kept: Vec<&str> = kept.lines().collect();
-            prop_assert_eq!(kept, expected.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        fn only_scope_context_and_page_records_are_unscoped(records in arb_records()) {
+            for (topic, body) in &records {
+                let record = super::super::Recalled { id: None, text: format!("[{topic}] {body}") };
+                let expected = topic == SCOPE_CONTEXT_TOPIC
+                    || topic == "web-fetch"
+                    || topic.starts_with("web-fetch-");
+                prop_assert_eq!(is_unscoped(&record), expected, "{}", topic);
+            }
         }
 
         /// A record line carries a topic of 1 to 200 characters, counted as characters, not

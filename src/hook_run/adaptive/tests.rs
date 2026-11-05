@@ -73,13 +73,13 @@ async fn server_with(pairs: &[(&str, &str)]) -> MockServer {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(body_string_contains("initialize"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(text("")))
+        .respond_with(crate::hook_run::test_recall::ToolReply(("").to_string()))
         .mount(&server)
         .await;
     for (needle, body) in pairs {
         Mock::given(method("POST"))
             .and(body_string_contains(*needle))
-            .respond_with(ResponseTemplate::new(200).set_body_json(text(body)))
+            .respond_with(crate::hook_run::test_recall::ToolReply((*body).to_string()))
             .mount(&server)
             .await;
     }
@@ -125,7 +125,7 @@ async fn failing_server() -> MockServer {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(body_string_contains("initialize"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(text("")))
+        .respond_with(crate::hook_run::test_recall::ToolReply(("").to_string()))
         .mount(&server)
         .await;
     Mock::given(method("POST"))
@@ -138,13 +138,13 @@ async fn failing_server() -> MockServer {
 #[test]
 fn outcome_merge_adds_counts_and_texts() {
     let mut a = Outcome::default();
-    a.push(Some(Ok("one".to_string())));
+    a.push(Some(Ok(Reply::Text("[t] one".to_string()))));
     a.push(Some(Err(anyhow::anyhow!("down"))));
     let mut b = Outcome::default();
-    b.push(Some(Ok("two".to_string())));
+    b.push(Some(Ok(Reply::Text("[t] two".to_string()))));
     b.push(Some(Err(anyhow::anyhow!("down"))));
     b.push(Some(Err(anyhow::anyhow!("down"))));
     a.merge(b);
     assert_eq!((a.calls, a.failed), (5, 3));
-    assert_eq!(a.texts, ["one", "two"]);
+    assert_eq!(a.text(), "[t] one\n[t] two");
 }

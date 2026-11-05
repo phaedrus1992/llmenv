@@ -6,7 +6,7 @@
 //! `preferences`, are named in `features.memory[].global_topics`, and only they are read across
 //! projects.
 
-use crate::hook_run::action::{Action, RecallQuery};
+use crate::hook_run::action::{Action, RecallQuery, Reply};
 use crate::hook_run::mcp_client::McpHttpClient;
 
 /// The records that one global topic recall returns at most, as the main recall of a turn.
@@ -36,24 +36,28 @@ pub(crate) async fn recall(
     text: &str,
     topics: &[String],
     limit: u8,
-) -> Option<anyhow::Result<String>> {
+) -> Option<anyhow::Result<Reply>> {
     let queries = topic_queries(text, topics, limit);
     if queries.is_empty() {
         return None;
     }
-    let mut texts = Vec::new();
+    let mut records = Vec::new();
+    let mut answered = 0usize;
     let mut failed = Vec::new();
     for q in queries {
         let topic = q.topic.clone().unwrap_or_default();
         match Action::RecallQuery(q).run(client, "", "").await {
-            Ok(found) => texts.push(found),
+            Ok(found) => {
+                answered += 1;
+                records.extend(found.into_records());
+            }
             Err(e) => {
                 tracing::error!("memory recall of the global topic {topic} failed: {e:#}");
                 failed.push((topic, e));
             }
         }
     }
-    if texts.is_empty() {
+    if answered == 0 {
         let names: Vec<&str> = failed.iter().map(|(t, _)| t.as_str()).collect();
         let causes: Vec<String> = failed.iter().map(|(t, e)| format!("{t}: {e:#}")).collect();
         return Some(Err(anyhow::anyhow!(
@@ -65,7 +69,7 @@ pub(crate) async fn recall(
     for (topic, _) in &failed {
         crate::agent_notice::record(partial_notice(topic));
     }
-    Some(Ok(texts.join("\n")))
+    Some(Ok(Reply::Records(records)))
 }
 
 /// The notice for one global topic whose recall failed while another topic answered.

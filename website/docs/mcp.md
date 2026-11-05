@@ -678,6 +678,11 @@ When the first recalls take more than 1.5 seconds, the fanouts do not run, and t
 A distinctive word has four or more characters and is not a common error word such as "error" or "failed".
 ICM ranks the best of an unrelated set near the top score, so the score alone cannot tell a related memory from an unrelated one.
 
+(changed in v3.14.0) The hook reads each recall in the JSON form of icm 0.11.5 or later, and it remembers a sent memory by its ICM record id.
+Two memories with the same text and different ids are both sent.
+A session state from an older llmenv holds the hash of each sent text; the hook still skips those memories, and records their ids from then on.
+A recall reply that is not a JSON list of records counts as a failed recall call.
+
 (added in v3.13.0) `llmenv doctor` reports the failure rate of the last 200 recall calls in a `Memory recall:` section.
 See [`doctor`](commands.md#doctor).
 

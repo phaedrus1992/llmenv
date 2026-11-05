@@ -72,6 +72,8 @@ pub(crate) mod shell_tool;
 pub(crate) mod slippage;
 mod slippage_read;
 pub(crate) mod stop_dedupe;
+#[cfg(test)]
+pub(crate) mod test_recall;
 mod timing;
 pub(crate) use cbm_index_cmd::index_result_path;
 use cbm_index_cmd::{
@@ -5231,7 +5233,7 @@ mod tests {
         let body = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
-            "result": { "content": [{ "type": "text", "text": "[t] one\n[t] two\nNo memories found." }] }
+            "result": { "content": [{ "type": "text", "text": crate::hook_run::test_recall::recall_json("[t] one\n[t] two\n[t] one") }] }
         });
         Mock::given(method("POST"))
             .and(path("/"))

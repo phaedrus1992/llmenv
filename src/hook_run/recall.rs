@@ -7,7 +7,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::future::Future;
 
-use crate::hook_run::action::{Action, split_recall_records};
+use crate::hook_run::action::{Action, Recalled, Reply};
 use crate::hook_run::session_ledger::record_hash;
 
 /// Claude Code saves hook output over about 10 KB to a file and shows the model a 2 KB
@@ -27,7 +27,8 @@ pub(super) use rank::{MOST_SPECIFIC_RANK, UNSCOPED_RANK, tag_specificity};
 /// The recall records kept so far, and what did not fit.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct RecallBudget {
-    kept: Vec<String>,
+    kept: Vec<Recalled>,
+    /// Keys of the records kept so far: the icm id, or the text hash of a record with no id.
     seen: HashSet<String>,
     kept_bytes: usize,
     /// Records seen, including duplicates and omitted ones.
@@ -42,10 +43,13 @@ pub(super) struct RecallBudget {
     skipped_actions: usize,
     /// Byte limit of the kept records.
     limit: usize,
-    /// Hashes of records the context already holds (#2249).
+    /// Keys of records the context already holds (#2249): icm ids, and the text hashes that a
+    /// ledger from before #3369 holds.
     sent: BTreeSet<String>,
-    /// Records skipped because their hash is in `sent`.
+    /// Records skipped because their key or text hash is in `sent`.
     already_sent: usize,
+    /// Ids of records that matched `sent` by text hash only, so the ledger learns their ids.
+    migrated: Vec<String>,
 }
 
 impl Default for RecallBudget {
@@ -69,6 +73,7 @@ impl RecallBudget {
             limit,
             sent,
             already_sent: 0,
+            migrated: Vec::new(),
         }
     }
 
@@ -82,19 +87,42 @@ impl RecallBudget {
         self.skipped_actions += count;
     }
 
+    /// Adds text that did not come from a JSON recall, split into records with no id.
+    #[cfg(test)]
     pub(super) fn add_text(&mut self, text: &str) {
-        self.add_records(split_recall_records(text));
+        self.add_records(Reply::Text(text.to_string()).into_records());
     }
 
-    pub(super) fn kept_hashes(&self) -> Vec<String> {
-        self.kept.iter().map(|r| record_hash(r)).collect()
+    /// The keys to add to the ledger's sent set: each kept record, and each record that matched
+    /// the ledger by its old text hash only. A ledger from before #3369 then moves to ids.
+    pub(super) fn kept_keys(&self) -> Vec<String> {
+        self.kept
+            .iter()
+            .map(Recalled::key)
+            .chain(self.migrated.iter().cloned())
+            .collect()
+    }
+
+    /// Whether the context already holds `record`. A record with an id also matches the text
+    /// hash that a ledger from before #3369 holds; such a match is noted, so the ledger learns
+    /// the id.
+    fn already_sent(&mut self, record: &Recalled) -> bool {
+        let key = record.key();
+        if self.sent.contains(&key) {
+            return true;
+        }
+        if record.id.is_some() && self.sent.contains(&record_hash(&record.text)) {
+            self.migrated.push(key);
+            return true;
+        }
+        false
     }
 
     /// The passthrough text, then the kept records. The omission notice is not here: it is llmenv
     /// text, so [`Self::hook_text`] sends it apart from the ICM memory (#2764).
     fn render(&self, passthrough: Vec<String>) -> String {
         let mut parts = passthrough;
-        parts.extend(self.kept.iter().cloned());
+        parts.extend(self.kept.iter().map(|r| r.text.clone()));
         parts.join("\n\n")
     }
 
@@ -107,19 +135,21 @@ impl RecallBudget {
         }
     }
 
-    /// Keep each record that is new and fits. A record that does not fit is counted as
-    /// omitted, and a later smaller record can still fit.
-    fn add_records(&mut self, records: Vec<String>) {
+    /// Keep each record that is new and fits. A record is new when its key is not kept yet:
+    /// two icm records with the same text and different ids are both kept (#3369). A record
+    /// that does not fit is counted as omitted, and a later smaller record can still fit.
+    pub(super) fn add_records(&mut self, records: Vec<Recalled>) {
         for record in records {
+            let bytes = record.text.len();
             self.records += 1;
-            self.record_bytes += record.len();
-            if self.sent.contains(&record_hash(&record)) {
+            self.record_bytes += bytes;
+            if self.already_sent(&record) {
                 self.already_sent += 1;
-            } else if self.seen.contains(&record) {
+            } else if self.seen.contains(&record.key()) {
                 self.duplicates += 1;
-            } else if self.kept_bytes + record.len() + SEPARATOR_BYTES <= self.limit {
-                self.kept_bytes += record.len() + SEPARATOR_BYTES;
-                self.seen.insert(record.clone());
+            } else if self.kept_bytes + bytes + SEPARATOR_BYTES <= self.limit {
+                self.kept_bytes += bytes + SEPARATOR_BYTES;
+                self.seen.insert(record.key());
                 self.kept.push(record);
             } else {
                 self.omitted += 1;
@@ -127,9 +157,20 @@ impl RecallBudget {
         }
     }
 
+    /// Adds each string as one record with no id.
     #[cfg(test)]
-    fn kept(&self) -> &[String] {
-        &self.kept
+    fn add_strings(&mut self, records: Vec<String>) {
+        self.add_records(
+            records
+                .into_iter()
+                .map(|text| Recalled { id: None, text })
+                .collect(),
+        );
+    }
+
+    #[cfg(test)]
+    fn kept(&self) -> Vec<&str> {
+        self.kept.iter().map(|r| r.text.as_str()).collect()
     }
 
     /// The `[LLMENV_CONTEXT]` trace line, or `None` when tracing is off or no recall ran or
@@ -144,7 +185,7 @@ impl RecallBudget {
         if !enabled || (self.records == 0 && self.skipped_actions == 0) {
             return None;
         }
-        let injected_bytes: usize = self.kept.iter().map(String::len).sum();
+        let injected_bytes: usize = self.kept.iter().map(|r| r.text.len()).sum();
         Some(format!(
             "[LLMENV_CONTEXT] recall_entries={} recall_bytes={} injected_entries={} \
              injected_bytes={injected_bytes} duplicate_records={} already_sent={} omitted={} \
@@ -178,13 +219,6 @@ impl RecallBudget {
     }
 }
 
-fn is_recall(action: &Action) -> bool {
-    matches!(
-        action,
-        Action::Recall(_) | Action::RecallTag(_) | Action::RecallBundle(_) | Action::RecallQuery(_)
-    )
-}
-
 /// Run `actions` in order through `run`, and join their text.
 ///
 /// Recall text is split into records, deduplicated by record, and kept in order until
@@ -196,7 +230,7 @@ fn is_recall(action: &Action) -> bool {
 pub(super) async fn run_with_budget<F, Fut>(actions: Vec<Action>, run: F) -> (String, RecallBudget)
 where
     F: FnMut(Action) -> Fut,
-    Fut: Future<Output = anyhow::Result<String>>,
+    Fut: Future<Output = anyhow::Result<Reply>>,
 {
     run_with_budget_filtered(actions, RecallBudget::default(), run).await
 }
@@ -213,16 +247,16 @@ async fn run_with_budget_filtered<F, Fut>(
 ) -> (String, RecallBudget)
 where
     F: FnMut(Action) -> Fut,
-    Fut: Future<Output = anyhow::Result<String>>,
+    Fut: Future<Output = anyhow::Result<Reply>>,
 {
     let mut passthrough: Vec<String> = Vec::new();
     for action in actions {
-        let recall = is_recall(&action);
+        let recall = action.is_recall();
         if recall && budget.is_full() {
             budget.skipped_actions += 1;
             continue;
         }
-        let Ok(text) = run(action).await.inspect_err(|e| {
+        let Ok(reply) = run(action).await.inspect_err(|e| {
             tracing::error!("memory action failed, its text is missing: {e:#}");
             crate::agent_notice::record(format!(
                 "llmenv could not run a memory action, so its text is missing: {e:#}. \
@@ -232,9 +266,12 @@ where
             continue;
         };
         if recall {
-            budget.add_text(&text);
-        } else if !text.is_empty() && !passthrough.contains(&text) {
-            passthrough.push(text);
+            budget.add_records(reply.into_records());
+        } else {
+            let text = reply.into_text();
+            if !text.is_empty() && !passthrough.contains(&text) {
+                passthrough.push(text);
+            }
         }
     }
     let text = budget.render(passthrough);
@@ -314,16 +351,71 @@ mod tests {
         run_with_budget(actions, |_| {
             let text = texts[index.get()].clone();
             index.set(index.get() + 1);
-            async move { Ok(text) }
+            async move { Ok(Reply::Text(text)) }
         })
         .await
+    }
+
+    fn with_id(id: &str, text: &str) -> Recalled {
+        Recalled {
+            id: Some(id.to_string()),
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn two_records_with_the_same_text_and_different_ids_are_both_kept() {
+        let mut budget = RecallBudget::default();
+        budget.add_records(vec![with_id("a", "[t] same"), with_id("b", "[t] same")]);
+        budget.add_records(vec![with_id("a", "[t] same")]);
+        assert_eq!(budget.kept(), ["[t] same", "[t] same"]);
+        assert_eq!(budget.duplicates, 1);
+        assert_eq!(budget.kept_keys(), ["a", "b"]);
+    }
+
+    #[test]
+    fn a_ledger_of_text_hashes_dedups_once_then_moves_to_ids() {
+        // A ledger from before #3369 holds the text hash of a record that it sent.
+        let old = BTreeSet::from([record_hash("[t] sent before")]);
+        let mut budget = RecallBudget::new(RECALL_BUDGET_BYTES, old.clone());
+        budget.add_records(vec![
+            with_id("old-id", "[t] sent before"),
+            with_id("new", "[t] new"),
+        ]);
+        assert_eq!(budget.kept(), ["[t] new"]);
+        assert_eq!(budget.already_sent, 1);
+        // The ledger learns the id of the old record beside the kept one.
+        let keys = budget.kept_keys();
+        assert_eq!(keys, ["new", "old-id"]);
+        // Next turn the ledger holds ids, so the old record is skipped by its id.
+        let mut sent = old;
+        sent.extend(keys);
+        let mut next = RecallBudget::new(RECALL_BUDGET_BYTES, sent);
+        next.add_records(vec![with_id("old-id", "[t] sent before")]);
+        assert!(next.kept().is_empty());
+        assert!(
+            next.kept_keys().is_empty(),
+            "an id match is not migrated again"
+        );
+    }
+
+    #[test]
+    fn a_record_with_no_id_is_keyed_by_its_text_hash() {
+        let mut budget = RecallBudget::new(
+            RECALL_BUDGET_BYTES,
+            BTreeSet::from([record_hash("[t] old")]),
+        );
+        budget.add_text("[t] old\n[t] new\n[t] new");
+        assert_eq!(budget.kept(), ["[t] new"]);
+        assert_eq!(budget.duplicates, 1);
+        assert_eq!(budget.kept_keys(), [record_hash("[t] new")]);
     }
 
     #[test]
     fn hook_text_keeps_the_omission_notice_out_of_memory() {
         // The notice is llmenv text, so it must not sit under the ICM memory header (#2764).
         let mut budget = RecallBudget::default();
-        budget.add_records(vec!["x".repeat(RECALL_BUDGET_BYTES + 1)]);
+        budget.add_strings(vec!["x".repeat(RECALL_BUDGET_BYTES + 1)]);
         let text = budget.hook_text(Vec::new());
         assert!(!text.memory.contains("omitted"), "{}", text.memory);
         assert!(
@@ -388,11 +480,11 @@ mod tests {
         let (text, budget) = run_with_budget(actions, |_| {
             calls.set(calls.get() + 1);
             async {
-                Ok(format!(
+                Ok(Reply::Text(format!(
                     "[t] {}\n[t] {}",
                     "a".repeat(7_900),
                     "b".repeat(500)
-                ))
+                )))
             }
         })
         .await;
@@ -418,7 +510,7 @@ mod tests {
             )],
             |_| {
                 let big = big.clone();
-                async move { Ok(big) }
+                async move { Ok(Reply::Text(big)) }
             },
         )
         .await;
@@ -434,9 +526,9 @@ mod tests {
     fn the_budget_is_used_exactly_and_never_exceeded() {
         let mut budget = RecallBudget::default();
         // Two records use 3,002 bytes each with the separator, so 1,994 bytes of room remain.
-        budget.add_records(vec![record_of(3_000), format!("{}y", record_of(2_999))]);
-        budget.add_records(vec![record_of(1_995), record_of(1_994)]);
-        let lengths: Vec<usize> = budget.kept().iter().map(String::len).collect();
+        budget.add_strings(vec![record_of(3_000), format!("{}y", record_of(2_999))]);
+        budget.add_strings(vec![record_of(1_995), record_of(1_994)]);
+        let lengths: Vec<usize> = budget.kept().iter().map(|r| r.len()).collect();
         assert_eq!(lengths, [3_000, 3_000, 1_994]);
         assert_eq!(budget.omitted, 1);
     }
@@ -445,11 +537,11 @@ mod tests {
     fn a_full_budget_starts_at_exactly_the_minimum_free_bytes() {
         let mut budget = RecallBudget::default();
         // 7,798 + 2 separator bytes leaves exactly MIN_FREE_BYTES free: not full yet.
-        budget.add_records(vec![record_of(
+        budget.add_strings(vec![record_of(
             RECALL_BUDGET_BYTES - MIN_FREE_BYTES - SEPARATOR_BYTES,
         )]);
         assert!(!budget.is_full());
-        budget.add_records(vec![record_of(6)]);
+        budget.add_strings(vec![record_of(6)]);
         assert!(budget.is_full());
     }
 
@@ -460,13 +552,13 @@ mod tests {
         budget.add_text("[t] old\n[t] new");
         assert_eq!(budget.kept(), ["[t] new"]);
         assert_eq!(budget.already_sent, 1);
-        assert_eq!(budget.kept_hashes(), [record_hash("[t] new")]);
+        assert_eq!(budget.kept_keys(), [record_hash("[t] new")]);
     }
 
     #[test]
     fn a_smaller_limit_is_respected() {
         let mut budget = RecallBudget::new(2_000, BTreeSet::new());
-        budget.add_records(vec![record_of(1_500), format!("{}y", record_of(1_499))]);
+        budget.add_strings(vec![record_of(1_500), format!("{}y", record_of(1_499))]);
         assert_eq!(budget.kept().len(), 1);
         assert_eq!(budget.omitted, 1);
     }
@@ -485,7 +577,7 @@ mod tests {
     #[test]
     fn trace_line_reports_every_counter() {
         let mut budget = RecallBudget::default();
-        budget.add_records(vec![
+        budget.add_strings(vec![
             "[t] a".to_string(),
             "[t] a".to_string(),
             "[t] bb".to_string(),
@@ -504,7 +596,7 @@ mod tests {
     #[test]
     fn trace_line_matches_the_docs_page() {
         let mut budget = RecallBudget::default();
-        budget.add_records(vec!["[t] a".to_string()]);
+        budget.add_strings(vec!["[t] a".to_string()]);
         let line = budget.trace_line(true).unwrap_or_default();
         assert!(
             crate::trace::docs_sync::docs_show(&line),
@@ -521,7 +613,7 @@ mod tests {
             |_| {
                 let text = texts[index.get()].to_string();
                 index.set(index.get() + 1);
-                async move { Ok(text) }
+                async move { Ok(Reply::Text(text)) }
             },
         )
         .await;
@@ -539,7 +631,7 @@ mod tests {
                 if first {
                     Err(anyhow::anyhow!("boom"))
                 } else {
-                    Ok("kept record".to_string())
+                    Ok(Reply::Text("kept record".to_string()))
                 }
             }
         })
@@ -557,7 +649,11 @@ mod tests {
         let mut outcomes = outcomes.into_iter();
         let (text, _) = runtime.block_on(run_with_budget(actions, |_| {
             let outcome = outcomes.next().expect("one outcome per action");
-            async move { outcome.ok_or_else(|| anyhow::anyhow!("boom")) }
+            async move {
+                outcome
+                    .map(Reply::Text)
+                    .ok_or_else(|| anyhow::anyhow!("boom"))
+            }
         }));
         text
     }
@@ -585,11 +681,11 @@ mod tests {
                 .map(|body| format!("[t] {}", body.trim_end()))
                 .collect();
             let mut budget = RecallBudget::default();
-            budget.add_records(input.clone());
+            budget.add_strings(input.clone());
             let kept_bytes: usize = budget.kept().iter().map(|r| r.len() + SEPARATOR_BYTES).sum();
             prop_assert!(kept_bytes <= RECALL_BUDGET_BYTES);
             for record in budget.kept() {
-                prop_assert!(input.contains(record));
+                prop_assert!(input.iter().any(|i| i == record));
             }
             prop_assert_eq!(
                 budget.kept().len() + budget.omitted + budget.duplicates,

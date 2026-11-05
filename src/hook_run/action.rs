@@ -7,13 +7,16 @@ use tracing::{debug, error};
 use crate::hook_run::mcp_client::McpHttpClient;
 use crate::hook_run::{BundleRecallQuery, TagRecallQuery};
 
+mod recalled;
 mod records;
+mod reply;
 mod response;
 
 pub(crate) use records::split_recall_records;
 #[cfg(test)]
 use records::{MAX_TOPIC_CHARS, is_record_start};
-use records::{SCOPE_CONTEXT_TOPIC, without_unscoped_records};
+use records::{SCOPE_CONTEXT_TOPIC, is_unscoped};
+pub(crate) use reply::{Recalled, Reply};
 pub(crate) use response::strip_advisory;
 
 /// The keyword prefix under which tag-scoped memory is stored and recalled.
@@ -149,7 +152,22 @@ impl Action {
     /// default cwd project filter (per the tool contract, an empty string
     /// searches all projects) and `keyword: llmenv-tag:<tag>` /
     /// `keyword: llmenv-bundle:<bundle>` to scope the recall.
+    ///
+    /// A recall asks for the JSON form, so each record keeps its icm id (#3369).
     pub fn arguments(&self, query: &str, chunk: &str) -> Value {
+        let mut args = self.base_arguments(query, chunk);
+        if self.is_recall() {
+            args["format"] = json!(crate::memory::recall_json::FORMAT);
+        }
+        args
+    }
+
+    /// Whether this action calls `icm_memory_recall`.
+    pub(crate) fn is_recall(&self) -> bool {
+        self.tool_name() == "icm_memory_recall"
+    }
+
+    fn base_arguments(&self, query: &str, chunk: &str) -> Value {
         match self {
             Action::WakeUp(w) => {
                 let mut args = json!({});
@@ -199,7 +217,7 @@ impl Action {
     }
 
     /// Whether this recall searches every project. Such a recall leaves out the records that
-    /// belong to one project but carry no project (see [`without_unscoped_records`]).
+    /// belong to one project but carry no project (see [`is_unscoped`]).
     fn recalls_all_projects(&self) -> bool {
         match self {
             Action::Recall(project) => project.is_empty(),
@@ -209,32 +227,36 @@ impl Action {
         }
     }
 
-    /// Execute the action: call the tool and return its text result.
+    /// Execute the action: call the tool and return its reply. A recall answers its records,
+    /// and any other action answers its text.
     ///
     /// # Errors
-    /// Propagates any client/network error from `call_tool`.
+    /// Propagates any client/network error from `call_tool`. A recall reply that is not a JSON
+    /// list of icm records is an error too.
     pub async fn run(
         &self,
         client: &McpHttpClient,
         query: &str,
         chunk: &str,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<Reply> {
         debug!(action = ?self, "dispatching MCP tool call");
-        client
+        let text = client
             .call_tool(self.tool_name(), self.arguments(query, chunk))
             .await
-            .map(|text| {
-                let text = strip_advisory(&text);
-                if self.recalls_all_projects() {
-                    without_unscoped_records(&text)
-                } else {
-                    text
-                }
-            })
-            .map_err(|e| {
-                error!(action = ?self, error = %e, "MCP tool call failed");
-                e
-            })
+            .inspect_err(|e| error!(action = ?self, error = %e, "MCP tool call failed"))?;
+        if !self.is_recall() {
+            return Ok(Reply::Text(strip_advisory(&text)));
+        }
+        let records = crate::memory::recall_json::parse(&text)
+            .inspect_err(|e| error!(action = ?self, error = %e, "recall reply unreadable"))?;
+        let all_projects = self.recalls_all_projects();
+        Ok(Reply::Records(
+            records
+                .iter()
+                .map(Recalled::from_record)
+                .filter(|r| !all_projects || !is_unscoped(r))
+                .collect(),
+        ))
     }
 }
 
@@ -267,9 +289,10 @@ mod tests {
             let q = RecallQuery { query, topic, keyword, project, limit };
             let args = Action::RecallQuery(q.clone()).arguments("x", "y");
             let obj = args.as_object().unwrap();
-            let expected = 2 + [&q.topic, &q.keyword, &q.project].iter().filter(|v| v.is_some()).count();
+            let expected = 3 + [&q.topic, &q.keyword, &q.project].iter().filter(|v| v.is_some()).count();
             prop_assert_eq!(obj.len(), expected);
             prop_assert_eq!(obj["query"].as_str(), Some(q.query.as_str()));
+            prop_assert_eq!(obj["format"].as_str(), Some("json"));
             prop_assert_eq!(obj["limit"].as_u64(), Some(u64::from(q.limit)));
             for (key, value) in [("topic", &q.topic), ("keyword", &q.keyword), ("project", &q.project)] {
                 prop_assert_eq!(obj.get(key).and_then(|v| v.as_str()), value.as_deref());
@@ -303,7 +326,7 @@ mod tests {
         assert_eq!(full.tool_name(), "icm_memory_recall");
         assert_eq!(
             full.arguments("ignored", "ignored"),
-            json!({"query": "q", "topic": "errors-resolved", "keyword": "cargo",
+            json!({"format": "json", "query": "q", "topic": "errors-resolved", "keyword": "cargo",
                    "project": "", "limit": 3})
         );
         let bare = Action::RecallQuery(RecallQuery {
@@ -313,7 +336,10 @@ mod tests {
             project: None,
             limit: 10,
         });
-        assert_eq!(bare.arguments("", ""), json!({"query": "q", "limit": 10}));
+        assert_eq!(
+            bare.arguments("", ""),
+            json!({"format": "json", "query": "q", "limit": 10})
+        );
     }
 
     #[test]
@@ -406,7 +432,7 @@ mod tests {
         let args = Action::Recall("llmenv".into()).arguments("rust, work", "chunk");
         assert_eq!(
             args,
-            serde_json::json!({ "query": "rust, work", "project": "llmenv" })
+            serde_json::json!({"format": "json",  "query": "rust, work", "project": "llmenv" })
         );
     }
 
@@ -415,7 +441,7 @@ mod tests {
         let args = Action::Recall(String::new()).arguments("rust, work", "chunk");
         assert_eq!(
             args,
-            serde_json::json!({ "query": "rust, work", "project": "" })
+            serde_json::json!({"format": "json",  "query": "rust, work", "project": "" })
         );
     }
 
@@ -614,7 +640,8 @@ mod tests {
         fn prop_recall_tag_arguments_shape(tag in valid_tag()) {
             let args = recall_tag(&tag).arguments("ignored", "ignored");
             let obj = args.as_object().expect("arguments must be a JSON object");
-            prop_assert_eq!(obj.len(), 3, "exactly query/project/keyword");
+            prop_assert_eq!(obj.len(), 4, "exactly query/project/keyword/format");
+            prop_assert_eq!(obj["format"].as_str(), Some("json"));
             prop_assert_eq!(&obj["query"], &serde_json::json!(tag));
             prop_assert_eq!(&obj["project"], &serde_json::json!(""));
             prop_assert_eq!(&obj["keyword"], &serde_json::json!(tag_keyword(&tag)));
@@ -636,7 +663,8 @@ mod tests {
         fn prop_recall_bundle_arguments_shape(bundle in valid_tag()) {
             let args = recall_bundle(&bundle).arguments("ignored", "ignored");
             let obj = args.as_object().expect("arguments must be a JSON object");
-            prop_assert_eq!(obj.len(), 3, "exactly query/project/keyword");
+            prop_assert_eq!(obj.len(), 4, "exactly query/project/keyword/format");
+            prop_assert_eq!(obj["format"].as_str(), Some("json"));
             prop_assert_eq!(&obj["query"], &serde_json::json!(bundle));
             prop_assert_eq!(&obj["project"], &serde_json::json!(""));
             prop_assert_eq!(&obj["keyword"], &serde_json::json!(bundle_keyword(&bundle)));

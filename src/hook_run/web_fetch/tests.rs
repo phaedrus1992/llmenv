@@ -68,27 +68,6 @@ proptest::proptest! {
     }
 
     #[test]
-    fn the_filter_drops_only_the_page_records(
-        records in proptest::collection::vec(
-            (proptest::sample::select(vec!["web-fetch", "web-fetch-a", "context-a", "web", "x"]),
-             "[a-z ]{1,12}"),
-            0..8,
-        ),
-    ) {
-        let text = records
-            .iter()
-            .map(|(topic, body)| format!("[{topic}] {body}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let expected: Vec<String> = records
-            .iter()
-            .filter(|(topic, _)| *topic != "web-fetch" && !topic.starts_with("web-fetch-"))
-            .map(|(topic, body)| format!("[{topic}] {body}").trim_end().to_string())
-            .collect();
-        proptest::prop_assert_eq!(without_web_pages(&text), expected.join("\n"));
-    }
-
-    #[test]
     fn a_stored_page_topic_is_a_web_fetch_topic(project in proptest::option::of("[-a-z0-9]{0,8}")) {
         proptest::prop_assert!(is_web_fetch_topic(&web_fetch_topic(project.as_deref())));
     }
