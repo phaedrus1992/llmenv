@@ -97,13 +97,14 @@ fn the_index_job_counts_attempts_and_logs_an_unreadable_earlier_checkpoint() {
     assert_eq!(load(&path).unwrap().attempts, 2);
     assert!(!logs.contains("unreadable"), "{logs}");
 
-    // An unreadable earlier file: the count restarts, and the loss is logged.
+    // An unreadable earlier file: the count restarts, and the agent is told (#3449).
     std::fs::write(&path, "not a checkpoint").unwrap();
-    let logs = crate::test_log_capture::capture_logs(|| path = begin_index());
+    path = begin_index();
     assert_eq!(load(&path).unwrap().attempts, 1);
+    let notices = crate::agent_notice::current().unwrap_or_default();
     assert!(
-        logs.contains("earlier index checkpoint unreadable"),
-        "{logs}"
+        notices.contains("earlier code index checkpoint") && notices.contains("Fix:"),
+        "{notices}"
     );
 }
 

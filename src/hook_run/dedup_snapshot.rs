@@ -14,8 +14,9 @@ pub(super) fn dedup_snapshot_path(
     match state_dir() {
         Ok(dir) => Some(dir.join(crate::paths::HOOK_STORE_CHUNK)),
         Err(e) => {
-            tracing::error!(
-                "session-end dedup skipped, the state directory is unavailable, so the chunk is stored again: {e}"
+            crate::agent_notice::no_state_folder(
+                "the session-end duplicate check is skipped, so the context chunk is stored again",
+                &e,
             );
             None
         }

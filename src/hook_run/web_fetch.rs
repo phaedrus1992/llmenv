@@ -143,13 +143,19 @@ pub(super) fn handle_web_fetch_in(
     redirect_stderr_to_detached_log(&mut cmd, detached_child_log_path());
     crate::mcp::proxy::detach_process_group(&mut cmd);
     let Ok(mut child) = crate::trace::spawn_counted("icm-store", &mut cmd) else {
-        tracing::error!("icm-store: failed to spawn detached store child");
+        crate::agent_notice::record_logged(
+            "llmenv: the fetched page is not stored in memory, because the store job cannot \
+             start. Fix: run `llmenv doctor`.",
+        );
         return None;
     };
     if let Some(mut stdin) = child.stdin.take()
         && let Err(e) = stdin.write_all(payload_json.as_bytes())
     {
-        tracing::error!("icm-store: failed to pipe args to detached child: {e}");
+        crate::agent_notice::record_logged(format!(
+            "llmenv: the fetched page is not stored in memory, because it cannot be sent to the \
+             store job: {e}. Fix: run `llmenv doctor`."
+        ));
     }
     // Not waited on by the caller: the child is process-group-detached and
     // outlives us.
