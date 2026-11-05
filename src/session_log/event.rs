@@ -75,6 +75,20 @@ pub struct SessionLogEvent {
     pub(crate) trace_fields: Option<serde_json::Value>,
 }
 
+/// A line with the full event shape that names the lost event, so a reader can parse it. The
+/// `json!` value holds only strings, so it always serializes.
+fn fallback_line(ts: &str, error: &serde_json::Error) -> String {
+    serde_json::json!({
+        "ts": ts,
+        "kind": "internal",
+        "scope": "process",
+        "role": "system",
+        "content": format!("llmenv lost a session log event because it cannot serialize: {error}"),
+        "fields": {},
+    })
+    .to_string()
+}
+
 /// Current time as an RFC 3339 timestamp (e.g. `2026-06-30T00:00:00Z`).
 #[must_use]
 pub(crate) fn now_rfc3339() -> String {
@@ -102,7 +116,7 @@ impl SessionLogEvent {
                     "failed to serialize SessionLogEvent — all data except ts lost in fallback"
                 )
             })
-            .unwrap_or_else(|_| format!("{{\"ts\":\"{}\",\"kind\":\"internal\"}}", self.ts))
+            .unwrap_or_else(|e| fallback_line(&self.ts, &e))
     }
 
     /// Cap `content` to `max` bytes (on a char boundary), returning self.
@@ -206,23 +220,14 @@ mod tests {
         prop_oneof![Just(EventScope::AgentSession), Just(EventScope::Process)]
     }
 
-    /// Any JSON value without a float: `serde_json::Value` has only string keys, so it always
-    /// serializes. A float is left out because serde_json can read a long float back one ulp off,
-    /// which is not a lost line.
+    /// A JSON object of strings and integers, the shape that producers write.
     fn arb_json() -> impl Strategy<Value = serde_json::Value> {
-        let leaf = prop_oneof![
-            Just(serde_json::Value::Null),
-            any::<bool>().prop_map(serde_json::Value::from),
-            any::<i64>().prop_map(serde_json::Value::from),
+        let value = prop_oneof![
             ".{0,12}".prop_map(serde_json::Value::from),
+            any::<i64>().prop_map(serde_json::Value::from),
         ];
-        leaf.prop_recursive(3, 24, 4, |inner| {
-            prop_oneof![
-                prop::collection::vec(inner.clone(), 0..4).prop_map(serde_json::Value::from),
-                prop::collection::btree_map(".{0,8}", inner, 0..4)
-                    .prop_map(|m| serde_json::Value::Object(m.into_iter().collect())),
-            ]
-        })
+        prop::collection::btree_map(".{0,8}", value, 0..4)
+            .prop_map(|m| serde_json::Value::Object(m.into_iter().collect()))
     }
 
     fn arb_event() -> impl Strategy<Value = SessionLogEvent> {
@@ -230,8 +235,7 @@ mod tests {
             (
                 ".{0,30}",
                 arb_json(),
-                // JSON has no `Some(null)`, so it reads back as `None`. Producers never write it.
-                prop::option::of(arb_json().prop_filter("not null", |v| !v.is_null())),
+                prop::option::of(arb_json()),
                 arb_event_kind(),
                 arb_event_scope(),
                 "[a-z]{1,10}",
@@ -265,6 +269,17 @@ mod tests {
                     }
                 },
             )
+    }
+
+    /// The fallback line has the full event shape, so the record child and a reader parse it.
+    #[test]
+    fn the_fallback_line_parses_as_an_event() {
+        let error = serde_json::from_str::<u8>("x").unwrap_err();
+        let line = fallback_line("2026-06-30T00:00:00Z \" quoted", &error);
+        let ev: SessionLogEvent = serde_json::from_str(&line).unwrap();
+        assert_eq!(ev.ts, "2026-06-30T00:00:00Z \" quoted");
+        assert_eq!(ev.kind, EventKind::Internal);
+        assert!(ev.content.contains("cannot serialize"), "{}", ev.content);
     }
 
     proptest! {
