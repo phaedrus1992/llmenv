@@ -15,6 +15,7 @@ mod cbm_index;
 mod dependent_tools;
 use dependent_tools::run_doctor_dependent_tools;
 mod hook_command;
+mod hook_programs;
 use hook_command::run_doctor_hook_command;
 mod cleartext;
 mod instruction_size;
@@ -1497,7 +1498,7 @@ pub(super) fn run_doctor(
 
     run_doctor_tool_availability(use_color, &config, &features);
     run_doctor_dependent_tools(use_color);
-    run_doctor_hook_command(use_color);
+    run_doctor_hook_command(use_color, &cache_dir);
     run_doctor_icm_server(use_color, &config, &config_dir, &active);
     run_doctor_mcp_servers(use_color, &config, &config_dir, &active);
     network::run_doctor_network(use_color, &config);

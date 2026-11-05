@@ -1211,7 +1211,10 @@ active context (active bundles, active MCP servers, etc.). Checks:
   It also warns when the file does not exist yet and the nearest existing folder above it is not writable.
   See [`session_log:`](configuration.md#session_log)
 - hook commands (added in v3.14.0) — warns when hook commands name a binary in a cargo `target`
-  folder or a temp folder, or a binary that was removed after it started
+  folder or a temp folder, or a binary that was removed after it started.
+  It reads the program from the rendered Claude Code `settings.json`, so an old render that names
+  another binary is found; with no rendered hooks, it checks the running binary and says so.
+  It also reports a binary path that cannot be named in a hook command
 - lifecycle hooks (added in v3.11.0) — lists which lifecycle events
   (`session_start`, `session_end`, `post_model_switch`, `turn_start`, `post_tool_batch`,
   `post_tool_use_failure`, `subagent_start`, `stop`) are wired for

@@ -4875,7 +4875,7 @@ mod tests {
         assert_eq!(json["statusLine"]["type"], "command");
         assert_eq!(
             json["statusLine"]["command"],
-            crate::adapter::hook_program::hook_command("statusline --color always")
+            crate::adapter::hook_program::hook_command("statusline --color always").unwrap()
         );
     }
 

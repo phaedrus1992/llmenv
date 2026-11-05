@@ -5,13 +5,24 @@ use std::path::PathBuf;
 
 use crate::util::shell_word;
 
-/// The command line that starts llmenv with `args`, such as `hook-run --engine crush`.
+/// The command line that starts llmenv with `args`, such as `hook-run --engine crush pre_tool_use`.
 ///
-/// The program is the running llmenv binary, shell-quoted. `PATH` is not searched, so a
-/// project folder on `PATH` cannot be written into an engine config. When the binary's path is
-/// not UTF-8 or the OS cannot report it, the bare name is used and an error is logged.
-pub(crate) fn hook_command(args: &str) -> String {
+/// # Errors
+/// The running binary's path cannot name llmenv in a hook command. See [`llmenv_program`].
+pub(crate) fn hook_command(args: &str) -> anyhow::Result<String> {
     hook_command_in(std::env::current_exe(), args)
+}
+
+/// The shell-quoted path of the running llmenv binary, which every hook command names.
+///
+/// `PATH` is not searched, so a project folder on `PATH` cannot be written into an engine config.
+/// `llmenv doctor` and the hook commands both use this lookup, so they cannot disagree (#3060).
+///
+/// # Errors
+/// The OS cannot report the binary's path, or the path is not UTF-8. A bare `llmenv` would let a
+/// `PATH` entry shadow llmenv, so no fallback is used and the export fails (#3060).
+pub(crate) fn llmenv_program() -> anyhow::Result<String> {
+    program_in(std::env::current_exe())
 }
 
 /// Pick how hook commands name llmenv, from the running binary's path in `exe`.
@@ -29,20 +40,21 @@ pub(crate) fn program_name(exe: std::io::Result<PathBuf>) -> Result<String, Stri
     }
 }
 
-/// The message for the bare-name fallback. It names the reason and the fix.
-pub(crate) fn fallback_message(reason: &str) -> String {
-    format!(
-        "{reason}, so hook commands use the bare name `llmenv`, which a PATH entry can shadow. \
-         Fix: move the llmenv binary to a UTF-8 path, then regenerate the hook config."
+/// The error for a binary path that hook commands cannot name. It names the reason and the fix.
+fn unusable_program(reason: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{reason}, so llmenv cannot write its hook commands: a bare `llmenv` would let a PATH \
+         entry run another program. Fix: install llmenv at a path that is valid UTF-8, then run \
+         `llmenv regenerate`"
     )
 }
 
-fn hook_command_in(exe: std::io::Result<PathBuf>, args: &str) -> String {
-    let program = program_name(exe).unwrap_or_else(|reason| {
-        tracing::error!("{}", fallback_message(&reason));
-        "llmenv".to_string()
-    });
-    format!("{program} {args}")
+fn program_in(exe: std::io::Result<PathBuf>) -> anyhow::Result<String> {
+    program_name(exe).map_err(|reason| unusable_program(&reason))
+}
+
+fn hook_command_in(exe: std::io::Result<PathBuf>, args: &str) -> anyhow::Result<String> {
+    Ok(format!("{} {args}", program_in(exe)?))
 }
 
 #[cfg(test)]
@@ -57,7 +69,8 @@ mod tests {
     #[test]
     fn renders_the_running_binary_path_not_a_path_search() {
         let exe = PathBuf::from("/opt/llmenv/bin/llmenv");
-        let command = hook_command_in(Ok(exe), "hook-run --engine crush pre_tool_use");
+        let command = hook_command_in(Ok(exe), "hook-run --engine crush pre_tool_use")
+            .expect("a UTF-8 path is used");
         assert_eq!(
             command,
             "/opt/llmenv/bin/llmenv hook-run --engine crush pre_tool_use"
@@ -65,36 +78,37 @@ mod tests {
     }
 
     #[test]
-    fn a_known_binary_path_is_used_without_a_fallback() {
+    fn a_known_binary_path_is_used() {
         let program = program_name(Ok(PathBuf::from("/opt/llmenv/bin/llmenv")));
         assert_eq!(program, Ok("/opt/llmenv/bin/llmenv".to_string()));
     }
 
     #[test]
-    fn an_unknown_binary_path_falls_back_to_the_bare_name_with_the_reason() {
-        let reason = program_name(Err(std::io::Error::other("no such file")))
-            .expect_err("an unknown path has a reason");
-        assert!(reason.contains("no such file"), "{reason}");
-        assert_eq!(
-            hook_command_in(Err(std::io::Error::other("gone")), "throttle"),
-            "llmenv throttle"
-        );
+    fn an_unknown_binary_path_is_an_error_that_names_the_cause_and_the_fix() {
+        let err = hook_command_in(Err(std::io::Error::other("no such file")), "throttle")
+            .expect_err("an unknown path writes no hook command");
+        let text = err.to_string();
+        assert!(text.contains("no such file"), "{text}");
+        assert!(text.contains("Fix: install llmenv at a path"), "{text}");
     }
 
     #[cfg(unix)]
     #[test]
-    fn a_non_utf8_binary_path_falls_back_to_the_bare_name_with_the_reason() {
+    fn a_non_utf8_binary_path_is_an_error_that_names_the_path() {
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
         let exe = PathBuf::from(OsString::from_vec(vec![b'/', 0xff, b'/', b'l']));
-        let reason = program_name(Ok(exe)).expect_err("a non-UTF-8 path has a reason");
-        assert!(reason.contains("not valid UTF-8"), "{reason}");
+        let err = hook_command_in(Ok(exe), "throttle").expect_err("a non-UTF-8 path is refused");
+        let text = err.to_string();
+        assert!(text.contains("not valid UTF-8"), "{text}");
+        assert!(text.contains("llmenv regenerate"), "{text}");
     }
 
     #[test]
-    fn the_fallback_message_names_the_fix() {
-        let message = fallback_message("the path is unknown");
-        assert!(message.contains("Fix: move the llmenv binary"), "{message}");
+    fn the_doctor_lookup_and_the_hook_command_agree() {
+        let program = llmenv_program().expect("the test binary has a UTF-8 path");
+        let command = hook_command("throttle").expect("the test binary has a UTF-8 path");
+        assert_eq!(command, format!("{program} throttle"));
     }
 
     proptest! {

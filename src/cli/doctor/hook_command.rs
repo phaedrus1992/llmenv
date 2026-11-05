@@ -1,11 +1,12 @@
 //! Doctor check for the program name in llmenv's hook commands (#3049, #3081, #3119). The hook
-//! commands name the running llmenv binary. The bare name is used only when that binary's path is
-//! not UTF-8 or the OS cannot report it. A path in a build or temp folder, or a removed binary,
-//! is also reported, because a hook then runs a file that anyone who can write there controls.
+//! commands name the llmenv binary that rendered them. A path that cannot name llmenv fails the
+//! export (#3060). A path in a build or temp folder, or a removed binary, is reported, because a
+//! hook then runs a file that anyone who can write there controls. The check reads the program
+//! from the rendered `settings.json`, so an old render that names another binary is found (#3392).
 
 use std::path::{Path, PathBuf};
 
-use crate::adapter::hook_program::{fallback_message, program_name};
+use crate::adapter::hook_program::llmenv_program;
 
 /// The suffix Linux appends to the path of a binary that was removed or replaced.
 const DELETED_SUFFIX: &str = " (deleted)";
@@ -25,30 +26,52 @@ enum HookPathRisk {
     Deleted,
 }
 
-/// Print the hook-command check for the running binary.
-pub(super) fn run_doctor_hook_command(use_color: bool) {
+/// Print the hook-command check. The programs come from the rendered Claude Code `settings.json`
+/// under `cache_dir`; the running binary is checked only when no rendered hook names llmenv.
+pub(super) fn run_doctor_hook_command(use_color: bool, cache_dir: &Path) {
     let pass = super::super::doctor_pass(use_color);
     let warn = super::super::doctor_warning(use_color);
-    let exe = std::env::current_exe();
-    let for_check = match &exe {
-        Ok(path) => Ok(path.clone()),
-        Err(e) => Err(std::io::Error::new(e.kind(), e.to_string())),
-    };
-    match (program_name(for_check), exe) {
-        (Ok(_), Ok(path)) => report_hook_path(&path, &pass, &warn),
-        (Ok(_), Err(e)) => eprintln!(
-            "{warn} llmenv could not read its own path, so the hook commands are not checked: {e}. \
-             Fix: run llmenv from an installed binary."
-        ),
-        (Err(reason), _) => eprintln!("{warn} {}", fallback_message(&reason)),
+    if let Err(e) = llmenv_program() {
+        eprintln!("{warn} {e:#}");
+    }
+    let rendered =
+        rendered_settings(cache_dir, &warn).map(|s| super::hook_programs::rendered_programs(&s));
+    match rendered {
+        Some(programs) if !programs.is_empty() => {
+            for program in programs {
+                report_hook_path(&program, "Hook commands name", &pass, &warn);
+            }
+        }
+        _ => match std::env::current_exe() {
+            Ok(exe) => report_hook_path(
+                &exe,
+                "No rendered hook config names llmenv, so the running binary is checked:",
+                &pass,
+                &warn,
+            ),
+            Err(e) => eprintln!(
+                "{warn} llmenv could not read its own path, so the hook commands are not checked: \
+                 {e}. Fix: run llmenv from an installed binary."
+            ),
+        },
     }
 }
 
-/// Print one warning per risk of `exe`, or one pass line when there is none.
-fn report_hook_path(exe: &Path, pass: &str, warn: &str) {
+/// The rendered Claude Code `settings.json` of this shell, or `None` when this shell has no llmenv
+/// folder or the file does not exist yet. A file that cannot be parsed is reported and skipped.
+fn rendered_settings(cache_dir: &Path, warn: &str) -> Option<serde_json::Value> {
+    use crate::adapter::AgentAdapter;
+    let adapter_root = cache_dir.join(crate::adapter::claude_code::ClaudeCodeAdapter.name());
+    let config_dir = crate::env_var::utf8_var("CLAUDE_CONFIG_DIR").ok()?;
+    let dir = super::rendered_claude_dir(&adapter_root, config_dir)?;
+    super::read_rendered_json(&dir.join("settings.json"), warn)
+}
+
+/// Print one warning per risk of `exe`, or one pass line, after `what`, when there is none.
+fn report_hook_path(exe: &Path, what: &str, pass: &str, warn: &str) {
     let risks = hook_path_risks(exe, &temp_roots());
     if risks.is_empty() {
-        eprintln!("{pass} Hook commands name llmenv by the path of the running binary");
+        eprintln!("{pass} {what} {}", exe.display());
         return;
     }
     for risk in risks {
@@ -163,20 +186,6 @@ mod tests {
 
     fn roots() -> Vec<PathBuf> {
         vec![PathBuf::from("/tmp")]
-    }
-
-    #[test]
-    fn an_unknown_binary_path_is_reported_with_the_fix() {
-        let reason = program_name(Err(std::io::Error::other("no path")))
-            .expect_err("an unknown path is reported");
-        let message = fallback_message(&reason);
-        assert!(message.contains("Fix: move the llmenv binary"), "{message}");
-    }
-
-    #[test]
-    fn a_known_binary_path_is_not_reported() {
-        let exe = std::path::PathBuf::from("/opt/llmenv/bin/llmenv");
-        assert!(program_name(Ok(exe)).is_ok());
     }
 
     #[test]
