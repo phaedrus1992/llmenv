@@ -290,3 +290,16 @@ fn any_execute_bit_makes_an_entry_executable() {
     }
     assert!(!is_executable_at(dir.as_fd(), OsStr::new("missing")).unwrap());
 }
+
+// A pre-1970 time or a nanosecond part outside one second is unknown, so it cannot overflow.
+#[test]
+fn a_stat_time_out_of_range_is_unknown() {
+    let at =
+        |secs: u64, nanos: u32| Some(std::time::UNIX_EPOCH + std::time::Duration::new(secs, nanos));
+    assert_eq!(stat_time(10i64, 999_999_999i64), at(10, 999_999_999));
+    assert_eq!(stat_time(10i64, 0i64), at(10, 0));
+    assert_eq!(stat_time(10i64, 1_000_000_000i64), None);
+    assert_eq!(stat_time(-1i64, 0i64), None);
+    assert_eq!(stat_time(10i64, -1i64), None);
+    assert_eq!(stat_time(i64::MAX, 1_000_000_000i64), None);
+}

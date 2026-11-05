@@ -249,6 +249,14 @@ mod tests {
     fn a_ctime_out_of_range_is_the_epoch() {
         assert_eq!(ctime_to_system_time(-1, 5), UNIX_EPOCH);
         assert_eq!(
+            ctime_to_system_time(10, 999_999_999),
+            UNIX_EPOCH + Duration::new(10, 999_999_999)
+        );
+        assert_eq!(
+            ctime_to_system_time(10, 1_000_000_000),
+            UNIX_EPOCH + Duration::from_secs(10)
+        );
+        assert_eq!(
             ctime_to_system_time(10, 2_000_000_000),
             UNIX_EPOCH + Duration::from_secs(10)
         );
@@ -259,7 +267,11 @@ mod tests {
         /// nanosecond part outside one second is read as zero.
         #[cfg(unix)]
         #[test]
-        fn a_ctime_never_panics_and_maps_by_its_parts(secs in any::<i64>(), nanos in any::<i64>()) {
+        fn a_ctime_never_panics_and_maps_by_its_parts(
+            // Mix the full range with values near the one-second edge, which a uniform i64 misses.
+            secs in prop_oneof![any::<i64>(), -10i64..4_000_000_000],
+            nanos in prop_oneof![any::<i64>(), -10i64..1_000_000_010, 999_999_990i64..1_000_000_010],
+        ) {
             let got = ctime_to_system_time(secs, nanos);
             let want = match (u64::try_from(secs), u32::try_from(nanos)) {
                 (Err(_), _) => UNIX_EPOCH,

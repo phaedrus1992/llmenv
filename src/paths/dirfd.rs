@@ -257,18 +257,15 @@ pub(crate) fn mtime_at(
         Err(rustix::io::Errno::NOENT) => return Ok(None),
         Err(e) => return Err(e.into()),
     };
-    // A nanosecond part of one second or more would carry into the seconds and can overflow.
-    let (Ok(secs), Some(nanos)) = (
-        u64::try_from(st.st_mtime),
-        u32::try_from(st.st_mtime_nsec)
-            .ok()
-            .filter(|n| *n < 1_000_000_000),
-    ) else {
-        return Ok(None);
-    };
-    Ok(Some(
-        std::time::UNIX_EPOCH + std::time::Duration::new(secs, nanos),
-    ))
+    Ok(stat_time(st.st_mtime, st.st_mtime_nsec))
+}
+
+/// The time in a stat result, or `None` for a pre-1970 time or a nanosecond part outside one
+/// second. Such a part would carry into the seconds and can overflow.
+fn stat_time<S: TryInto<u64>, N: TryInto<u32>>(secs: S, nanos: N) -> Option<std::time::SystemTime> {
+    let secs = secs.try_into().ok()?;
+    let nanos = nanos.try_into().ok().filter(|n| *n < 1_000_000_000)?;
+    Some(std::time::UNIX_EPOCH + std::time::Duration::new(secs, nanos))
 }
 
 /// Whether `name` in `dir` is a regular file, without following a symlink. `false` for a missing
