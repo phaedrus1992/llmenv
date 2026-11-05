@@ -80,3 +80,71 @@ pub(super) fn check_selected_plugins(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "test code")]
+mod tests {
+    use super::{MarketplaceSync, check_selected_plugins};
+    use crate::plugins::resolve::ResolvedPlugin;
+
+    fn plugin(marketplace: &str, name: &str) -> ResolvedPlugin {
+        ResolvedPlugin {
+            marketplace: marketplace.to_string(),
+            plugin: name.to_string(),
+            collection: "c".to_string(),
+            install_path: None,
+            git_commit_sha: None,
+        }
+    }
+
+    fn sync_of(dir: &std::path::Path, marketplace: &str, manifest: &str) -> MarketplaceSync {
+        std::fs::create_dir_all(dir.join(".claude-plugin")).expect("create manifest dir");
+        std::fs::write(
+            dir.join(".claude-plugin").join("marketplace.json"),
+            manifest,
+        )
+        .expect("write manifest");
+        MarketplaceSync {
+            locations: [(marketplace.to_string(), dir.to_path_buf())].into(),
+            skipped: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn every_plugin_of_one_manifest_is_found() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sync = sync_of(
+            dir.path(),
+            "m",
+            r#"{"name": "m", "plugins": [{"name": "a", "source": "./a"},
+                {"name": "b", "source": "./b"}]}"#,
+        );
+        check_selected_plugins(dir.path(), &sync, &[plugin("m", "a"), plugin("m", "b")])
+            .expect("both plugins are in the manifest");
+    }
+
+    #[test]
+    fn a_plugin_missing_from_a_shared_manifest_is_named() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sync = sync_of(
+            dir.path(),
+            "m",
+            r#"{"name": "m", "plugins": [{"name": "a", "source": "./a"}]}"#,
+        );
+        let err = check_selected_plugins(dir.path(), &sync, &[plugin("m", "a"), plugin("m", "z")])
+            .expect_err("z is not in the manifest");
+        assert!(format!("{err:#}").contains("z@m"), "{err:#}");
+    }
+
+    #[test]
+    fn an_unreadable_manifest_names_its_marketplace() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sync = sync_of(dir.path(), "broken", "not json");
+        let err = check_selected_plugins(dir.path(), &sync, &[plugin("broken", "a")])
+            .expect_err("the manifest is not JSON");
+        assert!(
+            format!("{err:#}").contains("reading marketplace manifest for 'broken'"),
+            "{err:#}"
+        );
+    }
+}
