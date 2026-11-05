@@ -417,6 +417,8 @@ A link or a folder in `notice_spool/` is removed unread.
 - `the code index job failed` — the codebase-memory-mcp index job failed, for example because the indexer is not installed.
 - `cannot read the detached job notice <path>` or `cannot remove the detached job notice <path>` —
   a file in `notice_spool/` is broken. Remove the file.
+- `a background job finished, but its checkpoint stays` — llmenv cannot remove the checkpoint of a
+  finished job, so a later session can run the job again. Remove the named file.
 - `the memory store has no state folder` or `memory consolidation has no state folder` — the job
   cannot check for duplicates, so a memory or a rule can be stored twice. Set `HOME` or `LLMENV_STATE_DIR`.
 

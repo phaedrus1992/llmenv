@@ -193,6 +193,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Apply the same cut-character rule to the task nudge state, the session-end duplicate record, the MCP proxy pid and lock files, task files, and the `llmenv doctor` code index result. These reads now refuse a FIFO, a file over 4 MiB, and a link that points nowhere, with the fix in the error. [fix:hook] [#3457]
 - Tell the agent when the repeat check or the stop reminder check is off for an unsafe session id, when a fetched page cannot be stored, when a transcript cannot be read, and when the recall ledger, agent config, or a detached job checkpoint has no state folder. Each case was a log line only. [fix:hook] [#3457]
 - Tell the agent when the repeat check, the read cache, or the cd check is off for one call, when slow main recalls skip the extra memory recalls, when the resume notice stays on for an unknown engine version, and when the code index root check leaves a root out. Each case was a log line only. [fix:hook] [#3462]
+- Tell the agent when a finished background job keeps its checkpoint, which makes a later session run the job again and then report that it gave up. [fix:hook] [#3465]
 
 ### Security
 

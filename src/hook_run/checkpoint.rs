@@ -433,27 +433,25 @@ use unrunnable::{drop_unrunnable, unrunnable_reason};
 
 /// Delete the checkpoint of a job that finished, or that cannot succeed on a retry. A job that
 /// failed in a way a later run may fix leaves its file. Fail-soft.
+///
+/// A checkpoint that stays makes the next session run the finished job again, and later report
+/// that it gave up, so a failed removal is a notice (#3465).
 pub(crate) fn finish(path: Option<&Path>) {
     if let Some(path) = path
         && let Err(e) = complete(path)
     {
-        tracing::error!("{e:#}");
+        crate::agent_notice::record_logged(format!(
+            "llmenv: a background job finished, but its checkpoint stays, so a later session can \
+             run it again: {e:#}. Fix: remove {}.",
+            path.display()
+        ));
     }
 }
 
-/// The kind, inputs, and session of each readable checkpoint, for the tests of the spawners.
 #[cfg(test)]
-pub(crate) fn checkpoint_entries_for_test(
-    state_dir: &Path,
-) -> Vec<(JobKind, serde_json::Value, Option<String>)> {
-    list(state_dir)
-        .into_iter()
-        .filter_map(|e| match e {
-            Entry::Ready(_, c) => Some((c.kind, c.inputs, c.session_id)),
-            Entry::Unreadable(..) => None,
-        })
-        .collect()
-}
+mod test_support;
+#[cfg(test)]
+pub(crate) use test_support::checkpoint_entries_for_test;
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test code")]
