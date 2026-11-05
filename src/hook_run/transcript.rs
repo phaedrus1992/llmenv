@@ -49,42 +49,8 @@ impl TurnState {
 /// long tool-call sequence, small enough that the read stays cheap.
 const TAIL_LINES: usize = 200;
 
-/// How many trailing bytes to read. `transcript_path` comes from hook stdin, so
-/// the read must stay bounded whatever the file is.
-const TAIL_BYTES: u64 = 1024 * 1024;
-
-/// The last [`TAIL_BYTES`] of a regular file, starting at a line boundary.
-/// `None` for anything that is not a readable regular file. A file that exists but cannot be
-/// opened is logged, because the checks that read the tail then pass with no word.
-fn read_tail(path: &Path) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(e) => {
-            tracing::error!("transcript {} cannot be opened: {e}", path.display());
-            return None;
-        }
-    };
-    let meta = file.metadata().ok()?;
-    if !meta.is_file() {
-        return None;
-    }
-    let start = meta.len().saturating_sub(TAIL_BYTES);
-    file.seek(SeekFrom::Start(start)).ok()?;
-    let mut bytes = Vec::new();
-    file.take(TAIL_BYTES).read_to_end(&mut bytes).ok()?;
-    let text = String::from_utf8_lossy(&bytes).into_owned();
-    if start == 0 {
-        return Some(text);
-    }
-    // The first line after the seek is cut in the middle, so it is dropped.
-    Some(
-        text.split_once('\n')
-            .map(|(_, rest)| rest.to_string())
-            .unwrap_or_default(),
-    )
-}
+mod tail;
+use tail::read_tail;
 
 /// Read the tail of `path` and summarise the current turn.
 ///
@@ -214,7 +180,7 @@ mod tests {
         lines.push(serde_json::json!({"message": {"role": "assistant",
             "content": [{"type": "text", "text": "last words"}]}}));
         let file = transcript(&lines);
-        assert!(std::fs::metadata(file.path()).unwrap().len() > TAIL_BYTES);
+        assert!(std::fs::metadata(file.path()).unwrap().len() > super::tail::TAIL_BYTES);
         assert_eq!(
             last_assistant_text(file.path(), 20).as_deref(),
             Some("last words")
