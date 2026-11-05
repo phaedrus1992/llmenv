@@ -154,10 +154,7 @@ impl Cutoff {
     /// The age rule of the state sweeps: the retention, judged by mtime or change time, so a
     /// restored entry is kept (#3275).
     fn rule(self) -> crate::materialize::expiry::AgeRule {
-        crate::materialize::expiry::AgeRule {
-            older_than: self.retention,
-            source: crate::materialize::cache::AgeSource::MtimeOrCtime,
-        }
+        crate::materialize::expiry::AgeRule::new(self.retention)
     }
 }
 

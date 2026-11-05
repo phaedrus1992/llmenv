@@ -257,8 +257,13 @@ pub(crate) fn mtime_at(
         Err(rustix::io::Errno::NOENT) => return Ok(None),
         Err(e) => return Err(e.into()),
     };
-    let (Ok(secs), Ok(nanos)) = (u64::try_from(st.st_mtime), u32::try_from(st.st_mtime_nsec))
-    else {
+    // A nanosecond part of one second or more would carry into the seconds and can overflow.
+    let (Ok(secs), Some(nanos)) = (
+        u64::try_from(st.st_mtime),
+        u32::try_from(st.st_mtime_nsec)
+            .ok()
+            .filter(|n| *n < 1_000_000_000),
+    ) else {
         return Ok(None);
     };
     Ok(Some(

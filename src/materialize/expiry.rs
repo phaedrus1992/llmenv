@@ -18,6 +18,17 @@ pub struct AgeRule {
     pub source: crate::materialize::cache::AgeSource,
 }
 
+impl AgeRule {
+    /// The production rule: entries older than `older_than`, judged by mtime or change time, so a
+    /// restored tree is kept (#3195). Only tests build a rule with `AgeSource::MtimeOnly` (#3280).
+    pub(crate) fn new(older_than: Duration) -> Self {
+        Self {
+            older_than,
+            source: crate::materialize::cache::AgeSource::MtimeOrCtime,
+        }
+    }
+}
+
 /// The paths whose clock-skew error is already logged in this process. A cache sweep scans a
 /// folder twice, once for its gate and once for the sweep, so one skewed entry would log twice.
 static SKEW_REPORTED: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());

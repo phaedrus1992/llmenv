@@ -161,6 +161,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Remove and report a session-log rotation whose name is not valid UTF-8. Such a rotation was never pruned and never named. [fix:prune] [#3351]
 - Name the folder and the fix when the session-log rotation prune of `llmenv doctor --gc` or `llmenv clean` cannot read the log folder, and keep the operating system error, so a permission failure shows as one. [fix:session-log] [#3350]
 - Judge every age check of the state cleanup in `llmenv doctor --gc` and `llmenv clean` by one clock, so the check that decides to run `lsof` and the sweeps that follow agree on which `state/tmp` entry or old codebase-memory index is old. [fix:doctor] [#3374]
+- Stop the cache and `state/tmp` age checks from reading a file time whose nanosecond part is one second or more. Such a value could overflow the time and stop `llmenv clean`. [fix:materialize] [#3280]
 
 ### Security
 

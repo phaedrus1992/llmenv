@@ -13,7 +13,9 @@ use super::skip_vanished;
 ///
 /// `MtimeOnly` trusts the modification time alone. A tree unpacked with its old mtimes kept
 /// (`tar -x`, `cp -p`) then looks old at once. `MtimeOrCtime` also counts the status-change time,
-/// which an unpack sets to now, so the tree reads as used (#3195).
+/// which an unpack sets to now, so the tree reads as used (#3195). Production code builds its
+/// rule with `AgeRule::new`, which picks `MtimeOrCtime`. `MtimeOnly` is for tests, which can only
+/// age a tree by its mtime (#3280).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgeSource {
     MtimeOnly,
@@ -116,14 +118,29 @@ pub(crate) fn file_stamp(meta: &std::fs::Metadata, age: AgeSource) -> std::io::R
 #[cfg(unix)]
 fn change_time(meta: &std::fs::Metadata) -> SystemTime {
     use std::os::unix::fs::MetadataExt as _;
-    // A pre-1970 ctime is not a real case for a file this walk reads. It maps to the epoch,
-    // which is the oldest value, so it never keeps a tree alive by accident.
-    let secs = u64::try_from(meta.ctime()).unwrap_or(0);
-    let nanos = u32::try_from(meta.ctime_nsec()).unwrap_or(0);
+    ctime_to_system_time(meta.ctime(), meta.ctime_nsec())
+}
+
+/// The change time in `secs` and `nanos`, as the file system reports it.
+///
+/// The kernel sets the change time from its clock, so a pre-1970 value is not a real case. It
+/// maps to the epoch, the oldest value, so it never keeps a tree alive by accident. A nanosecond
+/// part outside one second is read as zero, so it cannot carry into the seconds and overflow.
+#[cfg(unix)]
+fn ctime_to_system_time(secs: i64, nanos: i64) -> SystemTime {
+    let Ok(secs) = u64::try_from(secs) else {
+        return SystemTime::UNIX_EPOCH;
+    };
+    let nanos = u32::try_from(nanos)
+        .ok()
+        .filter(|n| *n < 1_000_000_000)
+        .unwrap_or(0);
+    // Seconds up to `i64::MAX` with nanoseconds under one second fit in a Unix `SystemTime`.
     SystemTime::UNIX_EPOCH + Duration::new(secs, nanos)
 }
 
-/// Windows has no status-change time in `std`. The source then falls back to the mtime.
+/// Windows has no status-change time in `std`. The epoch is the oldest value, so the `max` in
+/// `file_stamp` then gives the mtime.
 #[cfg(not(unix))]
 fn change_time(_meta: &std::fs::Metadata) -> SystemTime {
     SystemTime::UNIX_EPOCH
@@ -192,7 +209,31 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_ctime_out_of_range_is_the_epoch() {
+        assert_eq!(ctime_to_system_time(-1, 5), UNIX_EPOCH);
+        assert_eq!(
+            ctime_to_system_time(10, 2_000_000_000),
+            UNIX_EPOCH + Duration::from_secs(10)
+        );
+    }
+
     proptest! {
+        /// Any ctime maps to a time, never a panic (#3280). A negative ctime is the epoch, and a
+        /// nanosecond part outside one second is read as zero.
+        #[cfg(unix)]
+        #[test]
+        fn a_ctime_never_panics_and_maps_by_its_parts(secs in any::<i64>(), nanos in any::<i64>()) {
+            let got = ctime_to_system_time(secs, nanos);
+            let want = match (u64::try_from(secs), u32::try_from(nanos)) {
+                (Err(_), _) => UNIX_EPOCH,
+                (Ok(s), Ok(n)) if n < 1_000_000_000 => UNIX_EPOCH + Duration::new(s, n),
+                (Ok(s), _) => UNIX_EPOCH + Duration::from_secs(s),
+            };
+            prop_assert_eq!(got, want);
+        }
+
         /// With any file in the tree, the answer is the newest file mtime, whatever the folder
         /// mtimes are. With no file, it is the newest folder mtime.
         #[test]

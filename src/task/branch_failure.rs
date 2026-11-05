@@ -30,6 +30,27 @@ mod tests {
         ));
     }
 
+    proptest::proptest! {
+        /// A "not a git repository" message in any case, at any place in stderr, is never
+        /// unexpected, whatever the exit code (#3055).
+        #[test]
+        fn a_non_repo_message_in_any_case_is_never_unexpected(
+            code in proptest::option::of(proptest::prelude::any::<i32>()),
+            before in ".{0,40}",
+            message in "[nN][oO][tT] [aA] [gG][iI][tT] [rR][eE][pP][oO][sS][iI][tT][oO][rR][yY]",
+            after in ".{0,40}",
+        ) {
+            let stderr = format!("{before}{message}{after}");
+            proptest::prop_assert!(!branch_failure_is_unexpected(code, &stderr), "{stderr}");
+        }
+
+        /// Exit 1 is a detached HEAD, which is never unexpected, whatever stderr holds.
+        #[test]
+        fn exit_one_is_never_unexpected(stderr in ".{0,80}") {
+            proptest::prop_assert!(!branch_failure_is_unexpected(Some(1), &stderr));
+        }
+    }
+
     #[test]
     fn branch_failure_is_unexpected_flags_ownership_and_signal_failures() {
         assert!(branch_failure_is_unexpected(

@@ -89,10 +89,9 @@ fn prune_mode(args: &CleanArgs) -> anyhow::Result<PruneMode> {
     let duration = humantime::parse_duration(raw).with_context(|| {
         format!("cannot read --older-than {raw:?}: give a duration such as 14d or 1w")
     })?;
-    Ok(PruneMode::OlderThan(crate::materialize::expiry::AgeRule {
-        older_than: duration,
-        source: crate::materialize::cache::AgeSource::MtimeOrCtime,
-    }))
+    Ok(PruneMode::OlderThan(
+        crate::materialize::expiry::AgeRule::new(duration),
+    ))
 }
 
 /// What one step of the cache-folder cleanup removed and could not remove.
