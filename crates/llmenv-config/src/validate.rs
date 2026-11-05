@@ -555,10 +555,6 @@ impl Config {
         Ok(())
     }
 
-    /// Validate the durable-state block (#175): each tool's env var must be a
-    /// valid shell variable name, its subdir a single safe path component, and
-    /// no env var may repeat or collide with a var llmenv itself emits into the
-    /// same set (`LLMENV_STATE_DIR`, `CLAUDE_CONFIG_DIR`).
     /// Every widget `display` must be a preset that the widget accepts (#3059).
     fn validate_widget_displays(&self) -> Result<(), ValidateError> {
         let Some(statusline) = &self.statusline else {
@@ -572,6 +568,10 @@ impl Config {
         Ok(())
     }
 
+    /// Validate the durable-state block (#175): each tool's env var must be a
+    /// valid shell variable name, its subdir a single safe path component, and
+    /// no env var may repeat or collide with a var llmenv itself emits into the
+    /// same set (`LLMENV_STATE_DIR`, `CLAUDE_CONFIG_DIR`).
     fn validate_state(&self) -> Result<(), ValidateError> {
         let mut seen_env = std::collections::HashSet::new();
         // Reserve llmenv/adapter-emitted vars so a tool can't shadow them and
@@ -596,17 +596,17 @@ impl Config {
     fn validate_mcps(&self) -> Result<(), ValidateError> {
         servers::validate_mcp_servers(&self.mcp)?;
         servers::validate_hosts(&self.host)?;
-        match &self.features {
-            Some(features) => servers::validate_features(features, &self.host),
-            None => Ok(()),
-        }
+        self.features
+            .as_ref()
+            .map_or(Ok(()), |f| servers::validate_features(f, &self.host))
     }
 
     /// A hook whose `kind` doesn't match its `command`/`tool` field is
     /// schema-valid but produces a silent no-op in the generated engine
     /// config (Claude Code emits `{"type":"command"}` with no command key
     /// and runs nothing; Crush rejects it at load time). Fail fast here
-    /// instead, mirroring `validate_mcps`'s `McpStdioMissingCommand`.
+    /// instead, mirroring the `McpStdioMissingCommand` check of
+    /// `servers::validate_transport`.
     fn validate_hooks(&self) -> Result<(), ValidateError> {
         use super::HookHandlerKind;
 
