@@ -1272,10 +1272,9 @@ fn run_inner(
                 session_state::unix_now(),
             ),
             (None, _) => tracing::debug!("post_model_switch has no session id, skipped"),
-            (_, Err(e)) => crate::agent_notice::record_logged(format!(
-                "llmenv: the model switch is not recorded, because the state folder cannot be \
-                 found: {e}. Fix: set HOME, or set LLMENV_STATE_DIR."
-            )),
+            (_, Err(e)) => {
+                crate::agent_notice::no_state_folder("the model switch is not recorded", &e);
+            }
         }
         crate::trace::emit_trace_timing(crate::trace::HookTiming::new(t0, t_config));
         return Ok(HookText::default());
@@ -1703,10 +1702,7 @@ fn run_inner(
                 {
                     Some(Ok(dir)) => Some(dir),
                     Some(Err(e)) => {
-                        crate::agent_notice::record_logged(format!(
-                            "llmenv: the task reminder is skipped, because the state folder \
-                             cannot be found: {e}. Fix: set HOME, or set LLMENV_STATE_DIR."
-                        ));
+                        crate::agent_notice::no_state_folder("the task reminder is skipped", &e);
                         None
                     }
                     None => None,
@@ -2182,10 +2178,7 @@ fn adaptive_state_dir(
 ) -> Option<std::path::PathBuf> {
     resolve()
         .inspect_err(|e| {
-            crate::agent_notice::record_logged(format!(
-                "llmenv: adaptive recall is off for this event, because the state folder cannot \
-                 be found: {e:#}. Fix: set HOME, or set LLMENV_STATE_DIR to a valid absolute path."
-            ));
+            crate::agent_notice::no_state_folder("adaptive recall is off for this event", e);
         })
         .ok()
 }
@@ -2463,10 +2456,15 @@ fn trigger_index_with(
     // The wrapper is used only with both a checkpoint and an executable (`index_job_command`).
     let wrapped = uses_wrapper(checkpoint.as_deref(), exe.as_deref());
     if !wrapped {
-        crate::agent_notice::record_logged(
-            "llmenv: the code index job runs without its wrapper, so a failure of the indexer is \
-             not reported. Fix: run `llmenv doctor` to check the state folder.",
-        );
+        let cause = if exe.is_none() {
+            "llmenv cannot find its own program"
+        } else {
+            "the job has no checkpoint"
+        };
+        crate::agent_notice::record_logged(format!(
+            "llmenv: the code index job runs without its wrapper, because {cause}, so a failure \
+             of the indexer is not reported. Fix: run `llmenv doctor` to check the state folder."
+        ));
     }
     let mut cmd = index_job_command(checkpoint.as_deref(), exe, || {
         index_command(

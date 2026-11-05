@@ -110,8 +110,8 @@ fn read_text(path: &Path) -> std::io::Result<Option<String>> {
 
 /// The stored ring. A missing file is an empty ring. A file that is not a valid ring is
 /// replaced and the agent is told, because the rate of new calls is worth more than a ring
-/// that nobody can read. `InvalidData` covers an oversized or a non-regular file; bytes that are
-/// not UTF-8 read as text with U+FFFD and fail the parse (#3445).
+/// that nobody can read. `InvalidData` covers bytes that are not UTF-8 and an oversized file; a
+/// file cut inside its last character reads as the text before the cut and fails the parse (#3445).
 fn read_ring(path: &Path) -> anyhow::Result<Ring> {
     let text = match read_text(path) {
         Ok(Some(text)) => text,

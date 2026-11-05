@@ -122,14 +122,36 @@ pub(crate) fn large_bytes_io(path: &Path) -> std::io::Result<Vec<u8>> {
 /// [`state_text`] with the I/O error kept, for a caller that tells a read failure from bad
 /// content. A missing file is a `NotFound` error.
 ///
-/// Bytes that are not UTF-8 become U+FFFD instead of an error. A crash can cut a write inside a
-/// multi-byte character, and such a file is bad content for the caller to replace, not an
-/// unreadable file that blocks every later write (#3445).
+/// A file whose only bad bytes are an incomplete character at the end reads as the text before
+/// it. A crash can cut a write there, and such a file is bad content for the caller to replace,
+/// not an unreadable file that blocks every later write (#3445). Any other bytes that are not
+/// UTF-8 stay an error, so a file with a bad byte inside a string is never rewritten unseen.
 ///
 /// # Errors
-/// The errors of [`llmenv_paths::read_file_bounded`], and a missing file.
+/// The errors of [`llmenv_paths::read_file_bounded`], a missing file, and `InvalidData` for
+/// bytes that are not UTF-8 before the end.
 pub(crate) fn state_text_io(path: &Path) -> std::io::Result<String> {
-    state_bytes_io(path).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+    match String::from_utf8(state_bytes_io(path)?) {
+        Ok(text) => Ok(text),
+        Err(e) => {
+            let error = e.utf8_error();
+            let valid = error.valid_up_to();
+            if error.error_len().is_none() {
+                // The cut character is the last thing in the file.
+                return Ok(
+                    String::from_utf8_lossy(e.as_bytes().get(..valid).unwrap_or_default())
+                        .into_owned(),
+                );
+            }
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "it is not UTF-8 text (the first bad byte is at offset {valid}); save it as \
+                     UTF-8"
+                ),
+            ))
+        }
+    }
 }
 
 /// Open the regular file at `path` for a streamed read, or `None` when there is no file there.
@@ -160,13 +182,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_state_file_cut_inside_a_utf8_character_reads_as_bad_text_not_an_error() {
+    fn a_bad_byte_before_the_end_is_still_an_error() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("cut.json");
-        std::fs::write(&path, b"{\"k\": \"caf\xc3").unwrap();
-        let text = state_text_io(&path).unwrap();
-        assert!(text.ends_with('\u{FFFD}'), "{text:?}");
-        assert!(serde_json::from_str::<serde_json::Value>(&text).is_err());
+        let path = dir.path().join("latin1.json");
+        std::fs::write(&path, b"{\"k\": \"caf\xe9\"}").unwrap();
+        let err = state_text_io(&path).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData, "{err}");
+    }
+
+    proptest::proptest! {
+        /// Any cut of a saved JSON state file, inside a character or not, reads as the text
+        /// before the cut, and that text never parses as a different value (#3445).
+        #[test]
+        fn any_cut_state_file_reads_as_the_text_before_the_cut(
+            values in proptest::collection::vec("[a-zé€😀]{0,4}", 1..5),
+            cut in proptest::prelude::any::<proptest::sample::Index>(),
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("cut.json");
+            let saved = serde_json::to_vec(&values).unwrap();
+            let len = cut.index(saved.len());
+            std::fs::write(&path, &saved[..len]).unwrap();
+            let text = state_text_io(&path).unwrap();
+            proptest::prop_assert!(saved.starts_with(text.as_bytes()));
+            proptest::prop_assert!(serde_json::from_str::<Vec<String>>(&text).is_err());
+        }
     }
 
     #[test]
