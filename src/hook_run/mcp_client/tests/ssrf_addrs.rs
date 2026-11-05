@@ -19,8 +19,10 @@ fn validate_url_rejects_private_ips() {
 
 #[test]
 fn validate_url_accepts_public_ips() {
+    // IP literals only: a host name needs real DNS, which fails offline or on a slow resolver
+    // (#3428).
     assert!(validate("http://8.8.8.8:8080").is_ok());
-    assert!(validate("https://example.com:8080").is_ok());
+    assert!(validate("https://1.1.1.1:8080").is_ok());
 }
 
 #[test]

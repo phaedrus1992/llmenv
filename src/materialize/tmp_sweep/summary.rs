@@ -4,26 +4,22 @@ use std::path::{Path, PathBuf};
 
 use crate::materialize::dir_size::{DirSize, dir_size};
 use crate::materialize::expiry::AgeRule;
-use crate::materialize::open_files::open_paths;
 
 use super::StaleSummary;
 use super::walk::scan;
 
 /// Count and size the entries that [`sweep`](super::sweep) would remove, without removing any.
-///
-/// # Errors
-/// Fails when the in-use list cannot be read. See [`open_paths`].
-pub fn stale_summary(state_dir: &Path, rule: AgeRule) -> anyhow::Result<StaleSummary> {
-    stale_summary_with(state_dir, rule, open_paths)
-}
-
-/// [`stale_summary`] with the in-use list supplied on demand.
+/// `in_use` gives the paths that are in use, as
+/// [`open_paths`](crate::materialize::open_files::open_paths) does.
 ///
 /// The in-use list only removes entries from the stale count, so a scan with no in-use list
 /// gives the upper bound. When that bound holds no stale and no unreadable entry, the answer
-/// is final and `lsof` never runs. A `SessionStart` hook needs this: `lsof` lists every open
+/// is final and `in_use` never runs. A `SessionStart` hook needs this: `lsof` lists every open
 /// file on the host, and it can take seconds (#3031).
-pub(super) fn stale_summary_with(
+///
+/// # Errors
+/// Fails when the state folder cannot be read, or when `in_use` fails.
+pub(crate) fn stale_summary_with(
     state_dir: &Path,
     rule: AgeRule,
     in_use: impl FnOnce() -> anyhow::Result<Vec<PathBuf>>,
