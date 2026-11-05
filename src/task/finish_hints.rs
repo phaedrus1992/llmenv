@@ -19,7 +19,7 @@ use super::{Stored, Task, for_current_project, session, store_for_reminder, stor
 /// rather than issued as a bare command.
 pub(super) fn session_finish_reminders(caller: Option<&str>, stored: &Stored) -> String {
     for_current_project(|project| match store_for_reminder(project, stored) {
-        Ok(tasks) => finish_reminder_lines(project, caller, &tasks, stored),
+        Ok(tasks) => finish_reminder_lines(project, caller, tasks, stored),
         Err(warning) => warning,
     })
 }
@@ -27,7 +27,7 @@ pub(super) fn session_finish_reminders(caller: Option<&str>, stored: &Stored) ->
 fn finish_reminder_lines(
     project: &str,
     caller: Option<&str>,
-    tasks: &[Task],
+    tasks: &super::StrictTasks,
     stored: &Stored,
 ) -> String {
     let open = match stored.open_sessions_visible_to(project, caller) {

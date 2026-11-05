@@ -31,7 +31,7 @@ use finish_hints::session_finish_reminders;
 mod tracking;
 pub(crate) use tracking::{Tracking, tracking};
 pub mod session;
-pub(crate) use progress::{progress_in, wip_title_in};
+pub(crate) use progress::{StrictTasks, progress_in, wip_title_in};
 pub(crate) use reopen::{reopen_task, reopen_tasks};
 pub(crate) use resolve::resolve_identifier;
 
@@ -231,8 +231,8 @@ pub(crate) fn try_list_tasks(state_dir: &Path) -> anyhow::Result<Vec<Task>> {
 /// [`try_list_tasks`], but a task file that cannot be read is an error and not a skipped entry.
 /// A decision or a reminder that reads the store uses this, so it never sees a partial view
 /// (#2608).
-pub(crate) fn list_tasks_strict(state_dir: &Path) -> anyhow::Result<Vec<Task>> {
-    read_tasks(state_dir, UnreadablePolicy::Fail)
+pub(crate) fn list_tasks_strict(state_dir: &Path) -> anyhow::Result<StrictTasks> {
+    StrictTasks::read(state_dir)
 }
 
 /// What [`read_tasks`] does with a task file or directory entry that cannot be read.
@@ -1216,7 +1216,7 @@ pub(crate) fn session_start_reminder(state_dir: &Path) -> String {
     // One read of the tasks and the sessions feeds every reminder of this hook run (#3468).
     let stored = Stored::read(state_dir);
     let tasks = match stored.tasks() {
-        Ok(tasks) => match tasks_for_current_project(&stored, tasks.to_vec()) {
+        Ok(tasks) => match tasks_for_current_project(&stored, tasks.as_slice().to_vec()) {
             Ok(tasks) => tasks,
             Err(e) => {
                 read_warning = store_warning_text(&e);
@@ -1241,7 +1241,7 @@ pub(crate) fn session_start_reminder(state_dir: &Path) -> String {
         waiting_reminder(&tasks),
         session_finish_reminders(None, &stored),
         for_current_project(|project| match store_for_reminder(project, &stored) {
-            Ok(tasks) => empty_session_lines(&stored, &tasks, project, None).join("\n\n"),
+            Ok(tasks) => empty_session_lines(&stored, tasks.as_slice(), project, None).join("\n\n"),
             Err(warning) => warning,
         }),
     ])
@@ -1362,8 +1362,8 @@ fn idle_reminder_lines(project: &str, caller: Option<&str>, stored: &Stored) -> 
         Err(e) => return store_warning_text(&e),
     };
     let open_ids: Vec<String> = open.iter().map(|s| s.id.clone()).collect();
-    let stalled = relation::stalled_parent_lines(&tasks, &open_ids);
-    let idle = idle_sessions(open, &tasks)
+    let stalled = relation::stalled_parent_lines(tasks.as_slice(), &open_ids);
+    let idle = idle_sessions(open, tasks.as_slice())
         .iter()
         .map(|idle| {
             let id = &idle.session.id;
@@ -1381,7 +1381,7 @@ fn idle_reminder_lines(project: &str, caller: Option<&str>, stored: &Stored) -> 
             )
         })
         .collect::<Vec<_>>();
-    empty_session_lines(stored, &tasks, project, caller)
+    empty_session_lines(stored, tasks.as_slice(), project, caller)
         .into_iter()
         .chain(stalled)
         .chain(idle)
@@ -1462,7 +1462,7 @@ fn tasks_visible_to(caller: Option<&str>, stored: &Stored) -> anyhow::Result<Vec
     // not drop its tasks silently (#2628).
     let project_ids = stored.session_ids_for_project(&project)?;
     let all = stored.tasks().context("the task store cannot be read")?;
-    let mut tasks = keep_tasks_in_sessions(all.to_vec(), &project_ids);
+    let mut tasks = keep_tasks_in_sessions(all.as_slice().to_vec(), &project_ids);
     if caller.is_some() {
         let visible = stored.session_ids_visible_to(&project, caller)?;
         tasks.retain(|t| t.session.as_ref().is_some_and(|id| visible.contains(id)));

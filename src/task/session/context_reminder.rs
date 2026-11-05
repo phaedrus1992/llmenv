@@ -22,7 +22,7 @@ pub(in crate::task) fn missing_context_reminders(
         .filter(|session| session.resume.needs_nudge())
         .filter_map(|session| match stored.tasks() {
             Ok(tasks)
-                if tasks.iter().any(|task| {
+                if tasks.as_slice().iter().any(|task| {
                     task.session.as_deref() == Some(session.id.as_str())
                         && task.state != TaskState::Done
                 }) =>

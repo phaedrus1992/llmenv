@@ -3,22 +3,20 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use super::Task;
+use super::StrictTasks;
 use super::session::{self, Session};
 
 /// The task store and the session files of one hook run, each read once, strictly, and shared by
 /// its reminders (#3466, #3468).
 pub(super) struct Stored {
-    tasks: anyhow::Result<Vec<Task>>,
+    tasks: anyhow::Result<StrictTasks>,
     sessions: anyhow::Result<Vec<Session>>,
 }
 
 /// The error of a shared read. The error is borrowed by every reminder, so only its text can be
 /// carried on; the text is the same as the owned error shows.
-fn shared<T>(read: &anyhow::Result<Vec<T>>) -> anyhow::Result<&[T]> {
-    read.as_ref()
-        .map(Vec::as_slice)
-        .map_err(|e| anyhow::anyhow!("{e:#}"))
+fn shared<T>(read: &anyhow::Result<T>) -> anyhow::Result<&T> {
+    read.as_ref().map_err(|e| anyhow::anyhow!("{e:#}"))
 }
 
 impl Stored {
@@ -34,7 +32,7 @@ impl Stored {
     ///
     /// # Errors
     /// The task store cannot be read.
-    pub(super) fn tasks(&self) -> anyhow::Result<&[Task]> {
+    pub(super) fn tasks(&self) -> anyhow::Result<&StrictTasks> {
         shared(&self.tasks)
     }
 
@@ -85,7 +83,7 @@ impl Stored {
     /// A store from reads that a test made, such as a task read that failed.
     #[cfg(test)]
     pub(super) fn from_parts(
-        tasks: anyhow::Result<Vec<Task>>,
+        tasks: anyhow::Result<StrictTasks>,
         sessions: anyhow::Result<Vec<Session>>,
     ) -> Self {
         Self { tasks, sessions }
@@ -95,12 +93,14 @@ impl Stored {
 /// The tasks of `project` for a reminder. A session list or a task file that cannot be read is an
 /// error, and the caller prints its text in place of the reminder. A silent skip would tell the
 /// agent that nothing is open (#2608).
-pub(super) fn store_for_reminder(project: &str, stored: &Stored) -> Result<Vec<Task>, String> {
+pub(super) fn store_for_reminder<'a>(
+    project: &str,
+    stored: &'a Stored,
+) -> Result<&'a StrictTasks, String> {
     let context = "the task store cannot be read";
     stored
         .open_sessions_visible_to(project, None)
         .and_then(|_| stored.tasks())
-        .map(<[Task]>::to_vec)
         .map_err(|e| store_warning_text(&e.context(context)))
 }
 
@@ -146,7 +146,8 @@ mod tests {
 
     #[test]
     fn a_session_read_error_reaches_the_reminder_text() {
-        let stored = Stored::from_parts(Ok(Vec::new()), Err(anyhow::anyhow!("bad session file")));
+        let tasks = Ok(crate::task::StrictTasks::from_vec_for_test(Vec::new()));
+        let stored = Stored::from_parts(tasks, Err(anyhow::anyhow!("bad session file")));
         let err = store_for_reminder("proj-3468", &stored).expect_err("sessions are unreadable");
         assert!(
             err.contains("the task store cannot be read: bad session file"),
