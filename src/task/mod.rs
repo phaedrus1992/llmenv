@@ -929,7 +929,9 @@ fn close_task(
                  the work, or pass --force if it is done."
             );
         }
-        let all_tasks = try_list_tasks(state_dir)?;
+        // A strict read: a sub-task whose file cannot be read must not let its parent close
+        // (#3471).
+        let all_tasks = list_tasks_strict(state_dir)?;
         let undone = relation::undone_descendants(&slug, &all_tasks);
         if !force && !undone.is_empty() {
             anyhow::bail!("{}", relation::undone_children_message(&slug, &undone));
