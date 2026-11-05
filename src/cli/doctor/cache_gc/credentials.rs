@@ -9,7 +9,7 @@ use super::GcOutput;
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(in crate::cli) struct CredentialDrops {
     /// Entries whose credential was deleted.
-    pub(in crate::cli) removed: usize,
+    removed: usize,
     /// Entries whose credential could not be deleted. Each one is logged where it fails.
     pub(in crate::cli) failed: usize,
 }
