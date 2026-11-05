@@ -8,7 +8,9 @@ use std::time::SystemTime;
 use anyhow::Context;
 
 use super::claude_root::{is_split_root, scan_split_root};
-use crate::materialize::cache::{AgeSource, file_stamp, is_expired, newest_file_mtime};
+use crate::materialize::cache::{
+    AgeSource, file_stamp, is_expired, is_vanished, newest_file_mtime,
+};
 use crate::materialize::expiry::AgeRule;
 
 /// One entry that the scan found old enough to remove, and not in use.
@@ -52,6 +54,8 @@ pub(super) fn scan(
         }
         let is_dir = match entry.file_type() {
             Ok(file_type) => file_type.is_dir(),
+            // Another process removed the entry after the listing (#2835, #3423).
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
                 record_failure(&path, &e, &mut scan);
                 continue;
@@ -66,16 +70,6 @@ pub(super) fn scan(
         judge_entry(&path, is_dir, rule, now, &mut scan);
     }
     Ok(scan)
-}
-
-/// Whether `error` is a missing entry, anywhere in its chain. A `NotFound` is the entry being
-/// removed while the walk runs. Other errors stay failures.
-fn is_vanished(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
-    })
 }
 
 /// Mark one entry stale when its newest file mtime is older than `older_than`. Keep it otherwise.

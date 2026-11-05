@@ -55,6 +55,7 @@ pub(super) fn session_start_notices(
             hours,
             SystemTime::now(),
             crate::materialize::cache::AgeSource::MtimeOrCtime,
+            crate::materialize::open_files::open_paths,
         ),
         (Some(_), Err(e)) => Some(problem_notice(
             &format!("the stale state/tmp check did not run: {e:#}"),
@@ -78,6 +79,7 @@ fn stale_tmp_hint(
     hours: u64,
     now: SystemTime,
     source: crate::materialize::cache::AgeSource,
+    in_use: impl FnOnce() -> anyhow::Result<Vec<std::path::PathBuf>>,
 ) -> Option<String> {
     let day = utc_day(now);
     let marker = state_dir.join(HINT_MARKER);
@@ -93,9 +95,10 @@ fn stale_tmp_hint(
         }
     }
     let older_than = Duration::from_secs(hours.saturating_mul(3600));
-    let summary = match tmp_sweep::stale_summary(
+    let summary = match tmp_sweep::stale_summary_with(
         state_dir,
         crate::materialize::expiry::AgeRule { older_than, source },
+        in_use,
     ) {
         Ok(summary) => summary,
         Err(e) => {
@@ -163,6 +166,7 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
+// The tests pass an empty in-use list, so no test runs a system-wide `lsof` (#3428).
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -236,6 +240,7 @@ mod tests {
             168,
             now,
             crate::materialize::cache::AgeSource::MtimeOnly,
+            || Ok(Vec::new()),
         )
         .expect("a stale entry gives a hint");
         assert!(first.contains("1 state/tmp entries"), "{first}");
@@ -244,7 +249,8 @@ mod tests {
                 state.path(),
                 168,
                 now,
-                crate::materialize::cache::AgeSource::MtimeOnly
+                crate::materialize::cache::AgeSource::MtimeOnly,
+                || Ok(Vec::new()),
             )
             .is_none(),
             "the hint repeated on the same day"
@@ -254,7 +260,8 @@ mod tests {
                 state.path(),
                 168,
                 now + DAY,
-                crate::materialize::cache::AgeSource::MtimeOnly
+                crate::materialize::cache::AgeSource::MtimeOnly,
+                || Ok(Vec::new()),
             )
             .is_some(),
             "the hint did not return on the next day"
@@ -272,7 +279,8 @@ mod tests {
                 state.path(),
                 168,
                 SystemTime::now(),
-                crate::materialize::cache::AgeSource::MtimeOnly
+                crate::materialize::cache::AgeSource::MtimeOnly,
+                || Ok(Vec::new()),
             )
             .is_none()
         );
@@ -327,6 +335,7 @@ mod failure_tests {
             168,
             SystemTime::now(),
             crate::materialize::cache::AgeSource::MtimeOnly,
+            || Ok(Vec::new()),
         )
         .expect("an unreadable marker is shown, not skipped");
 
@@ -347,6 +356,7 @@ mod failure_tests {
             168,
             SystemTime::now(),
             crate::materialize::cache::AgeSource::MtimeOnly,
+            || Ok(Vec::new()),
         );
 
         // Restore the mode before any assertion, so the tempdir can be removed.

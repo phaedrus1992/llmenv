@@ -741,6 +741,8 @@ Set `global_topics: []` to read the session's project only.
 After a session ends, llmenv can ask an LLM to distill that session's episodic memories into a few
 semantic rules and store them back in ICM.
 (changed in v3.12.0) It reads only the memories of the current project, which it names the same way the session start does.
+It reads at most 50 memories, and fewer when they do not fit in a 32000-token budget.
+(changed in v3.14.0) Before v3.14.0 ICM returned at most 20 memories, because the request gave no token budget.
 It stores each rule under the topic `llmenv-consolidation-<project>`, so the rule comes back in that project's recall.
 Rules stored before v3.12.0 stay under the topic `llmenv-consolidation`.
 (changed in v3.13.0) No recall reads that old topic, so a rule there comes back in no session.
@@ -1258,6 +1260,8 @@ The slippage checks read a Bash command the way the task commit gate does (chang
 A write inside `$( )`, a subshell, a brace group, or after a single `&` counts as modifying for `explain_before_act`.
 A command nested more than 32 levels deep counts as modifying, and the deny names that limit.
 A Bash `cat`, `head`, `tail`, `sed -n`, or `grep` of one file counts as a read for `read_before_edit`.
+`read_before_edit` matches a read and a write by the resolved path, so `./src/x.rs` and `/repo/src/x.rs` are one file.
+(changed in v3.14.0) When llmenv cannot resolve the path of a `Write`, such as a dangling link, it compares the path as written, and the deny names that cause.
 
 (changed in v3.14.0) A command that the Monitor tool starts is read the same way.
 The `answer_before_act` and `explain_before_act` checks, the read record, and the task commit gate cover it, because llmenv now registers its shell guards for both `Bash` and `Monitor`.

@@ -373,8 +373,9 @@ fn remove_dir(p: &Path, dry_run: bool, report: &mut PruneReport) {
         report.removed.push(p.to_path_buf());
         return;
     }
-    match remove_dir_all_forcing_writable(p) {
-        Ok(()) => report.removed.push(p.to_path_buf()),
+    // An entry that another process removed first is gone, which is the goal (#3423).
+    match skip_vanished(remove_dir_all_forcing_writable(p)) {
+        Ok(_) => report.removed.push(p.to_path_buf()),
         Err(e) => {
             tracing::error!(
                 path = %p.display(),
@@ -398,8 +399,8 @@ fn remove_link(p: &Path, dry_run: bool, report: &mut PruneReport) {
         report.removed.push(p.to_path_buf());
         return;
     }
-    match std::fs::remove_file(p) {
-        Ok(()) => report.removed.push(p.to_path_buf()),
+    match skip_vanished(std::fs::remove_file(p)) {
+        Ok(_) => report.removed.push(p.to_path_buf()),
         Err(e) => {
             tracing::error!(
                 path = %p.display(),
@@ -441,6 +442,11 @@ fn entry_and_type(
     let p = entry.path();
     match entry.file_type() {
         Ok(ft) => Some((p, ft)),
+        // Another process removed the entry after the listing (#3423).
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!(path = %p.display(), "cache gc: entry removed during the walk");
+            None
+        }
         Err(e) => {
             tracing::error!(
                 "cache gc cannot read the type of {}, so it is kept: {e}",
@@ -450,6 +456,16 @@ fn entry_and_type(
             None
         }
     }
+}
+
+/// Whether `error` is a missing entry, anywhere in its chain. A `NotFound` is the entry being
+/// removed while a walk runs. Other errors stay failures (#2835, #3423).
+pub(crate) fn is_vanished(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+    })
 }
 
 /// `None` for a path that no longer exists. Any other error stays an error.
@@ -858,9 +874,13 @@ mod tests {
         // that claimed work the prune never did. remove_link stays non-fatal
         // (pruning continues) but surfaces the failure in `failed`, not `removed`.
         let mut report = PruneReport::default();
-        // A path under a non-existent parent: the real unlink fails (NotFound),
-        // exercising the failure branch deterministically without perms hacks.
-        let missing = Path::new("/nonexistent-llmenv-255-dir/dangling-link");
+        // A path under a regular file: the real unlink fails with "not a directory". A missing
+        // path is gone, which counts as removed (#3423), so it cannot test this branch.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"x").unwrap();
+        let missing = file.join("dangling-link");
+        let missing = missing.as_path();
         remove_link(missing, false, &mut report);
         assert!(
             report.removed.is_empty(),

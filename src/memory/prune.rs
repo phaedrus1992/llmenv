@@ -102,7 +102,7 @@ fn call_tool_blocking(
     })
 }
 
-/// The recall arguments for the records to prune: the project's own, at most [`RECALL_LIMIT`].
+/// The recall arguments for the records to prune: the project's own, at most [`BUDGET_MAX_LIMIT`](crate::memory::recall_json::BUDGET_MAX_LIMIT).
 /// Prune forgets what it reads, so a folder with no known project is an error: without a project
 /// filter ICM would answer with the records of its own working folder.
 ///
@@ -117,14 +117,12 @@ fn recall_args(project: Option<&str>) -> anyhow::Result<serde_json::Value> {
     })?;
     Ok(serde_json::json!({
         "query": "",
-        "limit": RECALL_LIMIT,
+        "limit": crate::memory::recall_json::BUDGET_MAX_LIMIT,
+        "max_tokens": crate::memory::recall_json::MAX_TOKENS,
         "project": project,
         "format": crate::memory::recall_json::FORMAT,
     }))
 }
-
-/// The most records one prune pass reads.
-const RECALL_LIMIT: u32 = 100;
 
 /// Forget each candidate, and give the count that ICM forgot. A failed forget is printed to
 /// stderr and the rest still run.
@@ -232,7 +230,9 @@ mod tests {
     fn prune_reads_one_project_and_refuses_when_it_cannot_tell_which() {
         let args = recall_args(Some("llmenv")).unwrap();
         assert_eq!(args["project"], "llmenv");
-        assert_eq!(args["limit"], 100);
+        // Without a budget icm clamps the limit to 20, so the call asks for one (#3419).
+        assert_eq!(args["limit"], 200);
+        assert_eq!(args["max_tokens"], 32_000);
         assert_eq!(args["format"], "json");
         let err = recall_args(None).unwrap_err().to_string();
         assert!(err.contains("Nothing was forgotten"), "{err}");

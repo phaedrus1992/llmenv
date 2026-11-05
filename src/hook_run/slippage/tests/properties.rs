@@ -78,3 +78,32 @@ proptest! {
         prop_assert_eq!(std::fs::read(&kept).unwrap(), bytes);
     }
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+    /// Every alias of one existing file gets one key: a `.` segment, a `dir/..` detour, a link to
+    /// the file, and the key itself. A missing path keys as written (#3389).
+    #[test]
+    fn every_alias_of_a_file_shares_one_key(name in "[a-z]{1,8}", missing in "[a-z]{1,8}") {
+        let work = tempfile::tempdir().unwrap();
+        let sub = work.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let file = sub.join(format!("{name}.txt"));
+        std::fs::write(&file, "x").unwrap();
+        let key = path_key(&file.to_string_lossy());
+        let root = work.path().to_string_lossy().into_owned();
+        let dotted = format!("{root}/./sub/{name}.txt");
+        let detour = format!("{root}/sub/../sub/{name}.txt");
+        prop_assert_eq!(&path_key(&dotted), &key);
+        prop_assert_eq!(&path_key(&detour), &key);
+        prop_assert_eq!(&path_key(&key), &key);
+        #[cfg(unix)]
+        {
+            let link = work.path().join("link");
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            prop_assert_eq!(&path_key(&link.to_string_lossy()), &key);
+        }
+        let absent = format!("{root}/sub/{missing}.absent");
+        prop_assert_eq!(path_key(&absent), absent);
+    }
+}

@@ -1,7 +1,7 @@
 //! The newest mtime under a cache folder, for the cache GC age check.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use anyhow::Context as _;
 
@@ -25,7 +25,8 @@ pub enum AgeSource {
 /// The newest file mtime under `p`, as the `state/tmp` sweep judges age: a folder mtime changes
 /// when a child is removed, so a partial delete would reset the age (#3184). On failure, the
 /// error is logged with its path, `p` is recorded in `failed`, and `None` is returned, so one
-/// unreadable folder does not stop the rest of the pass (#2859).
+/// unreadable folder does not stop the rest of the pass (#2859). An entry that another process
+/// removes during the walk is gone, not a failure, so it is not recorded (#3423).
 pub(crate) fn newest_file_mtime_or_record(
     p: &Path,
     source: AgeSource,
@@ -33,6 +34,10 @@ pub(crate) fn newest_file_mtime_or_record(
 ) -> Option<SystemTime> {
     match newest_file_mtime(p, source) {
         Ok(m) => Some(m),
+        Err(e) if super::is_vanished(&e) => {
+            tracing::debug!(path = %p.display(), "cache gc: entry removed during the walk");
+            None
+        }
         Err(e) => {
             tracing::error!(
                 "cache gc cannot scan the mtimes under {}, so it is kept: {e:#}. Fix: check \
@@ -125,18 +130,13 @@ fn change_time(meta: &std::fs::Metadata) -> SystemTime {
 ///
 /// The kernel sets the change time from its clock, so a pre-1970 value is not a real case. It
 /// maps to the epoch, the oldest value, so it never keeps a tree alive by accident. A nanosecond
-/// part outside one second is read as zero, so it cannot carry into the seconds and overflow.
+/// part outside one second is read as zero.
 #[cfg(unix)]
 fn ctime_to_system_time(secs: i64, nanos: i64) -> SystemTime {
-    let Ok(secs) = u64::try_from(secs) else {
-        return SystemTime::UNIX_EPOCH;
-    };
-    let nanos = u32::try_from(nanos)
-        .ok()
-        .filter(|n| *n < 1_000_000_000)
-        .unwrap_or(0);
-    // Seconds up to `i64::MAX` with nanoseconds under one second fit in a Unix `SystemTime`.
-    SystemTime::UNIX_EPOCH + Duration::new(secs, nanos)
+    use crate::paths::dirfd::stat_time;
+    stat_time(secs, nanos)
+        .or_else(|| stat_time(secs, 0))
+        .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
 /// Windows has no status-change time in `std`. The epoch is the oldest value, so the `max` in
@@ -209,10 +209,48 @@ mod tests {
         );
     }
 
+    // An entry listed by the gc and removed before its walk is gone, not a failure (#3423).
+    #[test]
+    fn an_entry_removed_before_its_walk_is_not_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("removed-after-listing");
+        let mut recorded = Vec::new();
+        let got = newest_file_mtime_or_record(&gone, AgeSource::MtimeOrCtime, |path, cause| {
+            recorded.push((path, cause));
+        });
+        assert_eq!(got, None);
+        assert!(recorded.is_empty(), "{recorded:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_entry_is_still_recorded() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let mut recorded = Vec::new();
+        let got = newest_file_mtime_or_record(&locked, AgeSource::MtimeOrCtime, |path, _| {
+            recorded.push(path);
+        });
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(got, None);
+        assert_eq!(recorded, vec![locked]);
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_ctime_out_of_range_is_the_epoch() {
         assert_eq!(ctime_to_system_time(-1, 5), UNIX_EPOCH);
+        assert_eq!(
+            ctime_to_system_time(10, 999_999_999),
+            UNIX_EPOCH + Duration::new(10, 999_999_999)
+        );
+        assert_eq!(
+            ctime_to_system_time(10, 1_000_000_000),
+            UNIX_EPOCH + Duration::from_secs(10)
+        );
         assert_eq!(
             ctime_to_system_time(10, 2_000_000_000),
             UNIX_EPOCH + Duration::from_secs(10)
@@ -224,14 +262,21 @@ mod tests {
         /// nanosecond part outside one second is read as zero.
         #[cfg(unix)]
         #[test]
-        fn a_ctime_never_panics_and_maps_by_its_parts(secs in any::<i64>(), nanos in any::<i64>()) {
+        fn a_ctime_never_panics_and_maps_by_its_parts(
+            // Mix the full range with values near the one-second edge, which a uniform i64 misses.
+            secs in prop_oneof![any::<i64>(), -10i64..4_000_000_000],
+            nanos in prop_oneof![any::<i64>(), -10i64..1_000_000_010, 999_999_990i64..1_000_000_010],
+        ) {
             let got = ctime_to_system_time(secs, nanos);
-            let want = match (u64::try_from(secs), u32::try_from(nanos)) {
-                (Err(_), _) => UNIX_EPOCH,
-                (Ok(s), Ok(n)) if n < 1_000_000_000 => UNIX_EPOCH + Duration::new(s, n),
-                (Ok(s), _) => UNIX_EPOCH + Duration::from_secs(s),
-            };
-            prop_assert_eq!(got, want);
+            prop_assert!(got >= UNIX_EPOCH);
+            if secs < 0 {
+                prop_assert_eq!(got, UNIX_EPOCH);
+            } else if (0..1_000_000_000).contains(&nanos) {
+                prop_assert_eq!(i64::from(got.duration_since(UNIX_EPOCH).unwrap().subsec_nanos()), nanos);
+                prop_assert_eq!(i64::try_from(got.duration_since(UNIX_EPOCH).unwrap().as_secs()).unwrap(), secs);
+            } else {
+                prop_assert_eq!(got, ctime_to_system_time(secs, 0));
+            }
         }
 
         /// With any file in the tree, the answer is the newest file mtime, whatever the folder
