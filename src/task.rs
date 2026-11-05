@@ -26,6 +26,10 @@ pub mod resume {
     pub use llmenv_task::resume::{MISSING_CONTEXT_NUDGE, ResumeContext, git_branch};
 }
 
+pub mod visibility {
+    pub use llmenv_task::visibility::owner_visible;
+}
+
 pub mod session {
     pub use llmenv_task::session::{
         EngineIdentity, PickError, Session, SessionSummary, SessionSummaryTask, StartDecision,

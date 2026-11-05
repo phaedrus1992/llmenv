@@ -26,15 +26,21 @@ use crate::materialize::cache::{AgeSource, file_stamp};
 /// when retention is zero. The config validator rejects `retention_days: 0`, but
 /// this function still handles it defensively.
 pub(crate) fn reap_session_log(log_path: &Path, retention_days: u64) {
-    reap_session_log_with(log_path, retention_days, AgeSource::MtimeOrCtime);
+    reap_session_log_with(
+        log_path,
+        retention_days,
+        AgeSource::MtimeOrCtime,
+        SystemTime::now(),
+    );
 }
 
-/// [`reap_session_log`] with the age source given. Tests use it to judge an old mtime alone.
-fn reap_session_log_with(log_path: &Path, retention_days: u64, source: AgeSource) {
+/// [`reap_session_log`] with the age source and the clock given. Tests use it to judge an old
+/// mtime alone, and to test the retention rule at a later time (#3375).
+fn reap_session_log_with(log_path: &Path, retention_days: u64, source: AgeSource, now: SystemTime) {
     if retention_days == 0 {
         return;
     }
-    let age = match log_age(log_path, source) {
+    let age = match log_age(log_path, source, now) {
         Ok(Some(age)) => age,
         Ok(None) => return,
         Err(e) => {
@@ -76,18 +82,26 @@ fn reap_session_log_with(log_path: &Path, retention_days: u64, source: AgeSource
         if let Err(e) = std::fs::remove_dir(parent)
             && e.kind() != std::io::ErrorKind::DirectoryNotEmpty
         {
-            tracing::error!("cannot remove session log dir {}: {e}", parent.display());
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the session log reaper could not remove the empty folder {} ({e}). Fix: \
+                 check the permissions of that folder.",
+                parent.display()
+            ));
         }
     }
 }
 
-/// Whether `dir` has no entries. A read error is logged and counts as not empty, so the
+/// Whether `dir` has no entries. A read error is noticed and counts as not empty, so the
 /// folder is kept.
 fn dir_is_empty(dir: &Path) -> bool {
     match dir.read_dir() {
         Ok(mut entries) => entries.next().is_none(),
         Err(e) => {
-            tracing::error!("cannot read session log dir {}: {e}", dir.display());
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the session log reaper cannot read the folder {} ({e}), so it is kept. \
+                 Fix: check the permissions of that folder.",
+                dir.display()
+            ));
             false
         }
     }
@@ -95,7 +109,7 @@ fn dir_is_empty(dir: &Path) -> bool {
 
 /// The age of the file at `path`. `None` for a missing file, and for a stamp in the
 /// future, which is kept rather than deleted and logged as clock skew.
-fn log_age(path: &Path, source: AgeSource) -> std::io::Result<Option<Duration>> {
+fn log_age(path: &Path, source: AgeSource, now: SystemTime) -> std::io::Result<Option<Duration>> {
     // `symlink_metadata` reads the link itself, because the reaper removes the link, not its target.
     // The newer of mtime and change time decides, as in the state sweeps (#3275). A restore with an
     // old mtime leaves a new change time, so a restored log is not removed at once.
@@ -104,15 +118,54 @@ fn log_age(path: &Path, source: AgeSource) -> std::io::Result<Option<Duration>> 
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
-    match SystemTime::now().duration_since(stamp) {
+    match now.duration_since(stamp) {
         Ok(age) => Ok(Some(age)),
         Err(_) => {
-            // Hooks keep only ERROR-level logs, so the skew is logged at that level.
-            tracing::error!(
-                path = %path.display(),
-                "session log has a future modified time (clock skew); it is kept"
-            );
+            // The notice repeats on every SessionStart until the clock is fixed. That repeat is the
+            // point: the file is kept until the skew clears, and the agent must see why (#3379).
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the session log {} has a modified time in the future (clock skew), so it is \
+                 kept. Fix: correct the system clock.",
+                path.display()
+            ));
             Ok(None)
+        }
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test code")]
+mod age_property_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// The reaper removes a log exactly when its age reaches the retention, for any age.
+        /// The clock is whole seconds, so the boundary is exact (#3375).
+        #[test]
+        fn a_log_is_removed_exactly_when_its_age_reaches_retention(
+            age_secs in 0u64..(60 * 86_400),
+            retention_days in 1u64..30,
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("session-log.jsonl");
+            std::fs::write(&path, "{}").unwrap();
+            let whole = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let written = SystemTime::UNIX_EPOCH + Duration::from_secs(whole);
+            filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(written)).unwrap();
+
+            reap_session_log_with(
+                &path,
+                retention_days,
+                AgeSource::MtimeOnly,
+                written + Duration::from_secs(age_secs),
+            );
+
+            let expected_removed = age_secs >= retention_days * 86_400;
+            prop_assert_eq!(!path.exists(), expected_removed, "age {}s, retention {}d", age_secs, retention_days);
         }
     }
 }
@@ -132,7 +185,9 @@ mod tests {
         let old = SystemTime::now() - Duration::from_secs(30 * 86_400);
         filetime::set_file_mtime(&log, filetime::FileTime::from_system_time(old)).unwrap();
 
-        let age = log_age(&log, AgeSource::MtimeOrCtime).unwrap().unwrap();
+        let age = log_age(&log, AgeSource::MtimeOrCtime, SystemTime::now())
+            .unwrap()
+            .unwrap();
 
         assert!(
             age < Duration::from_secs(86_400),
@@ -155,7 +210,9 @@ mod tests {
         let link = dir.path().join("session-log.jsonl");
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
-        let age = log_age(&link, AgeSource::MtimeOnly).unwrap().unwrap();
+        let age = log_age(&link, AgeSource::MtimeOnly, SystemTime::now())
+            .unwrap()
+            .unwrap();
 
         assert!(
             age < Duration::from_secs(3600),
@@ -167,7 +224,11 @@ mod tests {
     fn log_age_is_none_for_a_missing_file() {
         let dir = tempfile::tempdir().unwrap();
         let absent = dir.path().join("absent.jsonl");
-        assert!(log_age(&absent, AgeSource::MtimeOnly).unwrap().is_none());
+        assert!(
+            log_age(&absent, AgeSource::MtimeOnly, SystemTime::now())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -176,7 +237,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("file");
         std::fs::write(&file, "x").unwrap();
-        let err = log_age(&file.join("session-log.jsonl"), AgeSource::MtimeOnly).unwrap_err();
+        let err = log_age(
+            &file.join("session-log.jsonl"),
+            AgeSource::MtimeOnly,
+            SystemTime::now(),
+        )
+        .unwrap_err();
         assert_ne!(err.kind(), std::io::ErrorKind::NotFound, "{err}");
         // The reaper logs and returns; it must not panic or delete anything.
         reap_session_log(&file.join("session-log.jsonl"), 1);
@@ -208,8 +274,40 @@ mod tests {
         filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(old)).unwrap();
 
         // Setting the mtime also sets the change time to now, so only the mtime rule can age this file.
-        reap_session_log_with(&path, 1, AgeSource::MtimeOnly);
+        reap_session_log_with(&path, 1, AgeSource::MtimeOnly, SystemTime::now());
         assert!(!path.exists(), "file past retention must be deleted");
+    }
+
+    // #3375: the age rule reads the clock it is given, so a later clock can age the same file.
+    #[test]
+    fn the_retention_rule_follows_the_clock_it_is_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-log.jsonl");
+        std::fs::write(&path, "{}").unwrap();
+        let written = SystemTime::now();
+        filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(written)).unwrap();
+
+        reap_session_log_with(
+            &path,
+            7,
+            AgeSource::MtimeOnly,
+            written + Duration::from_secs(6 * 86_400),
+        );
+        assert!(
+            path.exists(),
+            "six days old is inside a seven-day retention"
+        );
+
+        reap_session_log_with(
+            &path,
+            7,
+            AgeSource::MtimeOnly,
+            written + Duration::from_secs(8 * 86_400),
+        );
+        assert!(
+            !path.exists(),
+            "eight days old is past a seven-day retention"
+        );
     }
 
     #[test]
@@ -236,7 +334,7 @@ mod tests {
         std::fs::write(&path, "{}").unwrap();
         let old = SystemTime::now() - Duration::from_secs(3 * 86_400);
         filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(old)).unwrap();
-        reap_session_log_with(&path, 1, AgeSource::MtimeOnly);
+        reap_session_log_with(&path, 1, AgeSource::MtimeOnly, SystemTime::now());
         assert!(!path.exists(), "file must be deleted");
         assert!(!dir.path().exists(), "empty parent dir must be removed");
     }

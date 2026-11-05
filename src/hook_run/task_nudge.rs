@@ -21,6 +21,7 @@ use crate::config::TaskTracker;
 use crate::hook_run::shell_split::{
     ends_task_before_commit, nesting_reason, runs_commit_or_pr, shell_segments,
 };
+use crate::hook_run::shell_tool::is_shell_tool;
 use crate::task::Tracking;
 
 mod boundary;
@@ -160,7 +161,7 @@ pub(crate) fn handle_post_tool_use(
         skill_reminder(tracker, payload, &tracking, &mut state)
     } else if MUTATING_TOOLS.contains(&tool) {
         mutation_reminder(tracker, &tracking, &mut state)
-    } else if tool == "Bash" {
+    } else if is_shell_tool(tool) {
         boundary_reminder(payload, &tracking, &mut state)
     } else {
         String::new()
@@ -265,7 +266,8 @@ pub(crate) fn handle_pre_tool_use(
     session_id: Option<&str>,
     state_dir: &Path,
 ) -> String {
-    if !tracker.enforce_commit || payload["tool_name"].as_str() != Some("Bash") {
+    let is_shell = payload["tool_name"].as_str().is_some_and(is_shell_tool);
+    if !tracker.enforce_commit || !is_shell {
         return String::new();
     }
     let Some(command) = payload["tool_input"]["command"].as_str() else {
