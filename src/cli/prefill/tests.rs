@@ -231,3 +231,38 @@ fn the_command_reads_a_transcript_and_fails_on_a_missing_one() {
     let err = format!("{:#}", run_prefill(&missing).unwrap_err());
     assert!(err.contains("absent.jsonl"), "{err}");
 }
+
+#[test]
+fn the_newest_jsonl_file_is_chosen_and_other_files_are_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+    let new = old + std::time::Duration::from_secs(60);
+    let newest_other = new + std::time::Duration::from_secs(60);
+    for (name, time) in [("a.jsonl", old), ("b.jsonl", new), ("c.txt", newest_other)] {
+        let file = std::fs::File::create(dir.path().join(name)).unwrap();
+        file.set_modified(time).unwrap();
+    }
+    let got = newest_jsonl_in(dir.path(), "Fix: x.").unwrap();
+    assert_eq!(got, dir.path().join("b.jsonl"));
+}
+
+#[test]
+fn a_folder_with_no_transcript_or_no_folder_is_an_error_with_the_fix() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "x").unwrap();
+    let err = newest_jsonl_in(dir.path(), "Fix: pass a path.")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("holds no transcript") && err.contains("Fix: pass a path."),
+        "{err}"
+    );
+    let err = format!(
+        "{:#}",
+        newest_jsonl_in(&dir.path().join("absent"), "Fix: y.").unwrap_err()
+    );
+    assert!(
+        err.contains("cannot list") && err.contains("Fix: y."),
+        "{err}"
+    );
+}

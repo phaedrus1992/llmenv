@@ -269,9 +269,14 @@ fn newest_transcript() -> anyhow::Result<PathBuf> {
     let dir = Path::new(&config_dir)
         .join(crate::materialize::inherit::PROJECTS_DIR)
         .join(&folder);
+    newest_jsonl_in(&dir, fix)
+}
+
+/// The `.jsonl` file in `dir` with the newest change time. `fix` ends each error.
+fn newest_jsonl_in(dir: &Path, fix: &str) -> anyhow::Result<PathBuf> {
     let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in
-        std::fs::read_dir(&dir).with_context(|| format!("cannot list {}. {fix}", dir.display()))?
+        std::fs::read_dir(dir).with_context(|| format!("cannot list {}. {fix}", dir.display()))?
     {
         let entry = entry.with_context(|| format!("cannot list {}. {fix}", dir.display()))?;
         let path = entry.path();
