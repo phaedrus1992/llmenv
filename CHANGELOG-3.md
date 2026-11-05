@@ -45,7 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Read the ICM recall as JSON in `llmenv memory prune` and post-session consolidation, so they need icm 0.11.5 or later. A reply that is not a JSON list of records fails with a named error and the fix, and prune forgets nothing. The prune summary no longer has the `unread` line. See [`memory prune`](https://phaedrus1992.github.io/llmenv/docs/commands#memory). [feat:mcp] [#3368]
 - Send each memory once by its ICM record id, so two memories with the same text are both sent. A session state from an older llmenv still skips the memories it sent. See [Adaptive recall](https://phaedrus1992.github.io/llmenv/docs/mcp#adaptive-recall-added-in-v3120). [feat:hook] [#3369]
 - Fail `llmenv export` and `llmenv regenerate` with the path and the fix when the llmenv binary path is not UTF-8 or unknown, in place of writing hook commands with a bare `llmenv` that a `PATH` entry could shadow. `llmenv doctor` uses the same lookup. [feat:adapter] [#3060]
-- Check the llmenv binary that the rendered hook commands name in `llmenv doctor`, not only the binary that runs doctor, so an old render that names a cargo `target` or temp binary is reported. [feat:adapter] [#3392]
+- Check the llmenv binary that the rendered hook commands name in `llmenv doctor`, not only the binary that runs doctor, so an old render that names a cargo `target` or temp binary, or a bare `llmenv`, is reported. [feat:adapter] [#3392]
 
 ### Fixed
 
