@@ -57,7 +57,7 @@ mod scope_selection {
     const TAGS: [&str; 5] = ["t0", "t1", "t2", "lang-x", "macos"];
     const BUNDLES: [&str; 4] = ["b0", "b1", "b2", "b3"];
 
-    fn pick<'a>(pool: &[&'a str], mask: u8) -> Vec<String> {
+    fn pick(pool: &[&str], mask: u8) -> Vec<String> {
         pool.iter()
             .enumerate()
             .filter(|(i, _)| mask & (1 << i) != 0)
