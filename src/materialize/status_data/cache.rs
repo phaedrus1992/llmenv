@@ -43,19 +43,17 @@ pub(super) fn collect_cache(cache_root: &Path, hashing: HashingMode) -> CacheDat
         );
         return unknown;
     }
-    let sizes = report
+    let total = report
         .removed
         .iter()
-        .map(|p| dir_size(p))
-        .collect::<anyhow::Result<Vec<DirSize>>>();
-    match sizes {
-        Ok(sizes) => {
-            let total = sizes.into_iter().fold(DirSize::default(), DirSize::combine);
-            CacheData {
-                prunable_bytes: Some(total.bytes),
-                prunable_partial: total.skipped > 0,
-            }
-        }
+        .try_fold(DirSize::default(), |total, p| {
+            Ok::<_, anyhow::Error>(total.combine(dir_size(p)?))
+        });
+    match total {
+        Ok(total) => CacheData {
+            prunable_bytes: Some(total.bytes),
+            prunable_partial: total.skipped > 0,
+        },
         Err(e) => {
             tracing::warn!(
                 "cache stat: the prunable size is unknown, so it shows as unknown: {e:#}"
