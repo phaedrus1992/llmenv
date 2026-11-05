@@ -9,13 +9,13 @@ use crate::materialize::expiry::AgeRule;
 
 pub(super) const DAY: Duration = Duration::from_secs(86_400);
 
-// Tests age a tree with `set_modified`, which cannot move the change time back. The mtime-only
-// rule is the one that sees that age, so these tests use it (#3195).
 /// A real or dry sweep of `root` with a one-week mtime rule, judged by the clock.
 fn sweep_week(root: &Path, dry_run: bool) -> anyhow::Result<crate::materialize::cache::GcReport> {
     sweep(root, mtime_rule(DAY * 7), &[], dry_run, SystemTime::now())
 }
 
+// Tests age a tree with `set_modified`, which cannot move the change time back. The mtime-only
+// rule is the one that sees that age, so these tests use it (#3195).
 pub(super) fn mtime_rule(older_than: Duration) -> AgeRule {
     AgeRule {
         older_than,
@@ -501,4 +501,40 @@ fn an_old_hawk_target_root_is_kept_when_empty() {
 
     assert!(report.removed.is_empty());
     assert!(hawk.exists());
+}
+
+// #3041: the in-use list is read only when the bound holds a stale or unreadable entry, and the
+// shortcut never changes the answer.
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(24))]
+    #[test]
+    fn the_shortcut_reads_lsof_only_when_needed_and_keeps_the_answer(
+        entries in proptest::collection::vec((proptest::bool::ANY, proptest::bool::ANY), 0..4),
+    ) {
+        let state = tempfile::tempdir().unwrap();
+        let tmp = state.path().join("tmp");
+        fs::create_dir_all(&tmp).unwrap();
+        let mut in_use = Vec::new();
+        for (i, (is_old, busy)) in entries.iter().enumerate() {
+            let entry = tmp.join(format!("e{i}"));
+            fs::create_dir_all(&entry).unwrap();
+            if *is_old {
+                age_tree(&entry, SystemTime::now() - 2 * DAY);
+            }
+            if *busy {
+                in_use.push(fs::canonicalize(&entry).unwrap());
+            }
+        }
+        let calls = std::cell::Cell::new(0);
+        let summary = stale_summary_with(state.path(), mtime_rule(DAY), || {
+            calls.set(calls.get() + 1);
+            Ok(in_use.clone())
+        })
+        .unwrap();
+        let any_old = entries.iter().any(|(is_old, _)| *is_old);
+        proptest::prop_assert_eq!(calls.get(), usize::from(any_old));
+        let full = stale_summary_in(&tmp, mtime_rule(DAY), &in_use, SystemTime::now()).unwrap();
+        proptest::prop_assert_eq!(summary.count, full.count);
+        proptest::prop_assert_eq!(summary.unreadable, full.unreadable);
+    }
 }
