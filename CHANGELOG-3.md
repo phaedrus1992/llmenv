@@ -178,6 +178,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Show the agent a notice from a detached job (memory store, session log record, consolidation, code index) on the next hook output. Before, a failed job only wrote a log line that the agent never saw. See [Notices from detached jobs](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#notices-from-detached-jobs). [feat:hook] [#3398]
 - Tell the agent when the record of handled hook events cannot be saved, read, or parsed, when a detached store has no state folder, and when a denied tool call drops recalled memory. Each case was a log line only. [fix:hook] [#3399]
 - Tell the agent when a hook skips consolidation, a web page store, a model switch record, the task reminder, or the session-end duplicate check, and when the code index job cannot report its result. Each case was a log line only. [fix:hook] [#3449]
+- Treat any llmenv state file that a crash cut inside a multi-byte character as bad content, which each reader replaces, instead of an unreadable file that blocks later writes. [fix:hook] [#3445]
 
 ### Security
 

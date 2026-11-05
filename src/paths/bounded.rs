@@ -122,11 +122,14 @@ pub(crate) fn large_bytes_io(path: &Path) -> std::io::Result<Vec<u8>> {
 /// [`state_text`] with the I/O error kept, for a caller that tells a read failure from bad
 /// content. A missing file is a `NotFound` error.
 ///
+/// Bytes that are not UTF-8 become U+FFFD instead of an error. A crash can cut a write inside a
+/// multi-byte character, and such a file is bad content for the caller to replace, not an
+/// unreadable file that blocks every later write (#3445).
+///
 /// # Errors
-/// The errors of [`llmenv_paths::read_text_bounded`], and a missing file.
+/// The errors of [`llmenv_paths::read_file_bounded`], and a missing file.
 pub(crate) fn state_text_io(path: &Path) -> std::io::Result<String> {
-    llmenv_paths::read_text_bounded(path, MAX_STATE_BYTES)?
-        .ok_or_else(|| std::io::ErrorKind::NotFound.into())
+    state_bytes_io(path).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Open the regular file at `path` for a streamed read, or `None` when there is no file there.
@@ -155,6 +158,16 @@ pub(crate) fn open_regular(path: &Path) -> std::io::Result<Option<std::fs::File>
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_state_file_cut_inside_a_utf8_character_reads_as_bad_text_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cut.json");
+        std::fs::write(&path, b"{\"k\": \"caf\xc3").unwrap();
+        let text = state_text_io(&path).unwrap();
+        assert!(text.ends_with('\u{FFFD}'), "{text:?}");
+        assert!(serde_json::from_str::<serde_json::Value>(&text).is_err());
+    }
 
     #[test]
     fn a_missing_file_is_none_or_an_error_that_names_it() {
