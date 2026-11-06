@@ -256,6 +256,7 @@ mod context_reminder;
 pub(in crate::task) mod filter;
 mod finish;
 mod resume_text;
+mod resume_write;
 pub(crate) use checkpoint::idle_display;
 use checkpoint::{checkpoint_error, engine_start, only_own_session, resume};
 pub(in crate::task) use context_reminder::missing_context_reminders;
@@ -264,6 +265,7 @@ use finish::untag_unfinished;
 #[cfg(test)]
 use resume_text::MAX_REMINDER_CONTEXT_CHARS;
 pub(crate) use resume_text::resume_reminder_lines;
+pub(crate) use resume_write::{append_override_note, update_resume};
 
 fn sessions_dir(state_dir: &Path) -> PathBuf {
     tasks_dir(state_dir).join("sessions")
@@ -566,27 +568,6 @@ fn abandon_session(
     session.abandoned_at = Some(now);
     save_session(state_dir, &session)?;
     Ok(session)
-}
-
-/// Change the resume context of an open session and bump its activity time.
-///
-/// # Errors
-/// The session does not exist, is closed, or cannot be saved.
-pub(crate) fn update_resume(
-    state_dir: &Path,
-    id: &str,
-    change: impl FnOnce(&mut ResumeContext),
-) -> anyhow::Result<Session> {
-    super::with_store_lock(state_dir, || {
-        let mut session = load_existing_session(state_dir, id)?;
-        if !session.is_open() {
-            anyhow::bail!("session '{id}' is closed and cannot be changed");
-        }
-        change(&mut session.resume);
-        session.last_activity = now_rfc3339();
-        save_session(state_dir, &session)?;
-        Ok(session)
-    })
 }
 
 /// One task's fields relevant to a session summary — a stable subset of

@@ -17,7 +17,9 @@ pub(crate) use slug::slugify;
 mod ancestors;
 pub(crate) mod core_text;
 mod finish_hints;
+mod parent_chain;
 use ancestors::ancestors_to_start;
+use parent_chain::reject_cycle;
 mod edit;
 pub(crate) use edit::edit_task;
 mod note;
@@ -1015,39 +1017,6 @@ fn resolve_note_index(notes: &[TaskNote], id: &str) -> anyhow::Result<usize> {
         .iter()
         .position(|n| n.at == id)
         .ok_or_else(|| anyhow::anyhow!("no note found with index or timestamp '{id}'"))
-}
-
-/// Errs if setting `slug`'s parent to `new_parent` would make `slug` its own
-/// ancestor — walks up from `new_parent` and checks `slug` never reappears. A
-/// `visited` guard (mirroring [`append_forest`]'s) makes a pre-existing
-/// malformed cycle elsewhere in the store terminate instead of looping
-/// forever; that's not this call's problem to fix. A missing ancestor ends the
-/// walk. An unreadable or corrupt ancestor fails the change: a cycle can pass
-/// through that file once it is repaired, so the walk must not stop silently.
-fn reject_cycle(state_dir: &Path, slug: &str, new_parent: &str) -> anyhow::Result<()> {
-    let mut current = new_parent.to_string();
-    let mut visited = HashSet::new();
-    loop {
-        if current == slug {
-            anyhow::bail!("setting parent to '{new_parent}' would make '{slug}' its own ancestor");
-        }
-        if !visited.insert(current.clone()) {
-            return Ok(());
-        }
-        let task = match load_task(state_dir, &current) {
-            Ok(task) => task,
-            Err(e) if is_not_found(&e) => return Ok(()),
-            Err(e) => {
-                return Err(e.context(format!(
-                    "cannot check parent '{new_parent}' of '{slug}': ancestor '{current}' is unreadable"
-                )));
-            }
-        };
-        let Some(parent) = task.parent else {
-            return Ok(());
-        };
-        current = parent;
-    }
 }
 
 /// True when `err` was caused by a file that does not exist.

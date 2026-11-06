@@ -73,9 +73,16 @@ pub(crate) fn caller_session(
 pub(crate) struct OverrideNote {
     slug: String,
     text: String,
+    /// True for a task with no session. Such a task has no session to hold its note.
+    owner_less: bool,
 }
 
 impl OverrideNote {
+    /// Whether the task has no session, so a deletion of it is recorded on the caller's session.
+    pub(crate) fn is_owner_less(&self) -> bool {
+        self.owner_less
+    }
+
     /// Appends the note to the task. The command change is already saved when this runs, so the
     /// error says so: a retry must not repeat the change.
     ///
@@ -160,7 +167,17 @@ fn ownership_note(
 ) -> anyhow::Result<Option<OverrideNote>> {
     let slug = slug.to_string();
     let Some(owner) = task.session.as_deref() else {
-        return Ok(None);
+        // An owner-less task (an orphan of a replaced session) has no owner to refuse for. The
+        // change is allowed, and the note names the caller so the change is on record (#3586).
+        let text = format!(
+            "acted on a task with no session; caller: {}",
+            caller.describe()
+        );
+        return Ok(Some(OverrideNote {
+            slug,
+            text,
+            owner_less: true,
+        }));
     };
     if matches!(caller, Caller::Session(id) if id == owner) {
         return Ok(None);
@@ -171,7 +188,11 @@ fn ownership_note(
                 "acted on with --other-session {owner}; caller: {}",
                 caller.describe()
             );
-            Ok(Some(OverrideNote { slug, text }))
+            Ok(Some(OverrideNote {
+                slug,
+                text,
+                owner_less: false,
+            }))
         }
         Some(named) => anyhow::bail!(
             "task '{slug}' belongs to session '{owner}', not '{named}'. \
@@ -189,6 +210,9 @@ fn ownership_note(
 /// Refuse a command that acts on session `session_id` (`clear --session`, `session edit`,
 /// `session note`, `session finish`) when the caller is not that session.
 ///
+/// Returns the note text when `--other-session` was needed and used. The caller appends it to
+/// the session once the command has succeeded (#3596). Returns `None` when no override applied.
+///
 /// # Errors
 /// Errors if the caller is another session and `other_session` does not name
 /// `session_id`.
@@ -196,18 +220,22 @@ pub(crate) fn ensure_session_is_ours(
     session_id: &str,
     caller: &Caller,
     other_session: Option<&str>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<String>> {
     if matches!(caller, Caller::Session(id) if id == session_id) {
-        return Ok(());
+        return Ok(None);
     }
     match other_session {
-        Some(named) if named == session_id => Ok(()),
+        Some(named) if named == session_id => Ok(Some(format!(
+            "acted on with --other-session {session_id}; caller: {}",
+            caller.describe()
+        ))),
         Some(named) => anyhow::bail!("this command acts on session '{session_id}', not '{named}'"),
         None => refuse_unless_caller(
             session_id,
             caller,
             &format!("this command acts on session '{session_id}'"),
-        ),
+        )
+        .map(|()| None),
     }
 }
 
@@ -334,3 +362,47 @@ fn refuse_unless_caller(owner: &str, caller: &Caller, what: &str) -> anyhow::Res
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests;
+
+/// Refuses the deletion of a task with no session when the caller has no session to record the
+/// deletion on. Such a deletion would leave no record of the caller (#3586).
+///
+/// # Errors
+/// Errors if the caller has no open session of its own.
+pub(crate) fn check_owner_less_delete(caller: &Caller) -> anyhow::Result<()> {
+    match caller {
+        Caller::Session(_) => Ok(()),
+        Caller::Unidentified(reason) => anyhow::bail!(
+            "this command would delete a task with no session, and the caller has no session to \
+             record the deletion on ({reason}). Fix: run the command from the conversation whose \
+             session is open"
+        ),
+    }
+}
+
+/// Records the deletion of tasks with no session on the caller's session, which
+/// [`check_owner_less_delete`] has already accepted. The deletes are saved when this runs.
+///
+/// # Errors
+/// Errors if the caller has no session, or if the note cannot be written.
+pub(crate) fn record_owner_less_delete(
+    state_dir: &Path,
+    caller: &Caller,
+    slugs: &[String],
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let Caller::Session(id) = caller else {
+        check_owner_less_delete(caller)?;
+        return Ok(());
+    };
+    let text = format!(
+        "Deleted tasks with no session: {}. Caller: {}.",
+        slugs.join(", "),
+        caller.describe()
+    );
+    session::append_override_note(state_dir, id, Some(&text)).with_context(|| {
+        format!(
+            "the tasks were deleted, but the note on session '{id}' was not saved; do not retry \
+             the delete"
+        )
+    })
+}
