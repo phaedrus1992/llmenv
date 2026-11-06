@@ -257,20 +257,21 @@ pub(crate) fn mtime_at(
         Err(rustix::io::Errno::NOENT) => return Ok(None),
         Err(e) => return Err(e.into()),
     };
+    // `st_mtime_nsec` is `i64` on macOS and `u64` on Linux. A value that does not fit `i64` is out
+    // of range, so it becomes -1, which `stat_time` refuses.
+    let nanos = i64::try_from(i128::from(st.st_mtime_nsec)).unwrap_or(-1);
     // An out-of-range time is an error, not `None`, so a caller cannot read it as a missing entry.
-    stat_time(st.st_mtime, st.st_mtime_nsec)
-        .map(Some)
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "the mtime of {} is out of range ({} s, {} ns)",
-                    name.to_string_lossy(),
-                    st.st_mtime,
-                    st.st_mtime_nsec
-                ),
-            )
-        })
+    stat_time(st.st_mtime, nanos).map(Some).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "the mtime of {} is out of range ({} s, {} ns)",
+                name.to_string_lossy(),
+                st.st_mtime,
+                st.st_mtime_nsec
+            ),
+        )
+    })
 }
 
 /// The time in a stat result, or `None` for a pre-1970 time or a nanosecond part outside one
