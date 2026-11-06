@@ -339,6 +339,10 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 - Refuse `llmenv task session edit`, `note`, and `finish` for a session of another conversation unless `--other-session` names its owner. Before, `finish --abandon-open` took the tasks of another conversation's session. [fix:task] [#3478]
 - Name the task note to add by hand when the `--other-session` note fails to save, and print it as data. Save that note before the command prints, so a closed stdout does not lose it. [fix:task] [#3478]
 - Leave a session open when `session start --replace` fails to untag its tasks, so a retry finds it. A failed TaskUpdate for a store error no longer tells the agent to check the id. [fix:task] [#3478]
+- Refuse `llmenv task add --session <id>` for a session of another conversation unless `--other-session` names its owner. The override is noted on the new task. [fix:task] [#3486]
+- Refuse a new task in another conversation's session by default. A lone open session of another conversation no longer takes the task, and a caller with no conversation id is refused for an owned session. [fix:task] [#3480]
+- Refuse `--parent` for a task in another session, because starting the child would change that session's task. [fix:task] [#3480]
+- Record `llmenv task clear --other-session` on the owning session, which names the caller and the deleted tasks. The deleted tasks could not keep the note. [fix:task] [#3481]
 
 ### Security
 

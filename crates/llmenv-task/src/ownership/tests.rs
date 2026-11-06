@@ -206,6 +206,27 @@ fn session_owned_by_another_conversation_is_not_the_callers() {
 }
 
 #[test]
+fn a_caller_with_no_id_is_refused_for_the_only_owned_session() {
+    let dir = TempDir::new().expect("tempdir");
+    let project_owner = conversation("conv-a");
+    let request = StartRequest {
+        name: Some("owned"),
+        description: None,
+        project: PROJECT,
+        owner: &project_owner,
+        resume: &ResumeContext::default(),
+    };
+    start_session_as(dir.path(), &request, StartDecision::Auto).expect("start");
+
+    let caller = caller_session(dir.path(), PROJECT, &EngineIdentity::default()).expect("ok");
+
+    assert!(
+        matches!(&caller, Caller::Unidentified(reason) if reason.contains("another conversation")),
+        "a shell with no id must not act as the owner of the sole session: {caller:?}"
+    );
+}
+
+#[test]
 fn several_open_sessions_and_no_identity_is_unidentified() {
     let dir = TempDir::new().expect("tempdir");
     start_session(dir.path(), Some("one"), None, PROJECT, StartDecision::Auto).expect("one");
