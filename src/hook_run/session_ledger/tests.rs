@@ -343,3 +343,6 @@ fn a_busy_recall_ledger_lock_is_an_agent_notice() {
     assert!(notices.contains("the recall ledger lock"), "{notices}");
     drop(dir);
 }
+
+#[expect(clippy::unwrap_used, reason = "test code")]
+mod truncation;

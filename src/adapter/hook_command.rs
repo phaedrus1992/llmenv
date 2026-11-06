@@ -210,3 +210,6 @@ fn is_system_path(rest: &str) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod properties;

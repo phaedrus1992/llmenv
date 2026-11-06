@@ -44,12 +44,6 @@ fn summary_lines(result: &PruneResult) -> Vec<String> {
             result.unknown
         ));
     }
-    if result.unread > 0 {
-        lines.push(format!(
-            "  unread (kept):       {} (a record with no importance or weight)",
-            result.unread
-        ));
-    }
     if result.dry_run {
         lines.extend(dry_run_lines(result));
     } else {
@@ -88,11 +82,8 @@ fn dry_run_lines(result: &PruneResult) -> Vec<String> {
     lines.push(String::new());
     lines.extend(
         [
-            "  ponytail: age-based TTL unavailable because ICM's MCP output",
-            "  omits `created_at` timestamps. This pass uses importance as a",
-            "  heuristic: low and medium importance memories are candidates;",
-            "  high and critical are always kept. Add date-based pruning once",
-            "  ICM exposes timestamps through the MCP interface.",
+            "  This pass uses importance, not age: low and medium importance",
+            "  memories are candidates; high and critical are always kept.",
         ]
         .map(str::to_owned),
     );
@@ -102,14 +93,11 @@ fn dry_run_lines(result: &PruneResult) -> Vec<String> {
 impl PruneResult {
     /// The records that prune kept because it cannot place them, as a sentence, or `None`.
     pub(crate) fn kept_unplaced(&self) -> Option<String> {
-        (self.unknown + self.unread > 0).then(|| {
+        (self.unknown > 0).then(|| {
             format!(
-                "{} record(s) that prune cannot place: {} with an importance it does not know, {} \
-                 with no importance or weight. Fix: check the icm version, or run `llmenv memory \
-                 prune --dry-run` to see the counts",
-                self.unknown + self.unread,
-                self.unknown,
-                self.unread
+                "{} record(s) that prune cannot place, with an importance it does not know. Fix: \
+                 check the icm version, or run `llmenv memory prune --dry-run` to see the counts",
+                self.unknown
             )
         })
     }
@@ -124,12 +112,13 @@ mod tests {
         assert_eq!(PruneResult::default().kept_unplaced(), None);
         let result = PruneResult {
             unknown: 2,
-            unread: 1,
             ..Default::default()
         };
         let text = result.kept_unplaced().unwrap_or_default();
-        assert!(text.starts_with("3 record(s)"), "{text}");
-        assert!(text.contains("2 with an importance"), "{text}");
+        assert!(
+            text.starts_with("2 record(s) that prune cannot place"),
+            "{text}"
+        );
     }
 
     fn joined(result: &PruneResult) -> String {
@@ -160,7 +149,10 @@ mod tests {
             text.contains("(50.0% of records are prune candidates)"),
             "{text}"
         );
-        assert!(text.contains("ponytail: age-based TTL"), "{text}");
+        assert!(
+            text.contains("This pass uses importance, not age"),
+            "{text}"
+        );
         assert!(!text.contains("Forgot:"), "{text}");
     }
 
@@ -199,14 +191,12 @@ mod tests {
     }
 
     #[test]
-    fn unknown_and_unread_records_get_their_own_lines() {
+    fn unknown_records_get_their_own_line() {
         let result = PruneResult {
             unknown: 1,
-            unread: 2,
             ..Default::default()
         };
         let text = joined(&result);
         assert!(text.contains("unknown (kept):      1"), "{text}");
-        assert!(text.contains("unread (kept):       2"), "{text}");
     }
 }

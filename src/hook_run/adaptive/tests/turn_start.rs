@@ -62,7 +62,7 @@ async fn one_failed_call_keeps_the_others() {
     ] {
         Mock::given(method("POST"))
             .and(body_string_contains(needle))
-            .respond_with(ResponseTemplate::new(200).set_body_json(text(body)))
+            .respond_with(crate::hook_run::test_recall::ToolReply((body).to_string()))
             .mount(&server)
             .await;
     }
@@ -250,4 +250,73 @@ async fn a_hook_records_its_recall_calls_for_doctor() {
         .expect("the hook wrote the ring");
     assert!(health.calls > 0, "{health:?}");
     assert_eq!(health.failed, health.calls, "{health:?}");
+}
+
+/// A reply slow enough that the main recalls pass the wave 2 cutoff.
+struct SlowReply(crate::hook_run::test_recall::ToolReply);
+
+impl wiremock::Respond for SlowReply {
+    fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+        self.0
+            .respond(request)
+            .set_delay(WAVE2_CUTOFF + Duration::from_millis(100))
+    }
+}
+
+/// The notice list is shared by the tests of one process, so the two tests on the skip notice
+/// take turns.
+static SKIP_NOTICE_TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[tokio::test]
+async fn slow_main_recalls_skip_the_fanouts_and_tell_the_agent() {
+    let _turn = SKIP_NOTICE_TURN.lock().await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("initialize"))
+        .respond_with(crate::hook_run::test_recall::ToolReply(String::new()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(SlowReply(crate::hook_run::test_recall::ToolReply(
+            "[context-llmenv] slow fact".to_string(),
+        )))
+        .mount(&server)
+        .await;
+    let f = fixture(&server);
+    f.store.update("s1", |l| {
+        l.set_scope_sent(MAIN_AGENT);
+        l.project = Some("llmenv".to_string());
+    });
+    let turn = json!({"prompt": "slow"});
+    turn_start(&ctx(&f, &turn), vec![]).await.unwrap();
+    let notices = crate::agent_notice::current().unwrap_or_default();
+    assert!(
+        notices.contains("extra memory recall(s) were skipped"),
+        "{notices}"
+    );
+}
+
+#[tokio::test]
+async fn slow_main_recalls_with_no_fanout_give_no_skip_notice() {
+    let _turn = SKIP_NOTICE_TURN.lock().await;
+    crate::agent_notice::forget_containing("extra memory recall");
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("initialize"))
+        .respond_with(crate::hook_run::test_recall::ToolReply(String::new()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(SlowReply(crate::hook_run::test_recall::ToolReply(
+            String::new(),
+        )))
+        .mount(&server)
+        .await;
+    let f = fixture(&server);
+    // No project means no fanout, so the slow recalls skip nothing.
+    f.store.update("s1", |l| l.set_scope_sent(MAIN_AGENT));
+    let turn = json!({"prompt": "slow"});
+    turn_start(&ctx(&f, &turn), vec![]).await.unwrap();
+    let notices = crate::agent_notice::current().unwrap_or_default();
+    assert!(!notices.contains("extra memory recall"), "{notices}");
 }

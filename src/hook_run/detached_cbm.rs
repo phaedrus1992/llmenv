@@ -44,7 +44,11 @@ pub fn run_cbm_index(checkpoint_path: &Path) -> anyhow::Result<()> {
         exit: i32::from(result.is_err()),
     });
     result.inspect_err(|e| {
-        tracing::error!("cbm-index-run: indexing failed: {e:#}");
+        // The child runs alone, so the notice reaches the agent through the spool (#3398).
+        crate::agent_notice::record_logged(format!(
+            "llmenv: the code index job failed: {e:#}. Fix: run `llmenv doctor` to check \
+             codebase-memory-mcp."
+        ));
     })
 }
 
@@ -89,7 +93,9 @@ fn run_cbm_index_with(
     }
     let status = status.context("cannot start codebase-memory-mcp")?;
     anyhow::ensure!(status.success(), "codebase-memory-mcp exited with {status}");
-    checkpoint::complete(checkpoint_path)
+    // The index is built, so a checkpoint that stays is a notice, not a failed job (#3465).
+    checkpoint::finish(Some(checkpoint_path));
+    Ok(())
 }
 
 /// The file one run writes before it replaces the result: unique to this process.
@@ -109,11 +115,19 @@ fn publish_result(pending: &Path, result: &Path, started: bool) {
                 result.display()
             ));
         }
-    } else if let Err(e) = std::fs::remove_file(pending) {
-        crate::agent_notice::record_logged(format!(
-            "llmenv: cannot remove the stale pending index result {}: {e}. Fix: remove it by hand.",
-            pending.display()
-        ));
+    } else {
+        match std::fs::remove_file(pending) {
+            Ok(()) => {}
+            // A pending file that is already gone needs no removal (#3386).
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::debug!(path = %pending.display(), "pending index result already gone");
+            }
+            Err(e) => crate::agent_notice::record_logged(format!(
+                "llmenv: cannot remove the stale pending index result {}: {e}. Fix: remove it by \
+                 hand.",
+                pending.display()
+            )),
+        }
     }
 }
 
@@ -299,7 +313,9 @@ mod tests {
     #[test]
     fn a_stale_pending_result_that_cannot_be_removed_is_recorded_in_this_process() {
         let dir = tempfile::tempdir().unwrap();
+        // A folder at the pending path cannot be removed as a file.
         let pending = dir.path().join("index.json.123.pending");
+        std::fs::create_dir(&pending).unwrap();
         let result = dir.path().join("index.json");
 
         publish_result(&pending, &result, false);
@@ -308,6 +324,17 @@ mod tests {
         assert!(text.contains("stale pending index result"), "{text}");
         assert!(text.contains("index.json.123.pending"), "{text}");
         assert!(text.contains("Fix:"), "{text}");
+    }
+
+    #[test]
+    fn a_pending_result_that_is_already_gone_is_not_a_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let pending = dir.path().join("index.json.456.pending");
+
+        publish_result(&pending, &dir.path().join("index.json"), false);
+
+        let text = crate::agent_notice::current().unwrap_or_default();
+        assert!(!text.contains("index.json.456.pending"), "{text}");
     }
 
     #[test]

@@ -141,3 +141,57 @@ fn trigger_codebase_memory_index_leaves_user_index_path_permissions_alone() {
         "a user-configured index_path must keep its prior permissions, got {mode:o}"
     );
 }
+
+/// The notice list is shared by the tests of one process, so the two tests on the wrapper notice
+/// take turns.
+static WRAPPER_NOTICE_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+const WRAPPER_NOTICE: &str = "runs without its wrapper";
+
+fn index_config() -> crate::config::CodebaseMemory {
+    crate::config::CodebaseMemory {
+        allowed_roots: vec![],
+        mem_budget_mb: None,
+        when: vec!["proj".to_string()],
+        index_path: None,
+        mcp_permissions: None,
+    }
+}
+
+#[test]
+fn an_index_job_with_a_checkpoint_and_its_own_program_gives_no_wrapper_notice() {
+    let _turn = WRAPPER_NOTICE_TURN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    crate::agent_notice::forget_containing(WRAPPER_NOTICE);
+    let state_dir = tempfile::tempdir().unwrap();
+    trigger_index_with(
+        std::path::Path::new("/repos/proj"),
+        &index_config(),
+        state_dir.path(),
+        || Ok("/usr/bin/true".into()),
+    );
+    let notices = crate::agent_notice::current().unwrap_or_default();
+    assert!(!notices.contains(WRAPPER_NOTICE), "{notices}");
+}
+
+#[test]
+fn an_index_job_with_no_checkpoint_tells_the_agent_that_it_runs_without_the_wrapper() {
+    let _turn = WRAPPER_NOTICE_TURN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    crate::agent_notice::forget_containing(WRAPPER_NOTICE);
+    let dir = tempfile::tempdir().unwrap();
+    // A state folder that is a file cannot hold a checkpoint.
+    let not_a_folder = dir.path().join("state");
+    std::fs::write(&not_a_folder, b"x").unwrap();
+    trigger_index_with(
+        std::path::Path::new("/repos/proj"),
+        &index_config(),
+        &not_a_folder,
+        || Ok("/usr/bin/true".into()),
+    );
+    let notices = crate::agent_notice::current().unwrap_or_default();
+    assert!(notices.contains(WRAPPER_NOTICE), "{notices}");
+    assert!(notices.contains("the job has no checkpoint"), "{notices}");
+}

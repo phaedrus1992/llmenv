@@ -11,7 +11,7 @@ use super::CHILD_GUARD_ENV;
 /// `--setting-sources ""` both drop that auth, and `--bare` also drops the
 /// OAuth login this backend exists for. `disableAllHooks` stops the hooks,
 /// and the default output style keeps the reply in the bullet format that
-/// [`parse_bullets`] reads.
+/// [`super::bullets::parse_bullets`] reads.
 pub(super) fn claude_command(program: &std::path::Path) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(program);
     cmd.args([

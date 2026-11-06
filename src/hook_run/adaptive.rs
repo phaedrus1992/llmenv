@@ -11,7 +11,7 @@ use serde_json::Value;
 use crate::agent_notice;
 #[cfg(test)]
 use crate::hook_run::HookEvent;
-use crate::hook_run::action::{Action, RecallQuery, split_recall_records};
+use crate::hook_run::action::{Action, RecallQuery, Reply};
 use crate::hook_run::recall::{RECALL_BUDGET_BYTES, RecallBudget};
 use crate::hook_run::relevance::{self, TurnSignals};
 use crate::hook_run::session_ledger::{Ledger, LedgerStore, LedgerTiming, MAIN_AGENT, record_hash};
@@ -124,7 +124,7 @@ fn report_ledger(flow: &str, timing: &LedgerTiming) {
     }
 }
 
-async fn recall(client: &McpHttpClient, q: Option<RecallQuery>) -> Option<anyhow::Result<String>> {
+async fn recall(client: &McpHttpClient, q: Option<RecallQuery>) -> Option<anyhow::Result<Reply>> {
     Some(Action::RecallQuery(q?).run(client, "", "").await)
 }
 
@@ -136,10 +136,12 @@ async fn project_memories(client: &McpHttpClient, project: &str) -> (String, boo
         project: Some(project.to_string()),
         ..query(project, MAIN_LIMIT)
     };
-    match Action::RecallQuery(q).run(client, "", "").await {
-        Ok(text) => {
-            let records: Vec<String> = split_recall_records(&text)
+    let answered = Action::RecallQuery(q).run(client, "", "").await;
+    match answered.and_then(Reply::into_records) {
+        Ok(records) => {
+            let records: Vec<String> = records
                 .into_iter()
+                .map(|r| r.text)
                 .filter(|r| !r.starts_with(SCOPE_RECORD))
                 .collect();
             let (kept, cut) = drop_cut_items(&records.join("\n"));
@@ -207,8 +209,8 @@ pub(super) async fn session_start(
             }
             None => (String::new(), None),
         };
-        let wake = wake.run(ctx.client, "", "").await.map(|t| {
-            let (kept, cut) = drop_cut_items(&t);
+        let wake = wake.run(ctx.client, "", "").await.map(|reply| {
+            let (kept, cut) = drop_cut_items(&reply.into_text());
             note_cut_items(cut);
             join_sections(&kept, &own)
         });
@@ -247,7 +249,7 @@ pub(super) async fn session_start(
         }
     };
     let complete = outcome.failed == 0;
-    let kept = budget.kept_hashes();
+    let kept = budget.kept_keys();
     note_unless_saved(
         ctx.store.update(ctx.session_id, |l| {
             l.mark_sent(MAIN_AGENT, kept);
@@ -351,7 +353,7 @@ pub(super) async fn turn_start(
         outcome.merge(wave);
     }
     report(ctx, "turn_start", &outcome, &budget);
-    let kept = budget.kept_hashes();
+    let kept = budget.kept_keys();
     let now = unix_now();
     let (updated, timing) = ctx.store.update_timed(ctx.session_id, |l| {
         l.mark_sent(MAIN_AGENT, kept);

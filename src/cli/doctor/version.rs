@@ -5,27 +5,7 @@
 /// commands ignore hook-inherited `GIT_DIR` (upstream #2330, #2650, #2341).
 const CBM_MIN_VERSION: (u64, u64, u64) = (0, 12, 0);
 
-/// Parse `X.Y.Z` with an optional leading `v` and an optional `-suffix` or
-/// `+suffix` on Z. `None` when the text does not have that shape.
-///
-/// A hand-written parse keeps a whole crate out of the tree for one comparison.
-pub(super) fn parse_semver_triple(text: &str) -> Option<(u64, u64, u64)> {
-    let core = text.strip_prefix('v').unwrap_or(text);
-    let core = core.split(['-', '+']).next()?;
-    let mut parts = core.split('.');
-    let mut next = || {
-        let part = parts.next()?;
-        // `[0-9]{1,9}`: `char::is_numeric` would accept full-width digits.
-        let is_digits = (1..=9).contains(&part.len()) && part.bytes().all(|b| b.is_ascii_digit());
-        if is_digits {
-            part.parse::<u64>().ok()
-        } else {
-            None
-        }
-    };
-    let triple = (next()?, next()?, next()?);
-    parts.next().is_none().then_some(triple)
-}
+use crate::util::semver::parse_semver_triple;
 
 /// The warning text for a codebase-memory-mcp older than [`CBM_MIN_VERSION`],
 /// or for a version that cannot be parsed. `None` when the version is at the floor
@@ -73,53 +53,6 @@ pub(super) fn opencode_floor_warning(version: &str) -> Option<String> {
 #[expect(clippy::expect_used, clippy::panic, reason = "test code")]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
-
-    #[test]
-    fn parse_semver_triple_accepts_the_expected_shapes() {
-        assert_eq!(parse_semver_triple("0.11.0"), Some((0, 11, 0)));
-        assert_eq!(parse_semver_triple("v0.10.8"), Some((0, 10, 8)));
-        assert_eq!(parse_semver_triple("0.11.0-rc.1"), Some((0, 11, 0)));
-        assert_eq!(parse_semver_triple("1.2.3+build"), Some((1, 2, 3)));
-    }
-
-    #[test]
-    fn parse_semver_triple_rejects_other_shapes() {
-        for bad in [
-            "0.11",
-            "0.11.0.1",
-            "0.x.0",
-            "\u{ff10}.11.0",
-            "",
-            "1234567890.0.0",
-        ] {
-            assert_eq!(parse_semver_triple(bad), None, "{bad:?}");
-        }
-    }
-
-    proptest! {
-        /// Any triple that fits nine digits round-trips through the text form, with or without
-        /// a `v` prefix and a suffix.
-        #[test]
-        fn parse_semver_triple_round_trips(
-            a in 0u64..1_000_000_000,
-            b in 0u64..1_000_000_000,
-            c in 0u64..1_000_000_000,
-            prefix in prop::sample::select(vec!["", "v"]),
-            suffix in prop::sample::select(vec!["", "-rc.1", "+build.5"]),
-        ) {
-            let text = format!("{prefix}{a}.{b}.{c}{suffix}");
-            prop_assert_eq!(parse_semver_triple(&text), Some((a, b, c)));
-        }
-
-        /// The parser never panics, and only accepts text that starts with a digit or `v`.
-        #[test]
-        fn parse_semver_triple_never_panics(text in "\\PC{0,24}") {
-            if parse_semver_triple(&text).is_some() {
-                prop_assert!(text.starts_with(|c: char| c.is_ascii_digit() || c == 'v'));
-            }
-        }
-    }
 
     #[test]
     fn cbm_floor_warning_fires_only_below_the_floor() {

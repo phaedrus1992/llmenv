@@ -35,7 +35,7 @@ pub(super) fn collect_cache(cache_root: &Path, hashing: HashingMode) -> CacheDat
         }
     };
     // An entry the scan could not read would make the total too small, so the total is unknown.
-    if let Some(first) = report.failed.first() {
+    if let Some((first, _)) = report.failed.first_key_value() {
         tracing::warn!(
             "cache stat: {} entries could not be read (first: {}), so the size shows as unknown",
             report.failed.len(),
@@ -43,19 +43,17 @@ pub(super) fn collect_cache(cache_root: &Path, hashing: HashingMode) -> CacheDat
         );
         return unknown;
     }
-    let sizes = report
+    let total = report
         .removed
         .iter()
-        .map(|p| dir_size(p))
-        .collect::<anyhow::Result<Vec<DirSize>>>();
-    match sizes {
-        Ok(sizes) => {
-            let total = sizes.into_iter().fold(DirSize::default(), DirSize::combine);
-            CacheData {
-                prunable_bytes: Some(total.bytes),
-                prunable_partial: total.skipped > 0,
-            }
-        }
+        .try_fold(DirSize::default(), |total, p| {
+            dir_size(p).map(|s| total.combine(s))
+        });
+    match total {
+        Ok(total) => CacheData {
+            prunable_bytes: Some(total.bytes),
+            prunable_partial: total.skipped > 0,
+        },
         Err(e) => {
             tracing::warn!(
                 "cache stat: the prunable size is unknown, so it shows as unknown: {e:#}"
@@ -108,6 +106,51 @@ mod tests {
                 prunable_partial: false,
             }
         );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(24))]
+        /// Over any set of stale folders, the prunable size is the sum of their file sizes, and
+        /// every folder is still on disk after the stat (#3064).
+        #[test]
+        fn collect_cache_sums_every_stale_folder_and_deletes_none(
+            folders in proptest::collection::vec(
+                proptest::collection::vec(0usize..2048, 0..4),
+                0..5,
+            ),
+            normal in proptest::bool::ANY,
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            let hashing = if normal { HashingMode::Normal } else { HashingMode::Strict };
+            if normal {
+                // The current generation is never prunable, whatever it holds.
+                let current = dir.path().join(crate::materialize::cache::version_major());
+                std::fs::create_dir_all(&current).unwrap();
+                std::fs::write(current.join("kept"), vec![b'x'; 300]).unwrap();
+            }
+            let mut total = 0u64;
+            let mut paths = Vec::new();
+            for (i, files) in folders.iter().enumerate() {
+                let stale = dir.path().join(format!("0.0.1-old-{i:08x}"));
+                std::fs::create_dir_all(stale.join("sub")).unwrap();
+                for (j, len) in files.iter().enumerate() {
+                    let parent = if j % 2 == 0 { stale.clone() } else { stale.join("sub") };
+                    std::fs::write(parent.join(format!("f{j}")), vec![b'x'; *len]).unwrap();
+                    total += u64::try_from(*len).unwrap();
+                }
+                paths.push(stale);
+            }
+
+            let result = collect_cache(dir.path(), hashing);
+
+            proptest::prop_assert_eq!(
+                result,
+                CacheData { prunable_bytes: Some(total), prunable_partial: false }
+            );
+            for path in &paths {
+                proptest::prop_assert!(path.exists(), "{} was deleted", path.display());
+            }
+        }
     }
 
     #[test]

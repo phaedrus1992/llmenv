@@ -113,3 +113,56 @@ fn a_missing_stats_log_reads_as_empty() {
     let stats = read_stats(state.path(), "s-missing").unwrap();
     assert!(stats.paths.is_empty());
 }
+
+fn write_payload(path: &std::path::Path) -> serde_json::Value {
+    serde_json::json!({
+        "tool_name": "Write",
+        "tool_input": { "file_path": path.to_str().unwrap() },
+    })
+}
+
+fn enabled() -> SlippageControl {
+    SlippageControl {
+        enabled: true,
+        read_before_edit: true,
+        ..Default::default()
+    }
+}
+
+// #3389: a Write deny for an unread file is one plain sentence run, with no stray spaces.
+#[test]
+fn an_unread_write_deny_has_no_run_of_spaces_and_no_resolve_note() {
+    let state = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let file = work.path().join("existing.txt");
+    std::fs::write(&file, "important").unwrap();
+    let deny = handle_pre_tool_use(
+        Some(&enabled()),
+        &write_payload(&file),
+        Some("s-plain"),
+        state.path(),
+    );
+    assert!(deny.starts_with("__DENY__:"), "{deny}");
+    assert!(deny.contains("haven't read it"), "{deny}");
+    assert!(!deny.contains("  "), "{deny}");
+    assert!(!deny.contains("cannot resolve"), "{deny}");
+}
+
+// #3389: a path that exists but cannot be resolved, such as a dangling link, names that cause.
+#[cfg(unix)]
+#[test]
+fn a_write_deny_for_an_unresolvable_path_names_the_cause() {
+    let state = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let link = work.path().join("dangling");
+    std::os::unix::fs::symlink(work.path().join("missing-target"), &link).unwrap();
+    let deny = handle_pre_tool_use(
+        Some(&enabled()),
+        &write_payload(&link),
+        Some("s-link"),
+        state.path(),
+    );
+    assert!(deny.starts_with("__DENY__:"), "{deny}");
+    assert!(deny.contains("cannot resolve"), "{deny}");
+    assert!(deny.contains("read it again by this path"), "{deny}");
+}

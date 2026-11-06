@@ -37,7 +37,6 @@ pub(super) fn file_stamp(path: &Path) -> Option<(i64, u64)> {
 #[allow(clippy::expect_used, reason = "a test: a failed setup must stop it")]
 mod tests {
     use super::*;
-    use crate::test_log_capture::capture_logs;
     use std::time::{Duration, UNIX_EPOCH};
 
     #[test]
@@ -52,12 +51,16 @@ mod tests {
             .expect("open a test file")
             .set_modified(before_epoch)
             .expect("set a pre-epoch mtime");
-        let mut got = Some((0, 0));
-        let logs = capture_logs(|| got = file_stamp(&file));
-        assert_eq!(got, None, "a pre-epoch mtime must not produce a stamp");
+        assert_eq!(
+            file_stamp(&file),
+            None,
+            "a pre-epoch mtime must not produce a stamp"
+        );
+        // The agent notice is the result; a captured log can miss the line under parallel tests (#3394).
+        let notices = crate::agent_notice::current().unwrap_or_default();
         assert!(
-            logs.contains("before 1970"),
-            "the log must name the cause: {logs}"
+            notices.contains("before 1970"),
+            "the notice must name the cause: {notices}"
         );
     }
 

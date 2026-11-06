@@ -5,13 +5,11 @@
 
 use std::collections::BTreeSet;
 
-use serde::Deserialize;
-
 use super::{
     AdaptiveCtx, FAILURE_BUDGET_BYTES, FAILURE_LIMIT, FANOUT_LIMIT, Outcome, RECALL_STATE_UNSAVED,
     RESOLVED_TOPIC, agent_key, note_skipped, note_unless_saved, query, report, report_ledger,
 };
-use crate::hook_run::action::{Action, RecallQuery, split_recall_records};
+use crate::hook_run::action::{Action, RecallQuery, Recalled, Reply};
 use crate::hook_run::recall::RecallBudget;
 use crate::hook_run::relevance;
 use crate::hook_run::session_state::unix_now;
@@ -24,15 +22,6 @@ const STOP_WORDS: [&str; 40] = [
     "line", "none", "note", "null", "path", "result", "returned", "running", "status", "test",
     "tests", "that", "then", "there", "this", "true", "unable", "warning", "with",
 ];
-
-/// One memory of a JSON recall reply.
-#[derive(Debug, Deserialize)]
-struct Memory {
-    topic: String,
-    summary: String,
-    #[serde(default)]
-    keywords: Vec<String>,
-}
 
 /// Text that marks a generic failure. Matched case-insensitively.
 const GENERIC_MARKERS: [&str; 5] = [
@@ -56,7 +45,8 @@ pub(super) fn is_generic(error: &str) -> bool {
 }
 
 /// Recalls `query` for a failure, and keeps only the memories that share a token in `wanted`.
-/// `None` means no recall ran.
+/// `None` means no recall ran. The call goes past [`Action::run`], because the match reads the
+/// keywords, which the injected record does not keep.
 ///
 /// ICM normalizes its score per query, so the best of an unrelated set also scores near 1.0
 /// and cannot gate the injection. A raw score is requested upstream (rtk-ai/icm#521).
@@ -64,39 +54,26 @@ async fn recall(
     client: &McpHttpClient,
     query: Option<RecallQuery>,
     wanted: &BTreeSet<String>,
-) -> Option<anyhow::Result<String>> {
+) -> Option<anyhow::Result<Reply>> {
     let action = Action::RecallQuery(query?);
-    let mut args = action.arguments("", "");
-    args["format"] = serde_json::json!("json");
-    let reply = client.call_tool(action.tool_name(), args).await;
-    Some(reply.map(|body| related_records(&body, wanted)))
+    let reply = client
+        .call_tool(action.tool_name(), action.arguments("", ""))
+        .await;
+    Some(reply.and_then(|body| related_records(&body, wanted).map(Reply::Records)))
 }
 
-/// The memories of a recall reply that share a token in `wanted`, as `[topic] summary`
-/// records. A JSON reply is matched on the summary and the keywords. ICM before 0.11.3 ignores
-/// `format` and answers in text, which has no keywords, so a text reply is matched on each
-/// record's text.
-fn related_records(body: &str, wanted: &BTreeSet<String>) -> String {
+/// The memories of a JSON recall reply that share a token in `wanted`, matched on the summary
+/// and the keywords.
+///
+/// # Errors
+/// The reply is not a JSON list of icm records.
+fn related_records(body: &str, wanted: &BTreeSet<String>) -> anyhow::Result<Vec<Recalled>> {
     let shares = |text: &str| !distinctive_tokens(text).is_disjoint(wanted);
-    // Read the first JSON value only, so a note that icm appends after the list is ignored.
-    let first = serde_json::Deserializer::from_str(body.trim())
-        .into_iter::<Vec<Memory>>()
-        .next();
-    let records: Vec<String> = if let Some(Ok(memories)) = first {
-        memories
-            .iter()
-            .filter(|m| shares(&format!("{} {}", m.summary, m.keywords.join(" "))))
-            .map(|m| format!("[{}] {}", m.topic, m.summary))
-            .collect()
-    } else {
-        tracing::debug!("the failure recall reply is not JSON; matching its text records");
-        let text = crate::hook_run::action::strip_advisory(body);
-        split_recall_records(&text)
-            .into_iter()
-            .filter(|r| shares(r))
-            .collect()
-    };
-    records.join("\n")
+    Ok(crate::memory::recall_json::parse(body)?
+        .iter()
+        .filter(|m| shares(&format!("{} {}", m.summary, m.keywords.join(" "))))
+        .map(Recalled::from_record)
+        .collect())
 }
 
 /// The lowercase tokens of `text` that can tie a memory to a failure: a word of four or more
@@ -179,10 +156,10 @@ pub(in crate::hook_run) async fn tool_failure(
     outcome.push(own);
     outcome.push(fixes);
     let mut budget = RecallBudget::new(FAILURE_BUDGET_BYTES, sent);
-    outcome.texts.iter().for_each(|t| budget.add_text(t));
+    budget.add_records(std::mem::take(&mut outcome.records));
     report(ctx, "post_tool_use_failure", &outcome, &budget);
     if record {
-        let kept = budget.kept_hashes();
+        let kept = budget.kept_keys();
         let (updated, timing) = ctx
             .store
             .update_timed(ctx.session_id, |l| l.mark_sent(&key, kept));
@@ -200,12 +177,20 @@ mod tests {
 
     fn rel(body: &str, error: &str) -> String {
         related_records(body, &distinctive_tokens(error))
+            .map(|records| crate::hook_run::action::Reply::Records(records).into_text())
+            .unwrap_or_default()
     }
 
     fn reply(items: &[(&str, &str, &[&str])]) -> String {
         let list: Vec<serde_json::Value> = items
             .iter()
-            .map(|(t, s, k)| serde_json::json!({"topic": t, "summary": s, "keywords": k}))
+            .enumerate()
+            .map(|(i, (t, s, k))| {
+                serde_json::json!({
+                    "id": format!("id{i}"), "topic": t, "summary": s, "keywords": k,
+                    "importance": "low",
+                })
+            })
             .collect();
         serde_json::Value::Array(list).to_string()
     }
@@ -245,17 +230,25 @@ mod tests {
         assert_eq!(rel(&body, "boom"), "[a] boom fix");
     }
 
-    /// ICM before 0.11.3 ignores `format` and answers in text, so the text records are matched.
+    /// A text reply comes from an icm older than 0.11.5, so it is an error that names the fix.
     #[test]
-    fn a_text_reply_from_an_older_icm_is_matched_on_its_records() {
-        let body = "[errors-resolved] pin mcp for request_ctx\n[other] Semgrep notes\n\n\
-                    [ICM: 9 tool calls since last store. Consider saving request_ctx]";
-        assert_eq!(
-            rel(body, "ImportError request_ctx"),
-            "[errors-resolved] pin mcp for request_ctx"
-        );
-        assert_eq!(rel("", "boom"), "");
-        assert_eq!(rel("No memories found.", "boom"), "");
+    fn a_text_reply_is_an_error() {
+        let wanted = distinctive_tokens("ImportError request_ctx");
+        for body in [
+            "[errors-resolved] pin mcp for request_ctx",
+            "No memories found.",
+            "",
+        ] {
+            let Err(err) = related_records(body, &wanted) else {
+                unreachable!("a text reply must be an error: {body:?}");
+            };
+            let fix = if body.is_empty() {
+                "llmenv doctor"
+            } else {
+                "Fix: upgrade icm to 0.11.5 or later"
+            };
+            assert!(err.to_string().contains(fix), "{err}");
+        }
     }
 
     #[test]

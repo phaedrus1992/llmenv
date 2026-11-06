@@ -77,6 +77,66 @@ fn a_recorded_root_counts_through_a_symlink() {
 }
 
 #[test]
+fn a_recorded_root_that_does_not_resolve_is_left_out_with_a_notice() {
+    let dir = tempfile::tempdir().unwrap();
+    let gone = dir.path().join("gone-root-3462");
+    assert!(undeclared_roots(std::slice::from_ref(&gone), &[]).is_empty());
+    let notices = llmenv_util::agent_notice::current().unwrap_or_default();
+    assert!(
+        notices.contains(&format!("{} does not resolve", gone.display())),
+        "{notices}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_declared_root_that_cannot_be_read_is_left_out_with_a_notice() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let locked = dir.path().join("locked-3462");
+    let root = locked.join("root");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let readable_anyway = std::fs::metadata(&root).is_ok();
+    // An empty record means an unconfined server, so one recorded root makes the check run.
+    let missing = missing_roots(std::slice::from_ref(&root), &[dir.path().join("other")]);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if readable_anyway {
+        return; // root ignores permissions, so the stat error cannot happen here
+    }
+    assert!(missing.is_empty(), "{missing:?}");
+    let notices = llmenv_util::agent_notice::current().unwrap_or_default();
+    assert!(
+        notices.contains(&format!("{} cannot be read", root.display())),
+        "{notices}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_recorded_root_that_cannot_be_resolved_names_the_cause() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let locked = dir.path().join("locked-recorded-3462");
+    let root = locked.join("root");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let resolvable_anyway = std::fs::canonicalize(&root).is_ok();
+    let undeclared = undeclared_roots(std::slice::from_ref(&root), &[]);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if resolvable_anyway {
+        return; // root ignores permissions, so the error cannot happen here
+    }
+    assert!(undeclared.is_empty(), "{undeclared:?}");
+    let notices = llmenv_util::agent_notice::current().unwrap_or_default();
+    assert!(
+        notices.contains(&format!("{} cannot be resolved", root.display()))
+            && notices.contains("check its permissions"),
+        "{notices}"
+    );
+}
+
+#[test]
 fn a_recorded_root_that_no_declared_root_covers_is_undeclared() {
     let dir = tempfile::tempdir().unwrap();
     let declared = dir.path().join("declared");

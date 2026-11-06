@@ -211,6 +211,47 @@ mod tests {
         }
     }
 
+    proptest::proptest! {
+        /// A display that names no clock style is the countdown, for any reset time, clock, and
+        /// window. A clock style never panics and never gives an empty label (#3064).
+        #[test]
+        fn reset_label_is_the_countdown_unless_a_clock_is_named(
+            resets_at in proptest::prelude::any::<i64>(),
+            now in proptest::prelude::any::<i64>(),
+            window in proptest::prelude::any::<i64>(),
+            display in proptest::option::of(proptest::prop_oneof![
+                proptest::strategy::Just("clock_24h".to_string()),
+                proptest::strategy::Just("clock_12h".to_string()),
+                "[a-z_0-9]{0,10}",
+            ]),
+        ) {
+            let cfg = display.as_deref().map(display_cfg);
+            let label = reset_label(resets_at, now, window, cfg.as_ref());
+            match display.as_deref() {
+                Some("clock_24h" | "clock_12h") => proptest::prop_assert!(!label.is_empty()),
+                _ => proptest::prop_assert_eq!(label, humanize_until(resets_at, now)),
+            }
+        }
+
+        /// A clock label for a reset time in range leads with a weekday only when the window is
+        /// longer than one day.
+        #[test]
+        fn a_clock_label_has_a_weekday_only_for_a_long_window(
+            ahead in 0i64..(14 * 86_400),
+            window in 1i64..(14 * 86_400),
+            twelve_hour in proptest::bool::ANY,
+        ) {
+            // With no system time zone, the label is the countdown by design.
+            proptest::prop_assume!(jiff::tz::TimeZone::try_system().is_ok());
+            let cfg = display_cfg(if twelve_hour { "clock_12h" } else { "clock_24h" });
+            let label = reset_label(NOW + ahead, NOW, window, Some(&cfg));
+            let weekday = label
+                .split_once(' ')
+                .is_some_and(|(day, _)| ["mon", "tue", "wed", "thu", "fri", "sat", "sun"].contains(&day));
+            proptest::prop_assert_eq!(weekday, window > ONE_DAY_SECS, "{}", label);
+        }
+    }
+
     #[test]
     fn reset_label_defaults_to_countdown() {
         assert_eq!(reset_label(NOW + 1380, NOW, FIVE_HOUR_SECS, None), "23m");

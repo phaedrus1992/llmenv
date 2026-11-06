@@ -5,6 +5,9 @@
 
 use std::sync::{Mutex, PoisonError};
 
+mod spool;
+pub use spool::{collect as collect_spool, start as start_spool};
+
 /// The most characters of one notice. A notice can carry an error chain, so the cap keeps one
 /// failure from filling the agent's context.
 const MAX_NOTICE_CHARS: usize = 1000;
@@ -75,8 +78,11 @@ impl NoticeList {
 /// Notices raised in this process.
 pub(crate) static NOTICES: Mutex<NoticeList> = Mutex::new(NoticeList::new());
 
-/// Add a notice for the agent. See `NoticeList::record`.
+/// Add a notice for the agent. See `NoticeList::record`. A detached child that spools also writes
+/// the notice to the spool, so the next hook run carries it (#3398).
 pub fn record(notice: impl Into<String>) {
+    let notice = clean(&notice.into());
+    spool::write(&notice);
     NOTICES
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -98,6 +104,27 @@ pub fn record_logged(notice: impl Into<String>) {
     let notice = notice.into();
     tracing::error!("{notice}");
     record(notice);
+}
+
+/// Record the top-level error of a detached child, so the next hook run shows it (#3398). Does
+/// nothing in a process that does not spool, where `main` prints the error itself.
+pub fn record_detached_job_failure(error: &dyn std::fmt::Display) {
+    if spool::active() {
+        record_logged(format!(
+            "llmenv: a detached job failed before it could run: {error:#}. Fix: run `llmenv \
+             doctor` to check the state folder and the config."
+        ));
+    }
+}
+
+/// Drop the notices that contain `text`, so a test sees only the notices of its own run.
+#[cfg(any(test, feature = "test-util"))]
+pub fn forget_containing(text: &str) {
+    NOTICES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .notices
+        .retain(|notice| !notice.contains(text));
 }
 
 #[cfg(test)]

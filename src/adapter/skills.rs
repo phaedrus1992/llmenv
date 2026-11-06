@@ -579,12 +579,14 @@ fn arb_hook_handler() -> impl proptest::prelude::Strategy<Value = crate::config:
                 kind: crate::config::HookHandlerKind::Command,
                 command: Some(command),
                 tool: None,
+                on_failure: None,
             }
         }),
         llmenv_util::testkit::arb_hook_tool_str().prop_map(|tool| crate::config::HookHandler {
             kind: crate::config::HookHandlerKind::McpTool,
             command: None,
             tool: Some(tool),
+            on_failure: None,
         }),
     ]
 }
