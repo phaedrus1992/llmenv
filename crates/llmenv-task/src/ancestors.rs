@@ -18,16 +18,32 @@ pub(super) fn ancestors_to_start(
     let mut current = child.clone();
     while current.relation == Relation::Child {
         let Some(parent_slug) = current.parent.clone() else {
-            break;
+            anyhow::bail!(
+                "cannot start '{}': sub-task '{}' has no parent. Fix: repair the task file of '{}' \
+                 so that its parent link matches its relation",
+                child.slug,
+                current.slug,
+                current.slug
+            );
         };
         if seen.contains(&parent_slug) {
-            break;
+            anyhow::bail!(
+                "cannot start '{}': its ancestors loop at '{parent_slug}'. Fix: clear the parent \
+                 of one task in that loop with `llmenv task edit <task> --no-parent`",
+                child.slug
+            );
         }
-        // A deleted parent leaves a dangling link, which the rest of the store tolerates. Any
-        // other read error fails the start, so the done and queue checks never run blind.
+        // A missing parent fails the start with the fix, so a dangling link is never passed over
+        // silently (#3591). Any other read error fails the start, so the done and queue checks
+        // never run blind.
         let parent = match load_task(state_dir, &parent_slug) {
             Ok(parent) => parent,
-            Err(e) if is_not_found(&e) => break,
+            Err(e) if is_not_found(&e) => anyhow::bail!(
+                "cannot start '{}': its parent '{parent_slug}' is missing from the task store. \
+                 Fix: clear the parent with `llmenv task edit {} --no-parent`",
+                child.slug,
+                child.slug
+            ),
             Err(e) => {
                 return Err(e.context(format!(
                     "cannot start '{}': ancestor '{parent_slug}' is unreadable. Repair or \
@@ -44,6 +60,8 @@ pub(super) fn ancestors_to_start(
             );
         }
         if parent.state == TaskState::Open {
+            // An open ancestor with no session has no queue to check. It is promoted as before
+            // sessions existed (#3586).
             if !force
                 && let Some(session_id) = &parent.session
                 && let Some(block) = relation::queue_block(
