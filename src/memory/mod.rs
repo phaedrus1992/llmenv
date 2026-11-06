@@ -7,11 +7,12 @@
 //! - `prune`  — TTL-based memory forgetting (R4)
 
 pub(crate) mod auto_prune;
+mod listing;
 pub(crate) mod project;
 pub mod prune;
+pub(crate) mod recall_json;
 pub mod resolve;
 
-use std::path::Path;
 use std::time::Duration;
 
 use llmenv_mcp::mcp_client::McpHttpClient;
@@ -27,16 +28,9 @@ fn connect() -> anyhow::Result<McpHttpClient> {
 
 /// The scope has no memory backend. Most sessions have none, so a stats poll treats it as
 /// absent and does not warn (#3062).
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
 pub(crate) struct NoBackendForScope(String);
-
-impl std::fmt::Display for NoBackendForScope {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for NoBackendForScope {}
 
 /// True when `err` says the scope has no memory backend, not that a backend failed.
 pub(crate) fn is_no_backend(err: &anyhow::Error) -> bool {
@@ -120,78 +114,46 @@ pub(crate) fn scope_recall_args(
     Ok(serde_json::json!({ "query": "", "project": project }))
 }
 
-/// Run the `list` subcommand: list stored memories for the active scope.
-pub(crate) fn list() -> anyhow::Result<()> {
+/// The project's records, read from the JSON form of recall (#3421).
+fn scope_records() -> anyhow::Result<Vec<recall_json::RecallRecord>> {
     let client = connect()?;
     let cwd = std::env::current_dir()?;
-    let result = call_tool_blocking(client, "icm_memory_recall", scope_recall_args(Some(&cwd))?)?;
-    println!("{result}");
+    let args = listing::listing_args(scope_recall_args(Some(&cwd))?);
+    let body = call_tool_blocking(client, "icm_memory_recall", args)?;
+    recall_json::parse(&body).map_err(|e| anyhow::anyhow!("icm memory recall: {e}"))
+}
+
+/// Run the `list` subcommand: list stored memories for the active scope.
+pub(crate) fn list() -> anyhow::Result<()> {
+    println!("{}", listing::render_list(&scope_records()?));
     Ok(())
 }
 
-/// Read the previous snapshot, or write `current` as the baseline on first run.
-///
-/// Returns `None` when there was no prior snapshot (baseline just written),
-/// `Some(previous)` otherwise.
-///
-/// #911: a single read that maps `NotFound` → first-run baseline init and
-/// propagates every other I/O error, rather than an `exists()` stat that masked
-/// a permission error as "no snapshot" — which would then overwrite an existing
-/// baseline with the current state and silently skip the diff.
-fn read_or_init_snapshot(snapshot_path: &Path, current: &str) -> anyhow::Result<Option<String>> {
-    match crate::paths::bounded::state_text_io(snapshot_path) {
-        Ok(previous) => Ok(Some(previous)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            crate::paths::write_owner_only_atomic(snapshot_path, current.as_bytes())?;
-            Ok(None)
-        }
-        Err(e) => {
-            Err(anyhow::Error::new(e).context(format!("reading {}", snapshot_path.display())))
-        }
-    }
-}
-
-/// Run the `diff` subcommand: compare current state with last snapshot.
+/// Run the `diff` subcommand: compare the project's records with the last `diff` run, by id.
 pub(crate) fn diff() -> anyhow::Result<()> {
-    let state_dir = crate::paths::state_dir()?;
-    let snapshot_path = state_dir.join(crate::paths::HOOK_STORE_CHUNK);
-
-    let current = {
-        let client = connect()?;
-        let cwd = std::env::current_dir()?;
-        call_tool_blocking(client, "icm_memory_recall", scope_recall_args(Some(&cwd))?)?
-    };
-
-    let Some(previous) = read_or_init_snapshot(&snapshot_path, &current)? else {
+    let snapshot_path = crate::paths::state_dir()?.join(listing::DIFF_SNAPSHOT);
+    let current: Vec<listing::SnapshotRecord> = scope_records()?
+        .iter()
+        .map(listing::SnapshotRecord::from)
+        .collect();
+    let Some(previous) = listing::read_snapshot(&snapshot_path)? else {
+        listing::write_snapshot(&snapshot_path, &current)?;
         println!("No previous snapshot to diff against. Saved current state as baseline.");
         return Ok(());
     };
-    if previous == current {
+    let lines = listing::diff_lines(&previous, &current);
+    if lines.is_empty() {
         println!("No changes since last snapshot.");
     } else {
         println!("Memory state has changed since last snapshot.");
         println!();
-        println!("--- previous");
-        println!("+++ current");
-        for (prev, curr) in previous.lines().zip(current.lines()) {
-            if prev != curr {
-                println!("-{prev}");
-                println!("+{curr}");
-            }
+        for line in lines {
+            println!("{line}");
         }
-        // Extra lines in current
-        for line in current.lines().skip(previous.lines().count()) {
-            println!("+{line}");
-        }
-        // Extra lines in previous
-        for line in previous.lines().skip(current.lines().count()) {
-            println!("-{line}");
-        }
+        println!();
+        println!("{}", listing::count_note(current.len()));
     }
-
-    // Update snapshot
-    crate::paths::write_owner_only_atomic(&snapshot_path, current.as_bytes())?;
-    Ok(())
+    listing::write_snapshot(&snapshot_path, &current)
 }
 
 /// Run the `prune` subcommand: evaluate and forget expired memories.
@@ -206,7 +168,7 @@ pub(crate) fn prune(dry_run: bool) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-    use super::{NoBackendForScope, is_no_backend, read_or_init_snapshot, scope_recall_args};
+    use super::{NoBackendForScope, is_no_backend, scope_recall_args};
 
     #[test]
     fn a_missing_backend_is_no_backend_and_a_failed_call_is_not() {
@@ -242,56 +204,6 @@ mod tests {
         assert!(
             err.is_some_and(|e| format!("{e:#}").contains("cannot tell the project")),
             "the root folder must stop the recall, not search all projects"
-        );
-    }
-
-    #[test]
-    fn first_run_writes_baseline_and_returns_none() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("snapshot");
-        let got = read_or_init_snapshot(&path, "current state").unwrap();
-        assert_eq!(got, None);
-        // Baseline was written with the current state.
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "current state");
-    }
-
-    #[test]
-    fn returns_previous_without_clobbering_when_snapshot_exists() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("snapshot");
-        std::fs::write(&path, "previous state").unwrap();
-        let got = read_or_init_snapshot(&path, "current state").unwrap();
-        assert_eq!(got.as_deref(), Some("previous state"));
-        // The existing baseline was not overwritten with the current state.
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "previous state");
-    }
-
-    // #911: a non-NotFound I/O error (EACCES) must propagate, not be masked as
-    // "no snapshot" — which would clobber the baseline.
-    #[cfg(unix)]
-    #[test]
-    fn propagates_permission_error_instead_of_masking_absent() {
-        use std::fs::{self, Permissions};
-        use std::os::unix::fs::PermissionsExt;
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("state");
-        fs::create_dir(&dir).unwrap();
-        let path = dir.join("snapshot");
-        fs::write(&path, "previous state").unwrap();
-        fs::set_permissions(&dir, Permissions::from_mode(0o000)).unwrap();
-        let result = read_or_init_snapshot(&path, "current state");
-        let readable_anyway = fs::read_dir(&dir).is_ok();
-        fs::set_permissions(&dir, Permissions::from_mode(0o755)).unwrap(); // restore for cleanup
-        // A process that bypasses permissions (root) cannot get EACCES here. A silent return
-        // would pass without testing anything, so the test fails and names the cause (#3086).
-        assert!(
-            !readable_anyway,
-            "EACCES cannot be exercised: this process reads the locked folder. Run the test as a \
-             non-root user."
-        );
-        assert!(
-            result.is_err(),
-            "permission error must propagate, got {result:?}"
         );
     }
 }

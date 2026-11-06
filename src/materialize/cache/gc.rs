@@ -44,7 +44,9 @@ pub fn gc(
         _ => None,
     };
     for entry in entries {
-        let Some((p, ft)) = entry_and_type(cache_root, entry, &mut report.failed) else {
+        let Some((p, ft)) = entry_and_type(cache_root, entry, |p, cause| {
+            report.record_failure(p, cause)
+        }) else {
             continue;
         };
         // Use `file_type()` (lstat-equivalent) — a symlink at the top level
@@ -54,34 +56,32 @@ pub fn gc(
             gc_remove_link(&p, &mut report);
             continue;
         }
+        // A file at the top level is not a cache folder. It is kept and counted, so the report
+        // covers every entry (#3277).
         if !ft.is_dir() {
-            continue;
-        }
-        if p.extension().is_some_and(|e| e == "tmp") {
-            gc_remove_dir(&p, &mut report);
-            continue;
-        }
-        // The durable state dir (#175) is a stable sibling of the hashed config
-        // folders and must outlive every materialization. It is never an age-based
-        // collection candidate — cache invalidation must not wipe tool state.
-        if p.file_name()
-            == Some(std::ffi::OsStr::new(
-                crate::materialize::state::STATE_DIR_NAME,
-            ))
-        {
+            tracing::debug!(
+                "cache gc keeps a file that is not a cache folder: {}",
+                p.display()
+            );
             report.kept += 1;
             continue;
         }
+        // A path from `read_dir` always ends in a name; a missing one is a failure, not a match.
+        let Some(name) = p.file_name() else {
+            tracing::error!(
+                "cache gc: the entry {} has no file name, so it is kept",
+                p.display()
+            );
+            report.record_failure(p.clone(), "the entry has no file name".into());
+            continue;
+        };
         // In Normal mode, a top-level dir matching the current generation version
         // is a container for per-shape leaf dirs. Walk into it and age-check each
         // shape individually instead of treating the whole generation as a unit.
-        if hashing == HashingMode::Normal
-            && is_current_name(
-                p.file_name().unwrap_or_default(),
-                hashing,
-                current_version.as_deref(),
-            )
-        {
+        // A generation name is a version number, so it is never a `.tmp` or the state folder.
+        let is_generation = hashing == HashingMode::Normal
+            && is_current_name(name, hashing, current_version.as_deref());
+        if is_generation {
             if let Err(e) = gc_normal_shapes(&p, rule, &now, &mut report) {
                 tracing::error!(
                     "cache gc cannot sweep the generation {}, so it is kept: {e:#}. Fix: check the permissions of that folder.",
@@ -91,19 +91,45 @@ pub fn gc(
             }
             continue;
         }
-        let Some(m) = newest_file_mtime_or_record(&p, rule.source, |path, cause| {
-            report.record_failure(path, cause)
-        }) else {
-            continue;
-        };
-        let expired = is_expired(now, m, rule.older_than, &p);
-        if expired {
-            gc_remove_dir(&p, &mut report);
-        } else {
-            report.kept += 1;
-        }
+        collect_if_expired(&p, rule, now, &mut report);
     }
     Ok(report)
+}
+
+/// Collect one cache folder: an orphaned `.tmp` staging folder always, the durable state folder
+/// never, and any other folder when it is older than `rule`. One helper serves the top level and
+/// the shapes of a generation, so the two cannot drift (#3277).
+fn collect_if_expired(
+    p: &Path,
+    rule: crate::materialize::expiry::AgeRule,
+    now: SystemTime,
+    report: &mut GcReport,
+) {
+    // A `.tmp` folder is a partial write from a materialize that crashed.
+    if p.extension().is_some_and(|e| e == "tmp") {
+        gc_remove_dir(p, report);
+        return;
+    }
+    // The durable state folder (#175) must outlive every materialization, at the top level and
+    // nested under a generation alike, so it is never an age-based candidate.
+    if p.file_name()
+        == Some(std::ffi::OsStr::new(
+            crate::materialize::state::STATE_DIR_NAME,
+        ))
+    {
+        report.kept += 1;
+        return;
+    }
+    let Some(m) = newest_file_mtime_or_record(p, rule.source, |path, cause| {
+        report.record_failure(path, cause)
+    }) else {
+        return;
+    };
+    if is_expired(now, m, rule.older_than, p) {
+        gc_remove_dir(p, report);
+    } else {
+        report.kept += 1;
+    }
 }
 
 /// Age-check each per-shape leaf directory under a `<version_major>` generation
@@ -133,43 +159,98 @@ fn gc_normal_shapes(
                 .context(format!("reading version dir {}", version_dir.display())));
         }
     } {
-        let Some((p, ft)) = entry_and_type(version_dir, entry, &mut report.failed) else {
-            continue;
-        };
-        if ft.is_symlink() || !ft.is_dir() {
-            tracing::trace!(
-                "gc_normal_shapes: skipping unexpected entry: {}",
-                p.display()
-            );
-            continue;
-        }
-        // Unconditionally remove .tmp staging directories — they represent
-        // orphaned partial writes from a previous crashed materialize call.
-        if p.extension().is_some_and(|e| e == "tmp") {
-            gc_remove_dir(&p, report);
-            continue;
-        }
-        // The durable state dir (#175) may appear nested under a version dir
-        // in some layouts; protect it from age-based collection regardless.
-        if p.file_name()
-            == Some(std::ffi::OsStr::new(
-                crate::materialize::state::STATE_DIR_NAME,
-            ))
-        {
-            report.kept += 1;
-            continue;
-        }
-        let Some(m) = newest_file_mtime_or_record(&p, rule.source, |path, cause| {
-            report.record_failure(path, cause)
+        let Some((p, ft)) = entry_and_type(version_dir, entry, |p, cause| {
+            report.record_failure(p, cause)
         }) else {
             continue;
         };
-        let expired = is_expired(*now, m, rule.older_than, &p);
-        if expired {
-            gc_remove_dir(&p, report);
-        } else {
+        // A file or a link inside a generation is not a shape. It is kept and counted, so the
+        // report adds up to every entry (#3277).
+        if ft.is_symlink() || !ft.is_dir() {
+            tracing::debug!("cache gc keeps a non-shape entry: {}", p.display());
             report.kept += 1;
+            continue;
         }
+        collect_if_expired(&p, rule, *now, report);
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "a test fails loudly when its fixture cannot be set up"
+)]
+mod tests {
+    use super::*;
+    use crate::materialize::expiry::AgeRule;
+    use std::time::Duration;
+
+    // #3277: every entry of a generation is in the report, a file or a link as kept.
+    #[test]
+    fn a_file_and_a_link_in_a_generation_are_kept_and_counted() {
+        let root = tempfile::tempdir().unwrap();
+        let generation = root.path().join(version_major());
+        std::fs::create_dir_all(generation.join("shape-a")).unwrap();
+        std::fs::write(generation.join("shape-a/f"), b"x").unwrap();
+        std::fs::write(generation.join("stray.txt"), b"x").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.path(), generation.join("link")).unwrap();
+        let report = gc(
+            root.path(),
+            AgeRule::new(Duration::from_secs(3600)),
+            HashingMode::Normal,
+            true,
+        )
+        .unwrap();
+        let entries = if cfg!(unix) { 3 } else { 2 };
+        assert_eq!(report.kept, entries, "{report:?}");
+        assert!(report.removed.is_empty(), "{report:?}");
+        assert!(report.failed.is_empty(), "{report:?}");
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(24))]
+        /// Each top-level entry lands in exactly one of removed, kept, or failed: a `.tmp` folder
+        /// is removed, the state folder and a file are kept, and a folder is removed exactly when
+        /// it is older than the rule (#3277).
+        #[test]
+        fn every_entry_is_removed_kept_or_failed_once(
+            kinds in proptest::collection::vec(0u8..5, 0..8),
+        ) {
+            let root = tempfile::tempdir().unwrap();
+            let old = SystemTime::now() - Duration::from_secs(10 * 86_400);
+            let mut want_removed = 0usize;
+            for (i, kind) in kinds.iter().enumerate() {
+                match kind {
+                    0 => {
+                        std::fs::create_dir(root.path().join(format!("s{i}.tmp"))).unwrap();
+                        want_removed += 1;
+                    }
+                    1 => std::fs::write(root.path().join(format!("f{i}")), b"x").unwrap(),
+                    2 | 3 => {
+                        let dir = root.path().join(format!("d{i}"));
+                        std::fs::create_dir(&dir).unwrap();
+                        std::fs::write(dir.join("f"), b"x").unwrap();
+                        if *kind == 2 {
+                            std::fs::File::open(dir.join("f")).unwrap().set_modified(old).unwrap();
+                            want_removed += 1;
+                        }
+                    }
+                    _ => {
+                        let state = root.path().join(crate::materialize::state::STATE_DIR_NAME);
+                        std::fs::create_dir_all(&state).unwrap();
+                    }
+                }
+            }
+            let entries = std::fs::read_dir(root.path()).unwrap().count();
+            let rule = AgeRule {
+                older_than: Duration::from_secs(86_400),
+                source: crate::materialize::cache::AgeSource::MtimeOnly,
+            };
+            let report = gc(root.path(), rule, HashingMode::Strict, true).unwrap();
+            proptest::prop_assert_eq!(report.removed.len() + report.kept + report.failed.len(), entries);
+            proptest::prop_assert_eq!(report.removed.len(), want_removed);
+        }
+    }
 }

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -11,12 +11,15 @@ use sha2::{Digest, Sha256};
 use crate::config::HashingMode;
 use crate::merge::MergedManifest;
 
+mod entries;
 mod gc;
 mod gc_report;
 pub use gc::gc;
 mod mtime;
 mod owner;
 mod write_bits;
+pub(crate) use entries::is_vanished;
+use entries::{entry_and_type, skip_vanished};
 use write_bits::remove_dir_all_forcing_writable;
 
 pub use crate::materialize::expiry::AgeRule;
@@ -238,10 +241,17 @@ pub enum PruneMode {
 pub struct PruneReport {
     pub(crate) removed: Vec<PathBuf>,
     pub(crate) kept: usize,
-    /// Entries prune attempted to unlink but could not (a non-fatal symlink
-    /// removal failure — see [`remove_link`]). Kept separate from `removed` so
-    /// the report never claims work it didn't do (#255).
-    pub(crate) failed: Vec<PathBuf>,
+    /// Entries prune could not check or remove, each with its cause. Kept separate from
+    /// `removed` so the report never claims work it didn't do (#255). A map, so a path is listed
+    /// once and always has a cause, as in [`GcReport::failed`].
+    pub(crate) failed: BTreeMap<PathBuf, String>,
+}
+
+impl PruneReport {
+    /// Record `path` as failed. A second failure of the same path keeps the first cause.
+    fn record_failure(&mut self, path: PathBuf, cause: String) {
+        self.failed.entry(path).or_insert(cause);
+    }
 }
 
 /// Prune cache folders under `cache_root` according to `mode` (#246).
@@ -289,7 +299,9 @@ pub(crate) fn prune(
     };
     let now = SystemTime::now();
     for entry in entries {
-        let Some((p, ft)) = entry_and_type(cache_root, entry, &mut report.failed) else {
+        let Some((p, ft)) = entry_and_type(cache_root, entry, |p, cause| {
+            report.record_failure(p, cause)
+        }) else {
             continue;
         };
         // lstat-equivalent: a symlink at the top level is never followed. We
@@ -300,6 +312,8 @@ pub(crate) fn prune(
             continue;
         }
         if !ft.is_dir() {
+            // `gc` counts a stray file as kept, so the two reports agree on one cache root.
+            report.kept += 1;
             continue;
         }
         // Orphaned staging dirs are always removed regardless of mode.
@@ -320,8 +334,14 @@ pub(crate) fn prune(
             continue;
         }
 
-        let is_current =
-            is_current_name(p.file_name().unwrap_or_default(), hashing, current_version);
+        // A path from `read_dir` always ends in a name; a missing one is a failure, not a match.
+        let Some(name) = p.file_name() else {
+            let cause = "the entry has no file name, so it is kept".to_string();
+            tracing::error!("cache prune: {}: {cause}", p.display());
+            report.record_failure(p, cause);
+            continue;
+        };
+        let is_current = is_current_name(name, hashing, current_version);
 
         let should_remove = match mode {
             PruneMode::All => true,
@@ -332,7 +352,9 @@ pub(crate) fn prune(
                 if !is_current {
                     false
                 } else if let Some(m) =
-                    newest_file_mtime_or_record(&p, rule.source, |path, _| report.failed.push(path))
+                    newest_file_mtime_or_record(&p, rule.source, |path, cause| {
+                        report.record_failure(path, cause)
+                    })
                 {
                     is_expired(now, m, rule.older_than, &p)
                 } else {
@@ -365,15 +387,16 @@ fn remove_dir(p: &Path, dry_run: bool, report: &mut PruneReport) {
         report.removed.push(p.to_path_buf());
         return;
     }
-    match remove_dir_all_forcing_writable(p) {
-        Ok(()) => report.removed.push(p.to_path_buf()),
+    // An entry that another process removed first is gone, which is the goal (#3423).
+    match skip_vanished(remove_dir_all_forcing_writable(p)) {
+        Ok(_) => report.removed.push(p.to_path_buf()),
         Err(e) => {
             tracing::error!(
                 path = %p.display(),
                 error = %e,
                 "failed to remove cache directory; skipping"
             );
-            report.failed.push(p.to_path_buf());
+            report.record_failure(p.to_path_buf(), format!("cannot remove the folder: {e}"));
         }
     }
 }
@@ -390,15 +413,15 @@ fn remove_link(p: &Path, dry_run: bool, report: &mut PruneReport) {
         report.removed.push(p.to_path_buf());
         return;
     }
-    match std::fs::remove_file(p) {
-        Ok(()) => report.removed.push(p.to_path_buf()),
+    match skip_vanished(std::fs::remove_file(p)) {
+        Ok(_) => report.removed.push(p.to_path_buf()),
         Err(e) => {
             tracing::error!(
                 path = %p.display(),
                 error = %e,
                 "failed to unlink cache symlink; skipping"
             );
-            report.failed.push(p.to_path_buf());
+            report.record_failure(p.to_path_buf(), format!("cannot unlink the link: {e}"));
         }
     }
 }
@@ -415,41 +438,6 @@ fn is_current_name(
         HashingMode::Strict => name
             .as_encoded_bytes()
             .starts_with(format!("{VERSION_TAG}-").as_bytes()),
-    }
-}
-
-/// The path and type of a cache entry, read without following a symlink. An entry that cannot
-/// be read is logged, recorded in `failed` (by `dir` when it has no path), and skipped, so the
-/// pass goes on.
-fn entry_and_type(
-    dir: &Path,
-    entry: std::io::Result<std::fs::DirEntry>,
-    failed: &mut Vec<PathBuf>,
-) -> Option<(PathBuf, std::fs::FileType)> {
-    let Some(entry) = crate::paths::readable_entry(dir, "cache gc", entry) else {
-        failed.push(dir.to_path_buf());
-        return None;
-    };
-    let p = entry.path();
-    match entry.file_type() {
-        Ok(ft) => Some((p, ft)),
-        Err(e) => {
-            tracing::error!(
-                "cache gc cannot read the type of {}, so it is kept: {e}",
-                p.display()
-            );
-            failed.push(p);
-            None
-        }
-    }
-}
-
-/// `None` for a path that no longer exists. Any other error stays an error.
-pub(super) fn skip_vanished<T>(result: std::io::Result<T>) -> std::io::Result<Option<T>> {
-    match result {
-        Ok(value) => Ok(Some(value)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
     }
 }
 
@@ -850,18 +838,27 @@ mod tests {
         // that claimed work the prune never did. remove_link stays non-fatal
         // (pruning continues) but surfaces the failure in `failed`, not `removed`.
         let mut report = PruneReport::default();
-        // A path under a non-existent parent: the real unlink fails (NotFound),
-        // exercising the failure branch deterministically without perms hacks.
-        let missing = Path::new("/nonexistent-llmenv-255-dir/dangling-link");
+        // A path under a regular file: the real unlink fails with "not a directory". A missing
+        // path is gone, which counts as removed (#3423), so it cannot test this branch.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"x").unwrap();
+        let missing = file.join("dangling-link");
+        let missing = missing.as_path();
         remove_link(missing, false, &mut report);
         assert!(
             report.removed.is_empty(),
             "a failed unlink must never be reported as removed"
         );
         assert_eq!(
-            report.failed,
-            vec![missing.to_path_buf()],
+            report.failed.keys().collect::<Vec<_>>(),
+            vec![missing],
             "the failed unlink is surfaced in `failed`"
+        );
+        assert!(
+            report.failed[missing].contains("cannot unlink"),
+            "{:?}",
+            report.failed
         );
     }
 
@@ -912,7 +909,7 @@ mod tests {
 
         assert_eq!(
             report.failed,
-            Vec::<PathBuf>::new(),
+            BTreeMap::new(),
             "restoring the write bit on a directory prune itself created must let \
              the removal through"
         );
@@ -952,10 +949,8 @@ mod tests {
             report.removed.is_empty(),
             "nothing was removed, so nothing may be claimed as removed"
         );
-        let mut failed = report.failed;
-        failed.sort();
         assert_eq!(
-            failed,
+            report.failed.into_keys().collect::<Vec<_>>(),
             vec![a, b],
             "the walk continued past the first failure and recorded both"
         );
@@ -987,9 +982,7 @@ mod tests {
         let report = result.expect("an unremovable entry is reported, not propagated");
 
         assert!(report.removed.is_empty());
-        let mut failed = report.failed;
-        failed.sort();
-        assert_eq!(failed, vec![a, b]);
+        assert_eq!(report.failed.into_keys().collect::<Vec<_>>(), vec![a, b]);
     }
 
     #[cfg(unix)]
@@ -1018,7 +1011,7 @@ mod tests {
 
         chmod(&unreadable, 0o755);
         let report = result.expect("one unreadable folder is not fatal");
-        assert_eq!(report.failed, vec![shape.clone()]);
+        assert_eq!(report.failed.keys().collect::<Vec<_>>(), vec![&shape]);
         assert!(shape.exists(), "the unreadable folder is kept");
         assert_eq!(report.removed, vec![other.clone()]);
         assert!(!other.exists());
@@ -1052,7 +1045,7 @@ mod tests {
 
         chmod(&unreadable, 0o755);
         let report = result.expect("one unreadable folder is not fatal");
-        assert_eq!(report.failed, vec![bad.clone()]);
+        assert_eq!(report.failed.keys().collect::<Vec<_>>(), vec![&bad]);
         assert!(bad.exists());
         assert_eq!(report.removed, vec![good.clone()]);
     }
@@ -1080,7 +1073,7 @@ mod tests {
 
         chmod(&unreadable, 0o755);
         let report = result.expect("one unreadable leaf is not fatal");
-        assert_eq!(report.failed, vec![bad.clone()]);
+        assert_eq!(report.failed.keys().collect::<Vec<_>>(), vec![&bad]);
         assert!(bad.exists());
     }
 

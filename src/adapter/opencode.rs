@@ -760,33 +760,17 @@ impl AgentAdapter for OpencodeAdapter {
             .hooks
             .iter()
             .filter(|hook| {
-                if !SUPPORTED_HOOK_EVENTS.contains(&hook.event.as_str()) {
-                    eprintln!(
-                        "warning: opencode adapter does not support hook event '{}' — \
-                         skipping this hook. Supported events: {}. Remove or move \
-                         this hook to a claude_code-only bundle to silence this warning.",
-                        hook.event,
-                        SUPPORTED_HOOK_EVENTS.join(", ")
-                    );
-                    return false;
-                }
-                if matches!(hook.handler.kind, crate::config::HookHandlerKind::McpTool) {
-                    eprintln!(
-                        "warning: opencode adapter does not support mcp_tool hooks \
-                         (hook event '{}', tool '{}') — skipping this hook. \
-                         Use a command hook instead.",
-                        hook.event,
-                        hook.handler.tool.as_deref().unwrap_or("<unknown>")
-                    );
-                    return false;
-                }
-                true
+                crate::adapter::hook_support::engine_can_run_hook(
+                    "opencode",
+                    SUPPORTED_HOOK_EVENTS,
+                    hook,
+                )
             })
             .cloned()
             .collect();
         all_hooks.extend(plugin_hooks);
 
-        let (pre_tools, lifecycle) = registrations(manifest);
+        let (pre_tools, lifecycle) = registrations(manifest)?;
         let mcp_servers: Vec<&str> = manifest.mcps.iter().map(|m| m.name.as_str()).collect();
         owned.extend(hook_bridge::write(
             out,
@@ -863,13 +847,13 @@ fn write_translated(out: &Path, rel: &Path, translated: &str) -> anyhow::Result<
 /// gate too, so when it is present the gate needs no entry of its own (#1442).
 fn registrations(
     manifest: &MergedManifest,
-) -> (Vec<&'static str>, Vec<hook_bridge::LifecycleHook>) {
+) -> anyhow::Result<(Vec<&'static str>, Vec<hook_bridge::LifecycleHook>)> {
     let gate = hook_bridge::pre_tool_hook_tools(manifest);
-    let lifecycle = lifecycle_hooks(manifest, !gate.is_empty());
+    let lifecycle = lifecycle_hooks(manifest, !gate.is_empty())?;
     if lifecycle.iter().any(|h| h.event == "PreToolUse") {
-        (Vec::new(), lifecycle)
+        Ok((Vec::new(), lifecycle))
     } else {
-        (gate, lifecycle)
+        Ok((gate, lifecycle))
     }
 }
 
@@ -880,17 +864,19 @@ fn registrations(
 fn lifecycle_hooks(
     manifest: &MergedManifest,
     gate_needed: bool,
-) -> Vec<hook_bridge::LifecycleHook> {
-    let hook = |event: &'static str, neutral: &str, fail_closed: bool| hook_bridge::LifecycleHook {
-        event,
-        command: super::hook_program::hook_command(&format!(
-            "hook-run {neutral} --engine opencode"
-        )),
-        fail_closed,
+) -> anyhow::Result<Vec<hook_bridge::LifecycleHook>> {
+    let hook = |event: &'static str, neutral: &str, fail_closed: bool| {
+        Ok::<_, anyhow::Error>(hook_bridge::LifecycleHook {
+            event,
+            command: super::hook_program::hook_command(&format!(
+                "hook-run {neutral} --engine opencode"
+            ))?,
+            fail_closed,
+        })
     };
     let mut out = vec![
-        hook("SessionStart", "session_start", false),
-        hook("SessionEnd", "session_end", false),
+        hook("SessionStart", "session_start", false)?,
+        hook("SessionEnd", "session_end", false)?,
     ];
     let turn_start = super::lifecycle_event_registered(manifest, "turn_start");
     // #317: the rules digest runs on UserPromptSubmit, so the layer registers the event itself.
@@ -898,23 +884,23 @@ fn lifecycle_hooks(
         && !manifest.session_log.any_sink_enabled()
         && !turn_start
     {
-        out.push(hook("UserPromptSubmit", "user_prompt_submit", false));
+        out.push(hook("UserPromptSubmit", "user_prompt_submit", false)?);
     }
     // #499: continuous per-prompt memory recall, gated because it runs on every prompt.
     if turn_start {
-        out.push(hook("UserPromptSubmit", "turn_start", false));
+        out.push(hook("UserPromptSubmit", "turn_start", false)?);
     }
     if manifest.session_log.any_sink_enabled() {
-        out.push(hook("UserPromptSubmit", "user_prompt_submit", false));
-        out.push(hook("PreToolUse", "pre_tool_use", gate_needed));
-        out.push(hook("PostToolUse", "post_tool_use", false));
-        out.push(hook("Stop", "stop", false));
+        out.push(hook("UserPromptSubmit", "user_prompt_submit", false)?);
+        out.push(hook("PreToolUse", "pre_tool_use", gate_needed)?);
+        out.push(hook("PostToolUse", "post_tool_use", false)?);
+        out.push(hook("Stop", "stop", false)?);
     } else if super::lifecycle_event_registered(manifest, "stop") {
         // #231/#317: the task tracker's Stop reminder and the self-critique layer each need their
         // own registration. The `else` keeps a session-log setup from registering `Stop` twice.
-        out.push(hook("Stop", "stop", false));
+        out.push(hook("Stop", "stop", false)?);
     }
-    out
+    Ok(out)
 }
 
 use plugin_parse::{parse_plugin_hooks, parse_plugin_mcp_entries};
@@ -3215,13 +3201,18 @@ mod tests {
     // need it, so no other tool call pays for it.
     #[test]
     fn index_repository_guard_hook_tracks_the_codebase_memory_mcp() {
-        let with = hook_bridge::hook_table(&[], &["mcp__x__index_repository", "Bash"], &[], &[]);
-        let without = hook_bridge::hook_table(&[], &[], &[], &[]).to_string();
+        let with =
+            hook_bridge::hook_table(&[], &["mcp__x__index_repository", "Bash"], &[], &[]).unwrap();
+        let without = hook_bridge::hook_table(&[], &[], &[], &[])
+            .unwrap()
+            .to_string();
         let entry = with["hooks"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|h| h["command"] == hook_command("hook-run pre_tool_use --engine opencode"))
+            .find(|h| {
+                h["command"] == hook_command("hook-run pre_tool_use --engine opencode").unwrap()
+            })
             .unwrap();
         assert_eq!(entry["matcher"], "mcp__x__index_repository|Bash");
         assert!(
@@ -3240,10 +3231,11 @@ mod tests {
                 kind: crate::config::HookHandlerKind::McpTool,
                 command: None,
                 tool: Some("x".into()),
+                on_failure: None,
             },
             bundle_origin: None,
         }];
-        let table = hook_bridge::hook_table(&hooks, &[], &[], &[]);
+        let table = hook_bridge::hook_table(&hooks, &[], &[], &[]).unwrap();
         let events: Vec<_> = table["hooks"]
             .as_array()
             .unwrap()
@@ -3262,12 +3254,13 @@ mod tests {
                 kind: crate::config::HookHandlerKind::Command,
                 command: Some("echo hello".into()),
                 tool: None,
+                on_failure: None,
             },
             bundle_origin: Some(PathBuf::from("/bundles/foo")),
         }];
         // "echo hello" has no '/' token, so resolve_bundle_relative_paths
         // returns None and the raw command is used.
-        let table = hook_bridge::hook_table(&hooks, &[], &["codebase-memory-mcp"], &[]);
+        let table = hook_bridge::hook_table(&hooks, &[], &["codebase-memory-mcp"], &[]).unwrap();
         assert_eq!(table["hooks"][0]["command"], "echo hello");
         assert_eq!(table["hooks"][0]["matcher"], "Bash");
         assert_eq!(
@@ -3648,8 +3641,8 @@ mod tests {
         fn every_command_hook_reaches_the_table_in_order(
             hooks in proptest::collection::vec(arb_hook(), 0..5)
         ) {
-            let table = hook_bridge::hook_table(&hooks, &[], &[], &[]);
-            prop_assert_eq!(&table, &hook_bridge::hook_table(&hooks, &[], &[], &[]));
+            let table = hook_bridge::hook_table(&hooks, &[], &[], &[]).unwrap();
+            prop_assert_eq!(&table, &hook_bridge::hook_table(&hooks, &[], &[], &[]).unwrap());
             let entries = table["hooks"].as_array().unwrap();
             let with_command: Vec<_> = hooks.iter().filter(|h| h.handler.command.is_some()).collect();
             for (hook, entry) in with_command.iter().zip(entries) {
@@ -4292,8 +4285,8 @@ mod tests {
 
     /// The `hook-run` commands that the hook table registers for `event`.
     fn table_commands(manifest: &MergedManifest, event: &str) -> Vec<String> {
-        let (pre_tools, lifecycle) = registrations(manifest);
-        let table = hook_bridge::hook_table(&[], &pre_tools, &[], &lifecycle);
+        let (pre_tools, lifecycle) = registrations(manifest).unwrap();
+        let table = hook_bridge::hook_table(&[], &pre_tools, &[], &lifecycle).unwrap();
         table["hooks"]
             .as_array()
             .into_iter()
@@ -4407,7 +4400,7 @@ mod tests {
     /// looks wired and never fires.
     #[test]
     fn session_log_events_are_all_supported_by_opencode() {
-        for hook in registrations(&MergedManifest::default()).1 {
+        for hook in registrations(&MergedManifest::default()).unwrap().1 {
             assert!(
                 SUPPORTED_HOOK_EVENTS.contains(&hook.event),
                 "{} is not an opencode event",

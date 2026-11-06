@@ -53,7 +53,7 @@ fn an_unpacked_tree_with_old_mtimes_is_kept_by_the_change_time_rule() {
         older_than: DAY * 7,
         source: AgeSource::MtimeOrCtime,
     };
-    let report = sweep(root.path(), rule, &[], false).unwrap();
+    let report = sweep(root.path(), rule, &[], false, SystemTime::now()).unwrap();
     assert!(report.removed.is_empty(), "removed {:?}", report.removed);
     assert!(unpacked.exists());
 }
@@ -65,7 +65,14 @@ fn the_mtime_only_rule_removes_an_unpacked_tree_with_old_mtimes() {
     fs::create_dir(&unpacked).unwrap();
     fs::write(unpacked.join("artifact"), b"x").unwrap();
     age_tree(&unpacked, old());
-    let report = sweep(root.path(), mtime_rule(DAY * 7), &[], false).unwrap();
+    let report = sweep(
+        root.path(),
+        mtime_rule(DAY * 7),
+        &[],
+        false,
+        SystemTime::now(),
+    )
+    .unwrap();
     assert_eq!(report.removed, vec![unpacked.clone()]);
     assert!(!unpacked.exists());
 }
@@ -82,7 +89,8 @@ fn the_summary_counts_and_sizes_the_stale_entries_and_removes_nothing() {
     fs::create_dir(&fresh).unwrap();
     fs::write(fresh.join("x"), [0_u8; 999]).unwrap();
 
-    let summary = stale_summary_in(root.path(), mtime_rule(DAY * 7), &[]).unwrap();
+    let summary =
+        stale_summary_in(root.path(), mtime_rule(DAY * 7), &[], SystemTime::now()).unwrap();
 
     assert_eq!(
         summary,
@@ -110,6 +118,7 @@ fn the_summary_skips_a_claude_code_root_and_an_entry_in_use() {
         root.path(),
         mtime_rule(DAY * 7),
         std::slice::from_ref(&busy),
+        SystemTime::now(),
     )
     .unwrap();
 
@@ -129,7 +138,7 @@ fn the_summary_of_a_missing_tmp_root_is_empty() {
     let root = tempfile::tempdir().unwrap();
     let missing = root.path().join("no-such-tmp");
 
-    let summary = stale_summary_in(&missing, mtime_rule(DAY * 7), &[]).unwrap();
+    let summary = stale_summary_in(&missing, mtime_rule(DAY * 7), &[], SystemTime::now()).unwrap();
 
     assert_eq!(
         summary,

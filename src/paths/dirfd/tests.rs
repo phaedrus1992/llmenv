@@ -431,3 +431,20 @@ fn write_file_through_dirs_rejects_unsafe_components_even_without_caller_validat
         );
     }
 }
+
+// A pre-1970 time or a nanosecond part outside one second is unknown, so it cannot overflow.
+#[test]
+fn a_stat_time_out_of_range_is_unknown() {
+    let at =
+        |secs: u64, nanos: u32| Some(std::time::UNIX_EPOCH + std::time::Duration::new(secs, nanos));
+    assert_eq!(stat_time(10i64, 999_999_999i64), at(10, 999_999_999));
+    assert_eq!(stat_time(10i64, 0i64), at(10, 0));
+    assert_eq!(stat_time(10i64, 1_000_000_000i64), None);
+    assert_eq!(stat_time(-1i64, 0i64), None);
+    assert_eq!(stat_time(10i64, -1i64), None);
+    assert_eq!(stat_time(i64::MAX, 1_000_000_000i64), None);
+    assert_eq!(
+        stat_time(i64::MAX, 999_999_999i64),
+        at(u64::try_from(i64::MAX).unwrap(), 999_999_999)
+    );
+}

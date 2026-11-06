@@ -244,3 +244,46 @@ proptest::proptest! {
         proptest::prop_assert_eq!(std::fs::metadata(&aside).expect("test").len(), 0);
     }
 }
+
+/// Each strict prefix of a saved map, the empty file included, is the shape a crash leaves. The
+/// read is a hard error that names the file, and the next write moves it aside and works (#3130).
+#[test]
+fn every_cut_off_map_is_an_error_until_the_next_write() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("transcript-sessions.json");
+    record_at(&path, "claude-1", "icm-aaa").expect("first write");
+    record_at(&path, "claude-2", "icm-bbb").expect("second write");
+    let saved = std::fs::read(&path).expect("saved map");
+    for len in 0..saved.len() {
+        std::fs::write(&path, &saved[..len]).expect("cut-off map");
+        let err = format!("{:#}", load_at(&path).expect_err("a cut-off map must fail"));
+        assert!(err.contains("is corrupt"), "{len}: {err}");
+        record_at(&path, "claude-3", "icm-ccc").expect("the next write moves the map aside");
+        let map = load_at(&path).expect("the new map reads");
+        assert_eq!(
+            map.get("claude-3").map(String::as_str),
+            Some("icm-ccc"),
+            "{len}"
+        );
+    }
+}
+
+proptest::proptest! {
+    /// For any saved map, any strict prefix is an error, never a smaller map.
+    #[test]
+    fn any_cut_off_map_is_an_error(
+        entries in proptest::collection::btree_map("[a-z0-9-]{1,8}", "\\PC{1,8}", 1..4),
+        cut in proptest::prelude::any::<proptest::sample::Index>(),
+    ) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("transcript-sessions.json");
+        for (claude, icm) in &entries {
+            record_at(&path, claude, icm).expect("write");
+        }
+        let saved = std::fs::read_to_string(&path).expect("saved map");
+        let saved = saved.trim_end();
+        let len = cut.index(saved.len());
+        std::fs::write(&path, &saved.as_bytes()[..len]).expect("cut-off map");
+        proptest::prop_assert!(load_at(&path).is_err());
+    }
+}

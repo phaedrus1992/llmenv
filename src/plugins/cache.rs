@@ -17,7 +17,8 @@ use crate::paths::expand_tilde;
 
 mod manifest;
 pub(crate) use manifest::{
-    MarketplacePluginEntry, read_marketplace_name, read_marketplace_plugins,
+    MarketplacePluginEntry, manifest_name, manifest_plugins, read_manifest, read_marketplace_name,
+    read_marketplace_plugins,
 };
 
 /// Typed errors from marketplace sync operations.
