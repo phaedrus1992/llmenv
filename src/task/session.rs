@@ -254,10 +254,13 @@ pub enum StartOutcome {
 mod checkpoint;
 mod context_reminder;
 pub(in crate::task) mod filter;
+mod finish;
 mod resume_text;
 pub(crate) use checkpoint::idle_display;
 use checkpoint::{checkpoint_error, engine_start, only_own_session, resume};
 pub(in crate::task) use context_reminder::missing_context_reminders;
+pub(crate) use finish::finish_session;
+use finish::untag_unfinished;
 #[cfg(test)]
 use resume_text::MAX_REMINDER_CONTEXT_CHARS;
 pub(crate) use resume_text::resume_reminder_lines;
@@ -369,22 +372,6 @@ pub(crate) fn open_sessions_strict(
     ))
 }
 
-/// The id of every session ever tagged with `project`, over [`list_sessions_strict`]. A corrupt file is
-/// an error, so the caller can report it instead of losing that file's tasks (#2628).
-///
-/// # Errors
-/// Returns an error if any session file cannot be read or parsed.
-pub(crate) fn try_session_ids_for_project(
-    state_dir: &Path,
-    project: &str,
-) -> anyhow::Result<std::collections::HashSet<String>> {
-    Ok(filter::ids_visible(
-        &list_sessions_strict(state_dir)?,
-        project,
-        None,
-    ))
-}
-
 /// Update a session's `last_activity` to now. No-op (returns `Ok`) if the
 /// session doesn't exist or isn't open — a dangling `task.session` reference
 /// (deleted session file) must never fail the task mutation that triggered
@@ -470,8 +457,26 @@ pub(crate) fn start_session_as(
         StartDecision::Replace => {
             let existing = open_sessions_strict(state_dir, project)?;
             let mut abandoned = Vec::with_capacity(existing.len());
+            // One strict read of the task store serves every abandoned session (#3479). With no
+            // session to abandon, the store is not read.
+            let mut tasks = if existing.is_empty() {
+                Vec::new()
+            } else {
+                super::read_tasks(state_dir, super::UnreadablePolicy::Fail)?
+            };
             for session in existing {
-                abandoned.push(abandon_session(state_dir, session)?);
+                let (own, rest): (Vec<Task>, Vec<Task>) = tasks
+                    .into_iter()
+                    .partition(|t| t.session.as_deref() == Some(session.id.as_str()));
+                tasks = rest;
+                let id = session.id.to_owned();
+                let done = abandoned.len();
+                abandoned.push(abandon_session(state_dir, session, own).with_context(|| {
+                    format!(
+                        "cannot abandon session '{id}'; {done} earlier session(s) are already \
+                         abandoned and no new session is started"
+                    )
+                })?);
             }
             let session = create_session(state_dir, request)?;
             Ok(StartOutcome::Replaced { session, abandoned })
@@ -542,128 +547,25 @@ fn try_tasks_in_session(state_dir: &Path, session_id: &str) -> anyhow::Result<Ve
 /// Abandon `session`: stamps `abandoned_at`, and for every one of its tasks
 /// that isn't already `done`, clears the `session` tag and appends an
 /// orphaning note. Already-`done` tasks keep their tag — a legitimate
-/// historical record. Caller must already hold the store lock. Returns the
+/// historical record. `tasks` are the tasks of `session`, from the caller's strict read. Caller
+/// must already hold the store lock. Returns the
 /// stamped session, so the caller doesn't re-read what was just written.
-fn abandon_session(state_dir: &Path, mut session: Session) -> anyhow::Result<Session> {
+fn abandon_session(
+    state_dir: &Path,
+    mut session: Session,
+    tasks: Vec<Task>,
+) -> anyhow::Result<Session> {
     let now = now_rfc3339();
-    session.abandoned_at = Some(now.clone());
-    save_session(state_dir, &session)?;
-
     let label = session.name.clone().unwrap_or_else(|| session.id.clone());
     let note = format!(
         "Orphaned: session '{label}' was abandoned (`session start --replace`) \
          before this task was finished."
     );
-    untag_unfinished(state_dir, &session.id, &now, &note)?;
+    // The stamp comes last, so a failed untag leaves the session open and a retry finds it.
+    untag_unfinished(state_dir, &session.id, tasks, &now, &note)?;
+    session.abandoned_at = Some(now);
+    save_session(state_dir, &session)?;
     Ok(session)
-}
-
-/// Clear the `session` tag from every task in `session_id` that is not `done`
-/// and append `note` to it. Caller must already hold the store lock. Returns
-/// the untagged tasks. Already-`done` tasks keep their tag as history.
-fn untag_unfinished(
-    state_dir: &Path,
-    session_id: &str,
-    now: &str,
-    note: &str,
-) -> anyhow::Result<Vec<Task>> {
-    let mut untagged = Vec::new();
-    for mut task in try_tasks_in_session(state_dir, session_id)?
-        .into_iter()
-        .filter(|t| t.state != TaskState::Done)
-    {
-        task.notes.push(TaskNote {
-            at: now.to_string(),
-            text: note.to_string(),
-        });
-        task.session = None;
-        task.updated_at = now.to_string();
-        super::save_task(state_dir, &task).with_context(|| {
-            format!(
-                "untagging task '{}' from session '{session_id}'; {} earlier task(s) are already untagged",
-                task.slug,
-                untagged.len()
-            )
-        })?;
-        untagged.push(task);
-    }
-    Ok(untagged)
-}
-
-/// The tasks that keep a session from finishing: every `open`, `wip`, or
-/// `waiting` task (#2416).
-#[must_use]
-fn unfinished_tasks(tasks: &[Task]) -> Vec<&Task> {
-    tasks
-        .iter()
-        .filter(|t| t.state != TaskState::Done)
-        .collect()
-}
-
-/// What [`finish_session`] did.
-#[derive(Debug, Clone)]
-pub(crate) struct FinishOutcome {
-    pub(crate) session: Session,
-    /// Tasks that were `done` when the session closed.
-    pub(crate) done: u64,
-    /// Tasks tagged to the session before it closed, abandoned ones included.
-    pub(crate) total: u64,
-    /// Tasks untagged because `abandon_open` was set.
-    pub(crate) abandoned: Vec<Task>,
-}
-
-fn unfinished_error(id: &str, unfinished: &[&Task]) -> anyhow::Error {
-    let list: String = unfinished
-        .iter()
-        .map(|t| format!("\n  {} {} {}", t.state.as_str(), t.slug, t.title))
-        .collect();
-    anyhow::anyhow!(
-        "session '{session}' has {n} unfinished task(s):{list}\nFinish them with `llmenv task done \
-         <slug>`, drop one with `llmenv task clear <slug>`, or pass --abandon-open to untag \
-         them and finish the session anyway.",
-        session = id,
-        n = unfinished.len()
-    )
-}
-
-/// Finish an open session by id: stamps `finished_at`. A session with an
-/// `open`, `wip`, or `waiting` task is not finished (#2416), so it is refused
-/// unless `abandon_open` untags those tasks first.
-///
-/// # Errors
-/// Errors if `id` doesn't resolve to an existing, currently-open session, or if
-/// the session has unfinished tasks and `abandon_open` is false.
-pub(crate) fn finish_session(
-    state_dir: &Path,
-    id: &str,
-    abandon_open: bool,
-) -> anyhow::Result<FinishOutcome> {
-    super::with_store_lock(state_dir, || {
-        let mut session = load_existing_session(state_dir, id)?;
-        if !session.is_open() {
-            anyhow::bail!("session '{id}' is already closed");
-        }
-        let tasks = try_tasks_in_session(state_dir, &session.id)?;
-        let unfinished = unfinished_tasks(&tasks);
-        if !unfinished.is_empty() && !abandon_open {
-            return Err(unfinished_error(id, &unfinished));
-        }
-        let now = now_rfc3339();
-        let note = format!(
-            "Dropped: session '{}' finished (`session finish --abandon-open`) before this task \
-             was finished.",
-            session.id
-        );
-        let abandoned = untag_unfinished(state_dir, &session.id, &now, &note)?;
-        session.finished_at = Some(now);
-        save_session(state_dir, &session)?;
-        Ok(FinishOutcome {
-            session,
-            done: (tasks.len() - unfinished.len()) as u64,
-            total: tasks.len() as u64,
-            abandoned,
-        })
-    })
 }
 
 /// Change the resume context of an open session and bump its activity time.
@@ -1776,6 +1678,54 @@ mod tests {
         assert_eq!(reloaded_done.session, Some(first.id));
     }
 
+    /// One read of the task store serves every abandoned session: each session's own tasks are
+    /// untagged, and a task of another project keeps its tag (#3479).
+    #[test]
+    fn start_session_replace_untags_the_tasks_of_each_abandoned_session_only() {
+        let dir = TempDir::new().expect("test");
+        let start = |name: &str, project: &str, decision| match start_session(
+            dir.path(),
+            Some(name),
+            None,
+            project,
+            decision,
+        )
+        .expect("test")
+        {
+            StartOutcome::Created(s) => s.id,
+            other => panic!("expected Created, got {other:?}"),
+        };
+        let one = start("one", PROJECT_A, StartDecision::Auto);
+        let two = start("two", PROJECT_A, StartDecision::New);
+        let other = start("other", PROJECT_B, StartDecision::Auto);
+        let add = |title: &str, session: &str| {
+            add_task_for_session(dir.path(), title, ParentSpec::Detached, session)
+                .expect("test")
+                .slug
+        };
+        let (a, b, c) = (add("A", &one), add("B", &two), add("C", &other));
+
+        let StartOutcome::Replaced { abandoned, .. } = start_session(
+            dir.path(),
+            Some("three"),
+            None,
+            PROJECT_A,
+            StartDecision::Replace,
+        )
+        .expect("test") else {
+            panic!("expected Replaced");
+        };
+        assert_eq!(abandoned.len(), 2);
+        for slug in [&a, &b] {
+            let task = load_task(dir.path(), slug).expect("test");
+            assert!(task.session.is_none(), "{slug} kept its tag");
+            assert!(task.notes[0].text.contains("Orphaned"), "{slug}");
+        }
+        let kept = load_task(dir.path(), &c).expect("test");
+        assert_eq!(kept.session.as_deref(), Some(other.as_str()));
+        assert!(kept.notes.is_empty());
+    }
+
     #[test]
     fn start_session_new_creates_alongside_existing_open_session() {
         let dir = TempDir::new().expect("test");
@@ -2141,7 +2091,11 @@ mod tests {
         start_session(dir.path(), Some("b"), None, PROJECT_A, StartDecision::New).expect("test");
         start_session(dir.path(), Some("c"), None, PROJECT_B, StartDecision::Auto).expect("test");
 
-        let ids = try_session_ids_for_project(dir.path(), PROJECT_A).expect("test");
+        let ids = filter::ids_visible(
+            &list_sessions_strict(dir.path()).expect("test"),
+            PROJECT_A,
+            None,
+        );
         assert_eq!(
             ids.len(),
             2,

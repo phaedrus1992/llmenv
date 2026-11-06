@@ -25,6 +25,8 @@ pub(crate) mod ownership;
 pub(crate) mod progress;
 pub(crate) use note::note_task;
 pub(crate) use resolve::TaskTarget;
+mod store_lock;
+pub(crate) use store_lock::with_store_lock;
 pub(crate) mod project;
 pub(crate) mod relation;
 mod reminder_store;
@@ -136,28 +138,6 @@ pub(crate) fn tasks_dir(state_dir: &Path) -> PathBuf {
 
 fn task_path(state_dir: &Path, slug: &str) -> PathBuf {
     tasks_dir(state_dir).join(format!("{slug}.json"))
-}
-
-/// Run `f` while holding an exclusive lock on the whole task store, so
-/// concurrent `llmenv task` invocations (e.g. from multiple Claude Code
-/// sessions on the same project) serialize their read-modify-write cycles
-/// instead of racing on the same file. Blocks until the lock is acquired.
-fn with_store_lock<T>(
-    state_dir: &Path,
-    f: impl FnOnce() -> anyhow::Result<T>,
-) -> anyhow::Result<T> {
-    let dir = tasks_dir(state_dir);
-    crate::paths::create_dir_owner_only(&dir)?;
-    let mut open_options = std::fs::OpenOptions::new();
-    open_options.create(true).truncate(false).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        open_options.mode(0o600);
-    }
-    let lock_file = crate::paths::refuse_symlink(&mut open_options).open(dir.join(".lock"))?;
-    lock_file.lock()?;
-    f()
 }
 
 /// Current RFC3339 timestamp (UTC).
@@ -815,9 +795,8 @@ pub(crate) fn start_task<'a>(
 
 /// Bump the `last_activity` of the session a task is tagged to, if any — so a
 /// session with active `add`/`start`/`done`/`note` traffic reads as "recent"
-/// in `session ls` and the `session start` checkpoint. Called outside
-/// `with_store_lock` (`touch_last_activity` takes the lock itself), *after*
-/// the task mutation has already been committed. Best-effort by design: a
+/// in `session ls` and the `session start` checkpoint. Called *after* the
+/// task mutation has already been committed. Best-effort by design: a
 /// failure to bump the timestamp (pure display bookkeeping) must never turn
 /// an already-persisted task change into a reported error — log and move on.
 fn touch_task_session(state_dir: &Path, task: &Task) {
@@ -1423,16 +1402,16 @@ fn tasks_visible_to(caller: Option<&str>, stored: &Stored) -> anyhow::Result<Vec
 /// project, and the conservative default is to never surface a task we
 /// can't attribute.
 ///
-/// # Errors
-/// Returns an error if a session file is corrupt or the sessions dir cannot be read. A tolerant
-/// read would drop that session's tasks without a word (#2665). The caller reports the error.
+/// `sessions` comes from the caller's strict read: a tolerant read would drop the tasks of a
+/// corrupt session file without a word (#2665). The caller can then use the same read again
+/// (#3479).
 pub(crate) fn filter_tasks_for_project(
-    state_dir: &Path,
+    sessions: &[session::Session],
     project: &str,
     tasks: Vec<Task>,
-) -> anyhow::Result<Vec<Task>> {
-    let session_ids = session::try_session_ids_for_project(state_dir, project)?;
-    Ok(session::filter::tasks_in_sessions(&tasks, &session_ids))
+) -> Vec<Task> {
+    let session_ids = session::filter::ids_visible(sessions, project, None);
+    session::filter::tasks_in_sessions(&tasks, &session_ids)
 }
 
 /// Resolve the "current" task for `task show --current`/`--next` (#1117):
@@ -3619,7 +3598,8 @@ mod tests {
         let no_session = t("legacy", TaskState::Open, None, None);
         let tasks = vec![in_project.clone(), other_session, no_session];
 
-        let kept = filter_tasks_for_project(dir.path(), "proj-a", tasks).expect("test");
+        let sessions = session::list_sessions_strict(dir.path()).expect("test");
+        let kept = filter_tasks_for_project(&sessions, "proj-a", tasks);
         assert_eq!(
             kept.iter().map(|x| x.slug.as_str()).collect::<Vec<_>>(),
             [in_project.slug.as_str()]
@@ -4359,7 +4339,8 @@ mod tests {
                     .filter(|t| t.session.as_deref().is_some_and(|s| a_id_set.contains(s)))
                     .count();
 
-                let result = filter_tasks_for_project(dir.path(), "proj-a", tasks).expect("test");
+                let sessions = session::list_sessions_strict(dir.path()).expect("test");
+                let result = filter_tasks_for_project(&sessions, "proj-a", tasks);
 
                 for t in &result {
                     // Subset: every returned task was in the input.

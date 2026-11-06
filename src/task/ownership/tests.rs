@@ -234,3 +234,41 @@ fn clearing_another_session_needs_its_own_id_as_the_flag_value() {
     assert!(ensure_session_is_ours("theirs", &caller, Some("theirs")).is_ok());
     assert!(ensure_session_is_ours("theirs", &caller, Some("mine")).is_err());
 }
+
+proptest::proptest! {
+    // Each case writes a session and a task file, so the case count stays low.
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(48))]
+
+    // The check against an oracle over every owner, caller, and override: a task is allowed when
+    // it has no session, when the caller owns it, or when --other-session names its owner. Only
+    // the override path gives a note, and the check never writes the store.
+    #[test]
+    fn the_check_matches_the_ownership_rule(
+        tag in proptest::option::of(proptest::sample::select(vec!["s-a", "s-b"])),
+        caller in proptest::option::of(proptest::sample::select(vec!["s-a", "s-b"])),
+        other in proptest::option::of(proptest::sample::select(vec!["s-a", "s-b"])),
+    ) {
+        let dir = TempDir::new().unwrap();
+        let (slug, _) = open_task_in_session(dir.path());
+        let mut task = load_task(dir.path(), &slug).unwrap();
+        task.session = tag.map(str::to_string);
+        save_task(dir.path(), &task).unwrap();
+        let path = crate::task::tasks_dir(dir.path()).join(format!("{slug}.json"));
+        let before = std::fs::read(&path).unwrap();
+        let caller = caller.map_or_else(
+            || Caller::Unidentified("no session".to_string()),
+            |id| Caller::Session(id.to_string()),
+        );
+        let got = ensure_task_is_ours(dir.path(), &slug, &caller, other);
+        let owns = tag.is_none() || matches!(&caller, Caller::Session(id) if Some(id.as_str()) == tag);
+        let overridden = !owns && tag.is_some() && other == tag;
+        match got {
+            Ok(note) => {
+                proptest::prop_assert!(owns || overridden, "allowed: {tag:?} {caller:?} {other:?}");
+                proptest::prop_assert_eq!(note.is_some(), overridden);
+            }
+            Err(e) => proptest::prop_assert!(!owns && !overridden, "refused: {e:#}"),
+        }
+        proptest::prop_assert_eq!(before, std::fs::read(&path).unwrap());
+    }
+}
