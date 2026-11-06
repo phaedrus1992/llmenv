@@ -31,12 +31,13 @@ pub(super) fn guard_tasks(
     crate::task::ownership::ensure_tasks_are_ours(state_dir, &inputs, &caller, other_session)
 }
 
-/// Refuse `clear --session <id>` when that session is not the caller's.
+/// Refuse `clear --session <id>` when that session is not the caller's. Returns the override
+/// note when `--other-session` was used.
 pub(super) fn guard_session(
     state_dir: &std::path::Path,
     id: &str,
     other_session: Option<&str>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<String>> {
     let caller = caller_session_for_task(state_dir)?;
     crate::task::ownership::ensure_session_is_ours(id, &caller, other_session)
 }
