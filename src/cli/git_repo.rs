@@ -17,7 +17,10 @@ pub(super) fn is_git_repo(dir: &Path) -> anyhow::Result<bool> {
     if output.status.success() {
         return Ok(true);
     }
-    if git::is_not_a_repo_message(&String::from_utf8_lossy(&output.stderr)) {
+    if git::is_outside_repo(
+        output.status.code(),
+        &String::from_utf8_lossy(&output.stderr),
+    ) {
         return Ok(false);
     }
     anyhow::bail!(

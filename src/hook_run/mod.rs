@@ -6,13 +6,15 @@
 //! one-line stderr warning and exit 0 — lifecycle hooks run on the agent's hot
 //! path and must never block it.
 
+mod name_check;
+use name_check::{validate_bundle, validate_tag};
 pub(crate) mod action;
 mod adaptive;
 pub(crate) mod agent_config;
 mod bundle_names;
 mod bundle_notice;
 mod dedup_snapshot;
-use dedup_snapshot::{dedup_snapshot_path, dedup_write_target};
+use dedup_snapshot::{dedup_snapshot_path, dedup_write_target, read_dedup_snapshot};
 pub(crate) mod cbm_index_guard;
 pub(crate) mod cd_guard;
 pub(crate) mod checkpoint;
@@ -62,6 +64,8 @@ pub(crate) mod shell_tool;
 pub(crate) mod slippage;
 mod slippage_read;
 pub(crate) mod stop_dedupe;
+#[cfg(test)]
+pub(crate) mod test_recall;
 mod timing;
 pub(crate) use cbm_index_cmd::index_result_path;
 use cbm_index_cmd::{
@@ -646,7 +650,10 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
     let claude_code_version = match crate::env_var::utf8_var("CLAUDE_CODE_VERSION") {
         Ok(version) => version.unwrap_or_default(),
         Err(e) => {
-            tracing::error!("{e:#}");
+            crate::agent_notice::record_logged(format!(
+                "llmenv: CLAUDE_CODE_VERSION is read as unset, so version checks such as the \
+                 resume notice use defaults: {e:#}"
+            ));
             String::new()
         }
     };
@@ -696,18 +703,20 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
     }
     // The resume fields are parsed before the notices are taken, because a wrong-type field
     // records a notice as it is read.
-    let resume_message = resume_cache::resume_notice(&hook_event_name, payload);
+    let resume_message = resume_cache::session_resume_notice(&hook_event_name, payload);
+    // A deny envelope replaces the whole output, so recalled memory is not sent (#3399).
+    if result.as_ref().is_ok_and(deny_drops_memory) {
+        crate::agent_notice::record_logged(
+            "llmenv: recalled memory was not shown, because the tool call was denied.",
+        );
+    }
     // Read after `run_inner`, so every output path below carries it to the agent (#2658).
-    let notice = crate::agent_notice::current();
+    let notice = crate::agent_notice::current_with_children();
     match result {
         Ok(text) => {
             // #318: deny envelope detected — write a proper deny JSON envelope
             // to stdout so the Claude Code engine blocks the tool call.
             if text.notes.starts_with("__DENY__:") {
-                if deny_drops_memory(&text) {
-                    // The deny envelope replaces the whole output, so this memory is not sent.
-                    tracing::error!("hook-run: memory text dropped for a deny envelope");
-                }
                 let reason = text.notes.trim_start_matches("__DENY__:");
                 let reason = match notice {
                     Some(notice) => format!("{notice}\n\n{reason}"),
@@ -911,11 +920,7 @@ fn resolve_pre_tool_decision(
             &state_dir,
         ),
         Err(e) => {
-            error!(
-                error = %e,
-                "failed to resolve state_dir; read_once/repeat_detect skipped for this call \
-                 and the task-tool redirect degraded to a deny"
-            );
+            crate::agent_notice::no_state_folder("read-once and repeat detection are skipped", &e);
             // The commit gate reads its state from the same directory, so it denies rather than
             // passing a commit it cannot check (#2630).
             if task_tracker_enabled
@@ -1072,7 +1077,7 @@ impl HookText {
 
 /// Whether a deny envelope would replace memory text that was computed in the same run.
 fn deny_drops_memory(text: &HookText) -> bool {
-    !text.memory.is_empty()
+    text.notes.starts_with("__DENY__:") && !text.memory.is_empty()
 }
 
 /// Puts the agent notice in front of the llmenv notes, with no empty separator.
@@ -1131,8 +1136,9 @@ fn run_inner(
     if records_locally(event)
         && let (Some(session_id), Ok(state_dir)) = (
             claude_session_id,
-            crate::paths::state_dir()
-                .inspect_err(|e| tracing::error!("no state dir, recall ledger skipped: {e}")),
+            crate::paths::state_dir().inspect_err(|e| {
+                crate::agent_notice::no_state_folder("the recall ledger is not updated", e);
+            }),
         )
     {
         adaptive::record_local(
@@ -1276,7 +1282,9 @@ fn run_inner(
                 session_state::unix_now(),
             ),
             (None, _) => tracing::debug!("post_model_switch has no session id, skipped"),
-            (_, Err(e)) => tracing::error!("no state dir, model switch not recorded: {e}"),
+            (_, Err(e)) => {
+                crate::agent_notice::no_state_folder("the model switch is not recorded", &e);
+            }
         }
         crate::trace::emit_trace_timing(crate::trace::HookTiming::new(t0, t_config));
         return Ok(HookText::default());
@@ -1684,10 +1692,12 @@ fn run_inner(
                     if let Err(e) =
                         crate::paths::write_owner_only_atomic(dedup_path, storage_chunk.as_bytes())
                     {
-                        tracing::error!(
-                            "session-end dedup snapshot not saved to {}, the next SessionEnd may store the chunk again: {e:#}",
+                        crate::agent_notice::record_logged(format!(
+                            "llmenv: the session-end duplicate record {} is not saved, so the \
+                             next session end can store the chunk again: {e:#}. Fix: check that \
+                             the state folder is writable.",
                             dedup_path.display()
-                        );
+                        ));
                     }
                 }
 
@@ -1702,9 +1712,7 @@ fn run_inner(
                 {
                     Some(Ok(dir)) => Some(dir),
                     Some(Err(e)) => {
-                        tracing::error!(
-                            "stop reminder skipped, the state directory is unavailable: {e}"
-                        );
+                        crate::agent_notice::no_state_folder("the task reminder is skipped", &e);
                         None
                     }
                     None => None,
@@ -1808,18 +1816,6 @@ fn recover_from_pipeline_error(
          returning it instead of silently dropping it"
     );
     Ok(HookText::from_notes(recovered))
-}
-
-/// The last stored SessionEnd chunk, or `None`. A missing file is the normal first run, so only
-/// another read error is logged.
-fn read_dedup_snapshot(path: &std::path::Path) -> Option<String> {
-    std::fs::read_to_string(path)
-        .inspect_err(|e| {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::error!("failed to read dedup cache {}: {e}", path.display());
-            }
-        })
-        .ok()
 }
 
 /// The agent notice for a hook run whose memory step failed.
@@ -2114,36 +2110,6 @@ fn apply_memory_config_defaults(
     chunk
 }
 
-/// Validate a tag to prevent query injection. Tags must be alphanumeric with
-/// hyphens and underscores only (same as bundle/scope naming).
-fn validate_tag(tag: &str) -> anyhow::Result<()> {
-    if tag.is_empty() {
-        return Err(anyhow::anyhow!("empty tag in recall query"));
-    }
-    if !crate::scope::matcher::is_valid_tag_charset(tag) {
-        return Err(anyhow::anyhow!(
-            "tag '{}' contains invalid characters (only alphanumeric, -, _ allowed)",
-            tag
-        ));
-    }
-    Ok(())
-}
-
-/// Validate a bundle name to prevent query injection. Bundle names follow the
-/// same character rules as tags: alphanumeric, hyphens, and underscores only.
-fn validate_bundle(bundle: &str) -> anyhow::Result<()> {
-    if bundle.is_empty() {
-        return Err(anyhow::anyhow!("empty bundle name in recall query"));
-    }
-    if !crate::scope::matcher::is_valid_tag_charset(bundle) {
-        return Err(anyhow::anyhow!(
-            "bundle '{}' contains invalid characters (only alphanumeric, -, _ allowed)",
-            bundle
-        ));
-    }
-    Ok(())
-}
-
 /// Where codebase-memory-mcp's index cache lives for `cm`/`state_dir`: the
 /// configured `index_path` override, or `state_dir/codebase-memory` by
 /// default. Single source of truth for both the spawned child's
@@ -2185,10 +2151,7 @@ fn adaptive_state_dir(
 ) -> Option<std::path::PathBuf> {
     resolve()
         .inspect_err(|e| {
-            crate::agent_notice::record_logged(format!(
-                "llmenv: adaptive recall is off for this event, because the state folder cannot \
-                 be found: {e:#}. Fix: set HOME, or set LLMENV_STATE_DIR to a valid absolute path."
-            ));
+            crate::agent_notice::no_state_folder("adaptive recall is off for this event", e);
         })
         .ok()
 }
@@ -2213,7 +2176,7 @@ fn append_section(out: &mut String, section: &str) {
 #[allow(clippy::expect_used, clippy::expect_fun_call)]
 mod pipeline_recovery_tests {
     use super::{
-        HookEvent, HookText, deny_drops_memory, join_notes, join_precomputed, read_dedup_snapshot,
+        HookEvent, HookText, deny_drops_memory, join_notes, join_precomputed,
         recover_from_pipeline_error,
     };
     use proptest::strategy::Strategy as _;
@@ -2264,6 +2227,14 @@ mod pipeline_recovery_tests {
         assert!(!deny_drops_memory(&HookText::from_notes(
             "__DENY__:why".to_string()
         )));
+        let allowed = HookText {
+            memory: "recalled".to_string(),
+            notes: "a note".to_string(),
+        };
+        assert!(
+            !deny_drops_memory(&allowed),
+            "no deny, so nothing is dropped"
+        );
     }
 
     #[test]
@@ -2302,19 +2273,6 @@ mod pipeline_recovery_tests {
         assert_eq!(joined.as_deref(), Some("__DENY__:already read\nturn"));
     }
 
-    #[test]
-    fn the_dedup_snapshot_reads_the_stored_chunk_and_a_missing_file_as_none() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("session_end_dedup");
-        assert_eq!(
-            read_dedup_snapshot(&path),
-            None,
-            "a first run has no snapshot"
-        );
-        std::fs::write(&path, "stored chunk").expect("write snapshot");
-        assert_eq!(read_dedup_snapshot(&path).as_deref(), Some("stored chunk"));
-    }
-
     /// A slot value: absent, empty, plain text, or a deny marker.
     fn slot() -> impl proptest::strategy::Strategy<Value = Option<String>> {
         proptest::prop_oneof![
@@ -2348,48 +2306,7 @@ mod pipeline_recovery_tests {
 }
 
 #[cfg(test)]
-mod write_hook_line_tests {
-    use super::write_hook_line;
-    use std::io::{Error, ErrorKind, Write};
-
-    /// A writer that fails every write with the given kind.
-    struct Failing(ErrorKind);
-
-    impl Write for Failing {
-        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-            Err(Error::from(self.0))
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn empty_output_writes_nothing_and_reports_nothing() {
-        let mut buf = Vec::new();
-        assert!(write_hook_line(&mut buf, "").is_none());
-        assert!(buf.is_empty());
-    }
-
-    #[test]
-    fn output_is_written_as_one_line() {
-        let mut buf = Vec::new();
-        assert!(write_hook_line(&mut buf, "context").is_none());
-        assert_eq!(buf, b"context\n");
-    }
-
-    #[test]
-    fn a_closed_pipe_is_not_reported() {
-        assert!(write_hook_line(&mut Failing(ErrorKind::BrokenPipe), "x").is_none());
-    }
-
-    #[test]
-    fn any_other_write_error_is_reported() {
-        let kind =
-            write_hook_line(&mut Failing(ErrorKind::PermissionDenied), "x").map(|e| e.kind());
-        assert_eq!(kind, Some(ErrorKind::PermissionDenied));
-    }
-}
+mod write_hook_line_tests;
 
 /// Fire-and-forget: registers `project_root` with codebase-memory-mcp's
 /// index + background auto-watch (#365). Mirrors `post_session_consolidation`'s
@@ -2457,6 +2374,17 @@ fn trigger_index_with(
     let checkpoint = begin_index_checkpoint(state_dir, &inputs, exe.is_some());
     // The wrapper is used only with both a checkpoint and an executable (`index_job_command`).
     let wrapped = uses_wrapper(checkpoint.as_deref(), exe.as_deref());
+    if !wrapped {
+        let cause = if exe.is_none() {
+            "llmenv cannot find its own program"
+        } else {
+            "the job has no checkpoint"
+        };
+        crate::agent_notice::record_logged(format!(
+            "llmenv: the code index job runs without its wrapper, because {cause}, so a failure \
+             of the indexer is not reported. Fix: run `llmenv doctor` to check the state folder."
+        ));
+    }
     let mut cmd = index_job_command(checkpoint.as_deref(), exe, || {
         index_command(
             &program,
@@ -2582,7 +2510,10 @@ fn maybe_start_consolidation(
                 drop(spawn());
             }
         }
-        Err(e) => tracing::error!("consolidation: cannot read merged memory entries: {e:#}"),
+        Err(e) => crate::agent_notice::record_logged(format!(
+            "llmenv: memory consolidation is skipped, because the memory settings cannot be \
+             read: {e:#}. Fix: run `llmenv validate`."
+        )),
     }
 }
 
@@ -3268,7 +3199,8 @@ mod tests {
             &config,
             &serde_json::Value::Null,
         );
-        let tracker_only = crate::task::stop_hook_reminder(state_dir.path(), None);
+        let tracker_only =
+            crate::task::stop_hook_reminder(&crate::task::Stored::read(state_dir.path()), None);
         assert!(
             !tracker_only.is_empty(),
             "fixture must produce tracker text, or this proves nothing"
@@ -3323,7 +3255,8 @@ mod tests {
         .expect("test");
         crate::task::start_task(state_dir.path(), &task.slug, false).expect("test");
         let text = resolve_stop_reminder(state_dir.path(), Some("s1"), &config, &question);
-        let tracker_only = crate::task::stop_hook_reminder(state_dir.path(), None);
+        let tracker_only =
+            crate::task::stop_hook_reminder(&crate::task::Stored::read(state_dir.path()), None);
         assert!(
             !tracker_only.is_empty(),
             "the fixture must produce tracker text"
@@ -5207,7 +5140,7 @@ mod tests {
         let body = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
-            "result": { "content": [{ "type": "text", "text": "[t] one\n[t] two\nNo memories found." }] }
+            "result": { "content": [{ "type": "text", "text": crate::hook_run::test_recall::recall_json("[t] one\n[t] two\n[t] one") }] }
         });
         Mock::given(method("POST"))
             .and(path("/"))

@@ -45,8 +45,8 @@ pub(crate) fn create_refusing_symlink(path: &std::path::Path) -> std::io::Result
     .open(path)
 }
 
-/// File name used for SessionEnd dedup across hook run and memory CLI.
-/// Shared between `hook_run` and `memory` modules — must not drift.
+/// File name of the SessionEnd dedup snapshot of `hook_run`. `memory diff` keeps its own
+/// snapshot, so it cannot overwrite this one (#3421).
 pub(crate) const HOOK_STORE_CHUNK: &str = "hook_store_chunk";
 
 /// Keeps a readable directory entry. An unreadable one is logged with its directory and

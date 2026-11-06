@@ -373,7 +373,9 @@ pub(crate) fn spawner_state_dir() -> Option<PathBuf> {
         return None;
     }
     crate::paths::state_dir()
-        .inspect_err(|e| tracing::error!("spawned job has no state dir, so no checkpoint: {e:#}"))
+        .inspect_err(|e| {
+            crate::agent_notice::no_state_folder("a detached job runs with no checkpoint", e);
+        })
         .ok()
 }
 
@@ -404,9 +406,11 @@ pub(crate) fn begin(
             }
             Err(_) if !earlier_path.exists() => {}
             // A count that restarts at 1 hides an indexer that always fails.
-            Err(e) => {
-                tracing::error!("earlier index checkpoint unreadable, attempts restart: {e:#}")
-            }
+            Err(e) => crate::agent_notice::record_logged(format!(
+                "llmenv: the earlier code index checkpoint {} cannot be read, so its attempt count \
+                 restarts at 1: {e:#}. Fix: remove the file.",
+                earlier_path.display()
+            )),
         }
     }
     write(state_dir, &checkpoint)
@@ -418,6 +422,10 @@ pub(crate) fn begin(
         .flatten()
 }
 
+mod describe;
+pub(crate) use describe::describe;
+#[cfg(test)]
+use describe::format_age;
 mod inputs;
 mod unrunnable;
 pub(crate) use inputs::{InputsError, inputs_or_checkpoint};
@@ -425,45 +433,25 @@ use unrunnable::{drop_unrunnable, unrunnable_reason};
 
 /// Delete the checkpoint of a job that finished, or that cannot succeed on a retry. A job that
 /// failed in a way a later run may fix leaves its file. Fail-soft.
+///
+/// A checkpoint that stays makes the next session run the finished job again, and later report
+/// that it gave up, so a failed removal is a notice (#3465).
 pub(crate) fn finish(path: Option<&Path>) {
     if let Some(path) = path
         && let Err(e) = complete(path)
     {
-        tracing::error!("{e:#}");
+        crate::agent_notice::record_logged(format!(
+            "llmenv: a background job finished, but its checkpoint stays, so a later session can \
+             run it again: {e:#}. Fix: remove {}.",
+            path.display()
+        ));
     }
 }
 
-/// The kind, inputs, and session of each readable checkpoint, for the tests of the spawners.
 #[cfg(test)]
-pub(crate) fn checkpoint_entries_for_test(
-    state_dir: &Path,
-) -> Vec<(JobKind, serde_json::Value, Option<String>)> {
-    list(state_dir)
-        .into_iter()
-        .filter_map(|e| match e {
-            Entry::Ready(_, c) => Some((c.kind, c.inputs, c.session_id)),
-            Entry::Unreadable(..) => None,
-        })
-        .collect()
-}
-
-/// Doctor's description of one checkpoint: kind, age, attempts, phase, and what to read.
-#[must_use]
-pub(crate) fn describe(checkpoint: &Checkpoint, now: u64, log: &Path) -> String {
-    let age = now.saturating_sub(checkpoint.started_at);
-    format!(
-        "{} started {} ago, {}/{MAX_ATTEMPTS} attempts, phase {}; log: {}",
-        checkpoint.kind.as_str(),
-        format_age(age),
-        checkpoint.attempts,
-        checkpoint.phase,
-        log.display()
-    )
-}
-
-fn format_age(secs: u64) -> String {
-    humantime::format_duration(std::time::Duration::from_secs(secs)).to_string()
-}
+mod test_support;
+#[cfg(test)]
+pub(crate) use test_support::checkpoint_entries_for_test;
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test code")]

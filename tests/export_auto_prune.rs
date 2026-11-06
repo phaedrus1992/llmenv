@@ -56,7 +56,9 @@ fn export_keeps_the_prune_summary_out_of_stdout() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(body_string_contains("icm_memory_recall"))
-            .respond_with(reply("--- old-1 ---\n  importance: low\n  weight: 0.1\n"))
+            .respond_with(reply(
+                r#"[{"id":"old-1","topic":"t","summary":"s","importance":"low","weight":0.1}]"#,
+            ))
             .mount(&server)
             .await;
         Mock::given(method("POST"))

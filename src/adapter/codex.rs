@@ -589,23 +589,7 @@ fn render_hooks(manifest: &MergedManifest) -> serde_json::Map<String, serde_json
         std::collections::BTreeMap::new();
 
     for hook in &manifest.capabilities.hooks {
-        if !SUPPORTED_HOOK_EVENTS.contains(&hook.event.as_str()) {
-            eprintln!(
-                "warning: Codex has no '{}' lifecycle event — skipping this hook. \
-                 Supported events: {}. Move it to a claude_code-only bundle to \
-                 silence this warning.",
-                hook.event,
-                SUPPORTED_HOOK_EVENTS.join(", ")
-            );
-            continue;
-        }
-        if matches!(hook.handler.kind, crate::config::HookHandlerKind::McpTool) {
-            eprintln!(
-                "warning: Codex hooks run commands only, so the mcp_tool hook on '{}' \
-                 (tool '{}') is skipped. Use a command hook instead.",
-                hook.event,
-                hook.handler.tool.as_deref().unwrap_or("<unnamed>")
-            );
+        if !super::hook_support::engine_can_run_hook("codex", SUPPORTED_HOOK_EVENTS, hook) {
             continue;
         }
         let Some(command) = hook.handler.command.as_ref() else {
@@ -1314,6 +1298,7 @@ mod tests {
                 kind: crate::config::HookHandlerKind::Command,
                 command: Some(command.into()),
                 tool: None,
+                on_failure: None,
             },
             bundle_origin: None,
         }

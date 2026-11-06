@@ -96,6 +96,23 @@ pub(super) fn release_lock(lock_path: &Path) {
     }
 }
 
+/// The most bytes of a pidfile or a lockfile that llmenv reads. Each holds one pid.
+const MAX_PID_FILE_BYTES: u64 = 4 * 1024;
+
+/// Read a pidfile or a lockfile. A FIFO, a link, or a file past the cap is an error, and a missing
+/// file is `NotFound`, so a caller cannot take a planted file for an absent one (#3457).
+///
+/// # Errors
+/// The file is missing, is not a regular file, is too large, or is not UTF-8.
+pub(super) fn read_state_text(path: &Path) -> std::io::Result<String> {
+    llmenv_paths::read_text_bounded(path, MAX_PID_FILE_BYTES)?.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("{} is missing", path.display()),
+        )
+    })
+}
+
 /// Reads the pid recorded in the lockfile, if it holds one.
 ///
 /// An absent lock and a lock with no readable pid both give `Ok(None)`. `try_lock`
@@ -104,7 +121,7 @@ pub(super) fn release_lock(lock_path: &Path) {
 /// read failure is an error. Reading it as "no holder" would let a peer reclaim
 /// a lock whose holder may still be alive (#2587).
 pub(super) fn lock_holder(lock_path: &Path) -> anyhow::Result<Option<u32>> {
-    match std::fs::read_to_string(lock_path) {
+    match read_state_text(lock_path) {
         Ok(text) => Ok(text.trim().parse::<u32>().ok()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(anyhow::Error::new(e)
@@ -117,6 +134,18 @@ pub(super) fn lock_holder(lock_path: &Path) -> anyhow::Result<Option<u32>> {
 mod lock_notice_tests {
     use super::{lock_holder, release_lock, write_staging};
     use proptest::prelude::*;
+
+    /// A dangling link at the lock path is an error, not "no holder": a peer must not reclaim a
+    /// lock that it cannot read (#2587, #3457).
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_link_at_the_lock_path_is_an_error() {
+        let dir = tempfile::tempdir().expect("test");
+        let lock = dir.path().join("proxy.lock");
+        std::os::unix::fs::symlink(dir.path().join("gone"), &lock).expect("test");
+        let err = lock_holder(&lock).expect_err("a dangling link is not an empty lock");
+        assert!(format!("{err:#}").contains("link"), "{err:#}");
+    }
 
     /// #3204: a lockfile that cannot be removed is named for the agent. A directory at the
     /// lock path makes `remove_file` fail for a real reason.

@@ -249,7 +249,7 @@ pub(crate) fn seed_status_line(out: &std::path::Path) -> anyhow::Result<()> {
         // (never a TTY), so the default `auto` color resolution would
         // silently disable every `style:` widget override — the seeded
         // command must opt in explicitly rather than rely on TTY detection.
-        serde_json::json!({ "type": "command", "command": hook_command("statusline --color always") }),
+        serde_json::json!({ "type": "command", "command": hook_command("statusline --color always")? }),
     );
     apply_seeded_settings(out, &seeded)
 }

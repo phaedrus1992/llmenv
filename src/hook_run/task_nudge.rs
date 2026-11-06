@@ -37,7 +37,9 @@ use deny::{
 use notices::{needs_state, note_no_state, note_unlocked_skip};
 use state::{load, read_state, save, state_path};
 pub(crate) use stop::handle_stop;
-use stop::waiting_reminder;
+#[cfg(test)]
+pub(crate) use stop::handle_stop_read;
+use stop::question_reminder;
 
 /// Skills that start a multi-step workflow, when `workflow_skills` is not set.
 const DEFAULT_WORKFLOW_SKILLS: [&str; 5] = [
@@ -81,6 +83,10 @@ struct NudgeState {
     /// Turn ends since the last Stop reminder for a task in progress with tasks queued behind it.
     #[serde(default)]
     stop_quiet_turns: u32,
+    /// The tasks of ownerless sessions that the question reminder already named in this
+    /// conversation (#3187).
+    #[serde(default)]
+    ownerless_question_reminded: Vec<String>,
 }
 
 /// The commands that register work, for the state of the project.
@@ -136,7 +142,7 @@ pub(crate) fn handle_post_tool_use(
     };
     let tracking = crate::task::tracking(state_dir, session_id);
     if tool == "AskUserQuestion" {
-        return waiting_reminder(&tracking);
+        return question_reminder(&tracking, session_id, state_dir);
     }
     let Some(path) = session_id.and_then(|id| state_path(state_dir, id)) else {
         if needs_state(tool) {

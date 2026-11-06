@@ -463,6 +463,8 @@ llmenv status mcps
 (added in v3.12.0) On the host that serves memory, `llmenv doctor` also reports the ICM server version.
 It warns below 0.10.60, where adaptive recall returns little, and below 0.10.64, where the ranking is weaker.
 (changed in v3.13.0) It also warns below 0.11.3, where recall cannot answer in JSON, so the tool-failure recall matches the memory summary only.
+(changed in v3.14.0) It also warns below 0.11.5, where JSON recall has no record ids, takes one query per call, and has no `icm_memory_related`. The fix line reads `Fix: upgrade icm to 0.11.5 or later`.
+When this host serves memory and `icm` is not on `PATH`, the warning names the fix: install icm 0.11.5 or later.
 
 ```bash
 llmenv doctor
@@ -676,6 +678,11 @@ When the first recalls take more than 1.5 seconds, the fanouts do not run, and t
 A distinctive word has four or more characters and is not a common error word such as "error" or "failed".
 ICM ranks the best of an unrelated set near the top score, so the score alone cannot tell a related memory from an unrelated one.
 
+(changed in v3.14.0) The hook reads each recall in the JSON form of icm 0.11.5 or later, and it remembers a sent memory by its ICM record id.
+Two memories with the same text and different ids are both sent.
+A session state from an older llmenv holds the hash of each sent text; the hook still skips those memories, and records their ids from then on.
+A recall reply that is not a JSON list of records counts as a failed recall call.
+
 (added in v3.13.0) `llmenv doctor` reports the failure rate of the last 200 recall calls in a `Memory recall:` section.
 See [`doctor`](commands.md#doctor).
 
@@ -691,6 +698,8 @@ To remove the pages of one project, run `icm_memory_forget_topic` with its `web-
 
 Consolidation runs from the `session_end` hook.
 It reads only the memories of the current project and stores each new rule under `llmenv-consolidation-<project>`.
+(changed in v3.14.0) It reads the JSON form of the ICM recall, so it needs icm 0.11.5 or later.
+When the reply is not a JSON list of records, the run stops, logs the reason with the fix, and tries again at the next session end.
 See [Post-session consolidation](configuration.md#post-session-consolidation).
 
 ### Session logging

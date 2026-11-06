@@ -5,7 +5,10 @@ fn memories(items: &[(&str, &str, &[&str])]) -> String {
     let list: Vec<serde_json::Value> = items
         .iter()
         .map(|(topic, summary, keywords)| {
-            json!({"topic": topic, "summary": summary, "keywords": keywords, "score": 1.0})
+            json!({
+                "id": format!("{topic}/{summary}"), "topic": topic, "summary": summary,
+                "keywords": keywords, "importance": "medium", "score": 1.0,
+            })
         })
         .collect();
     serde_json::Value::Array(list).to_string()
@@ -98,18 +101,21 @@ fn tool_failure_logs_when_the_error_cannot_be_recorded() {
         .enable_all()
         .build()
         .unwrap();
-    let logs = crate::test_log_capture::capture_logs(|| {
-        rt.block_on(async {
-            let server = server_with(&[]).await;
-            let f = fixture(&server);
-            // A directory where the ledger file belongs makes the read fail, not miss.
-            std::fs::create_dir_all(f._dir.path().join("recall_session/s1.json")).unwrap();
-            let payload = json!({"tool_name": "Bash", "error": "boom"});
-            let out = tool_failure(&ctx(&f, &payload)).await.unwrap().text();
-            assert!(out.is_empty(), "{out}");
-        });
+    rt.block_on(async {
+        let server = server_with(&[]).await;
+        let f = fixture(&server);
+        // A directory where the ledger file belongs makes the read fail, not miss.
+        std::fs::create_dir_all(f._dir.path().join("recall_session/s1.json")).unwrap();
+        let payload = json!({"tool_name": "Bash", "error": "boom"});
+        let out = tool_failure(&ctx(&f, &payload)).await.unwrap().text();
+        assert!(out.is_empty(), "{out}");
     });
-    assert!(logs.contains("error not recorded"), "{logs}");
+    // The agent notice is the observable result. A captured log is not: tracing caches the
+    // interest of a call site for the whole process, so a test that runs on another thread at the
+    // same time can hide the line from this thread's subscriber (#3394). `record_logged` writes
+    // the same text to the log; its own test covers that.
+    let notices = crate::agent_notice::current().unwrap_or_default();
+    assert!(notices.contains("error not recorded"), "{notices}");
 }
 
 #[tokio::test]

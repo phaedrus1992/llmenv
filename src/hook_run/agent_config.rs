@@ -138,7 +138,10 @@ fn booted_hash_in(config_dir: Option<&std::ffi::OsStr>) -> Option<String> {
     match crate::materialize::manifest::CacheManifest::read(Path::new(dir)) {
         Ok(manifest) => manifest.map(|m| m.content_hash),
         Err(e) => {
-            tracing::error!("cannot read the booted config manifest, config hash unknown: {e}");
+            crate::agent_notice::record_logged(format!(
+                "llmenv: cannot read the booted config manifest, so the session document shows \
+                 the config as unknown: {e}. Fix: run `llmenv regenerate`."
+            ));
             None
         }
     }
@@ -175,7 +178,7 @@ pub(crate) fn record_for_event(
         return None;
     };
     let state_dir = state_dir
-        .inspect_err(|e| tracing::error!("no state dir, agent config not written: {e}"))
+        .inspect_err(|e| crate::agent_notice::no_state_folder("the agent config is not written", e))
         .ok()?;
     let hash = booted_hash_in(std::env::var_os("CLAUDE_CONFIG_DIR").as_deref());
     let facts = StartFacts::from_payload(
@@ -778,21 +781,4 @@ mod tests {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "test code")]
-mod reset_notice_tests {
-    use super::{DIR, write_session_start};
-
-    #[test]
-    fn a_session_start_over_a_corrupt_config_tells_the_agent() {
-        let dir = tempfile::tempdir().unwrap();
-        let config_dir = dir.path().join(DIR);
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(config_dir.join("s1.json"), "not json").unwrap();
-        write_session_start(dir.path(), "s1", super::tests::doc());
-        let text = crate::agent_notice::current().unwrap_or_default();
-        assert!(
-            text.contains("agent config could not be read"),
-            "got: {text}"
-        );
-    }
-}
+mod reset_notice_tests;

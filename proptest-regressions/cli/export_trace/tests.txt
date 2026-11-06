@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 75f44d229cb65ebf7fb23db62234cab2a7e6d7de1d6718f74a46ea77d4ab4785 # shrinks to raw_scopes = [(0, 0, 2), (0, 0, 0), (0, 0, 4)], whens = [0, 12, 0, 0], extra = 4, chosen = 1, tag = None

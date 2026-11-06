@@ -175,10 +175,14 @@ pub(crate) fn handle_pre_tool_use(
                 return String::new();
             }
             match read_stats(state_dir, session_id) {
-                Ok(stats) if stats.paths.contains(&path_key(path)) => String::new(),
-                Ok(_) => format!(
-                    "__DENY__:`{path}` already exists and you haven't read it in this session.                      Write replaces the whole file, so read it first and confirm what you'd be                      discarding — this fires most often after a compaction dropped the earlier read."
-                ),
+                Ok(stats) => {
+                    let (key, unresolved) = resolved_key(path);
+                    if stats.paths.contains(&key) {
+                        String::new()
+                    } else {
+                        unread_write_deny(path, unresolved.as_deref())
+                    }
+                }
                 // The stats log is the cause, so the reason names it and not the file to write.
                 Err(problem) => {
                     format!("__DENY__:llmenv cannot confirm that you read `{path}`. {problem}")
@@ -197,17 +201,44 @@ pub(crate) fn handle_pre_tool_use(
 /// get the layer switched off. Falls back to the literal path when the file
 /// can't be resolved (it may not exist yet, which is the allowed case anyway).
 pub(super) fn path_key(path: &str) -> String {
-    // A literal path can differ from the canonical path of the same file, so a fallback can make a
-    // false deny. The debug log names the fallback when a run is traced (#3379).
-    std::fs::canonicalize(path)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|e| {
-            tracing::debug!(
-                path,
-                "slippage: cannot canonicalize, so the literal path is the key: {e}"
-            );
-            path.to_string()
-        })
+    let (key, unresolved) = resolved_key(path);
+    if let Some(e) = unresolved {
+        tracing::debug!(
+            path,
+            "slippage: cannot canonicalize, so the literal path is the key: {e}"
+        );
+    }
+    key
+}
+
+/// The key for `path`, and the reason when it cannot be resolved. A literal path can differ from
+/// the canonical path of the same file, so a fallback can make a false deny (#3379, #3389).
+fn resolved_key(path: &str) -> (String, Option<String>) {
+    match std::fs::canonicalize(path) {
+        Ok(p) => (p.to_string_lossy().into_owned(), None),
+        Err(e) => (path.to_string(), Some(e.to_string())),
+    }
+}
+
+/// The deny text for a Write to a file with no read record. When the path cannot be resolved,
+/// the text names that cause, because the read may be recorded under another form of the path.
+fn unread_write_deny(path: &str, unresolved: Option<&str>) -> String {
+    let base = format!(
+        "__DENY__:`{path}` already exists and you haven't read it in this session. Write replaces \
+         the whole file, so read it first and confirm what you'd be discarding. This fires most \
+         often after a compaction dropped the earlier read."
+    );
+    let Some(e) = unresolved else {
+        return base;
+    };
+    tracing::warn!(
+        path,
+        "slippage: Write denied for a path that cannot be resolved: {e}"
+    );
+    format!(
+        "{base} llmenv cannot resolve `{path}` ({e}), so it compared the path as written. If you \
+         read this file by another path, read it again by this path."
+    )
 }
 
 /// Persist `stats` for `session_id`, best-effort.

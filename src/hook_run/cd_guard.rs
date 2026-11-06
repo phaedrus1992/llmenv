@@ -98,7 +98,10 @@ fn command_ends_with_cd(command: &str) -> bool {
             .find(|words| !is_transparent(words))
             .is_some_and(|words| runs_cd_in_this_shell(words)),
         Err(NestingTooDeep) => {
-            tracing::error!("cd guard: command nests too deep to check for cd; no advisory");
+            crate::agent_notice::record_logged(
+                "llmenv: the cd check is off for this command, because it nests too deep to \
+                 check. Fix: none is needed; a flatter command gets the check.",
+            );
             false
         }
     }
@@ -224,6 +227,8 @@ mod tests {
     fn a_command_too_deep_to_split_gets_no_cd_advisory() {
         let nested = format!("{}cd /tmp{}", "$(".repeat(40), ")".repeat(40));
         assert!(!command_ends_with_cd(&nested));
+        let notice = crate::agent_notice::current().unwrap_or_default();
+        assert!(notice.contains("the cd check is off"), "{notice}");
     }
 
     #[test]

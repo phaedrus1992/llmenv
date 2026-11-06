@@ -19,8 +19,10 @@ fn validate_url_rejects_private_ips() {
 
 #[test]
 fn validate_url_accepts_public_ips() {
+    // IP literals only: a host name needs real DNS, which fails offline or on a slow resolver
+    // (#3428).
     assert!(validate("http://8.8.8.8:8080").is_ok());
-    assert!(validate("https://example.com:8080").is_ok());
+    assert!(validate("https://1.1.1.1:8080").is_ok());
 }
 
 #[test]
@@ -256,7 +258,10 @@ fn validate_url_rejects_domain_resolving_to_loopback() {
     // DNS-rebinding TOCTOU: a hostname that resolves to a blocked address must
     // be rejected at validation time, before any request is sent. localhost is
     // the always-available stand-in for an attacker-controlled rebind (#191).
-    assert!(validate("http://localhost:8080").is_err());
+    // localhost resolves from the hosts file, with no DNS server. The error must name the
+    // blocked address, so a resolver failure cannot pass this test (#3428).
+    let err = validate("http://localhost:8080").unwrap_err().to_string();
+    assert!(err.contains("not allowed (SSRF)"), "{err}");
 }
 
 #[test]
