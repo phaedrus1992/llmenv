@@ -405,3 +405,34 @@ fn deleting_a_task_with_no_session_is_refused_without_a_caller_session() {
         "a refused delete must leave the task"
     );
 }
+
+/// A change, as opposed to a delete, to a task with no session is allowed for a caller with no
+/// session, and the change is recorded on the task (#3586).
+#[test]
+fn update_of_a_task_with_no_session_is_allowed_for_a_caller_without_a_session() {
+    let dir = tmp();
+    let conv = session::EngineIdentity::from_session_id(Some("conv-me"));
+    handle_inner_as(
+        "TaskCreate",
+        Some(&json!({ "subject": "owner-less step" })),
+        dir.path(),
+        PROJECT,
+        &conv,
+    );
+    orphan(dir.path(), "owner-less-step");
+
+    let out = handle_inner_as(
+        "TaskUpdate",
+        Some(&json!({ "taskId": "owner-less-step", "status": "in_progress" })),
+        dir.path(),
+        PROJECT,
+        &session::EngineIdentity::default(),
+    );
+
+    assert!(out.contains("started 'owner-less-step'"), "{out}");
+    assert!(
+        task_file(dir.path(), "owner-less-step")
+            .contains("acted on a task with no session; caller: an unidentified caller"),
+        "the change must be on the task"
+    );
+}
