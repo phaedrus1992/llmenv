@@ -3523,7 +3523,7 @@ fn resolve_session_id(
         Err(e) => anyhow::bail!(
             "{}",
             e.ambiguity_message("pass an id explicitly")
-                .unwrap_or_default()
+                .unwrap_or_else(|| "more than one session is open".to_string())
         ),
     }
 }

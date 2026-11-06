@@ -43,7 +43,7 @@ pub(super) fn resolve_session_for_add(
             if !session.is_open() || session.project != project {
                 anyhow::bail!(
                     "session '{}' is not an open session of this project. Fix: run `llmenv task \
-                     session ls --current-project` to list them.",
+                     session ls` to list the open sessions.",
                     session.id
                 );
             }

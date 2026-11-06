@@ -48,6 +48,11 @@ pub(crate) fn caller_session(
         Ok(picked) if picked.may_take_tasks(owner.session_id.as_deref()) => {
             Caller::Session(picked.id)
         }
+        Ok(picked) if owner.session_id.is_none() => Caller::Unidentified(format!(
+            "the only open session '{}' belongs to another conversation, and this caller has no \
+             conversation id. Set CLAUDE_CODE_SESSION_ID",
+            picked.id
+        )),
         Ok(picked) => Caller::Unidentified(format!(
             "the only open session '{}' belongs to another conversation",
             picked.id
@@ -290,8 +295,8 @@ pub(super) fn check_child_parent(parent: &Task, session_id: &str) -> anyhow::Res
     }
     if parent.session.is_none() {
         anyhow::bail!(
-            "task '{}' has no session, so it cannot take a sub-task of this one. Fix: add the \
-             sub-task to a parent of a session.",
+            "task '{}' has no session, so it cannot take a sub-task of this one. Fix: pick a \
+             parent task of session '{session_id}'.",
             parent.slug
         );
     }

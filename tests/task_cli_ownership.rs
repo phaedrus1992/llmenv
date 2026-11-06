@@ -49,6 +49,45 @@ fn clear_with_other_session_notes_the_owning_session() {
     );
 }
 
+#[test]
+fn clear_note_lists_only_the_tasks_that_needed_the_override() {
+    let dir = TempDir::new().unwrap();
+    let run = |conv: &str, args: &[&str]| {
+        llmenv(dir.path())
+            .env("CLAUDE_CODE_SESSION_ID", conv)
+            .args(args)
+            .assert()
+            .success();
+    };
+    run("conv-old", &["task", "session", "start", "first"]);
+    run("conv-old", &["task", "add", "theirs"]);
+    run("conv-new", &["task", "session", "start", "second", "--new"]);
+    run("conv-new", &["task", "add", "mine"]);
+
+    run(
+        "conv-new",
+        &[
+            "task",
+            "clear",
+            "mine",
+            "theirs",
+            "--other-session",
+            "first",
+        ],
+    );
+
+    let shown = llmenv(dir.path())
+        .env("CLAUDE_CODE_SESSION_ID", "conv-old")
+        .args(["task", "session", "show", "first"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&shown.stdout);
+    assert!(
+        text.contains("Deleted tasks: theirs."),
+        "the note must list only the task that needed the override:\n{text}"
+    );
+}
+
 // --- #3480: the picker and the parent link respect ownership ---
 
 #[test]

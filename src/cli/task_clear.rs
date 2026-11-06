@@ -7,7 +7,10 @@ use anyhow::Context;
 
 use super::caller_session_for_task;
 use super::task_guard::{guard_session, guard_tasks};
-use crate::task::ownership::Caller;
+use crate::task::ownership::{Caller, OverrideNote};
+
+/// A task that passed the ownership check, with the override note when the check needed one.
+type Checked = (String, Option<OverrideNote>);
 
 /// `llmenv task clear`, run by the caller under the store lock, so the checked tasks are the
 /// tasks that are deleted (#3478).
@@ -34,14 +37,11 @@ pub(super) fn run(
         Some(named) => clear_session(state_dir, named, &mut deleted),
         None => clear_ids(state_dir, &checked, &mut deleted),
     };
-    let note = match (other_session, caller, session) {
-        (Some(owner), Some(caller), Some(named)) if !deleted.is_empty() => {
-            let used = owner == named && !matches!(&caller, Caller::Session(id) if id == named);
-            used.then(|| record_override(state_dir, owner, &caller.describe(), &deleted))
-        }
-        (Some(owner), Some(caller), None) if !deleted.is_empty() => {
-            let used = checked.iter().any(|(_, note)| note.is_some());
-            used.then(|| record_override(state_dir, owner, &caller.describe(), &deleted))
+    let note = match (other_session, caller.as_ref()) {
+        (Some(owner), Some(caller)) => {
+            let covered = overridden_slugs(session, owner, caller, &checked, &deleted);
+            (!covered.is_empty())
+                .then(|| record_override(state_dir, owner, &caller.describe(), &covered))
         }
         _ => None,
     };
@@ -54,19 +54,65 @@ pub(super) fn run(
     }
 }
 
-/// Deletes every task of `named`, and records the deleted slugs.
+/// The deleted slugs that the `--other-session` override covered. A task that the caller owned,
+/// or that never needed the override, stays out of the note.
+fn overridden_slugs(
+    session: Option<&str>,
+    owner: &str,
+    caller: &Caller,
+    checked: &[Checked],
+    deleted: &[String],
+) -> Vec<String> {
+    match session {
+        Some(named) => {
+            let used = owner == named && !matches!(caller, Caller::Session(id) if id == named);
+            if used { deleted.to_vec() } else { Vec::new() }
+        }
+        None => deleted
+            .iter()
+            .filter(|slug| checked.iter().any(|(c, note)| c == *slug && note.is_some()))
+            .cloned()
+            .collect(),
+    }
+}
+
+/// Deletes every task of `named`, and records the deleted slugs. A failure stops the delete, so
+/// the slugs that left the store are found by reading it again.
 fn clear_session(state_dir: &Path, named: &str, deleted: &mut Vec<String>) -> anyhow::Result<()> {
-    let cleared = crate::task::session::delete_tasks_in_session(state_dir, named)?;
-    println!("Cleared {} task(s) from session '{named}'", cleared.len());
-    deleted.extend(cleared.into_iter().map(|task| task.slug));
-    Ok(())
+    let before = session_slugs(state_dir, named)?;
+    match crate::task::session::delete_tasks_in_session(state_dir, named) {
+        Ok(cleared) => {
+            println!("Cleared {} task(s) from session '{named}'", cleared.len());
+            deleted.extend(cleared.into_iter().map(|task| task.slug));
+            Ok(())
+        }
+        Err(error) => match session_slugs(state_dir, named) {
+            Ok(remaining) => {
+                deleted.extend(before.into_iter().filter(|slug| !remaining.contains(slug)));
+                Err(error)
+            }
+            Err(read) => Err(error.context(format!(
+                "some tasks may be deleted, and the store could not be read to note them: {read:#}"
+            ))),
+        },
+    }
+}
+
+/// The slugs of the tasks tagged to session `named`.
+fn session_slugs(state_dir: &Path, named: &str) -> anyhow::Result<Vec<String>> {
+    Ok(crate::task::list_tasks_strict(state_dir)?
+        .as_slice()
+        .iter()
+        .filter(|task| task.session.as_deref() == Some(named))
+        .map(|task| task.slug.clone())
+        .collect())
 }
 
 /// Deletes the checked tasks one by one. A failure stops the loop, and the error names the
 /// tasks that are already gone.
 fn clear_ids(
     state_dir: &Path,
-    checked: &[(String, Option<crate::task::ownership::OverrideNote>)],
+    checked: &[Checked],
     deleted: &mut Vec<String>,
 ) -> anyhow::Result<()> {
     for (slug, _) in checked {
