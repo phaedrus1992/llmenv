@@ -13,6 +13,18 @@ impl Session {
     pub(crate) fn visible_to(&self, caller: Option<&str>) -> bool {
         owner_visible(self.owner_session(), caller)
     }
+
+    /// Whether a new task from `caller` may join this session (#3480). A session with no owner
+    /// takes any task. An owned session takes a task only from its owner, so a caller with no
+    /// conversation id is refused. [`Session::visible_to`] allows that caller, which suits a
+    /// reminder but not a write.
+    #[must_use]
+    pub(crate) fn may_take_tasks(&self, caller: Option<&str>) -> bool {
+        match self.owner_session() {
+            None => true,
+            Some(owner) => caller == Some(owner),
+        }
+    }
 }
 
 /// Whether a session with `owner` is visible to `caller`. A session with no owner is visible to

@@ -4,9 +4,9 @@
 
 use std::path::Path;
 
-use super::Task;
 use super::resolve::{check_identifier, resolve_in};
-use super::session::{self, EngineIdentity};
+use super::session::{self, EngineIdentity, Session};
+use super::{Task, TaskState};
 
 /// Which session the calling conversation works in.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,7 +43,16 @@ pub(crate) fn caller_session(
     // Strict read: a corrupt session file must not hide the open session that owns this caller (#2665).
     let open = session::open_sessions_strict(state_dir, project)?;
     Ok(match session::pick_open_session(open, owner) {
-        Ok(picked) if picked.visible_to(owner.session_id.as_deref()) => Caller::Session(picked.id),
+        // A caller with no conversation id is not the owner of an owned session. The write
+        // guards must refuse it, as `task add` does (#3480).
+        Ok(picked) if picked.may_take_tasks(owner.session_id.as_deref()) => {
+            Caller::Session(picked.id)
+        }
+        Ok(picked) if owner.session_id.is_none() => Caller::Unidentified(format!(
+            "the only open session '{}' belongs to another conversation, and this caller has no \
+             conversation id. Set CLAUDE_CODE_SESSION_ID",
+            picked.id
+        )),
         Ok(picked) => Caller::Unidentified(format!(
             "the only open session '{}' belongs to another conversation",
             picked.id
@@ -200,6 +209,112 @@ pub(crate) fn ensure_session_is_ours(
             &format!("this command acts on session '{session_id}'"),
         ),
     }
+}
+
+/// Refuses a `task add --session <id>` that names a session of another conversation, unless
+/// `--other-session` names that session's owner (#3486). A session with no recorded owner, or one
+/// that the caller owns, takes the task without a check.
+///
+/// Returns `true` when the override was used, so the caller can record it.
+///
+/// # Errors
+/// Errors if the session store cannot be read, or if the session belongs to another
+/// conversation and `other_session` does not name its owner.
+pub(crate) fn ensure_named_session_takes_tasks(
+    state_dir: &Path,
+    session_id: &str,
+    owner: &EngineIdentity,
+    other_session: Option<&str>,
+) -> anyhow::Result<bool> {
+    let sessions = session::list_sessions_strict(state_dir)?;
+    // A missing or closed session is reported by the add resolver, with its own message.
+    let Some(target) = sessions.iter().find(|s| s.id == session_id) else {
+        return Ok(false);
+    };
+    if target.may_take_tasks(owner.session_id.as_deref()) {
+        return Ok(false);
+    }
+    match other_session {
+        Some(named) if named == session_id => Ok(true),
+        _ => anyhow::bail!(foreign_session_message(session_id)),
+    }
+}
+
+/// Refuses a task that would join `session` when the session belongs to another conversation,
+/// or when the caller has no conversation id (#3480). The picker of a new task calls this, so
+/// a sole open session of another conversation cannot take the task by default.
+///
+/// # Errors
+/// Errors when [`Session::may_take_tasks`] refuses the caller.
+pub(crate) fn check_takes_tasks(session: &Session, owner: &EngineIdentity) -> anyhow::Result<()> {
+    if session.may_take_tasks(owner.session_id.as_deref()) {
+        return Ok(());
+    }
+    anyhow::bail!(foreign_session_message(&session.id))
+}
+
+/// Refuses a parent link from a task of `child_session` to a parent in another session (#3480).
+/// Starting a child promotes each open ancestor to `wip`, so a cross-session link would change
+/// the other session's task. A parent with no session is allowed, as before sessions existed.
+///
+/// # Errors
+/// Errors when `parent` belongs to a session other than `child_session`.
+pub(crate) fn ensure_parent_in_session(
+    parent: Option<&Task>,
+    parent_slug: &str,
+    child_session: Option<&str>,
+) -> anyhow::Result<()> {
+    // The caller resolved the name just before this check, so a missing task is a bug in the
+    // caller. It must not pass as "no session to compare".
+    let Some(parent) = parent else {
+        anyhow::bail!(
+            "parent task '{parent_slug}' was not found. Fix: run `llmenv task ls --all` to list the \
+             task names, then pass one of them."
+        );
+    };
+    match parent.session.as_deref() {
+        None => Ok(()),
+        Some(session) if Some(session) == child_session => Ok(()),
+        Some(session) => anyhow::bail!(
+            "task '{}' belongs to session '{session}', so it cannot be the parent of a task in \
+             another session. Link a task of the same session, or none.",
+            parent.slug
+        ),
+    }
+}
+
+/// A sub-task needs an unfinished parent in its own session.
+pub(super) fn check_child_parent(parent: &Task, session_id: &str) -> anyhow::Result<()> {
+    if parent.state == TaskState::Done {
+        anyhow::bail!(
+            "task '{}' is done, so it cannot take a sub-task. Reopen it with `llmenv task start \
+             --reopen {}`.",
+            parent.slug,
+            parent.slug
+        );
+    }
+    if parent.session.is_none() {
+        anyhow::bail!(
+            "task '{}' has no session, so it cannot take a sub-task of this one. Fix: pick a \
+             parent task of session '{session_id}'.",
+            parent.slug
+        );
+    }
+    if parent.session.as_deref() != Some(session_id) {
+        anyhow::bail!(
+            "task '{}' belongs to another session, so it cannot take a sub-task of this one",
+            parent.slug
+        );
+    }
+    Ok(())
+}
+
+/// The refusal text for a session of another conversation. It names the one override.
+fn foreign_session_message(session_id: &str) -> String {
+    format!(
+        "session '{session_id}' belongs to another conversation, so a task cannot be added to it. \
+         To add it anyway, pass the owning session's id as --other-session <SESSION_ID>."
+    )
 }
 
 fn refuse_unless_caller(owner: &str, caller: &Caller, what: &str) -> anyhow::Result<()> {

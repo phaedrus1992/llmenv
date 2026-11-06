@@ -23,6 +23,7 @@ pub(crate) use edit::edit_task;
 mod note;
 pub(crate) mod ownership;
 pub(crate) mod progress;
+mod session_choice;
 pub(crate) use note::note_task;
 pub(crate) use resolve::TaskTarget;
 mod store_lock;
@@ -522,7 +523,7 @@ pub(crate) fn add_task_with(
     session: SessionChoice<'_>,
     project: &str,
 ) -> anyhow::Result<Task> {
-    let resolved_session = resolve_session_for_add(state_dir, session, project)?;
+    let resolved_session = session_choice::resolve_session_for_add(state_dir, session, project)?;
     let task = add_task_for_session_with(state_dir, new, parent, &resolved_session)?;
     touch_task_session(state_dir, &task);
     Ok(task)
@@ -589,7 +590,14 @@ fn add_task_for_session_with(
             resolve::resolve_in(state_dir, name, all)
         };
         let explicit_parent = match parent {
-            ParentSpec::Explicit(p) => Some(resolve(p)?),
+            ParentSpec::Explicit(p) => {
+                let slug = resolve(p)?;
+                let parent_task = all_tasks
+                    .as_ref()
+                    .and_then(|all| all.as_slice().iter().find(|t| t.slug == slug));
+                ownership::ensure_parent_in_session(parent_task, &slug, Some(session_id))?;
+                Some(slug)
+            }
             ParentSpec::Detached => None,
         };
         let (parent_slug, relation, parallel) = match new.placement {
@@ -597,7 +605,7 @@ fn add_task_for_session_with(
             Placement::Parallel => (explicit_parent, Relation::Queued, true),
             Placement::Child(p) => {
                 let slug = resolve(p)?;
-                check_child_parent(&load_task(state_dir, &slug)?, session_id)?;
+                ownership::check_child_parent(&load_task(state_dir, &slug)?, session_id)?;
                 (Some(slug), Relation::Child, false)
             }
         };
@@ -632,75 +640,6 @@ fn add_task_for_session_with(
         save_task(state_dir, &task)?;
         Ok(task)
     })
-}
-
-/// A sub-task needs an unfinished parent in its own session.
-fn check_child_parent(parent: &Task, session_id: &str) -> anyhow::Result<()> {
-    if parent.state == TaskState::Done {
-        anyhow::bail!(
-            "task '{}' is done, so it cannot take a sub-task. Reopen it with `llmenv task start \
-             --reopen {}`.",
-            parent.slug,
-            parent.slug
-        );
-    }
-    if parent.session.as_deref() != Some(session_id) {
-        anyhow::bail!(
-            "task '{}' belongs to another session, so it cannot take a sub-task of this one",
-            parent.slug
-        );
-    }
-    Ok(())
-}
-
-/// Resolve which session a `task add` belongs to, per the mandatory-sessions
-/// rules. An explicit id is honored as long as it names an existing, open
-/// session (any project — an explicit id is a deliberate choice). Otherwise
-/// it resolves through [`session::pick_open_session`].
-fn resolve_session_for_add(
-    state_dir: &Path,
-    session: SessionChoice<'_>,
-    project: &str,
-) -> anyhow::Result<String> {
-    let owner = match session {
-        SessionChoice::Named(id) => {
-            // Strict `list_sessions_strict`: an unreadable store or a corrupt session
-            // file must error out here rather than be misread as "no
-            // such session" (#1112, #2665) — this is the same resolution step `TaskCreate`
-            // (via `add_task`) runs through, so the hook redirect's own unreadable-
-            // store guard in `task_tools::create` would otherwise be undone here.
-            let exists_open = session::list_sessions_strict(state_dir)?
-                .into_iter()
-                .any(|s| s.id == id && s.is_open());
-            if !exists_open {
-                anyhow::bail!("session '{id}' does not exist or is not open");
-            }
-            return Ok(id.to_string());
-        }
-        SessionChoice::Resolve(owner) => owner,
-        SessionChoice::Checked(session) => {
-            if !session.is_open() || session.project != project {
-                anyhow::bail!(
-                    "session '{}' is not an open session of this project",
-                    session.id
-                );
-            }
-            return Ok(session.id.clone());
-        }
-    };
-    let open = session::open_sessions_strict(state_dir, project)?;
-    match session::pick_open_session(open, owner) {
-        Ok(session) => Ok(session.id),
-        Err(session::PickError::NoneOpen) => anyhow::bail!(
-            "no open session for this project — run `llmenv task session start` first, \
-             or pass --session <id>"
-        ),
-        Err(e) => anyhow::bail!(
-            "{}",
-            e.ambiguity_message("pass --session <id>, or see `llmenv task session ls`")
-                .unwrap_or_default()
-        ),
-    }
 }
 
 /// Claim a task, transitioning it to `wip`.
