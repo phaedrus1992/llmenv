@@ -55,15 +55,17 @@ export default function RetroMidiPlayer(): ReactNode {
     if (!enabled) return undefined;
 
     let cancelled = false;
-    let player: MidiPlayer.Player | undefined;
     // A holder object, because the lint rule refuses a reassigned variable in an async function.
-    const audio: { context?: AudioContext } = {};
+    const live: {
+      context?: AudioContext;
+      player?: MidiPlayer.Player;
+      removeListeners?: () => void;
+    } = {};
     const activeNotes = new Map<string, ReturnType<Instrument['play']>>();
-    let removeInteractionListeners: (() => void) | undefined;
 
     async function setup(): Promise<void> {
       const audioContext = new AudioContext();
-      audio.context = audioContext;
+      live.context = audioContext;
       const [melodic, percussion] = await Promise.all([
         Soundfont.instrument(audioContext, MELODIC_INSTRUMENT),
         Soundfont.instrument(audioContext, PERCUSSION_INSTRUMENT),
@@ -77,7 +79,8 @@ export default function RetroMidiPlayer(): ReactNode {
       const arrayBuffer = await response.arrayBuffer();
       if (cancelled) return;
 
-      player = new MidiPlayer.Player();
+      const player = new MidiPlayer.Player();
+      live.player = player;
       player.on('midiEvent', (event: MidiPlayer.Event) => {
         if (cancelled || !event.noteName) return;
         const instrument = event.channel === PERCUSSION_CHANNEL ? percussion : melodic;
@@ -96,13 +99,13 @@ export default function RetroMidiPlayer(): ReactNode {
       // page — try immediately, and fall back to starting on first click/key.
       const tryPlay = () => {
         void audioContext.resume().then(() => {
-          if (!cancelled && player && !player.isPlaying()) player.play();
+          if (!cancelled && !player.isPlaying()) player.play();
         });
       };
       tryPlay();
       document.addEventListener('pointerdown', tryPlay, { once: true });
       document.addEventListener('keydown', tryPlay, { once: true });
-      removeInteractionListeners = () => {
+      live.removeListeners = () => {
         document.removeEventListener('pointerdown', tryPlay);
         document.removeEventListener('keydown', tryPlay);
       };
@@ -114,9 +117,9 @@ export default function RetroMidiPlayer(): ReactNode {
 
     return () => {
       cancelled = true;
-      removeInteractionListeners?.();
-      player?.stop();
-      void audio.context?.close();
+      live.removeListeners?.();
+      live.player?.stop();
+      void live.context?.close();
     };
   }, [enabled, midiUrl]);
 
