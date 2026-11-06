@@ -125,6 +125,26 @@ fn create(
     else {
         return deny("TaskCreate carried no `subject`; use `llmenv task add \"<title>\"`.");
     };
+    // The pick, the ownership check, and the add share one store lock. Otherwise an owner change
+    // between the pick and the add goes unseen (#3589). `add_task` re-enters this lock.
+    task::with_store_lock(state_dir, || {
+        Ok(create_under_lock(input, state_dir, subject, project, owner))
+    })
+    .unwrap_or_else(|e| {
+        deny(&format!(
+            "cannot lock the llmenv task store ({e:#}); track this with `llmenv task` manually."
+        ))
+    })
+}
+
+/// The pick and the add of [`create`], run under the store lock that [`create`] holds.
+fn create_under_lock(
+    input: Option<&Value>,
+    state_dir: &Path,
+    subject: &str,
+    project: &str,
+    owner: &session::EngineIdentity,
+) -> String {
     let session = match ensure_session(state_dir, project, owner) {
         Ok(session) => session,
         Err(msg) => return msg,
