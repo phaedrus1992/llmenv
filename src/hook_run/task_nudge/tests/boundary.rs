@@ -98,7 +98,7 @@ fn a_stalled_turn_end_is_reminded_first_and_then_every_n_turn_ends() {
         stop_nudge_every: Some(3),
         ..TaskTracker::default()
     };
-    let turn_end = || handle_stop(&tracker, &serde_json::json!({}), Some("s1"), dir.path());
+    let turn_end = || handle_stop_read(&tracker, &serde_json::json!({}), Some("s1"), dir.path());
     let reminded = |text: &str| text.contains("'step-one' is in progress");
     assert!(
         reminded(&turn_end()),
@@ -124,7 +124,7 @@ fn a_stall_that_ends_restarts_the_stop_throttle() {
         stop_nudge_every: Some(10),
         ..TaskTracker::default()
     };
-    let turn_end = || handle_stop(&tracker, &serde_json::json!({}), Some("s1"), dir.path());
+    let turn_end = || handle_stop_read(&tracker, &serde_json::json!({}), Some("s1"), dir.path());
     assert!(turn_end().contains("'step-one' is in progress"));
     assert_eq!(turn_end(), "", "the throttle holds inside its window");
     // The wip task ends, and a turn end sees no stall, so the throttle restarts. Step three stays
@@ -141,7 +141,7 @@ fn a_wip_task_with_an_empty_queue_gets_no_stop_reminder() {
     let session = open_session(dir.path());
     let one = add(dir.path(), &session, "Step one");
     start_task(dir.path(), &one, false).unwrap();
-    let text = handle_stop(
+    let text = handle_stop_read(
         &TaskTracker::default(),
         &serde_json::json!({}),
         Some("s1"),
@@ -179,7 +179,7 @@ proptest! {
         };
         let fired = (0..turns)
             .filter(|_| {
-                !handle_stop(&tracker, &serde_json::json!({}), Some("s1"), dir.path()).is_empty()
+                !handle_stop_read(&tracker, &serde_json::json!({}), Some("s1"), dir.path()).is_empty()
             })
             .count();
         prop_assert_eq!(fired, turns.div_ceil(every as usize));

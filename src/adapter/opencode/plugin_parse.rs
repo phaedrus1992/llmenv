@@ -64,6 +64,7 @@ pub(super) fn parse_plugin_hooks(
                         kind: crate::config::HookHandlerKind::Command,
                         command: Some(resolved),
                         tool: None,
+                        on_failure: None,
                     },
                     bundle_origin: None,
                 });

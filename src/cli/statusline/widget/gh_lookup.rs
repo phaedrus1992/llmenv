@@ -34,6 +34,11 @@ pub(super) const GH_NO_PR_SIGNS: [&str; 3] = [
     "not a git repository",
 ];
 
+/// The exit code of `gh pr view` for each no-PR answer. Measured on gh 2.103.3: all three signs
+/// exit 1, gh's code for a plain error. A no-PR sign with another exit, or a kill by a signal, is
+/// a failure, because the text alone does not prove the answer (#3442).
+const GH_NO_PR_EXIT: i32 = 1;
+
 /// The `gh` errors that mean the login is missing or expired. Lowercase, like the no-PR list,
 /// because the same case rule applies to both.
 pub(super) const GH_LOGIN_SIGNS: [&str; 3] =
@@ -48,9 +53,17 @@ pub(super) fn classify_gh_exit(status: std::process::ExitStatus, stderr: &str) -
     let detail = llmenv_git::git_failure_detail(stderr.as_bytes(), &[], status);
     let first_line = detail.lines().next().unwrap_or("");
     let lowered = stderr.to_ascii_lowercase();
-    if GH_NO_PR_SIGNS.iter().any(|sign| lowered.contains(sign)) {
-        tracing::debug!("gh pr view exited {status}, read as no PR: {first_line}");
-        return Ok(None);
+    if GH_NO_PR_SIGNS.iter().any(|s| lowered.contains(s)) {
+        if status.code() == Some(GH_NO_PR_EXIT) {
+            tracing::debug!("gh pr view exited {status}, read as no PR: {first_line}");
+            return Ok(None);
+        }
+        tracing::error!(
+            "gh pr view said there is no PR but exited {status}, not exit {GH_NO_PR_EXIT}, so it \
+             is a failure: {first_line}. Fix: check `gh --version`; the exit was measured on gh \
+             2.103.3."
+        );
+        return Err(GhFailure::Failed);
     }
     if GH_LOGIN_SIGNS.iter().any(|sign| lowered.contains(sign)) {
         tracing::error!("gh pr view: gh is not logged in ({status}): {first_line}");
@@ -114,6 +127,34 @@ mod tests {
         ) {
             let text = format!("{prefix}{}{suffix}", capitalized(GH_NO_PR_SIGNS[pick]));
             proptest::prop_assert_eq!(classify_gh_exit(exit_one(), &text), Ok(None));
+        }
+
+        /// A no-PR sign with any other exit, or with a kill by a signal, is a failure (#3442).
+        #[test]
+        fn a_no_pr_sign_with_another_exit_is_a_failure(
+            pick in 0..GH_NO_PR_SIGNS.len(),
+            code in 2i32..256,
+            signal in 1i32..32,
+        ) {
+            let text = GH_NO_PR_SIGNS[pick];
+            let by_code = std::process::ExitStatus::from_raw(code << 8);
+            proptest::prop_assert_eq!(classify_gh_exit(by_code, text), Err(GhFailure::Failed));
+            let by_signal = std::process::ExitStatus::from_raw(signal);
+            proptest::prop_assert_eq!(classify_gh_exit(by_signal, text), Err(GhFailure::Failed));
+        }
+
+        /// The whole rule for any exit and any text: no PR exactly when the exit is 1 and the
+        /// lowered text holds a no-PR sign.
+        #[test]
+        fn no_pr_needs_exit_one_and_a_sign_for_any_exit_and_text(
+            raw in proptest::prop_oneof![proptest::strategy::Strategy::prop_map(0i32..256, |c| c << 8), 1i32..32],
+            text in "\\PC{0,80}|.{0,20}(no pull requests found|not a git repository).{0,20}",
+        ) {
+            let status = std::process::ExitStatus::from_raw(raw);
+            let lowered = text.to_ascii_lowercase();
+            let expected = status.code() == Some(1)
+                && GH_NO_PR_SIGNS.iter().any(|s| lowered.contains(s));
+            proptest::prop_assert_eq!(classify_gh_exit(status, &text) == Ok(None), expected);
         }
 
         #[test]

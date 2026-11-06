@@ -1,11 +1,12 @@
 //! Doctor check for the program name in llmenv's hook commands (#3049, #3081, #3119). The hook
-//! commands name the running llmenv binary. The bare name is used only when that binary's path is
-//! not UTF-8 or the OS cannot report it. A path in a build or temp folder, or a removed binary,
-//! is also reported, because a hook then runs a file that anyone who can write there controls.
+//! commands name the llmenv binary that rendered them. A path that cannot name llmenv fails the
+//! export (#3060). A path in a build or temp folder, or a removed binary, is reported, because a
+//! hook then runs a file that anyone who can write there controls. The check reads the program
+//! from the rendered `settings.json`, so an old render that names another binary is found (#3392).
 
 use std::path::{Path, PathBuf};
 
-use crate::adapter::hook_program::{fallback_message, program_name};
+use crate::adapter::hook_program::llmenv_program;
 
 /// The suffix Linux appends to the path of a binary that was removed or replaced.
 const DELETED_SUFFIX: &str = " (deleted)";
@@ -17,6 +18,8 @@ const FIXED_TEMP_ROOTS: [&str; 2] = ["/tmp", "/var/tmp"];
 /// A reason the binary that hook commands name is not safe to keep.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HookPathRisk {
+    /// The path is not absolute, so `PATH` or the working folder picks the program.
+    NotAbsolute,
     /// The path has a `target` folder in it, which is where cargo builds.
     BuildFolder,
     /// The path is under a temp folder.
@@ -25,30 +28,101 @@ enum HookPathRisk {
     Deleted,
 }
 
-/// Print the hook-command check for the running binary.
-pub(super) fn run_doctor_hook_command(use_color: bool) {
+/// The rendered Claude Code `settings.json` of this shell, as far as doctor can read it.
+#[derive(Debug, PartialEq)]
+enum Rendered {
+    /// The parsed file.
+    Settings(serde_json::Value),
+    /// This shell has no rendered file, for the reason given. Nothing is wrong.
+    Absent(String),
+    /// The file or its folder cannot be read, for the reason given.
+    Unreadable(String),
+}
+
+/// Print the hook-command check: the programs that the rendered Claude Code hooks name, then the
+/// running binary, which the next export writes into every engine's hook commands.
+pub(super) fn run_doctor_hook_command(use_color: bool, cache_dir: &Path) {
     let pass = super::super::doctor_pass(use_color);
     let warn = super::super::doctor_warning(use_color);
-    let exe = std::env::current_exe();
-    let for_check = match &exe {
-        Ok(path) => Ok(path.clone()),
-        Err(e) => Err(std::io::Error::new(e.kind(), e.to_string())),
-    };
-    match (program_name(for_check), exe) {
-        (Ok(_), Ok(path)) => report_hook_path(&path, &pass, &warn),
-        (Ok(_), Err(e)) => eprintln!(
-            "{warn} llmenv could not read its own path, so the hook commands are not checked: {e}. \
-             Fix: run llmenv from an installed binary."
+    let info = super::super::doctor_info(use_color);
+    if let Err(e) = llmenv_program() {
+        eprintln!("{warn} {e:#}");
+    }
+    let config_dir = crate::env_var::utf8_var("CLAUDE_CONFIG_DIR").map_err(|e| format!("{e:#}"));
+    match rendered_source(&claude_root(cache_dir), config_dir) {
+        Rendered::Settings(settings) => report_rendered(&settings, &pass, &warn, &info),
+        Rendered::Absent(reason) => {
+            eprintln!("{info} {reason}, so no rendered hook command is checked");
+        }
+        Rendered::Unreadable(reason) => eprintln!(
+            "{warn} {reason}, so the rendered hook commands are not checked. Fix: run `llmenv \
+             regenerate` in this shell"
         ),
-        (Err(reason), _) => eprintln!("{warn} {}", fallback_message(&reason)),
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        report_hook_path(
+            &exe,
+            "The running llmenv, which the next export writes, is",
+            &pass,
+            &warn,
+        );
     }
 }
 
-/// Print one warning per risk of `exe`, or one pass line when there is none.
-fn report_hook_path(exe: &Path, pass: &str, warn: &str) {
+fn claude_root(cache_dir: &Path) -> PathBuf {
+    use crate::adapter::AgentAdapter;
+    cache_dir.join(crate::adapter::claude_code::ClaudeCodeAdapter.name())
+}
+
+/// Check each program that the rendered hook commands name, and name each llmenv hook command
+/// whose program cannot be read.
+fn report_rendered(settings: &serde_json::Value, pass: &str, warn: &str, info: &str) {
+    let found = super::hook_programs::rendered_programs(settings);
+    for program in &found.programs {
+        report_hook_path(program, "Rendered hook commands name", pass, warn);
+    }
+    for command in &found.unreadable {
+        eprintln!(
+            "{warn} The program of the rendered hook command {command:?} cannot be read, so it is \
+             not checked. Fix: run `llmenv regenerate`"
+        );
+    }
+    if found.programs.is_empty() && found.unreadable.is_empty() {
+        eprintln!("{info} The rendered settings.json has no llmenv hook command");
+    }
+}
+
+/// Find and read the rendered `settings.json` under `adapter_root` that `config_dir`, the value
+/// of `CLAUDE_CONFIG_DIR`, names.
+fn rendered_source(adapter_root: &Path, config_dir: Result<Option<String>, String>) -> Rendered {
+    let config_dir = match config_dir {
+        Ok(value) => value,
+        Err(e) => return Rendered::Unreadable(format!("CLAUDE_CONFIG_DIR cannot be read: {e}")),
+    };
+    let Some(dir) = super::rendered_claude_dir(adapter_root, config_dir) else {
+        return Rendered::Absent(format!(
+            "CLAUDE_CONFIG_DIR does not name an llmenv folder under {}",
+            adapter_root.display()
+        ));
+    };
+    let path = dir.join("settings.json");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text).map_or_else(
+            |e| Rendered::Unreadable(format!("{} is not valid JSON ({e})", path.display())),
+            Rendered::Settings,
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Rendered::Absent(format!("{} does not exist yet", path.display()))
+        }
+        Err(e) => Rendered::Unreadable(format!("{} cannot be read ({e})", path.display())),
+    }
+}
+
+/// Print one warning per risk of `exe`, or one pass line, after `what`, when there is none.
+fn report_hook_path(exe: &Path, what: &str, pass: &str, warn: &str) {
     let risks = hook_path_risks(exe, &temp_roots());
     if risks.is_empty() {
-        eprintln!("{pass} Hook commands name llmenv by the path of the running binary");
+        eprintln!("{pass} {what} {}", exe.display());
         return;
     }
     for risk in risks {
@@ -59,6 +133,10 @@ fn report_hook_path(exe: &Path, pass: &str, warn: &str) {
 /// The risks of `exe`, the path that hook commands name. `temp_roots` are the temp folders to
 /// test against. The result is in the order Deleted, BuildFolder, TempFolder, and has no repeats.
 fn hook_path_risks(exe: &Path, temp_roots: &[PathBuf]) -> Vec<HookPathRisk> {
+    // A relative path names a different file in each folder, so it is not resolved here.
+    if !exe.is_absolute() {
+        return vec![HookPathRisk::NotAbsolute];
+    }
     let mut risks = Vec::new();
     let text = exe.to_string_lossy();
     let path = match text.strip_suffix(DELETED_SUFFIX) {
@@ -135,6 +213,11 @@ fn temp_roots() -> Vec<PathBuf> {
 fn risk_message(risk: HookPathRisk, exe: &Path) -> String {
     let path = exe.display();
     match risk {
+        HookPathRisk::NotAbsolute => format!(
+            "Hook commands name {path}, which is not an absolute path, so PATH or the working \
+             folder picks the program that runs. Fix: run `llmenv regenerate` with the installed \
+             llmenv"
+        ),
         HookPathRisk::BuildFolder => format!(
             "Hook commands name {path}, which is in a cargo target folder. A later build replaces \
              it, and anyone who can write that folder controls every hook. Fix: install llmenv, \
@@ -166,17 +249,68 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_binary_path_is_reported_with_the_fix() {
-        let reason = program_name(Err(std::io::Error::other("no path")))
-            .expect_err("an unknown path is reported");
-        let message = fallback_message(&reason);
-        assert!(message.contains("Fix: move the llmenv binary"), "{message}");
+    fn a_bare_or_relative_program_is_a_not_absolute_risk_alone() {
+        for program in ["llmenv", "./target/debug/llmenv", "bin/llmenv"] {
+            assert_eq!(
+                hook_path_risks(Path::new(program), &roots()),
+                vec![HookPathRisk::NotAbsolute],
+                "{program}"
+            );
+        }
+        let text = risk_message(HookPathRisk::NotAbsolute, Path::new("llmenv"));
+        assert!(text.contains("Fix: run `llmenv regenerate`"), "{text}");
+    }
+
+    /// A temp tree with a rendered Claude Code folder, and the CLAUDE_CONFIG_DIR value for it.
+    fn rendered_tree(settings: Option<&str>) -> (tempfile::TempDir, PathBuf, String) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("claude-code");
+        let dir = root.join("3").join("abc");
+        std::fs::create_dir_all(&dir).expect("create the rendered folder");
+        if let Some(text) = settings {
+            std::fs::write(dir.join("settings.json"), text).expect("write settings.json");
+        }
+        let config_dir = dir.display().to_string();
+        (tmp, root, config_dir)
     }
 
     #[test]
-    fn a_known_binary_path_is_not_reported() {
-        let exe = std::path::PathBuf::from("/opt/llmenv/bin/llmenv");
-        assert!(program_name(Ok(exe)).is_ok());
+    fn a_rendered_settings_file_is_read() {
+        let (_tmp, root, dir) = rendered_tree(Some(r#"{"hooks": {}}"#));
+        assert_eq!(
+            rendered_source(&root, Ok(Some(dir))),
+            Rendered::Settings(serde_json::json!({"hooks": {}}))
+        );
+    }
+
+    #[test]
+    fn no_llmenv_folder_and_no_file_yet_are_absent() {
+        let (_tmp, root, dir) = rendered_tree(None);
+        assert!(matches!(
+            rendered_source(&root, Ok(None)),
+            Rendered::Absent(_)
+        ));
+        assert!(matches!(
+            rendered_source(&root, Ok(Some("/elsewhere".to_string()))),
+            Rendered::Absent(r) if r.contains("does not name an llmenv folder")
+        ));
+        assert!(matches!(
+            rendered_source(&root, Ok(Some(dir))),
+            Rendered::Absent(r) if r.contains("does not exist yet")
+        ));
+    }
+
+    #[test]
+    fn a_broken_file_and_an_unreadable_variable_are_unreadable() {
+        let (_tmp, root, dir) = rendered_tree(Some("{not json"));
+        assert!(matches!(
+            rendered_source(&root, Ok(Some(dir))),
+            Rendered::Unreadable(r) if r.contains("is not valid JSON")
+        ));
+        assert!(matches!(
+            rendered_source(&root, Err("not UTF-8".to_string())),
+            Rendered::Unreadable(r) if r.contains("CLAUDE_CONFIG_DIR cannot be read: not UTF-8")
+        ));
     }
 
     #[test]

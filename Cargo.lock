@@ -1383,6 +1383,7 @@ dependencies = [
  "hyper-util",
  "insta",
  "jiff",
+ "llmenv",
  "llmenv-config",
  "llmenv-git",
  "llmenv-mcp",
@@ -1403,6 +1404,7 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "sha2",
+ "shell-words",
  "tempfile",
  "thiserror",
  "tokio",
@@ -1524,6 +1526,7 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "sha2",
+ "tempfile",
  "tracing",
 ]
 

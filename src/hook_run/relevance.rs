@@ -131,6 +131,7 @@ pub(crate) fn turn_query(signals: &TurnSignals<'_>) -> String {
 }
 
 /// The `[topic]` of one recall record.
+#[cfg(test)]
 pub(crate) fn record_topic(record: &str) -> Option<&str> {
     let (topic, _) = record.strip_prefix('[')?.split_once(']')?;
     (!topic.is_empty()).then_some(topic)

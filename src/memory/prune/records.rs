@@ -1,84 +1,51 @@
-//! The records of the non-compact `icm_memory_recall` output that prune reads.
+//! The records of the JSON `icm_memory_recall` reply that prune reads (#3368).
 
 use super::importance::Importance;
 
-/// A parsed memory record from the non-compact `icm_memory_recall` output.
+/// One record of a recall reply, as prune needs it.
 #[derive(Debug, Clone)]
 pub(super) struct MemoryRecord {
     pub(super) id: String,
     pub(super) importance: Importance,
 }
 
-/// The record headers in `text`, read or not. A header with no importance or weight is not a
-/// record that [`parse_recall_output`] returns, so prune reports the difference.
-pub(super) fn count_headers(text: &str) -> usize {
-    text.lines()
-        .filter_map(|line| line.strip_prefix("--- "))
-        .filter(|rest| rest.ends_with(" ---"))
-        .count()
+/// The records of a JSON recall reply, in icm's rank order.
+///
+/// # Errors
+/// The reply is not a JSON list of icm records. Prune forgets for good, so it reads nothing from
+/// a reply that it cannot read in full.
+pub(super) fn read_records(
+    body: &str,
+) -> Result<Vec<MemoryRecord>, crate::memory::recall_json::RecallJsonError> {
+    Ok(crate::memory::recall_json::parse(body)?
+        .into_iter()
+        .map(|r| MemoryRecord {
+            importance: Importance::from_str(&r.importance),
+            id: r.id,
+        })
+        .collect())
 }
 
-/// Parse the non-compact `icm_memory_recall` output into structured records.
-///
-/// The format (per ICM's `format_memory_output` with compact=false):
-///
-/// ```text
-/// --- <id> ---
-///   topic: ...
-///   importance: ...
-///   weight: ...
-///   summary: ...
-///   keywords: ...
-///   raw: ...
-///   score: ...
-/// ```
-pub(super) fn parse_recall_output(text: &str) -> Vec<MemoryRecord> {
-    let mut records = Vec::new();
-    let mut current_id: Option<String> = None;
-    let mut current_importance: Option<Importance> = None;
-    // `has_weight` guards against partial records: we only finalize a record
-    // once both importance and weight have been seen.
-    let mut has_weight = false;
-    let mut weight_seen = false;
+#[cfg(test)]
+mod tests {
+    use super::Importance;
+    use proptest::prelude::*;
 
-    // A record header starts at column 0, and the fields of a record are indented. Memory
-    // content is free text, so a line inside it must not forge a header: only an unindented
-    // header counts. The first `importance` and `weight` of a record win, so a later line in
-    // the summary cannot change them.
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = line.strip_prefix("--- ") {
-            // new record start: "--- <id> ---"
-            if let Some(id) = rest.strip_suffix(" ---") {
-                // Finalize previous record
-                if let (Some(id), Some(importance)) = (current_id.take(), current_importance.take())
-                    && has_weight
-                {
-                    records.push(MemoryRecord { id, importance });
-                }
-                has_weight = false;
-                weight_seen = false;
-                current_id = Some(id.to_string());
+    proptest! {
+        // Only a trimmed `medium` or `low` is forgotten. Any other text, such as `Medium` or
+        // `critical`, is kept, because prune forgets for good.
+        #[test]
+        fn only_medium_and_low_are_pruned(s in "\\PC{0,12}") {
+            let pruned = Importance::from_str(&s).should_prune();
+            prop_assert_eq!(pruned, matches!(s.trim(), "medium" | "low"));
+        }
+
+        #[test]
+        fn padding_a_known_level_does_not_change_it(pad in "[ \\t]{0,3}") {
+            for level in ["critical", "high", "medium", "low"] {
+                let padded = format!("{pad}{level}{pad}");
+                prop_assert_eq!(Importance::from_str(&padded), Importance::from_str(level));
             }
-        } else if let Some(rest) = trimmed.strip_prefix("importance:") {
-            if current_importance.is_none() {
-                current_importance = Some(Importance::from_str(rest));
-            }
-        } else if let Some(rest) = trimmed.strip_prefix("weight:")
-            && !weight_seen
-        {
-            weight_seen = true;
-            // `f64::from_str` also accepts `nan` and `inf`, which are not weights.
-            has_weight = rest.trim().parse::<f64>().is_ok_and(f64::is_finite);
         }
     }
-
-    // Finalize the last record
-    if let (Some(id), Some(importance)) = (current_id, current_importance)
-        && has_weight
-    {
-        records.push(MemoryRecord { id, importance });
-    }
-
-    records
 }

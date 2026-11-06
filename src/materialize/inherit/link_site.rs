@@ -21,9 +21,13 @@ pub(super) fn clear_link_site(link: &Path, target: &Path) -> anyhow::Result<bool
         if std::fs::read_link(link).is_ok_and(|dest| dest == target) {
             return Ok(false);
         }
-        std::fs::remove_file(link)
-            .with_context(|| format!("replacing stale link {}", link.display()))?;
-        return Ok(true);
+        match std::fs::remove_file(link) {
+            // A link that another process removed first is replaced, which is the goal.
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(e).with_context(|| format!("replacing stale link {}", link.display()));
+            }
+            _ => return Ok(true),
+        }
     }
     if file_type.is_dir() {
         let skipped = move_dir_newest_wins(link, target)?;

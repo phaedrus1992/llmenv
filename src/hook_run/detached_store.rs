@@ -45,7 +45,11 @@ pub fn run_icm_store(payload_json: &str, checkpoint: Option<&Path>) -> anyhow::R
         exit: i32::from(result.is_err()),
     });
     result.inspect_err(|e| {
-        tracing::error!("icm-store: detached store failed: {e}");
+        // The child runs alone, so the notice reaches the agent through the spool (#3398).
+        crate::agent_notice::record_logged(format!(
+            "llmenv: a memory was not stored in ICM: {e:#}. Fix: run `llmenv doctor` to check \
+             the memory server."
+        ));
     })
 }
 
@@ -90,7 +94,13 @@ fn run_icm_store_inner(args: serde_json::Value) -> anyhow::Result<()> {
         .enable_all()
         .build()?;
     let state_dir = crate::paths::state_dir()
-        .inspect_err(|e| tracing::error!("ICM store has no state dir, so it skips dedupe: {e:#}"))
+        .inspect_err(|e| {
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the memory store has no state folder, so it skips the duplicate check \
+                 and a memory can be stored twice: {e:#}. Fix: set HOME, or set \
+                 LLMENV_STATE_DIR to a valid absolute path."
+            ));
+        })
         .ok();
     rt.block_on(store_once(&client, state_dir.as_deref(), args))
 }
@@ -291,20 +301,14 @@ mod tests {
     // sibling test reaching this `error!` outside any subscriber would make the
     // capture order-dependent.
     #[test]
-    fn run_icm_store_rejects_malformed_payload_json_and_logs_at_error_level() {
-        let dir = tempfile::tempdir().unwrap();
-        let log = dir.path().join("events.jsonl");
-        let err = crate::session_log::tracing_layer::capture_file_logs_at(
-            &log,
-            tracing_subscriber::filter::LevelFilter::ERROR,
-            || run_icm_store("not json", None).unwrap_err(),
-        );
+    fn run_icm_store_rejects_malformed_payload_json_with_a_notice() {
+        let err = run_icm_store("not json", None).unwrap_err();
 
         assert!(err.to_string().to_lowercase().contains("expected"));
-        let body = std::fs::read_to_string(&log).unwrap_or_default();
+        let notices = crate::agent_notice::current().unwrap_or_default();
         assert!(
-            body.contains("detached store failed"),
-            "the failure must log at a level the default EnvFilter passes: {body}"
+            notices.contains("a memory was not stored in ICM") && notices.contains("Fix:"),
+            "the failure must reach the agent as a notice: {notices}"
         );
     }
 }

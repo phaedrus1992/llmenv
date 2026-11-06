@@ -11,11 +11,10 @@ use super::remove_dir_all_forcing_writable;
 pub struct GcReport {
     pub removed: Vec<PathBuf>,
     pub kept: usize,
-    /// Entries gc tried to remove but couldn't. Same contract as
-    /// [`super::PruneReport::failed`] — never counted as `removed` (#1372).
-    pub(crate) failed: Vec<PathBuf>,
-    /// The reason for each entry in `failed`, keyed by path, so the summary can name it (#3077).
-    pub(crate) causes: BTreeMap<PathBuf, String>,
+    /// Entries gc tried to remove but couldn't, each with the reason the summary names (#3077).
+    /// Same contract as [`super::PruneReport::failed`]: never counted as `removed` (#1372). A map,
+    /// so a path is listed once and always has a cause (#3441).
+    pub(crate) failed: BTreeMap<PathBuf, String>,
     /// When set, the sweep records each removal in `removed` and deletes nothing (#2917).
     pub(crate) dry_run: bool,
 }
@@ -26,16 +25,15 @@ impl GcReport {
         Self {
             removed: Vec::new(),
             kept: 0,
-            failed: Vec::new(),
-            causes: BTreeMap::new(),
+            failed: BTreeMap::new(),
             dry_run,
         }
     }
 
-    /// Record `path` as failed, with the reason the sweep gave (#3077).
+    /// Record `path` as failed, with the reason the sweep gave (#3077). A second failure of the
+    /// same path keeps the first cause.
     pub(crate) fn record_failure(&mut self, path: PathBuf, cause: String) {
-        self.causes.insert(path.clone(), cause);
-        self.failed.push(path);
+        self.failed.entry(path).or_insert(cause);
     }
 }
 
@@ -73,8 +71,9 @@ fn gc_remove(
         report.removed.push(p.to_path_buf());
         return;
     }
-    match remove(p) {
-        Ok(()) => report.removed.push(p.to_path_buf()),
+    // An entry that another process removed first is gone, which is the goal (#3423).
+    match super::skip_vanished(remove(p)) {
+        Ok(_) => report.removed.push(p.to_path_buf()),
         Err(e) => {
             let cause = super::owner::removal_cause(p, &e);
             tracing::error!(
@@ -98,12 +97,40 @@ mod tests {
     #[test]
     fn a_failed_removal_keeps_its_cause_with_its_path() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let missing = dir.path().join("absent");
+        // A path under a regular file fails with "not a directory", not "not found".
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"x").expect("write fixture");
+        let blocked = file.join("child");
         let mut report = GcReport::new(false);
 
-        gc_remove_link(&missing, &mut report);
+        gc_remove_link(&blocked, &mut report);
 
-        assert_eq!(report.failed, vec![missing.clone()]);
-        assert!(report.causes.get(&missing).is_some_and(|c| !c.is_empty()));
+        assert_eq!(report.failed.keys().collect::<Vec<_>>(), vec![&blocked]);
+        assert!(report.failed.get(&blocked).is_some_and(|c| !c.is_empty()));
+    }
+
+    // An entry that another process removed first is gone, not a failure (#3423).
+    #[test]
+    fn an_entry_removed_by_another_process_is_not_a_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gone = dir.path().join("absent");
+        let mut report = GcReport::new(false);
+
+        gc_remove_link(&gone, &mut report);
+        gc_remove_dir(&gone, &mut report);
+
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert_eq!(report.removed, vec![gone.clone(), gone]);
+    }
+
+    /// A path that fails twice is listed once, with its first cause (#3441).
+    #[test]
+    fn a_path_that_fails_twice_keeps_its_first_cause() {
+        let mut report = GcReport::new(false);
+        report.record_failure(PathBuf::from("a"), "first".to_string());
+        report.record_failure(PathBuf::from("b"), "other".to_string());
+        report.record_failure(PathBuf::from("a"), "second".to_string());
+        assert_eq!(report.failed.len(), 2);
+        assert_eq!(report.failed[Path::new("a")], "first");
     }
 }

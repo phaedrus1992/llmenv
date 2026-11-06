@@ -59,7 +59,10 @@ pub(super) fn reconcile_pidfile(pid_path: &Path) {
 /// Removes the pidfile temp after a failed write or publish. A failed removal is recorded, so a
 /// leftover temp file is not silent (#2657).
 pub(super) fn discard_pidfile_temp(tmp: &Path) {
-    if let Err(e) = std::fs::remove_file(tmp) {
+    // A temp that is already gone is not a leftover.
+    if let Err(e) = std::fs::remove_file(tmp)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
         llmenv_util::agent_notice::record_logged(format!(
             "llmenv: could not remove pidfile temp {} ({e}). Fix: remove the file by hand.",
             tmp.display()
@@ -126,6 +129,15 @@ mod notice_tests {
         let notices = llmenv_util::agent_notice::current().unwrap_or_default();
         assert!(notices.contains("pidfile-3217-temp"), "{notices}");
         assert!(notices.contains("Fix:"), "{notices}");
+    }
+
+    /// A pidfile temp that is already gone is not a leftover, so it gives no notice.
+    #[test]
+    fn a_pidfile_temp_that_is_already_gone_is_not_recorded() {
+        let dir = tempfile::tempdir().expect("test");
+        discard_pidfile_temp(&dir.path().join("pidfile-gone-temp.tmp"));
+        let notices = llmenv_util::agent_notice::current().unwrap_or_default();
+        assert!(!notices.contains("pidfile-gone-temp"), "{notices}");
     }
 
     /// A proxy whose stderr log cannot be opened names the log for the agent. A directory at the

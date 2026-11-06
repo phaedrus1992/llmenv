@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use super::{Task, TaskState, list_tasks_strict, project, queue_order, session};
+use super::{Task, TaskState, project, queue_order, session};
 
 /// How well the current project's work is tracked right now (#2456).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,8 +18,13 @@ pub enum Tracking {
     /// A session has unfinished tasks. `wip` is the slug of one task in progress, if any,
     /// `waiting` lists the slugs of the tasks that wait on the user, and `next` is the first
     /// task still `open`, the one to start next. `queued` counts every task still `open`.
+    ///
+    /// `wip_ownerless` is true when `wip` belongs to a session with no recorded owner and the
+    /// caller has a conversation id. The question reminder then names it once per conversation
+    /// (#3187).
     Tracked {
         wip: Option<String>,
+        wip_ownerless: bool,
         waiting: Vec<String>,
         next: Option<String>,
         queued: usize,
@@ -31,6 +36,12 @@ pub enum Tracking {
 /// any of them counts. A session that another conversation owns does not (#3185). A read error is
 /// [`Tracking::Unknown`], so a hook never nudges on a guess.
 pub fn tracking(state_dir: &Path, caller: Option<&str>) -> Tracking {
+    tracking_in(&super::Stored::read(state_dir), caller)
+}
+
+/// [`tracking`] over a read of the stores that the caller already made, so one Stop run reads
+/// them once (#3472).
+pub fn tracking_in(stored: &super::Stored, caller: Option<&str>) -> Tracking {
     let project = match project::current_tag() {
         Ok(project) => project,
         Err(e) => {
@@ -40,20 +51,26 @@ pub fn tracking(state_dir: &Path, caller: Option<&str>) -> Tracking {
     };
     // A store that cannot be read is unknown, not empty: a hook never nudges or denies on a guess.
     let (sessions, tasks) = match (
-        session::open_sessions_strict(state_dir, &project),
-        list_tasks_strict(state_dir),
+        stored.open_sessions_visible_to(&project, None),
+        stored.tasks(),
     ) {
-        (Ok(sessions), Ok(tasks)) => (sessions, tasks),
+        (Ok(sessions), Ok(tasks)) => (sessions, tasks.as_slice()),
         (Err(e), _) | (_, Err(e)) => {
             tracing::error!("task store cannot be read, so tracking is unknown: {e:#}");
             return Tracking::Unknown(format!("{e:#}"));
         }
     };
-    let ids: Vec<String> = sessions
+    let visible: Vec<session::Session> = sessions
         .into_iter()
         .filter(|s| s.visible_to(caller))
-        .map(|s| s.id)
         .collect();
+    tracking_of(&visible, tasks, caller)
+}
+
+/// The tracking state over the open sessions of the project that `caller` sees, and every task
+/// of the store. Pure, so a property can drive it with no project or files (#3475).
+fn tracking_of(visible: &[session::Session], tasks: &[Task], caller: Option<&str>) -> Tracking {
+    let ids: Vec<String> = visible.iter().map(|s| s.id.clone()).collect();
     if ids.is_empty() {
         return Tracking::NoSession;
     }
@@ -65,10 +82,14 @@ pub fn tracking(state_dir: &Path, caller: Option<&str>) -> Tracking {
     if unfinished.is_empty() {
         return Tracking::NoTasks;
     }
-    let wip = unfinished
-        .iter()
-        .find(|t| t.state == TaskState::Wip)
-        .map(|t| t.slug.clone());
+    let wip_task = unfinished.iter().find(|t| t.state == TaskState::Wip);
+    let wip = wip_task.map(|t| t.slug.clone());
+    let wip_ownerless = caller.is_some()
+        && wip_task.and_then(|t| t.session.as_ref()).is_some_and(|id| {
+            visible
+                .iter()
+                .any(|s| &s.id == id && s.owner_session().is_none())
+        });
     let waiting = unfinished
         .iter()
         .filter(|t| t.state == TaskState::Waiting)
@@ -86,8 +107,12 @@ pub fn tracking(state_dir: &Path, caller: Option<&str>) -> Tracking {
         .count();
     Tracking::Tracked {
         wip,
+        wip_ownerless,
         waiting,
         next,
         queued,
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -39,12 +39,12 @@ pub(crate) fn state_path() -> anyhow::Result<PathBuf> {
 /// cannot be read is an error too. Writes use [`load_for_write`], which moves a corrupt
 /// file aside instead of failing.
 fn load_at(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
-    let Some(s) = read_map_text(path)? else {
+    let Some(s) = read_map_bytes(path)? else {
         return Ok(BTreeMap::default());
     };
     // A corrupt map is an error here, not a miss. A miss would end a session's
     // lifecycle link silently (#2658). The next write moves the file aside.
-    serde_json::from_str(&s).with_context(|| {
+    serde_json::from_slice(&s).with_context(|| {
         format!(
             "the session map {} is corrupt. The next write moves it aside to {}.corrupt",
             path.display(),
@@ -53,9 +53,10 @@ fn load_at(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
     })
 }
 
-/// Read the map text at `path`. `None` means the file is missing.
-fn read_map_text(path: &Path) -> anyhow::Result<Option<String>> {
-    match crate::paths::bounded::state_text_io(path) {
+/// Read the map bytes at `path`. `None` means the file is missing. Bytes, not text: a write cut
+/// inside a UTF-8 character is corrupt and moves aside, not an unreadable file (#3130).
+fn read_map_bytes(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
+    match crate::paths::bounded::state_bytes_io(path) {
         Ok(s) => Ok(Some(s)),
         // A missing file is the normal first run, so it is not a warning.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -116,10 +117,10 @@ fn reserve_aside_name(path: &Path) -> anyhow::Result<PathBuf> {
 /// `transcript-sessions.json.corrupt` first. Without the move, the write would
 /// replace the file and erase every other mapping in it (#2658).
 fn load_for_write(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
-    let Some(s) = read_map_text(path)? else {
+    let Some(s) = read_map_bytes(path)? else {
         return Ok(BTreeMap::default());
     };
-    match serde_json::from_str(&s) {
+    match serde_json::from_slice(&s) {
         Ok(map) => Ok(map),
         Err(e) => {
             // A second corruption must not overwrite the first aside copy (#2658 review).
