@@ -200,6 +200,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Refuse a new task in another conversation's session by default. A lone open session of another conversation no longer takes the task, and a caller with no conversation id is refused for an owned session. [fix:task] [#3480]
 - Refuse `--parent` for a task in another session, because starting the child would change that session's task. [fix:task] [#3480]
 - Record `llmenv task clear --other-session` on the owning session, which names the caller and the deleted tasks. The deleted tasks could not keep the note. [fix:task] [#3481]
+- Refuse a delete of a task with no session unless the caller has an open session, and record the delete on the caller's session. A change to such a task now writes a note that names the caller. `TaskUpdate` and `llmenv task clear` follow the same rule. [fix:task] [#3586]
+- Refuse `llmenv task session show` and `llmenv task session summary` with no id when the only open session belongs to another conversation. The refusal names the id argument to use. An explicit id still reads the session. [fix:task] [#3588]
+- Record the caller on the session when `llmenv task session edit`, `note`, or `finish` uses `--other-session`, including a closed session. Before, no record named the caller. [fix:task] [#3596]
+- Pick and check the session for a new task under the same store lock as the add, so an owner change cannot slip in between. [fix:hook] [#3589]
+- Fail a parent change, or `llmenv task start`, when the parent chain loops or names a missing task. The error names the task and the fix. Before, the walk ended without an error. A sub-task with no parent also fails to start. A dangling parent now blocks the change until it is repaired. [fix:task] [#3591]
 
 ### Security
 

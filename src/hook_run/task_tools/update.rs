@@ -6,6 +6,9 @@ use std::path::Path;
 use serde_json::Value;
 
 use super::{deny, str_field};
+use crate::task::ownership::{
+    Caller, OverrideNote, check_owner_less_delete, record_owner_less_delete,
+};
 use crate::task::{self, session};
 
 /// Apply a TaskUpdate for the conversation `owner`, and return the deny text for the agent.
@@ -44,11 +47,26 @@ pub(super) fn update(
     // is the task that changes (#3478). A refused check saves no note.
     let applied = task::with_store_lock(state_dir, || {
         // A refused or unresolved id is a task error, not a store error, so the deny keeps the id hint.
-        let slug = match checked_slug(state_dir, project, owner, id) {
-            Ok(slug) => slug,
+        let (slug, ownership_note, caller) = match checked_slug(state_dir, project, owner, id) {
+            Ok(checked) => checked,
             Err(e) => return Ok((Err(e), String::new())),
         };
-        let change = change(state_dir, &slug, status);
+        // The delete of an owner-less task needs a caller session to hold its record. The check
+        // runs before the delete.
+        let owner_less_delete = deleted
+            && ownership_note
+                .as_ref()
+                .is_some_and(OverrideNote::is_owner_less);
+        let change = if owner_less_delete {
+            check_owner_less_delete(&caller)
+        } else {
+            Ok(())
+        }
+        .and_then(|()| change(state_dir, &slug, status))
+        .and_then(|msg| {
+            record_check_note(state_dir, &caller, &slug, ownership_note.as_ref(), deleted)
+                .map(|()| msg)
+        });
         // The note is kept when the change fails too, and the deny says where it went.
         let note = note.map_or_else(String::new, |note| {
             note_outcome(
@@ -67,16 +85,36 @@ pub(super) fn update(
     }
 }
 
-/// The slug that `id` names, when the caller may change that task. The check is the check of
-/// the `llmenv task` commands. TaskUpdate has no `--other-session`, so no override applies.
+/// The slug that `id` names, when the caller may change that task, with the ownership note and
+/// the caller. The check is the check of the `llmenv task` commands. TaskUpdate has no
+/// `--other-session`, so the note is set only for a task with no session.
 fn checked_slug(
     state_dir: &Path,
     project: &str,
     owner: &session::EngineIdentity,
     id: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, Option<OverrideNote>, Caller)> {
     let caller = task::ownership::caller_session(state_dir, project, owner)?;
-    task::ownership::ensure_task_is_ours(state_dir, id, &caller, None).map(|(slug, _)| slug)
+    let (slug, note) = task::ownership::ensure_task_is_ours(state_dir, id, &caller, None)?;
+    Ok((slug, note, caller))
+}
+
+/// Records the ownership note of a TaskUpdate after its change saved (#3586). A deleted task
+/// has no task left to hold the note, so its note goes to the caller's session.
+fn record_check_note(
+    state_dir: &Path,
+    caller: &Caller,
+    slug: &str,
+    note: Option<&OverrideNote>,
+    deleted: bool,
+) -> anyhow::Result<()> {
+    match note {
+        Some(note) if note.is_owner_less() && deleted => {
+            record_owner_less_delete(state_dir, caller, &[slug.to_string()])
+        }
+        Some(note) => note.record(state_dir),
+        None => Ok(()),
+    }
 }
 
 /// Run the status change on the checked `slug`, and return the text that names it.
