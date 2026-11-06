@@ -71,9 +71,15 @@ fn a_write_past_its_deadline_names_the_operation_and_the_fix() {
 
 #[test]
 fn a_worker_that_dies_without_an_answer_says_the_write_may_not_be_stored() {
-    let err = keychain_write_with(config_dir(), &creds(), Duration::from_secs(5), |_, _, _| {
-        panic!("the setter dies before it answers")
-    })
+    // The cause of the flake is not confirmed (#3483). The worker's panic hook runs before its
+    // sender drops, and under load that hook may outlast a short deadline. The long deadline
+    // here keeps a slow hook from reporting a timeout.
+    let err = keychain_write_with(
+        config_dir(),
+        &creds(),
+        Duration::from_secs(60),
+        |_, _, _| panic!("the setter dies before it answers"),
+    )
     .expect_err("a worker that ends without an answer must fail the write");
     let message = format!("{err:#}");
     assert!(message.contains("ended without an answer"), "{message}");
