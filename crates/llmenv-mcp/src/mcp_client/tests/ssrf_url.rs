@@ -181,7 +181,7 @@ fn cleartext_safe_edges_for_cgnat() {
 /// Test convenience: `SsrfPolicy::PublicOnly` with a generous timeout,
 /// matching every pre-existing test's expectations before `SsrfPolicy` and
 /// per-call DNS timeouts were introduced. 10s, not 2s (#1236): a real DNS
-/// lookup (`validate_url_accepts_public_ips`'s `example.com`) contending
+/// lookup contending
 /// with the rest of a `--workspace` parallel test run for CPU/network
 /// blew a 2s budget intermittently — this is test-only slack, not a
 /// change to production's own timeout policy.

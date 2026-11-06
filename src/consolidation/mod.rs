@@ -23,7 +23,7 @@
 //! 6. Store each rule as `type: semantic`, `importance: high`, in the project's
 //!    rule topic, unless a matching rule is already stored there (#2387).
 //!
-//! All failures are fail-soft: `tracing::error!`, return `Ok(summary)`. The
+//! All failures are fail-soft: an agent notice, then `Ok(summary)`. The
 //! detached child's log filter is ERROR-only by default, so a `warn!` here
 //! would leave no trace (#2355).
 
@@ -34,14 +34,15 @@ use crate::hook_run::checkpoint;
 use crate::hook_run::idempotency;
 use llmenv_mcp::mcp_client::McpHttpClient;
 
+mod bullets;
+mod phase;
+use phase::{note_phase, notice, saved_summary, settle};
 mod dedup;
 
 /// Hard timeout for the LLM backend call.
 const LLM_TIMEOUT: Duration = Duration::from_secs(120);
 /// Minimum episodic records needed to trigger consolidation.
 const MIN_RECORDS: usize = 3;
-/// Maximum character length for a single rule bullet.
-const MAX_RULE_LENGTH: usize = 500;
 /// Default model for the `anthropic-api` backend.
 const DEFAULT_MODEL: &str = "claude-sonnet-5";
 
@@ -77,42 +78,6 @@ Output nothing if no new rules emerge.
 
 Session observations:
 {summaries}";
-
-/// A parsed memory record from the ICM recall output.
-#[derive(Debug)]
-struct MemoryRecord {
-    summary: String,
-    topic: Option<String>,
-}
-
-/// Parse the non-compact `icm_memory_recall` output into structured records.
-/// Extracts the `summary` field from each record.
-fn parse_recall_output(text: &str) -> Vec<MemoryRecord> {
-    let mut records = Vec::new();
-    // A record counts only when it carries a `summary:` line.
-    let mut summary: Option<String> = None;
-    let mut topic: Option<String> = None;
-    let mut in_record = false;
-
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("--- ") && trimmed.ends_with(" ---") {
-            records.extend(summary.take().map(|summary| MemoryRecord {
-                summary,
-                topic: topic.take(),
-            }));
-            topic = None;
-            in_record = true;
-        } else if in_record && let Some(rest) = trimmed.strip_prefix("summary:") {
-            summary = Some(rest.trim().to_string());
-        } else if in_record && let Some(rest) = trimmed.strip_prefix("topic:") {
-            topic = Some(rest.trim().to_string());
-        }
-    }
-
-    records.extend(summary.map(|summary| MemoryRecord { summary, topic }));
-    records
-}
 
 /// Build the prompt body for the Anthropic API call.
 fn build_prompt(max_rules: u32, summaries: &[String]) -> String {
@@ -306,6 +271,9 @@ fn kill_process_group(pid: u32) {
         match rustix::process::kill_process_group(pid, rustix::process::Signal::KILL) {
             Ok(()) | Err(rustix::io::Errno::SRCH) => {}
             Err(e) => {
+                notice(&format!(
+                    "consolidation: cannot kill the process group {pid_i32}, so it can still run: {e}"
+                ));
                 tracing::error!(
                     pid = pid_i32,
                     error = %e,
@@ -482,30 +450,6 @@ async fn post_messages(
     answer_text(&json)
 }
 
-/// Parse bullet-point rules from the model's text output.
-///
-/// Returns lines that start with `- ` (dash-space), trimming whitespace.
-/// Empty output → no rules → no store calls (success, not an error).
-fn parse_bullets(text: &str) -> Vec<String> {
-    text.lines()
-        .map(|l| l.trim())
-        .filter(|l| l.starts_with("- ") && l.len() > 2)
-        .map(|l| {
-            let rule = l[2..].trim();
-            if rule.chars().count() > MAX_RULE_LENGTH {
-                // Ponytail: truncate overlong rules with a marker. Truncates
-                // by character count, not byte length — MAX_RULE_LENGTH is a
-                // character bound, and byte-slicing panics when a multi-byte
-                // char straddles the cut point (#1166).
-                let truncated: String = rule.chars().take(MAX_RULE_LENGTH).collect();
-                format!("{truncated}… (truncated)")
-            } else {
-                rule.to_string()
-            }
-        })
-        .collect()
-}
-
 /// What names one consolidation run: the project, and the id of the run that started it.
 struct RunScope<'a> {
     project: &'a str,
@@ -519,7 +463,12 @@ fn run_id(checkpoint: Option<&std::path::Path>) -> String {
             // An empty id on a resumed run makes the rule request ids differ from the first
             // run, so the seen-set misses a repeat.
             checkpoint::load(p)
-                .inspect_err(|e| tracing::error!("consolidation run id unknown: {e:#}"))
+                .inspect_err(|e| {
+                    phase::notice(&format!(
+                        "consolidation: the run tag is lost, so a repeated rule may be stored \
+                         again: {e:#}"
+                    ));
+                })
                 .ok()
         })
         .and_then(|c| c.inputs["run_tag"].as_str().map(str::to_string))
@@ -595,6 +544,27 @@ async fn store_new_rules(
     (stored, duplicates)
 }
 
+/// The line that a consolidation run logs. A rule whose duplicate check or store failed is
+/// counted, so the log says that the next run tries it again.
+fn summary(
+    records: usize,
+    rules: usize,
+    backend: impl std::fmt::Debug,
+    (stored, duplicates, failed): (usize, usize, usize),
+) -> String {
+    let mut msg = format!(
+        "consolidation: distilled {records} memory records into {rules} semantic rule(s) \
+         (backend: {backend:?}, rules stored: {stored}, duplicates skipped: {duplicates}"
+    );
+    if failed > 0 {
+        msg.push_str(&format!(
+            ", failed: {failed}, tried again on the next run; the log above names each cause"
+        ));
+    }
+    msg.push(')');
+    msg
+}
+
 /// How far the first half of a consolidation run got.
 enum Distilled {
     /// The model returned a summary; `records` is the number of memories it read, 0 on a resume.
@@ -622,6 +592,9 @@ async fn distill(
                         "query": "",
                         "project": project,
                         "limit": 50,
+                        // Without a budget icm clamps the limit to 20 (#3419).
+                        "max_tokens": crate::memory::recall_json::MAX_TOKENS,
+                        "format": crate::memory::recall_json::FORMAT,
                     }),
                 )
                 .await
@@ -632,7 +605,7 @@ async fn distill(
         Ok(out) => out,
         Err(e) => {
             let msg = format!("consolidation: recall failed (fail-soft): {e}");
-            tracing::error!("{msg}");
+            notice(&msg);
             return Distilled::Stop {
                 msg,
                 settled: false,
@@ -640,7 +613,17 @@ async fn distill(
         }
     };
 
-    let records = parse_recall_output(&output);
+    let records = match crate::memory::recall_json::parse(&output) {
+        Ok(records) => records,
+        Err(e) => {
+            let msg = format!("consolidation: recall reply unreadable (fail-soft): {e}");
+            notice(&msg);
+            return Distilled::Stop {
+                msg,
+                settled: false,
+            };
+        }
+    };
     if records.len() < MIN_RECORDS {
         let msg = format!(
             "consolidation: skipping — only {} record(s) found, need at least {MIN_RECORDS}",
@@ -677,52 +660,12 @@ async fn distill(
         }
         Err(e) => {
             let msg = format!("consolidation: LLM call failed (fail-soft): {e}");
-            tracing::error!("{msg}");
+            notice(&msg);
             Distilled::Stop {
                 msg,
                 settled: false,
             }
         }
-    }
-}
-
-/// Record the phase (and the model summary, once there is one) in the checkpoint. Fail-soft.
-fn note_phase(checkpoint: Option<&std::path::Path>, phase: &str, summary: Option<&str>) {
-    let Some(path) = checkpoint else {
-        return;
-    };
-    let result = checkpoint::update(path, |c| {
-        c.phase = phase.to_string();
-        if let Some(summary) = summary {
-            c.inputs["summary"] = serde_json::json!(summary);
-        }
-    });
-    if let Err(e) = result {
-        tracing::error!("consolidation: cannot update the checkpoint: {e:#}");
-    }
-}
-
-/// The model summary a previous run saved, when this run resumes after the model step.
-fn saved_summary(checkpoint: Option<&std::path::Path>) -> Option<String> {
-    let loaded = checkpoint::load(checkpoint?)
-        .inspect_err(|e| {
-            tracing::error!(
-                "consolidation: the model summary is lost, so the run asks again: {e:#}"
-            );
-        })
-        .ok()?;
-    if loaded.phase != "summarized" {
-        return None;
-    }
-    loaded.inputs["summary"].as_str().map(str::to_string)
-}
-
-/// Delete the checkpoint of a run with nothing left to retry. Fail-soft.
-fn settle(checkpoint: Option<&std::path::Path>) {
-    if let Some(path) = checkpoint
-        && let Err(e) = checkpoint::complete(path)
-    {
-        tracing::error!("consolidation: {e:#}");
     }
 }
 
@@ -737,7 +680,7 @@ fn settle(checkpoint: Option<&std::path::Path>) {
 /// from storing a rule twice (#2397).
 ///
 /// # Errors
-/// All errors are caught and logged via `tracing::error!` — this function
+/// All errors are caught and recorded as agent notices — this function
 /// always returns `Ok(summary)` to match the fail-soft contract.
 pub(crate) async fn run(
     cc: &crate::config::ConsolidationConfig,
@@ -766,7 +709,7 @@ pub(crate) async fn run(
     };
 
     // Step 5: Parse bullet points
-    let rules = parse_bullets(&llm_output);
+    let rules = bullets::parse_bullets(&llm_output);
 
     if rules.is_empty() {
         let msg = format!("consolidation: LLM returned no rules (parsed {records} records)");
@@ -787,14 +730,15 @@ pub(crate) async fn run(
     };
     let (stored, duplicates) = store_new_rules(client, state_dir, &scope, &rules).await;
 
-    let msg = format!(
-        "consolidation: distilled {records} memory records into {} semantic rule(s) \
-         (backend: {:?}, rules stored: {stored}, duplicates skipped: {duplicates})",
+    let failed = rules.len().saturating_sub(stored + duplicates);
+    let msg = summary(
+        records,
         rules.len(),
-        cc.backend,
+        &cc.backend,
+        (stored, duplicates, failed),
     );
-    if stored + duplicates < rules.len() {
-        tracing::error!("{msg}");
+    if failed > 0 {
+        notice(&msg);
     } else {
         tracing::info!("{msg}");
         settle(checkpoint);
@@ -1063,120 +1007,6 @@ mod tests {
         assert!(msg.contains("overloaded"), "{msg}");
     }
 
-    #[test]
-    fn parse_recall_output_empty() {
-        assert!(parse_recall_output("").is_empty());
-    }
-
-    #[test]
-    fn parse_recall_output_single_record() {
-        let text = "--- abc123 ---\n  topic: test\n  importance: high\n  weight: 0.85\n  summary: observed that the project uses Rust\n  keywords: test\n  score: 0.9\n";
-        let records = parse_recall_output(text);
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].summary, "observed that the project uses Rust");
-    }
-
-    #[test]
-    fn parse_recall_output_multiple_records() {
-        let text = "--- id-1 ---\n  summary: first observation\n  weight: 0.1\n--- id-2 ---\n  summary: second observation\n  weight: 0.99\n";
-        let records = parse_recall_output(text);
-        assert_eq!(records.len(), 2);
-        assert_eq!(records[0].summary, "first observation");
-        assert_eq!(records[1].summary, "second observation");
-    }
-
-    #[test]
-    fn parse_bullets_empty_text() {
-        assert!(parse_bullets("").is_empty());
-    }
-
-    #[test]
-    fn parse_bullets_only_prose() {
-        let text = "This is just a paragraph of text.\nNo bullet points here.";
-        assert!(parse_bullets(text).is_empty());
-    }
-
-    #[test]
-    fn parse_bullets_single() {
-        let text = "- Use Rust for all new projects";
-        let bullets = parse_bullets(text);
-        assert_eq!(bullets, vec!["Use Rust for all new projects"]);
-    }
-
-    #[test]
-    fn parse_bullets_multiple() {
-        let text = "- First rule\n- Second rule\nSome prose in between\n- Third rule";
-        let bullets = parse_bullets(text);
-        assert_eq!(bullets, vec!["First rule", "Second rule", "Third rule"]);
-    }
-
-    #[test]
-    fn parse_bullets_respects_max_rule_length() {
-        let long = "x".repeat(MAX_RULE_LENGTH + 10);
-        let text = format!("- {long}");
-        let bullets = parse_bullets(&text);
-        assert_eq!(bullets.len(), 1);
-        assert!(bullets[0].ends_with("… (truncated)"));
-        assert!(bullets[0].len() <= MAX_RULE_LENGTH + "… (truncated)".len());
-    }
-
-    // #1166: MAX_RULE_LENGTH is documented as a *character* bound, but the
-    // truncation sliced by *byte* index — a multi-byte char straddling byte
-    // index MAX_RULE_LENGTH panics ("byte index is not a char boundary").
-    // "x" (1 byte) then "é" (2 bytes) repeated puts the boundary mid-char.
-    #[test]
-    fn parse_bullets_truncates_multibyte_rule_without_panicking() {
-        let long = "x".to_string() + &"é".repeat(MAX_RULE_LENGTH);
-        let text = format!("- {long}");
-        let bullets = parse_bullets(&text);
-        assert_eq!(bullets.len(), 1);
-        assert!(bullets[0].ends_with("… (truncated)"));
-        assert_eq!(
-            bullets[0].chars().count(),
-            MAX_RULE_LENGTH + "… (truncated)".chars().count(),
-            "truncation must count characters, not bytes"
-        );
-    }
-
-    #[test]
-    fn parse_bullets_strips_leading_dash_space() {
-        let text = "-  hello world";
-        let bullets = parse_bullets(text);
-        assert_eq!(bullets, vec!["hello world"]);
-    }
-
-    #[test]
-    fn parse_recall_output_missing_summary_skipped() {
-        let text = "--- id-1 ---\n  importance: high\n  weight: 0.5\n";
-        let records = parse_recall_output(text);
-        assert_eq!(records.len(), 0);
-    }
-
-    #[test]
-    fn parse_recall_output_keeps_each_record_topic() {
-        let text =
-            "--- a ---\n  topic: t1\n  summary: one\n--- b ---\n  summary: two\n  topic: t2\n";
-        let got: Vec<_> = parse_recall_output(text)
-            .into_iter()
-            .map(|r| (r.summary, r.topic))
-            .collect();
-        assert_eq!(
-            got,
-            [
-                ("one".to_string(), Some("t1".to_string())),
-                ("two".to_string(), Some("t2".to_string()))
-            ]
-        );
-    }
-
-    #[test]
-    fn parse_recall_output_empty_summary_creates_record() {
-        let text = "--- id-1 ---\n  summary:\n  weight: 0.5\n";
-        let records = parse_recall_output(text);
-        assert_eq!(records.len(), 1);
-        assert!(records[0].summary.is_empty());
-    }
-
     // -- isolated claude -p child (#2355) --
 
     #[test]
@@ -1291,7 +1121,7 @@ mod tests {
         use wiremock::{Mock, MockServer, ResponseTemplate};
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body("")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body("[]")))
             .mount(&server)
             .await;
         let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("client");
@@ -1359,7 +1189,7 @@ mod tests {
         use wiremock::matchers::{body_string_contains, method};
         use wiremock::{Mock, ResponseTemplate};
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body("")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body("[]")))
             .mount(server)
             .await;
         if !store_ok {
@@ -1372,6 +1202,51 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_summary_counts_failed_rules_only_when_some_failed() {
+        let ok = summary(9, 2, "Claude", (1, 1, 0));
+        assert_eq!(
+            ok,
+            "consolidation: distilled 9 memory records into 2 semantic rule(s) (backend: \
+             \"Claude\", rules stored: 1, duplicates skipped: 1)"
+        );
+        let failed = summary(9, 3, "Claude", (1, 1, 1));
+        assert!(
+            failed.ends_with("duplicates skipped: 1, failed: 1, tried again on the next run; the log above names each cause)"),
+            "{failed}"
+        );
+    }
+
+    #[tokio::test]
+    async fn distill_asks_for_json_and_stops_fail_soft_on_a_text_reply() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, ResponseTemplate};
+        let server = wiremock::MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body("--- a ---\n")))
+            .mount(&server)
+            .await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).expect("client");
+        let Distilled::Stop { msg, settled } = distill(&cc(), &client, "proj", None).await else {
+            unreachable!("a text reply must stop the run");
+        };
+        assert!(!settled, "an unreadable reply is retried on a later run");
+        assert!(msg.contains("recall reply unreadable"), "{msg}");
+        assert!(msg.contains("Fix: upgrade icm to 0.11.5 or later"), "{msg}");
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(
+            notices.contains("recall reply unreadable"),
+            "the agent is told: {notices}"
+        );
+        let asked = server.received_requests().await.expect("recorded");
+        assert!(
+            asked
+                .iter()
+                .any(|r| String::from_utf8_lossy(&r.body).contains(r#""format":"json""#)),
+            "the recall must ask for JSON"
+        );
+    }
+
     async fn recalls_of_fifty(server: &wiremock::MockServer) -> usize {
         server
             .received_requests()
@@ -1382,6 +1257,7 @@ mod tests {
             .filter(|b| {
                 b["params"]["name"] == "icm_memory_recall"
                     && b["params"]["arguments"]["limit"] == 50
+                    && b["params"]["arguments"]["max_tokens"] == 32_000
             })
             .count()
     }
@@ -1421,6 +1297,11 @@ mod tests {
             .expect("run");
         let kept = crate::hook_run::checkpoint::load(&file).expect("kept");
         assert_eq!(kept.phase, "summarized");
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(
+            notices.contains("llmenv: consolidation"),
+            "the agent is told: {notices}"
+        );
         assert!(
             kept.inputs["summary"]
                 .as_str()
@@ -1588,82 +1469,6 @@ mod tests {
                 out.contains(&joined),
                 "joined summaries {joined:?} missing from {out:?}"
             );
-        }
-    }
-
-    // ===== #1166: property-test coverage for parse_bullets and parse_recall_output =====
-
-    /// A single simulated line of `icm_memory_recall` output.
-    fn arb_recall_line() -> impl Strategy<Value = String> {
-        prop_oneof![
-            Just("--- record ---".to_string()),
-            "summary: .{0,20}".prop_map(|s| s),
-            ".{0,20}".prop_map(|s| s),
-        ]
-    }
-
-    proptest! {
-        /// The model's raw text response is arbitrary as far as `parse_bullets`
-        /// is concerned — no input should panic. Multi-line, multi-byte
-        /// content is exactly the case #1166 found panicking.
-        #[test]
-        fn parse_bullets_never_panics(
-            lines in proptest::collection::vec(".{0,600}", 0..10),
-        ) {
-            let text = lines.join("\n");
-            let _ = parse_bullets(&text);
-        }
-
-        /// Every returned bullet is bounded by MAX_RULE_LENGTH characters
-        /// (plus the truncation marker) regardless of the input's byte/char
-        /// composition — the invariant the byte/char confusion violated.
-        #[test]
-        fn parse_bullets_never_exceeds_max_length(
-            rule in ".{0,600}",
-        ) {
-            let text = format!("- {rule}");
-            let bullets = parse_bullets(&text);
-            let marker_len = "… (truncated)".chars().count();
-            for bullet in &bullets {
-                prop_assert!(
-                    bullet.chars().count() <= MAX_RULE_LENGTH + marker_len,
-                    "bullet {bullet:?} exceeds the length bound"
-                );
-            }
-        }
-
-        /// Arbitrary recall-output text — including delimiter lines with no
-        /// `summary:` field, and `summary:` lines outside any delimiter —
-        /// must never panic.
-        #[test]
-        fn parse_recall_output_never_panics(
-            lines in proptest::collection::vec(arb_recall_line(), 0..10),
-        ) {
-            let text = lines.join("\n");
-            let _ = parse_recall_output(&text);
-        }
-
-        /// A record can only be produced once a `--- ... ---` delimiter has
-        /// opened it, so the output can never contain more records than
-        /// there are delimiter lines in the input — true regardless of how
-        /// many (or few) `summary:` lines follow each one.
-        #[test]
-        fn parse_recall_output_never_exceeds_delimiter_count(
-            lines in proptest::collection::vec(arb_recall_line(), 0..10),
-        ) {
-            // Match parse_recall_output's own delimiter predicate, not the
-            // literal synthetic delimiter string — a random ".{0,20}" junk
-            // line could otherwise coincidentally match "--- ... ---" too.
-            let delimiter_count = lines
-                .iter()
-                .filter(|l| {
-                    let t = l.trim();
-                    t.starts_with("--- ") && t.ends_with(" ---")
-                })
-                .count();
-            let text = lines.join("\n");
-            let records = parse_recall_output(&text);
-            prop_assert!(records.len() <= delimiter_count);
         }
     }
 }

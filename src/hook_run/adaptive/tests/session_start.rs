@@ -69,7 +69,9 @@ async fn resume_and_fork_skip_the_wake_up_call() {
         let server = server_with(&[("llmenv-tag:proj", "[context-p] scope fact")]).await;
         Mock::given(method("POST"))
             .and(body_string_contains("icm_wake_up"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(text("wake pack")))
+            .respond_with(crate::hook_run::test_recall::ToolReply(
+                ("wake pack").to_string(),
+            ))
             .expect(0)
             .mount(&server)
             .await;
@@ -94,7 +96,7 @@ async fn session_start_keeps_the_wake_pack_when_a_scope_call_fails() {
     for (needle, body) in [("initialize", ""), ("icm_wake_up", "wake pack")] {
         Mock::given(method("POST"))
             .and(body_string_contains(needle))
-            .respond_with(ResponseTemplate::new(200).set_body_json(text(body)))
+            .respond_with(crate::hook_run::test_recall::ToolReply((body).to_string()))
             .mount(&server)
             .await;
     }

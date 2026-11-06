@@ -12,7 +12,7 @@ use crate::task::Tracking;
 const DEFAULT_STOP_NUDGE_EVERY: u32 = 5;
 
 /// The reminder to park the task that waits for the user's answer.
-pub(super) fn waiting_reminder(tracking: &Tracking) -> String {
+fn waiting_reminder(tracking: &Tracking) -> String {
     match tracking {
         Tracking::Tracked {
             wip: Some(slug), ..
@@ -25,6 +25,40 @@ pub(super) fn waiting_reminder(tracking: &Tracking) -> String {
     }
 }
 
+/// The question reminder for the conversation `caller`. A task of a session with no recorded
+/// owner is visible to every conversation, so each conversation hears about it once, at its first
+/// question, and not at each question after that (#3187). This is an exception to the
+/// `visible_to` rule for the question reminder only.
+pub(super) fn question_reminder(
+    tracking: &Tracking,
+    caller: Option<&str>,
+    state_dir: &Path,
+) -> String {
+    let text = waiting_reminder(tracking);
+    let Tracking::Tracked {
+        wip: Some(slug),
+        wip_ownerless: true,
+        ..
+    } = tracking
+    else {
+        return text;
+    };
+    let first = with_stop_state(caller, state_dir, |state| {
+        let first = !state.ownerless_question_reminded.contains(slug);
+        if first {
+            state.ownerless_question_reminded.push(slug.clone());
+        }
+        first
+    });
+    // No usable session id, or a state that cannot be read or locked, keeps the reminder. A failed
+    // lock or read records its own agent notice.
+    if first == Some(false) {
+        String::new()
+    } else {
+        text
+    }
+}
+
 /// The addition to the Stop reminder. A question to the user parks the task in progress, and
 /// queued tasks with none in progress name the next start.
 pub(crate) fn handle_stop(
@@ -32,6 +66,7 @@ pub(crate) fn handle_stop(
     payload: &serde_json::Value,
     caller: Option<&str>,
     state_dir: &Path,
+    stored: &crate::task::Stored,
 ) -> String {
     if !tracker.nudges {
         return String::new();
@@ -39,7 +74,7 @@ pub(crate) fn handle_stop(
     let asks = payload["last_assistant_message"]
         .as_str()
         .is_some_and(|m| m.trim_end().ends_with('?'));
-    let tracking = crate::task::tracking(state_dir, caller);
+    let tracking = crate::task::tracking_in(stored, caller);
     let stalled = matches!(
         &tracking,
         Tracking::Tracked { wip: Some(_), queued, .. } if *queued > 0
@@ -49,7 +84,9 @@ pub(crate) fn handle_stop(
         clear_stop_turns(caller, state_dir);
     }
     match &tracking {
-        Tracking::Tracked { wip: Some(_), .. } if asks => waiting_reminder(&tracking),
+        Tracking::Tracked { wip: Some(_), .. } if asks => {
+            question_reminder(&tracking, caller, state_dir)
+        }
         Tracking::Tracked { waiting, .. } if asks && !waiting.is_empty() => format!(
             "llmenv task tracker: waiting on the user: {}. After the user answers, run `llmenv \
              task start <slug>`.",
@@ -147,4 +184,21 @@ fn with_stop_state<T>(
         save(&path, &state);
     }
     Some(out)
+}
+
+/// [`handle_stop`] with its own read of the stores, for the tests that drive one turn end.
+#[cfg(test)]
+pub(crate) fn handle_stop_read(
+    tracker: &TaskTracker,
+    payload: &serde_json::Value,
+    caller: Option<&str>,
+    state_dir: &Path,
+) -> String {
+    handle_stop(
+        tracker,
+        payload,
+        caller,
+        state_dir,
+        &crate::task::Stored::read(state_dir),
+    )
 }

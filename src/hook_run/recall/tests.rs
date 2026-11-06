@@ -68,16 +68,71 @@ async fn run_texts(texts: Vec<String>) -> (String, RecallBudget) {
     run_with_budget(actions, |_| {
         let text = texts[index.get()].clone();
         index.set(index.get() + 1);
-        async move { Ok(text) }
+        async move { Ok(Reply::Records(test_records(&text))) }
     })
     .await
+}
+
+fn with_id(id: &str, text: &str) -> Recalled {
+    Recalled {
+        id: id.to_string(),
+        ..Recalled::from_text(text)
+    }
+}
+
+#[test]
+fn two_records_with_the_same_text_and_different_ids_are_both_kept() {
+    let mut budget = RecallBudget::default();
+    budget.add_records(vec![with_id("a", "[t] same"), with_id("b", "[t] same")]);
+    budget.add_records(vec![with_id("a", "[t] same")]);
+    assert_eq!(budget.kept(), ["[t] same", "[t] same"]);
+    assert_eq!(budget.duplicates, 1);
+    assert_eq!(budget.kept_keys(), ["a", "b"]);
+}
+
+#[test]
+fn a_ledger_of_text_hashes_dedups_once_then_moves_to_ids() {
+    // A ledger from before #3369 holds the text hash of a record that it sent.
+    let old = BTreeSet::from([record_hash("[t] sent before")]);
+    let mut budget = RecallBudget::new(RECALL_BUDGET_BYTES, old.clone());
+    budget.add_records(vec![
+        with_id("old-id", "[t] sent before"),
+        with_id("new", "[t] new"),
+    ]);
+    assert_eq!(budget.kept(), ["[t] new"]);
+    assert_eq!(budget.already_sent, 1);
+    // The ledger learns the id of the old record beside the kept one.
+    let keys = budget.kept_keys();
+    assert_eq!(keys, ["new", "old-id"]);
+    // Next turn the ledger holds ids, so the old record is skipped by its id.
+    let mut sent = old;
+    sent.extend(keys);
+    let mut next = RecallBudget::new(RECALL_BUDGET_BYTES, sent);
+    next.add_records(vec![with_id("old-id", "[t] sent before")]);
+    assert!(next.kept().is_empty());
+    assert!(
+        next.kept_keys().is_empty(),
+        "an id match is not migrated again"
+    );
+}
+
+#[test]
+fn a_record_with_no_id_is_keyed_by_its_text_hash() {
+    let mut budget = RecallBudget::new(
+        RECALL_BUDGET_BYTES,
+        BTreeSet::from([record_hash("[t] old")]),
+    );
+    budget.add_text("[t] old\n[t] new\n[t] new");
+    assert_eq!(budget.kept(), ["[t] new"]);
+    assert_eq!(budget.duplicates, 1);
+    assert_eq!(budget.kept_keys(), [record_hash("[t] new")]);
 }
 
 #[test]
 fn hook_text_keeps_the_omission_notice_out_of_memory() {
     // The notice is llmenv text, so it must not sit under the ICM memory header (#2764).
     let mut budget = RecallBudget::default();
-    budget.add_records(vec!["x".repeat(RECALL_BUDGET_BYTES + 1)]);
+    budget.add_strings(vec!["x".repeat(RECALL_BUDGET_BYTES + 1)]);
     let text = budget.hook_text(Vec::new());
     assert!(!text.memory.contains("omitted"), "{}", text.memory);
     assert!(
@@ -142,11 +197,11 @@ async fn later_recalls_are_skipped_once_the_budget_is_full() {
     let (text, budget) = run_with_budget(actions, |_| {
         calls.set(calls.get() + 1);
         async {
-            Ok(format!(
+            Ok(Reply::Records(test_records(&format!(
                 "[t] {}\n[t] {}",
                 "a".repeat(7_900),
                 "b".repeat(500)
-            ))
+            ))))
         }
     })
     .await;
@@ -172,7 +227,7 @@ async fn non_recall_actions_pass_through_outside_the_budget() {
         )],
         |_| {
             let big = big.clone();
-            async move { Ok(big) }
+            async move { Ok(Reply::Text(big)) }
         },
     )
     .await;
@@ -188,9 +243,9 @@ fn record_of(len: usize) -> String {
 fn the_budget_is_used_exactly_and_never_exceeded() {
     let mut budget = RecallBudget::default();
     // Two records use 3,002 bytes each with the separator, so 1,994 bytes of room remain.
-    budget.add_records(vec![record_of(3_000), format!("{}y", record_of(2_999))]);
-    budget.add_records(vec![record_of(1_995), record_of(1_994)]);
-    let lengths: Vec<usize> = budget.kept().iter().map(String::len).collect();
+    budget.add_strings(vec![record_of(3_000), format!("{}y", record_of(2_999))]);
+    budget.add_strings(vec![record_of(1_995), record_of(1_994)]);
+    let lengths: Vec<usize> = budget.kept().iter().map(|r| r.len()).collect();
     assert_eq!(lengths, [3_000, 3_000, 1_994]);
     assert_eq!(budget.omitted, 1);
 }
@@ -199,11 +254,11 @@ fn the_budget_is_used_exactly_and_never_exceeded() {
 fn a_full_budget_starts_at_exactly_the_minimum_free_bytes() {
     let mut budget = RecallBudget::default();
     // 7,798 + 2 separator bytes leaves exactly MIN_FREE_BYTES free: not full yet.
-    budget.add_records(vec![record_of(
+    budget.add_strings(vec![record_of(
         RECALL_BUDGET_BYTES - MIN_FREE_BYTES - SEPARATOR_BYTES,
     )]);
     assert!(!budget.is_full());
-    budget.add_records(vec![record_of(6)]);
+    budget.add_strings(vec![record_of(6)]);
     assert!(budget.is_full());
 }
 
@@ -214,13 +269,13 @@ fn sent_records_are_skipped_and_counted() {
     budget.add_text("[t] old\n[t] new");
     assert_eq!(budget.kept(), ["[t] new"]);
     assert_eq!(budget.already_sent, 1);
-    assert_eq!(budget.kept_hashes(), [record_hash("[t] new")]);
+    assert_eq!(budget.kept_keys(), [record_hash("[t] new")]);
 }
 
 #[test]
 fn a_smaller_limit_is_respected() {
     let mut budget = RecallBudget::new(2_000, BTreeSet::new());
-    budget.add_records(vec![record_of(1_500), format!("{}y", record_of(1_499))]);
+    budget.add_strings(vec![record_of(1_500), format!("{}y", record_of(1_499))]);
     assert_eq!(budget.kept().len(), 1);
     assert_eq!(budget.omitted, 1);
 }
@@ -239,7 +294,7 @@ fn trace_line_is_absent_until_a_recall_ran() {
 #[test]
 fn trace_line_reports_every_counter() {
     let mut budget = RecallBudget::default();
-    budget.add_records(vec![
+    budget.add_strings(vec![
         "[t] a".to_string(),
         "[t] a".to_string(),
         "[t] bb".to_string(),
@@ -263,7 +318,7 @@ async fn passthrough_text_skips_empty_results_and_exact_duplicates() {
         |_| {
             let text = texts[index.get()].to_string();
             index.set(index.get() + 1);
-            async move { Ok(text) }
+            async move { Ok(Reply::Text(text)) }
         },
     )
     .await;
@@ -281,12 +336,12 @@ async fn a_failing_action_keeps_the_text_of_the_others() {
             if first {
                 Err(anyhow::anyhow!("boom"))
             } else {
-                Ok("kept record".to_string())
+                Ok(Reply::Records(test_records("[t] kept record")))
             }
         }
     })
     .await;
-    assert_eq!(text, "kept record");
+    assert_eq!(text, "[t] kept record");
 }
 
 /// Run one passthrough action per outcome. `None` is a failed action.
@@ -299,7 +354,11 @@ fn run_outcomes(outcomes: Vec<Option<String>>) -> String {
     let mut outcomes = outcomes.into_iter();
     let (text, _) = runtime.block_on(run_with_budget(actions, |_| {
         let outcome = outcomes.next().expect("one outcome per action");
-        async move { outcome.ok_or_else(|| anyhow::anyhow!("boom")) }
+        async move {
+            outcome
+                .map(Reply::Text)
+                .ok_or_else(|| anyhow::anyhow!("boom"))
+        }
     }));
     text
 }
@@ -315,6 +374,38 @@ proptest! {
     }
 }
 
+fn arb_record() -> impl Strategy<Value = Recalled> {
+    ("[a-d]", "[a-z]{1,40}").prop_map(|(id, body)| Recalled {
+        id,
+        ..Recalled::from_text(&format!("[t] {body}"))
+    })
+}
+
+proptest! {
+    /// Every record is kept, a duplicate, already sent, or omitted; no kept id was sent; and
+    /// once the kept keys go back to the ledger, the same records keep nothing.
+    #[test]
+    fn the_budget_accounts_for_every_record_and_learns_its_keys(
+        records in prop::collection::vec(arb_record(), 0..12),
+        sent_ids in prop::collection::btree_set("[a-d]", 0..3),
+        limit in 50usize..400,
+    ) {
+        let mut budget = RecallBudget::new(limit, sent_ids.clone());
+        let count = records.len();
+        budget.add_records(records);
+        prop_assert_eq!(
+            budget.kept().len() + budget.duplicates + budget.already_sent + budget.omitted,
+            count
+        );
+        prop_assert!(budget.kept.iter().all(|r| !sent_ids.contains(&r.id)));
+        let mut sent = sent_ids;
+        sent.extend(budget.kept_keys());
+        let mut next = RecallBudget::new(limit, sent);
+        next.add_records(budget.kept.to_vec());
+        prop_assert!(next.kept().is_empty());
+    }
+}
+
 proptest! {
     /// Whatever the records, the kept text stays within budget and every kept record is
     /// byte-identical to an input record.
@@ -327,11 +418,11 @@ proptest! {
             .map(|body| format!("[t] {}", body.trim_end()))
             .collect();
         let mut budget = RecallBudget::default();
-        budget.add_records(input.clone());
+        budget.add_strings(input.clone());
         let kept_bytes: usize = budget.kept().iter().map(|r| r.len() + SEPARATOR_BYTES).sum();
         prop_assert!(kept_bytes <= RECALL_BUDGET_BYTES);
         for record in budget.kept() {
-            prop_assert!(input.contains(record));
+            prop_assert!(input.iter().any(|i| i == record));
         }
         prop_assert_eq!(
             budget.kept().len() + budget.omitted + budget.duplicates,
@@ -344,7 +435,7 @@ proptest! {
 #[test]
 fn trace_line_matches_the_docs_page() {
     let mut budget = RecallBudget::default();
-    budget.add_records(vec!["[t] a".to_string()]);
+    budget.add_strings(vec!["[t] a".to_string()]);
     let line = budget.trace_line(true).unwrap_or_default();
     assert!(
         crate::trace::docs_sync::docs_show(&line),

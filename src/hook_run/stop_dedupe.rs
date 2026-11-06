@@ -80,7 +80,10 @@ pub(crate) fn forget(state_dir: &Path, session_id: Option<&str>) {
 fn state_path(state_dir: &Path, session_id: Option<&str>) -> Option<PathBuf> {
     let id = session_id?;
     if !crate::paths::is_valid_short_name(id) {
-        tracing::error!("session_id failed path-safety validation for stop_dedupe, ignoring");
+        crate::agent_notice::record_logged(
+            "llmenv: the stop reminder can repeat, because the session id is not safe in a \
+             file name.",
+        );
         return None;
     }
     Some(state_dir.join("stop_dedupe").join(format!("{id}.json")))

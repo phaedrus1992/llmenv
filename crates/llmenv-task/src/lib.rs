@@ -14,11 +14,24 @@
 mod branch_failure;
 mod slug;
 pub(crate) use slug::slugify;
+mod ancestors;
 pub mod core_text;
 mod finish_hints;
+use ancestors::ancestors_to_start;
+mod edit;
+pub use edit::edit_task;
+mod note;
+pub use note::note_task;
 pub mod ownership;
+pub(crate) mod progress;
+pub use resolve::TaskTarget;
+mod store_lock;
+pub use store_lock::with_store_lock;
 pub mod project;
 pub mod relation;
+mod reminder_store;
+pub use reminder_store::Stored;
+use reminder_store::{store_for_reminder, store_warning_text};
 pub mod reopen;
 mod resolve;
 pub mod resume;
@@ -27,9 +40,10 @@ pub mod visibility;
 pub use finish_hints::last_task_hint;
 use finish_hints::session_finish_reminders;
 mod tracking;
-pub use reopen::{reopen_task, reopen_tasks};
+pub use progress::{StrictTasks, progress_in, wip_title_in};
+pub use reopen::reopen_task;
 pub use resolve::resolve_identifier;
-pub use tracking::{Tracking, tracking};
+pub use tracking::{Tracking, tracking, tracking_in};
 
 pub use relation::Placement;
 use relation::Relation;
@@ -126,28 +140,6 @@ fn task_path(state_dir: &Path, slug: &str) -> PathBuf {
     tasks_dir(state_dir).join(format!("{slug}.json"))
 }
 
-/// Run `f` while holding an exclusive lock on the whole task store, so
-/// concurrent `llmenv task` invocations (e.g. from multiple Claude Code
-/// sessions on the same project) serialize their read-modify-write cycles
-/// instead of racing on the same file. Blocks until the lock is acquired.
-fn with_store_lock<T>(
-    state_dir: &Path,
-    f: impl FnOnce() -> anyhow::Result<T>,
-) -> anyhow::Result<T> {
-    let dir = tasks_dir(state_dir);
-    llmenv_paths::create_dir_owner_only(&dir)?;
-    let mut open_options = std::fs::OpenOptions::new();
-    open_options.create(true).truncate(false).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        open_options.mode(0o600);
-    }
-    let lock_file = llmenv_paths::refuse_symlink(&mut open_options).open(dir.join(".lock"))?;
-    lock_file.lock()?;
-    f()
-}
-
 /// Current RFC3339 timestamp (UTC).
 /// Nanosecond precision, not seconds: the queue (#2455) orders tasks by comparing `created_at`
 /// strings, and several sequential `task add` invocations (agent tool calls, shell loops)
@@ -185,7 +177,7 @@ fn unique_slug(dir: &Path, base_slug: &str) -> String {
 ///
 /// # Errors
 /// Returns an error when `task.slug` fails validation, or the write fails.
-pub(crate) fn save_task(state_dir: &Path, task: &Task) -> anyhow::Result<()> {
+pub fn save_task(state_dir: &Path, task: &Task) -> anyhow::Result<()> {
     if !llmenv_paths::is_valid_short_name(&task.slug) {
         anyhow::bail!("'{}' is not a valid task slug", task.slug);
     }
@@ -211,7 +203,7 @@ pub fn load_task(state_dir: &Path, slug: &str) -> anyhow::Result<Task> {
         anyhow::bail!("'{slug}' is not a valid task slug");
     }
     let path = task_path(state_dir, slug);
-    let content = std::fs::read_to_string(&path)
+    let content = session::read_state_text(&path)
         .with_context(|| format!("cannot read task '{slug}' at {}", path.display()))?;
     serde_json::from_str(&content)
         .with_context(|| format!("task '{slug}' at {} is not valid task JSON", path.display()))
@@ -249,8 +241,8 @@ pub fn try_list_tasks(state_dir: &Path) -> anyhow::Result<Vec<Task>> {
 /// [`try_list_tasks`], but a task file that cannot be read is an error and not a skipped entry.
 /// A decision or a reminder that reads the store uses this, so it never sees a partial view
 /// (#2608).
-fn list_tasks_strict(state_dir: &Path) -> anyhow::Result<Vec<Task>> {
-    read_tasks(state_dir, UnreadablePolicy::Fail)
+pub fn list_tasks_strict(state_dir: &Path) -> anyhow::Result<StrictTasks> {
+    StrictTasks::read(state_dir)
 }
 
 /// What [`read_tasks`] does with a task file or directory entry that cannot be read.
@@ -470,30 +462,6 @@ fn visit<'a>(
     }
 }
 
-/// The title of the most recently updated `wip` or `waiting` task in `session_ids`, for the
-/// statusline's "what's in progress right now" fill-in (#905). `None` when nothing matching is
-/// currently `wip`/`waiting`, or when `session_ids` is empty. A task file that cannot be read is
-/// an error, not a skipped task, so a corrupt file never removes the title without a sign (#2687).
-///
-/// # Errors
-/// The task store cannot be read.
-pub fn current_wip_title(
-    state_dir: &Path,
-    session_ids: &[String],
-) -> anyhow::Result<Option<String>> {
-    if session_ids.is_empty() {
-        return Ok(None);
-    }
-    let tasks = list_tasks_strict(state_dir)?;
-    Ok(most_recently_updated(tasks.iter().filter(|t| {
-        matches!(t.state, TaskState::Wip | TaskState::Waiting)
-            && t.session
-                .as_deref()
-                .is_some_and(|sid| session_ids.iter().any(|s| s == sid))
-    }))
-    .map(|t| t.title.clone()))
-}
-
 /// The most recently updated of `tasks`, by `updated_at` string comparison
 /// (RFC3339 sorts lexicographically). Ties resolve to `max_by`'s documented
 /// last-element-wins rule — callers that need a stable tiebreak on ties sort
@@ -521,6 +489,11 @@ pub enum SessionChoice<'a> {
     /// No `--session`: the project's only open session, else the one the
     /// caller owns ([`session::pick_open_session`], #2365).
     Resolve(&'a session::EngineIdentity),
+    /// An open session of the project that the caller read in the same command, so the session
+    /// files are not read again (#3474). A `Session` comes only from a read or a start, so a
+    /// caller cannot name an arbitrary id here. The session can close between that read and the
+    /// write, as with `Resolve`, which also reads before the store lock.
+    Checked(&'a session::Session),
 }
 
 /// Create a new task in `open` state and persist it, tagged to a resolved
@@ -609,21 +582,48 @@ fn add_task_for_session_with(
     let title = new.title;
     with_store_lock(state_dir, || {
         let dir = tasks_dir(state_dir);
+        // One strict read resolves every name that the new task refers to (#3477). Each name is
+        // checked first, so a bad name gets its own error even when the store is unreadable.
+        let names = [
+            match parent {
+                ParentSpec::Explicit(p) => Some(p),
+                ParentSpec::Detached => None,
+            },
+            match new.placement {
+                Placement::Child(p) => Some(p),
+                Placement::Queue | Placement::Parallel => None,
+            },
+            new.after,
+        ];
+        for name in names.iter().flatten() {
+            resolve::check_identifier(name)?;
+        }
+        let all_tasks = names
+            .iter()
+            .any(Option::is_some)
+            .then(|| list_tasks_strict(state_dir))
+            .transpose()?;
+        let resolve = |name: &str| -> anyhow::Result<String> {
+            let all = all_tasks
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("the task store was not read to find '{name}'"))?;
+            resolve::resolve_in(state_dir, name, all)
+        };
         let explicit_parent = match parent {
-            ParentSpec::Explicit(p) => Some(resolve_identifier(state_dir, p)?),
+            ParentSpec::Explicit(p) => Some(resolve(p)?),
             ParentSpec::Detached => None,
         };
         let (parent_slug, relation, parallel) = match new.placement {
             Placement::Queue => (explicit_parent, Relation::Queued, false),
             Placement::Parallel => (explicit_parent, Relation::Queued, true),
             Placement::Child(p) => {
-                let slug = resolve_identifier(state_dir, p)?;
+                let slug = resolve(p)?;
                 check_child_parent(&load_task(state_dir, &slug)?, session_id)?;
                 (Some(slug), Relation::Child, false)
             }
         };
         let blocked_on = match new.after {
-            Some(after) => vec![resolve_identifier(state_dir, after)?],
+            Some(after) => vec![resolve(after)?],
             None => Vec::new(),
         };
         let now = now_rfc3339();
@@ -699,6 +699,15 @@ fn resolve_session_for_add(
             return Ok(id.to_string());
         }
         SessionChoice::Resolve(owner) => owner,
+        SessionChoice::Checked(session) => {
+            if !session.is_open() || session.project != project {
+                anyhow::bail!(
+                    "session '{}' is not an open session of this project",
+                    session.id
+                );
+            }
+            return Ok(session.id.clone());
+        }
     };
     let open = session::open_sessions_strict(state_dir, project)?;
     match session::pick_open_session(open, owner) {
@@ -732,9 +741,17 @@ fn resolve_session_for_add(
 /// unmet, same rationale as [`is_actionable`]'s dangling-blocker handling.
 /// `force` overrides both cases — the agent may know better than the
 /// ordering hint.
-pub fn start_task(state_dir: &Path, input: &str, force: bool) -> anyhow::Result<Task> {
+pub fn start_task<'a>(
+    state_dir: &Path,
+    target: impl Into<TaskTarget<'a>>,
+    force: bool,
+) -> anyhow::Result<Task> {
+    let target = target.into();
     let task = with_store_lock(state_dir, || {
-        let slug = resolve_identifier(state_dir, input)?;
+        // One strict read feeds the name lookup, the blocker check, and the queue check (#3474).
+        target.check()?;
+        let all_tasks = list_tasks_strict(state_dir)?;
+        let slug = target.slug_in(state_dir, &all_tasks)?;
         let mut task = load_task(state_dir, &slug)?;
         if task.state == TaskState::Done {
             anyhow::bail!(
@@ -743,9 +760,11 @@ pub fn start_task(state_dir: &Path, input: &str, force: bool) -> anyhow::Result<
             );
         }
         if !force && !task.blocked_on.is_empty() {
-            let all_tasks = read_tasks(state_dir, UnreadablePolicy::Fail)?;
-            let by_slug: HashMap<&str, &Task> =
-                all_tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
+            let by_slug: HashMap<&str, &Task> = all_tasks
+                .as_slice()
+                .iter()
+                .map(|t| (t.slug.as_str(), t))
+                .collect();
             let unmet: Vec<String> = task
                 .blocked_on
                 .iter()
@@ -770,13 +789,16 @@ pub fn start_task(state_dir: &Path, input: &str, force: bool) -> anyhow::Result<
             && let Some(session_id) = &task.session
             && let Some(block) = relation::queue_block(
                 &task,
-                &session::try_tasks_in_session(state_dir, session_id)?,
+                &session::filter::tasks_in_sessions(
+                    all_tasks.as_slice(),
+                    &std::iter::once(session_id.clone()).collect(),
+                ),
             )
         {
             anyhow::bail!("{block}");
         }
         // The ancestors go first: if one cannot start, the sub-task stays `open`.
-        let promoted = ancestors_to_start(state_dir, &task, force)?;
+        let promoted = ancestors_to_start(state_dir, &task, force, &all_tasks)?;
         let now = now_rfc3339();
         for mut ancestor in promoted {
             ancestor.state = TaskState::Wip;
@@ -792,63 +814,10 @@ pub fn start_task(state_dir: &Path, input: &str, force: bool) -> anyhow::Result<
     Ok(task)
 }
 
-/// The `open` ancestors that starting the sub-task `child` puts in progress (#2455). A queued
-/// ancestor is held by the queue like any task, and a `done` ancestor refuses unless `force`.
-/// A top-level task has no ancestors to start.
-fn ancestors_to_start(state_dir: &Path, child: &Task, force: bool) -> anyhow::Result<Vec<Task>> {
-    let mut promoted = Vec::new();
-    let mut seen = vec![child.slug.clone()];
-    let mut current = child.clone();
-    while current.relation == Relation::Child {
-        let Some(parent_slug) = current.parent.clone() else {
-            break;
-        };
-        if seen.contains(&parent_slug) {
-            break;
-        }
-        // A deleted parent leaves a dangling link, which the rest of the store tolerates. Any
-        // other read error fails the start, so the done and queue checks never run blind.
-        let parent = match load_task(state_dir, &parent_slug) {
-            Ok(parent) => parent,
-            Err(e) if is_not_found(&e) => break,
-            Err(e) => {
-                return Err(e.context(format!(
-                    "cannot start '{}': ancestor '{parent_slug}' is unreadable. Repair or \
-                     remove its task file, then start again",
-                    child.slug
-                )));
-            }
-        };
-        if parent.state == TaskState::Done && !force {
-            anyhow::bail!(
-                "the parent '{parent_slug}' of '{}' is done. Reopen it with `llmenv task start \
-                 --reopen {parent_slug}`, or pass --force.",
-                child.slug
-            );
-        }
-        if parent.state == TaskState::Open {
-            if !force
-                && let Some(session_id) = &parent.session
-                && let Some(block) = relation::queue_block(
-                    &parent,
-                    &session::try_tasks_in_session(state_dir, session_id)?,
-                )
-            {
-                anyhow::bail!("the parent of '{}' cannot start: {block}", child.slug);
-            }
-            promoted.push(parent.clone());
-        }
-        seen.push(parent_slug);
-        current = parent;
-    }
-    Ok(promoted)
-}
-
 /// Bump the `last_activity` of the session a task is tagged to, if any — so a
 /// session with active `add`/`start`/`done`/`note` traffic reads as "recent"
-/// in `session ls` and the `session start` checkpoint. Called outside
-/// `with_store_lock` (`touch_last_activity` takes the lock itself), *after*
-/// the task mutation has already been committed. Best-effort by design: a
+/// in `session ls` and the `session start` checkpoint. Called *after* the
+/// task mutation has already been committed. Best-effort by design: a
 /// failure to bump the timestamp (pure display bookkeeping) must never turn
 /// an already-persisted task change into a reported error — log and move on.
 fn touch_task_session(state_dir: &Path, task: &Task) {
@@ -857,10 +826,10 @@ fn touch_task_session(state_dir: &Path, task: &Task) {
     {
         // error level, because the default log filter drops warnings. A session that cannot load
         // is a real fault, even though the task change is already saved.
-        tracing::error!(
-            error = %e, session_id = %session_id,
-            "failed to update last_activity after a task change (task change itself is already saved)"
-        );
+        llmenv_util::agent_notice::record_logged(format!(
+            "llmenv: the task change is saved, but the activity time of session {session_id} is \
+             not, so the session can look idle: {e:#}. Fix: run `llmenv task session show`."
+        ));
     }
 }
 
@@ -869,9 +838,13 @@ fn touch_task_session(state_dir: &Path, task: &Task) {
 /// other tasks' `parent`/`blocked_on` references to it, which already
 /// tolerate a dangling target the same way a deleted blocker does (see
 /// `start_task`'s warning path).
-pub fn delete_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
+pub fn delete_task<'a>(
+    state_dir: &Path,
+    target: impl Into<TaskTarget<'a>>,
+) -> anyhow::Result<Task> {
+    let target = target.into();
     with_store_lock(state_dir, || {
-        let slug = resolve_identifier(state_dir, input)?;
+        let slug = target.slug(state_dir)?;
         let task = load_task(state_dir, &slug)?;
         std::fs::remove_file(task_path(state_dir, &slug))?;
         Ok(task)
@@ -930,8 +903,12 @@ impl Completed {
 /// # Errors
 /// Errors if `input` does not resolve to a task, the task is `open` and `force`
 /// is false, or the save fails.
-pub fn complete_task(state_dir: &Path, input: &str, force: bool) -> anyhow::Result<Completed> {
-    close_task(state_dir, input, force, None)
+pub fn complete_task<'a>(
+    state_dir: &Path,
+    target: impl Into<TaskTarget<'a>>,
+    force: bool,
+) -> anyhow::Result<Completed> {
+    close_task(state_dir, target.into(), force, None)
 }
 
 /// [`complete_task`] for a named caller. A `done --force` that closes an `open`, `wip`, or
@@ -941,23 +918,26 @@ pub fn complete_task(state_dir: &Path, input: &str, force: bool) -> anyhow::Resu
 ///
 /// # Errors
 /// Errors as [`complete_task`] does.
-pub fn complete_task_by(
+pub fn complete_task_by<'a>(
     state_dir: &Path,
-    input: &str,
+    target: impl Into<TaskTarget<'a>>,
     force: bool,
     caller: &ownership::Caller,
 ) -> anyhow::Result<Completed> {
-    close_task(state_dir, input, force, Some(caller))
+    close_task(state_dir, target.into(), force, Some(caller))
 }
 
 fn close_task(
     state_dir: &Path,
-    input: &str,
+    target: TaskTarget<'_>,
     force: bool,
     caller: Option<&ownership::Caller>,
 ) -> anyhow::Result<Completed> {
     let completed = with_store_lock(state_dir, || {
-        let slug = resolve_identifier(state_dir, input)?;
+        // One strict read feeds the name lookup and the sub-task check (#3471, #3474).
+        target.check()?;
+        let all_tasks = list_tasks_strict(state_dir)?;
+        let slug = target.slug_in(state_dir, &all_tasks)?;
         let mut task = load_task(state_dir, &slug)?;
         let prior = task.state;
         if prior == TaskState::Open && !force {
@@ -966,7 +946,6 @@ fn close_task(
                  the work, or pass --force if it is done."
             );
         }
-        let all_tasks = try_list_tasks(state_dir)?;
         let undone = relation::undone_descendants(&slug, &all_tasks);
         if !force && !undone.is_empty() {
             anyhow::bail!("{}", relation::undone_children_message(&slug, &undone));
@@ -1006,23 +985,6 @@ fn forced_close_text(prior: TaskState, caller: &ownership::Caller) -> String {
     )
 }
 
-/// Append a timestamped progress note to a task.
-pub fn note_task(state_dir: &Path, input: &str, text: &str) -> anyhow::Result<Task> {
-    let task = with_store_lock(state_dir, || {
-        let slug = resolve_identifier(state_dir, input)?;
-        let mut task = load_task(state_dir, &slug)?;
-        task.notes.push(TaskNote {
-            at: now_rfc3339(),
-            text: text.to_string(),
-        });
-        task.updated_at = now_rfc3339();
-        save_task(state_dir, &task)?;
-        Ok(task)
-    })?;
-    touch_task_session(state_dir, &task);
-    Ok(task)
-}
-
 /// Mark a task `waiting` — blocked on something outside the agent's control
 /// (typically human input) rather than actively being worked. `reason` is
 /// recorded as a note so `llmenv task show` carries the context. Resume with
@@ -1030,9 +992,14 @@ pub fn note_task(state_dir: &Path, input: &str, text: &str) -> anyhow::Result<Ta
 ///
 /// # Errors
 /// Errors if the task is already done.
-pub fn wait_task(state_dir: &Path, input: &str, reason: &str) -> anyhow::Result<Task> {
+pub fn wait_task<'a>(
+    state_dir: &Path,
+    target: impl Into<TaskTarget<'a>>,
+    reason: &str,
+) -> anyhow::Result<Task> {
+    let target = target.into();
     let task = with_store_lock(state_dir, || {
-        let slug = resolve_identifier(state_dir, input)?;
+        let slug = target.slug(state_dir)?;
         let mut task = load_task(state_dir, &slug)?;
         if task.state == TaskState::Done {
             anyhow::bail!("task '{slug}' is already done; cannot mark it waiting");
@@ -1058,10 +1025,19 @@ pub fn wait_task(state_dir: &Path, input: &str, reason: &str) -> anyhow::Result<
 /// (unlike the load-time tolerance for dangling `blocked_on` entries left
 /// behind by a since-deleted task file). Also errors if `input` and `on`
 /// resolve to the same task — a task cannot block itself.
-pub fn block_task(state_dir: &Path, input: &str, on: &str) -> anyhow::Result<Task> {
+pub fn block_task<'a>(
+    state_dir: &Path,
+    target: impl Into<TaskTarget<'a>>,
+    on: &str,
+) -> anyhow::Result<Task> {
+    let target = target.into();
     with_store_lock(state_dir, || {
-        let slug = resolve_identifier(state_dir, input)?;
-        let on_slug = resolve_identifier(state_dir, on)?;
+        // One strict read resolves both names (#3477).
+        target.check()?;
+        resolve::check_identifier(on)?;
+        let all_tasks = list_tasks_strict(state_dir)?;
+        let slug = target.slug_in(state_dir, &all_tasks)?;
+        let on_slug = resolve::resolve_in(state_dir, on, &all_tasks)?;
         if slug == on_slug {
             anyhow::bail!("task '{slug}' cannot be blocked on itself");
         }
@@ -1101,75 +1077,6 @@ pub struct TaskEdit<'a> {
     pub delete_note: Option<&'a str>,
     /// Replace the detail. An empty string clears it.
     pub detail: Option<&'a str>,
-}
-
-/// Mutate an existing task's title, parent, `blocked_on` set, and notes in a
-/// single load-mutate-save cycle (#930).
-///
-/// # Errors
-/// - `edit.parent` doesn't resolve to an existing task, names `input` itself,
-///   or would make `input` its own ancestor (cycle) — see [`reject_cycle`].
-/// - Any `edit.block_on` id doesn't resolve to an existing task, or names
-///   `input` itself — same eager-validation reasoning as [`block_task`].
-/// - Any `edit.unblock` id doesn't resolve to an existing task.
-/// - `edit.delete_note` doesn't match an existing note's index or timestamp.
-pub fn edit_task(state_dir: &Path, input: &str, edit: &TaskEdit<'_>) -> anyhow::Result<Task> {
-    let task = with_store_lock(state_dir, || {
-        let slug = resolve_identifier(state_dir, input)?;
-        let mut task = load_task(state_dir, &slug)?;
-
-        if let Some(title) = edit.title {
-            task.title = title.to_string();
-        }
-
-        if let Some(parent_input) = edit.parent {
-            let parent_slug = resolve_identifier(state_dir, parent_input)?;
-            if parent_slug == slug {
-                anyhow::bail!("task '{slug}' cannot be its own parent");
-            }
-            reject_cycle(state_dir, &slug, &parent_slug)?;
-            task.parent = Some(parent_slug);
-        } else if edit.no_parent {
-            task.parent = None;
-        }
-
-        for on in edit.block_on {
-            let on_slug = resolve_identifier(state_dir, on)?;
-            if on_slug == slug {
-                anyhow::bail!("task '{slug}' cannot be blocked on itself");
-            }
-            if !task.blocked_on.contains(&on_slug) {
-                task.blocked_on.push(on_slug);
-            }
-        }
-
-        for on in edit.unblock {
-            let on_slug = resolve_identifier(state_dir, on)?;
-            task.blocked_on.retain(|b| b != &on_slug);
-        }
-
-        if let Some(text) = edit.add_note {
-            task.notes.push(TaskNote {
-                at: now_rfc3339(),
-                text: text.to_string(),
-            });
-        }
-
-        if let Some(id) = edit.delete_note {
-            let idx = resolve_note_index(&task.notes, id)?;
-            task.notes.remove(idx);
-        }
-
-        if let Some(detail) = edit.detail {
-            task.detail = (!detail.is_empty()).then(|| detail.to_string());
-        }
-
-        task.updated_at = now_rfc3339();
-        save_task(state_dir, &task)?;
-        Ok(task)
-    })?;
-    touch_task_session(state_dir, &task);
-    Ok(task)
 }
 
 /// Resolve a `--delete-note` argument to an index into `notes`: either a
@@ -1246,19 +1153,29 @@ pub fn session_start_reminder(state_dir: &Path) -> String {
     // A session file that cannot be read is named here, the same way the Stop reminder names it,
     // so its tasks are not dropped without a word (#2665).
     let mut read_warning = String::new();
-    let tasks = match list_tasks_strict(state_dir) {
-        Ok(tasks) => match tasks_for_current_project(state_dir, tasks) {
+    // One read of the tasks and the sessions feeds every reminder of this hook run (#3468).
+    let stored = Stored::read(state_dir);
+    let tasks = match stored.tasks() {
+        Ok(tasks) => match tasks_for_current_project(&stored, tasks.as_slice()) {
             Ok(tasks) => tasks,
             Err(e) => {
                 read_warning = store_warning_text(&e);
                 Vec::new()
             }
         },
-        Err(_) => Vec::new(),
+        // The reminders below repeat this text when the project resolves, and
+        // `combine_reminders` drops the copy. Without a project they do not run, so the text
+        // must come from here.
+        Err(e) => {
+            read_warning = store_warning_text(&e.context("the task store cannot be read"));
+            Vec::new()
+        }
     };
     combine_reminders([
         read_warning,
-        for_current_project(|project| session::resume_reminders(state_dir, project)),
+        for_current_project(|project| {
+            session::resume_reminder_lines(stored.open_sessions_visible_to(project, None))
+        }),
         wip_reminder(
             &tasks,
             "In-progress task(s) in this project",
@@ -1268,9 +1185,9 @@ pub fn session_start_reminder(state_dir: &Path) -> String {
              different, possibly still-active session owns it — leave it alone.",
         ),
         waiting_reminder(&tasks),
-        session_finish_reminders(state_dir, None),
-        for_current_project(|project| match store_for_reminder(state_dir, project) {
-            Ok(tasks) => empty_session_lines(state_dir, &tasks, project, None).join("\n\n"),
+        session_finish_reminders(None, &stored),
+        for_current_project(|project| match store_for_reminder(project, &stored) {
+            Ok(tasks) => empty_session_lines(&stored, tasks.as_slice(), project, None).join("\n\n"),
             Err(warning) => warning,
         }),
     ])
@@ -1296,8 +1213,10 @@ pub fn session_start_reminder(state_dir: &Path) -> String {
 /// `wip` task from a different project sharing this task store must never
 /// surface here. See [`wip_reminder`] for why, within the project, the
 /// footer never presumes a listed task belongs to this conversation (#1028).
-pub fn stop_hook_reminder(state_dir: &Path, caller: Option<&str>) -> String {
-    let (tasks, store_warning) = match tasks_visible_to(state_dir, caller) {
+pub fn stop_hook_reminder(stored: &Stored, caller: Option<&str>) -> String {
+    // The caller reads the tasks and the sessions once for the whole Stop run, task tracking
+    // included (#3466, #3468, #3472).
+    let (tasks, store_warning) = match tasks_visible_to(caller, stored) {
         Ok(tasks) => (tasks, String::new()),
         Err(e) => (Vec::new(), store_warning_text(&e)),
     };
@@ -1315,11 +1234,9 @@ pub fn stop_hook_reminder(state_dir: &Path, caller: Option<&str>) -> String {
              only then ask the user once with a specific actionable question, and \
              `llmenv task note <slug> \"...\"` the blocker instead of repeating status.",
         ),
-        session_finish_reminders(state_dir, caller),
-        idle_session_reminders(state_dir, caller),
-        for_current_project(|project| {
-            session::missing_context_reminders(state_dir, project, caller)
-        }),
+        session_finish_reminders(caller, stored),
+        idle_session_reminders(caller, stored),
+        for_current_project(|project| session::missing_context_reminders(project, caller, stored)),
         store_warning,
     ])
 }
@@ -1376,43 +1293,22 @@ fn idle_sessions(open: Vec<Session>, all_tasks: &[Task]) -> Vec<IdleSession> {
 /// The Stop reminder for each [`IdleSession`] in the current project. Like
 /// [`session_finish_reminders`], it cannot tell whose session it names
 /// (#1028), so the nudge is conditioned on the agent recognizing it.
-fn idle_session_reminders(state_dir: &Path, caller: Option<&str>) -> String {
-    for_current_project(|project| idle_reminder_lines(state_dir, project, caller))
+fn idle_session_reminders(caller: Option<&str>, stored: &Stored) -> String {
+    for_current_project(|project| idle_reminder_lines(project, caller, stored))
 }
 
-/// The tasks of `project` for a reminder. A session list or a task file that cannot be read is an
-/// error, and the caller prints its text in place of the reminder. A silent skip would tell the
-/// agent that nothing is open (#2608).
-fn store_for_reminder(state_dir: &Path, project: &str) -> Result<Vec<Task>, String> {
-    let sessions = session::open_sessions_strict(state_dir, project);
-    match (sessions, list_tasks_strict(state_dir)) {
-        (Ok(_), Ok(tasks)) => Ok(tasks),
-        (Err(e), _) | (_, Err(e)) => Err(store_warning_text(
-            &e.context("the task store cannot be read"),
-        )),
-    }
-}
-
-/// The reminder text for a store that cannot be read.
-fn store_warning_text(error: &anyhow::Error) -> String {
-    format!(
-        "The task reminders were not checked ({error:#}). \
-         Fix the task store, then run `llmenv task ls --all` to confirm."
-    )
-}
-
-fn idle_reminder_lines(state_dir: &Path, project: &str, caller: Option<&str>) -> String {
-    let tasks = match store_for_reminder(state_dir, project) {
+fn idle_reminder_lines(project: &str, caller: Option<&str>, stored: &Stored) -> String {
+    let tasks = match store_for_reminder(project, stored) {
         Ok(tasks) => tasks,
         Err(warning) => return warning,
     };
-    let open = match session::try_open_sessions_visible_to(state_dir, project, caller) {
+    let open = match stored.open_sessions_visible_to(project, caller) {
         Ok(open) => open,
         Err(e) => return store_warning_text(&e),
     };
     let open_ids: Vec<String> = open.iter().map(|s| s.id.clone()).collect();
-    let stalled = relation::stalled_parent_lines(&tasks, &open_ids);
-    let idle = idle_sessions(open, &tasks)
+    let stalled = relation::stalled_parent_lines(tasks.as_slice(), &open_ids);
+    let idle = idle_sessions(open, tasks.as_slice())
         .iter()
         .map(|idle| {
             let id = &idle.session.id;
@@ -1430,7 +1326,7 @@ fn idle_reminder_lines(state_dir: &Path, project: &str, caller: Option<&str>) ->
             )
         })
         .collect::<Vec<_>>();
-    empty_session_lines(state_dir, &tasks, project, caller)
+    empty_session_lines(stored, tasks.as_slice(), project, caller)
         .into_iter()
         .chain(stalled)
         .chain(idle)
@@ -1449,12 +1345,12 @@ fn queue_order(a: &Task, b: &Task) -> std::cmp::Ordering {
 /// A line for each open session of `project` that holds no task at all (#2456). An empty session
 /// is an error state: the work goes on with nothing recorded.
 fn empty_session_lines(
-    state_dir: &Path,
+    stored: &Stored,
     tasks: &[Task],
     project: &str,
     caller: Option<&str>,
 ) -> Vec<String> {
-    let open = match session::try_open_sessions_visible_to(state_dir, project, caller) {
+    let open = match stored.open_sessions_visible_to(project, caller) {
         Ok(open) => open,
         Err(e) => return vec![store_warning_text(&e)],
     };
@@ -1484,7 +1380,7 @@ fn empty_session_lines(
 /// may no longer be "open" — whose `project` matches. Mirrors
 /// [`session_finish_reminders`]'s own project resolution. Empty when the
 /// project can't be resolved (degrades silently — hooks must never error).
-fn tasks_for_current_project(state_dir: &Path, tasks: Vec<Task>) -> anyhow::Result<Vec<Task>> {
+fn tasks_for_current_project(stored: &Stored, tasks: &[Task]) -> anyhow::Result<Vec<Task>> {
     let project = match project::current_tag() {
         Ok(project) => project,
         Err(e) => {
@@ -1493,24 +1389,27 @@ fn tasks_for_current_project(state_dir: &Path, tasks: Vec<Task>) -> anyhow::Resu
             return Ok(Vec::new());
         }
     };
-    filter_tasks_for_project(state_dir, &project, tasks)
+    Ok(session::filter::tasks_in_sessions(
+        tasks,
+        &stored.session_ids_visible_to(&project, None)?,
+    ))
 }
 
 /// The tasks of the current project that `caller` may be told about: all of them without a
 /// conversation id, else those of sessions that [`session::Session`] does not hide from it
 /// (#2511).
-fn tasks_visible_to(state_dir: &Path, caller: Option<&str>) -> anyhow::Result<Vec<Task>> {
+fn tasks_visible_to(caller: Option<&str>, stored: &Stored) -> anyhow::Result<Vec<Task>> {
     // An unresolved project must reach the Stop reminder as an error, not as an empty list
     // that looks like "no wip tasks" (#2658 review).
     let project = project::current_tag()
         .map_err(|e| anyhow::Error::new(e).context("cannot resolve the project tag"))?;
     // Strict session reads: a corrupt session file must reach the Stop reminder as an error,
     // not drop its tasks silently (#2628).
-    let project_ids = session::try_session_ids_for_project(state_dir, &project)?;
-    let stored = list_tasks_strict(state_dir).context("the task store cannot be read")?;
-    let mut tasks = keep_tasks_in_sessions(stored, &project_ids);
+    let project_ids = stored.session_ids_visible_to(&project, None)?;
+    let all = stored.tasks().context("the task store cannot be read")?;
+    let mut tasks = session::filter::tasks_in_sessions(all.as_slice(), &project_ids);
     if caller.is_some() {
-        let visible = session::try_session_ids_visible_to(state_dir, &project, caller)?;
+        let visible = stored.session_ids_visible_to(&project, caller)?;
         tasks.retain(|t| t.session.as_ref().is_some_and(|id| visible.contains(id)));
     }
     Ok(tasks)
@@ -1518,37 +1417,22 @@ fn tasks_visible_to(state_dir: &Path, caller: Option<&str>) -> anyhow::Result<Ve
 
 /// Keep only tasks whose session is tagged to `project` — any session ever
 /// tagged to it, open or closed — the shared filter behind `task ls
-/// --current-project` (#1117) and the SessionStart/Stop hook reminders
-/// ([`tasks_for_current_project`]). Legacy tasks with no `session` (predate
+/// --current-project` (#1117). The SessionStart/Stop hook reminders apply the same rule to
+/// their shared read ([`tasks_for_current_project`]). Legacy tasks with no `session` (predate
 /// mandatory sessions) are dropped: they can't be attributed to any
 /// project, and the conservative default is to never surface a task we
 /// can't attribute.
 ///
-/// # Errors
-/// Returns an error if a session file is corrupt or the sessions dir cannot be read. A tolerant
-/// read would drop that session's tasks without a word (#2665). The caller reports the error.
+/// `sessions` comes from the caller's strict read: a tolerant read would drop the tasks of a
+/// corrupt session file without a word (#2665). The caller can then use the same read again
+/// (#3479).
 pub fn filter_tasks_for_project(
-    state_dir: &Path,
+    sessions: &[session::Session],
     project: &str,
     tasks: Vec<Task>,
-) -> anyhow::Result<Vec<Task>> {
-    let session_ids = session::try_session_ids_for_project(state_dir, project)?;
-    Ok(keep_tasks_in_sessions(tasks, &session_ids))
-}
-
-/// Keep the tasks whose session is in `session_ids`. A task with no session is dropped.
-fn keep_tasks_in_sessions(
-    tasks: Vec<Task>,
-    session_ids: &std::collections::HashSet<String>,
 ) -> Vec<Task> {
-    tasks
-        .into_iter()
-        .filter(|t| {
-            t.session
-                .as_deref()
-                .is_some_and(|sid| session_ids.contains(sid))
-        })
-        .collect()
+    let session_ids = session::filter::ids_visible(sessions, project, None);
+    session::filter::tasks_in_sessions(&tasks, &session_ids)
 }
 
 /// Resolve the "current" task for `task show --current`/`--next` (#1117):
@@ -2917,7 +2801,7 @@ mod tests {
         let dir = TempDir::new().expect("test");
         let created = start_session_here(dir.path(), &resume::ResumeContext::default());
         add_task_for_session(dir.path(), "Step", ParentSpec::Detached, &created.id).expect("add");
-        let reminder = stop_hook_reminder(dir.path(), None);
+        let reminder = stop_hook_reminder(&Stored::read(dir.path()), None);
         assert!(reminder.contains("no resume context"), "{reminder}");
         assert!(reminder.contains("task session edit"), "{reminder}");
         assert!(
@@ -2941,18 +2825,25 @@ mod tests {
             &created.id,
         )
         .expect("add");
-        assert!(!stop_hook_reminder(with_context.path(), None).contains("no resume context"));
+        assert!(
+            !stop_hook_reminder(&Stored::read(with_context.path()), None)
+                .contains("no resume context")
+        );
 
         let no_tasks = TempDir::new().expect("test");
         start_session_here(no_tasks.path(), &resume::ResumeContext::default());
-        assert!(!stop_hook_reminder(no_tasks.path(), None).contains("no resume context"));
+        assert!(
+            !stop_hook_reminder(&Stored::read(no_tasks.path()), None).contains("no resume context")
+        );
 
         let all_done = TempDir::new().expect("test");
         let created = start_session_here(all_done.path(), &resume::ResumeContext::default());
         let task = add_task_for_session(all_done.path(), "Step", ParentSpec::Detached, &created.id)
             .expect("add");
         complete_task(all_done.path(), &task.slug, true).expect("done");
-        assert!(!stop_hook_reminder(all_done.path(), None).contains("no resume context"));
+        assert!(
+            !stop_hook_reminder(&Stored::read(all_done.path()), None).contains("no resume context")
+        );
     }
 
     #[test]
@@ -2965,7 +2856,7 @@ mod tests {
     #[test]
     fn stop_hook_reminder_empty_when_store_is_empty() {
         let dir = TempDir::new().expect("test");
-        assert!(stop_hook_reminder(dir.path(), None).is_empty());
+        assert!(stop_hook_reminder(&Stored::read(dir.path()), None).is_empty());
     }
 
     // --- open tasks, nothing started (#2338) ---
@@ -2986,7 +2877,7 @@ mod tests {
         let dir = TempDir::new().expect("test");
         let (session_id, first, second) = idle_session_in_project(dir.path(), &current_project());
 
-        let reminder = stop_hook_reminder(dir.path(), None);
+        let reminder = stop_hook_reminder(&Stored::read(dir.path()), None);
         assert!(
             reminder.contains(&session_id),
             "must name the session: {reminder}"
@@ -3015,7 +2906,8 @@ mod tests {
     fn unreadable_store_reminder_warns_instead_of_reporting_no_work() {
         let dir = TempDir::new().expect("test");
         std::fs::write(dir.path().join("tasks"), "x").expect("test");
-        let reminder = idle_reminder_lines(dir.path(), &current_project(), None);
+        let stored = Stored::read(dir.path());
+        let reminder = idle_reminder_lines(&current_project(), None, &stored);
         assert!(reminder.contains("task store cannot be read"), "{reminder}");
         assert!(!reminder.contains("has no tasks"), "{reminder}");
     }
@@ -3026,7 +2918,7 @@ mod tests {
         let dir = TempDir::new().expect("test");
         let (_, first, _) = idle_session_in_project(dir.path(), &current_project());
 
-        let reminder = stop_hook_reminder(dir.path(), None);
+        let reminder = stop_hook_reminder(&Stored::read(dir.path()), None);
         let start = format!("llmenv task start {}", first.slug);
         let wait = format!("llmenv task wait {} \"<reason>\"", first.slug);
         assert!(reminder.contains(&start), "{reminder}");
@@ -3043,7 +2935,7 @@ mod tests {
         let (session_id, first, second) = idle_session_in_project(dir.path(), &current_project());
         start_task(dir.path(), &first.slug, false).expect("test");
 
-        let reminder = stop_hook_reminder(dir.path(), None);
+        let reminder = stop_hook_reminder(&Stored::read(dir.path()), None);
         assert!(
             reminder.contains(&first.slug),
             "wip reminder still fires: {reminder}"
@@ -3061,7 +2953,7 @@ mod tests {
         wait_task(dir.path(), &first.slug, "spec review").expect("test");
 
         // A `waiting` task means the session is paused on purpose; stay quiet.
-        let reminder = stop_hook_reminder(dir.path(), None);
+        let reminder = stop_hook_reminder(&Stored::read(dir.path()), None);
         assert!(!reminder.contains(&second.slug), "{reminder}");
     }
 
@@ -3069,7 +2961,7 @@ mod tests {
     fn stop_hook_reminder_skips_idle_session_from_other_project() {
         let dir = TempDir::new().expect("test");
         let (_, first, _) = idle_session_in_project(dir.path(), "other-project-0000000000");
-        assert!(!stop_hook_reminder(dir.path(), None).contains(&first.slug));
+        assert!(!stop_hook_reminder(&Stored::read(dir.path()), None).contains(&first.slug));
     }
 
     #[test]
@@ -3079,7 +2971,7 @@ mod tests {
         let (session_id, first, second) = idle_session_in_project(dir.path(), &project);
         block_task(dir.path(), &first.slug, &second.slug).expect("test");
 
-        let open = session::try_open_sessions_visible_to(dir.path(), &project, None).expect("test");
+        let open = session::open_sessions_strict(dir.path(), &project).expect("test");
         let idle = idle_sessions(open, &list_tasks(dir.path()));
         assert_eq!(idle.len(), 1);
         assert_eq!(idle[0].session.id, session_id);
@@ -3118,7 +3010,7 @@ mod tests {
         start_task(dir.path(), &scan.slug, false).expect("test");
         complete_task(dir.path(), &scan.slug, false).expect("test");
 
-        let reminder = stop_hook_reminder(dir.path(), None);
+        let reminder = stop_hook_reminder(&Stored::read(dir.path()), None);
         assert!(reminder.contains("1 of 2 sub-tasks done"), "{reminder}");
         assert!(
             reminder.contains(&format!("llmenv task start {}", audit.slug)),
@@ -3141,7 +3033,7 @@ mod tests {
         .expect("test");
         start_task(dir.path(), &scan.slug, false).expect("test");
 
-        let reminder = stop_hook_reminder(dir.path(), None);
+        let reminder = stop_hook_reminder(&Stored::read(dir.path()), None);
         assert!(
             reminder.contains("0 of 1 sub-tasks done, 1 in progress"),
             "{reminder}"
@@ -3337,7 +3229,7 @@ mod tests {
                     expected.insert(sid, open);
                 }
             }
-            let open = session::try_open_sessions_visible_to(dir.path(), PROJECT, None).expect("test");
+            let open = session::open_sessions_strict(dir.path(), PROJECT).expect("test");
             let idle = idle_sessions(open, &list_tasks(dir.path()));
             let got: std::collections::BTreeMap<String, usize> = idle
                 .iter()
@@ -3495,7 +3387,7 @@ mod tests {
     fn stop_hook_reminder_flags_wip_tasks() {
         let dir = TempDir::new().expect("test");
         let task = wip_task_in_project(dir.path(), "Left in progress", &current_project());
-        let reminder = stop_hook_reminder(dir.path(), None);
+        let reminder = stop_hook_reminder(&Stored::read(dir.path()), None);
         assert!(reminder.contains(&task.slug));
     }
 
@@ -3505,7 +3397,7 @@ mod tests {
         let task = mk(dir.path(), "Blocked on review", None).expect("test");
         wait_task(dir.path(), &task.slug, "spec review").expect("test");
         // `waiting` is meant to be quiet — Stop must not re-inject its FYI.
-        assert!(stop_hook_reminder(dir.path(), None).is_empty());
+        assert!(stop_hook_reminder(&Stored::read(dir.path()), None).is_empty());
     }
 
     #[test]
@@ -3516,7 +3408,7 @@ mod tests {
         let waiting =
             waiting_task_in_project(dir.path(), "Blocked on review", &project, "spec review");
 
-        let reminder = stop_hook_reminder(dir.path(), None);
+        let reminder = stop_hook_reminder(&Stored::read(dir.path()), None);
         assert!(reminder.contains(&wip.slug));
         assert!(reminder.contains("exhaust safe autonomous remediation"));
         // The waiting task and its FYI must stay silent on Stop.
@@ -3536,7 +3428,7 @@ mod tests {
         let dir = TempDir::new().expect("test");
         let task = wip_task_in_project(dir.path(), "Someone's task", &current_project());
 
-        let reminder = stop_hook_reminder(dir.path(), None);
+        let reminder = stop_hook_reminder(&Stored::read(dir.path()), None);
         assert!(
             reminder.contains(task.session.as_deref().expect("test")),
             "reminder must name the owning session so the agent can tell whether it's its \
@@ -3628,7 +3520,7 @@ mod tests {
         let leaked = wip_task_in_project(dir.path(), "Other project's task", other_project);
         // No session/task tagged to the real current project at all — a
         // `wip` task belonging to a different project must not surface.
-        let reminder = stop_hook_reminder(dir.path(), None);
+        let reminder = stop_hook_reminder(&Stored::read(dir.path()), None);
         assert!(!reminder.contains(&leaked.slug));
         assert!(reminder.is_empty());
     }
@@ -3651,7 +3543,7 @@ mod tests {
         let mine = wip_task_in_project(dir.path(), "My task", &project);
         let leaked = wip_task_in_project(dir.path(), "Other project's task", "other-project-999");
 
-        let reminder = stop_hook_reminder(dir.path(), None);
+        let reminder = stop_hook_reminder(&Stored::read(dir.path()), None);
         assert!(reminder.contains(&mine.slug), "own-project task must show");
         assert!(
             !reminder.contains(&leaked.slug),
@@ -3670,7 +3562,7 @@ mod tests {
         legacy.state = TaskState::Wip;
         save_task(dir.path(), &legacy).expect("test");
 
-        assert!(!stop_hook_reminder(dir.path(), None).contains(&legacy.slug));
+        assert!(!stop_hook_reminder(&Stored::read(dir.path()), None).contains(&legacy.slug));
         assert!(!session_start_reminder(dir.path()).contains(&legacy.slug));
     }
 
@@ -3747,7 +3639,8 @@ mod tests {
         let no_session = t("legacy", TaskState::Open, None, None);
         let tasks = vec![in_project.clone(), other_session, no_session];
 
-        let kept = filter_tasks_for_project(dir.path(), "proj-a", tasks).expect("test");
+        let sessions = session::list_sessions_strict(dir.path()).expect("test");
+        let kept = filter_tasks_for_project(&sessions, "proj-a", tasks);
         assert_eq!(
             kept.iter().map(|x| x.slug.as_str()).collect::<Vec<_>>(),
             [in_project.slug.as_str()]
@@ -4492,7 +4385,8 @@ mod tests {
                     .filter(|t| t.session.as_deref().is_some_and(|s| a_id_set.contains(s)))
                     .count();
 
-                let result = filter_tasks_for_project(dir.path(), "proj-a", tasks).expect("test");
+                let sessions = session::list_sessions_strict(dir.path()).expect("test");
+                let result = filter_tasks_for_project(&sessions, "proj-a", tasks);
 
                 for t in &result {
                     // Subset: every returned task was in the input.
@@ -4696,29 +4590,4 @@ mod tests {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-mod reject_cycle_tests {
-    use super::{reject_cycle, task_path};
-    use tempfile::TempDir;
-
-    #[test]
-    fn a_corrupt_ancestor_fails_the_parent_change() {
-        let dir = TempDir::new().expect("tempdir");
-        let path = task_path(dir.path(), "ancestor");
-        std::fs::create_dir_all(path.parent().expect("task dir")).expect("mkdir");
-        std::fs::write(&path, "{not task json").expect("write corrupt ancestor");
-
-        let err = reject_cycle(dir.path(), "child", "ancestor")
-            .expect_err("a corrupt ancestor must not pass silently");
-
-        let msg = format!("{err:#}");
-        assert!(msg.contains("ancestor"), "must name the ancestor: {msg}");
-    }
-
-    #[test]
-    fn a_missing_ancestor_ends_the_walk_without_error() {
-        let dir = TempDir::new().expect("tempdir");
-
-        reject_cycle(dir.path(), "child", "absent")
-            .expect("a missing ancestor is not a cycle and not a corrupt file");
-    }
-}
+mod reject_cycle_tests;

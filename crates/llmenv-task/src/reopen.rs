@@ -5,11 +5,13 @@
 
 use std::path::Path;
 
+use super::TaskTarget;
+
 use anyhow::Context;
 
 use crate::{
-    Relation, Task, TaskNote, TaskState, load_task, now_rfc3339, resolve_identifier, save_task,
-    touch_task_session, with_store_lock,
+    Relation, Task, TaskNote, TaskState, load_task, now_rfc3339, save_task, touch_task_session,
+    with_store_lock,
 };
 
 /// Set a `done` task to `open` and append a note that names the command used.
@@ -29,9 +31,13 @@ fn mark_reopened(task: &mut Task, command: &str) {
 ///
 /// # Errors
 /// Errors if `input` does not resolve to a task, or the save fails.
-pub fn reopen_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
+pub fn reopen_task<'a>(
+    state_dir: &Path,
+    target: impl Into<super::TaskTarget<'a>>,
+) -> anyhow::Result<Task> {
+    let target = target.into();
     let task = with_store_lock(state_dir, || {
-        let slug = resolve_identifier(state_dir, input)?;
+        let slug = target.slug(state_dir)?;
         let mut task = load_task(state_dir, &slug)?;
         if task.state != TaskState::Done {
             return Ok(task);
@@ -57,11 +63,32 @@ pub fn reopen_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
 /// Errors if an identifier does not resolve, a task is not `done`, a sub-task has a `done`
 /// parent that is not also named, or a save fails. A save error names the tasks that the call
 /// already reopened.
-pub fn reopen_tasks(state_dir: &Path, inputs: &[String]) -> anyhow::Result<Vec<Task>> {
+#[cfg(test)]
+fn reopen_tasks(state_dir: &Path, inputs: &[String]) -> anyhow::Result<Vec<Task>> {
+    let targets: Vec<TaskTarget<'_>> = inputs.iter().map(TaskTarget::from).collect();
+    reopen_targets(state_dir, &targets)
+}
+
+/// [`reopen_tasks`] for the slugs that the ownership check resolved, so the tasks that were
+/// checked are the tasks that are reopened, with no second lookup (#3477).
+///
+/// # Errors
+/// The errors of [`reopen_tasks`].
+pub fn reopen_resolved(state_dir: &Path, slugs: &[String]) -> anyhow::Result<Vec<Task>> {
+    let targets: Vec<TaskTarget<'_>> = slugs.iter().map(|s| TaskTarget::Resolved(s)).collect();
+    reopen_targets(state_dir, &targets)
+}
+
+fn reopen_targets(state_dir: &Path, targets: &[TaskTarget<'_>]) -> anyhow::Result<Vec<Task>> {
     let tasks = with_store_lock(state_dir, || {
+        // One strict read resolves every name (#3477).
+        for target in targets {
+            target.check()?;
+        }
+        let all_tasks = super::list_tasks_strict(state_dir)?;
         let mut tasks: Vec<Task> = Vec::new();
-        for input in inputs {
-            let slug = resolve_identifier(state_dir, input)?;
+        for target in targets {
+            let slug = target.slug_in(state_dir, &all_tasks)?;
             if tasks.iter().all(|t| t.slug != slug) {
                 tasks.push(load_task(state_dir, &slug)?);
             }
@@ -107,14 +134,24 @@ pub fn reopen_tasks(state_dir: &Path, inputs: &[String]) -> anyhow::Result<Vec<T
 /// Refuse a sub-task whose parent is `done` and is not in `tasks`. `complete_task` never lets a
 /// parent finish before its sub-tasks, so this call must not rebuild that state.
 fn refuse_done_parents(state_dir: &Path, tasks: &[Task]) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    // A parent that is not done stays so for this call, so each one is read once (#3463).
+    let mut open_parents = std::collections::HashSet::new();
     for task in tasks.iter().filter(|t| t.relation == Relation::Child) {
         let Some(parent_slug) = task.parent.as_deref() else {
             continue;
         };
-        if tasks.iter().any(|t| t.slug == parent_slug) {
+        if open_parents.contains(parent_slug) || tasks.iter().any(|t| t.slug == parent_slug) {
             continue;
         }
-        let parent = load_task(state_dir, parent_slug)?;
+        let parent = load_task(state_dir, parent_slug).with_context(|| {
+            format!(
+                "no task was changed: cannot read '{parent_slug}', the parent of '{}'. Fix: \
+                 repair or remove {}, then run the command again",
+                task.slug,
+                super::task_path(state_dir, parent_slug).display()
+            )
+        })?;
         if parent.state == TaskState::Done {
             anyhow::bail!(
                 "no task was changed: '{}' is a sub-task of '{parent_slug}', which is done. \
@@ -122,6 +159,7 @@ fn refuse_done_parents(state_dir: &Path, tasks: &[Task]) -> anyhow::Result<()> {
                 task.slug
             );
         }
+        open_parents.insert(parent_slug);
     }
     Ok(())
 }
@@ -274,5 +312,87 @@ mod tests {
         let child = sub_task(dir.path(), "Child task", &parent.slug);
         complete_task(dir.path(), &child.slug, true).unwrap();
         reopen_tasks(dir.path(), std::slice::from_ref(&child.slug)).unwrap();
+    }
+
+    #[test]
+    fn reopen_tasks_accepts_two_sub_tasks_of_one_open_parent() {
+        let dir = TempDir::new().unwrap();
+        let parent = open(dir.path(), "Parent task");
+        let first = sub_task(dir.path(), "First child", &parent.slug);
+        let second = sub_task(dir.path(), "Second child", &parent.slug);
+        for child in [&first, &second] {
+            complete_task(dir.path(), &child.slug, true).unwrap();
+        }
+        reopen_tasks(dir.path(), &[first.slug.clone(), second.slug.clone()]).unwrap();
+        for slug in [&first.slug, &second.slug] {
+            assert_eq!(load_task(dir.path(), slug).unwrap().state, TaskState::Open);
+        }
+    }
+
+    /// The strict read of the store names a corrupt parent file before any task changes
+    /// (#3463, #3471).
+    #[test]
+    fn an_unreadable_parent_file_is_named_and_nothing_changes() {
+        let dir = TempDir::new().unwrap();
+        let parent = open(dir.path(), "Parent task");
+        let child = sub_task(dir.path(), "Child task", &parent.slug);
+        complete_task(dir.path(), &child.slug, true).unwrap();
+        let path = super::super::task_path(dir.path(), &parent.slug);
+        std::fs::write(&path, "not json").unwrap();
+
+        let err = reopen_tasks(dir.path(), std::slice::from_ref(&child.slug)).unwrap_err();
+
+        let text = format!("{err:#}");
+        assert!(text.contains(&path.display().to_string()), "{text}");
+        assert_eq!(
+            load_task(dir.path(), &child.slug).unwrap().state,
+            TaskState::Done
+        );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(16))]
+
+        /// A batch of done sub-tasks is refused exactly when one of them has a done parent that
+        /// is not in the batch, however many sub-tasks share a parent (#3463).
+        #[test]
+        fn a_batch_is_refused_exactly_when_a_done_parent_is_left_out(
+            parents in proptest::collection::vec(
+                (proptest::prelude::any::<bool>(), proptest::prelude::any::<bool>()),
+                1..=3,
+            ),
+            children in proptest::collection::vec(0usize..3, 1..=4),
+        ) {
+            let dir = TempDir::new().unwrap();
+            let parent_tasks: Vec<Task> = (0..parents.len())
+                .map(|i| open(dir.path(), &format!("Parent {i}")))
+                .collect();
+            let child_tasks: Vec<(usize, Task)> = children
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let index = p % parents.len();
+                    let parent = &parent_tasks[index].slug;
+                    (index, sub_task(dir.path(), &format!("Child {i}"), parent))
+                })
+                .collect();
+            for (_, child) in &child_tasks {
+                complete_task(dir.path(), &child.slug, true).unwrap();
+            }
+            let mut batch: Vec<String> =
+                child_tasks.iter().map(|(_, c)| c.slug.to_string()).collect();
+            for (task, (is_done, in_batch)) in parent_tasks.iter().zip(&parents) {
+                if *is_done {
+                    complete_task(dir.path(), &task.slug, true).unwrap();
+                    if *in_batch {
+                        batch.push(task.slug.to_string());
+                    }
+                }
+            }
+            let refused = child_tasks
+                .iter()
+                .any(|(index, _)| parents[*index].0 && !parents[*index].1);
+            proptest::prop_assert_eq!(reopen_tasks(dir.path(), &batch).is_err(), refused);
+        }
     }
 }

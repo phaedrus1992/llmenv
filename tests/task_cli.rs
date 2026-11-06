@@ -2999,3 +2999,89 @@ fn session_start_adds_the_first_tasks() {
     let tasks: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(tasks.as_array().unwrap().len(), 2);
 }
+
+/// Two open sessions with no conversation id: the caller names neither, so a command that acts
+/// on a session by id needs `--other-session` (#3478).
+fn two_open_sessions(dir: &std::path::Path) {
+    start_session(dir, "alpha");
+    llmenv(dir)
+        .args(["task", "session", "start", "beta", "--new"])
+        .assert()
+        .success();
+    llmenv(dir)
+        .args(["task", "add", "Beta step", "--session", "beta"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn session_finish_of_an_unowned_session_is_refused_without_other_session() {
+    let dir = TempDir::new().unwrap();
+    two_open_sessions(dir.path());
+
+    llmenv(dir.path())
+        .args(["task", "session", "finish", "beta", "--abandon-open"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "this command acts on session 'beta'",
+        ));
+    // The refusal left the task tagged to its session.
+    llmenv(dir.path())
+        .args(["task", "show", "beta-step"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("beta").and(predicates::str::contains("Dropped").not()));
+
+    llmenv(dir.path())
+        .args([
+            "task",
+            "session",
+            "finish",
+            "beta",
+            "--abandon-open",
+            "--other-session",
+            "beta",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn session_note_and_edit_of_an_unowned_session_are_refused_without_other_session() {
+    let dir = TempDir::new().unwrap();
+    two_open_sessions(dir.path());
+
+    llmenv(dir.path())
+        .args(["task", "session", "note", "a note", "--id", "beta"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "this command acts on session 'beta'",
+        ));
+    llmenv(dir.path())
+        .args([
+            "task",
+            "session",
+            "edit",
+            "beta",
+            "--other-session",
+            "alpha",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not 'alpha'"));
+    llmenv(dir.path())
+        .args([
+            "task",
+            "session",
+            "note",
+            "a note",
+            "--id",
+            "beta",
+            "--other-session",
+            "beta",
+        ])
+        .assert()
+        .success();
+}
