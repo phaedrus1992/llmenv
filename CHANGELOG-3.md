@@ -58,6 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Share that read with the task tracking check of the Stop hook, which read both stores again. [perf:hook] [#3472]
 - Read each store once in the TaskCreate and TaskUpdate redirects, and in `llmenv task start` and `llmenv task done`. A failed TaskUpdate now says `couldn't update task '<id>'` with the full cause, for a bad id and a refused change alike, and says which task got its note. [perf:task] [#3474]
 - Read the task store once in the other `llmenv task` commands (`start`, `note`, `wait`, `block`, `edit`, `reopen`, `clear`, `add`, `ls`). The ownership check now hands its resolved task to the command, so the check and the change always act on the same task. [perf:task] [#3477]
+- Read the task store once in `llmenv task session start --replace` and `llmenv task session finish`, and the session files once in `llmenv task ls --current-project`. Before, `--replace` read the whole store once for each session that it abandoned. [perf:task] [#3479]
 
 ### Fixed
 
@@ -191,6 +192,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Tell the agent when the repeat check, the read cache, or the cd check is off for one call, when slow main recalls skip the extra memory recalls, when the resume notice stays on for an unknown engine version, and when the code index root check leaves a root out. Each case was a log line only. [fix:hook] [#3462]
 - Tell the agent when a finished background job (memory store, session log record, consolidation, or code index) keeps its checkpoint, which makes a later session run the job again and then report that it gave up. [fix:hook] [#3465]
 - Fail the TaskList redirect, `llmenv task done`, `llmenv task show --current` and `--next`, and task name lookup with the read error when one task file is corrupt. Before, the corrupt task was left out, so the list could read as empty, a parent could close over an open sub-task, and a task could read as not found. [fix:task] [#3471]
+- Refuse a TaskUpdate that starts, closes, deletes, or notes a task of another conversation's session, with the same text as the `llmenv task` commands. Before, the native tool skipped the ownership check. The `llmenv task` commands and the TaskUpdate redirect now check the owner and change the task under one store lock. [fix:task] [#3478]
 
 ### Security
 

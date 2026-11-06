@@ -16,9 +16,9 @@ pub(super) fn guard_task(
 }
 
 /// [`guard_task`] for several ids, with one read of the store. The command then acts on the
-/// returned slugs, which are the tasks that were checked (#3477). The check reads outside the
-/// store lock that the command takes, so a task that another process re-tags between the two
-/// is not checked again; #3478 tracks a check under the lock.
+/// returned slugs, which are the tasks that were checked (#3477). Each command runs the check
+/// and the change in one `with_store_lock`, so no other process changes the task between the
+/// two (#3478).
 pub(super) fn guard_tasks(
     state_dir: &std::path::Path,
     ids: &[String],

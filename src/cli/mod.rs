@@ -2711,14 +2711,19 @@ fn run_init_auth_prompt(adapter_root: &Path) -> anyhow::Result<()> {
 /// with any `blocked_on` refs. `tasks` is already filtered by the caller.
 fn render_task_ls_human(
     state_dir: &Path,
+    sessions: Option<Vec<crate::task::session::Session>>,
     tasks: Vec<crate::task::Task>,
     use_color: bool,
 ) -> anyhow::Result<String> {
     if tasks.is_empty() {
         return Ok("No tasks.\n".to_string());
     }
-    // One strict read of the session files feeds the priority order and the labels (#3477).
-    let sessions = crate::task::session::list_sessions_strict(state_dir)?;
+    // One strict read of the session files feeds the priority order and the labels (#3477). A
+    // read that the caller already made is used again (#3479).
+    let sessions = match sessions {
+        Some(sessions) => sessions,
+        None => crate::task::session::list_sessions_strict(state_dir)?,
+    };
     let priority: Vec<String> = match crate::task::project::current_tag() {
         Ok(p) => sessions
             .iter()
@@ -2896,26 +2901,28 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             reopen,
             other_session,
         } => {
-            let (slug, audit) = guard_task(&state_dir, &id, other_session.as_deref())?;
-            if reopen {
-                crate::task::reopen_task(&state_dir, crate::task::TaskTarget::Resolved(&slug))?;
-            }
-            let task = crate::task::start_task(
-                &state_dir,
-                crate::task::TaskTarget::Resolved(&slug),
-                force,
-            )
-            .map_err(|e| {
+            crate::task::with_store_lock(&state_dir, || {
+                let (slug, audit) = guard_task(&state_dir, &id, other_session.as_deref())?;
                 if reopen {
-                    e.context(format!(
-                        "task '{id}' is now reopened (open), but it did not start"
-                    ))
-                } else {
-                    e
+                    crate::task::reopen_task(&state_dir, crate::task::TaskTarget::Resolved(&slug))?;
                 }
+                let task = crate::task::start_task(
+                    &state_dir,
+                    crate::task::TaskTarget::Resolved(&slug),
+                    force,
+                )
+                .map_err(|e| {
+                    if reopen {
+                        e.context(format!(
+                            "task '{id}' is now reopened (open), but it did not start"
+                        ))
+                    } else {
+                        e
+                    }
+                })?;
+                println!("Started '{}' — now {:?}", task.slug, task.state);
+                record_override(&state_dir, audit)
             })?;
-            println!("Started '{}' — now {:?}", task.slug, task.state);
-            record_override(&state_dir, audit)?;
         }
         TaskCommand::Done {
             id,
@@ -2923,16 +2930,18 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             other_session,
         } => task_done::run(&state_dir, &id, force, other_session.as_deref())?,
         TaskCommand::Reopen { ids, other_session } => {
-            let (slugs, audits): (Vec<String>, Vec<_>) =
-                guard_tasks(&state_dir, &ids, other_session.as_deref())?
+            crate::task::with_store_lock(&state_dir, || {
+                let (slugs, audits): (Vec<String>, Vec<_>) =
+                    guard_tasks(&state_dir, &ids, other_session.as_deref())?
+                        .into_iter()
+                        .unzip();
+                for task in crate::task::reopen::reopen_resolved(&state_dir, &slugs)? {
+                    println!("Reopened '{}' — now {:?}", task.slug, task.state);
+                }
+                audits
                     .into_iter()
-                    .unzip();
-            for task in crate::task::reopen::reopen_resolved(&state_dir, &slugs)? {
-                println!("Reopened '{}' — now {:?}", task.slug, task.state);
-            }
-            for audit in audits {
-                record_override(&state_dir, audit)?;
-            }
+                    .try_for_each(|audit| record_override(&state_dir, audit))
+            })?;
         }
         TaskCommand::Ls {
             format,
@@ -2952,9 +2961,14 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 );
             }
             let mut tasks = crate::task::try_list_tasks(&state_dir)?;
+            // One strict read of the session files serves the project filter and the
+            // renderer (#3479).
+            let mut sessions = None;
             if current_project {
                 let project = current_project_tag()?;
-                tasks = crate::task::filter_tasks_for_project(&state_dir, &project, tasks)?;
+                let read = crate::task::session::list_sessions_strict(&state_dir)?;
+                tasks = crate::task::filter_tasks_for_project(&read, &project, tasks);
+                sessions = Some(read);
             }
             if let Some(session_id) = &session {
                 tasks.retain(|t| t.session.as_deref() == Some(session_id.as_str()));
@@ -2979,7 +2993,10 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 None => {
                     use std::io::IsTerminal;
                     let use_color = should_use_color(Some(color), std::io::stdout().is_terminal());
-                    print!("{}", render_task_ls_human(&state_dir, tasks, use_color)?);
+                    print!(
+                        "{}",
+                        render_task_ls_human(&state_dir, sessions, tasks, use_color)?
+                    );
                 }
             }
         }
@@ -3005,7 +3022,7 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             text,
             other_session,
         } => {
-            let (slug, audit) = guard_task(&state_dir, &id, other_session.as_deref())?;
+            // stdin is read before the lock, so a slow writer does not hold the store.
             let text = match text {
                 Some(t) => t,
                 None => {
@@ -3015,20 +3032,23 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                     buf.trim().to_string()
                 }
             };
-            let task = crate::task::note_task(
-                &state_dir,
-                crate::task::TaskTarget::Resolved(&slug),
-                &text,
-            )?;
-            println!("Noted on '{}'", task.slug);
-            record_override(&state_dir, audit)?;
+            crate::task::with_store_lock(&state_dir, || {
+                let (slug, audit) = guard_task(&state_dir, &id, other_session.as_deref())?;
+                let task = crate::task::note_task(
+                    &state_dir,
+                    crate::task::TaskTarget::Resolved(&slug),
+                    &text,
+                )?;
+                println!("Noted on '{}'", task.slug);
+                record_override(&state_dir, audit)
+            })?;
         }
         TaskCommand::Wait {
             id,
             reason,
             other_session,
         } => {
-            let (slug, audit) = guard_task(&state_dir, &id, other_session.as_deref())?;
+            // stdin is read before the lock, so a slow writer does not hold the store.
             let reason = match reason {
                 Some(r) => r,
                 None => {
@@ -3038,28 +3058,36 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                     buf.trim().to_string()
                 }
             };
-            let task = crate::task::wait_task(
-                &state_dir,
-                crate::task::TaskTarget::Resolved(&slug),
-                &reason,
-            )?;
-            println!("Marked '{}' waiting", task.slug);
-            record_override(&state_dir, audit)?;
+            crate::task::with_store_lock(&state_dir, || {
+                let (slug, audit) = guard_task(&state_dir, &id, other_session.as_deref())?;
+                let task = crate::task::wait_task(
+                    &state_dir,
+                    crate::task::TaskTarget::Resolved(&slug),
+                    &reason,
+                )?;
+                println!("Marked '{}' waiting", task.slug);
+                record_override(&state_dir, audit)
+            })?;
         }
         TaskCommand::Block {
             id,
             on,
             other_session,
         } => {
-            let (slug, audit) = guard_task(&state_dir, &id, other_session.as_deref())?;
-            let task =
-                crate::task::block_task(&state_dir, crate::task::TaskTarget::Resolved(&slug), &on)?;
-            println!(
-                "'{}' is now blocked on: {}",
-                task.slug,
-                task.blocked_on.join(", ")
-            );
-            record_override(&state_dir, audit)?;
+            crate::task::with_store_lock(&state_dir, || {
+                let (slug, audit) = guard_task(&state_dir, &id, other_session.as_deref())?;
+                let task = crate::task::block_task(
+                    &state_dir,
+                    crate::task::TaskTarget::Resolved(&slug),
+                    &on,
+                )?;
+                println!(
+                    "'{}' is now blocked on: {}",
+                    task.slug,
+                    task.blocked_on.join(", ")
+                );
+                record_override(&state_dir, audit)
+            })?;
         }
         TaskCommand::Edit {
             id,
@@ -3073,7 +3101,7 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             detail,
             other_session,
         } => {
-            let (slug, audit) = guard_task(&state_dir, &id, other_session.as_deref())?;
+            // stdin is read before the lock, so a slow writer does not hold the store.
             let detail = detail.resolve()?;
             let add_note = match add_note.as_deref() {
                 Some("") => {
@@ -3095,44 +3123,63 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 delete_note: delete_note.as_deref(),
                 detail: detail.as_deref(),
             };
-            let task = crate::task::edit_task(
-                &state_dir,
-                crate::task::TaskTarget::Resolved(&slug),
-                &edit,
-            )?;
-            println!("Updated '{}'", task.slug);
-            record_override(&state_dir, audit)?;
+            crate::task::with_store_lock(&state_dir, || {
+                let (slug, audit) = guard_task(&state_dir, &id, other_session.as_deref())?;
+                let task = crate::task::edit_task(
+                    &state_dir,
+                    crate::task::TaskTarget::Resolved(&slug),
+                    &edit,
+                )?;
+                println!("Updated '{}'", task.slug);
+                record_override(&state_dir, audit)
+            })?;
         }
         TaskCommand::Clear {
             ids,
             session,
             other_session,
         } => {
-            if let Some(session_id) = &session {
-                guard_session(&state_dir, session_id, other_session.as_deref())?;
-            }
-            // `clear` deletes the task, so a pending override note has nowhere to live.
-            let checked = guard_tasks(&state_dir, &ids, other_session.as_deref())?;
-            if let Some(session_id) = session {
-                let cleared =
-                    crate::task::session::delete_tasks_in_session(&state_dir, &session_id)?;
-                println!(
-                    "Cleared {} task(s) from session '{session_id}'",
-                    cleared.len()
-                );
-            } else if ids.is_empty() {
-                anyhow::bail!("specify one or more task ids, or --session <id>");
-            } else {
-                for (slug, _) in &checked {
-                    let task = crate::task::delete_task(
-                        &state_dir,
-                        crate::task::TaskTarget::Resolved(slug),
-                    )?;
-                    println!("Cleared task '{}' ({})", task.slug, task.title);
-                }
-            }
+            crate::task::with_store_lock(&state_dir, || {
+                run_task_clear(
+                    &state_dir,
+                    &ids,
+                    session.as_deref(),
+                    other_session.as_deref(),
+                )
+            })?;
         }
         TaskCommand::Session { command } => run_task_session_command(&state_dir, command, color)?,
+    }
+    Ok(())
+}
+
+/// `llmenv task clear`, run by the caller under the store lock, so the checked tasks are the
+/// tasks that are deleted (#3478).
+fn run_task_clear(
+    state_dir: &std::path::Path,
+    ids: &[String],
+    session: Option<&str>,
+    other_session: Option<&str>,
+) -> anyhow::Result<()> {
+    if let Some(session_id) = session {
+        guard_session(state_dir, session_id, other_session)?;
+    }
+    // `clear` deletes the task, so a pending override note has nowhere to live.
+    let checked = guard_tasks(state_dir, ids, other_session)?;
+    if let Some(session_id) = session {
+        let cleared = crate::task::session::delete_tasks_in_session(state_dir, session_id)?;
+        println!(
+            "Cleared {} task(s) from session '{session_id}'",
+            cleared.len()
+        );
+    } else if ids.is_empty() {
+        anyhow::bail!("specify one or more task ids, or --session <id>");
+    } else {
+        for (slug, _) in &checked {
+            let task =
+                crate::task::delete_task(state_dir, crate::task::TaskTarget::Resolved(slug))?;
+            println!("Cleared task '{}' ({})", task.slug, task.title);
+        }
     }
     Ok(())
 }

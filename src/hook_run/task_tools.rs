@@ -19,6 +19,8 @@ use serde_json::Value;
 
 use crate::task::{self, session};
 
+mod update;
+
 /// The Claude Code built-in task tools this handler intercepts.
 const TASK_TOOLS: [&str; 3] = ["TaskCreate", "TaskList", "TaskUpdate"];
 
@@ -103,7 +105,7 @@ fn handle_inner_as(
     match tool {
         "TaskCreate" => create(input, state_dir, project, owner),
         "TaskList" => list(state_dir),
-        "TaskUpdate" => update(input, state_dir),
+        "TaskUpdate" => update::update(input, state_dir, project, owner),
         // Unreachable: `task_tool_name` admits only TASK_TOOLS.
         other => deny(&format!(
             "unhandled task tool '{other}'; use `llmenv task`."
@@ -266,96 +268,6 @@ fn list(state_dir: &Path) -> String {
     deny(&format!(
         "The llmenv task tracker is authoritative (Claude's TaskList is redirected here):\n{body}"
     ))
-}
-
-fn update(input: Option<&Value>, state_dir: &Path) -> String {
-    // Claude Code may stream either `taskId` or the pre-rename `task_id`.
-    let Some(id) = str_field(input, "taskId")
-        .or_else(|| str_field(input, "task_id"))
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    else {
-        return deny(
-            "TaskUpdate carried no `taskId`; update via `llmenv task start|note|done|wait <id>` \
-             or `llmenv task block <id> --on <other>` (see `llmenv task ls --all` for ids).",
-        );
-    };
-    // Each status runs one task command, which reads the store once and resolves `id` from that
-    // read; the note then goes to the resolved slug (#3474).
-    let status = str_field(input, "status");
-    let outcome = match status {
-        Some("in_progress") => {
-            // force=false: the redirect must enforce the same hard-block on
-            // an unmet `blocked_on` (#1164) that `llmenv task start` does --
-            // an agent shouldn't bypass it just by using the native tool.
-            task::start_task(state_dir, id, false)
-                .map(|t| (format!("started '{}'", t.slug), t.slug))
-        }
-        Some("completed") => {
-            // force=false: the redirect must not let an agent skip the start
-            // check that `llmenv task done` enforces (#2416).
-            task::complete_task(state_dir, id, false)
-                .map(|c| (format!("completed '{}'", c.task.slug), c.task.slug))
-        }
-        Some("deleted") => {
-            task::delete_task(state_dir, id).map(|t| (format!("deleted '{}'", t.slug), t.slug))
-        }
-        // Name the unrecognized value rather than silently reporting "unchanged"
-        // as if the requested transition had been honored.
-        Some(other) => task::resolve_identifier(state_dir, id).map(|s| {
-            (
-                format!("left '{s}' unchanged (status '{other}' not recognized)"),
-                s,
-            )
-        }),
-        None => {
-            task::resolve_identifier(state_dir, id).map(|s| (format!("left '{s}' unchanged"), s))
-        }
-    };
-    // A description/subject on an update becomes a progress note — but not on a
-    // delete (the task is gone). Surface a failed note rather than reporting
-    // silent success.
-    let note = str_field(input, "description")
-        .or_else(|| str_field(input, "subject"))
-        .map(str::trim)
-        .filter(|s| !s.is_empty() && status != Some("deleted"));
-    match outcome {
-        Ok((msg, slug)) => {
-            let note_text = note.map_or_else(String::new, |note| {
-                note_outcome(
-                    task::note_task(state_dir, task::TaskTarget::Resolved(&slug), note),
-                    &slug,
-                )
-            });
-            deny(&format!(
-                "{msg}{note_text} — llmenv task tracker (TaskUpdate redirected)."
-            ))
-        }
-        // Preserve the real reason (invalid id, no match, an ambiguous prefix, or a refused
-        // transition) — flattening them would misreport the case. The note is kept on the
-        // failure path too, through its own lookup of `id`, and the deny says where it went.
-        Err(e) => {
-            tracing::error!(error = %format!("{e:#}"), id = %id, "task redirect: couldn't update task");
-            let note_text = note.map_or_else(String::new, |note| {
-                note_outcome(task::note_task(state_dir, id, note), id)
-            });
-            deny(&format!(
-                "couldn't update task '{id}' ({e:#}){note_text}. If the id is wrong, run \
-                 `llmenv task ls --all` for the current ids."
-            ))
-        }
-    }
-}
-
-/// The text that tells the agent what happened to the note of a TaskUpdate.
-fn note_outcome(saved: anyhow::Result<task::Task>, target: &str) -> String {
-    match saved {
-        Ok(task) => format!(" (note saved to '{}')", task.slug),
-        Err(e) => {
-            tracing::error!(error = %format!("{e:#}"), target = %target, "task redirect: progress note not saved");
-            format!(" (note not saved: {e:#})")
-        }
-    }
 }
 
 /// Read a string field off the tool input, if present.
