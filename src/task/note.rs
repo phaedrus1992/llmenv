@@ -3,31 +3,20 @@
 use std::path::Path;
 
 use super::{
-    Task, TaskNote, load_task, now_rfc3339, resolve_identifier, save_task, touch_task_session,
+    Task, TaskNote, TaskTarget, load_task, now_rfc3339, save_task, touch_task_session,
     with_store_lock,
 };
 
-/// Append a timestamped progress note to a task.
-pub(crate) fn note_task(state_dir: &Path, input: &str, text: &str) -> anyhow::Result<Task> {
-    note_with(state_dir, text, || resolve_identifier(state_dir, input))
-}
-
-/// [`note_task`] for a slug that the caller resolved in the same command, so the store is not
-/// read again to find it (#3474). A slug with no task file is an error.
-///
-/// # Errors
-/// The task cannot be loaded or saved.
-pub(crate) fn note_resolved(state_dir: &Path, slug: &str, text: &str) -> anyhow::Result<Task> {
-    note_with(state_dir, text, || Ok(slug.to_string()))
-}
-
-fn note_with(
+/// Append a timestamped progress note to a task. A [`TaskTarget::Resolved`] slug is not looked up
+/// again (#3474, #3477).
+pub(crate) fn note_task<'a>(
     state_dir: &Path,
+    target: impl Into<TaskTarget<'a>>,
     text: &str,
-    slug: impl FnOnce() -> anyhow::Result<String>,
 ) -> anyhow::Result<Task> {
+    let target = target.into();
     let task = with_store_lock(state_dir, || {
-        let slug = slug()?;
+        let slug = target.slug(state_dir)?;
         let mut task = load_task(state_dir, &slug)?;
         task.notes.push(TaskNote {
             at: now_rfc3339(),

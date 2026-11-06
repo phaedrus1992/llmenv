@@ -150,7 +150,8 @@ fn create(
             if let Some(desc) = str_field(input, "description")
                 .map(str::trim)
                 .filter(|d| !d.is_empty())
-                && let Err(e) = task::note_resolved(state_dir, &t.slug, desc)
+                && let Err(e) =
+                    task::note_task(state_dir, task::TaskTarget::Resolved(&t.slug), desc)
             {
                 tracing::error!(
                     error = %e,
@@ -321,7 +322,10 @@ fn update(input: Option<&Value>, state_dir: &Path) -> String {
     match outcome {
         Ok((msg, slug)) => {
             let note_text = note.map_or_else(String::new, |note| {
-                note_outcome(task::note_resolved(state_dir, &slug, note), &slug)
+                note_outcome(
+                    task::note_task(state_dir, task::TaskTarget::Resolved(&slug), note),
+                    &slug,
+                )
             });
             deny(&format!(
                 "{msg}{note_text} — llmenv task tracker (TaskUpdate redirected)."

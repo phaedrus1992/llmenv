@@ -8,8 +8,8 @@ use std::path::Path;
 use anyhow::Context;
 
 use crate::task::{
-    Relation, Task, TaskNote, TaskState, load_task, now_rfc3339, resolve_identifier, save_task,
-    touch_task_session, with_store_lock,
+    Relation, Task, TaskNote, TaskState, load_task, now_rfc3339, save_task, touch_task_session,
+    with_store_lock,
 };
 
 /// Set a `done` task to `open` and append a note that names the command used.
@@ -29,9 +29,13 @@ fn mark_reopened(task: &mut Task, command: &str) {
 ///
 /// # Errors
 /// Errors if `input` does not resolve to a task, or the save fails.
-pub(crate) fn reopen_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
+pub(crate) fn reopen_task<'a>(
+    state_dir: &Path,
+    target: impl Into<super::TaskTarget<'a>>,
+) -> anyhow::Result<Task> {
+    let target = target.into();
     let task = with_store_lock(state_dir, || {
-        let slug = resolve_identifier(state_dir, input)?;
+        let slug = target.slug(state_dir)?;
         let mut task = load_task(state_dir, &slug)?;
         if task.state != TaskState::Done {
             return Ok(task);
@@ -59,9 +63,14 @@ pub(crate) fn reopen_task(state_dir: &Path, input: &str) -> anyhow::Result<Task>
 /// already reopened.
 pub(crate) fn reopen_tasks(state_dir: &Path, inputs: &[String]) -> anyhow::Result<Vec<Task>> {
     let tasks = with_store_lock(state_dir, || {
+        // One strict read resolves every name (#3477).
+        for input in inputs {
+            super::resolve::check_identifier(input)?;
+        }
+        let all_tasks = super::list_tasks_strict(state_dir)?;
         let mut tasks: Vec<Task> = Vec::new();
         for input in inputs {
-            let slug = resolve_identifier(state_dir, input)?;
+            let slug = super::resolve::resolve_in(state_dir, input, &all_tasks)?;
             if tasks.iter().all(|t| t.slug != slug) {
                 tasks.push(load_task(state_dir, &slug)?);
             }

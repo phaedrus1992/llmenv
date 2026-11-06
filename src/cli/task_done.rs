@@ -12,10 +12,15 @@ pub(super) fn run(
     force: bool,
     other_session: Option<&str>,
 ) -> anyhow::Result<()> {
-    let audit = guard_task(state_dir, id, other_session)?;
+    let (slug, audit) = guard_task(state_dir, id, other_session)?;
     // The caller is resolved before the close, so a failure here leaves the task open.
     let caller = caller_session_for_task(state_dir)?;
-    let completed = crate::task::complete_task_by(state_dir, id, force, &caller)?;
+    let completed = crate::task::complete_task_by(
+        state_dir,
+        crate::task::TaskTarget::Resolved(&slug),
+        force,
+        &caller,
+    )?;
     // The close has happened, so the override audit is written before anything else can fail.
     record_override(state_dir, audit)?;
     println!("Completed '{}'", completed.task.slug);
