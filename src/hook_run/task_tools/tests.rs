@@ -299,3 +299,109 @@ fn a_refused_update_says_where_its_note_went() {
     assert!(out.contains("couldn't update task 'never-begun'"), "{out}");
     assert!(out.contains("note saved to 'never-begun'"), "{out}");
 }
+
+/// Makes task `slug` a task with no session, as a replace of its session leaves it (#3586).
+fn orphan(dir: &Path, slug: &str) {
+    let mut task = crate::task::load_task(dir, slug).expect("load task");
+    task.session = None;
+    crate::task::save_task(dir, &task).expect("save orphaned task");
+}
+
+fn task_file(dir: &Path, slug: &str) -> String {
+    let path = crate::task::tasks_dir(dir).join(format!("{slug}.json"));
+    std::fs::read_to_string(path).expect("read task file")
+}
+
+/// A change to a task with no session names the caller on that task (#3586).
+#[test]
+fn update_of_a_task_with_no_session_records_the_caller_on_the_task() {
+    let dir = tmp();
+    let conv = session::EngineIdentity::from_session_id(Some("conv-me"));
+    handle_inner_as(
+        "TaskCreate",
+        Some(&json!({ "subject": "owner-less step" })),
+        dir.path(),
+        PROJECT,
+        &conv,
+    );
+    orphan(dir.path(), "owner-less-step");
+
+    let out = handle_inner_as(
+        "TaskUpdate",
+        Some(&json!({ "taskId": "owner-less-step", "status": "in_progress" })),
+        dir.path(),
+        PROJECT,
+        &conv,
+    );
+
+    assert!(out.contains("started 'owner-less-step'"), "{out}");
+    assert!(
+        task_file(dir.path(), "owner-less-step")
+            .contains("acted on a task with no session; caller: session"),
+        "the change must be on the task"
+    );
+}
+
+/// A delete of a task with no session records the deletion on the caller's session (#3586).
+#[test]
+fn deleting_a_task_with_no_session_records_the_deletion_on_the_callers_session() {
+    let dir = tmp();
+    let conv = session::EngineIdentity::from_session_id(Some("conv-me"));
+    handle_inner_as(
+        "TaskCreate",
+        Some(&json!({ "subject": "owner-less step" })),
+        dir.path(),
+        PROJECT,
+        &conv,
+    );
+    orphan(dir.path(), "owner-less-step");
+
+    let out = handle_inner_as(
+        "TaskUpdate",
+        Some(&json!({ "taskId": "owner-less-step", "status": "deleted" })),
+        dir.path(),
+        PROJECT,
+        &conv,
+    );
+
+    assert!(out.contains("deleted 'owner-less-step'"), "{out}");
+    let open = session::open_sessions_strict(dir.path(), PROJECT).expect("read sessions");
+    let context = open
+        .iter()
+        .find_map(|s| s.resume.context.clone())
+        .unwrap_or_default();
+    assert!(
+        context.contains("Deleted tasks with no session: owner-less-step"),
+        "the deletion must be on the caller's session: {context}"
+    );
+}
+
+/// A delete of a task with no session is refused when the caller has no session to record it on,
+/// and the task stays (#3586).
+#[test]
+fn deleting_a_task_with_no_session_is_refused_without_a_caller_session() {
+    let dir = tmp();
+    let conv = session::EngineIdentity::from_session_id(Some("conv-me"));
+    handle_inner_as(
+        "TaskCreate",
+        Some(&json!({ "subject": "owner-less step" })),
+        dir.path(),
+        PROJECT,
+        &conv,
+    );
+    orphan(dir.path(), "owner-less-step");
+
+    let out = handle_inner_as(
+        "TaskUpdate",
+        Some(&json!({ "taskId": "owner-less-step", "status": "deleted" })),
+        dir.path(),
+        PROJECT,
+        &session::EngineIdentity::default(),
+    );
+
+    assert!(out.contains("no session to record"), "{out}");
+    assert!(
+        task_file(dir.path(), "owner-less-step").contains("owner-less step"),
+        "a refused delete must leave the task"
+    );
+}
