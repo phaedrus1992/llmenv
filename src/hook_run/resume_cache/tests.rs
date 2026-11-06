@@ -382,3 +382,24 @@ proptest! {
         prop_assert_eq!(native_warning_covers(&env, || helper), new_enough && subscription);
     }
 }
+
+#[test]
+fn a_process_variable_is_read_as_it_is_and_an_unset_one_is_none() {
+    assert_eq!(super::hook_env("PATH"), std::env::var("PATH").ok());
+    assert_eq!(
+        super::hook_env("LLMENV_TEST_VARIABLE_THAT_IS_NEVER_SET"),
+        None
+    );
+}
+
+#[test]
+fn the_process_notice_only_exists_for_a_session_start() {
+    let payload = expensive_resume();
+    assert_eq!(super::session_resume_notice("Stop", &payload), None);
+    // Claude Code sets the version in its own hook processes, and the notice may then be
+    // covered by its own warning. Without it, nothing covers the notice.
+    if std::env::var_os("CLAUDE_CODE_VERSION").is_none() {
+        let notice = super::session_resume_notice("SessionStart", &payload);
+        assert!(notice.is_some_and(|n| !n.is_empty()));
+    }
+}

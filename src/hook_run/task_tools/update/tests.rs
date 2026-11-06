@@ -211,3 +211,41 @@ proptest::proptest! {
         proptest::prop_assert_eq!(before, std::fs::read(&path).unwrap());
     }
 }
+
+#[test]
+fn an_unusable_task_store_gets_the_store_deny_and_not_the_id_hint() {
+    let dir = tempfile::tempdir().unwrap();
+    // A state folder that is a file cannot hold the task store.
+    let state = dir.path().join("state");
+    std::fs::write(&state, b"x").unwrap();
+    let out = update_as(
+        &state,
+        "conv-me",
+        &json!({ "taskId": "any", "status": "in_progress" }),
+    );
+    assert!(out.starts_with("__DENY__:"), "{out}");
+    assert!(out.contains("couldn't update task 'any'"), "{out}");
+    assert!(out.contains("the task store is unavailable"), "{out}");
+    assert!(!out.contains("If the id is wrong"), "{out}");
+}
+
+#[test]
+fn only_a_delete_with_a_description_says_that_the_description_is_not_saved() {
+    let said = "description not saved: the task is deleted";
+    let run = |status: Option<&str>, description: Option<&str>| {
+        let dir = tempfile::tempdir().unwrap();
+        let (mine, _) = two_conversations(dir.path());
+        let mut input = json!({ "taskId": mine });
+        if let Some(status) = status {
+            input["status"] = json!(status);
+        }
+        if let Some(description) = description {
+            input["description"] = json!(description);
+        }
+        update_as(dir.path(), "conv-me", &input)
+    };
+    assert!(run(Some("deleted"), Some("why")).contains(said));
+    assert!(!run(Some("deleted"), None).contains(said));
+    assert!(!run(Some("in_progress"), Some("why")).contains(said));
+    assert!(!run(None, Some("why")).contains(said));
+}

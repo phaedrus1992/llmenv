@@ -110,8 +110,6 @@ fn attach_system_message(out: &str, message: &str) -> String {
     Value::Object(object).to_string()
 }
 
-/// The hook output for a `SessionStart` event. A resume with an expensive, expired cache adds
-/// the notice as `systemMessage`. Every other event and payload returns `out` unchanged.
 /// The resume cost notice for this event, or `None`. A wrong-type field is recorded for the agent
 /// as a side effect, so the caller must take the notice list after this call.
 ///

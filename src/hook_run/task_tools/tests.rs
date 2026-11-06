@@ -176,6 +176,35 @@ fn create_does_not_auto_start_second_session_when_store_unreadable() {
 }
 
 #[test]
+fn create_saves_a_description_as_a_note_and_skips_a_blank_one() {
+    let dir = tmp();
+    handle_inner(
+        "TaskCreate",
+        Some(&json!({ "subject": "with note", "description": " split the handler " })),
+        dir.path(),
+        PROJECT,
+    );
+    let blank = handle_inner(
+        "TaskCreate",
+        Some(&json!({ "subject": "blank note", "description": "   " })),
+        dir.path(),
+        PROJECT,
+    );
+    assert!(!blank.contains("wasn't saved"), "{blank}");
+    let notes_of = |title: &str| {
+        let task = task::list_tasks(dir.path())
+            .into_iter()
+            .find(|t| t.title == title)
+            .unwrap();
+        serde_json::to_value(&task).unwrap()["notes"]
+            .as_array()
+            .map_or(0, Vec::len)
+    };
+    assert_eq!(notes_of("with note"), 1);
+    assert_eq!(notes_of("blank note"), 0);
+}
+
+#[test]
 fn create_without_subject_denies_with_guidance() {
     let dir = tmp();
     let out = handle_inner("TaskCreate", Some(&json!({})), dir.path(), PROJECT);

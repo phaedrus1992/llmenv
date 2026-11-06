@@ -99,6 +99,24 @@ mod tests {
     }
 
     #[test]
+    fn hooks_are_equal_when_event_matcher_and_handler_match_whatever_the_bundle() {
+        let a = hook("bash a.sh", None);
+        let mut other_bundle = hook("bash a.sh", None);
+        other_bundle.bundle_origin = Some("/bundles/b".into());
+        assert_eq!(a, other_bundle);
+
+        let mut other_event = hook("bash a.sh", None);
+        other_event.event = "Stop".into();
+        assert_ne!(a, other_event);
+
+        let mut other_matcher = hook("bash a.sh", None);
+        other_matcher.matcher = Some("Bash".into());
+        assert_ne!(a, other_matcher);
+
+        assert_ne!(a, hook("bash b.sh", None));
+    }
+
+    #[test]
     fn the_same_relative_command_of_two_bundles_is_two_guards() {
         let mut a = hook("bash hooks/guard.sh", None);
         a.bundle_origin = Some("/bundles/a".into());
