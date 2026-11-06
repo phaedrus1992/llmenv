@@ -89,6 +89,13 @@ It is shown at most once per UTC day, and not at all when no entry is stale.
 The notice gives the idle time, the context size, and the estimated cost.
 It goes to you, not to the agent.
 Claude Code sends these values on a `resume` or `fork` start, and no notice is shown when a value is missing.
+(changed in v3.14.0) On subscription auth with Claude Code 2.1.304 or later, llmenv shows no notice, because Claude Code warns itself when a resume would use a noticeable share of the 5-hour limit on a Pro or Max plan.
+llmenv counts a session as subscription auth when `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_BASE_URL` are unset or empty, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, and `CLAUDE_CODE_USE_FOUNDRY` are unset, empty, `0`, or `false`, and no `apiKeyHelper` is set in the rendered settings or in the project's `.claude/settings.json` or `.claude/settings.local.json`.
+It cannot see the plan, so a Team or Enterprise plan on subscription auth also gets no llmenv notice.
+An API key, gateway, or cloud provider session keeps the notice, as does a session whose Claude Code version llmenv cannot read, and a pre-release of 2.1.304.
+llmenv reads the Claude Code version when it renders the config, so after a Claude Code upgrade or downgrade the notice follows the new version from the next `llmenv regenerate`.
+Claude Code 2.1.299 and later also compact a conversation of 200K or more tokens that stays idle for about 54 minutes, before its one-hour cache expires, so an expensive resume after a long idle time is rarer.
+Turn that off with `"idleCompaction": false` in Claude Code's settings, or change its token floor with `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS`; llmenv has no config key for either.
 
 ### `remote_sync` — toggle background remote git operations
 
@@ -307,6 +314,18 @@ capabilities:
 - A **hook** has an `event`, optional `matcher`, and a `handler` of type
   `command` (with `command:`) or `mcp_tool` (with `tool:`). Hook command paths
   declared in a bundle are bundle-relative and resolved at materialize time.
+- `handler.on_failure: block` (added in v3.14.0) makes a guard hook fail closed.
+  Claude Code then blocks the action when the hook cannot start, times out, or exits with an unexpected code, instead of letting it through.
+  Only a `command` hook can set it, and only `block` is a valid value.
+  llmenv reads `claude --version` to decide whether to write it as `onFailure`.
+  For 2.1.295 or later, the first release that reads the key, llmenv writes it.
+  For an older release, or a pre-release of 2.1.295, llmenv leaves it out and logs an error that names the hooks, because they then fail open.
+  When llmenv cannot read the version, it writes the key as asked and logs a warning.
+  When two bundles add the same hook and one of them sets `on_failure: block`, the one merged hook blocks.
+  llmenv checks the hooks of a bundle when it loads the bundle, so a bundle hook that sets `on_failure` on an `mcp_tool` handler is an error that names the bundle.
+  Crush and opencode do not read it: the hook still runs there, and llmenv warns that it fails open.
+  llmenv sets it on none of its own hooks: a broken llmenv binary would then block every matched tool call.
+  Use it on a deny-only guard, such as a script that refuses a commit on the main branch, where a failure that lets the action through is worse than a blocked action.
 - `plugins` are `<marketplace>:<plugin>` strings.
 - `env` is a map of environment variables that llmenv exports for the session.
   A later contributor overrides an earlier one.
@@ -741,6 +760,8 @@ Set `global_topics: []` to read the session's project only.
 After a session ends, llmenv can ask an LLM to distill that session's episodic memories into a few
 semantic rules and store them back in ICM.
 (changed in v3.12.0) It reads only the memories of the current project, which it names the same way the session start does.
+It reads at most 50 memories, and fewer when they do not fit in a 32000-token budget.
+(changed in v3.14.0) Before v3.14.0 ICM returned at most 20 memories, because the request gave no token budget.
 It stores each rule under the topic `llmenv-consolidation-<project>`, so the rule comes back in that project's recall.
 Rules stored before v3.12.0 stay under the topic `llmenv-consolidation`.
 (changed in v3.13.0) No recall reads that old topic, so a rule there comes back in no session.
@@ -1258,6 +1279,8 @@ The slippage checks read a Bash command the way the task commit gate does (chang
 A write inside `$( )`, a subshell, a brace group, or after a single `&` counts as modifying for `explain_before_act`.
 A command nested more than 32 levels deep counts as modifying, and the deny names that limit.
 A Bash `cat`, `head`, `tail`, `sed -n`, or `grep` of one file counts as a read for `read_before_edit`.
+`read_before_edit` matches a read and a write by the resolved path, so `./src/x.rs` and `/repo/src/x.rs` are one file.
+(changed in v3.14.0) When llmenv cannot resolve the path of a `Write`, such as a dangling link, it compares the path as written, and the deny names that cause.
 
 (changed in v3.14.0) A command that the Monitor tool starts is read the same way.
 The `answer_before_act` and `explain_before_act` checks, the read record, and the task commit gate cover it, because llmenv now registers its shell guards for both `Bash` and `Monitor`.
@@ -1559,6 +1582,8 @@ The `pr` widget shows `pr: unreadable` when the branch cannot be read, instead o
 When `gh` gives no answer, the `pr` widget names the cause: `pr: gh missing` when `gh` is not installed, `pr: gh not logged in` when its login failed or expired, and `pr: gh failed` for a timeout or another error (changed in v3.13.0).
 The cause stays cached for the same 60 seconds as a PR answer.
 A branch with no open PR shows nothing in the `pr` widget, and it does not show `pr: gh failed` (fixed in v3.14.0).
+The "no PR" answer needs `gh` exit code 1 with its no-PR message, as gh 2.103.3 writes it.
+The same message with another exit, or a `gh` killed by a signal, shows `pr: gh failed` (changed in v3.14.0).
 A branch with no open PR, or a repository with no GitHub remote, still shows nothing.
 
 An unrecognized placeholder inside a custom `format` string (e.g. `{title}`

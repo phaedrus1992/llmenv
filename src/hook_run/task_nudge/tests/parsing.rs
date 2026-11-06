@@ -279,6 +279,7 @@ proptest! {
         start_reminded in proptest::option::of("[a-z-]{1,12}"),
         boundary_reminded in proptest::collection::vec("[a-z -]{1,20}", 0..4),
         stop_quiet_turns in any::<u32>(),
+        ownerless_question_reminded in proptest::collection::vec("[a-z-]{1,12}", 0..3),
     ) {
         let state = NudgeState {
             calls,
@@ -288,6 +289,7 @@ proptest! {
             start_reminded,
             boundary_reminded,
             stop_quiet_turns,
+            ownerless_question_reminded,
         };
         let json = serde_json::to_string(&state).unwrap();
         prop_assert_eq!(serde_json::from_str::<NudgeState>(&json).unwrap(), state);

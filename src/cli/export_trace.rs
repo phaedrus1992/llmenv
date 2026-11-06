@@ -4,9 +4,10 @@
 //! adapters, and emit environment variables. The `run_export` entry point in
 //! `src/cli/mod.rs` handles CLI setup and delegates here.
 
+use super::env_vars::{validate_var_name, validate_var_value};
 use super::{
     build_manifest, ensure_local_memory_proxy, firing_bundles, installed_adapters,
-    validate_var_name, validate_var_value, warn_dead_config,
+    marker_disabled_bundle_names, warn_dead_config,
 };
 use crate::config::{Bundle, Config};
 use crate::scope::ActiveScopes;
@@ -229,7 +230,9 @@ pub(crate) fn run_export_core(
 }
 
 /// The bundles that fire, and the scopes that the materialize step uses. With `--scope`, only that
-/// scope's tags count. An unknown scope id fires nothing for it, and a warning says so.
+/// scope's tags and `enable_bundles` count, because `--scope` narrows the export. A bundle that any
+/// active scope disables stays off, because narrowing never turns a bundle on (#3269). An unknown
+/// scope id is ignored with a warning, so every matching bundle fires.
 fn select_firing<'a>(
     config: &'a Config,
     active: &ActiveScopes,
@@ -241,16 +244,24 @@ fn select_firing<'a>(
         let firing = firing_bundles(&config.bundle, active, tag);
         return (firing, active.clone());
     };
+    // The narrowed scopes carry every active disable, so the firing set and the cache shape,
+    // which both read `disable_bundles`, agree.
+    let mut all_disabled: Vec<String> = marker_disabled_bundle_names(active).into_iter().collect();
+    all_disabled.sort();
     let filtered_scopes = active
         .scopes
         .iter()
         .filter(|s| s.id == scope_id)
-        .cloned()
+        .map(|s| {
+            let mut s = s.clone();
+            s.disable_bundles = all_disabled.clone();
+            s
+        })
         .collect::<Vec<_>>();
     if filtered_scopes.is_empty() {
         eprintln!(
-            "warning: scope '{scope_id}' not active in current environment \
-             — no bundles will fire for this scope"
+            "warning: scope '{scope_id}' is not active in the current environment, so --scope \
+             is ignored and every matching bundle fires"
         );
         let firing = firing_bundles(&config.bundle, active, tag);
         return (firing, active.clone());

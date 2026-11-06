@@ -105,7 +105,7 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         resolve_per_key(contributors, "default_models role", |c| &c.default_models)?;
     let model_effort = resolve_per_key(contributors, "model_effort model", |c| &c.model_effort)?;
 
-    dedup(&mut hooks);
+    llmenv_config::dedup_hooks(&mut hooks);
     dedup(&mut plugins);
     dedup(&mut mcp);
     dedup(&mut lsp);
@@ -258,6 +258,7 @@ mod tests {
                 kind: HookHandlerKind::Command,
                 command: Some(cmd.into()),
                 tool: None,
+                on_failure: None,
             },
             bundle_origin: None,
         }

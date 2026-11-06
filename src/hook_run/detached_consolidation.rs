@@ -40,17 +40,18 @@ pub fn run_consolidation(
         exit: i32::from(result.is_err()),
     });
     result.inspect_err(|e| {
-        tracing::error!("consolidation-run: detached consolidation failed: {e:#}");
+        // The child runs alone, so the notice reaches the agent through the spool (#3398).
+        crate::agent_notice::record_logged(format!(
+            "llmenv: memory consolidation failed: {e:#}. Fix: run `llmenv doctor` to check the \
+             memory server and the consolidation backend."
+        ));
     })
 }
 
 /// Delete the checkpoint of a run that has nothing to do, such as consolidation switched off.
+/// A checkpoint that stays is a notice, because a later session runs the job again (#3465).
 fn settle(checkpoint: Option<&std::path::Path>) {
-    if let Some(path) = checkpoint
-        && let Err(e) = crate::hook_run::checkpoint::complete(path)
-    {
-        tracing::error!("consolidation-run: {e:#}");
-    }
+    crate::hook_run::checkpoint::finish(checkpoint);
 }
 
 fn run_consolidation_at(
@@ -93,7 +94,13 @@ fn run_consolidation_at(
         .enable_all()
         .build()?;
     let state_dir = crate::paths::state_dir()
-        .inspect_err(|e| tracing::error!("consolidation has no state dir: {e:#}"))
+        .inspect_err(|e| {
+            crate::agent_notice::record_logged(format!(
+                "llmenv: memory consolidation has no state folder, so it skips the duplicate \
+                 check and a rule can be stored twice: {e:#}. Fix: set HOME, or set \
+                 LLMENV_STATE_DIR to a valid absolute path."
+            ));
+        })
         .ok();
     let _result = rt.block_on(consolidation::run(
         cc,
@@ -109,6 +116,16 @@ fn run_consolidation_at(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_settled_checkpoint_that_stays_is_a_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let stuck = dir.path().join("consolidation-3465");
+        std::fs::create_dir_all(stuck.join("inner")).unwrap();
+        settle(Some(&stuck));
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(notices.contains("its checkpoint stays"), "{notices}");
+    }
 
     #[test]
     fn run_consolidation_reports_a_missing_config() {

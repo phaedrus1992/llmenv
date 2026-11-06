@@ -9,7 +9,7 @@ use super::GcOutput;
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(in crate::cli) struct CredentialDrops {
     /// Entries whose credential was deleted.
-    pub(in crate::cli) removed: usize,
+    removed: usize,
     /// Entries whose credential could not be deleted. Each one is logged where it fails.
     pub(in crate::cli) failed: usize,
 }
@@ -33,7 +33,8 @@ pub(in crate::cli) fn forget_credentials_for(removed: &[PathBuf]) -> CredentialD
 }
 
 /// Count the results of a drop run. `Ok(true)` is a removed credential, `Ok(false)` is an entry
-/// that had none, and `Err` is a drop that failed.
+/// that had none, and `Err` is a drop that failed. The error is dropped here, because
+/// [`forget_credentials_for`] logs each one with its path first.
 fn tally(results: impl IntoIterator<Item = anyhow::Result<bool>>) -> CredentialDrops {
     results
         .into_iter()
@@ -51,19 +52,27 @@ fn tally(results: impl IntoIterator<Item = anyhow::Result<bool>>) -> CredentialD
 /// failed drops, so the sweep counts them as failures (#3073).
 pub(super) fn report_credential_drops(removed: &[PathBuf], out: GcOutput<'_>) -> usize {
     let drops = forget_credentials_for(removed);
-    if drops.removed > 0 {
-        eprintln!(
-            "{} GC: dropped {} orphaned OAuth credential entries",
-            out.pass, drops.removed
-        );
-    }
-    if drops.failed > 0 {
-        eprintln!(
-            "{} GC: could not drop {} OAuth credential entries; see the error above",
-            out.warn, drops.failed
-        );
-    }
+    drops.print(&format!("{} GC: ", out.pass), &format!("{} GC: ", out.warn));
     drops.failed
+}
+
+impl CredentialDrops {
+    /// Print the dropped and the failed count to stderr, each after its prefix. A zero count prints
+    /// nothing. `doctor --gc` and `llmenv clean` share these lines (#3087).
+    pub(in crate::cli) fn print(&self, pass_prefix: &str, warn_prefix: &str) {
+        if self.removed > 0 {
+            eprintln!(
+                "{pass_prefix}dropped {} orphaned OAuth credential entries",
+                self.removed
+            );
+        }
+        if self.failed > 0 {
+            eprintln!(
+                "{warn_prefix}could not drop {} OAuth credential entries; see the error above",
+                self.failed
+            );
+        }
+    }
 }
 
 #[cfg(test)]

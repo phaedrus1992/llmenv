@@ -221,9 +221,10 @@ They are `route`, `arp`, `ip`, `networksetup`, `ipconfig`, `iw`, `nmcli`, and `n
 When one of them is not found, its scopes do not match.
 llmenv also gives `mcp-proxy` the absolute path of `icm`, because `mcp-proxy` would otherwise do its own `PATH` search.
 The hook commands in each engine's config name the running llmenv binary by its absolute path (changed in v3.14.0).
-The bare name `llmenv` is used only when that path is not UTF-8 or the OS cannot report it.
-llmenv then logs an error that names the fix.
-`llmenv doctor` also reports this fallback, with the fix (added in v3.14.0).
+When that path is not UTF-8, or the OS cannot report it, `llmenv export` and `llmenv regenerate` fail.
+The error names the path and the fix.
+A bare `llmenv` would let a `PATH` entry run another program, so no fallback is used.
+`llmenv doctor` uses the same lookup and reports the same error (added in v3.14.0).
 `llmenv doctor` also warns when the hook path is in a cargo `target` folder or a temp folder,
 or names a binary that was removed. Install llmenv, then run `llmenv regenerate` with the
 installed binary (added in v3.14.0).
@@ -326,7 +327,9 @@ See [`memory`](commands.md#memory).
   keyword and topic after the limit, so adaptive recall returns little or nothing. It warns again
   below 0.10.64, where recall ranking is weaker. (changed in v3.13.0) It warns below 0.11.3, where
   recall cannot answer in JSON, so the tool-failure recall matches the memory summary only, not its
-  keywords. Run `icm upgrade --apply` on that host. On a
+  keywords. (changed in v3.14.0) It warns below 0.11.5, where JSON recall has no record ids
+  and no multi-query form, so memory dedup and consolidation cannot read the records.
+  Run `icm upgrade --apply` on that host. On a
   memory client, doctor cannot read the server version, because `mcp-proxy` does not forward it;
   run `icm --version` on the server host.
 - **`mcp-proxy` missing** — the server host needs `mcp-proxy` or `uvx` on
@@ -395,6 +398,65 @@ Each notice starts with `llmenv:` and appears once per hook run.
 - `cannot write the trace file <path>`, `cannot write a trace line to stderr`, and `trace line
   dropped` — (added in v3.14.0) a trace line was lost. Fix `LLMENV_TRACE_FILE`, or unset
   `LLMENV_TRACE_TIMING`, as the notice says.
+
+### Notices from detached jobs
+
+(added in v3.14.0)
+
+The memory store, the session log record, memory consolidation, and the code index run as detached jobs after the hook returns.
+A notice from such a job is written to `notice_spool/` in the state directory.
+The next hook run prints it and removes the file, so the agent sees it one hook later.
+The state directory is shared by all sessions, so that hook run can belong to another session.
+One hook run prints at most 32 of these notices, oldest first, and the rest wait for the next run.
+A link or a folder in `notice_spool/` is removed unread.
+
+- `a memory was not stored in ICM` — a detached memory store failed. Run `llmenv doctor` to check the memory server.
+- `a session log record was not written` — a detached session log write failed.
+  Run `llmenv doctor` to check `session_log.file.path`.
+- `memory consolidation failed` — the consolidation job at session end failed. Run `llmenv doctor`.
+- `the code index job failed` — the codebase-memory-mcp index job failed, for example because the indexer is not installed.
+- `cannot read the detached job notice <path>` or `cannot remove the detached job notice <path>` —
+  a file in `notice_spool/` is broken. Remove the file.
+- `a background job finished, but its checkpoint stays` — llmenv cannot remove the checkpoint of a
+  finished job, so a later session can run the job again. Remove the named file.
+- `the memory store has no state folder` or `memory consolidation has no state folder` — the job
+  cannot check for duplicates, so a memory or a rule can be stored twice. Set `HOME` or `LLMENV_STATE_DIR`.
+
+These notices come from the hook itself (added in v3.14.0):
+
+- `cannot save the idempotency seen-set`, `the idempotency seen-set ... is corrupt`, and `cannot read
+  the idempotency seen-set` — the record of handled events is lost, so an event can run again.
+  Check the state directory, or remove the named file.
+- `recalled memory was not shown, because the tool call was denied` — a deny replaces the whole
+  hook output. The memory comes back on the next prompt.
+- `memory consolidation is skipped`, `the fetched page is not stored in memory`, `the model switch is
+  not recorded`, `the task reminder is skipped`, and `the session-end duplicate check is skipped` —
+  a hook step could not run. The notice names the cause and the fix.
+- `cannot create the index result file`, `cannot remove the old index result file`, `the earlier code
+  index checkpoint ... cannot be read`, and `the code index job runs without its wrapper` — the code
+  index job cannot report its result. Check the state directory, or remove the named file.
+- `the repeat check is off for this event` and `the stop reminder can repeat` — the session id is
+  not safe in a file name, so the check that keeps state per session does not run.
+- `the repeat check is off for this event, because the PreToolUse payload has no tool name`, and
+  `the read cache is off for this Read call` — the engine sent a payload without a required field.
+  Report it as a Claude Code payload bug.
+- `the cd check is off for this command` — the command nests too deep to check.
+- `extra memory recall(s) were skipped` — the main recalls were slow, so the extra recalls did not
+  run for this prompt. Run `llmenv doctor` to check the memory server.
+- `the resume cost notice stays on` — `CLAUDE_CODE_VERSION` is not a version, so llmenv keeps its
+  own resume notice.
+- `the declared code index root <path> cannot be read` and `the recorded code index root <path>
+  does not resolve` — the code index root check leaves that root out.
+- `CLAUDE_CODE_VERSION is read as unset` — the variable is not valid text, so the version checks
+  use their defaults.
+- `the transcript <path> cannot be opened` (or `examined`, or `read`) — the checks that read the transcript pass
+  without a check. Check the permissions of the file.
+- `the session-end duplicate record <path> cannot be read` — the context chunk can be stored again.
+  Remove the file.
+- `the recall ledger is not updated`, `the agent config is not written`, and `a detached job runs
+  with no checkpoint` — the state folder is missing or not valid. Set `HOME` or `LLMENV_STATE_DIR`.
+- `the activity time of session <id> is not` saved — the task change is saved, but the session can
+  look idle. Run `llmenv task session show`.
 
 ## Profiling hook-run latency
 

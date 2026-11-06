@@ -8,7 +8,9 @@ use std::time::SystemTime;
 use anyhow::Context;
 
 use super::claude_root::{is_split_root, scan_split_root};
-use crate::materialize::cache::{AgeSource, file_stamp, is_expired, newest_file_mtime};
+use crate::materialize::cache::{
+    AgeSource, file_stamp, is_expired, is_vanished, newest_file_mtime,
+};
 use crate::materialize::expiry::AgeRule;
 
 /// One entry that the scan found old enough to remove, and not in use.
@@ -26,15 +28,20 @@ pub(super) struct Scan {
     pub(super) failed: BTreeMap<PathBuf, String>,
 }
 
-/// Walk `tmp_root` and sort every entry into stale, kept, or failed. The walk changes nothing.
-pub(super) fn scan(tmp_root: &Path, rule: AgeRule, in_use: &[PathBuf]) -> anyhow::Result<Scan> {
+/// Walk `tmp_root` and sort every entry into stale, kept, or failed, judged against `now`. The
+/// walk changes nothing.
+pub(super) fn scan(
+    tmp_root: &Path,
+    rule: AgeRule,
+    in_use: &[PathBuf],
+    now: SystemTime,
+) -> anyhow::Result<Scan> {
     let mut scan = Scan::default();
     let Some(entries) = crate::paths::read_dir_optional(tmp_root)? else {
         return Ok(scan);
     };
     let root = std::fs::canonicalize(tmp_root)
         .with_context(|| format!("resolving {}", tmp_root.display()))?;
-    let now = SystemTime::now();
     for entry in entries {
         let Some(entry) = entry_or_failure(&root, entry, &mut scan) else {
             continue;
@@ -47,6 +54,8 @@ pub(super) fn scan(tmp_root: &Path, rule: AgeRule, in_use: &[PathBuf]) -> anyhow
         }
         let is_dir = match entry.file_type() {
             Ok(file_type) => file_type.is_dir(),
+            // Another process removed the entry after the listing (#2835, #3423).
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
                 record_failure(&path, &e, &mut scan);
                 continue;
@@ -61,16 +70,6 @@ pub(super) fn scan(tmp_root: &Path, rule: AgeRule, in_use: &[PathBuf]) -> anyhow
         judge_entry(&path, is_dir, rule, now, &mut scan);
     }
     Ok(scan)
-}
-
-/// Whether `error` is a missing entry, anywhere in its chain. A `NotFound` is the entry being
-/// removed while the walk runs. Other errors stay failures.
-fn is_vanished(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
-    })
 }
 
 /// Mark one entry stale when its newest file mtime is older than `older_than`. Keep it otherwise.
@@ -194,8 +193,48 @@ mod tests {
                 filetime::set_file_mtime(&file, filetime::FileTime::from_system_time(mtime)).unwrap();
             }
             let rule = mtime_rule(std::time::Duration::from_secs(7 * 86_400));
-            let result = scan(dir.path(), rule, &[]).unwrap();
+            let result = scan(dir.path(), rule, &[], SystemTime::now()).unwrap();
             proptest::prop_assert_eq!(result.stale.len() + result.kept + result.failed.len(), ages.len());
+        }
+
+        /// An entry is stale only when it is past the threshold and no in-use path is at or under
+        /// it. An entry that holds an in-use path is never stale, whatever its age (#3280).
+        #[test]
+        fn an_entry_is_stale_only_when_old_and_not_in_use(
+            entries in proptest::collection::vec(
+                // Seven days is the threshold. It is left out, so the expected verdict is clear.
+                (proptest::strategy::Strategy::prop_map(0u64..30, |d| if d == 7 { 8 } else { d }), proptest::option::of(proptest::bool::ANY)),
+                0..6,
+            ),
+        ) {
+            use crate::materialize::tmp_sweep::tests::mtime_rule;
+            let dir = tempfile::tempdir().unwrap();
+            let root = std::fs::canonicalize(dir.path()).unwrap();
+            let now = SystemTime::now();
+            let mut in_use = Vec::new();
+            let mut expected = std::collections::BTreeSet::new();
+            for (i, (age_days, used)) in entries.iter().enumerate() {
+                let entry = root.join(format!("e{i}"));
+                let child = entry.join("f");
+                std::fs::create_dir(&entry).unwrap();
+                std::fs::write(&child, b"x").unwrap();
+                let mtime = now - DAY * u32::try_from(*age_days).unwrap();
+                filetime::set_file_mtime(&child, filetime::FileTime::from_system_time(mtime)).unwrap();
+                match used {
+                    Some(true) => in_use.push(child),
+                    Some(false) => in_use.push(entry.clone()),
+                    None if *age_days > 7 => {
+                        expected.insert(entry);
+                    }
+                    None => {}
+                }
+            }
+            let result = scan(&root, mtime_rule(DAY * 7), &in_use, now).unwrap();
+            let stale: std::collections::BTreeSet<PathBuf> =
+                result.stale.into_iter().map(|s| s.path).collect();
+            proptest::prop_assert!(result.failed.is_empty(), "{:?}", result.failed);
+            proptest::prop_assert_eq!(result.kept + stale.len(), entries.len());
+            proptest::prop_assert_eq!(stale, expected);
         }
     }
 

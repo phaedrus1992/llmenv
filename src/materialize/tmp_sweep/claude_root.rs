@@ -50,6 +50,8 @@ pub(super) fn scan_split_root(
         }
         match entry.file_type() {
             Ok(file_type) => judge_entry(&path, file_type.is_dir(), rule, now, scan),
+            // An entry removed after the listing is not a failure, as in the top-level walk.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => record_failure(&path, &e, scan),
         }
     }
@@ -77,7 +79,14 @@ mod tests {
         fs::create_dir(&claude).unwrap();
         age_tree(&claude, old());
 
-        let report = sweep(root.path(), mtime_rule(DAY * 7), &[], false).unwrap();
+        let report = sweep(
+            root.path(),
+            mtime_rule(DAY * 7),
+            &[],
+            false,
+            SystemTime::now(),
+        )
+        .unwrap();
 
         assert!(report.removed.is_empty());
         assert!(claude.exists(), "the per-user TMPDIR root was removed");
@@ -95,7 +104,14 @@ mod tests {
         let fresh_child = claude.join("shell-fresh");
         fs::create_dir(&fresh_child).unwrap();
 
-        let report = sweep(root.path(), mtime_rule(DAY * 7), &[], false).unwrap();
+        let report = sweep(
+            root.path(),
+            mtime_rule(DAY * 7),
+            &[],
+            false,
+            SystemTime::now(),
+        )
+        .unwrap();
 
         assert_eq!(report.removed.len(), 1, "removed: {:?}", report.removed);
         assert!(
@@ -125,6 +141,7 @@ mod tests {
             mtime_rule(DAY * 7),
             std::slice::from_ref(&cwd_file),
             false,
+            SystemTime::now(),
         )
         .unwrap();
 
@@ -148,7 +165,14 @@ mod tests {
             .set_modified(SystemTime::now() + DAY)
             .unwrap();
 
-        let report = sweep(root.path(), mtime_rule(DAY * 7), &[], false).unwrap();
+        let report = sweep(
+            root.path(),
+            mtime_rule(DAY * 7),
+            &[],
+            false,
+            SystemTime::now(),
+        )
+        .unwrap();
 
         assert!(report.removed.is_empty());
         assert!(future.exists());

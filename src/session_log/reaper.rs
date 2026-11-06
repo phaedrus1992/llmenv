@@ -59,15 +59,20 @@ fn reap_session_log_with(log_path: &Path, retention_days: u64, source: AgeSource
     if age < retention {
         return;
     }
-    if let Err(e) = std::fs::remove_file(log_path) {
-        // Hook stderr is dropped, so the agent gets a notice as well as the error log.
-        tracing::error!("session_log reaper: failed to remove {log_path:?}: {e}");
-        crate::agent_notice::record_logged(format!(
-            "llmenv: the session log reaper could not remove {} ({e}), so it stays on disk. Fix: \
+    match std::fs::remove_file(log_path) {
+        Ok(()) => {}
+        // Another process reaped the file first, so it is gone, which is the goal (#3423).
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            // Hook stderr is dropped, so the agent gets a notice as well as the error log.
+            tracing::error!("session_log reaper: failed to remove {log_path:?}: {e}");
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the session log reaper could not remove {} ({e}), so it stays on disk. Fix: \
              check the permissions of that file and its folder.",
-            log_path.display()
-        ));
-        return;
+                log_path.display()
+            ));
+            return;
+        }
     }
     tracing::info!(
         path = %log_path.display(),

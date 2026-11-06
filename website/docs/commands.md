@@ -35,6 +35,7 @@ and emits the introspection env vars (`LLMENV_ACTIVE_*`, `LLMENV_PROJECT_ROOT`,
   when the scope is active in the current environment. If the requested scope
   isn't active, a warning is printed and all matching tags are exported
   instead.
+  A bundle that any active scope disables stays off with `--scope` (changed in v3.14.0).
 - `--explain` annotates each exported variable with a `# source:` comment line
   showing whether it comes from the adapter (with the firing bundle names) or
   from llmenv introspection.
@@ -379,21 +380,33 @@ Inspect ICM memory state for the active scope.
   used` and lists every project.
   Before v3.12.0 ICM filtered by the working directory of the ICM server, which is unrelated to your project when ICM
   runs on another host.
-- `memory diff` — show what changed since the last session.
+  (changed in v3.14.0) It prints one line for each memory, `[topic] summary (importance, id)`, then the count.
+  It asks ICM for at most 200 memories, and fewer come back when they do not fit in a 32000-token budget.
+  Before v3.14.0 it printed ICM's text reply, which held at most 5 memories.
+- `memory diff` — show the memories that changed since the last `memory diff` run.
   (changed in v3.12.0) It compares the same project-scoped recall as `memory list` and gives the same warning.
+  (changed in v3.14.0) It matches memories by ICM id: `+` marks a new memory, `-` a removed one,
+  and a `-` then `+` pair a changed one.
+  It keeps its own snapshot in `memory_diff_snapshot.json` in the state folder,
+  so an ICM upgrade that changes the text form shows no change.
+  The first run after an upgrade saves a new baseline.
+  Before v3.14.0 it compared ICM's text reply line by line, in the file that the session end hook also writes.
 - `memory prune [--dry-run]` — preview or apply forgetting by memory importance.
   It forgets `low` and `medium` importance memories and keeps `high` and `critical` ones.
-  It reads at most 100 memories for each run.
+  It reads at most 200 memories for each run, and fewer when they do not fit in a 32000-token budget.
+  Run it again to read the memories that one run did not reach.
+  (changed in v3.14.0) Before v3.14.0 ICM returned at most 20 memories for each run, because the request gave no token budget.
   (changed in v3.12.0) It reads only the memories of the project that the current folder belongs to.
   When llmenv cannot tell the project, the command refuses to run and forgets nothing.
   Before v3.12.0 the command had no project filter, so ICM answered with the records of its own working folder.
   `--dry-run` prints the counts and forgets nothing.
   (changed in v3.12.0) The command refuses to run, and forgets nothing, while the active `features.memory` entry sets `retention`.
-  ICM's recall output has no record age or type, so llmenv cannot apply the per-type durations.
+  ICM's recall output has no memory type, so llmenv cannot apply the per-type durations.
   Remove `retention` from that entry to use the importance-based prune.
   A `retention` on an entry that is not active does not block the prune.
-  (changed in v3.13.0) It keeps a memory whose importance it does not know, and a record with no importance or weight.
-  Its summary counts both.
+  (changed in v3.13.0) It keeps a memory whose importance it does not know, and its summary counts it.
+  (changed in v3.14.0) It reads the JSON form of the ICM recall, so it needs icm 0.11.5 or later.
+  When the reply is not a JSON list of records, or one record has no id, the command fails and forgets nothing.
   The `auto_prune` pass prints no summary, because the shell evaluates the output of `llmenv export`.
   It prints a warning when it keeps such records, or when two active entries stop it from running.
 
@@ -464,6 +477,38 @@ Examples: `lsof` cannot run, or a `bundle.yaml` cannot be read.
 The failures are printed above the summary, and every other removal still runs first.
 The codebase-memory sweep reads the `index_path` of the top-level config and of every bundle.
 A bundle counts whether or not it is active in the current folder.
+
+## `prefill`
+
+(added in v3.14.0)
+
+`llmenv prefill [TRANSCRIPT]` shows the real prompt prefill of a Claude Code session.
+It reads the `api-request-shape` and `api-request` records of the session transcript (`.jsonl`).
+Claude Code 2.1.300 and later write these records.
+With no argument, it reads the newest transcript of the current folder under `$CLAUDE_CONFIG_DIR/projects`.
+
+The report holds:
+
+- The number of requests, and the number of request shapes that they use.
+  A shape is the `system` blocks and the `tools` array of a request.
+- The number of shape changes. Each change is a full prompt cache miss.
+- The size of the `system` blocks and of the tool schemas of the last shape, in characters of their JSON text.
+- The ten largest tool schemas.
+- The cache breakpoints of the last request, such as `system[1], messages[10].content[0]`.
+
+The record format is not documented.
+When a request record lacks a field that the report needs, the command fails and names the transcript line.
+It also fails in these cases:
+
+- A request record is not complete JSON.
+- A request names a shape that no shape record holds.
+- Two shape records with the same hash differ.
+
+It never reports a zero in place of a missing value.
+Other record kinds, and lines that are not JSON, are skipped.
+With no argument, the folder under `projects` is the current folder.
+Each character in it that is not an ASCII letter or digit is written as `-`.
+A transcript with no `api-request` record also fails, because an older Claude Code wrote it.
 
 ## `read-once`
 
@@ -842,6 +887,8 @@ Nothing turns off the third item.
   (changed in v3.14.0) The reminder names only tasks of sessions that this conversation owns, or that have no owner.
   A task of a session that another conversation owns is not named.
   It does not count as tracked work for the commit gate.
+  (changed in v3.14.0) A task of a session with no owner, such as one started outside an engine, is named once per
+  conversation, at its first question, and not at each question after that.
 - The first `git commit` or `gh pr create` of a session with no task in progress is denied once, with the commands to
   run. A `llmenv task done` or `llmenv task wait` earlier in the same command does not count as a task in
   progress. The same command runs on the next try.
@@ -1210,7 +1257,12 @@ active context (active bundles, active MCP servers, etc.). Checks:
   It also warns when the file does not exist yet and the nearest existing folder above it is not writable.
   See [`session_log:`](configuration.md#session_log)
 - hook commands (added in v3.14.0) — warns when hook commands name a binary in a cargo `target`
-  folder or a temp folder, or a binary that was removed after it started
+  folder or a temp folder, or a binary that was removed after it started.
+  It reads the program of each llmenv hook from the rendered Claude Code `settings.json`, so an old
+  render that names another binary is found, and a program that is not an absolute path is a
+  warning. A hook command whose program cannot be read is named. It then checks the running
+  binary, which the next export writes into the hooks of every engine.
+  It also reports a binary path that cannot be named in a hook command
 - lifecycle hooks (added in v3.11.0) — lists which lifecycle events
   (`session_start`, `session_end`, `post_model_switch`, `turn_start`, `post_tool_batch`,
   `post_tool_use_failure`, `subagent_start`, `stop`) are wired for
@@ -1323,8 +1375,8 @@ active context (active bundles, active MCP servers, etc.). Checks:
   A server that is down gets the reason and the fix. Nothing prints when the scope has no managed server.
   See [Session-start health check](mcp.md#session-start-health-check-added-in-v3120).
 - ICM server version (added in v3.12.0) — on the host that serves memory, reads the version of the local
-  `icm` binary and warns below 0.10.60, below 0.10.64, and (changed in v3.13.0) below 0.11.3. On a memory
-  client the version is unknown, and
+  `icm` binary and warns below 0.10.60, below 0.10.64, (changed in v3.13.0) below 0.11.3, and
+  (changed in v3.14.0) below 0.11.5. On a memory client the version is unknown, and
   doctor says to run `icm --version` on the server host. See
   [Troubleshooting](troubleshooting.md#memory-backend-issues).
 - codebase-memory index (added in v3.12.0) — with one active `features.codebase_memory` entry, reports the

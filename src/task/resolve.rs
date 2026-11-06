@@ -9,7 +9,7 @@ use std::path::Path;
 use anyhow::Context as _;
 
 use super::session::{self, EngineIdentity};
-use super::{task_path, try_list_tasks};
+use super::{list_tasks_strict, task_path};
 
 /// Resolve a user-supplied identifier (exact slug or unambiguous prefix) to the exact slug of
 /// an existing task. The caller's open session is searched first, so a bare slug does not
@@ -35,14 +35,121 @@ fn resolve_identifier_for(
     input: &str,
     owner: &EngineIdentity,
 ) -> anyhow::Result<String> {
+    check_identifier(input)?;
+    // A strict read: an unreadable store or task file must error out here rather than be
+    // misread as "no task found" (#1112, #3471). This is the resolution step every mutating
+    // task command (and `TaskUpdate`'s hook redirect) runs through.
+    resolve_with(
+        state_dir,
+        input,
+        owner,
+        list_tasks_strict(state_dir)?.as_slice(),
+    )
+}
+
+/// The task that a command acts on: a name to look up, or a slug that a lookup in the same
+/// command already returned, such as the one the ownership check resolved. A resolved slug is
+/// not looked up again, so the check and the command act on the same task, and the store is
+/// read once (#3477).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum TaskTarget<'a> {
+    /// A name from the user or the agent: a slug or a unique slug prefix.
+    Input(&'a str),
+    /// A slug that a lookup in this command returned.
+    Resolved(&'a str),
+}
+
+impl<'a> From<&'a str> for TaskTarget<'a> {
+    fn from(input: &'a str) -> Self {
+        Self::Input(input)
+    }
+}
+
+impl<'a> From<&'a String> for TaskTarget<'a> {
+    fn from(input: &'a String) -> Self {
+        Self::Input(input)
+    }
+}
+
+impl TaskTarget<'_> {
+    /// Refuse an input that cannot be a slug, before any read of the store.
+    ///
+    /// # Errors
+    /// The input is not a valid task identifier.
+    pub(crate) fn check(self) -> anyhow::Result<()> {
+        match self {
+            Self::Input(name) | Self::Resolved(name) => check_identifier(name),
+        }
+    }
+
+    /// The slug, with a strict read of the store for an input.
+    ///
+    /// # Errors
+    /// The errors of [`resolve_identifier`].
+    pub(crate) fn slug(self, state_dir: &Path) -> anyhow::Result<String> {
+        match self {
+            Self::Input(input) => resolve_identifier(state_dir, input),
+            // A slug comes from a task file, which a person can edit, so it is checked before it
+            // becomes a path.
+            Self::Resolved(slug) => check_identifier(slug).map(|()| slug.to_string()),
+        }
+    }
+
+    /// The slug, from a strict read of the store that the caller already made.
+    ///
+    /// # Errors
+    /// The errors of [`resolve_in`].
+    pub(crate) fn slug_in(
+        self,
+        state_dir: &Path,
+        tasks: &super::StrictTasks,
+    ) -> anyhow::Result<String> {
+        match self {
+            Self::Input(input) => {
+                check_identifier(input)?;
+                resolve_in(state_dir, input, tasks)
+            }
+            Self::Resolved(slug) => check_identifier(slug).map(|()| slug.to_string()),
+        }
+    }
+}
+
+/// Refuse a name that cannot be a task slug, before any read of the store, so a bad name gets
+/// its own error even when the store is unreadable.
+///
+/// # Errors
+/// `input` is not a valid task identifier.
+pub(super) fn check_identifier(input: &str) -> anyhow::Result<()> {
     if !crate::paths::is_valid_short_name(input) {
         anyhow::bail!("'{input}' is not a valid task identifier");
     }
-    // Fallible `try_list_tasks` rather than the tolerant `list_tasks`: an unreadable store
-    // must error out here rather than be misread as "no task found" (#1112) — this is the
-    // resolution step every mutating task command (and `TaskUpdate`'s hook redirect) runs
-    // through.
-    let tasks = try_list_tasks(state_dir)?;
+    Ok(())
+}
+
+/// [`resolve_identifier`] over a strict read of the store that the caller already made, so one
+/// task command reads the store once (#3474). The caller runs [`check_identifier`] first.
+///
+/// # Errors
+/// The session files cannot be read, or no task, or more than one, matches `input`.
+pub(super) fn resolve_in(
+    state_dir: &Path,
+    input: &str,
+    tasks: &super::StrictTasks,
+) -> anyhow::Result<String> {
+    resolve_with(
+        state_dir,
+        input,
+        &EngineIdentity::from_env()?,
+        tasks.as_slice(),
+    )
+}
+
+fn resolve_with(
+    state_dir: &Path,
+    input: &str,
+    owner: &EngineIdentity,
+    tasks: &[super::Task],
+) -> anyhow::Result<String> {
     let preferred = preferred_sessions(state_dir, owner)
         .with_context(|| format!("listing sessions to resolve task '{input}'"))?;
     if !preferred.is_empty() {
@@ -99,186 +206,4 @@ fn pick(slugs: &[&str], input: &str) -> anyhow::Result<Option<String>> {
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test code")]
-mod tests {
-    use super::*;
-    use crate::task::session::{StartDecision, StartOutcome, start_session};
-    use crate::task::{ParentSpec, add_task_for_session};
-    use tempfile::TempDir;
-
-    const PROJECT: &str = "test-project-0000000000";
-    const NOBODY: EngineIdentity = EngineIdentity {
-        session_id: None,
-        pid: None,
-    };
-
-    fn open_session(dir: &Path, decision: StartDecision) -> String {
-        match start_session(dir, None, None, PROJECT, decision).unwrap() {
-            StartOutcome::Created(s)
-            | StartOutcome::Resumed(s)
-            | StartOutcome::Replaced { session: s, .. } => s.id,
-        }
-    }
-
-    fn add(dir: &Path, title: &str, session_id: &str) -> String {
-        add_task_for_session(dir, title, ParentSpec::Detached, session_id)
-            .unwrap()
-            .slug
-    }
-
-    /// An old finished session and a new open one, each with tasks titled "Plan task N".
-    /// Returns the new session's id and slugs for N = 1..=3. The new slugs carry a `-2`.
-    fn old_and_new(dir: &Path) -> (String, Vec<String>) {
-        let old = open_session(dir, StartDecision::Auto);
-        for n in 1..=3 {
-            add(dir, &format!("Plan task {n}"), &old);
-        }
-        let new = open_session(dir, StartDecision::Replace);
-        let slugs = (1..=3)
-            .map(|n| add(dir, &format!("Plan task {n}"), &new))
-            .collect();
-        (new, slugs)
-    }
-
-    #[test]
-    fn bare_slug_reaches_the_open_session_task_not_the_finished_one() {
-        let dir = TempDir::new().unwrap();
-        let (_, new) = old_and_new(dir.path());
-        assert_eq!(new, ["plan-task-1-2", "plan-task-2-2", "plan-task-3-2"]);
-        assert_eq!(
-            resolve_identifier_for(dir.path(), "plan-task-3", &NOBODY).unwrap(),
-            "plan-task-3-2"
-        );
-    }
-
-    #[test]
-    fn exact_slug_of_the_open_session_wins() {
-        let dir = TempDir::new().unwrap();
-        let (_, new) = old_and_new(dir.path());
-        assert_eq!(
-            resolve_identifier_for(dir.path(), &new[0], &NOBODY).unwrap(),
-            new[0]
-        );
-    }
-
-    #[test]
-    fn a_prefix_that_hits_several_open_session_tasks_is_ambiguous() {
-        let dir = TempDir::new().unwrap();
-        old_and_new(dir.path());
-        let err = resolve_identifier_for(dir.path(), "plan-task", &NOBODY)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("plan-task-1-2") && err.contains("plan-task-3-2"),
-            "{err}"
-        );
-        assert!(
-            !err.contains("plan-task-1,"),
-            "old session slug leaked: {err}"
-        );
-    }
-
-    #[test]
-    fn a_slug_only_a_finished_session_has_still_resolves() {
-        let dir = TempDir::new().unwrap();
-        let old = open_session(dir.path(), StartDecision::Auto);
-        let slug = add(dir.path(), "Old only", &old);
-        open_session(dir.path(), StartDecision::Replace);
-        assert_eq!(
-            resolve_identifier_for(dir.path(), &slug, &NOBODY).unwrap(),
-            slug
-        );
-    }
-
-    #[test]
-    fn with_no_open_session_resolution_is_project_wide() {
-        let dir = TempDir::new().unwrap();
-        let slug = add(dir.path(), "Fix login timeout", "gone");
-        assert_eq!(
-            resolve_identifier_for(dir.path(), "fix-log", &NOBODY).unwrap(),
-            slug
-        );
-    }
-
-    #[test]
-    fn unknown_identifier_is_an_error() {
-        let dir = TempDir::new().unwrap();
-        old_and_new(dir.path());
-        let err = resolve_identifier_for(dir.path(), "nope", &NOBODY).unwrap_err();
-        assert!(err.to_string().contains("no task found"), "{err}");
-    }
-
-    #[test]
-    fn with_several_open_sessions_and_no_owner_an_open_session_task_still_wins() {
-        let dir = TempDir::new().unwrap();
-        let old = open_session(dir.path(), StartDecision::Auto);
-        let finished = add(dir.path(), "Shared", &old);
-        let first = open_session(dir.path(), StartDecision::Replace);
-        let second = open_session(dir.path(), StartDecision::New);
-        assert_ne!(first, second);
-        let live = add(dir.path(), "Shared", &second);
-        assert_eq!((finished.as_str(), live.as_str()), ("shared", "shared-2"));
-        assert_eq!(
-            resolve_identifier_for(dir.path(), "shared", &NOBODY).unwrap(),
-            "shared-2"
-        );
-    }
-
-    #[test]
-    fn pick_prefers_an_exact_match_and_rejects_an_ambiguous_prefix() {
-        assert_eq!(pick(&["ab", "abc"], "ab").unwrap().as_deref(), Some("ab"));
-        assert_eq!(
-            pick(&["abc", "abd"], "abc").unwrap().as_deref(),
-            Some("abc")
-        );
-        assert!(pick(&["abc", "abd"], "ab").is_err());
-        assert_eq!(pick(&["abc"], "x").unwrap(), None);
-    }
-
-    proptest::proptest! {
-        // Each case writes session and task files, so the case count stays low.
-        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(24))]
-
-        // Whatever the titles, a bare slug never resolves to a task of the finished session
-        // while the open session has tasks, and each open-session slug resolves to itself.
-        #[test]
-        fn open_session_tasks_win_over_finished_session_tasks(
-            titles in proptest::collection::btree_set("[a-z]{1,6}", 1..6),
-        ) {
-            let dir = TempDir::new().unwrap();
-            let old = open_session(dir.path(), StartDecision::Auto);
-            for t in &titles {
-                add(dir.path(), t, &old);
-            }
-            let new = open_session(dir.path(), StartDecision::Replace);
-            let mine: Vec<String> = titles.iter().map(|t| add(dir.path(), t, &new)).collect();
-            for t in &titles {
-                let bare = crate::task::slugify(t);
-                if let Ok(slug) = resolve_identifier_for(dir.path(), &bare, &NOBODY) {
-                    proptest::prop_assert!(mine.contains(&slug), "{bare} -> {slug}");
-                }
-            }
-            for slug in &mine {
-                proptest::prop_assert_eq!(
-                    &resolve_identifier_for(dir.path(), slug, &NOBODY).unwrap(),
-                    slug
-                );
-            }
-        }
-        // `pick` gives the same answer for any order of the slugs.
-        #[test]
-        fn pick_ignores_the_order_of_the_slugs(
-            slugs in proptest::collection::btree_set("[a-c]{1,4}", 0..8),
-            input in "[a-c]{1,3}",
-        ) {
-            let forward: Vec<&str> = slugs.iter().map(String::as_str).collect();
-            let mut backward = forward.clone();
-            backward.reverse();
-            let a = pick(&forward, &input).map_err(|e| e.to_string());
-            let b = pick(&backward, &input).map_err(|e| e.to_string());
-            proptest::prop_assert_eq!(a, b);
-            if slugs.contains(&input) {
-                proptest::prop_assert_eq!(pick(&forward, &input).unwrap(), Some(input));
-            }
-        }
-    }
-}
+mod tests;

@@ -5,6 +5,9 @@
 
 use std::sync::{Mutex, PoisonError};
 
+mod spool;
+pub(crate) use spool::start as start_spool;
+
 /// The most characters of one notice. A notice can carry an error chain, so the cap keeps one
 /// failure from filling the agent's context.
 const MAX_NOTICE_CHARS: usize = 1000;
@@ -75,8 +78,11 @@ impl NoticeList {
 /// Notices raised in this process.
 static NOTICES: Mutex<NoticeList> = Mutex::new(NoticeList::new());
 
-/// Add a notice for the agent. See `NoticeList::record`.
+/// Add a notice for the agent. See `NoticeList::record`. A detached child that spools also writes
+/// the notice to the spool, so the next hook run carries it (#3398).
 pub(crate) fn record(notice: impl Into<String>) {
+    let notice = clean(&notice.into());
+    spool::write(&notice);
     NOTICES
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -98,6 +104,46 @@ pub(crate) fn current() -> Option<String> {
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .current()
+}
+
+/// [`current`] after the notices that detached children spooled under the state folder are read
+/// in, for the hook output (#3398). A state folder that cannot be found leaves the spool unread.
+pub(crate) fn current_with_children() -> Option<String> {
+    match crate::paths::state_dir() {
+        Ok(state_dir) => spool::collect(&state_dir),
+        Err(e) => no_state_folder("the notices of detached jobs are not read", &e),
+    }
+    current()
+}
+
+/// Tell the agent that `skipped` did not happen because the state folder is missing or not
+/// valid. The error says which.
+pub(crate) fn no_state_folder(skipped: &str, error: &anyhow::Error) {
+    record_logged(format!(
+        "llmenv: {skipped}, because the state folder is not usable: {error:#}. Fix: set HOME, or \
+         set LLMENV_STATE_DIR to a valid absolute path."
+    ));
+}
+
+/// Record the top-level error of a detached child, so the next hook run shows it (#3398). Does
+/// nothing in a process that does not spool, where `main` prints the error itself.
+pub fn record_detached_job_failure(error: &anyhow::Error) {
+    if spool::active() {
+        record_logged(format!(
+            "llmenv: a detached job failed before it could run: {error:#}. Fix: run `llmenv \
+             doctor` to check the state folder and the config."
+        ));
+    }
+}
+
+/// Drop the notices that contain `text`, so a test sees only the notices of its own run.
+#[cfg(test)]
+pub(crate) fn forget_containing(text: &str) {
+    NOTICES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .notices
+        .retain(|notice| !notice.contains(text));
 }
 
 #[cfg(test)]

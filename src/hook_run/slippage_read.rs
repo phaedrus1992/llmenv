@@ -384,12 +384,12 @@ mod tests {
         // A directory at the log path fails to read with an error other than NotFound.
         let path = crate::hook_run::slippage::stats_path(state.path(), "s1");
         std::fs::create_dir_all(&path).expect("mkdir as the log path");
-        let logs = crate::test_log_capture::capture_logs(|| {
-            assert!(load_stats(state.path(), "s1").paths.is_empty());
-        });
+        assert!(load_stats(state.path(), "s1").paths.is_empty());
+        // The agent notice is the result; a captured log can miss the line under parallel tests (#3394).
+        let notices = crate::agent_notice::current().unwrap_or_default();
         assert!(
-            logs.contains("cannot read the slippage stats log"),
-            "{logs}"
+            notices.contains("cannot read the slippage stats log"),
+            "{notices}"
         );
     }
 

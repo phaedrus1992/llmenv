@@ -47,6 +47,7 @@ fn hook(event: &str, matcher: Option<&str>, command: &str) -> crate::config::Hoo
             kind: crate::config::HookHandlerKind::Command,
             command: Some(command.into()),
             tool: None,
+            on_failure: None,
         },
         bundle_origin: None,
     }
@@ -108,7 +109,7 @@ fn the_plugin_runs_hooks_as_opencode_would() {
         ),
         hook("SessionStart", None, "echo start note"),
     ];
-    let mut table = hook_table(&hooks, &[], &["codebase-memory-mcp"]);
+    let mut table = hook_table(&hooks, &[], &["codebase-memory-mcp"]).unwrap();
     // Keep only the test hooks: the built-in hooks call an installed `llmenv`.
     table["hooks"]
         .as_array_mut()
@@ -170,7 +171,7 @@ fn the_plugin_runs_hooks_as_opencode_would() {
 #[test]
 fn the_plugin_maps_file_arguments_both_ways() {
     let dir = tempfile::tempdir().unwrap();
-    let plugin = write_plugin(dir.path(), &hook_table(&[], &[], &[]));
+    let plugin = write_plugin(dir.path(), &hook_table(&[], &[], &[]).unwrap());
     let driver = r#"
 const m = await import(process.argv[1]);
 const n = m.toNeutral("edit", { path: "/a", oldString: "x", newString: "y", other: 1 });

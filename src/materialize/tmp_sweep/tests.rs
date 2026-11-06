@@ -9,6 +9,11 @@ use crate::materialize::expiry::AgeRule;
 
 pub(super) const DAY: Duration = Duration::from_secs(86_400);
 
+/// A real or dry sweep of `root` with a one-week mtime rule, judged by the clock.
+fn sweep_week(root: &Path, dry_run: bool) -> anyhow::Result<crate::materialize::cache::GcReport> {
+    sweep(root, mtime_rule(DAY * 7), &[], dry_run, SystemTime::now())
+}
+
 // Tests age a tree with `set_modified`, which cannot move the change time back. The mtime-only
 // rule is the one that sees that age, so these tests use it (#3195).
 pub(super) fn mtime_rule(older_than: Duration) -> AgeRule {
@@ -63,7 +68,7 @@ fn an_unpacked_tree_with_old_mtimes_is_kept_by_the_change_time_rule() {
         older_than: DAY * 7,
         source: AgeSource::MtimeOrCtime,
     };
-    let report = sweep(root.path(), rule, &[], false).unwrap();
+    let report = sweep(root.path(), rule, &[], false, SystemTime::now()).unwrap();
     assert!(report.removed.is_empty(), "removed {:?}", report.removed);
     assert!(unpacked.exists());
 }
@@ -75,7 +80,7 @@ fn the_mtime_only_rule_removes_an_unpacked_tree_with_old_mtimes() {
     fs::create_dir(&unpacked).unwrap();
     fs::write(unpacked.join("artifact"), b"x").unwrap();
     age_tree(&unpacked, old());
-    let report = sweep(root.path(), mtime_rule(DAY * 7), &[], false).unwrap();
+    let report = sweep_week(root.path(), false).unwrap();
     assert_eq!(report.removed, vec![unpacked.clone()]);
     assert!(!unpacked.exists());
 }
@@ -132,9 +137,9 @@ fn a_dry_run_lists_exactly_what_a_real_run_removes() {
         }
         let before = listing(root.path());
 
-        let preview = sweep(root.path(), mtime_rule(DAY * 7), &in_use, true).unwrap();
+        let preview = sweep(root.path(), mtime_rule(DAY * 7), &in_use, true, SystemTime::now()).unwrap();
         prop_assert_eq!(&listing(root.path()), &before);
-        let real = sweep(root.path(), mtime_rule(DAY * 7), &in_use, false).unwrap();
+        let real = sweep(root.path(), mtime_rule(DAY * 7), &in_use, false, SystemTime::now()).unwrap();
 
         let mut listed = preview.removed.clone();
         listed.sort();
@@ -157,7 +162,7 @@ fn a_dry_run_lists_the_old_entries_and_removes_none() {
     age_tree(&old_file, old());
     fs::create_dir(root.path().join("fresh")).unwrap();
 
-    let report = sweep(root.path(), mtime_rule(DAY * 7), &[], true).unwrap();
+    let report = sweep_week(root.path(), true).unwrap();
 
     let mut listed = report.removed.clone();
     listed.sort();
@@ -181,7 +186,7 @@ fn an_old_directory_and_an_old_file_are_removed_and_a_fresh_one_is_kept() {
     let fresh = root.path().join("fresh");
     fs::create_dir(&fresh).unwrap();
 
-    let report = sweep(root.path(), mtime_rule(DAY * 7), &[], false).unwrap();
+    let report = sweep_week(root.path(), false).unwrap();
 
     assert_eq!(report.removed.len(), 2, "removed: {:?}", report.removed);
     assert_eq!(report.kept, 1);
@@ -204,6 +209,7 @@ fn an_old_entry_with_a_path_in_use_is_kept() {
         mtime_rule(DAY * 7),
         std::slice::from_ref(&held),
         false,
+        SystemTime::now(),
     )
     .unwrap();
 
@@ -235,6 +241,7 @@ fn an_in_use_path_matches_when_the_root_is_reached_through_a_symlink() {
         mtime_rule(DAY * 7),
         std::slice::from_ref(&held),
         false,
+        SystemTime::now(),
     )
     .unwrap();
 
@@ -256,7 +263,7 @@ fn an_entry_with_a_future_mtime_is_kept() {
         .set_modified(SystemTime::now() + DAY)
         .unwrap();
 
-    let report = sweep(root.path(), mtime_rule(DAY * 7), &[], false).unwrap();
+    let report = sweep_week(root.path(), false).unwrap();
 
     assert!(report.removed.is_empty());
     assert!(future.exists());
@@ -275,15 +282,15 @@ fn an_unreadable_entry_is_recorded_and_the_rest_are_still_swept() {
     fs::write(&old_file, b"o").unwrap();
     age_tree(&old_file, old());
 
-    let report = sweep(root.path(), mtime_rule(DAY * 7), &[], false).unwrap();
+    let report = sweep_week(root.path(), false).unwrap();
 
     // Restore the mode before any assertion, so the tempdir can be removed.
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
     let locked_path = root.path().canonicalize().unwrap().join("locked");
-    assert_eq!(report.failed, vec![locked_path.clone()]);
+    assert_eq!(report.failed.keys().collect::<Vec<_>>(), vec![&locked_path]);
     // The doctor line names the cause, so the report must carry one for each failed path.
     let cause = report
-        .causes
+        .failed
         .get(&locked_path)
         .expect("a cause for the failed entry");
     assert!(!cause.is_empty(), "cause: {cause:?}");
@@ -305,7 +312,14 @@ fn an_expired_symlink_is_removed_and_its_target_is_kept() {
     let link = tmp.join("link");
     std::os::unix::fs::symlink(&target, &link).unwrap();
 
-    let report = sweep(&tmp, mtime_rule(Duration::ZERO), &[], false).unwrap();
+    let report = sweep(
+        &tmp,
+        mtime_rule(Duration::ZERO),
+        &[],
+        false,
+        SystemTime::now(),
+    )
+    .unwrap();
 
     assert_eq!(
         report.removed,
@@ -327,7 +341,8 @@ fn the_summary_counts_and_sizes_the_stale_entries_and_removes_nothing() {
     fs::create_dir(&fresh).unwrap();
     fs::write(fresh.join("x"), [0_u8; 999]).unwrap();
 
-    let summary = stale_summary_in(root.path(), mtime_rule(DAY * 7), &[]).unwrap();
+    let summary =
+        stale_summary_in(root.path(), mtime_rule(DAY * 7), &[], SystemTime::now()).unwrap();
 
     assert_eq!(
         summary,
@@ -355,6 +370,7 @@ fn the_summary_skips_a_claude_code_root_and_an_entry_in_use() {
         root.path(),
         mtime_rule(DAY * 7),
         std::slice::from_ref(&busy),
+        SystemTime::now(),
     )
     .unwrap();
 
@@ -374,7 +390,7 @@ fn the_summary_of_a_missing_tmp_root_is_empty() {
     let root = tempfile::tempdir().unwrap();
     let missing = root.path().join("no-such-tmp");
 
-    let summary = stale_summary_in(&missing, mtime_rule(DAY * 7), &[]).unwrap();
+    let summary = stale_summary_in(&missing, mtime_rule(DAY * 7), &[], SystemTime::now()).unwrap();
 
     assert_eq!(
         summary,
@@ -411,7 +427,7 @@ fn an_entry_with_old_files_and_fresh_folders_is_removed() {
     age_tree(&entry, old());
     touch_dirs(&entry);
 
-    let report = sweep(root.path(), mtime_rule(DAY * 7), &[], false).unwrap();
+    let report = sweep_week(root.path(), false).unwrap();
 
     assert_eq!(
         report.removed,
@@ -428,7 +444,7 @@ fn an_entry_with_a_fresh_file_is_kept() {
     age_tree(&entry, old());
     fs::write(entry.join("deep").join("new"), b"x").unwrap();
 
-    let report = sweep(root.path(), mtime_rule(DAY * 7), &[], false).unwrap();
+    let report = sweep_week(root.path(), false).unwrap();
 
     assert!(report.removed.is_empty(), "{:?}", report.removed);
 }
@@ -438,7 +454,7 @@ fn a_fresh_folder_tree_with_no_file_is_kept() {
     let root = tempfile::tempdir().unwrap();
     fs::create_dir_all(root.path().join("empty").join("sub")).unwrap();
 
-    let report = sweep(root.path(), mtime_rule(DAY * 7), &[], false).unwrap();
+    let report = sweep_week(root.path(), false).unwrap();
 
     assert!(report.removed.is_empty(), "{:?}", report.removed);
 }
@@ -450,7 +466,7 @@ fn an_old_folder_tree_with_no_file_is_removed() {
     fs::create_dir_all(entry.join("sub")).unwrap();
     age_tree(&entry, old());
 
-    let report = sweep(root.path(), mtime_rule(DAY * 7), &[], false).unwrap();
+    let report = sweep_week(root.path(), false).unwrap();
 
     assert_eq!(report.removed.len(), 1);
 }
@@ -467,7 +483,7 @@ fn each_build_in_the_hawk_target_root_is_judged_alone() {
     age_tree(&hawk, old());
     fs::write(hawk.join("fresh-build").join("g"), b"x").unwrap();
 
-    let report = sweep(root.path(), mtime_rule(DAY * 7), &[], false).unwrap();
+    let report = sweep_week(root.path(), false).unwrap();
 
     let resolved = fs::canonicalize(&hawk).unwrap();
     assert_eq!(report.removed, vec![resolved.join("old-build")]);
@@ -481,8 +497,90 @@ fn an_old_hawk_target_root_is_kept_when_empty() {
     fs::create_dir(&hawk).unwrap();
     age_tree(&hawk, old());
 
-    let report = sweep(root.path(), mtime_rule(DAY * 7), &[], false).unwrap();
+    let report = sweep_week(root.path(), false).unwrap();
 
     assert!(report.removed.is_empty());
     assert!(hawk.exists());
+}
+
+// #3041: the in-use list is read only when the bound holds a stale or unreadable entry, and the
+// shortcut never changes the answer.
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(24))]
+    #[test]
+    fn the_shortcut_reads_lsof_only_when_needed_and_keeps_the_answer(
+        entries in proptest::collection::vec((proptest::bool::ANY, proptest::bool::ANY), 0..4),
+    ) {
+        let state = tempfile::tempdir().unwrap();
+        let tmp = state.path().join("tmp");
+        fs::create_dir_all(&tmp).unwrap();
+        let mut in_use = Vec::new();
+        for (i, (is_old, busy)) in entries.iter().enumerate() {
+            let entry = tmp.join(format!("e{i}"));
+            fs::create_dir_all(&entry).unwrap();
+            if *is_old {
+                age_tree(&entry, SystemTime::now() - 2 * DAY);
+            }
+            if *busy {
+                in_use.push(fs::canonicalize(&entry).unwrap());
+            }
+        }
+        let calls = std::cell::Cell::new(0);
+        let summary = stale_summary_with(state.path(), mtime_rule(DAY), || {
+            calls.set(calls.get() + 1);
+            Ok(in_use.clone())
+        })
+        .unwrap();
+        let any_old = entries.iter().any(|(is_old, _)| *is_old);
+        proptest::prop_assert_eq!(calls.get(), usize::from(any_old));
+        let full = stale_summary_in(&tmp, mtime_rule(DAY), &in_use, SystemTime::now()).unwrap();
+        proptest::prop_assert_eq!(summary.count, full.count);
+        proptest::prop_assert_eq!(summary.unreadable, full.unreadable);
+    }
+}
+
+// The production rule judges by mtime or change time, so a tree with old mtimes that was just
+// written (a restore) is never stale (#3195, #3280).
+#[cfg(unix)]
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(16))]
+    #[test]
+    fn the_production_rule_keeps_a_tree_with_old_mtimes_and_a_fresh_change_time(
+        ages in proptest::collection::vec(8u32..400, 1..5),
+    ) {
+        let state = tempfile::tempdir().unwrap();
+        let tmp = state.path().join("tmp");
+        fs::create_dir_all(&tmp).unwrap();
+        for (i, days) in ages.iter().enumerate() {
+            let entry = tmp.join(format!("e{i}"));
+            fs::create_dir_all(&entry).unwrap();
+            fs::write(entry.join("f"), b"x").unwrap();
+            age_tree(&entry, SystemTime::now() - DAY * *days);
+        }
+        let summary = stale_summary_in(&tmp, AgeRule::new(DAY * 7), &[], SystemTime::now()).unwrap();
+        proptest::prop_assert_eq!(summary.count, 0);
+        let old = stale_summary_in(&tmp, mtime_rule(DAY * 7), &[], SystemTime::now()).unwrap();
+        proptest::prop_assert_eq!(old.count, ages.len());
+    }
+}
+
+/// An unreadable entry in the bound scan also makes the shortcut read the in-use list (#3041).
+#[cfg(unix)]
+#[test]
+fn an_unreadable_entry_makes_the_shortcut_read_lsof() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let state = tempfile::tempdir().unwrap();
+    let locked = state.path().join("tmp").join("locked");
+    fs::create_dir_all(locked.join("inner")).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let calls = std::cell::Cell::new(0);
+    let summary = stale_summary_with(state.path(), mtime_rule(DAY), || {
+        calls.set(calls.get() + 1);
+        Ok(Vec::new())
+    });
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+    let summary = summary.unwrap();
+    assert_eq!(calls.get(), 1);
+    assert_eq!(summary.unreadable, 1);
+    assert_eq!(summary.count, 0);
 }

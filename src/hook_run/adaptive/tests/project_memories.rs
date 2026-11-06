@@ -129,12 +129,14 @@ async fn a_failed_wake_up_keeps_the_project_memories() {
         .await;
     Mock::given(method("POST"))
         .and(body_string_contains("\"project\":\"proj-a\""))
-        .respond_with(ResponseTemplate::new(200).set_body_json(text("[decisions-a] project fact")))
+        .respond_with(crate::hook_run::test_recall::ToolReply(
+            ("[decisions-a] project fact").to_string(),
+        ))
         .mount(&server)
         .await;
     Mock::given(method("POST"))
         .and(body_string_contains("initialize"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(text("")))
+        .respond_with(crate::hook_run::test_recall::ToolReply(("").to_string()))
         .mount(&server)
         .await;
     let f = fixture(&server);

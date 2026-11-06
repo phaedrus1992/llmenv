@@ -97,13 +97,14 @@ fn the_index_job_counts_attempts_and_logs_an_unreadable_earlier_checkpoint() {
     assert_eq!(load(&path).unwrap().attempts, 2);
     assert!(!logs.contains("unreadable"), "{logs}");
 
-    // An unreadable earlier file: the count restarts, and the loss is logged.
+    // An unreadable earlier file: the count restarts, and the agent is told (#3449).
     std::fs::write(&path, "not a checkpoint").unwrap();
-    let logs = crate::test_log_capture::capture_logs(|| path = begin_index());
+    path = begin_index();
     assert_eq!(load(&path).unwrap().attempts, 1);
+    let notices = crate::agent_notice::current().unwrap_or_default();
     assert!(
-        logs.contains("earlier index checkpoint unreadable"),
-        "{logs}"
+        notices.contains("earlier code index checkpoint") && notices.contains("Fix:"),
+        "{notices}"
     );
 }
 
@@ -198,6 +199,20 @@ fn completing_a_path_that_cannot_be_removed_is_an_error() {
     std::fs::create_dir_all(not_a_file.join("inner")).unwrap();
     assert!(complete(&not_a_file).is_err());
     assert!(complete(&dir.path().join("missing.json")).is_ok());
+}
+
+#[test]
+fn a_checkpoint_that_stays_after_its_job_finished_is_a_notice() {
+    let dir = tempfile::tempdir().unwrap();
+    let stuck = dir.path().join("stuck-3465");
+    std::fs::create_dir_all(stuck.join("inner")).unwrap();
+    super::finish(Some(&stuck));
+    let notices = crate::agent_notice::current().unwrap_or_default();
+    assert!(
+        notices.contains("its checkpoint stays")
+            && notices.contains(&format!("Fix: remove {}", stuck.display())),
+        "{notices}"
+    );
 }
 
 #[test]
@@ -330,3 +345,6 @@ proptest! {
         prop_assert!(load(&path).unwrap().attempts >= attempts);
     }
 }
+
+#[expect(clippy::unwrap_used, reason = "test code")]
+mod truncation;

@@ -19,6 +19,8 @@ use serde_json::Value;
 
 use crate::task::{self, session};
 
+mod update;
+
 /// The Claude Code built-in task tools this handler intercepts.
 const TASK_TOOLS: [&str; 3] = ["TaskCreate", "TaskList", "TaskUpdate"];
 
@@ -103,7 +105,7 @@ fn handle_inner_as(
     match tool {
         "TaskCreate" => create(input, state_dir, project, owner),
         "TaskList" => list(state_dir),
-        "TaskUpdate" => update(input, state_dir),
+        "TaskUpdate" => update::update(input, state_dir, project, owner),
         // Unreachable: `task_tool_name` admits only TASK_TOOLS.
         other => deny(&format!(
             "unhandled task tool '{other}'; use `llmenv task`."
@@ -123,14 +125,15 @@ fn create(
     else {
         return deny("TaskCreate carried no `subject`; use `llmenv task add \"<title>\"`.");
     };
-    if let Err(msg) = ensure_session(state_dir, project, owner) {
-        return msg;
-    }
+    let session = match ensure_session(state_dir, project, owner) {
+        Ok(session) => session,
+        Err(msg) => return msg,
+    };
     match task::add_task(
         state_dir,
         subject,
         task::ParentSpec::Detached,
-        task::SessionChoice::Resolve(owner),
+        task::SessionChoice::Checked(&session),
         project,
     ) {
         Ok(t) => {
@@ -149,14 +152,15 @@ fn create(
             if let Some(desc) = str_field(input, "description")
                 .map(str::trim)
                 .filter(|d| !d.is_empty())
-                && let Err(e) = task::note_task(state_dir, &t.slug, desc)
+                && let Err(e) =
+                    task::note_task(state_dir, task::TaskTarget::Resolved(&t.slug), desc)
             {
                 tracing::error!(
                     error = %e,
                     slug = %t.slug,
                     "task redirect: description note not saved"
                 );
-                msg.push_str(&format!(" (note: the description wasn't saved — {e})"));
+                msg.push_str(&format!(" (note: the description wasn't saved — {e:#})"));
             }
             deny(&msg)
         }
@@ -184,7 +188,7 @@ fn ensure_session(
     state_dir: &Path,
     project: &str,
     owner: &session::EngineIdentity,
-) -> Result<(), String> {
+) -> Result<session::Session, String> {
     let open_sessions = match session::open_sessions_strict(state_dir, project) {
         Ok(sessions) => sessions,
         Err(e) => {
@@ -204,34 +208,49 @@ fn ensure_session(
                  session ({e:#}); track this with `llmenv task` manually."
             ))
         })?;
-    if open_sessions.is_empty()
-        && let Err(e) = session::start_session_as(
-            state_dir,
-            &session::StartRequest {
-                name: None,
-                description: None,
-                project,
-                owner,
-                resume: &detected,
-            },
-            session::StartDecision::Auto,
-        )
-    {
-        tracing::error!(error = %e, "task redirect: couldn't auto-start a session");
-        return Err(deny(&format!(
-            "couldn't auto-start a task session ({e}); run `llmenv task session start`."
-        )));
+    if !open_sessions.is_empty() {
+        // The one read of the session files picks the session the task goes to (#3474).
+        return session::pick_open_session(open_sessions, owner).map_err(|e| {
+            let cause = e
+                .ambiguity_message("pass --session <id>, or see `llmenv task session ls`")
+                .unwrap_or_else(|| "no open session for this project".to_string());
+            tracing::error!(cause = %cause, "task redirect: couldn't pick the task session");
+            deny(&format!(
+                "couldn't pick the task session ({cause}); track this with `llmenv task` manually."
+            ))
+        });
     }
-    Ok(())
+    match session::start_session_as(
+        state_dir,
+        &session::StartRequest {
+            name: None,
+            description: None,
+            project,
+            owner,
+            resume: &detected,
+        },
+        session::StartDecision::Auto,
+    ) {
+        Ok(
+            session::StartOutcome::Created(s)
+            | session::StartOutcome::Resumed(s)
+            | session::StartOutcome::Replaced { session: s, .. },
+        ) => Ok(s),
+        Err(e) => {
+            tracing::error!(error = %e, "task redirect: couldn't auto-start a session");
+            Err(deny(&format!(
+                "couldn't auto-start a task session ({e}); run `llmenv task session start`."
+            )))
+        }
+    }
 }
 
 fn list(state_dir: &Path) -> String {
-    // Uses the fallible `try_list_tasks` rather than the tolerant `list_tasks`:
-    // an unreadable store must deny with the real error, not be misreported as
-    // "(no tasks tracked yet)" — an affirmative claim that is false and can
-    // make the agent re-create tasks that already exist (#1112).
-    let tasks = match task::try_list_tasks(state_dir) {
-        Ok(tasks) => tasks,
+    // A strict read: an unreadable store or task file must deny with the real error, not be
+    // misreported as "(no tasks tracked yet)" or as a short list. That claim is false and can
+    // make the agent create tasks that already exist (#1112, #3471).
+    let tasks = match task::list_tasks_strict(state_dir) {
+        Ok(tasks) => tasks.into_vec(),
         Err(e) => {
             tracing::error!(error = %e, "task redirect: couldn't read the task store");
             return deny(&format!(
@@ -251,77 +270,6 @@ fn list(state_dir: &Path) -> String {
     ))
 }
 
-fn update(input: Option<&Value>, state_dir: &Path) -> String {
-    // Claude Code may stream either `taskId` or the pre-rename `task_id`.
-    let Some(id) = str_field(input, "taskId")
-        .or_else(|| str_field(input, "task_id"))
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    else {
-        return deny(
-            "TaskUpdate carried no `taskId`; update via `llmenv task start|note|done|wait <id>` \
-             or `llmenv task block <id> --on <other>` (see `llmenv task ls --all` for ids).",
-        );
-    };
-    let slug = match task::resolve_identifier(state_dir, id) {
-        Ok(s) => s,
-        // Preserve the real reason (invalid id, no match, OR an ambiguous prefix
-        // that matched several tasks) — flattening all three to "no match" would
-        // misreport a too-many-matches case as zero.
-        Err(e) => {
-            tracing::error!(error = %e, id = %id, "task redirect: couldn't resolve task id");
-            return deny(&format!(
-                "couldn't resolve task '{id}' ({e}); \
-                 run `llmenv task ls --all` for the current ids."
-            ));
-        }
-    };
-    let status = str_field(input, "status");
-    let outcome = match status {
-        Some("in_progress") => {
-            // force=false: the redirect must enforce the same hard-block on
-            // an unmet `blocked_on` (#1164) that `llmenv task start` does --
-            // an agent shouldn't bypass it just by using the native tool.
-            task::start_task(state_dir, &slug, false).map(|_| format!("started '{slug}'"))
-        }
-        Some("completed") => {
-            // force=false: the redirect must not let an agent skip the start
-            // check that `llmenv task done` enforces (#2416).
-            task::complete_task(state_dir, &slug, false).map(|_| format!("completed '{slug}'"))
-        }
-        Some("deleted") => task::delete_task(state_dir, &slug).map(|_| format!("deleted '{slug}'")),
-        // Name the unrecognized value rather than silently reporting "unchanged"
-        // as if the requested transition had been honored.
-        Some(other) => Ok(format!(
-            "left '{slug}' unchanged (status '{other}' not recognized)"
-        )),
-        None => Ok(format!("left '{slug}' unchanged")),
-    };
-    // A description/subject on an update becomes a progress note — but not on a
-    // delete (the task is gone). Surface a failed note rather than reporting
-    // silent success.
-    let mut note_warning = String::new();
-    if status != Some("deleted")
-        && let Some(note) = str_field(input, "description")
-            .or_else(|| str_field(input, "subject"))
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        && let Err(e) = task::note_task(state_dir, &slug, note)
-    {
-        tracing::error!(error = %e, slug = %slug, "task redirect: progress note not saved");
-        note_warning = format!(" (note not saved: {e})");
-    }
-    match outcome {
-        Ok(msg) => deny(&format!(
-            "{msg}{note_warning} — llmenv task tracker (TaskUpdate redirected)."
-        )),
-        Err(e) => {
-            tracing::error!(error = %e, slug = %slug, "task redirect: couldn't update task");
-            deny(&format!("couldn't update '{slug}' ({e})."))
-        }
-    }
-}
-
 /// Read a string field off the tool input, if present.
 fn str_field<'a>(input: Option<&'a Value>, key: &str) -> Option<&'a str> {
     input.and_then(|i| i.get(key)).and_then(Value::as_str)
@@ -335,302 +283,4 @@ fn deny(msg: &str) -> String {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    const PROJECT: &str = "proj-x";
-
-    fn tmp() -> tempfile::TempDir {
-        tempfile::tempdir().unwrap()
-    }
-
-    #[test]
-    fn task_create_with_two_open_sessions_joins_the_payload_conversations_session() {
-        let dir = tmp();
-        let start = |name: &str, conv: &str| {
-            let owner = session::EngineIdentity::from_session_id(Some(conv));
-            let request = session::StartRequest {
-                name: Some(name),
-                description: None,
-                project: PROJECT,
-                owner: &owner,
-                resume: &crate::task::resume::ResumeContext::default(),
-            };
-            match session::start_session_as(dir.path(), &request, session::StartDecision::New)
-                .unwrap()
-            {
-                session::StartOutcome::Created(s) => s,
-                other => panic!("expected Created, got {other:?}"),
-            }
-        };
-        start("theirs", "conv-other");
-        let mine = start("mine", "conv-me");
-
-        let owner = session::EngineIdentity::from_session_id(Some("conv-me"));
-        let out = handle_inner_as(
-            "TaskCreate",
-            Some(&json!({ "subject": "my step" })),
-            dir.path(),
-            PROJECT,
-            &owner,
-        );
-        assert!(out.contains("Tracked"), "{out}");
-        let task = task::list_tasks(dir.path())
-            .into_iter()
-            .find(|t| t.title == "my step")
-            .expect("task created");
-        assert_eq!(task.session.as_deref(), Some(mine.id.as_str()));
-    }
-
-    #[test]
-    fn non_task_tool_passes_through() {
-        let dir = tmp();
-        assert_eq!(
-            handle_pre_tool_use(
-                &json!({ "tool_name": "Read", "tool_input": {} }),
-                dir.path()
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn unavailable_tracker_denies_task_tools_and_names_the_error() {
-        let err = anyhow::anyhow!("HOME is not set");
-        let out = deny_tracker_unavailable(&json!({ "tool_name": "TaskCreate" }), &err)
-            .expect("a task tool must still get a decision");
-        assert!(out.starts_with("__DENY__:"), "{out}");
-        assert!(
-            out.contains("HOME is not set"),
-            "names the real error: {out}"
-        );
-        assert!(
-            out.contains("llmenv task"),
-            "keeps the manual fallback: {out}"
-        );
-    }
-
-    /// Degrading to a deny must not swallow non-task tools — they still belong
-    /// to the rest of the pipeline.
-    #[test]
-    fn unavailable_tracker_passes_non_task_tools_through() {
-        let err = anyhow::anyhow!("HOME is not set");
-        assert_eq!(
-            deny_tracker_unavailable(&json!({ "tool_name": "Read" }), &err),
-            None
-        );
-    }
-
-    #[test]
-    fn create_auto_starts_session_and_records_task() {
-        let dir = tmp();
-        let out = handle_inner(
-            "TaskCreate",
-            Some(&json!({ "subject": "Fix the auth bug", "description": "split the handler" })),
-            dir.path(),
-            PROJECT,
-        );
-        assert!(out.starts_with("__DENY__:"), "must deny: {out}");
-        let tasks = task::list_tasks(dir.path());
-        assert_eq!(tasks.len(), 1, "task should be recorded");
-        assert_eq!(tasks[0].title, "Fix the auth bug");
-        // The created slug is surfaced so the agent can update it.
-        assert!(out.contains(&tasks[0].slug), "deny names the slug: {out}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn list_denies_with_real_error_on_unreadable_store_not_empty_message() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tmp();
-        // Seed a task so the store exists before making it unreadable.
-        handle_inner(
-            "TaskCreate",
-            Some(&json!({ "subject": "seed" })),
-            dir.path(),
-            PROJECT,
-        );
-        let tasks_dir = task::tasks_dir(dir.path());
-        std::fs::set_permissions(&tasks_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
-
-        let readable_anyway = std::fs::read_dir(&tasks_dir).is_ok();
-        let out = handle_inner("TaskList", None, dir.path(), PROJECT);
-
-        std::fs::set_permissions(&tasks_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        if readable_anyway {
-            return; // running as root / FS ignores perms — can't exercise EACCES
-        }
-        assert!(out.starts_with("__DENY__:"), "{out}");
-        assert!(
-            !out.contains("(no tasks tracked yet)"),
-            "must not claim the store is empty when it's actually unreadable: {out}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn create_does_not_auto_start_second_session_when_store_unreadable() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tmp();
-        // Seed one real session for PROJECT.
-        handle_inner(
-            "TaskCreate",
-            Some(&json!({ "subject": "seed" })),
-            dir.path(),
-            PROJECT,
-        );
-        assert_eq!(
-            session::list_sessions_strict(dir.path())
-                .expect("test")
-                .len(),
-            1
-        );
-
-        let sessions_dir = task::tasks_dir(dir.path()).join("sessions");
-        std::fs::set_permissions(&sessions_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
-
-        let readable_anyway = std::fs::read_dir(&sessions_dir).is_ok();
-        let out = handle_inner(
-            "TaskCreate",
-            Some(&json!({ "subject": "second task" })),
-            dir.path(),
-            PROJECT,
-        );
-
-        std::fs::set_permissions(&sessions_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        if readable_anyway {
-            return; // running as root / FS ignores perms — can't exercise EACCES
-        }
-        assert!(out.starts_with("__DENY__:"), "{out}");
-        assert_eq!(
-            session::list_sessions_strict(dir.path())
-                .expect("test")
-                .len(),
-            1,
-            "must not auto-start a second session over an unreadable store: {out}"
-        );
-    }
-
-    #[test]
-    fn create_without_subject_denies_with_guidance() {
-        let dir = tmp();
-        let out = handle_inner("TaskCreate", Some(&json!({})), dir.path(), PROJECT);
-        assert!(out.starts_with("__DENY__:"));
-        assert!(out.contains("llmenv task add"));
-        assert!(task::list_tasks(dir.path()).is_empty());
-    }
-
-    #[test]
-    fn update_refuses_done_on_an_open_task() {
-        let dir = tmp();
-        // Seed a task via the same create path.
-        handle_inner(
-            "TaskCreate",
-            Some(&json!({ "subject": "ship it" })),
-            dir.path(),
-            PROJECT,
-        );
-        let slug = task::list_tasks(dir.path())[0].slug.clone();
-
-        let out = handle_inner(
-            "TaskUpdate",
-            Some(&json!({ "taskId": slug, "status": "completed" })),
-            dir.path(),
-            PROJECT,
-        );
-        assert!(out.starts_with("__DENY__:"), "{out}");
-        assert!(
-            out.contains("never started") && out.contains("llmenv task start"),
-            "open -> done must be refused with the fix (#2416): {out}"
-        );
-        let t = &task::list_tasks(dir.path())[0];
-        assert_eq!(
-            t.state,
-            task::TaskState::Open,
-            "a refused done leaves the task open: {t:?}"
-        );
-    }
-
-    #[test]
-    fn update_completed_after_start_has_no_never_started_warning() {
-        let dir = tmp();
-        handle_inner(
-            "TaskCreate",
-            Some(&json!({ "subject": "ship it" })),
-            dir.path(),
-            PROJECT,
-        );
-        let slug = task::list_tasks(dir.path())[0].slug.clone();
-        handle_inner(
-            "TaskUpdate",
-            Some(&json!({ "taskId": slug, "status": "in_progress" })),
-            dir.path(),
-            PROJECT,
-        );
-        let out = handle_inner(
-            "TaskUpdate",
-            Some(&json!({ "taskId": slug, "status": "completed" })),
-            dir.path(),
-            PROJECT,
-        );
-        assert!(!out.contains("never started"), "{out}");
-    }
-
-    #[test]
-    fn update_unrecognized_status_is_reported_not_swallowed() {
-        let dir = tmp();
-        handle_inner(
-            "TaskCreate",
-            Some(&json!({ "subject": "beta" })),
-            dir.path(),
-            PROJECT,
-        );
-        let slug = task::list_tasks(dir.path())[0].slug.clone();
-        // `pending` isn't a transition this handler maps — it must say so, not
-        // silently claim success.
-        let out = handle_inner(
-            "TaskUpdate",
-            Some(&json!({ "taskId": slug, "status": "pending" })),
-            dir.path(),
-            PROJECT,
-        );
-        assert!(out.contains("not recognized"), "{out}");
-    }
-
-    #[test]
-    fn update_unknown_id_denies_without_error() {
-        let dir = tmp();
-        let out = handle_inner(
-            "TaskUpdate",
-            Some(&json!({ "taskId": "does-not-exist", "status": "completed" })),
-            dir.path(),
-            PROJECT,
-        );
-        assert!(out.starts_with("__DENY__:"));
-        assert!(out.contains("llmenv task ls"));
-    }
-
-    #[test]
-    fn list_renders_tracker_state() {
-        let dir = tmp();
-        handle_inner(
-            "TaskCreate",
-            Some(&json!({ "subject": "alpha" })),
-            dir.path(),
-            PROJECT,
-        );
-        let out = handle_inner("TaskList", None, dir.path(), PROJECT);
-        assert!(out.starts_with("__DENY__:"));
-        assert!(out.contains("alpha"), "list should show the task: {out}");
-    }
-
-    #[test]
-    fn list_empty_is_graceful() {
-        let dir = tmp();
-        let out = handle_inner("TaskList", None, dir.path(), PROJECT);
-        assert!(out.contains("no tasks tracked yet"), "{out}");
-    }
-}
+mod tests;

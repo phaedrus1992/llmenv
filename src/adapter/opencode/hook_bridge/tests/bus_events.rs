@@ -74,7 +74,7 @@ fn the_plugin_bridges_bus_events_and_subagent_stops() {
         hook("PostModelSwitch", None, &record),
         hook("PostToolBatch", None, &record),
     ];
-    let mut table = hook_table(&hooks, &[], &["codebase-memory-mcp"]);
+    let mut table = hook_table(&hooks, &[], &["codebase-memory-mcp"]).unwrap();
     table["hooks"]
         .as_array_mut()
         .unwrap()
@@ -209,7 +209,7 @@ fn a_subagent_start_block_stops_a_matching_launch_only() {
         Some("explore"),
         &format!("echo '{deny}'"),
     )];
-    let mut table = hook_table(&hooks, &[], &["codebase-memory-mcp"]);
+    let mut table = hook_table(&hooks, &[], &["codebase-memory-mcp"]).unwrap();
     table["hooks"]
         .as_array_mut()
         .unwrap()
@@ -254,7 +254,7 @@ fn a_malformed_bus_event_is_named_and_an_inherited_name_runs_nothing() {
     let log_s = log.display();
     let record = format!("p=$(cat); printf '%s\\n' \"$p\" >> '{log_s}'");
     let hooks = vec![hook("Notification", None, &record)];
-    let mut table = hook_table(&hooks, &[], &["codebase-memory-mcp"]);
+    let mut table = hook_table(&hooks, &[], &["codebase-memory-mcp"]).unwrap();
     table["hooks"]
         .as_array_mut()
         .unwrap()

@@ -18,17 +18,8 @@ const TOOL_NAME_WEBSEARCH: &str = "WebSearch";
 const WEB_FETCH_TOPIC: &str = "web-fetch";
 
 /// Whether `topic` holds fetched pages, with or without a project.
-fn is_web_fetch_topic(topic: &str) -> bool {
+pub(super) fn is_web_fetch_topic(topic: &str) -> bool {
     topic == WEB_FETCH_TOPIC || topic.starts_with("web-fetch-")
-}
-
-/// `text` without its web-fetch records, for a recall across all projects (#2911).
-pub(super) fn without_web_pages(text: &str) -> String {
-    super::action::split_recall_records(text)
-        .into_iter()
-        .filter(|record| !super::relevance::record_topic(record).is_some_and(is_web_fetch_topic))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 fn web_fetch_topic(project: Option<&str>) -> String {
@@ -132,14 +123,23 @@ pub(super) fn handle_web_fetch_in(
     // The project lookup runs git, so it waits until the call is known to be a web fetch.
     web_tool(payload)?;
     let args = web_fetch_store_args(payload, session_project(payload).as_deref())?;
-    let Ok(payload_json) = serde_json::to_string(&args) else {
-        tracing::error!("icm-store: failed to serialize store args");
-        return None;
+    let payload_json = match serde_json::to_string(&args) {
+        Ok(json) => json,
+        Err(e) => {
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the fetched page is not stored in memory, because its store request \
+                 cannot be built: {e}. Fix: report this as an llmenv bug."
+            ));
+            return None;
+        }
     };
     // Spawns this same binary as a detached child. The path is this process's own image, not input.
     // nosemgrep: rust.lang.security.current-exe.current-exe
     let Ok(exe) = std::env::current_exe() else {
-        tracing::error!("icm-store: cannot resolve current_exe for detached store");
+        crate::agent_notice::record_logged(
+            "llmenv: the fetched page is not stored in memory, because llmenv cannot find its \
+             own program. Fix: run `llmenv doctor`.",
+        );
         return None;
     };
     let checkpoint = checkpoint::begin(
@@ -152,13 +152,19 @@ pub(super) fn handle_web_fetch_in(
     redirect_stderr_to_detached_log(&mut cmd, detached_child_log_path());
     crate::mcp::proxy::detach_process_group(&mut cmd);
     let Ok(mut child) = crate::trace::spawn_counted("icm-store", &mut cmd) else {
-        tracing::error!("icm-store: failed to spawn detached store child");
+        crate::agent_notice::record_logged(
+            "llmenv: the fetched page is not stored in memory, because the store job cannot \
+             start. Fix: run `llmenv doctor`.",
+        );
         return None;
     };
     if let Some(mut stdin) = child.stdin.take()
         && let Err(e) = stdin.write_all(payload_json.as_bytes())
     {
-        tracing::error!("icm-store: failed to pipe args to detached child: {e}");
+        crate::agent_notice::record_logged(format!(
+            "llmenv: the fetched page is not stored in memory, because it cannot be sent to the \
+             store job: {e}. Fix: run `llmenv doctor`."
+        ));
     }
     // Not waited on by the caller: the child is process-group-detached and
     // outlives us.

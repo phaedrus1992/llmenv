@@ -25,9 +25,11 @@ pub(crate) fn local_query(
     crate::process::run_traced("git:local-query", cmd, LOCAL_QUERY_TIMEOUT)
 }
 
-/// Whether git's stderr says the directory is outside a repository.
+/// Whether a failed git command ran in a folder outside a repository: git's fatal exit, 128, with
+/// "not a git repository" in stderr. The phrase from any other exit, or from a kill by signal
+/// (`None`), is a real failure (#3433).
 ///
 /// Git may capitalise the message, so the match ignores case (#3040).
-pub(crate) fn is_not_a_repo_message(stderr: &str) -> bool {
-    stderr.to_ascii_lowercase().contains("not a git repository")
+pub(crate) fn is_outside_repo(code: Option<i32>, stderr: &str) -> bool {
+    code == Some(128) && stderr.to_ascii_lowercase().contains("not a git repository")
 }

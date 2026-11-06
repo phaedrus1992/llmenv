@@ -15,6 +15,7 @@ mod cbm_index;
 mod dependent_tools;
 use dependent_tools::run_doctor_dependent_tools;
 mod hook_command;
+mod hook_programs;
 use hook_command::run_doctor_hook_command;
 mod cleartext;
 mod instruction_size;
@@ -29,7 +30,7 @@ mod task_text;
 mod token_env;
 use token_env::effective_token_efficiency_var;
 mod icm_server;
-use icm_server::icm_server_check;
+use icm_server::{ICM_SERVER_MIN, icm_version_verdict};
 mod recall_health;
 mod session_log_path;
 mod tool_availability;
@@ -521,14 +522,16 @@ fn run_doctor_icm_server(
         eprintln!(
             "{info} ICM server version unknown: the memory server is another host, and \
              mcp-proxy does not forward the icm version (#2161). Run `icm --version` on that \
-             host; recall needs 0.10.64 or later."
+             host; llmenv needs {ICM_SERVER_MIN} or later."
         );
         return;
     }
-    match local_icm_version() {
-        Ok(version) => print_check(icm_server_check(&version), &pass, &warn, &info),
-        Err(reason) => eprintln!("{warn} {reason}"),
-    }
+    print_check(
+        icm_version_verdict(local_icm_version()),
+        &pass,
+        &warn,
+        &info,
+    );
 }
 
 /// Claude Code field-prefix patterns: a bare `<field>:<value>` filter, as
@@ -1495,7 +1498,7 @@ pub(super) fn run_doctor(
 
     run_doctor_tool_availability(use_color, &config, &features);
     run_doctor_dependent_tools(use_color);
-    run_doctor_hook_command(use_color);
+    run_doctor_hook_command(use_color, &cache_dir);
     run_doctor_icm_server(use_color, &config, &config_dir, &active);
     run_doctor_mcp_servers(use_color, &config, &config_dir, &active);
     network::run_doctor_network(use_color, &config);
@@ -2541,6 +2544,7 @@ mod tests {
                 kind: crate::config::HookHandlerKind::Command,
                 command: Some("echo hi".into()),
                 tool: None,
+                on_failure: None,
             },
             bundle_origin: None,
         }

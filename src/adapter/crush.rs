@@ -132,27 +132,11 @@ impl AgentAdapter for CrushAdapter {
             .hooks
             .iter()
             .filter(|hook| {
-                if !SUPPORTED_HOOK_EVENTS.contains(&hook.event.as_str()) {
-                    eprintln!(
-                        "warning: Crush adapter does not support hook event '{}' — \
-                         skipping this hook. Supported events: {}. Remove or move \
-                         this hook to a claude_code-only bundle to silence this warning.",
-                        hook.event,
-                        SUPPORTED_HOOK_EVENTS.join(", ")
-                    );
-                    return false;
-                }
-                if matches!(hook.handler.kind, crate::config::HookHandlerKind::McpTool) {
-                    eprintln!(
-                        "warning: Crush adapter does not support mcp_tool hooks \
-                         (hook event '{}', tool '{}') — skipping this hook. \
-                         Use a command hook instead.",
-                        hook.event,
-                        hook.handler.tool.as_deref().unwrap_or("<unknown>")
-                    );
-                    return false;
-                }
-                true
+                crate::adapter::hook_support::engine_can_run_hook(
+                    "Crush",
+                    SUPPORTED_HOOK_EVENTS,
+                    hook,
+                )
             })
             .collect();
 
@@ -251,7 +235,7 @@ impl AgentAdapter for CrushAdapter {
             .entry("PreToolUse".into())
             .or_default()
             // Guards for llmenv's own PreToolUse hooks, run on every tool call as on Claude Code.
-            .push(json!({ "command": hook_command("hook-run --engine crush pre_tool_use") }));
+            .push(json!({ "command": hook_command("hook-run --engine crush pre_tool_use")? }));
 
         let mut hooks_value = serde_json::Value::Object(
             hooks_by_event
@@ -496,6 +480,7 @@ mod tests {
                 kind: HookHandlerKind::Command,
                 command: Some(command.into()),
                 tool: None,
+                on_failure: None,
             },
             bundle_origin: None,
         }
@@ -634,7 +619,7 @@ mod tests {
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(
             doc,
-            serde_json::json!({ "hooks": { "PreToolUse": [{ "command": hook_command("hook-run --engine crush pre_tool_use") }] } })
+            serde_json::json!({ "hooks": { "PreToolUse": [{ "command": hook_command("hook-run --engine crush pre_tool_use").unwrap() }] } })
         );
     }
 
@@ -667,6 +652,7 @@ mod tests {
                 kind: HookHandlerKind::Command,
                 command: None,
                 tool: None,
+                on_failure: None,
             },
             bundle_origin: None,
         });
@@ -698,6 +684,7 @@ mod tests {
                 kind: HookHandlerKind::Command,
                 command: Some("echo hi".into()),
                 tool: None,
+                on_failure: None,
             },
             bundle_origin: None,
         });
@@ -734,6 +721,7 @@ mod tests {
                 kind: HookHandlerKind::Command,
                 command: Some("bash hooks/guard.sh".into()),
                 tool: None,
+                on_failure: None,
             },
             bundle_origin: Some(PathBuf::from("/bundles/mybundle")),
         });
@@ -764,6 +752,7 @@ mod tests {
                 kind: HookHandlerKind::Command,
                 command: Some("echo start".into()),
                 tool: None,
+                on_failure: None,
             },
             bundle_origin: None,
         });
@@ -775,7 +764,7 @@ mod tests {
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(
             doc["hooks"]["PreToolUse"],
-            serde_json::json!([{ "command": hook_command("hook-run --engine crush pre_tool_use") }]),
+            serde_json::json!([{ "command": hook_command("hook-run --engine crush pre_tool_use").unwrap() }]),
             "unsupported hook must not appear in output, so only llmenv's own hook remains: {doc}"
         );
     }
@@ -795,6 +784,7 @@ mod tests {
                 kind: HookHandlerKind::Command,
                 command: Some("echo post".into()),
                 tool: None,
+                on_failure: None,
             },
             bundle_origin: None,
         });
@@ -1099,8 +1089,9 @@ mod tests {
             matcher: Some("^Bash$".into()),
             handler: HookHandler {
                 kind: HookHandlerKind::Command,
-                command: Some(hook_command("throttle pre-tool")),
+                command: Some(hook_command("throttle pre-tool").unwrap()),
                 tool: None,
+                on_failure: None,
             },
             bundle_origin: None,
         });
@@ -1242,6 +1233,7 @@ mod tests {
                 kind: HookHandlerKind::Command,
                 command: Some("bash hooks/guard.sh".into()),
                 tool: None,
+                on_failure: None,
             },
             bundle_origin: Some(PathBuf::from("/bundles/foo")),
         });
@@ -1461,6 +1453,7 @@ mod tests {
                 kind: HookHandlerKind::McpTool,
                 command: None,
                 tool: Some("my_tool".into()),
+                on_failure: None,
             },
             bundle_origin: None,
         });
@@ -1472,7 +1465,7 @@ mod tests {
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(
             doc["hooks"]["PreToolUse"],
-            serde_json::json!([{ "command": hook_command("hook-run --engine crush pre_tool_use") }]),
+            serde_json::json!([{ "command": hook_command("hook-run --engine crush pre_tool_use").unwrap() }]),
             "mcp_tool hook must not appear in output, so only llmenv's own hook remains: {doc}"
         );
     }

@@ -633,6 +633,7 @@ fn fresh_render_dedups_typed_and_native_hook_duplicate() {
                     kind: llmenv::config::HookHandlerKind::Command,
                     command: Some("/bin/guard.sh".to_string()),
                     tool: None,
+                    on_failure: None,
                 },
                 bundle_origin: None,
             }],

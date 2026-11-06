@@ -110,15 +110,133 @@ fn attach_system_message(out: &str, message: &str) -> String {
     Value::Object(object).to_string()
 }
 
-/// The hook output for a `SessionStart` event. A resume with an expensive, expired cache adds
-/// the notice as `systemMessage`. Every other event and payload returns `out` unchanged.
 /// The resume cost notice for this event, or `None`. A wrong-type field is recorded for the agent
 /// as a side effect, so the caller must take the notice list after this call.
-pub(crate) fn resume_notice(hook_event_name: &str, payload: &Value) -> Option<String> {
+///
+/// `env` reads a variable of the hook process, such as [`hook_env`], and `api_key_helper` says
+/// whether a settings file sets `apiKeyHelper`.
+fn resume_notice(
+    hook_event_name: &str,
+    payload: &Value,
+    env: impl Fn(&str) -> Option<String>,
+    api_key_helper: impl FnOnce() -> bool,
+) -> Option<String> {
     if hook_event_name != "SessionStart" {
         return None;
     }
-    ResumeCache::from_payload(payload).notice()
+    let notice = ResumeCache::from_payload(payload).notice()?;
+    // Claude Code warns about an expensive resume itself on a subscription, so a second notice
+    // would repeat it (#3103).
+    (!native_warning_covers(&env, api_key_helper)).then_some(notice)
+}
+
+/// [`resume_notice`] for the hook process: its environment, and the settings files of its
+/// session, found through `CLAUDE_CONFIG_DIR` and the payload `cwd`.
+pub(crate) fn session_resume_notice(hook_event_name: &str, payload: &Value) -> Option<String> {
+    resume_notice(hook_event_name, payload, hook_env, || {
+        let config_dir = hook_env("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from);
+        let cwd = payload["cwd"].as_str().map(std::path::Path::new);
+        api_key_helper_set(config_dir.as_deref(), cwd)
+    })
+}
+
+/// A variable of the hook process. A value that is not UTF-8 counts as set, so it can only keep
+/// the notice.
+fn hook_env(name: &str) -> Option<String> {
+    match std::env::var(name) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => Some("(not UTF-8)".into()),
+    }
+}
+
+/// A settings file larger than this is not a real one. A repo controls the project files.
+const SETTINGS_MAX_BYTES: u64 = 1 << 20;
+
+/// Whether one of the settings files that Claude Code reads for this session sets
+/// `apiKeyHelper`, which gives an API key with no variable: the rendered settings in
+/// `CLAUDE_CONFIG_DIR`, and the project's `.claude/settings.json` and `.claude/settings.local.json`
+/// under `cwd`. A file that exists but cannot be read or parsed counts as set, so it keeps the
+/// notice.
+fn api_key_helper_set(config_dir: Option<&std::path::Path>, cwd: Option<&std::path::Path>) -> bool {
+    let project = cwd.map(|c| c.join(".claude"));
+    let files = [
+        config_dir.map(|d| d.join("settings.json")),
+        project.as_ref().map(|p| p.join("settings.json")),
+        project.as_ref().map(|p| p.join("settings.local.json")),
+    ];
+    files.into_iter().flatten().any(|file| {
+        match llmenv_paths::read_text_bounded(&file, SETTINGS_MAX_BYTES) {
+            Ok(Some(text)) => serde_json::from_str::<Value>(&text).map_or(true, |v| {
+                v.get("apiKeyHelper").is_some_and(|h| !h.is_null())
+            }),
+            Ok(None) => false,
+            // A repo can plant a pipe, a link, or a huge file here. The notice stays on.
+            Err(e) => {
+                tracing::warn!(
+                    "cannot read {}: {e}, so the helper counts as set",
+                    file.display()
+                );
+                true
+            }
+        }
+    })
+}
+
+/// The first Claude Code release with its own warning when a resume would use a noticeable share
+/// of the 5-hour limit on a Pro or Max plan (changelog entry for 2.1.304, #3103).
+const NATIVE_RESUME_WARNING_SINCE: (u64, u64, u64) = (2, 1, 304);
+
+/// The variables that put a session on metered or third-party auth: an API key, a gateway, or a
+/// cloud provider. Claude Code gives such a session no resume warning of its own.
+const METERED_AUTH_VARS: [&str; 3] = [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+];
+
+/// The provider switches. Each one is on unless it is empty, `0`, or `false`.
+const PROVIDER_FLAGS: [&str; 3] = [
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+];
+
+/// Whether Claude Code shows its own resume warning for this session: subscription auth on the
+/// 2.1.304 release or later. Every doubt keeps the llmenv notice, because a second notice costs
+/// less than none.
+///
+/// - Any metered auth variable that is not empty, any provider switch that is on, or an
+///   `apiKeyHelper` in the settings means metered auth.
+/// - llmenv cannot see the plan, so a Team plan on subscription auth also counts.
+/// - A missing or unparseable version, or a pre-release of 2.1.304, keeps the notice.
+fn native_warning_covers(
+    env: &impl Fn(&str) -> Option<String>,
+    api_key_helper: impl FnOnce() -> bool,
+) -> bool {
+    let metered = METERED_AUTH_VARS
+        .iter()
+        .any(|name| env(name).is_some_and(|v| !v.is_empty()));
+    let provider = PROVIDER_FLAGS
+        .iter()
+        .any(|name| env(name).is_some_and(|v| !matches!(v.as_str(), "" | "0" | "false")));
+    if metered || provider {
+        return false;
+    }
+    let Some(version) = env("CLAUDE_CODE_VERSION").filter(|v| !v.is_empty()) else {
+        tracing::debug!("resume notice kept: CLAUDE_CODE_VERSION is not set or empty");
+        return false;
+    };
+    match crate::util::semver::is_release_at_least(&version, NATIVE_RESUME_WARNING_SINCE) {
+        Some(newer) => newer && !api_key_helper(),
+        None => {
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the resume cost notice stays on, because CLAUDE_CODE_VERSION is \
+                 not a version ({version:?}). Fix: none is needed."
+            ));
+            false
+        }
+    }
 }
 
 /// Add `message` as the system message of `out`. A `None` message leaves `out` unchanged.
@@ -131,251 +249,7 @@ pub(crate) fn with_resume_notice(out: String, message: Option<&str>) -> String {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-mod tests {
-    use proptest::prelude::*;
-    use serde_json::{Value, json};
-
-    use super::{
-        ResumeCache, attach_system_message, field, resume_notice, usd, with_resume_notice,
-    };
-
-    fn expensive_resume() -> Value {
-        json!({
-            "source": "resume",
-            "seconds_since_last_response": 5400,
-            "context_tokens": 182_340,
-            "prompt_cache_likely_expired": true,
-            "estimated_cache_write_usd": 1.1396
-        })
-    }
-
-    #[test]
-    fn all_four_fields_are_read() {
-        let cache = ResumeCache::from_payload(&expensive_resume());
-
-        assert_eq!(cache.seconds_since_last_response, Some(5400));
-        assert_eq!(cache.context_tokens, Some(182_340));
-        assert_eq!(cache.prompt_cache_likely_expired, Some(true));
-        assert_eq!(cache.estimated_cache_write_usd, Some(1.1396));
-    }
-
-    #[test]
-    fn each_missing_field_is_absent_and_the_others_are_kept() {
-        for key in [
-            "seconds_since_last_response",
-            "context_tokens",
-            "prompt_cache_likely_expired",
-            "estimated_cache_write_usd",
-        ] {
-            let mut payload = expensive_resume();
-            payload.as_object_mut().unwrap().remove(key);
-
-            let cache = ResumeCache::from_payload(&payload);
-
-            assert!(cache.notice().is_none(), "a notice without {key}");
-        }
-        let cache = ResumeCache::from_payload(&json!({"context_tokens": 5}));
-        assert_eq!(cache.context_tokens, Some(5));
-        assert_eq!(cache.seconds_since_last_response, None);
-    }
-
-    #[test]
-    fn a_wrong_type_is_absent_for_each_field() {
-        let payload = json!({
-            "seconds_since_last_response": "5400",
-            "context_tokens": -1,
-            "prompt_cache_likely_expired": "yes",
-            "estimated_cache_write_usd": "1.14"
-        });
-
-        let cache = ResumeCache::from_payload(&payload);
-
-        assert_eq!(cache, ResumeCache::default());
-    }
-
-    #[test]
-    fn a_wrong_type_is_recorded_for_the_agent_with_its_field_name() {
-        let payload = json!({ "probe_cache_cost": "1.14" });
-
-        assert_eq!(field(&payload, "probe_cache_cost", usd), None);
-
-        let text = crate::agent_notice::current().unwrap_or_default();
-        assert!(text.contains("probe_cache_cost"), "{text}");
-        assert!(text.contains("Fix:"), "{text}");
-    }
-
-    #[test]
-    fn the_resume_notice_names_a_wrong_type_before_the_notices_are_taken() {
-        let payload = json!({
-            "seconds_since_last_response": "probe-wrong-type-resume",
-            "estimated_cache_write_usd": 1.14
-        });
-
-        let message = resume_notice("SessionStart", &payload);
-
-        let taken = crate::agent_notice::current().unwrap_or_default();
-        assert!(message.is_none(), "{message:?}");
-        assert!(taken.contains("seconds_since_last_response"), "{taken}");
-    }
-
-    #[test]
-    fn a_negative_cost_is_not_a_cost() {
-        let payload = json!({"estimated_cache_write_usd": -0.5});
-
-        assert_eq!(
-            ResumeCache::from_payload(&payload).estimated_cache_write_usd,
-            None
-        );
-    }
-
-    #[test]
-    fn a_huge_token_count_is_kept_as_read() {
-        let payload = json!({"context_tokens": u64::MAX});
-
-        assert_eq!(
-            ResumeCache::from_payload(&payload).context_tokens,
-            Some(u64::MAX)
-        );
-    }
-
-    #[test]
-    fn an_expired_resume_above_the_threshold_gives_the_three_numbers() {
-        let notice = ResumeCache::from_payload(&expensive_resume())
-            .notice()
-            .expect("an expired resume over 0.50 USD gives a notice");
-
-        assert_eq!(
-            notice,
-            "Prompt cache expired after 90 min idle. Resuming rewrites about 182k tokens \
-             (about $1.14). /compact first, or start fresh, to lower the cost."
-        );
-    }
-
-    #[test]
-    fn the_threshold_is_inclusive_and_a_cheaper_resume_gives_no_notice() {
-        let mut payload = expensive_resume();
-        payload["estimated_cache_write_usd"] = json!(0.50);
-        assert!(ResumeCache::from_payload(&payload).notice().is_some());
-
-        payload["estimated_cache_write_usd"] = json!(0.49);
-        assert!(ResumeCache::from_payload(&payload).notice().is_none());
-    }
-
-    #[test]
-    fn a_warm_cache_gives_no_notice() {
-        let mut payload = expensive_resume();
-        payload["prompt_cache_likely_expired"] = json!(false);
-
-        assert!(ResumeCache::from_payload(&payload).notice().is_none());
-    }
-
-    #[test]
-    fn a_startup_without_the_fields_gives_no_notice_and_the_output_is_unchanged() {
-        let payload = json!({"source": "startup"});
-
-        let message = resume_notice("SessionStart", &payload);
-
-        assert_eq!(
-            with_resume_notice("{\"x\":1}".to_string(), message.as_deref()),
-            "{\"x\":1}"
-        );
-    }
-
-    #[test]
-    fn the_notice_is_added_to_the_output_as_system_message() {
-        let message = resume_notice("SessionStart", &expensive_resume());
-        let out = with_resume_notice(
-            "{\"hookSpecificOutput\":{}}".to_string(),
-            message.as_deref(),
-        );
-        let parsed: Value = serde_json::from_str(&out).unwrap();
-
-        assert!(
-            parsed["systemMessage"]
-                .as_str()
-                .unwrap()
-                .contains("182k tokens")
-        );
-        assert!(parsed.get("hookSpecificOutput").is_some());
-    }
-
-    #[test]
-    fn an_empty_output_becomes_the_message_object_alone() {
-        let out = attach_system_message("", "note");
-
-        assert_eq!(out, "{\"systemMessage\":\"note\"}");
-    }
-
-    #[test]
-    fn other_events_never_get_the_notice() {
-        let message = resume_notice("PreToolUse", &expensive_resume());
-
-        assert_eq!(with_resume_notice(String::new(), message.as_deref()), "");
-    }
-
-    #[test]
-    fn a_non_object_output_is_returned_unchanged() {
-        assert_eq!(attach_system_message("[1,2]", "note"), "[1,2]");
-    }
-
-    #[test]
-    fn a_non_json_output_is_returned_unchanged() {
-        assert_eq!(attach_system_message("not json", "note"), "not json");
-    }
-
-    proptest::proptest! {
-        /// Any payload value never panics the parser, and a field of the wrong type is absent.
-        #[test]
-        fn a_wrong_type_never_fills_a_field(
-            number in any::<u64>(),
-            text in "[a-z0-9]{0,8}",
-            flag in any::<bool>(),
-        ) {
-            let payload = json!({
-                "seconds_since_last_response": text,
-                "context_tokens": number,
-                "prompt_cache_likely_expired": flag,
-                "estimated_cache_write_usd": text,
-            });
-
-            let cache = ResumeCache::from_payload(&payload);
-
-            prop_assert_eq!(cache.seconds_since_last_response, None);
-            prop_assert_eq!(cache.context_tokens, Some(number));
-            prop_assert_eq!(cache.prompt_cache_likely_expired, Some(flag));
-            prop_assert_eq!(cache.estimated_cache_write_usd, None);
-        }
-
-        /// A cost below zero is never read, however large its magnitude.
-        #[test]
-        fn a_negative_cost_is_never_read(cost in -1.0e12f64..-1.0e-9) {
-            let payload = json!({"estimated_cache_write_usd": cost});
-
-            prop_assert_eq!(
-                ResumeCache::from_payload(&payload).estimated_cache_write_usd,
-                None
-            );
-        }
-
-        /// The message lands at `systemMessage`, and every existing key survives.
-        #[test]
-        fn attaching_keeps_existing_keys_and_sets_the_message(
-            key in "[a-z]{1,8}",
-            value in any::<i64>(),
-            message in "[ -~]{0,40}",
-        ) {
-            let mut object = serde_json::Map::new();
-            object.insert(key.clone(), json!(value));
-            let out = Value::Object(object).to_string();
-
-            let attached = attach_system_message(&out, &message);
-            let parsed: Value = serde_json::from_str(&attached).unwrap();
-
-            prop_assert_eq!(&parsed["systemMessage"], &Value::String(message));
-            prop_assert_eq!(&parsed[&key], &json!(value));
-        }
-    }
-}
+mod tests;
 
 #[cfg(test)]
 mod notice_tests;

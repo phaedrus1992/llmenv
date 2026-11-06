@@ -12,21 +12,33 @@ use std::path::{Path, PathBuf};
 
 mod clean;
 mod config_guard;
+mod env_vars;
 mod export_trace;
 mod git_repo;
 mod guard;
 mod init_settings;
 mod login;
+mod prefill;
+mod shell_names;
+use env_vars::reject_invalid_var_names;
 use login::{import_auth_from_file, run_login, run_login_capture};
+use shell_names::{completion_filename, detect_shell};
 use sync_cmd::run_sync;
+mod plugin_check;
 mod plugin_payloads;
 mod post_materialize;
+use plugin_check::check_selected_plugins;
 use plugin_payloads::sync_plugin_payloads;
 
 mod doctor;
 mod init_cmd;
+mod task_guard;
+use task_guard::{guard_session, guard_task, guard_tasks, record_override};
 #[cfg(test)]
 mod init_run_tests;
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "test code")]
+mod task_show_tests;
 use init_cmd::run_init;
 mod init_templates;
 mod proxy_restart;
@@ -370,6 +382,8 @@ enum Command {
     /// Remove stale cache folders, old state/tmp entries, old session-log rotations, and old
     /// codebase-memory indexes
     Clean(clean::CleanArgs),
+    /// Show the real prompt prefill of a Claude Code session from its transcript
+    Prefill(prefill::PrefillArgs),
     /// Deprecated: use `llmenv clean`
     Prune(clean::CleanArgs),
     /// Manage the read-once file dedup cache (#318).
@@ -634,6 +648,9 @@ enum TaskSessionCommand {
         id: Option<String>,
         #[command(flatten)]
         resume_context: ResumeArgs,
+        /// Act on a session of another conversation. Pass that session's id as SESSION_ID. Without it, the command refuses.
+        #[arg(long, value_name = "SESSION_ID")]
+        other_session: Option<String>,
     },
     /// Append a line to a session's resume context. Reads stdin when `text` is omitted.
     /// Auto-resolves the session like `finish`, or pass `--id`.
@@ -641,6 +658,9 @@ enum TaskSessionCommand {
         text: Option<String>,
         #[arg(long)]
         id: Option<String>,
+        /// Act on a session of another conversation. Pass that session's id as SESSION_ID. Without it, the command refuses.
+        #[arg(long, value_name = "SESSION_ID")]
+        other_session: Option<String>,
     },
     /// Finish a session by id. Auto-resolves when exactly one session is
     /// open for the current project. Refuses while a task is `open`, `wip`,
@@ -649,6 +669,9 @@ enum TaskSessionCommand {
         id: Option<String>,
         #[arg(long)]
         abandon_open: bool,
+        /// Act on a session of another conversation. Pass that session's id as SESSION_ID. Without it, the command refuses.
+        #[arg(long, value_name = "SESSION_ID")]
+        other_session: Option<String>,
     },
     /// Show one session's progress. Auto-resolves like `finish`.
     Show { id: Option<String> },
@@ -916,15 +939,17 @@ pub fn run() -> anyhow::Result<()> {
         Some(Command::SessionLogRecord { checkpoint }) => {
             use std::io::Read;
             let mut payload_json = String::new();
-            std::io::stdin().read_to_string(&mut payload_json)?;
+            // The checkpoint check starts the notice spool, so a stdin error reaches the agent.
             let checkpoint = checked_checkpoint(checkpoint)?;
+            std::io::stdin().read_to_string(&mut payload_json)?;
             crate::session_log::detached::run_record(&payload_json, checkpoint.as_deref())?;
         }
         Some(Command::IcmStore { checkpoint }) => {
             use std::io::Read;
             let mut payload_json = String::new();
-            std::io::stdin().read_to_string(&mut payload_json)?;
+            // The checkpoint check starts the notice spool, so a stdin error reaches the agent.
             let checkpoint = checked_checkpoint(checkpoint)?;
+            std::io::stdin().read_to_string(&mut payload_json)?;
             crate::hook_run::detached_store::run_icm_store(&payload_json, checkpoint.as_deref())?;
         }
         Some(Command::ConsolidationRun { checkpoint }) => {
@@ -957,6 +982,7 @@ pub fn run() -> anyhow::Result<()> {
         }
         Some(Command::Task { command }) => run_task_command(*command, cli.color.to_mode())?,
         Some(Command::Clean(args)) => clean::run_clean(&args, use_color)?,
+        Some(Command::Prefill(args)) => prefill::run_prefill(&args)?,
         Some(Command::Prune(args)) => clean::run_prune_alias(&args, use_color)?,
         Some(Command::Validate) => {
             run_validate(use_color)?;
@@ -1009,52 +1035,6 @@ fn check_git_remote(dir: &Path) -> anyhow::Result<String> {
 
     let remote = String::from_utf8(output.stdout)?.trim().to_string();
     Ok(remote)
-}
-
-/// Reject any var in `vars` whose name isn't a valid shell identifier.
-/// Applied to adapter-returned env vars before they propagate, so the
-/// `export NAME=...` contract holds regardless of which emission path runs.
-fn reject_invalid_var_names(env: &[(String, String)]) -> anyhow::Result<()> {
-    for (name, value) in env {
-        validate_var_name(name)?;
-        validate_var_value(value)?;
-    }
-    Ok(())
-}
-
-fn validate_var_name(name: &str) -> anyhow::Result<()> {
-    // Shell variable names must match [A-Za-z_][A-Za-z0-9_]*
-    if name.is_empty() {
-        anyhow::bail!("Variable name cannot be empty");
-    }
-    let first = name.as_bytes()[0] as char;
-    if !first.is_ascii_alphabetic() && first != '_' {
-        anyhow::bail!(
-            "Variable name '{}' must start with letter or underscore",
-            name
-        );
-    }
-    for ch in name.chars() {
-        if !ch.is_ascii_alphanumeric() && ch != '_' {
-            anyhow::bail!(
-                "Variable name '{}' contains invalid character '{}'",
-                name,
-                ch
-            );
-        }
-    }
-    Ok(())
-}
-
-fn validate_var_value(value: &str) -> anyhow::Result<()> {
-    // Only NUL is rejected: it can't survive in a C-string env var and would
-    // truncate the export. Newlines/CR are safe because every emission path
-    // single-quotes the value (`util::single_quote`), and values like
-    // LLMENV_ICM_CONTEXT are legitimately multiline. (#469)
-    if value.contains('\0') {
-        anyhow::bail!("variable value contains forbidden NUL byte");
-    }
-    Ok(())
 }
 
 /// Case-insensitive check: true if any item in `list` matches `target` ignoring case.
@@ -1868,7 +1848,11 @@ fn migrate_stranded_transcripts_once(adapter_root: &Path, state_dir: &Path) {
         }
     }
     if let Err(e) = crate::paths::create_refusing_symlink(&marker) {
-        tracing::debug!("could not write {}: {e}", marker.display());
+        tracing::warn!(
+            "could not write {}: {e}. Fix: make the state folder writable, or the migration \
+             scans every folder on each run",
+            marker.display()
+        );
     }
 }
 
@@ -2740,27 +2724,39 @@ fn run_init_auth_prompt(adapter_root: &Path) -> anyhow::Result<()> {
 /// with any `blocked_on` refs. `tasks` is already filtered by the caller.
 fn render_task_ls_human(
     state_dir: &Path,
+    sessions: Option<Vec<crate::task::session::Session>>,
     tasks: Vec<crate::task::Task>,
     use_color: bool,
 ) -> anyhow::Result<String> {
     if tasks.is_empty() {
         return Ok("No tasks.\n".to_string());
     }
+    // One strict read of the session files feeds the priority order and the labels (#3477). A
+    // read that the caller already made is used again (#3479).
+    let sessions = match sessions {
+        Some(sessions) => sessions,
+        None => crate::task::session::list_sessions_strict(state_dir)?,
+    };
     let priority: Vec<String> = match crate::task::project::current_tag() {
-        Ok(p) => crate::task::session::open_sessions_strict(state_dir, &p)?
-            .into_iter()
-            .map(|s| s.id)
+        Ok(p) => sessions
+            .iter()
+            .filter(|s| s.is_open() && s.project == p)
+            .map(|s| s.id.clone())
             .collect(),
         Err(e) => {
+            // The caller reads stdout, so the warning goes to stderr, where the agent sees it.
             tracing::error!(error = %e, "cannot resolve the project tag; task ls skips the priority order");
+            eprintln!(
+                "llmenv: cannot resolve the project tag, so task ls shows no priority order: \
+                 {e:#}. Fix: run llmenv task ls from inside the project."
+            );
             Vec::new()
         }
     };
-    let labels: std::collections::HashMap<String, String> =
-        crate::task::session::list_sessions_strict(state_dir)?
-            .into_iter()
-            .map(|s| (s.id.clone(), s.name.unwrap_or(s.id)))
-            .collect();
+    let labels: std::collections::HashMap<String, String> = sessions
+        .into_iter()
+        .map(|s| (s.id.clone(), s.name.unwrap_or(s.id)))
+        .collect();
 
     let rows = crate::task::display_rows(tasks, &priority);
     let mut out = String::new();
@@ -2854,11 +2850,14 @@ fn render_task_session_summary_human(
     out
 }
 
-/// Handle `llmenv task <subcommand>` (#231). Thin formatting layer over
-/// `crate::task`, which owns the store logic.
 /// The `--checkpoint` path of a detached child, checked to be a checkpoint file under the state
 /// dir (#2396). The child deletes and trusts the file, so it must not take an arbitrary path.
+/// Every detached child calls this first, so it also spools the child's notices for the next
+/// hook run (#3398).
 fn checked_checkpoint(path: Option<PathBuf>) -> anyhow::Result<Option<PathBuf>> {
+    if let Ok(state_dir) = paths::state_dir() {
+        crate::agent_notice::start_spool(&state_dir);
+    }
     let Some(path) = path else {
         return Ok(None);
     };
@@ -2866,6 +2865,8 @@ fn checked_checkpoint(path: Option<PathBuf>) -> anyhow::Result<Option<PathBuf>> 
     crate::hook_run::checkpoint::validated_path(&state_dir, &path).map(Some)
 }
 
+/// Handle `llmenv task <subcommand>` (#231). Thin formatting layer over
+/// `crate::task`, which owns the store logic.
 fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()> {
     let state_dir = crate::paths::state_dir()?;
     match command {
@@ -2918,21 +2919,30 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             reopen,
             other_session,
         } => {
-            let audit = guard_task(&state_dir, &id, other_session.as_deref())?;
-            if reopen {
-                crate::task::reopen_task(&state_dir, &id)?;
-            }
-            let task = crate::task::start_task(&state_dir, &id, force).map_err(|e| {
+            crate::task::with_store_lock(&state_dir, || {
+                let (slug, audit) = guard_task(&state_dir, &id, other_session.as_deref())?;
                 if reopen {
-                    e.context(format!(
-                        "task '{id}' is now reopened (open), but it did not start"
-                    ))
-                } else {
-                    e
+                    crate::task::reopen_task(&state_dir, crate::task::TaskTarget::Resolved(&slug))?;
                 }
+                let task = crate::task::start_task(
+                    &state_dir,
+                    crate::task::TaskTarget::Resolved(&slug),
+                    force,
+                )
+                .map_err(|e| {
+                    if reopen {
+                        e.context(format!(
+                            "task '{id}' is now reopened (open), but it did not start"
+                        ))
+                    } else {
+                        e
+                    }
+                })?;
+                // The audit note comes first: a closed stdout makes `println!` panic.
+                record_override(&state_dir, audit)?;
+                println!("Started '{}' — now {:?}", task.slug, task.state);
+                Ok(())
             })?;
-            println!("Started '{}' — now {:?}", task.slug, task.state);
-            record_override(&state_dir, audit)?;
         }
         TaskCommand::Done {
             id,
@@ -2940,16 +2950,28 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             other_session,
         } => task_done::run(&state_dir, &id, force, other_session.as_deref())?,
         TaskCommand::Reopen { ids, other_session } => {
-            let audits = ids
-                .iter()
-                .map(|id| guard_task(&state_dir, id, other_session.as_deref()))
-                .collect::<anyhow::Result<Vec<_>>>()?;
-            for task in crate::task::reopen_tasks(&state_dir, &ids)? {
-                println!("Reopened '{}' — now {:?}", task.slug, task.state);
-            }
-            for audit in audits {
-                record_override(&state_dir, audit)?;
-            }
+            crate::task::with_store_lock(&state_dir, || {
+                let (slugs, audits): (Vec<String>, Vec<_>) =
+                    guard_tasks(&state_dir, &ids, other_session.as_deref())?
+                        .into_iter()
+                        .unzip();
+                let reopened = crate::task::reopen::reopen_resolved(&state_dir, &slugs)?;
+                // Every note is tried, so one failed note does not hide the others. The notes
+                // come before the print: a closed stdout makes `println!` panic.
+                let failed: Vec<String> = audits
+                    .into_iter()
+                    .filter_map(|audit| record_override(&state_dir, audit).err())
+                    .map(|e| format!("{e:#}"))
+                    .collect();
+                for task in reopened {
+                    println!("Reopened '{}' — now {:?}", task.slug, task.state);
+                }
+                if failed.is_empty() {
+                    Ok(())
+                } else {
+                    anyhow::bail!("{}", failed.join("\n"))
+                }
+            })?;
         }
         TaskCommand::Ls {
             format,
@@ -2969,9 +2991,14 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 );
             }
             let mut tasks = crate::task::try_list_tasks(&state_dir)?;
+            // One strict read of the session files serves the project filter and the
+            // renderer (#3479).
+            let mut sessions = None;
             if current_project {
                 let project = current_project_tag()?;
-                tasks = crate::task::filter_tasks_for_project(&state_dir, &project, tasks)?;
+                let read = crate::task::session::list_sessions_strict(&state_dir)?;
+                tasks = crate::task::filter_tasks_for_project(&read, &project, tasks);
+                sessions = Some(read);
             }
             if let Some(session_id) = &session {
                 tasks.retain(|t| t.session.as_deref() == Some(session_id.as_str()));
@@ -2996,7 +3023,10 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 None => {
                     use std::io::IsTerminal;
                     let use_color = should_use_color(Some(color), std::io::stdout().is_terminal());
-                    print!("{}", render_task_ls_human(&state_dir, tasks, use_color)?);
+                    print!(
+                        "{}",
+                        render_task_ls_human(&state_dir, sessions, tasks, use_color)?
+                    );
                 }
             }
         }
@@ -3022,7 +3052,7 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             text,
             other_session,
         } => {
-            let audit = guard_task(&state_dir, &id, other_session.as_deref())?;
+            // stdin is read before the lock, so a slow writer does not hold the store.
             let text = match text {
                 Some(t) => t,
                 None => {
@@ -3032,16 +3062,25 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                     buf.trim().to_string()
                 }
             };
-            let task = crate::task::note_task(&state_dir, &id, &text)?;
-            println!("Noted on '{}'", task.slug);
-            record_override(&state_dir, audit)?;
+            crate::task::with_store_lock(&state_dir, || {
+                let (slug, audit) = guard_task(&state_dir, &id, other_session.as_deref())?;
+                let task = crate::task::note_task(
+                    &state_dir,
+                    crate::task::TaskTarget::Resolved(&slug),
+                    &text,
+                )?;
+                // The audit note comes first: a closed stdout makes `println!` panic.
+                record_override(&state_dir, audit)?;
+                println!("Noted on '{}'", task.slug);
+                Ok(())
+            })?;
         }
         TaskCommand::Wait {
             id,
             reason,
             other_session,
         } => {
-            let audit = guard_task(&state_dir, &id, other_session.as_deref())?;
+            // stdin is read before the lock, so a slow writer does not hold the store.
             let reason = match reason {
                 Some(r) => r,
                 None => {
@@ -3051,23 +3090,40 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                     buf.trim().to_string()
                 }
             };
-            let task = crate::task::wait_task(&state_dir, &id, &reason)?;
-            println!("Marked '{}' waiting", task.slug);
-            record_override(&state_dir, audit)?;
+            crate::task::with_store_lock(&state_dir, || {
+                let (slug, audit) = guard_task(&state_dir, &id, other_session.as_deref())?;
+                let task = crate::task::wait_task(
+                    &state_dir,
+                    crate::task::TaskTarget::Resolved(&slug),
+                    &reason,
+                )?;
+                // The audit note comes first: a closed stdout makes `println!` panic.
+                record_override(&state_dir, audit)?;
+                println!("Marked '{}' waiting", task.slug);
+                Ok(())
+            })?;
         }
         TaskCommand::Block {
             id,
             on,
             other_session,
         } => {
-            let audit = guard_task(&state_dir, &id, other_session.as_deref())?;
-            let task = crate::task::block_task(&state_dir, &id, &on)?;
-            println!(
-                "'{}' is now blocked on: {}",
-                task.slug,
-                task.blocked_on.join(", ")
-            );
-            record_override(&state_dir, audit)?;
+            crate::task::with_store_lock(&state_dir, || {
+                let (slug, audit) = guard_task(&state_dir, &id, other_session.as_deref())?;
+                let task = crate::task::block_task(
+                    &state_dir,
+                    crate::task::TaskTarget::Resolved(&slug),
+                    &on,
+                )?;
+                // The audit note comes first: a closed stdout makes `println!` panic.
+                record_override(&state_dir, audit)?;
+                println!(
+                    "'{}' is now blocked on: {}",
+                    task.slug,
+                    task.blocked_on.join(", ")
+                );
+                Ok(())
+            })?;
         }
         TaskCommand::Edit {
             id,
@@ -3081,7 +3137,7 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             detail,
             other_session,
         } => {
-            let audit = guard_task(&state_dir, &id, other_session.as_deref())?;
+            // stdin is read before the lock, so a slow writer does not hold the store.
             let detail = detail.resolve()?;
             let add_note = match add_note.as_deref() {
                 Some("") => {
@@ -3103,39 +3159,62 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 delete_note: delete_note.as_deref(),
                 detail: detail.as_deref(),
             };
-            let task = crate::task::edit_task(&state_dir, &id, &edit)?;
-            println!("Updated '{}'", task.slug);
-            record_override(&state_dir, audit)?;
+            crate::task::with_store_lock(&state_dir, || {
+                let (slug, audit) = guard_task(&state_dir, &id, other_session.as_deref())?;
+                let task = crate::task::edit_task(
+                    &state_dir,
+                    crate::task::TaskTarget::Resolved(&slug),
+                    &edit,
+                )?;
+                // The audit note comes first: a closed stdout makes `println!` panic.
+                record_override(&state_dir, audit)?;
+                println!("Updated '{}'", task.slug);
+                Ok(())
+            })?;
         }
         TaskCommand::Clear {
             ids,
             session,
             other_session,
         } => {
-            if let Some(session_id) = &session {
-                guard_session(&state_dir, session_id, other_session.as_deref())?;
-            }
-            for id in &ids {
-                // `clear` deletes the task, so a pending override note has nowhere to live.
-                guard_task(&state_dir, id, other_session.as_deref())?;
-            }
-            if let Some(session_id) = session {
-                let cleared =
-                    crate::task::session::delete_tasks_in_session(&state_dir, &session_id)?;
-                println!(
-                    "Cleared {} task(s) from session '{session_id}'",
-                    cleared.len()
-                );
-            } else if ids.is_empty() {
-                anyhow::bail!("specify one or more task ids, or --session <id>");
-            } else {
-                for id in &ids {
-                    let task = crate::task::delete_task(&state_dir, id)?;
-                    println!("Cleared task '{}' ({})", task.slug, task.title);
-                }
-            }
+            crate::task::with_store_lock(&state_dir, || {
+                run_task_clear(
+                    &state_dir,
+                    &ids,
+                    session.as_deref(),
+                    other_session.as_deref(),
+                )
+            })?;
         }
         TaskCommand::Session { command } => run_task_session_command(&state_dir, command, color)?,
+    }
+    Ok(())
+}
+
+/// `llmenv task clear`, run by the caller under the store lock, so the checked tasks are the
+/// tasks that are deleted (#3478).
+fn run_task_clear(
+    state_dir: &std::path::Path,
+    ids: &[String],
+    session: Option<&str>,
+    other_session: Option<&str>,
+) -> anyhow::Result<()> {
+    if let Some(named) = session {
+        guard_session(state_dir, named, other_session)?;
+    }
+    // `clear` deletes the task, so a pending override note has nowhere to live.
+    let checked = guard_tasks(state_dir, ids, other_session)?;
+    if let Some(named) = session {
+        let cleared = crate::task::session::delete_tasks_in_session(state_dir, named)?;
+        println!("Cleared {} task(s) from session '{named}'", cleared.len());
+    } else if ids.is_empty() {
+        anyhow::bail!("specify one or more task ids, or --session <id>");
+    } else {
+        for (slug, _) in &checked {
+            let task =
+                crate::task::delete_task(state_dir, crate::task::TaskTarget::Resolved(slug))?;
+            println!("Cleared task '{}' ({})", task.slug, task.title);
+        }
     }
     Ok(())
 }
@@ -3154,37 +3233,6 @@ fn caller_session_for_task(
     let project = current_project_tag()?;
     let owner = crate::task::session::EngineIdentity::from_env()?;
     crate::task::ownership::caller_session(state_dir, &project, &owner)
-}
-
-/// Refuse a command that acts on task `id` when the task belongs to another session.
-fn guard_task(
-    state_dir: &std::path::Path,
-    id: &str,
-    other_session: Option<&str>,
-) -> anyhow::Result<Option<crate::task::ownership::OverrideNote>> {
-    let caller = caller_session_for_task(state_dir)?;
-    crate::task::ownership::ensure_task_is_ours(state_dir, id, &caller, other_session)
-}
-
-/// Refuse `clear --session <id>` when that session is not the caller's.
-fn guard_session(
-    state_dir: &std::path::Path,
-    id: &str,
-    other_session: Option<&str>,
-) -> anyhow::Result<()> {
-    let caller = caller_session_for_task(state_dir)?;
-    crate::task::ownership::ensure_session_is_ours(id, &caller, other_session)
-}
-
-/// Appends the pending `--other-session` note, once the command has succeeded.
-fn record_override(
-    state_dir: &std::path::Path,
-    audit: Option<crate::task::ownership::OverrideNote>,
-) -> anyhow::Result<()> {
-    match audit {
-        Some(note) => note.record(state_dir),
-        None => Ok(()),
-    }
 }
 
 /// What `task show --current`/`--next` resolves to (#1117).
@@ -3216,7 +3264,9 @@ fn run_task_show_current_or_next(state_dir: &Path, target: ShowTarget) -> anyhow
     if open_sessions.is_empty() {
         anyhow::bail!("no open session for this project");
     }
-    let all_tasks = crate::task::try_list_tasks(state_dir)?;
+    // A strict read, as task name lookup does: a corrupt task file must fail the command, not
+    // turn into "No current task." or a different next task (#3471).
+    let all_tasks = crate::task::list_tasks_strict(state_dir)?.into_vec();
     let multi = open_sessions.len() > 1;
     for (i, session) in open_sessions.iter().enumerate() {
         if multi {
@@ -3356,13 +3406,24 @@ fn run_task_session_command(
                 );
             }
         }
-        TaskSessionCommand::Edit { id, resume_context } => {
+        TaskSessionCommand::Edit {
+            id,
+            resume_context,
+            other_session,
+        } => {
             let update = resume_context.into_context()?;
             let id = resolve_session_id(state_dir, &project, id)?;
-            let session = session::update_resume(state_dir, &id, |r| r.apply(&update))?;
+            let session = crate::task::with_store_lock(state_dir, || {
+                guard_session(state_dir, &id, other_session.as_deref())?;
+                session::update_resume(state_dir, &id, |r| r.apply(&update))
+            })?;
             println!("Updated resume context for session '{}'", session.id);
         }
-        TaskSessionCommand::Note { text, id } => {
+        TaskSessionCommand::Note {
+            text,
+            id,
+            other_session,
+        } => {
             let text = match text {
                 Some(text) => text,
                 None => std::io::read_to_string(std::io::stdin())?,
@@ -3373,12 +3434,22 @@ fn run_task_session_command(
                 "the note is empty: pass text or pipe it on stdin"
             );
             let id = resolve_session_id(state_dir, &project, id)?;
-            let session = session::update_resume(state_dir, &id, |r| r.append_note(text))?;
+            let session = crate::task::with_store_lock(state_dir, || {
+                guard_session(state_dir, &id, other_session.as_deref())?;
+                session::update_resume(state_dir, &id, |r| r.append_note(text))
+            })?;
             println!("Noted session '{}'", session.id);
         }
-        TaskSessionCommand::Finish { id, abandon_open } => {
+        TaskSessionCommand::Finish {
+            id,
+            abandon_open,
+            other_session,
+        } => {
             let id = resolve_session_id(state_dir, &project, id)?;
-            let outcome = session::finish_session(state_dir, &id, abandon_open)?;
+            let outcome = crate::task::with_store_lock(state_dir, || {
+                guard_session(state_dir, &id, other_session.as_deref())?;
+                session::finish_session(state_dir, &id, abandon_open)
+            })?;
             let (done, total) = (outcome.done, outcome.total);
             let id = &outcome.session.id;
             if outcome.abandoned.is_empty() {
@@ -3942,69 +4013,6 @@ fn sync_selected_marketplaces(
     Ok(out)
 }
 
-/// Check that each selected plugin exists in its synced marketplace manifest, and sync the
-/// payload of each external plugin (a git URL source, not a path in the clone). A plugin of a
-/// skipped marketplace is noted and not counted as missing.
-fn check_selected_plugins(
-    cache_root: &Path,
-    sync: &MarketplaceSync,
-    selected: &[crate::plugins::resolve::ResolvedPlugin],
-) -> anyhow::Result<()> {
-    let mut missing_plugins: Vec<String> = Vec::new();
-    for p in selected {
-        if sync.skipped.contains(&p.marketplace) {
-            eprintln!(
-                "- {}@{}: skipped, its marketplace is not on this host",
-                p.plugin, p.marketplace
-            );
-            continue;
-        }
-        let Some(dir) = sync.locations.get(&p.marketplace) else {
-            anyhow::bail!(
-                "marketplace '{}' was neither synced nor skipped",
-                p.marketplace
-            );
-        };
-        let plugins = crate::plugins::cache::read_marketplace_plugins(dir)
-            .with_context(|| format!("reading marketplace manifest for '{}'", p.marketplace))?;
-        let Some(entry) = plugins.iter().find(|e| e.name == p.plugin) else {
-            eprintln!(
-                "✗ {}@{}: not found in the manifest under {} — check that the plugin name \
-                 matches an entry in that manifest",
-                p.plugin,
-                p.marketplace,
-                dir.display()
-            );
-            missing_plugins.push(format!("{}@{}", p.plugin, p.marketplace));
-            continue;
-        };
-        if !crate::plugins::cache::is_external_plugin_source(&entry.source) {
-            continue;
-        }
-        let state =
-            crate::plugins::cache::sync_plugin_entry(cache_root, &p.marketplace, entry, true)
-                .with_context(|| {
-                    format!("syncing external plugin '{}@{}'", p.plugin, p.marketplace)
-                })?;
-        let head = state.head.as_deref().unwrap_or("(unknown)");
-        println!(
-            "✓ {}@{} (external) → {} [{}]",
-            p.plugin,
-            p.marketplace,
-            state.install_location.display(),
-            head
-        );
-    }
-    if !missing_plugins.is_empty() {
-        anyhow::bail!(
-            "{} plugin(s) not found after sync: {}",
-            missing_plugins.len(),
-            missing_plugins.join(", ")
-        );
-    }
-    Ok(())
-}
-
 /// Print one advisory line for each top-level config key that llmenv does not read (#2669).
 ///
 /// This is advisory: serde ignored the key, so the rest of the file still loads. A failure to
@@ -4161,40 +4169,6 @@ fn run_completions(shell: clap_complete::Shell) -> anyhow::Result<()> {
         .write_all(&buf)
         .context("failed to write completions to stdout")?;
     Ok(())
-}
-
-/// Map `$SHELL`'s basename to a [`clap_complete::Shell`]. `shell_env` is the
-/// raw `$SHELL` value (injected so this is unit-testable without mutating
-/// process env) — typically a path like `/bin/zsh`.
-fn detect_shell(shell_env: Option<&str>) -> anyhow::Result<clap_complete::Shell> {
-    let shell_path = shell_env.ok_or_else(|| {
-        anyhow::anyhow!("--shell not given and $SHELL is not set; pass --shell explicitly")
-    })?;
-    let name = Path::new(shell_path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| {
-            anyhow::anyhow!("could not determine shell name from $SHELL={shell_path}")
-        })?;
-    match name {
-        "bash" => Ok(clap_complete::Shell::Bash),
-        "zsh" => Ok(clap_complete::Shell::Zsh),
-        "fish" => Ok(clap_complete::Shell::Fish),
-        other => anyhow::bail!(
-            "unrecognized shell '{other}' from $SHELL={shell_path}; pass --shell explicitly \
-             (bash, zsh, or fish)"
-        ),
-    }
-}
-
-/// The file name a completion script is conventionally installed under.
-/// zsh's autoload-based completion system requires the leading underscore.
-fn completion_filename(shell: clap_complete::Shell) -> &'static str {
-    match shell {
-        clap_complete::Shell::Zsh => "_llmenv",
-        clap_complete::Shell::Fish => "llmenv.fish",
-        _ => "llmenv",
-    }
 }
 
 /// The shell's standard per-user completion directory. `bash_completion_user_dir`
@@ -4361,46 +4335,6 @@ mod tests {
         let input = "line1  \nline2   \nline3";
         let expected = "line1\nline2\nline3";
         assert_eq!(compress_agents_md(input), expected);
-    }
-
-    // #756: shell autocomplete install support.
-
-    #[test]
-    fn detect_shell_maps_shell_env_basename() {
-        assert_eq!(
-            detect_shell(Some("/bin/bash")).expect("test"),
-            clap_complete::Shell::Bash
-        );
-        assert_eq!(
-            detect_shell(Some("/usr/bin/zsh")).expect("test"),
-            clap_complete::Shell::Zsh
-        );
-        assert_eq!(
-            detect_shell(Some("/usr/local/bin/fish")).expect("test"),
-            clap_complete::Shell::Fish
-        );
-    }
-
-    #[test]
-    fn detect_shell_errors_when_shell_env_unset() {
-        let err = detect_shell(None).expect_err("test");
-        assert!(err.to_string().contains("SHELL"));
-    }
-
-    #[test]
-    fn detect_shell_errors_on_unrecognized_shell() {
-        let err = detect_shell(Some("/bin/csh")).expect_err("test");
-        assert!(err.to_string().contains("csh"));
-    }
-
-    #[test]
-    fn completion_filename_prefixes_zsh_with_underscore() {
-        assert_eq!(completion_filename(clap_complete::Shell::Zsh), "_llmenv");
-        assert_eq!(completion_filename(clap_complete::Shell::Bash), "llmenv");
-        assert_eq!(
-            completion_filename(clap_complete::Shell::Fish),
-            "llmenv.fish"
-        );
     }
 
     #[test]
@@ -4875,7 +4809,7 @@ mod tests {
         assert_eq!(json["statusLine"]["type"], "command");
         assert_eq!(
             json["statusLine"]["command"],
-            crate::adapter::hook_program::hook_command("statusline --color always")
+            crate::adapter::hook_program::hook_command("statusline --color always").unwrap()
         );
     }
 
@@ -5159,6 +5093,9 @@ mod tests {
 
     #[test]
     fn build_and_materialize_only_claude_code_emits_llmenv_state_dir() {
+        // A fixed engine version, so the test never runs the host's `claude --version`.
+        crate::adapter::claude_code::version::TEST_VERSION
+            .with(|v| *v.borrow_mut() = Some(Some("2.1.318".into())));
         // Regression test for the #543 follow-up: state_env_vars() always emits
         // the literal key "LLMENV_STATE_DIR", so calling it once per adapter in
         // the export/regenerate loop made whichever adapter materialized last
@@ -5497,55 +5434,6 @@ mod tests {
         // Newlines/CR stay inside the single-quoted string — inert at shell source time.
         assert_eq!(crate::util::single_quote("line1\nline2"), "'line1\nline2'");
         assert_eq!(crate::util::single_quote("line1\rline2"), "'line1\rline2'");
-    }
-
-    #[test]
-    fn validate_var_name_accepts_valid_names() {
-        assert!(validate_var_name("MY_VAR").is_ok());
-        assert!(validate_var_name("_private").is_ok());
-        assert!(validate_var_name("var123").is_ok());
-        assert!(validate_var_name("x").is_ok());
-    }
-
-    #[test]
-    fn validate_var_name_rejects_invalid_names() {
-        assert!(validate_var_name("").is_err());
-        assert!(validate_var_name("123var").is_err());
-        assert!(validate_var_name("my-var").is_err());
-        assert!(validate_var_name("my var").is_err());
-        assert!(validate_var_name("my$var").is_err());
-    }
-
-    #[test]
-    fn reject_invalid_var_names_passes_valid_and_fails_invalid() {
-        let ok = vec![
-            ("CLAUDE_CONFIG_DIR".to_string(), "/x".to_string()),
-            ("_PRIVATE".to_string(), "y".to_string()),
-        ];
-        assert!(reject_invalid_var_names(&ok).is_ok());
-
-        let bad = vec![("bad-name".to_string(), "v".to_string())];
-        assert!(reject_invalid_var_names(&bad).is_err());
-
-        let bad_leading_digit = vec![("1ABC".to_string(), "v".to_string())];
-        assert!(reject_invalid_var_names(&bad_leading_digit).is_err());
-    }
-
-    #[test]
-    fn reject_invalid_var_names_allows_multiline_values() {
-        // NUL truncates the C-string env var — still rejected.
-        let with_nul = vec![("VALID_NAME".to_string(), "value\0malicious".to_string())];
-        assert!(reject_invalid_var_names(&with_nul).is_err());
-
-        // Newlines/CR are safe — emission always single-quotes via shell_escape. (#469)
-        let with_newline = vec![(
-            "VALID_NAME".to_string(),
-            "## context\nActive tags: `foo`".to_string(),
-        )];
-        assert!(reject_invalid_var_names(&with_newline).is_ok());
-
-        let with_cr = vec![("VALID_NAME".to_string(), "value\rmore".to_string())];
-        assert!(reject_invalid_var_names(&with_cr).is_ok());
     }
 
     #[test]
@@ -5965,40 +5853,4 @@ mod tests {
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::expect_fun_call)]
-mod git_remote_tests {
-    use super::check_git_remote;
-
-    #[test]
-    fn a_directory_outside_git_is_not_a_repo() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        assert!(!super::git_repo::is_git_repo(dir.path()).expect("git runs"));
-    }
-
-    #[test]
-    fn an_initialized_directory_is_a_repo() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let init = std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(dir.path())
-            .status()
-            .expect("run git init");
-        assert!(init.success());
-        assert!(super::git_repo::is_git_repo(dir.path()).expect("git runs"));
-    }
-
-    #[test]
-    fn a_git_failure_is_not_reported_as_no_remote() {
-        // A `.git` file that names a missing gitdir makes git exit 128 (#2710).
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            dir.path().join(".git"),
-            "gitdir: /nonexistent/llmenv-2710\n",
-        )
-        .expect("write");
-        let err = check_git_remote(dir.path()).expect_err("a broken checkout has no remote");
-        assert!(
-            !err.to_string().contains("no remote configured"),
-            "got: {err}"
-        );
-    }
-}
+mod git_remote_tests;

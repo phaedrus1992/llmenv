@@ -80,7 +80,11 @@ pub(super) fn create_result_file(path: &std::path::Path) -> std::io::Result<std:
     use std::os::unix::fs::OpenOptionsExt;
     // A failed removal shows below: `create_new` then fails on what is still there.
     if let Some(e) = session_state::removal_error_to_log(std::fs::remove_file(path)) {
-        tracing::error!("could not remove result file {} ({e})", path.display());
+        crate::agent_notice::record_logged(format!(
+            "llmenv: cannot remove the old index result file {}, so the new result cannot be \
+             saved: {e}. Fix: remove the file.",
+            path.display()
+        ));
     }
     std::fs::OpenOptions::new()
         .write(true)
@@ -95,10 +99,11 @@ pub(super) fn result_stdout(path: &std::path::Path) -> std::process::Stdio {
     match create_result_file(path) {
         Ok(file) => std::process::Stdio::from(file),
         Err(e) => {
-            tracing::error!(
-                "cannot create the index result file {}, so doctor cannot report the result: {e}",
+            crate::agent_notice::record_logged(format!(
+                "llmenv: cannot create the index result file {}, so doctor cannot report the \
+                 result: {e}. Fix: check that the state folder is writable.",
                 path.display()
-            );
+            ));
             std::process::Stdio::null()
         }
     }
@@ -131,5 +136,32 @@ pub(super) fn index_job_command(
             cmd
         }
         _ => direct(),
+    }
+}
+
+#[cfg(all(test, unix))]
+#[expect(clippy::unwrap_used, reason = "test code")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_result_file_that_cannot_be_made_is_a_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        // A folder with an entry at the result path can be neither removed as a file nor
+        // created as one (#3449).
+        let path = dir.path().join("index-result-3449.json");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("keep"), b"x").unwrap();
+        let _stdout = result_stdout(&path);
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(
+            notices.contains("cannot remove the old index result file"),
+            "{notices}"
+        );
+        assert!(
+            notices.contains("cannot create the index result file"),
+            "{notices}"
+        );
+        assert!(notices.contains("index-result-3449.json"), "{notices}");
     }
 }

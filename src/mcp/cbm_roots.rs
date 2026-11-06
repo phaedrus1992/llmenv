@@ -138,9 +138,20 @@ pub(crate) struct RootsReport {
     pub cache_dir: PathBuf,
 }
 
-/// The canonical form of `path`, or `None` when it does not resolve.
+/// The canonical form of `path`, or `None` when it does not resolve. A cause other than a
+/// missing path is a notice, because the root check then leaves the root out (#3462).
 fn canonical(path: &Path) -> Option<PathBuf> {
-    std::fs::canonicalize(path).ok()
+    std::fs::canonicalize(path)
+        .inspect_err(|e| {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                crate::agent_notice::record_logged(format!(
+                    "llmenv: the code index root {} cannot be resolved, so the root check leaves \
+                     it out: {e}. Fix: check its permissions.",
+                    path.display()
+                ));
+            }
+        })
+        .ok()
 }
 
 /// Whether `path` is one of `roots` or sits under one. Both sides resolve links first, so a
@@ -169,14 +180,18 @@ fn missing_roots(wanted: &[PathBuf], listed: &[PathBuf]) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Whether `path` is a folder. A stat error other than "not found" is logged, because it
-/// would otherwise drop a declared root from the report without a word (#2916).
+/// Whether `path` is a folder. A stat error other than "not found" is a notice, because it
+/// would otherwise drop a declared root from the report without a word (#2916, #3462).
 fn is_folder(path: &Path) -> bool {
     match std::fs::metadata(path) {
         Ok(meta) => meta.is_dir(),
         Err(e) => {
             if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::error!("cannot read the declared root {}: {e}", path.display());
+                crate::agent_notice::record_logged(format!(
+                    "llmenv: the declared code index root {} cannot be read, so the root \
+                     check leaves it out: {e}. Fix: check its permissions.",
+                    path.display()
+                ));
             }
             false
         }
@@ -190,10 +205,11 @@ fn undeclared_roots(listed: &[PathBuf], wanted: &[PathBuf]) -> Vec<PathBuf> {
         .iter()
         .filter(|root| {
             if canonical(root).is_none() {
-                tracing::error!(
-                    "recorded root {} does not resolve, so it is not reported",
+                crate::agent_notice::record_logged(format!(
+                    "llmenv: the recorded code index root {} does not resolve, so the root \
+                     check leaves it out. Fix: run `llmenv doctor`.",
                     root.display()
-                );
+                ));
                 return false;
             }
             !is_within_any(root, wanted)

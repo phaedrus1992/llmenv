@@ -77,7 +77,7 @@ pub(super) fn write(
 ) -> anyhow::Result<Vec<PathBuf>> {
     use anyhow::Context as _;
 
-    let table = hook_table(hooks, pre_tools, mcp_servers);
+    let table = hook_table(hooks, pre_tools, mcp_servers)?;
     let plugin_dir = out.join("plugin");
     std::fs::create_dir_all(&plugin_dir)
         .with_context(|| format!("creating {}", plugin_dir.display()))?;
@@ -101,7 +101,7 @@ pub(super) fn hook_table(
     hooks: &[crate::config::Hook],
     pre_tools: &[&str],
     mcp_servers: &[&str],
-) -> serde_json::Value {
+) -> anyhow::Result<serde_json::Value> {
     let mut entries: Vec<serde_json::Value> = hooks.iter().filter_map(user_hook_entry).collect();
     let builtin = |event: &str, matcher: Option<&str>, command: &str| {
         serde_json::json!({
@@ -114,17 +114,17 @@ pub(super) fn hook_table(
     entries.push(builtin(
         "SessionStart",
         None,
-        &hook_command("check-stale --engine opencode"),
+        &hook_command("check-stale --engine opencode")?,
     ));
     entries.push(builtin(
         "SessionStart",
         None,
-        &hook_command("config-context --engine opencode"),
+        &hook_command("config-context --engine opencode")?,
     ));
     entries.push(builtin(
         "PreToolUse",
         Some(CONFIG_GUARD_MATCHER),
-        &hook_command("config-guard --engine opencode"),
+        &hook_command("config-guard --engine opencode")?,
     ));
     if !pre_tools.is_empty() {
         // The commit gate and the index guard deny on purpose, so a run that times out or cannot
@@ -132,7 +132,7 @@ pub(super) fn hook_table(
         let mut gate = builtin(
             "PreToolUse",
             Some(&pre_tools.join("|")),
-            &hook_command("hook-run pre_tool_use --engine opencode"),
+            &hook_command("hook-run pre_tool_use --engine opencode")?,
         );
         gate["timeout"] = USER_HOOK_TIMEOUT_MS.into();
         gate["failClosed"] = true.into();
@@ -150,11 +150,11 @@ pub(super) fn hook_table(
             );
         }
     }
-    serde_json::json!({
+    Ok(serde_json::json!({
         "hooks": entries,
         "tools": crate::adapter::tools::opencode_hooks::tools_json(),
         "mcpServers": namespaces,
-    })
+    }))
 }
 
 /// The table entry for one user hook, or `None` for a hook with no command. Such a hook (an
@@ -169,18 +169,9 @@ fn user_hook_entry(hook: &crate::config::Hook) -> Option<serde_json::Value> {
         return None;
     };
     let command = match &hook.bundle_origin {
+        // `None` means no word of the command is a bundle-relative path, so it runs as written.
         Some(bundle_dir) => super::super::resolve_bundle_relative_paths(command, bundle_dir)
-            .unwrap_or_else(|| {
-                // `tracing` errors are off at the default log level, and the hook may not run.
-                eprintln!(
-                    "warning: the {} hook command `{command}` names a path in the bundle {} that \
-                     cannot be resolved, so opencode runs the command as written. Fix: check the \
-                     path in the hook command",
-                    hook.event,
-                    bundle_dir.display()
-                );
-                command.to_string()
-            }),
+            .unwrap_or_else(|| command.to_string()),
         None => command.to_string(),
     };
     Some(serde_json::json!({

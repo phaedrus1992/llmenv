@@ -68,10 +68,13 @@ impl Unit {
 /// `dir` exists but cannot be read, or one of its entries cannot be read.
 /// Production passes `AgeSource::MtimeOrCtime`, so a restored index keeps its old mtime and the
 /// change time counts too (#3275).
+///
+/// Each unit is judged against `now`, the caller's clock (#3374).
 pub(crate) fn scan_units_with(
     dir: &Path,
     older_than: Duration,
     source: AgeSource,
+    now: SystemTime,
 ) -> anyhow::Result<Option<Vec<Unit>>> {
     let Some(entries) = crate::paths::read_dir_optional(dir)? else {
         return Ok(None);
@@ -91,7 +94,6 @@ pub(crate) fn scan_units_with(
             databases.entry(base).or_default().push(entry.path());
         }
     }
-    let now = SystemTime::now();
     let units = databases
         .into_values()
         .filter_map(|files| unit_of(files, now, older_than, dir, source))
@@ -234,7 +236,7 @@ mod tests {
             for name in &written {
                 std::fs::write(dir.path().join(name), "x").unwrap();
             }
-            let units = scan_units_with(dir.path(), Duration::from_secs(3600), AgeSource::MtimeOnly).unwrap().unwrap();
+            let units = scan_units_with(dir.path(), Duration::from_secs(3600), AgeSource::MtimeOnly, SystemTime::now()).unwrap().unwrap();
 
             let mut grouped: Vec<String> = units
                 .iter()

@@ -23,10 +23,7 @@ pub(super) fn sweep_cache(
 ) -> usize {
     match crate::materialize::cache::gc(
         cache_dir,
-        crate::materialize::expiry::AgeRule {
-            older_than: retention,
-            source: crate::materialize::cache::AgeSource::MtimeOrCtime,
-        },
+        crate::materialize::expiry::AgeRule::new(retention),
         config.cache.hashing,
         out.dry_run,
     ) {
