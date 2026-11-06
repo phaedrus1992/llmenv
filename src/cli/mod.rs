@@ -3199,17 +3199,14 @@ fn run_task_clear(
     session: Option<&str>,
     other_session: Option<&str>,
 ) -> anyhow::Result<()> {
-    if let Some(session_id) = session {
-        guard_session(state_dir, session_id, other_session)?;
+    if let Some(named) = session {
+        guard_session(state_dir, named, other_session)?;
     }
     // `clear` deletes the task, so a pending override note has nowhere to live.
     let checked = guard_tasks(state_dir, ids, other_session)?;
-    if let Some(session_id) = session {
-        let cleared = crate::task::session::delete_tasks_in_session(state_dir, session_id)?;
-        println!(
-            "Cleared {} task(s) from session '{session_id}'",
-            cleared.len()
-        );
+    if let Some(named) = session {
+        let cleared = crate::task::session::delete_tasks_in_session(state_dir, named)?;
+        println!("Cleared {} task(s) from session '{named}'", cleared.len());
     } else if ids.is_empty() {
         anyhow::bail!("specify one or more task ids, or --session <id>");
     } else {
