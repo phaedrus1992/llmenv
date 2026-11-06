@@ -32,6 +32,8 @@ use plugin_payloads::sync_plugin_payloads;
 
 mod doctor;
 mod init_cmd;
+mod task_add;
+mod task_clear;
 mod task_guard;
 use task_guard::{guard_session, guard_task, guard_tasks, record_override};
 #[cfg(test)]
@@ -450,6 +452,9 @@ enum TaskCommand {
         /// exactly one session is open for the current project.
         #[arg(long)]
         session: Option<String>,
+        /// Add to a session of another conversation. Pass that session's id as SESSION_ID. Without it, `add --session` refuses such a session.
+        #[arg(long, value_name = "SESSION_ID")]
+        other_session: Option<String>,
         #[command(flatten)]
         detail: DetailArgs,
     },
@@ -2878,40 +2883,22 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             parallel,
             after,
             session,
+            other_session,
             detail,
         } => {
             let detail = detail.resolve()?;
-            if no_parent {
-                eprintln!(
-                    "llmenv: --no-parent has no effect since v3.12.0; a new task no longer chains"
-                );
-            }
-            let parent_spec = match parent.as_deref() {
-                Some(p) => crate::task::ParentSpec::Explicit(p),
-                None => crate::task::ParentSpec::Detached,
-            };
-            let placement = match (child_of.as_deref(), parallel) {
-                (Some(p), _) => crate::task::Placement::Child(p),
-                (None, true) => crate::task::Placement::Parallel,
-                (None, false) => crate::task::Placement::Queue,
-            };
-            let project = current_project_tag()?;
-            let owner = crate::task::session::EngineIdentity::from_env()?;
-            let choice = match session.as_deref() {
-                Some(id) => crate::task::SessionChoice::Named(id),
-                None => crate::task::SessionChoice::Resolve(&owner),
-            };
-            if detail.as_deref().is_some_and(str::is_empty) {
-                eprintln!("llmenv: the task detail is empty, so none was saved");
-            }
-            let new = crate::task::NewTask {
+            let args = task_add::AddArgs {
                 title: &title,
-                detail: detail.as_deref(),
-                placement,
+                parent: parent.as_deref(),
+                no_parent,
+                child_of: child_of.as_deref(),
+                parallel,
                 after: after.as_deref(),
+                session: session.as_deref(),
+                other_session: other_session.as_deref(),
+                detail: detail.as_deref(),
             };
-            let task = crate::task::add_task_with(&state_dir, &new, parent_spec, choice, &project)?;
-            println!("Added task '{}' ({})", task.slug, task.title);
+            task_add::run(&state_dir, &args)?;
         }
         TaskCommand::Start {
             id,
@@ -3178,7 +3165,7 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             other_session,
         } => {
             crate::task::with_store_lock(&state_dir, || {
-                run_task_clear(
+                task_clear::run(
                     &state_dir,
                     &ids,
                     session.as_deref(),
@@ -3187,34 +3174,6 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             })?;
         }
         TaskCommand::Session { command } => run_task_session_command(&state_dir, command, color)?,
-    }
-    Ok(())
-}
-
-/// `llmenv task clear`, run by the caller under the store lock, so the checked tasks are the
-/// tasks that are deleted (#3478).
-fn run_task_clear(
-    state_dir: &std::path::Path,
-    ids: &[String],
-    session: Option<&str>,
-    other_session: Option<&str>,
-) -> anyhow::Result<()> {
-    if let Some(named) = session {
-        guard_session(state_dir, named, other_session)?;
-    }
-    // `clear` deletes the task, so a pending override note has nowhere to live.
-    let checked = guard_tasks(state_dir, ids, other_session)?;
-    if let Some(named) = session {
-        let cleared = crate::task::session::delete_tasks_in_session(state_dir, named)?;
-        println!("Cleared {} task(s) from session '{named}'", cleared.len());
-    } else if ids.is_empty() {
-        anyhow::bail!("specify one or more task ids, or --session <id>");
-    } else {
-        for (slug, _) in &checked {
-            let task =
-                crate::task::delete_task(state_dir, crate::task::TaskTarget::Resolved(slug))?;
-            println!("Cleared task '{}' ({})", task.slug, task.title);
-        }
     }
     Ok(())
 }
