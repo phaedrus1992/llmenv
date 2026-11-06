@@ -469,7 +469,14 @@ pub(crate) fn start_session_as(
                     .into_iter()
                     .partition(|t| t.session.as_deref() == Some(session.id.as_str()));
                 tasks = rest;
-                abandoned.push(abandon_session(state_dir, session, own)?);
+                let id = session.id.to_owned();
+                let done = abandoned.len();
+                abandoned.push(abandon_session(state_dir, session, own).with_context(|| {
+                    format!(
+                        "cannot abandon session '{id}'; {done} earlier session(s) are already \
+                         abandoned and no new session is started"
+                    )
+                })?);
             }
             let session = create_session(state_dir, request)?;
             Ok(StartOutcome::Replaced { session, abandoned })

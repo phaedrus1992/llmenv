@@ -8,19 +8,6 @@ use serde_json::Value;
 use super::{deny, str_field};
 use crate::task::{self, session};
 
-/// What a TaskUpdate did under the store lock.
-enum Applied {
-    /// The id does not resolve, or the task belongs to the session of another conversation.
-    /// Nothing changed and no note was saved.
-    Refused(anyhow::Error),
-    /// The check passed. `change` is the result of the status change, and `note` tells the agent
-    /// what happened to the progress note.
-    Checked {
-        change: anyhow::Result<String>,
-        note: String,
-    },
-}
-
 /// Apply a TaskUpdate for the conversation `owner`, and return the deny text for the agent.
 pub(super) fn update(
     input: Option<&Value>,
@@ -40,42 +27,39 @@ pub(super) fn update(
         );
     };
     let status = str_field(input, "status");
-    // A description/subject on an update becomes a progress note, but not on a delete, because
-    // the task is gone.
-    let note = str_field(input, "description")
+    let text = str_field(input, "description")
         .or_else(|| str_field(input, "subject"))
         .map(str::trim)
-        .filter(|s| !s.is_empty() && status != Some("deleted"));
+        .filter(|s| !s.is_empty());
+    // A description/subject on an update becomes a progress note, but not on a delete, because
+    // the task is gone. The deny says so, so the text is not lost without a word.
+    let deleted = status == Some("deleted");
+    let note = text.filter(|_| !deleted);
+    let dropped = if deleted && text.is_some() {
+        " (description not saved: the task is deleted)"
+    } else {
+        ""
+    };
     // The check, the change, and the note run under one store lock, so the task that was checked
-    // is the task that changes (#3478).
+    // is the task that changes (#3478). A refused check saves no note.
     let applied = task::with_store_lock(state_dir, || {
-        Ok(match checked_slug(state_dir, project, owner, id) {
-            Err(e) => Applied::Refused(e),
-            Ok(slug) => {
-                let change = change(state_dir, &slug, status);
-                // The note is kept when the change fails too, and the deny says where it went.
-                let note = note.map_or_else(String::new, |note| {
-                    note_outcome(
-                        task::note_task(state_dir, task::TaskTarget::Resolved(&slug), note),
-                        &slug,
-                    )
-                });
-                Applied::Checked { change, note }
-            }
-        })
+        let slug = checked_slug(state_dir, project, owner, id)?;
+        let change = change(state_dir, &slug, status);
+        // The note is kept when the change fails too, and the deny says where it went.
+        let note = note.map_or_else(String::new, |note| {
+            note_outcome(
+                task::note_task(state_dir, task::TaskTarget::Resolved(&slug), note),
+                &slug,
+            )
+        });
+        Ok((change, note))
     });
     match applied {
-        Ok(Applied::Checked {
-            change: Ok(msg),
-            note,
-        }) => deny(&format!(
-            "{msg}{note} — llmenv task tracker (TaskUpdate redirected)."
+        Ok((Ok(msg), note)) => deny(&format!(
+            "{msg}{note}{dropped} — llmenv task tracker (TaskUpdate redirected)."
         )),
-        Ok(Applied::Checked {
-            change: Err(e),
-            note,
-        }) => failed(id, &e, &note),
-        Ok(Applied::Refused(e)) | Err(e) => failed(id, &e, ""),
+        Ok((Err(e), note)) => failed(id, &e, &note),
+        Err(e) => failed(id, &e, ""),
     }
 }
 

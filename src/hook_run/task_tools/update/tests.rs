@@ -1,4 +1,5 @@
 use super::*;
+use proptest::strategy::Strategy;
 use serde_json::json;
 
 const PROJECT: &str = "proj-x";
@@ -121,4 +122,64 @@ fn a_task_with_no_session_is_never_refused() {
         &json!({ "taskId": loose.slug, "status": "in_progress" }),
     );
     assert!(out.contains(&format!("started '{}'", loose.slug)), "{out}");
+}
+
+#[test]
+fn a_delete_with_a_description_says_the_description_is_not_saved() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mine, _) = two_conversations(dir.path());
+    let out = update_as(
+        dir.path(),
+        "conv-me",
+        &json!({ "taskId": mine, "status": "deleted", "description": "gone now" }),
+    );
+    assert!(out.contains(&format!("deleted '{mine}'")), "{out}");
+    assert!(out.contains("description not saved"), "{out}");
+}
+
+#[test]
+fn a_failed_change_keeps_its_note_and_names_the_task() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mine, _) = two_conversations(dir.path());
+    // The task was never started, so a close without force is refused.
+    let out = update_as(
+        dir.path(),
+        "conv-me",
+        &json!({ "taskId": mine, "status": "completed", "description": "why" }),
+    );
+    assert!(
+        out.contains(&format!("couldn't update task '{mine}'")),
+        "{out}"
+    );
+    assert!(out.contains(&format!("note saved to '{mine}'")), "{out}");
+}
+
+proptest::proptest! {
+    // Each case writes session and task files, so the case count stays low.
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(24))]
+
+    // An unknown status never changes the task, and the deny names the status. A padded id
+    // reaches the same task as the bare id.
+    #[test]
+    fn an_unknown_status_changes_nothing(
+        status in "[a-z_]{1,12}".prop_filter("a known status", |s| {
+            !["in_progress", "completed", "deleted"].contains(&s.as_str())
+        }),
+        pad in "[ \t]{0,3}",
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (mine, _) = two_conversations(dir.path());
+        let before = std::fs::read(crate::task::tasks_dir(dir.path()).join(format!("{mine}.json")))
+            .unwrap();
+        let out = update_as(
+            dir.path(),
+            "conv-me",
+            &json!({ "taskId": format!("{pad}{mine}{pad}"), "status": status }),
+        );
+        let expected = format!("left '{mine}' unchanged (status '{status}' not recognized)");
+        proptest::prop_assert!(out.contains(&expected), "{}", out);
+        let after = std::fs::read(crate::task::tasks_dir(dir.path()).join(format!("{mine}.json")))
+            .unwrap();
+        proptest::prop_assert_eq!(before, after);
+    }
 }

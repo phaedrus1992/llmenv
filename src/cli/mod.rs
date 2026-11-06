@@ -2731,7 +2731,12 @@ fn render_task_ls_human(
             .map(|s| s.id.clone())
             .collect(),
         Err(e) => {
+            // The caller reads stdout, so the warning goes to stderr, where the agent sees it.
             tracing::error!(error = %e, "cannot resolve the project tag; task ls skips the priority order");
+            eprintln!(
+                "llmenv: cannot resolve the project tag, so task ls shows no priority order: \
+                 {e:#}. Fix: run llmenv task ls from inside the project."
+            );
             Vec::new()
         }
     };
@@ -2938,9 +2943,17 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 for task in crate::task::reopen::reopen_resolved(&state_dir, &slugs)? {
                     println!("Reopened '{}' — now {:?}", task.slug, task.state);
                 }
-                audits
+                // Every note is tried, so one failed note does not hide the others.
+                let failed: Vec<String> = audits
                     .into_iter()
-                    .try_for_each(|audit| record_override(&state_dir, audit))
+                    .filter_map(|audit| record_override(&state_dir, audit).err())
+                    .map(|e| format!("{e:#}"))
+                    .collect();
+                if failed.is_empty() {
+                    Ok(())
+                } else {
+                    anyhow::bail!("{}", failed.join("\n"))
+                }
             })?;
         }
         TaskCommand::Ls {

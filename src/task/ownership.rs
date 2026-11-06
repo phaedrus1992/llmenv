@@ -67,12 +67,20 @@ pub(crate) struct OverrideNote {
 }
 
 impl OverrideNote {
-    /// Appends the note to the task.
+    /// Appends the note to the task. The command change is already saved when this runs, so the
+    /// error says so: a retry must not repeat the change.
     ///
     /// # Errors
     /// Errors if the task cannot be read or written.
     pub(crate) fn record(&self, state_dir: &Path) -> anyhow::Result<()> {
-        super::note_task(state_dir, &self.slug, &self.text)?;
+        use anyhow::Context;
+        super::note_task(state_dir, &self.slug, &self.text).with_context(|| {
+            format!(
+                "the change to task '{}' is saved, but its --other-session note is not. Fix: run \
+                 `llmenv task note {} \"{}\"`",
+                self.slug, self.slug, self.text
+            )
+        })?;
         Ok(())
     }
 }

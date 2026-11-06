@@ -38,16 +38,6 @@ pub(super) fn untag_unfinished(
     Ok(untagged)
 }
 
-/// The tasks that keep a session from finishing: every `open`, `wip`, or
-/// `waiting` task (#2416).
-#[must_use]
-fn unfinished_tasks(tasks: &[Task]) -> Vec<&Task> {
-    tasks
-        .iter()
-        .filter(|t| t.state != TaskState::Done)
-        .collect()
-}
-
 /// What [`finish_session`] did.
 #[derive(Debug, Clone)]
 pub(crate) struct FinishOutcome {
@@ -93,7 +83,12 @@ pub(crate) fn finish_session(
         }
         // One strict read gives the unfinished check and the tasks to untag (#3479).
         let tasks = try_tasks_in_session(state_dir, &session.id)?;
-        let unfinished = unfinished_tasks(&tasks);
+        // The tasks that keep a session from finishing: every `open`, `wip`, or `waiting` task
+        // (#2416).
+        let unfinished: Vec<&Task> = tasks
+            .iter()
+            .filter(|t| t.state != TaskState::Done)
+            .collect();
         if !unfinished.is_empty() && !abandon_open {
             return Err(unfinished_error(id, &unfinished));
         }
@@ -107,7 +102,12 @@ pub(crate) fn finish_session(
         );
         let abandoned = untag_unfinished(state_dir, &session.id, tasks, &now, &note)?;
         session.finished_at = Some(now);
-        save_session(state_dir, &session)?;
+        save_session(state_dir, &session).with_context(|| {
+            format!(
+                "session '{id}' stays open, but {} unfinished task(s) are already untagged from it",
+                abandoned.len()
+            )
+        })?;
         Ok(FinishOutcome {
             session,
             done,
@@ -116,3 +116,7 @@ pub(crate) fn finish_session(
         })
     })
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests;
