@@ -182,4 +182,32 @@ proptest::proptest! {
             .unwrap();
         proptest::prop_assert_eq!(before, after);
     }
+
+    // A refused update leaves the task file as it was and saves no note, for every status.
+    #[test]
+    fn a_refused_update_changes_no_file_for_any_status(
+        status in proptest::option::of(proptest::prop_oneof![
+            proptest::strategy::Just("in_progress".to_string()),
+            proptest::strategy::Just("completed".to_string()),
+            proptest::strategy::Just("deleted".to_string()),
+            "[a-z_]{1,12}",
+        ]),
+        note in proptest::option::of("[a-z ]{1,20}"),
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, theirs) = two_conversations(dir.path());
+        let path = crate::task::tasks_dir(dir.path()).join(format!("{theirs}.json"));
+        let before = std::fs::read(&path).unwrap();
+        let mut input = json!({ "taskId": theirs });
+        if let Some(status) = &status {
+            input["status"] = json!(status);
+        }
+        if let Some(note) = &note {
+            input["description"] = json!(note);
+        }
+        let out = update_as(dir.path(), "conv-me", &input);
+        proptest::prop_assert!(out.contains("belongs to session"), "{}", out);
+        proptest::prop_assert!(!out.contains("note saved"), "{}", out);
+        proptest::prop_assert_eq!(before, std::fs::read(&path).unwrap());
+    }
 }

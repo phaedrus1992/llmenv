@@ -556,15 +556,15 @@ fn abandon_session(
     tasks: Vec<Task>,
 ) -> anyhow::Result<Session> {
     let now = now_rfc3339();
-    session.abandoned_at = Some(now.clone());
-    save_session(state_dir, &session)?;
-
     let label = session.name.clone().unwrap_or_else(|| session.id.clone());
     let note = format!(
         "Orphaned: session '{label}' was abandoned (`session start --replace`) \
          before this task was finished."
     );
+    // The stamp comes last, so a failed untag leaves the session open and a retry finds it.
     untag_unfinished(state_dir, &session.id, tasks, &now, &note)?;
+    session.abandoned_at = Some(now);
+    save_session(state_dir, &session)?;
     Ok(session)
 }
 

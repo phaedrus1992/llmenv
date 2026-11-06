@@ -43,7 +43,11 @@ pub(super) fn update(
     // The check, the change, and the note run under one store lock, so the task that was checked
     // is the task that changes (#3478). A refused check saves no note.
     let applied = task::with_store_lock(state_dir, || {
-        let slug = checked_slug(state_dir, project, owner, id)?;
+        // A refused or unresolved id is a task error, not a store error, so the deny keeps the id hint.
+        let slug = match checked_slug(state_dir, project, owner, id) {
+            Ok(slug) => slug,
+            Err(e) => return Ok((Err(e), String::new())),
+        };
         let change = change(state_dir, &slug, status);
         // The note is kept when the change fails too, and the deny says where it went.
         let note = note.map_or_else(String::new, |note| {
@@ -59,7 +63,7 @@ pub(super) fn update(
             "{msg}{note}{dropped} — llmenv task tracker (TaskUpdate redirected)."
         )),
         Ok((Err(e), note)) => failed(id, &e, &note),
-        Err(e) => failed(id, &e, ""),
+        Err(e) => store_failed(id, &e),
     }
 }
 
@@ -72,11 +76,7 @@ fn checked_slug(
     id: &str,
 ) -> anyhow::Result<String> {
     let caller = task::ownership::caller_session(state_dir, project, owner)?;
-    let mut checked = task::ownership::ensure_tasks_are_ours(state_dir, &[id], &caller, None)?;
-    checked
-        .pop()
-        .map(|(slug, _)| slug)
-        .ok_or_else(|| anyhow::anyhow!("no task was checked for '{id}'"))
+    task::ownership::ensure_task_is_ours(state_dir, id, &caller, None).map(|(slug, _)| slug)
 }
 
 /// Run the status change on the checked `slug`, and return the text that names it.
@@ -95,10 +95,10 @@ fn change(state_dir: &Path, slug: &str, status: Option<&str>) -> anyhow::Result<
             task::delete_task(state_dir, target).map(|t| format!("deleted '{}'", t.slug))
         }
         // Name the unrecognized value, so an unknown status does not read as a change that ran.
-        Some(other) => Ok(format!(
-            "left '{slug}' unchanged (status '{other}' not recognized)"
+        other => Ok(format!(
+            "left '{slug}' unchanged{}",
+            other.map_or_else(String::new, |s| format!(" (status '{s}' not recognized)"))
         )),
-        None => Ok(format!("left '{slug}' unchanged")),
     }
 }
 
@@ -109,6 +109,15 @@ fn failed(id: &str, e: &anyhow::Error, note: &str) -> String {
     deny(&format!(
         "couldn't update task '{id}' ({e:#}){note}. If the id is wrong, run \
          `llmenv task ls --all` for the current ids."
+    ))
+}
+
+/// The deny for a TaskUpdate that could not lock or open the task store. The id is not the cause.
+fn store_failed(id: &str, e: &anyhow::Error) -> String {
+    tracing::error!(error = %format!("{e:#}"), id = %id, "task redirect: task store unavailable");
+    deny(&format!(
+        "couldn't update task '{id}': the task store is unavailable ({e:#}). Fix the cause, then \
+         run the update again."
     ))
 }
 

@@ -648,6 +648,9 @@ enum TaskSessionCommand {
         id: Option<String>,
         #[command(flatten)]
         resume_context: ResumeArgs,
+        /// Act on a session of another conversation. Pass that session's id as SESSION_ID. Without it, the command refuses.
+        #[arg(long, value_name = "SESSION_ID")]
+        other_session: Option<String>,
     },
     /// Append a line to a session's resume context. Reads stdin when `text` is omitted.
     /// Auto-resolves the session like `finish`, or pass `--id`.
@@ -655,6 +658,9 @@ enum TaskSessionCommand {
         text: Option<String>,
         #[arg(long)]
         id: Option<String>,
+        /// Act on a session of another conversation. Pass that session's id as SESSION_ID. Without it, the command refuses.
+        #[arg(long, value_name = "SESSION_ID")]
+        other_session: Option<String>,
     },
     /// Finish a session by id. Auto-resolves when exactly one session is
     /// open for the current project. Refuses while a task is `open`, `wip`,
@@ -663,6 +669,9 @@ enum TaskSessionCommand {
         id: Option<String>,
         #[arg(long)]
         abandon_open: bool,
+        /// Act on a session of another conversation. Pass that session's id as SESSION_ID. Without it, the command refuses.
+        #[arg(long, value_name = "SESSION_ID")]
+        other_session: Option<String>,
     },
     /// Show one session's progress. Auto-resolves like `finish`.
     Show { id: Option<String> },
@@ -2925,8 +2934,10 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                         e
                     }
                 })?;
+                // The audit note comes first: a closed stdout makes `println!` panic.
+                record_override(&state_dir, audit)?;
                 println!("Started '{}' — now {:?}", task.slug, task.state);
-                record_override(&state_dir, audit)
+                Ok(())
             })?;
         }
         TaskCommand::Done {
@@ -2940,15 +2951,17 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                     guard_tasks(&state_dir, &ids, other_session.as_deref())?
                         .into_iter()
                         .unzip();
-                for task in crate::task::reopen::reopen_resolved(&state_dir, &slugs)? {
-                    println!("Reopened '{}' — now {:?}", task.slug, task.state);
-                }
-                // Every note is tried, so one failed note does not hide the others.
+                let reopened = crate::task::reopen::reopen_resolved(&state_dir, &slugs)?;
+                // Every note is tried, so one failed note does not hide the others. The notes
+                // come before the print: a closed stdout makes `println!` panic.
                 let failed: Vec<String> = audits
                     .into_iter()
                     .filter_map(|audit| record_override(&state_dir, audit).err())
                     .map(|e| format!("{e:#}"))
                     .collect();
+                for task in reopened {
+                    println!("Reopened '{}' — now {:?}", task.slug, task.state);
+                }
                 if failed.is_empty() {
                     Ok(())
                 } else {
@@ -3052,8 +3065,10 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                     crate::task::TaskTarget::Resolved(&slug),
                     &text,
                 )?;
+                // The audit note comes first: a closed stdout makes `println!` panic.
+                record_override(&state_dir, audit)?;
                 println!("Noted on '{}'", task.slug);
-                record_override(&state_dir, audit)
+                Ok(())
             })?;
         }
         TaskCommand::Wait {
@@ -3078,8 +3093,10 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                     crate::task::TaskTarget::Resolved(&slug),
                     &reason,
                 )?;
+                // The audit note comes first: a closed stdout makes `println!` panic.
+                record_override(&state_dir, audit)?;
                 println!("Marked '{}' waiting", task.slug);
-                record_override(&state_dir, audit)
+                Ok(())
             })?;
         }
         TaskCommand::Block {
@@ -3094,12 +3111,14 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                     crate::task::TaskTarget::Resolved(&slug),
                     &on,
                 )?;
+                // The audit note comes first: a closed stdout makes `println!` panic.
+                record_override(&state_dir, audit)?;
                 println!(
                     "'{}' is now blocked on: {}",
                     task.slug,
                     task.blocked_on.join(", ")
                 );
-                record_override(&state_dir, audit)
+                Ok(())
             })?;
         }
         TaskCommand::Edit {
@@ -3143,8 +3162,10 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                     crate::task::TaskTarget::Resolved(&slug),
                     &edit,
                 )?;
+                // The audit note comes first: a closed stdout makes `println!` panic.
+                record_override(&state_dir, audit)?;
                 println!("Updated '{}'", task.slug);
-                record_override(&state_dir, audit)
+                Ok(())
             })?;
         }
         TaskCommand::Clear {
@@ -3384,13 +3405,24 @@ fn run_task_session_command(
                 );
             }
         }
-        TaskSessionCommand::Edit { id, resume_context } => {
+        TaskSessionCommand::Edit {
+            id,
+            resume_context,
+            other_session,
+        } => {
             let update = resume_context.into_context()?;
             let id = resolve_session_id(state_dir, &project, id)?;
-            let session = session::update_resume(state_dir, &id, |r| r.apply(&update))?;
+            let session = crate::task::with_store_lock(state_dir, || {
+                guard_session(state_dir, &id, other_session.as_deref())?;
+                session::update_resume(state_dir, &id, |r| r.apply(&update))
+            })?;
             println!("Updated resume context for session '{}'", session.id);
         }
-        TaskSessionCommand::Note { text, id } => {
+        TaskSessionCommand::Note {
+            text,
+            id,
+            other_session,
+        } => {
             let text = match text {
                 Some(text) => text,
                 None => std::io::read_to_string(std::io::stdin())?,
@@ -3401,12 +3433,22 @@ fn run_task_session_command(
                 "the note is empty: pass text or pipe it on stdin"
             );
             let id = resolve_session_id(state_dir, &project, id)?;
-            let session = session::update_resume(state_dir, &id, |r| r.append_note(text))?;
+            let session = crate::task::with_store_lock(state_dir, || {
+                guard_session(state_dir, &id, other_session.as_deref())?;
+                session::update_resume(state_dir, &id, |r| r.append_note(text))
+            })?;
             println!("Noted session '{}'", session.id);
         }
-        TaskSessionCommand::Finish { id, abandon_open } => {
+        TaskSessionCommand::Finish {
+            id,
+            abandon_open,
+            other_session,
+        } => {
             let id = resolve_session_id(state_dir, &project, id)?;
-            let outcome = session::finish_session(state_dir, &id, abandon_open)?;
+            let outcome = crate::task::with_store_lock(state_dir, || {
+                guard_session(state_dir, &id, other_session.as_deref())?;
+                session::finish_session(state_dir, &id, abandon_open)
+            })?;
             let (done, total) = (outcome.done, outcome.total);
             let id = &outcome.session.id;
             if outcome.abandoned.is_empty() {

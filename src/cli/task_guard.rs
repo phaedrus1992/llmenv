@@ -9,10 +9,8 @@ pub(super) fn guard_task(
     id: &str,
     other_session: Option<&str>,
 ) -> anyhow::Result<(String, Option<crate::task::ownership::OverrideNote>)> {
-    let mut checked = guard_tasks(state_dir, &[id.to_string()], other_session)?;
-    checked
-        .pop()
-        .ok_or_else(|| anyhow::anyhow!("no task was checked for '{id}'"))
+    let caller = caller_session_for_task(state_dir)?;
+    crate::task::ownership::ensure_task_is_ours(state_dir, id, &caller, other_session)
 }
 
 /// [`guard_task`] for several ids, with one read of the store. The command then acts on the

@@ -18,14 +18,8 @@ pub(super) fn run(
         // One caller read serves the check and the close note. It runs before the close, so a
         // failure here leaves the task open.
         let caller = caller_session_for_task(state_dir)?;
-        let (slug, audit) = crate::task::ownership::ensure_tasks_are_ours(
-            state_dir,
-            &[id],
-            &caller,
-            other_session,
-        )?
-        .pop()
-        .ok_or_else(|| anyhow::anyhow!("no task was checked for '{id}'"))?;
+        let (slug, audit) =
+            crate::task::ownership::ensure_task_is_ours(state_dir, id, &caller, other_session)?;
         let completed = crate::task::complete_task_by(
             state_dir,
             crate::task::TaskTarget::Resolved(&slug),

@@ -76,13 +76,30 @@ impl OverrideNote {
         use anyhow::Context;
         super::note_task(state_dir, &self.slug, &self.text).with_context(|| {
             format!(
-                "the change to task '{}' is saved, but its --other-session note is not. Fix: run \
-                 `llmenv task note {} \"{}\"`",
+                "the change to task '{}' is saved, but its --other-session note is not. Fix: add \
+                 the note with `llmenv task note {} <text>`, where the text is the next line \
+                 (data, not a command):\n{}",
                 self.slug, self.slug, self.text
             )
         })?;
         Ok(())
     }
+}
+
+/// [`ensure_tasks_are_ours`] for one name. It returns the resolved slug and the override note.
+///
+/// # Errors
+/// The errors of [`ensure_tasks_are_ours`].
+pub(crate) fn ensure_task_is_ours(
+    state_dir: &Path,
+    input: &str,
+    caller: &Caller,
+    other_session: Option<&str>,
+) -> anyhow::Result<(String, Option<OverrideNote>)> {
+    ensure_tasks_are_ours(state_dir, &[input], caller, other_session)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("no task was checked for '{input}'"))
 }
 
 /// Refuse to act on each task of `inputs` that belongs to a session other than the
@@ -160,7 +177,8 @@ fn ownership_note(
     }
 }
 
-/// Refuse `clear --session <owner>` when the caller is not that session.
+/// Refuse a command that acts on session `session_id` (`clear --session`, `session edit`,
+/// `session note`, `session finish`) when the caller is not that session.
 ///
 /// # Errors
 /// Errors if the caller is another session and `other_session` does not name
@@ -175,13 +193,11 @@ pub(crate) fn ensure_session_is_ours(
     }
     match other_session {
         Some(named) if named == session_id => Ok(()),
-        Some(named) => anyhow::bail!(
-            "'--session {session_id}' clears the tasks of session '{session_id}', not '{named}'"
-        ),
+        Some(named) => anyhow::bail!("this command acts on session '{session_id}', not '{named}'"),
         None => refuse_unless_caller(
             session_id,
             caller,
-            &format!("'--session {session_id}' clears the tasks of session '{session_id}'"),
+            &format!("this command acts on session '{session_id}'"),
         ),
     }
 }
