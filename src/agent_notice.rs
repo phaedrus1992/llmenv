@@ -136,6 +136,16 @@ pub fn record_detached_job_failure(error: &anyhow::Error) {
     }
 }
 
+/// Drop the notices that contain `text`, so a test sees only the notices of its own run.
+#[cfg(test)]
+pub(crate) fn forget_containing(text: &str) {
+    NOTICES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .notices
+        .retain(|notice| !notice.contains(text));
+}
+
 #[cfg(test)]
 mod tests {
     use super::{NoticeList, clean, current, record};

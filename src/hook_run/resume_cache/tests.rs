@@ -301,7 +301,11 @@ fn an_empty_version_keeps_the_notice_like_an_unset_one() {
     let env = env_of(&[("CLAUDE_CODE_VERSION", "")]);
     assert!(resume_notice("SessionStart", &expensive_resume(), env, || false).is_some());
     let notices = crate::agent_notice::current().unwrap_or_default();
-    assert!(!notices.contains("is not a version"), "{notices}");
+    // The notice list is shared by the tests of one process, so only the empty value counts here.
+    assert!(
+        !notices.contains("CLAUDE_CODE_VERSION is not a version (\"\")"),
+        "{notices}"
+    );
 }
 
 #[test]

@@ -263,8 +263,13 @@ impl wiremock::Respond for SlowReply {
     }
 }
 
+/// The notice list is shared by the tests of one process, so the two tests on the skip notice
+/// take turns.
+static SKIP_NOTICE_TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn slow_main_recalls_skip_the_fanouts_and_tell_the_agent() {
+    let _turn = SKIP_NOTICE_TURN.lock().await;
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(body_string_contains("initialize"))
@@ -293,6 +298,8 @@ async fn slow_main_recalls_skip_the_fanouts_and_tell_the_agent() {
 
 #[tokio::test]
 async fn slow_main_recalls_with_no_fanout_give_no_skip_notice() {
+    let _turn = SKIP_NOTICE_TURN.lock().await;
+    crate::agent_notice::forget_containing("extra memory recall");
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(body_string_contains("initialize"))
