@@ -171,21 +171,34 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_new_binary_that_never_exits_is_replaced_by_the_backup() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let exe = dir.path().join("llmenv");
-        use std::os::unix::fs::PermissionsExt;
-        // `exec` replaces the shell, so the kill at the deadline reaches the process that hangs.
-        std::fs::write(&exe, "#!/bin/sh\nexec /bin/sleep 600\n").unwrap();
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let backup = dir.path().join(".llmenv-upgrade.bak");
-        std::fs::write(&backup, b"old binary").unwrap();
-        let err = verify_installed(&exe, &backup, Duration::from_millis(100))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("did not finish --version"), "{err}");
-        assert!(err.ends_with("restored original"), "{err}");
-        assert_eq!(std::fs::read(&exe).unwrap(), b"old binary");
-        assert!(!backup.exists(), "the backup must move back into place");
+        // Another test thread can fork while this script is open for writing. The child then
+        // holds the file until its own exec, and our exec fails with "Text file busy" (#3550).
+        // The whole setup runs again on that error, so the next attempt gets a fresh file.
+        const ATTEMPTS: u32 = 50;
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let dir = tempfile::TempDir::new().unwrap();
+            let exe = dir.path().join("llmenv");
+            use std::os::unix::fs::PermissionsExt;
+            // `exec` replaces the shell, so the kill at the deadline reaches the process that hangs.
+            std::fs::write(&exe, "#!/bin/sh\nexec /bin/sleep 600\n").unwrap();
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let backup = dir.path().join(".llmenv-upgrade.bak");
+            std::fs::write(&backup, b"old binary").unwrap();
+            let result = verify_installed(&exe, &backup, Duration::from_millis(100));
+            if attempt < ATTEMPTS
+                && matches!(&result, Err(e) if e.to_string().contains("Text file busy"))
+            {
+                continue;
+            }
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains("did not finish --version"), "{err}");
+            assert!(err.ends_with("restored original"), "{err}");
+            assert_eq!(std::fs::read(&exe).unwrap(), b"old binary");
+            assert!(!backup.exists(), "the backup must move back into place");
+            return;
+        }
     }
 
     #[cfg(unix)]
