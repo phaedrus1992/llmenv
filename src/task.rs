@@ -18,8 +18,9 @@ pub mod core_text {
 
 pub mod ownership {
     pub use llmenv_task::ownership::{
-        Caller, OverrideNote, caller_session, check_takes_tasks, ensure_named_session_takes_tasks,
-        ensure_session_is_ours, ensure_task_is_ours, ensure_tasks_are_ours,
+        Caller, OverrideNote, caller_session, check_owner_less_delete, check_takes_tasks,
+        ensure_named_session_takes_tasks, ensure_session_is_ours, ensure_task_is_ours,
+        ensure_tasks_are_ours, record_owner_less_delete,
     };
 }
 
@@ -42,9 +43,9 @@ pub mod visibility {
 pub mod session {
     pub use llmenv_task::session::{
         EngineIdentity, PickError, Session, SessionSummary, SessionSummaryTask, StartDecision,
-        StartOutcome, StartRequest, delete_tasks_in_session, finish_session, idle_display,
-        list_sessions_strict, load_existing_session, open_sessions_strict, pick_open_session,
-        session_summary, session_summary_with_agent, start_session, start_session_as,
-        touch_last_activity, try_session_progress, update_resume,
+        StartOutcome, StartRequest, append_override_note, delete_tasks_in_session, finish_session,
+        idle_display, list_sessions_strict, load_existing_session, open_sessions_strict,
+        pick_open_session, session_summary, session_summary_with_agent, start_session,
+        start_session_as, touch_last_activity, try_session_progress, update_resume,
     };
 }
