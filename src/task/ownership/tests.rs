@@ -326,7 +326,7 @@ fn an_other_session_override_returns_a_session_note_naming_the_caller() {
 
     assert!(
         note.contains("some-other-session"),
-        "note must name the caller: {note}"
+        "note must name the caller"
     );
 }
 
