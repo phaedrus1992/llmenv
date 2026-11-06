@@ -1848,7 +1848,11 @@ fn migrate_stranded_transcripts_once(adapter_root: &Path, state_dir: &Path) {
         }
     }
     if let Err(e) = crate::paths::create_refusing_symlink(&marker) {
-        tracing::debug!("could not write {}: {e}", marker.display());
+        tracing::warn!(
+            "could not write {}: {e}. Fix: make the state folder writable, or the migration \
+             scans every folder on each run",
+            marker.display()
+        );
     }
 }
 

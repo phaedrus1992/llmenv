@@ -66,9 +66,11 @@ pub fn dedup_hooks(hooks: &mut Vec<Hook>) {
 
 impl Hook {
     /// Whether `other` runs the same handler on the same event and matcher, whatever its
-    /// `on_failure` is.
+    /// `on_failure` is. A command path is relative to its bundle, so two bundles that spell one
+    /// command run two different files.
     fn same_guard(&self, other: &Self) -> bool {
-        self.event == other.event
+        self.bundle_origin == other.bundle_origin
+            && self.event == other.event
             && self.matcher == other.matcher
             && self.handler.kind == other.handler.kind
             && self.handler.command == other.handler.command
@@ -93,6 +95,18 @@ mod tests {
             },
             bundle_origin: None,
         }
+    }
+
+    #[test]
+    fn the_same_relative_command_of_two_bundles_is_two_guards() {
+        let mut a = hook("bash hooks/guard.sh", None);
+        a.bundle_origin = Some("/bundles/a".into());
+        let mut b = hook("bash hooks/guard.sh", Some(HookOnFailure::Block));
+        b.bundle_origin = Some("/bundles/b".into());
+        let mut hooks = vec![a, b];
+        dedup_hooks(&mut hooks);
+        assert_eq!(hooks.len(), 2);
+        assert_eq!(hooks[0].handler.on_failure, None);
     }
 
     #[test]

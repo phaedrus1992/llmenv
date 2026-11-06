@@ -46,8 +46,5 @@ pub(super) fn record_override(
     state_dir: &std::path::Path,
     audit: Option<crate::task::ownership::OverrideNote>,
 ) -> anyhow::Result<()> {
-    match audit {
-        Some(note) => note.record(state_dir),
-        None => Ok(()),
-    }
+    audit.map_or(Ok(()), |note| note.record(state_dir))
 }

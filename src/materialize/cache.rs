@@ -320,6 +320,8 @@ pub(crate) fn prune(
             continue;
         }
         if !ft.is_dir() {
+            // `gc` counts a stray file as kept, so the two reports agree on one cache root.
+            report.kept += 1;
             continue;
         }
         // Orphaned staging dirs are always removed regardless of mode.

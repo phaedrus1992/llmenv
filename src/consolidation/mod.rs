@@ -463,7 +463,12 @@ fn run_id(checkpoint: Option<&std::path::Path>) -> String {
             // An empty id on a resumed run makes the rule request ids differ from the first
             // run, so the seen-set misses a repeat.
             checkpoint::load(p)
-                .inspect_err(|e| tracing::error!("consolidation run id unknown: {e:#}"))
+                .inspect_err(|e| {
+                    phase::notice(&format!(
+                        "consolidation: the run tag is lost, so a repeated rule may be stored \
+                         again: {e:#}"
+                    ));
+                })
                 .ok()
         })
         .and_then(|c| c.inputs["run_tag"].as_str().map(str::to_string))

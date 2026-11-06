@@ -100,6 +100,29 @@ mod tests {
 
     const OLDER_THAN: Duration = Duration::from_secs(60);
 
+    proptest::proptest! {
+        // An entry is expired exactly when its age is above the limit, and a larger age stays
+        // expired. An mtime at or after the clock is never expired.
+        #[test]
+        fn expiry_is_a_threshold_on_the_age(
+            age in 0u64..10_000,
+            limit in 0u64..10_000,
+            extra in 0u64..10_000,
+            ahead in 0u64..10_000,
+        ) {
+            let now = std::time::UNIX_EPOCH + Duration::from_secs(1_000_000);
+            let path = Path::new("/llmenv-test/expiry-threshold");
+            let limit = Duration::from_secs(limit);
+            let expired = |age: u64| is_expired(now, now - Duration::from_secs(age), limit, path);
+            proptest::prop_assert_eq!(expired(age), Duration::from_secs(age) > limit);
+            if expired(age) {
+                proptest::prop_assert!(expired(age + extra));
+            }
+            let future = now + Duration::from_secs(ahead);
+            proptest::prop_assert!(!is_expired(now, future, limit, path));
+        }
+    }
+
     /// The given clock is the only clock of the verdict (#3374). An mtime after it is kept, even
     /// when the wall clock calls the entry old.
     #[test]

@@ -1,7 +1,7 @@
 //! Doctor's verdict on the version of the ICM server (#2261).
 
 use super::CheckLevel;
-use super::version::parse_semver_triple;
+use crate::util::semver::parse_semver_triple;
 
 /// ICM server releases that fix recall behavior llmenv depends on (#2261): 0.10.60 applies the
 /// keyword/topic filter before the limit (adaptive recall fanout needs it), and 0.10.64 changes

@@ -152,6 +152,9 @@ fn hook_env(name: &str) -> Option<String> {
     }
 }
 
+/// A settings file larger than this is not a real one. A repo controls the project files.
+const SETTINGS_MAX_BYTES: u64 = 1 << 20;
+
 /// Whether one of the settings files that Claude Code reads for this session sets
 /// `apiKeyHelper`, which gives an API key with no variable: the rendered settings in
 /// `CLAUDE_CONFIG_DIR`, and the project's `.claude/settings.json` and `.claude/settings.local.json`
@@ -164,15 +167,22 @@ fn api_key_helper_set(config_dir: Option<&std::path::Path>, cwd: Option<&std::pa
         project.as_ref().map(|p| p.join("settings.json")),
         project.as_ref().map(|p| p.join("settings.local.json")),
     ];
-    files
-        .into_iter()
-        .flatten()
-        .any(|file| match std::fs::read_to_string(&file) {
-            Ok(text) => serde_json::from_str::<Value>(&text).map_or(true, |v| {
+    files.into_iter().flatten().any(|file| {
+        match llmenv_paths::read_text_bounded(&file, SETTINGS_MAX_BYTES) {
+            Ok(Some(text)) => serde_json::from_str::<Value>(&text).map_or(true, |v| {
                 v.get("apiKeyHelper").is_some_and(|h| !h.is_null())
             }),
-            Err(e) => e.kind() != std::io::ErrorKind::NotFound,
-        })
+            Ok(None) => false,
+            // A repo can plant a pipe, a link, or a huge file here. The notice stays on.
+            Err(e) => {
+                tracing::warn!(
+                    "cannot read {}: {e}, so the helper counts as set",
+                    file.display()
+                );
+                true
+            }
+        }
+    })
 }
 
 /// The first Claude Code release with its own warning when a resume would use a noticeable share

@@ -336,7 +336,7 @@ impl SessionLog {
 impl<'de> serde::Deserialize<'de> for SessionLog {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let v = serde_yaml::Value::deserialize(d)?;
-        if !v.is_mapping() {
+        let Some(m) = v.as_mapping() else {
             let got = match &v {
                 serde_yaml::Value::String(_) => {
                     "a string (the pre-3.0 bare path-string form is no longer supported); use \
@@ -352,9 +352,7 @@ impl<'de> serde::Deserialize<'de> for SessionLog {
                 "session_log must be a mapping, not {got}; use \
                  `session_log: {{ file: true }}` (file path overridable via `path:`)"
             )));
-        }
-        #[expect(clippy::unwrap_used, reason = "guarded by is_mapping() check above")]
-        let m = v.as_mapping().unwrap();
+        };
 
         let is_old_shape = m.iter().any(|(k, v)| {
             let key = k.as_str().unwrap_or("");

@@ -698,8 +698,17 @@ pub(crate) fn delete_tasks_in_session(
 ) -> anyhow::Result<Vec<Task>> {
     super::with_store_lock(state_dir, || {
         let tasks = try_tasks_in_session(state_dir, session_id)?;
-        for t in &tasks {
-            std::fs::remove_file(task_path(state_dir, &t.slug))?;
+        for (done, t) in tasks.iter().enumerate() {
+            let path = task_path(state_dir, &t.slug);
+            std::fs::remove_file(&path).with_context(|| {
+                format!(
+                    "cannot delete task '{}' ({}); {done} of {} task(s) of session '{session_id}' \
+                     are already deleted. Fix: make the file writable, then run the command again",
+                    t.slug,
+                    path.display(),
+                    tasks.len()
+                )
+            })?;
         }
         Ok(tasks)
     })

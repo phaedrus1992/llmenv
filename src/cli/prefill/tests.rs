@@ -298,3 +298,20 @@ proptest! {
         prop_assert_eq!(newest_jsonl_in(dir.path(), "Fix: x.").unwrap(), want);
     }
 }
+
+proptest! {
+    // The folder name keeps one character for each character of the path, and only ASCII letters
+    // and digits stay as they are.
+    #[test]
+    fn the_project_folder_name_keeps_the_length_and_only_ascii_alphanumerics(cwd in "\\PC{0,40}") {
+        let name = project_folder_name(&cwd);
+        prop_assert_eq!(name.chars().count(), cwd.chars().count());
+        for (out, input) in name.chars().zip(cwd.chars()) {
+            if input.is_ascii_alphanumeric() {
+                prop_assert_eq!(out, input);
+            } else {
+                prop_assert_eq!(out, '-');
+            }
+        }
+    }
+}

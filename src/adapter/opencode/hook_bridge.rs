@@ -169,18 +169,9 @@ fn user_hook_entry(hook: &crate::config::Hook) -> Option<serde_json::Value> {
         return None;
     };
     let command = match &hook.bundle_origin {
+        // `None` means no word of the command is a bundle-relative path, so it runs as written.
         Some(bundle_dir) => super::super::resolve_bundle_relative_paths(command, bundle_dir)
-            .unwrap_or_else(|| {
-                // `tracing` errors are off at the default log level, and the hook may not run.
-                eprintln!(
-                    "warning: the {} hook command `{command}` names a path in the bundle {} that \
-                     cannot be resolved, so opencode runs the command as written. Fix: check the \
-                     path in the hook command",
-                    hook.event,
-                    bundle_dir.display()
-                );
-                command.to_string()
-            }),
+            .unwrap_or_else(|| command.to_string()),
         None => command.to_string(),
     };
     Some(serde_json::json!({

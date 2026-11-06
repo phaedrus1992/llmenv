@@ -910,11 +910,7 @@ fn resolve_pre_tool_decision(
             &state_dir,
         ),
         Err(e) => {
-            error!(
-                error = %e,
-                "failed to resolve state_dir; read_once/repeat_detect skipped for this call \
-                 and the task-tool redirect degraded to a deny"
-            );
+            crate::agent_notice::no_state_folder("read-once and repeat detection are skipped", &e);
             // The commit gate reads its state from the same directory, so it denies rather than
             // passing a commit it cannot check (#2630).
             if task_tracker_enabled

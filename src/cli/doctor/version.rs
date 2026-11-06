@@ -5,7 +5,7 @@
 /// commands ignore hook-inherited `GIT_DIR` (upstream #2330, #2650, #2341).
 const CBM_MIN_VERSION: (u64, u64, u64) = (0, 12, 0);
 
-pub(super) use crate::util::semver::parse_semver_triple;
+use crate::util::semver::parse_semver_triple;
 
 /// The warning text for a codebase-memory-mcp older than [`CBM_MIN_VERSION`],
 /// or for a version that cannot be parsed. `None` when the version is at the floor

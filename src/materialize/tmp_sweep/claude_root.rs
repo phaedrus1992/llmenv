@@ -50,6 +50,8 @@ pub(super) fn scan_split_root(
         }
         match entry.file_type() {
             Ok(file_type) => judge_entry(&path, file_type.is_dir(), rule, now, scan),
+            // An entry removed after the listing is not a failure, as in the top-level walk.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => record_failure(&path, &e, scan),
         }
     }

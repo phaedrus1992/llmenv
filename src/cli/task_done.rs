@@ -26,10 +26,12 @@ pub(super) fn run(
             force,
             &caller,
         )?;
-        // The close is saved. A failed audit note says so in its error (OverrideNote::record).
-        record_override(state_dir, audit)?;
-        Ok(completed)
+        // The close is saved. A failed audit note says so in its error (OverrideNote::record),
+        // and the notes of the close print first, so a failed audit does not hide them.
+        let audit_result = record_override(state_dir, audit);
+        Ok((completed, audit_result))
     })?;
+    let (completed, audit_result) = completed;
     println!("Completed '{}'", completed.task.slug);
     if let Some(note) = completed.skipped_start_note() {
         println!("{note}");
@@ -46,5 +48,5 @@ pub(super) fn run(
             completed.task.slug
         ),
     }
-    Ok(())
+    audit_result
 }

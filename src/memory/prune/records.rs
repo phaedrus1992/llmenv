@@ -51,3 +51,27 @@ pub(super) fn read_records(
         })
         .collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Importance;
+    use proptest::prelude::*;
+
+    proptest! {
+        // Only a trimmed `medium` or `low` is forgotten. Any other text, such as `Medium` or
+        // `critical`, is kept, because prune forgets for good.
+        #[test]
+        fn only_medium_and_low_are_pruned(s in "\\PC{0,12}") {
+            let pruned = Importance::from_str(&s).should_prune();
+            prop_assert_eq!(pruned, matches!(s.trim(), "medium" | "low"));
+        }
+
+        #[test]
+        fn padding_a_known_level_does_not_change_it(pad in "[ \\t]{0,3}") {
+            for level in ["critical", "high", "medium", "low"] {
+                let padded = format!("{pad}{level}{pad}");
+                prop_assert_eq!(Importance::from_str(&padded), Importance::from_str(level));
+            }
+        }
+    }
+}

@@ -138,7 +138,10 @@ fn booted_hash_in(config_dir: Option<&std::ffi::OsStr>) -> Option<String> {
     match crate::materialize::manifest::CacheManifest::read(Path::new(dir)) {
         Ok(manifest) => manifest.map(|m| m.content_hash),
         Err(e) => {
-            tracing::error!("cannot read the booted config manifest, config hash unknown: {e}");
+            crate::agent_notice::record_logged(format!(
+                "llmenv: cannot read the booted config manifest, so the session document shows \
+                 the config as unknown: {e}. Fix: run `llmenv regenerate`."
+            ));
             None
         }
     }
