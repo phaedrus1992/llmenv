@@ -143,7 +143,7 @@ test-support = []
 
 [dev-dependencies]
 # The integration tests age a tree with set_modified, which only the mtime-only rule sees (#3432).
-llmenv = { path = ".", version = "4.0.0-alpha.1", features = ["test-support"] }
+llmenv = { path = ".", version = "5.0.0-alpha.1", features = ["test-support"] }
 assert_cmd = "=2.2.2"
 insta = { version = "=1.49.0", features = ["yaml"] }
 predicates = "=3.1.4"
