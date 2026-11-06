@@ -35,7 +35,11 @@ mod init_cmd;
 mod task_add;
 mod task_clear;
 mod task_guard;
-use task_guard::{guard_session, guard_task, guard_tasks, record_override};
+mod task_session_pick;
+use task_guard::{
+    guard_session, guard_task, guard_tasks, record_override, record_session_override,
+};
+use task_session_pick::{resolve_session_for_read, resolve_session_id};
 #[cfg(test)]
 mod init_run_tests;
 #[cfg(test)]
@@ -3373,8 +3377,10 @@ fn run_task_session_command(
             let update = resume_context.into_context()?;
             let id = resolve_session_id(state_dir, &project, id)?;
             let session = crate::task::with_store_lock(state_dir, || {
-                guard_session(state_dir, &id, other_session.as_deref())?;
-                session::update_resume(state_dir, &id, |r| r.apply(&update))
+                let audit = guard_session(state_dir, &id, other_session.as_deref())?;
+                let session = session::update_resume(state_dir, &id, |r| r.apply(&update))?;
+                record_session_override(state_dir, &id, audit.as_deref())?;
+                Ok(session)
             })?;
             println!("Updated resume context for session '{}'", session.id);
         }
@@ -3394,8 +3400,10 @@ fn run_task_session_command(
             );
             let id = resolve_session_id(state_dir, &project, id)?;
             let session = crate::task::with_store_lock(state_dir, || {
-                guard_session(state_dir, &id, other_session.as_deref())?;
-                session::update_resume(state_dir, &id, |r| r.append_note(text))
+                let audit = guard_session(state_dir, &id, other_session.as_deref())?;
+                let session = session::update_resume(state_dir, &id, |r| r.append_note(text))?;
+                record_session_override(state_dir, &id, audit.as_deref())?;
+                Ok(session)
             })?;
             println!("Noted session '{}'", session.id);
         }
@@ -3406,8 +3414,10 @@ fn run_task_session_command(
         } => {
             let id = resolve_session_id(state_dir, &project, id)?;
             let outcome = crate::task::with_store_lock(state_dir, || {
-                guard_session(state_dir, &id, other_session.as_deref())?;
-                session::finish_session(state_dir, &id, abandon_open)
+                let audit = guard_session(state_dir, &id, other_session.as_deref())?;
+                let outcome = session::finish_session(state_dir, &id, abandon_open)?;
+                record_session_override(state_dir, &id, audit.as_deref())?;
+                Ok(outcome)
             })?;
             let (done, total) = (outcome.done, outcome.total);
             let id = &outcome.session.id;
@@ -3427,7 +3437,7 @@ fn run_task_session_command(
             }
         }
         TaskSessionCommand::Show { id } => {
-            let id = resolve_session_id(state_dir, &project, id)?;
+            let id = resolve_session_for_read(state_dir, &project, id)?;
             // Validate the session exists rather than printing "0/0 done" for
             // a typo'd id (session_progress returns (0, 0) for any unknown id).
             // A corrupt session file is reported with its path, not as a missing id (#2628).
@@ -3455,7 +3465,7 @@ fn run_task_session_command(
             }
         }
         TaskSessionCommand::Summary { id, format } => {
-            let id = resolve_session_id(state_dir, &project, id)?;
+            let id = resolve_session_for_read(state_dir, &project, id)?;
             let summary = session::session_summary(state_dir, &id)?;
             match format {
                 Some(TaskListFormat::Json) => {
@@ -3498,33 +3508,6 @@ fn start_outcome_lacks_context(outcome: &crate::task::session::StartOutcome) -> 
     match outcome {
         StartOutcome::Created(s) | StartOutcome::Resumed(s) => s.resume.needs_nudge(),
         StartOutcome::Replaced { session, .. } => session.resume.needs_nudge(),
-    }
-}
-
-/// Resolve an explicit-or-omitted session id the same way `add_task` does:
-/// omitted resolves through [`crate::task::session::pick_open_session`], so
-/// with two or more open the caller's own session wins (#2365).
-fn resolve_session_id(
-    state_dir: &std::path::Path,
-    project: &str,
-    id: Option<String>,
-) -> anyhow::Result<String> {
-    use crate::task::session::{self, EngineIdentity, PickError};
-    if let Some(id) = id {
-        return Ok(id);
-    }
-    // Fallible read: an unreadable store must not read as "no open session" (#1112).
-    let open = session::open_sessions_strict(state_dir, project)?;
-    match session::pick_open_session(open, &EngineIdentity::from_env()?) {
-        Ok(session) => Ok(session.id),
-        Err(PickError::NoneOpen) => {
-            anyhow::bail!("no open session for this project — pass an id explicitly")
-        }
-        Err(e) => anyhow::bail!(
-            "{}",
-            e.ambiguity_message("pass an id explicitly")
-                .unwrap_or_else(|| "more than one session is open".to_string())
-        ),
     }
 }
 

@@ -160,7 +160,13 @@ fn ownership_note(
 ) -> anyhow::Result<Option<OverrideNote>> {
     let slug = slug.to_string();
     let Some(owner) = task.session.as_deref() else {
-        return Ok(None);
+        // An owner-less task (an orphan of a replaced session) has no owner to refuse for. The
+        // change is allowed, and the note names the caller so the change is on record (#3586).
+        let text = format!(
+            "acted on a task with no session; caller: {}",
+            caller.describe()
+        );
+        return Ok(Some(OverrideNote { slug, text }));
     };
     if matches!(caller, Caller::Session(id) if id == owner) {
         return Ok(None);
@@ -189,6 +195,9 @@ fn ownership_note(
 /// Refuse a command that acts on session `session_id` (`clear --session`, `session edit`,
 /// `session note`, `session finish`) when the caller is not that session.
 ///
+/// Returns the note text when `--other-session` was needed and used. The caller appends it to
+/// the session once the command has succeeded (#3596). Returns `None` when no override applied.
+///
 /// # Errors
 /// Errors if the caller is another session and `other_session` does not name
 /// `session_id`.
@@ -196,18 +205,22 @@ pub(crate) fn ensure_session_is_ours(
     session_id: &str,
     caller: &Caller,
     other_session: Option<&str>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<String>> {
     if matches!(caller, Caller::Session(id) if id == session_id) {
-        return Ok(());
+        return Ok(None);
     }
     match other_session {
-        Some(named) if named == session_id => Ok(()),
+        Some(named) if named == session_id => Ok(Some(format!(
+            "acted on with --other-session {session_id}; caller: {}",
+            caller.describe()
+        ))),
         Some(named) => anyhow::bail!("this command acts on session '{session_id}', not '{named}'"),
         None => refuse_unless_caller(
             session_id,
             caller,
             &format!("this command acts on session '{session_id}'"),
-        ),
+        )
+        .map(|()| None),
     }
 }
 

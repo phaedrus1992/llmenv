@@ -262,7 +262,7 @@ proptest::proptest! {
 
     // The check against an oracle over every owner, caller, and override: a task is allowed when
     // it has no session, when the caller owns it, or when --other-session names its owner. Only
-    // the override path gives a note, and the check never writes the store.
+    // the override path and an owner-less task give a note, and the check never writes the store.
     #[test]
     fn the_check_matches_the_ownership_rule(
         tag in proptest::option::of(proptest::sample::select(vec!["s-a", "s-b"])),
@@ -286,10 +286,57 @@ proptest::proptest! {
         match got {
             Ok(note) => {
                 proptest::prop_assert!(owns || overridden, "allowed: {tag:?} {caller:?} {other:?}");
-                proptest::prop_assert_eq!(note.is_some(), overridden);
+                proptest::prop_assert_eq!(note.is_some(), overridden || tag.is_none());
             }
             Err(e) => proptest::prop_assert!(!owns && !overridden, "refused: {e:#}"),
         }
         proptest::prop_assert_eq!(before, std::fs::read(&path).unwrap());
     }
+}
+
+#[test]
+fn a_change_to_an_owner_less_task_records_a_note_naming_the_caller() {
+    let dir = TempDir::new().expect("tempdir");
+    let (slug, _owner) = open_task_in_session(dir.path());
+    let mut task = load_task(dir.path(), &slug).expect("load task");
+    task.session = None;
+    save_task(dir.path(), &task).expect("save owner-less task");
+    let caller = Caller::Session("some-conversation".to_string());
+
+    let note = ensure_task_is_ours(dir.path(), &slug, &caller, None)
+        .expect("an owner-less task is not refused")
+        .expect("the change must record a note");
+
+    let text = format!("{note:?}");
+    assert!(
+        text.contains("some-conversation"),
+        "note must name the caller: {text}"
+    );
+}
+
+#[test]
+fn an_other_session_override_returns_a_session_note_naming_the_caller() {
+    let dir = TempDir::new().expect("tempdir");
+    let (_task, owner) = open_task_in_session(dir.path());
+    let caller = Caller::Session("some-other-session".to_string());
+
+    let note = ensure_session_is_ours(&owner, &caller, Some(&owner))
+        .expect("the named owner may be acted on")
+        .expect("the override must return a note");
+
+    assert!(
+        note.contains("some-other-session"),
+        "note must name the caller: {note}"
+    );
+}
+
+#[test]
+fn the_caller_own_session_returns_no_note() {
+    let dir = TempDir::new().expect("tempdir");
+    let (_task, owner) = open_task_in_session(dir.path());
+    let caller = Caller::Session(owner.clone());
+
+    let note = ensure_session_is_ours(&owner, &caller, None).expect("own session is allowed");
+
+    assert!(note.is_none(), "no override applied, so no note");
 }

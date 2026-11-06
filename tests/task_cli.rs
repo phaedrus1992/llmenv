@@ -3045,6 +3045,14 @@ fn session_finish_of_an_unowned_session_is_refused_without_other_session() {
         ])
         .assert()
         .success();
+    // The finish closed the session first, so the note must still land on the closed session (#3596).
+    llmenv(dir.path())
+        .args(["task", "session", "show", "beta"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "acted on with --other-session beta",
+        ));
 }
 
 #[test]
@@ -3084,4 +3092,57 @@ fn session_note_and_edit_of_an_unowned_session_are_refused_without_other_session
         ])
         .assert()
         .success();
+}
+
+// --- #3588: an implicit session read must not pick another conversation's session ---
+
+#[test]
+fn session_show_without_an_id_refuses_another_conversations_only_session() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .env("CLAUDE_CODE_SESSION_ID", "conv-owner")
+        .args(["task", "session", "start", "solo"])
+        .assert()
+        .success();
+
+    llmenv(dir.path())
+        .args(["task", "session", "show"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("solo"));
+    llmenv(dir.path())
+        .env("CLAUDE_CODE_SESSION_ID", "conv-owner")
+        .args(["task", "session", "show"])
+        .assert()
+        .success();
+}
+
+// --- #3596: a session override leaves a note that names the caller ---
+
+#[test]
+fn session_note_with_other_session_records_a_caller_note_on_the_session() {
+    let dir = TempDir::new().unwrap();
+    two_open_sessions(dir.path());
+
+    llmenv(dir.path())
+        .args([
+            "task",
+            "session",
+            "note",
+            "a note",
+            "--id",
+            "beta",
+            "--other-session",
+            "beta",
+        ])
+        .assert()
+        .success();
+
+    llmenv(dir.path())
+        .args(["task", "session", "show", "beta"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "acted on with --other-session beta",
+        ));
 }

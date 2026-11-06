@@ -31,14 +31,28 @@ pub(super) fn guard_tasks(
     crate::task::ownership::ensure_tasks_are_ours(state_dir, &inputs, &caller, other_session)
 }
 
-/// Refuse `clear --session <id>` when that session is not the caller's.
+/// Refuse `clear --session <id>` when that session is not the caller's. Returns the override
+/// note when `--other-session` was used.
 pub(super) fn guard_session(
     state_dir: &std::path::Path,
     id: &str,
     other_session: Option<&str>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<String>> {
     let caller = caller_session_for_task(state_dir)?;
     crate::task::ownership::ensure_session_is_ours(id, &caller, other_session)
+}
+
+/// Appends the `--other-session` note of a session command to that session. Runs inside the
+/// same store lock as the change, so the note and the change land together (#3596).
+pub(super) fn record_session_override(
+    state_dir: &std::path::Path,
+    id: &str,
+    note: Option<&str>,
+) -> anyhow::Result<()> {
+    let Some(text) = note else {
+        return Ok(());
+    };
+    crate::task::session::append_override_note(state_dir, id, text)
 }
 
 /// Appends the pending `--other-session` note, once the command has succeeded.
