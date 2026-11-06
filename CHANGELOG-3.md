@@ -57,6 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Read the session files once per Stop and SessionStart hook run, not once for each reminder. [perf:task] [#3468]
 - Share that read with the task tracking check of the Stop hook, which read both stores again. [perf:hook] [#3472]
 - Read each store once in the TaskCreate and TaskUpdate redirects, and in `llmenv task start` and `llmenv task done`. A failed TaskUpdate now says `couldn't update task '<id>'` with the full cause, for a bad id and a refused change alike, and says which task got its note. [perf:task] [#3474]
+- Read the task store once in the other `llmenv task` commands (`start`, `note`, `wait`, `block`, `edit`, `reopen`, `clear`, `add`, `ls`). The ownership check now hands its resolved task to the command, so the check and the change always act on the same task. [perf:task] [#3477]
 
 ### Fixed
 

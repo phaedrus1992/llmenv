@@ -18,10 +18,13 @@ mod ancestors;
 pub(crate) mod core_text;
 mod finish_hints;
 use ancestors::ancestors_to_start;
+mod edit;
+pub(crate) use edit::edit_task;
 mod note;
 pub(crate) mod ownership;
 pub(crate) mod progress;
-pub(crate) use note::{note_resolved, note_task};
+pub(crate) use note::note_task;
+pub(crate) use resolve::TaskTarget;
 pub(crate) mod project;
 pub(crate) mod relation;
 mod reminder_store;
@@ -37,7 +40,7 @@ mod tracking;
 pub(crate) use tracking::{Tracking, tracking, tracking_in};
 pub mod session;
 pub(crate) use progress::{StrictTasks, progress_in, wip_title_in};
-pub(crate) use reopen::{reopen_task, reopen_tasks};
+pub(crate) use reopen::reopen_task;
 pub(crate) use resolve::resolve_identifier;
 
 pub(crate) use relation::Placement;
@@ -578,21 +581,48 @@ fn add_task_for_session_with(
     let title = new.title;
     with_store_lock(state_dir, || {
         let dir = tasks_dir(state_dir);
+        // One strict read resolves every name that the new task refers to (#3477). Each name is
+        // checked first, so a bad name gets its own error even when the store is unreadable.
+        let names = [
+            match parent {
+                ParentSpec::Explicit(p) => Some(p),
+                ParentSpec::Detached => None,
+            },
+            match new.placement {
+                Placement::Child(p) => Some(p),
+                Placement::Queue | Placement::Parallel => None,
+            },
+            new.after,
+        ];
+        for name in names.iter().flatten() {
+            resolve::check_identifier(name)?;
+        }
+        let all_tasks = names
+            .iter()
+            .any(Option::is_some)
+            .then(|| list_tasks_strict(state_dir))
+            .transpose()?;
+        let resolve = |name: &str| -> anyhow::Result<String> {
+            let all = all_tasks
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("the task store was not read to find '{name}'"))?;
+            resolve::resolve_in(state_dir, name, all)
+        };
         let explicit_parent = match parent {
-            ParentSpec::Explicit(p) => Some(resolve_identifier(state_dir, p)?),
+            ParentSpec::Explicit(p) => Some(resolve(p)?),
             ParentSpec::Detached => None,
         };
         let (parent_slug, relation, parallel) = match new.placement {
             Placement::Queue => (explicit_parent, Relation::Queued, false),
             Placement::Parallel => (explicit_parent, Relation::Queued, true),
             Placement::Child(p) => {
-                let slug = resolve_identifier(state_dir, p)?;
+                let slug = resolve(p)?;
                 check_child_parent(&load_task(state_dir, &slug)?, session_id)?;
                 (Some(slug), Relation::Child, false)
             }
         };
         let blocked_on = match new.after {
-            Some(after) => vec![resolve_identifier(state_dir, after)?],
+            Some(after) => vec![resolve(after)?],
             None => Vec::new(),
         };
         let now = now_rfc3339();
@@ -710,12 +740,17 @@ fn resolve_session_for_add(
 /// unmet, same rationale as [`is_actionable`]'s dangling-blocker handling.
 /// `force` overrides both cases — the agent may know better than the
 /// ordering hint.
-pub(crate) fn start_task(state_dir: &Path, input: &str, force: bool) -> anyhow::Result<Task> {
+pub(crate) fn start_task<'a>(
+    state_dir: &Path,
+    target: impl Into<TaskTarget<'a>>,
+    force: bool,
+) -> anyhow::Result<Task> {
+    let target = target.into();
     let task = with_store_lock(state_dir, || {
         // One strict read feeds the name lookup, the blocker check, and the queue check (#3474).
-        resolve::check_identifier(input)?;
+        target.check()?;
         let all_tasks = list_tasks_strict(state_dir)?;
-        let slug = resolve::resolve_in(state_dir, input, &all_tasks)?;
+        let slug = target.slug_in(state_dir, &all_tasks)?;
         let mut task = load_task(state_dir, &slug)?;
         if task.state == TaskState::Done {
             anyhow::bail!(
@@ -803,9 +838,13 @@ fn touch_task_session(state_dir: &Path, task: &Task) {
 /// other tasks' `parent`/`blocked_on` references to it, which already
 /// tolerate a dangling target the same way a deleted blocker does (see
 /// `start_task`'s warning path).
-pub(crate) fn delete_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
+pub(crate) fn delete_task<'a>(
+    state_dir: &Path,
+    target: impl Into<TaskTarget<'a>>,
+) -> anyhow::Result<Task> {
+    let target = target.into();
     with_store_lock(state_dir, || {
-        let slug = resolve_identifier(state_dir, input)?;
+        let slug = target.slug(state_dir)?;
         let task = load_task(state_dir, &slug)?;
         std::fs::remove_file(task_path(state_dir, &slug))?;
         Ok(task)
@@ -864,12 +903,12 @@ impl Completed {
 /// # Errors
 /// Errors if `input` does not resolve to a task, the task is `open` and `force`
 /// is false, or the save fails.
-pub(crate) fn complete_task(
+pub(crate) fn complete_task<'a>(
     state_dir: &Path,
-    input: &str,
+    target: impl Into<TaskTarget<'a>>,
     force: bool,
 ) -> anyhow::Result<Completed> {
-    close_task(state_dir, input, force, None)
+    close_task(state_dir, target.into(), force, None)
 }
 
 /// [`complete_task`] for a named caller. A `done --force` that closes an `open`, `wip`, or
@@ -879,26 +918,26 @@ pub(crate) fn complete_task(
 ///
 /// # Errors
 /// Errors as [`complete_task`] does.
-pub(crate) fn complete_task_by(
+pub(crate) fn complete_task_by<'a>(
     state_dir: &Path,
-    input: &str,
+    target: impl Into<TaskTarget<'a>>,
     force: bool,
     caller: &ownership::Caller,
 ) -> anyhow::Result<Completed> {
-    close_task(state_dir, input, force, Some(caller))
+    close_task(state_dir, target.into(), force, Some(caller))
 }
 
 fn close_task(
     state_dir: &Path,
-    input: &str,
+    target: TaskTarget<'_>,
     force: bool,
     caller: Option<&ownership::Caller>,
 ) -> anyhow::Result<Completed> {
     let completed = with_store_lock(state_dir, || {
         // One strict read feeds the name lookup and the sub-task check (#3471, #3474).
-        resolve::check_identifier(input)?;
+        target.check()?;
         let all_tasks = list_tasks_strict(state_dir)?;
-        let slug = resolve::resolve_in(state_dir, input, &all_tasks)?;
+        let slug = target.slug_in(state_dir, &all_tasks)?;
         let mut task = load_task(state_dir, &slug)?;
         let prior = task.state;
         if prior == TaskState::Open && !force {
@@ -953,9 +992,14 @@ fn forced_close_text(prior: TaskState, caller: &ownership::Caller) -> String {
 ///
 /// # Errors
 /// Errors if the task is already done.
-pub(crate) fn wait_task(state_dir: &Path, input: &str, reason: &str) -> anyhow::Result<Task> {
+pub(crate) fn wait_task<'a>(
+    state_dir: &Path,
+    target: impl Into<TaskTarget<'a>>,
+    reason: &str,
+) -> anyhow::Result<Task> {
+    let target = target.into();
     let task = with_store_lock(state_dir, || {
-        let slug = resolve_identifier(state_dir, input)?;
+        let slug = target.slug(state_dir)?;
         let mut task = load_task(state_dir, &slug)?;
         if task.state == TaskState::Done {
             anyhow::bail!("task '{slug}' is already done; cannot mark it waiting");
@@ -981,10 +1025,19 @@ pub(crate) fn wait_task(state_dir: &Path, input: &str, reason: &str) -> anyhow::
 /// (unlike the load-time tolerance for dangling `blocked_on` entries left
 /// behind by a since-deleted task file). Also errors if `input` and `on`
 /// resolve to the same task — a task cannot block itself.
-pub(crate) fn block_task(state_dir: &Path, input: &str, on: &str) -> anyhow::Result<Task> {
+pub(crate) fn block_task<'a>(
+    state_dir: &Path,
+    target: impl Into<TaskTarget<'a>>,
+    on: &str,
+) -> anyhow::Result<Task> {
+    let target = target.into();
     with_store_lock(state_dir, || {
-        let slug = resolve_identifier(state_dir, input)?;
-        let on_slug = resolve_identifier(state_dir, on)?;
+        // One strict read resolves both names (#3477).
+        target.check()?;
+        resolve::check_identifier(on)?;
+        let all_tasks = list_tasks_strict(state_dir)?;
+        let slug = target.slug_in(state_dir, &all_tasks)?;
+        let on_slug = resolve::resolve_in(state_dir, on, &all_tasks)?;
         if slug == on_slug {
             anyhow::bail!("task '{slug}' cannot be blocked on itself");
         }
@@ -1024,79 +1077,6 @@ pub struct TaskEdit<'a> {
     pub(crate) delete_note: Option<&'a str>,
     /// Replace the detail. An empty string clears it.
     pub(crate) detail: Option<&'a str>,
-}
-
-/// Mutate an existing task's title, parent, `blocked_on` set, and notes in a
-/// single load-mutate-save cycle (#930).
-///
-/// # Errors
-/// - `edit.parent` doesn't resolve to an existing task, names `input` itself,
-///   or would make `input` its own ancestor (cycle) — see [`reject_cycle`].
-/// - Any `edit.block_on` id doesn't resolve to an existing task, or names
-///   `input` itself — same eager-validation reasoning as [`block_task`].
-/// - Any `edit.unblock` id doesn't resolve to an existing task.
-/// - `edit.delete_note` doesn't match an existing note's index or timestamp.
-pub(crate) fn edit_task(
-    state_dir: &Path,
-    input: &str,
-    edit: &TaskEdit<'_>,
-) -> anyhow::Result<Task> {
-    let task = with_store_lock(state_dir, || {
-        let slug = resolve_identifier(state_dir, input)?;
-        let mut task = load_task(state_dir, &slug)?;
-
-        if let Some(title) = edit.title {
-            task.title = title.to_string();
-        }
-
-        if let Some(parent_input) = edit.parent {
-            let parent_slug = resolve_identifier(state_dir, parent_input)?;
-            if parent_slug == slug {
-                anyhow::bail!("task '{slug}' cannot be its own parent");
-            }
-            reject_cycle(state_dir, &slug, &parent_slug)?;
-            task.parent = Some(parent_slug);
-        } else if edit.no_parent {
-            task.parent = None;
-        }
-
-        for on in edit.block_on {
-            let on_slug = resolve_identifier(state_dir, on)?;
-            if on_slug == slug {
-                anyhow::bail!("task '{slug}' cannot be blocked on itself");
-            }
-            if !task.blocked_on.contains(&on_slug) {
-                task.blocked_on.push(on_slug);
-            }
-        }
-
-        for on in edit.unblock {
-            let on_slug = resolve_identifier(state_dir, on)?;
-            task.blocked_on.retain(|b| b != &on_slug);
-        }
-
-        if let Some(text) = edit.add_note {
-            task.notes.push(TaskNote {
-                at: now_rfc3339(),
-                text: text.to_string(),
-            });
-        }
-
-        if let Some(id) = edit.delete_note {
-            let idx = resolve_note_index(&task.notes, id)?;
-            task.notes.remove(idx);
-        }
-
-        if let Some(detail) = edit.detail {
-            task.detail = (!detail.is_empty()).then(|| detail.to_string());
-        }
-
-        task.updated_at = now_rfc3339();
-        save_task(state_dir, &task)?;
-        Ok(task)
-    })?;
-    touch_task_session(state_dir, &task);
-    Ok(task)
 }
 
 /// Resolve a `--delete-note` argument to an index into `notes`: either a

@@ -5,11 +5,13 @@
 
 use std::path::Path;
 
+use super::TaskTarget;
+
 use anyhow::Context;
 
 use crate::task::{
-    Relation, Task, TaskNote, TaskState, load_task, now_rfc3339, resolve_identifier, save_task,
-    touch_task_session, with_store_lock,
+    Relation, Task, TaskNote, TaskState, load_task, now_rfc3339, save_task, touch_task_session,
+    with_store_lock,
 };
 
 /// Set a `done` task to `open` and append a note that names the command used.
@@ -29,9 +31,13 @@ fn mark_reopened(task: &mut Task, command: &str) {
 ///
 /// # Errors
 /// Errors if `input` does not resolve to a task, or the save fails.
-pub(crate) fn reopen_task(state_dir: &Path, input: &str) -> anyhow::Result<Task> {
+pub(crate) fn reopen_task<'a>(
+    state_dir: &Path,
+    target: impl Into<super::TaskTarget<'a>>,
+) -> anyhow::Result<Task> {
+    let target = target.into();
     let task = with_store_lock(state_dir, || {
-        let slug = resolve_identifier(state_dir, input)?;
+        let slug = target.slug(state_dir)?;
         let mut task = load_task(state_dir, &slug)?;
         if task.state != TaskState::Done {
             return Ok(task);
@@ -57,11 +63,32 @@ pub(crate) fn reopen_task(state_dir: &Path, input: &str) -> anyhow::Result<Task>
 /// Errors if an identifier does not resolve, a task is not `done`, a sub-task has a `done`
 /// parent that is not also named, or a save fails. A save error names the tasks that the call
 /// already reopened.
-pub(crate) fn reopen_tasks(state_dir: &Path, inputs: &[String]) -> anyhow::Result<Vec<Task>> {
+#[cfg(test)]
+fn reopen_tasks(state_dir: &Path, inputs: &[String]) -> anyhow::Result<Vec<Task>> {
+    let targets: Vec<TaskTarget<'_>> = inputs.iter().map(TaskTarget::from).collect();
+    reopen_targets(state_dir, &targets)
+}
+
+/// [`reopen_tasks`] for the slugs that the ownership check resolved, so the tasks that were
+/// checked are the tasks that are reopened, with no second lookup (#3477).
+///
+/// # Errors
+/// The errors of [`reopen_tasks`].
+pub(crate) fn reopen_resolved(state_dir: &Path, slugs: &[String]) -> anyhow::Result<Vec<Task>> {
+    let targets: Vec<TaskTarget<'_>> = slugs.iter().map(|s| TaskTarget::Resolved(s)).collect();
+    reopen_targets(state_dir, &targets)
+}
+
+fn reopen_targets(state_dir: &Path, targets: &[TaskTarget<'_>]) -> anyhow::Result<Vec<Task>> {
     let tasks = with_store_lock(state_dir, || {
+        // One strict read resolves every name (#3477).
+        for target in targets {
+            target.check()?;
+        }
+        let all_tasks = super::list_tasks_strict(state_dir)?;
         let mut tasks: Vec<Task> = Vec::new();
-        for input in inputs {
-            let slug = resolve_identifier(state_dir, input)?;
+        for target in targets {
+            let slug = target.slug_in(state_dir, &all_tasks)?;
             if tasks.iter().all(|t| t.slug != slug) {
                 tasks.push(load_task(state_dir, &slug)?);
             }
