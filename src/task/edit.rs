@@ -21,13 +21,19 @@ pub(crate) fn edit_task<'a>(
 ) -> anyhow::Result<Task> {
     let target = target.into();
     let task = with_store_lock(state_dir, || {
-        // One strict read resolves the task, the parent, and every blocker name (#3477).
+        // One strict read resolves the task, the parent, and every blocker name (#3477). Each
+        // name is checked first, so a bad name gets its own error even over a broken store.
         target.check()?;
-        let all_tasks = list_tasks_strict(state_dir)?;
-        let resolve = |name: &str| {
+        for name in edit
+            .parent
+            .into_iter()
+            .chain(edit.block_on.iter().map(String::as_str))
+            .chain(edit.unblock.iter().map(String::as_str))
+        {
             resolve::check_identifier(name)?;
-            resolve::resolve_in(state_dir, name, &all_tasks)
-        };
+        }
+        let all_tasks = list_tasks_strict(state_dir)?;
+        let resolve = |name: &str| resolve::resolve_in(state_dir, name, &all_tasks);
         let slug = target.slug_in(state_dir, &all_tasks)?;
         let mut task = load_task(state_dir, &slug)?;
 

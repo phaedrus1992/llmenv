@@ -5,6 +5,8 @@
 
 use std::path::Path;
 
+use super::TaskTarget;
+
 use anyhow::Context;
 
 use crate::task::{
@@ -61,16 +63,32 @@ pub(crate) fn reopen_task<'a>(
 /// Errors if an identifier does not resolve, a task is not `done`, a sub-task has a `done`
 /// parent that is not also named, or a save fails. A save error names the tasks that the call
 /// already reopened.
-pub(crate) fn reopen_tasks(state_dir: &Path, inputs: &[String]) -> anyhow::Result<Vec<Task>> {
+#[cfg(test)]
+fn reopen_tasks(state_dir: &Path, inputs: &[String]) -> anyhow::Result<Vec<Task>> {
+    let targets: Vec<TaskTarget<'_>> = inputs.iter().map(TaskTarget::from).collect();
+    reopen_targets(state_dir, &targets)
+}
+
+/// [`reopen_tasks`] for the slugs that the ownership check resolved, so the tasks that were
+/// checked are the tasks that are reopened, with no second lookup (#3477).
+///
+/// # Errors
+/// The errors of [`reopen_tasks`].
+pub(crate) fn reopen_resolved(state_dir: &Path, slugs: &[String]) -> anyhow::Result<Vec<Task>> {
+    let targets: Vec<TaskTarget<'_>> = slugs.iter().map(|s| TaskTarget::Resolved(s)).collect();
+    reopen_targets(state_dir, &targets)
+}
+
+fn reopen_targets(state_dir: &Path, targets: &[TaskTarget<'_>]) -> anyhow::Result<Vec<Task>> {
     let tasks = with_store_lock(state_dir, || {
         // One strict read resolves every name (#3477).
-        for input in inputs {
-            super::resolve::check_identifier(input)?;
+        for target in targets {
+            target.check()?;
         }
         let all_tasks = super::list_tasks_strict(state_dir)?;
         let mut tasks: Vec<Task> = Vec::new();
-        for input in inputs {
-            let slug = super::resolve::resolve_in(state_dir, input, &all_tasks)?;
+        for target in targets {
+            let slug = target.slug_in(state_dir, &all_tasks)?;
             if tasks.iter().all(|t| t.slug != slug) {
                 tasks.push(load_task(state_dir, &slug)?);
             }

@@ -16,12 +16,18 @@ pub(super) fn guard_task(
 }
 
 /// [`guard_task`] for several ids, with one read of the store. The command then acts on the
-/// returned slugs, which are the tasks that were checked (#3477).
+/// returned slugs, which are the tasks that were checked (#3477). The check reads outside the
+/// store lock that the command takes, so a task that another process re-tags between the two
+/// is not checked again; #3478 tracks a check under the lock.
 pub(super) fn guard_tasks(
     state_dir: &std::path::Path,
     ids: &[String],
     other_session: Option<&str>,
 ) -> anyhow::Result<Vec<(String, Option<crate::task::ownership::OverrideNote>)>> {
+    // No id means nothing to check, so the caller lookup does not run before the usage error.
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
     let caller = caller_session_for_task(state_dir)?;
     let inputs: Vec<&str> = ids.iter().map(String::as_str).collect();
     crate::task::ownership::ensure_tasks_are_ours(state_dir, &inputs, &caller, other_session)

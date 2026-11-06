@@ -40,7 +40,7 @@ mod tracking;
 pub(crate) use tracking::{Tracking, tracking, tracking_in};
 pub mod session;
 pub(crate) use progress::{StrictTasks, progress_in, wip_title_in};
-pub(crate) use reopen::{reopen_task, reopen_tasks};
+pub(crate) use reopen::reopen_task;
 pub(crate) use resolve::resolve_identifier;
 
 pub(crate) use relation::Placement;

@@ -2927,7 +2927,7 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 guard_tasks(&state_dir, &ids, other_session.as_deref())?
                     .into_iter()
                     .unzip();
-            for task in crate::task::reopen_tasks(&state_dir, &slugs)? {
+            for task in crate::task::reopen::reopen_resolved(&state_dir, &slugs)? {
                 println!("Reopened '{}' — now {:?}", task.slug, task.state);
             }
             for audit in audits {

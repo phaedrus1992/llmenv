@@ -78,8 +78,7 @@ impl TaskTarget<'_> {
     /// The input is not a valid task identifier.
     pub(crate) fn check(self) -> anyhow::Result<()> {
         match self {
-            Self::Input(input) => check_identifier(input),
-            Self::Resolved(_) => Ok(()),
+            Self::Input(name) | Self::Resolved(name) => check_identifier(name),
         }
     }
 
@@ -90,7 +89,9 @@ impl TaskTarget<'_> {
     pub(crate) fn slug(self, state_dir: &Path) -> anyhow::Result<String> {
         match self {
             Self::Input(input) => resolve_identifier(state_dir, input),
-            Self::Resolved(slug) => Ok(slug.to_string()),
+            // A slug comes from a task file, which a person can edit, so it is checked before it
+            // becomes a path.
+            Self::Resolved(slug) => check_identifier(slug).map(|()| slug.to_string()),
         }
     }
 
@@ -108,7 +109,7 @@ impl TaskTarget<'_> {
                 check_identifier(input)?;
                 resolve_in(state_dir, input, tasks)
             }
-            Self::Resolved(slug) => Ok(slug.to_string()),
+            Self::Resolved(slug) => check_identifier(slug).map(|()| slug.to_string()),
         }
     }
 }
