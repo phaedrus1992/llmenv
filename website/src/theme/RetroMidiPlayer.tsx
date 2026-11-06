@@ -56,12 +56,14 @@ export default function RetroMidiPlayer(): ReactNode {
 
     let cancelled = false;
     let player: MidiPlayer.Player | undefined;
-    let audioContext: AudioContext | undefined;
+    // A holder object, because the lint rule refuses a reassigned variable in an async function.
+    const audio: { context?: AudioContext } = {};
     const activeNotes = new Map<string, ReturnType<Instrument['play']>>();
     let removeInteractionListeners: (() => void) | undefined;
 
     async function setup(): Promise<void> {
-      audioContext = new AudioContext();
+      const audioContext = new AudioContext();
+      audio.context = audioContext;
       const [melodic, percussion] = await Promise.all([
         Soundfont.instrument(audioContext, MELODIC_INSTRUMENT),
         Soundfont.instrument(audioContext, PERCUSSION_INSTRUMENT),
@@ -93,7 +95,7 @@ export default function RetroMidiPlayer(): ReactNode {
       // Browsers block audio autoplay until the user has interacted with the
       // page — try immediately, and fall back to starting on first click/key.
       const tryPlay = () => {
-        void audioContext?.resume().then(() => {
+        void audioContext.resume().then(() => {
           if (!cancelled && player && !player.isPlaying()) player.play();
         });
       };
@@ -114,7 +116,7 @@ export default function RetroMidiPlayer(): ReactNode {
       cancelled = true;
       removeInteractionListeners?.();
       player?.stop();
-      void audioContext?.close();
+      void audio.context?.close();
     };
   }, [enabled, midiUrl]);
 
