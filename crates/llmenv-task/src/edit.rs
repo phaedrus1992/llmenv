@@ -46,6 +46,12 @@ pub fn edit_task<'a>(
             if parent_slug == slug {
                 anyhow::bail!("task '{slug}' cannot be its own parent");
             }
+            let parent_task = all_tasks.as_slice().iter().find(|t| t.slug == parent_slug);
+            ownership::ensure_parent_in_session(
+                parent_task,
+                &parent_slug,
+                task.session.as_deref(),
+            )?;
             reject_cycle(state_dir, &slug, &parent_slug)?;
             task.parent = Some(parent_slug);
         } else if edit.no_parent {

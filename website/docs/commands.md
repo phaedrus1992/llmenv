@@ -887,7 +887,7 @@ re-ingestion on the next turn.
 
 ```text
 llmenv task add <title> [--child-of SLUG | --parallel] [--after SLUG] [--parent SLUG] [--session <id>]
-  [--detail <text> | --detail-file <path>]
+  [--detail <text> | --detail-file <path>] [--other-session <owner-id>]
 llmenv task start <id> [--force] [--reopen] [--other-session <owner-id>]
 llmenv task done <id> [--force] [--other-session <owner-id>]
 llmenv task reopen <id>...
@@ -961,7 +961,11 @@ Only when the open session has no match does the search cover the whole project.
   The refusal names the owning session. To act on the task anyway, pass `--other-session <owner-id>`,
   where `<owner-id>` is that owning session's id. A different id is refused. A bare `--other-session`
   is a usage error. Each override appends a task note that names the calling session,
-  once the command succeeds. `clear` deletes its tasks, so it writes no note.
+  once the command succeeds. `clear` deletes its tasks, so it writes a note on the owning
+  session instead (#3481).
+  `task add --session <id>` refuses a session of another conversation the same way, and a
+  `--parent` in another session is refused (#3480, #3486). An owned session takes a new task
+  only from its owner. A caller with no conversation id is refused for that session.
   A bare `--force` does not override this check.
 - `task done <id> [--force]` — mark a task complete. (changed in v3.12.0) Refuses a parent whose sub-tasks are
   not all `done`, and lists them; `--force` closes it anyway and prints a note.
