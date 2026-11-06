@@ -13,9 +13,7 @@ impl Session {
     pub(crate) fn visible_to(&self, caller: Option<&str>) -> bool {
         owner_visible(self.owner_session(), caller)
     }
-}
 
-impl Session {
     /// Whether a new task from `caller` may join this session (#3480). A session with no owner
     /// takes any task. An owned session takes a task only from its owner, so a caller with no
     /// conversation id is refused. [`Session::visible_to`] allows that caller, which suits a

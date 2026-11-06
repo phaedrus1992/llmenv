@@ -4,9 +4,9 @@
 
 use std::path::Path;
 
-use super::Task;
 use super::resolve::{check_identifier, resolve_in};
 use super::session::{self, EngineIdentity, Session};
+use super::{Task, TaskState};
 
 /// Which session the calling conversation works in.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,7 +43,11 @@ pub(crate) fn caller_session(
     // Strict read: a corrupt session file must not hide the open session that owns this caller (#2665).
     let open = session::open_sessions_strict(state_dir, project)?;
     Ok(match session::pick_open_session(open, owner) {
-        Ok(picked) if picked.visible_to(owner.session_id.as_deref()) => Caller::Session(picked.id),
+        // A caller with no conversation id is not the owner of an owned session. The write
+        // guards must refuse it, as `task add` does (#3480).
+        Ok(picked) if picked.may_take_tasks(owner.session_id.as_deref()) => {
+            Caller::Session(picked.id)
+        }
         Ok(picked) => Caller::Unidentified(format!(
             "the only open session '{}' belongs to another conversation",
             picked.id
@@ -252,10 +256,16 @@ pub(crate) fn check_takes_tasks(session: &Session, owner: &EngineIdentity) -> an
 /// Errors when `parent` belongs to a session other than `child_session`.
 pub(crate) fn ensure_parent_in_session(
     parent: Option<&Task>,
+    parent_slug: &str,
     child_session: Option<&str>,
 ) -> anyhow::Result<()> {
+    // The caller resolved the name just before this check, so a missing task is a bug in the
+    // caller. It must not pass as "no session to compare".
     let Some(parent) = parent else {
-        return Ok(());
+        anyhow::bail!(
+            "parent task '{parent_slug}' was not found. Fix: run `llmenv task ls --all` to list the \
+             task names, then pass one of them."
+        );
     };
     match parent.session.as_deref() {
         None => Ok(()),
@@ -266,6 +276,32 @@ pub(crate) fn ensure_parent_in_session(
             parent.slug
         ),
     }
+}
+
+/// A sub-task needs an unfinished parent in its own session.
+pub(super) fn check_child_parent(parent: &Task, session_id: &str) -> anyhow::Result<()> {
+    if parent.state == TaskState::Done {
+        anyhow::bail!(
+            "task '{}' is done, so it cannot take a sub-task. Reopen it with `llmenv task start \
+             --reopen {}`.",
+            parent.slug,
+            parent.slug
+        );
+    }
+    if parent.session.is_none() {
+        anyhow::bail!(
+            "task '{}' has no session, so it cannot take a sub-task of this one. Fix: add the \
+             sub-task to a parent of a session.",
+            parent.slug
+        );
+    }
+    if parent.session.as_deref() != Some(session_id) {
+        anyhow::bail!(
+            "task '{}' belongs to another session, so it cannot take a sub-task of this one",
+            parent.slug
+        );
+    }
+    Ok(())
 }
 
 /// The refusal text for a session of another conversation. It names the one override.

@@ -65,7 +65,8 @@ pub(super) fn run(state_dir: &Path, args: &AddArgs<'_>) -> anyhow::Result<()> {
         let text = format!("Added with --other-session, which names the owner of session '{id}'.");
         note_task(state_dir, task.slug.as_str(), &text).map_err(|err| {
             anyhow::anyhow!(
-                "task '{}' was added, but its --other-session note was not saved: {err:#}",
+                "task '{}' was added, but its --other-session note was not saved: {err:#}. Do not \
+                 retry the add, or it creates a duplicate task.",
                 task.slug
             )
         })?;

@@ -31,7 +31,10 @@ pub(super) fn resolve_session_for_add(
                 .into_iter()
                 .any(|s| s.id == id && s.is_open());
             if !exists_open {
-                anyhow::bail!("session '{id}' does not exist or is not open");
+                anyhow::bail!(
+                    "session '{id}' does not exist or is not open. Fix: run `llmenv task session ls` \
+                     to list the open sessions, then pass one of their ids."
+                );
             }
             return Ok(id.to_string());
         }
@@ -39,7 +42,8 @@ pub(super) fn resolve_session_for_add(
         SessionChoice::Checked(session) => {
             if !session.is_open() || session.project != project {
                 anyhow::bail!(
-                    "session '{}' is not an open session of this project",
+                    "session '{}' is not an open session of this project. Fix: run `llmenv task \
+                     session ls --current-project` to list them.",
                     session.id
                 );
             }
@@ -59,7 +63,7 @@ pub(super) fn resolve_session_for_add(
         Err(e) => anyhow::bail!(
             "{}",
             e.ambiguity_message("pass --session <id>, or see `llmenv task session ls`")
-                .unwrap_or_default()
+                .unwrap_or_else(|| "more than one session is open, so none was chosen".to_string())
         ),
     }
 }

@@ -453,7 +453,7 @@ enum TaskCommand {
         #[arg(long)]
         session: Option<String>,
         /// Add to a session of another conversation. Pass that session's id as SESSION_ID. Without it, `add --session` refuses such a session.
-        #[arg(long, value_name = "SESSION_ID")]
+        #[arg(long, value_name = "SESSION_ID", requires = "session")]
         other_session: Option<String>,
         #[command(flatten)]
         detail: DetailArgs,
@@ -2898,7 +2898,7 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 other_session: other_session.as_deref(),
                 detail: detail.as_deref(),
             };
-            task_add::run(&state_dir, &args)?;
+            crate::task::with_store_lock(&state_dir, || task_add::run(&state_dir, &args))?;
         }
         TaskCommand::Start {
             id,

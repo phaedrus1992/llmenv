@@ -595,7 +595,7 @@ fn add_task_for_session_with(
                 let parent_task = all_tasks
                     .as_ref()
                     .and_then(|all| all.as_slice().iter().find(|t| t.slug == slug));
-                ownership::ensure_parent_in_session(parent_task, Some(session_id))?;
+                ownership::ensure_parent_in_session(parent_task, &slug, Some(session_id))?;
                 Some(slug)
             }
             ParentSpec::Detached => None,
@@ -605,7 +605,7 @@ fn add_task_for_session_with(
             Placement::Parallel => (explicit_parent, Relation::Queued, true),
             Placement::Child(p) => {
                 let slug = resolve(p)?;
-                check_child_parent(&load_task(state_dir, &slug)?, session_id)?;
+                ownership::check_child_parent(&load_task(state_dir, &slug)?, session_id)?;
                 (Some(slug), Relation::Child, false)
             }
         };
@@ -640,25 +640,6 @@ fn add_task_for_session_with(
         save_task(state_dir, &task)?;
         Ok(task)
     })
-}
-
-/// A sub-task needs an unfinished parent in its own session.
-fn check_child_parent(parent: &Task, session_id: &str) -> anyhow::Result<()> {
-    if parent.state == TaskState::Done {
-        anyhow::bail!(
-            "task '{}' is done, so it cannot take a sub-task. Reopen it with `llmenv task start \
-             --reopen {}`.",
-            parent.slug,
-            parent.slug
-        );
-    }
-    if parent.session.as_deref() != Some(session_id) {
-        anyhow::bail!(
-            "task '{}' belongs to another session, so it cannot take a sub-task of this one",
-            parent.slug
-        );
-    }
-    Ok(())
 }
 
 /// Claim a task, transitioning it to `wip`.
