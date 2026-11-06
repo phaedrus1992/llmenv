@@ -15,7 +15,10 @@ pub(super) fn reject_cycle(state_dir: &Path, slug: &str, new_parent: &str) -> an
     let mut visited = HashSet::new();
     loop {
         if current == slug {
-            anyhow::bail!("setting parent to '{new_parent}' would make '{slug}' its own ancestor");
+            anyhow::bail!(
+                "setting parent to '{new_parent}' would make '{slug}' its own ancestor. Fix: pick \
+                 a parent other than the task itself"
+            );
         }
         if !visited.insert(current.clone()) {
             anyhow::bail!(

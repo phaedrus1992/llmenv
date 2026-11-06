@@ -1,6 +1,7 @@
 //! Picks the session a `llmenv task session` command acts on when no id is named.
 
-use crate::cli::task_guard::guard_session;
+use super::caller_session_for_task;
+use crate::task::ownership::ensure_session_is_ours;
 
 /// Resolve an explicit-or-omitted session id the same way `add_task` does:
 /// omitted resolves through [`crate::task::session::pick_open_session`], so
@@ -41,6 +42,14 @@ pub(super) fn resolve_session_for_read(
         return Ok(id);
     }
     let picked = resolve_session_id(state_dir, project, None)?;
-    guard_session(state_dir, &picked, None)?;
+    let caller = caller_session_for_task(state_dir)?;
+    // The read names its own fix. The write guard's text names `--other-session`, which these
+    // commands do not take.
+    ensure_session_is_ours(&picked, &caller, None).map_err(|_| {
+        anyhow::anyhow!(
+            "session '{picked}' belongs to another conversation. Fix: pass its id as an argument \
+             to read it, for example `llmenv task session show {picked}`"
+        )
+    })?;
     Ok(picked)
 }

@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+use anyhow::Context;
+
 use crate::task::resume::ResumeContext;
 use crate::task::{now_rfc3339, with_store_lock};
 
@@ -28,16 +30,26 @@ pub(crate) fn update_resume(
     })
 }
 
-/// Appends an `--other-session` audit note to session `id`, open or closed. The caller runs it
-/// after its change has saved, so a failed command leaves no note. A closed session is allowed
-/// here, because `session finish` closes the session before it writes the note (#3596).
+/// Appends an `--other-session` audit note to session `id`, open or closed. Nothing is written
+/// when `note` is `None`. The caller runs this after its change has saved, under the same store
+/// lock, so a closed session is allowed here: `session finish` closes the session first (#3596).
 ///
 /// # Errors
-/// Errors if the session cannot be read or written.
-pub(crate) fn append_override_note(state_dir: &Path, id: &str, text: &str) -> anyhow::Result<()> {
+/// Errors if the session cannot be read or written. The change itself is already saved.
+pub(crate) fn append_override_note(
+    state_dir: &Path,
+    id: &str,
+    note: Option<&str>,
+) -> anyhow::Result<()> {
+    let Some(text) = note else {
+        return Ok(());
+    };
     with_store_lock(state_dir, || {
         let mut session = load_existing_session(state_dir, id)?;
         session.resume.append_note(text);
         save_session(state_dir, &session)
+    })
+    .with_context(|| {
+        format!("the change to session '{id}' is saved, but its override note was not written")
     })
 }

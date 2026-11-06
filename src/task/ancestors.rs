@@ -18,7 +18,13 @@ pub(super) fn ancestors_to_start(
     let mut current = child.clone();
     while current.relation == Relation::Child {
         let Some(parent_slug) = current.parent.clone() else {
-            break;
+            anyhow::bail!(
+                "cannot start '{}': sub-task '{}' has no parent. Fix: repair the task file of '{}' \
+                 so that its parent link matches its relation",
+                child.slug,
+                current.slug,
+                current.slug
+            );
         };
         if seen.contains(&parent_slug) {
             anyhow::bail!(
@@ -54,6 +60,8 @@ pub(super) fn ancestors_to_start(
             );
         }
         if parent.state == TaskState::Open {
+            // An open ancestor with no session has no queue to check. It is promoted as before
+            // sessions existed (#3586).
             if !force
                 && let Some(session_id) = &parent.session
                 && let Some(block) = relation::queue_block(

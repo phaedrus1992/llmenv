@@ -131,8 +131,9 @@ fn create(
         Ok(create_under_lock(input, state_dir, subject, project, owner))
     })
     .unwrap_or_else(|e| {
+        tracing::error!(error = %format!("{e:#}"), "task redirect: task store lock failed");
         deny(&format!(
-            "cannot lock the llmenv task store ({e:#}); track this with `llmenv task` manually."
+            "cannot lock the llmenv task store ({e:#}). Fix: run `llmenv doctor`, then retry TaskCreate."
         ))
     })
 }

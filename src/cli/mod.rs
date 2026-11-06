@@ -36,9 +36,7 @@ mod task_add;
 mod task_clear;
 mod task_guard;
 mod task_session_pick;
-use task_guard::{
-    guard_session, guard_task, guard_tasks, record_override, record_session_override,
-};
+use task_guard::{guard_session, guard_task, guard_tasks, record_override};
 use task_session_pick::{resolve_session_for_read, resolve_session_id};
 #[cfg(test)]
 mod init_run_tests;
@@ -3375,11 +3373,11 @@ fn run_task_session_command(
             other_session,
         } => {
             let update = resume_context.into_context()?;
-            let id = resolve_session_id(state_dir, &project, id)?;
             let session = crate::task::with_store_lock(state_dir, || {
+                let id = resolve_session_id(state_dir, &project, id)?;
                 let audit = guard_session(state_dir, &id, other_session.as_deref())?;
                 let session = session::update_resume(state_dir, &id, |r| r.apply(&update))?;
-                record_session_override(state_dir, &id, audit.as_deref())?;
+                session::append_override_note(state_dir, &id, audit.as_deref())?;
                 Ok(session)
             })?;
             println!("Updated resume context for session '{}'", session.id);
@@ -3398,11 +3396,11 @@ fn run_task_session_command(
                 !text.is_empty(),
                 "the note is empty: pass text or pipe it on stdin"
             );
-            let id = resolve_session_id(state_dir, &project, id)?;
             let session = crate::task::with_store_lock(state_dir, || {
+                let id = resolve_session_id(state_dir, &project, id)?;
                 let audit = guard_session(state_dir, &id, other_session.as_deref())?;
                 let session = session::update_resume(state_dir, &id, |r| r.append_note(text))?;
-                record_session_override(state_dir, &id, audit.as_deref())?;
+                session::append_override_note(state_dir, &id, audit.as_deref())?;
                 Ok(session)
             })?;
             println!("Noted session '{}'", session.id);
@@ -3412,11 +3410,11 @@ fn run_task_session_command(
             abandon_open,
             other_session,
         } => {
-            let id = resolve_session_id(state_dir, &project, id)?;
             let outcome = crate::task::with_store_lock(state_dir, || {
+                let id = resolve_session_id(state_dir, &project, id)?;
                 let audit = guard_session(state_dir, &id, other_session.as_deref())?;
                 let outcome = session::finish_session(state_dir, &id, abandon_open)?;
-                record_session_override(state_dir, &id, audit.as_deref())?;
+                session::append_override_note(state_dir, &id, audit.as_deref())?;
                 Ok(outcome)
             })?;
             let (done, total) = (outcome.done, outcome.total);

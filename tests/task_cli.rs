@@ -3146,3 +3146,51 @@ fn session_note_with_other_session_records_a_caller_note_on_the_session() {
             "acted on with --other-session beta",
         ));
 }
+
+// --- #3586: deleting a task with no session records the caller, or is refused ---
+
+#[test]
+fn clearing_a_task_with_no_session_records_on_the_callers_session_or_is_refused() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .env("CLAUDE_CODE_SESSION_ID", "conv-old")
+        .args(["task", "session", "start", "first"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .env("CLAUDE_CODE_SESSION_ID", "conv-old")
+        .args(["task", "add", "orphan one"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .env("CLAUDE_CODE_SESSION_ID", "conv-old")
+        .args(["task", "add", "orphan two"])
+        .assert()
+        .success();
+    // The replace takes both tasks out of their session, so each has no session.
+    llmenv(dir.path())
+        .env("CLAUDE_CODE_SESSION_ID", "conv-new")
+        .args(["task", "session", "start", "second", "--replace"])
+        .assert()
+        .success();
+
+    // A caller with no conversation id has no session to record the deletion on.
+    llmenv(dir.path())
+        .args(["task", "clear", "orphan-two"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no session to record"));
+
+    llmenv(dir.path())
+        .env("CLAUDE_CODE_SESSION_ID", "conv-new")
+        .args(["task", "clear", "orphan-one"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "session", "show", "second"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "Deleted tasks with no session: orphan-one",
+        ));
+}
