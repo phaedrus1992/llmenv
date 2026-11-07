@@ -149,9 +149,9 @@ mod tests {
     /// entry is counted once (#3509).
     #[test]
     fn a_not_found_while_the_path_still_exists_is_a_failure() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = tempfile::TempDir::new().expect("test");
         let present = dir.path().join("present");
-        std::fs::write(&present, b"x").unwrap();
+        std::fs::write(&present, b"x").expect("test");
         let mut report = GcReport::new(false);
         gc_remove(&present, &mut report, "remove", |_| {
             Err(std::io::Error::from(std::io::ErrorKind::NotFound))
