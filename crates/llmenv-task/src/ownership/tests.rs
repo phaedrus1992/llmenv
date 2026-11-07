@@ -2,7 +2,10 @@ use super::super::resume::ResumeContext;
 use super::super::session::{EngineIdentity, StartDecision, StartOutcome, start_session};
 use super::super::session::{StartRequest, start_session_as};
 use super::super::{ParentSpec, SessionChoice, TaskState, add_task, load_task, save_task};
-use super::{Caller, OverrideNote, caller_session, ensure_session_is_ours, ensure_tasks_are_ours};
+use super::{
+    Caller, OverrideNote, caller_session, ensure_parent_in_session, ensure_session_is_ours,
+    ensure_tasks_are_ours,
+};
 
 /// The check for one name, as the commands with one id run it.
 fn ensure_task_is_ours(
@@ -339,4 +342,25 @@ fn the_caller_own_session_returns_no_note() {
     let note = ensure_session_is_ours(&owner, &caller, None).expect("own session is allowed");
 
     assert!(note.is_none(), "no override applied, so no note");
+}
+
+/// A parent with no session is refused for a child of a session, the same as `child_of` refuses
+/// it, because starting the child would change a task that no session owns (#3593).
+#[test]
+fn an_explicit_parent_with_no_session_is_refused_like_child_of() {
+    let dir = TempDir::new().expect("tempdir");
+    let (slug, owner) = open_task_in_session(dir.path());
+    let mut task = load_task(dir.path(), &slug).expect("load task");
+    task.session = None;
+    save_task(dir.path(), &task).expect("save owner-less task");
+    let parent = load_task(dir.path(), &slug).expect("load parent");
+
+    let err = ensure_parent_in_session(Some(&parent), &slug, Some(&owner))
+        .expect_err("a session-less parent must be refused for a child in a session");
+
+    assert!(format!("{err:#}").contains("has no session"), "{err:#}");
+    assert!(
+        ensure_parent_in_session(Some(&parent), &slug, None).is_err(),
+        "a session-less parent is refused for a session-less child too"
+    );
 }
