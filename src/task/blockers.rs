@@ -2,7 +2,42 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::{Task, TaskState};
+use super::*;
+
+/// Record an ordering dependency: `input` is blocked on `on`.
+///
+/// # Errors
+/// Errors if `on` doesn't resolve to an existing task — this is a fresh
+/// write, not a load of possibly-stale state, so it's validated eagerly
+/// (unlike the load-time tolerance for dangling `blocked_on` entries left
+/// behind by a since-deleted task file). Also errors if `input` and `on`
+/// resolve to the same task — a task cannot block itself.
+pub(crate) fn block_task<'a>(
+    state_dir: &Path,
+    target: impl Into<TaskTarget<'a>>,
+    on: &str,
+) -> anyhow::Result<Task> {
+    let target = target.into();
+    with_store_lock(state_dir, || {
+        // One strict read resolves both names (#3477).
+        target.check()?;
+        resolve::check_identifier(on)?;
+        let all_tasks = list_tasks_strict(state_dir)?;
+        let slug = target.slug_in(state_dir, &all_tasks)?;
+        let on_slug = resolve::resolve_in(state_dir, on, &all_tasks)?;
+        if slug == on_slug {
+            anyhow::bail!("task '{slug}' cannot be blocked on itself");
+        }
+        block_cycle::reject_block_cycle(all_tasks.as_slice(), &slug, &on_slug)?;
+        let mut task = load_task(state_dir, &slug)?;
+        if !task.blocked_on.contains(&on_slug) {
+            task.blocked_on.push(on_slug);
+        }
+        task.updated_at = now_rfc3339();
+        save_task(state_dir, &task)?;
+        Ok(task)
+    })
+}
 
 /// True when `task` is neither `done` nor `waiting`, and every one of its
 /// `blocked_on` refs is (recursively) done per [`is_done_including_descendants`].

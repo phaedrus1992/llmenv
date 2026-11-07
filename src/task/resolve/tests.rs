@@ -247,6 +247,36 @@ fn a_checked_session_that_closed_is_refused() {
     assert!(checked.is_open());
 }
 
+/// A session that was open when the caller read it, and closed before the lock, is refused. The
+/// check reads the store again under the lock, so the stale open copy is not trusted.
+#[test]
+fn a_checked_session_that_closes_after_the_read_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let id = open_session(dir.path(), StartDecision::Auto);
+    let read = session::list_sessions_strict(dir.path()).unwrap();
+    let stale_open = read.iter().find(|s| s.id == id).unwrap();
+    session::finish_session(dir.path(), &id, true).unwrap();
+    let err = crate::task::add_task(
+        dir.path(),
+        "Too late",
+        crate::task::ParentSpec::Detached,
+        crate::task::SessionChoice::Checked(stale_open),
+        PROJECT,
+    )
+    .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("not an open session"),
+        "{err:#}"
+    );
+    assert!(
+        crate::task::list_tasks_strict(dir.path())
+            .unwrap()
+            .as_slice()
+            .is_empty(),
+        "no task may land in the closed session"
+    );
+}
+
 /// A bad `--after` name is refused before a broken store is read (#3477).
 #[test]
 fn a_bad_after_name_is_refused_before_a_broken_store_is_read() {

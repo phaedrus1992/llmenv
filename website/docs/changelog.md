@@ -71,6 +71,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Refuse a task blocker that would close a loop, from `task block` and `task edit --block-on`. [fix:task] [#3505]
+- Check the session of `task add` under the task store lock, wait at most ten seconds for that lock, and name every promoted ancestor when a `task start` save fails. [fix:task] [#3505]
+- Say that the task store cannot be read when a TaskUpdate fails on it, not that the id is wrong. [fix:hook] [#3505]
+- Keep the notice of a failed detached job to a fixed text, with the cause in the log, so one project's text does not reach another project's agent through the notice spool. A folder of broken spool entries no longer starves the notices after it. [fix:hook] [#3507]
+- Tell the agent about failures that hooks only logged: a dropped `on_failure: block`, a transcript line longer than the tail window, a failed spawn of a store or consolidation job, a failed consolidation store, and a refused session id. [fix:hook] [#3506] [#3507]
+- Refuse a state file that ends inside a character, with its path in the error, instead of reading a shorter text. Name a codebase-memory result that is over its size cap. [fix:cli] [#3508]
+- Keep the `llmenv memory diff` baseline when the recall reaches its record limit, and say when `llmenv memory prune` read that limit. A recall reply that is not a list no longer echoes its text into the error. [fix:cli] [#3508]
+- Keep a `.tmp` staging folder in the cache gc while its writer is alive. Count a removal only when the path is gone, keep every failure cause, and keep a copy whose age cannot be read. [fix:materialize] [#3509]
+- Report a malformed `hooks` or `statusLine` value in `llmenv doctor` as unreadable, and read the llmenv program past an `env NAME=value` prefix. [fix:cli] [#3509]
 - Count and name only this conversation's task sessions in the status line `tasks` widget, plus sessions with no owner. Two conversations in one project no longer see each other's work. [fix:statusline] [#3196]
 - Tell the agent once per session when a bundle fires with no content folder, so a memory backend that it may declare is not silently missing. [fix:hook] [#3218]
 - Tell the agent when session-log retention is skipped, when the reaper cannot remove or read its folder, or when a session log has a future modified time. These failures were logged only at a level the hook hides. [fix:hook] [#3379]

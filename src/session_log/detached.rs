@@ -130,6 +130,11 @@ fn spawn_record_in(
         && let Err(e) = stdin.write_all(payload_json.as_bytes())
     {
         record_lost(&format!("the event cannot be sent to the record job: {e}"));
+        // The child would read no event and record a second notice of its own, so it is stopped.
+        if let Err(kill) = child.kill() {
+            tracing::error!(error = %kill, "cannot stop the record job that got no event");
+        }
+        return None;
     }
     // Not waited on by the caller: the child is process-group-detached and
     // outlives us.
@@ -181,12 +186,13 @@ pub(crate) fn run_record(
         started: t0,
         exit: i32::from(result.is_err()),
     });
+    // The notice names the setting to check. The cause stays in the log (#3507).
     result.inspect_err(|e| {
-        // The child runs alone, so the notice reaches the agent through the spool (#3398).
-        crate::agent_notice::record_logged(format!(
-            "llmenv: a session log record was not written: {e:#}. Fix: run `llmenv doctor` to \
-             check session_log.file.path."
-        ));
+        crate::agent_notice::record_job_notice_with_cause(
+            "llmenv: a session log record was not written. Fix: run `llmenv doctor` to check \
+             session_log.file.path. The cause is in the llmenv log.",
+            e,
+        );
     })
 }
 

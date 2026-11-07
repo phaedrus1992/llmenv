@@ -41,8 +41,8 @@ fn parse_refuses_a_text_reply_and_names_the_upgrade() {
     assert!(matches!(err, RecallJsonError::NotAList { .. }), "{err:?}");
     let text = err.to_string();
     assert!(
-        text.contains("starts with \"--- 01JB7Q ---   topic: \""),
-        "{text}"
+        !text.contains("01JB7Q"),
+        "the error must not echo the reply: {text}"
     );
     assert!(
         text.contains("Fix: upgrade icm to 0.11.5 or later"),
@@ -92,12 +92,11 @@ fn parse_refuses_a_record_that_is_not_an_object() {
 }
 
 #[test]
-fn a_bad_reply_is_quoted_short_and_on_one_line() {
-    let long = format!("x\n{}", "y".repeat(500));
-    let RecallJsonError::NotAList { start, .. } = parse(&long).unwrap_err() else {
-        unreachable!("want NotAList");
-    };
-    assert_eq!(start, format!("x {}", "y".repeat(QUOTE_CHARS - 2)));
+fn a_reply_that_is_not_a_list_never_echoes_its_text() {
+    let err = parse("MARK-memory text that is not a list").unwrap_err();
+    assert!(matches!(err, RecallJsonError::NotAList { .. }), "{err:?}");
+    assert!(!err.to_string().contains("MARK"), "{err}");
+    assert!(err.to_string().contains("Fix:"), "{err}");
 }
 
 fn arb_record() -> impl Strategy<Value = RecallRecord> {
@@ -149,12 +148,38 @@ proptest! {
         );
     }
 
-    /// Any text reads or fails, and a failure never quotes more than the quote limit.
+    /// Any text reads or fails, and a failure never echoes the reply, so memory text cannot reach
+    /// an error line (#3508).
     #[test]
-    fn parse_never_panics_and_quotes_little(body in "\\PC{0,300}") {
-        if let Err(RecallJsonError::NotAList { start, .. }) = parse(&body) {
-            prop_assert!(start.chars().count() <= QUOTE_CHARS);
-            prop_assert!(!start.contains('\n'));
+    fn parse_never_panics_and_never_echoes_the_reply(body in "\\PC{0,300}") {
+        let marked = format!("MARK{body}");
+        if let Err(e) = parse(&marked) {
+            prop_assert!(!e.to_string().contains("MARK"), "{e}");
         }
+    }
+
+}
+
+proptest! {
+    /// No strict prefix of a complete reply list reads as a shorter list. A cut reply is an error,
+    /// so a caller never stores a partial list as if it were whole (#3508).
+    #[test]
+    fn a_cut_reply_list_never_reads_as_a_shorter_list(
+        count in 1usize..4,
+        text in "[a-z]{1,8}",
+    ) {
+        let values: Vec<serde_json::Value> = (0..count)
+            .map(|i| serde_json::json!({
+                "id": format!("id{i}"),
+                "topic": text.clone(),
+                "summary": text.clone(),
+                "importance": "high",
+            }))
+            .collect();
+        let body = serde_json::to_string(&values).unwrap_or_default();
+        for cut in 0..body.len() {
+            prop_assert!(parse(&body[..cut]).is_err(), "cut at {cut} read as a list");
+        }
+        prop_assert_eq!(parse(&body).map(|records| records.len()).ok(), Some(count));
     }
 }
