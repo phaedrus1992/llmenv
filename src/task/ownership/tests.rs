@@ -359,4 +359,8 @@ fn an_explicit_parent_with_no_session_is_refused_like_child_of() {
         .expect_err("a session-less parent must be refused for a child in a session");
 
     assert!(format!("{err:#}").contains("has no session"), "{err:#}");
+    assert!(
+        ensure_parent_in_session(Some(&parent), &slug, None).is_err(),
+        "a session-less parent is refused for a session-less child too"
+    );
 }

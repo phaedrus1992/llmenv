@@ -59,20 +59,6 @@ fn a_loop_among_the_ancestors_fails_the_parent_change_with_its_fix() {
     assert!(msg.contains("Fix:"), "must state the fix: {msg}");
 }
 
-/// Writes stored task `p{i}`, with `null` for no parent and `p{j}` for a parent link.
-fn write_indexed_task(dir: &std::path::Path, index: usize, parent: Option<usize>) {
-    let path = task_path(dir, &format!("p{index}"));
-    std::fs::create_dir_all(path.parent().expect("task dir")).expect("mkdir");
-    let body = serde_json::json!({
-        "slug": format!("p{index}"),
-        "title": format!("p{index}"),
-        "parent": parent.map(|j| format!("p{j}")),
-        "created_at": "2026-01-01T00:00:00Z",
-        "updated_at": "2026-01-01T00:00:00Z",
-    });
-    std::fs::write(&path, body.to_string()).expect("write task");
-}
-
 /// The answer a walk over the same links gives: `true` when `new_parent` reaches a root with no
 /// parent, without passing task 0 or a loop or a missing task. Task indexes at or past the
 /// length are missing.
@@ -104,7 +90,7 @@ proptest::proptest! {
     ) {
         let dir = TempDir::new().unwrap();
         for (index, parent) in parents.iter().enumerate() {
-            write_indexed_task(dir.path(), index, *parent);
+            write_chain_task(dir.path(), index, *parent, false, true);
         }
         let new_parent_name = format!("p{new_parent}");
         let accepted = reject_cycle(dir.path(), "p0", &new_parent_name).is_ok();

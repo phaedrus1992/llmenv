@@ -286,7 +286,8 @@ pub(crate) fn check_takes_tasks(session: &Session, owner: &EngineIdentity) -> an
 /// the other session's task. A parent with no session is refused too (#3593).
 ///
 /// # Errors
-/// Errors when `parent` belongs to a session other than `child_session`.
+/// Errors when `parent` belongs to a session other than `child_session`, or when `parent`
+/// has no session.
 pub(crate) fn ensure_parent_in_session(
     parent: Option<&Task>,
     parent_slug: &str,
@@ -300,21 +301,19 @@ pub(crate) fn ensure_parent_in_session(
              task names, then pass one of them."
         );
     };
-    // A parent with no session is refused as well, as `child_of` refuses it (#3593). Starting a
-    // child promotes its open ancestors, so an owner-less parent would change a task that no
-    // session owns.
+    // A session-less parent is refused for every child (#3593). Starting a child promotes its
+    // open ancestors, so an owner-less parent would change a task that no session owns.
     match parent.session.as_deref() {
-        session if session == child_session => Ok(()),
+        Some(session) if Some(session) == child_session => Ok(()),
         Some(session) => anyhow::bail!(
             "task '{}' belongs to session '{session}', so it cannot be the parent of a task in \
              another session. Link a task of the same session, or none.",
             parent.slug
         ),
         None => anyhow::bail!(
-            "task '{}' has no session, so it cannot be the parent of a task in session '{}'. Fix: \
-             link a task of the same session, or none.",
-            parent.slug,
-            child_session.unwrap_or("none")
+            "task '{}' has no session, so it cannot be the parent of a task. Fix: link a task \
+             of a session, or none.",
+            parent.slug
         ),
     }
 }

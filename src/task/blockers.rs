@@ -39,7 +39,17 @@ pub(super) fn is_done_including_descendants(
 ) -> bool {
     // A loop is not done. This fails closed, so the task stays out of the next-task choice, and
     // `start_task` reports the loop with its fix (#3601).
-    matches!(first_undone_in_subtree(slug, waiter, by_slug), Ok(None))
+    match first_undone_in_subtree(slug, waiter, by_slug) {
+        Ok(undone) => undone.is_none(),
+        Err(err) => {
+            tracing::warn!(
+                error = %format!("{err:#}"),
+                blocker = slug,
+                "task next: a blocker walk failed, so the task is not offered"
+            );
+            false
+        }
+    }
 }
 
 /// The first task in `slug`'s subtree (skipping `waiter`'s) that holds
