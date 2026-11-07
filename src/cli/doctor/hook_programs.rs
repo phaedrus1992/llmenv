@@ -48,7 +48,7 @@ fn classify(command: &str) -> Command {
             Command::Other
         };
     };
-    match words.as_slice() {
+    match skip_env_prefix(command, &words) {
         [program, subcommand, ..] if LLMENV_SUBCOMMANDS.contains(&subcommand.as_str()) => {
             if program.is_empty() {
                 Command::Unreadable
@@ -58,6 +58,39 @@ fn classify(command: &str) -> Command {
         }
         _ => Command::Other,
     }
+}
+
+/// The words after a leading `env` and its `NAME=value` assignments. A hook command can start with
+/// them, so the program is the first word after they are skipped (#3509).
+///
+/// The prefix is read from the raw, unquoted tokens of `command`. A quoted word such as `'a='` is a
+/// command name to the shell, not an assignment, and the split words cannot show the quotes.
+fn skip_env_prefix<'a>(command: &str, words: &'a [String]) -> &'a [String] {
+    let skipped = command
+        .split_whitespace()
+        .take_while(|token| *token == "env" || is_assignment(token))
+        .count();
+    &words[skipped.min(words.len())..]
+}
+
+/// Whether `word` is a shell `NAME=value` assignment, with a name that is a plain identifier.
+fn is_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        !name.is_empty()
+            && !name.starts_with(|c: char| c.is_ascii_digit())
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+/// The reason a `hooks` or `statusLine` value cannot be read, or `None` when it has a usable shape.
+fn malformed_shape(settings: &serde_json::Value) -> Option<&'static str> {
+    if settings.get("hooks").is_some_and(|h| !h.is_object()) {
+        return Some("the \"hooks\" value is not an object of hook events");
+    }
+    if settings.get("statusLine").is_some_and(|s| !s.is_object()) {
+        return Some("the \"statusLine\" value is not an object with a command");
+    }
+    None
 }
 
 /// Every hook command and the status line command in a rendered `settings.json`.
@@ -82,6 +115,9 @@ fn commands(settings: &serde_json::Value) -> Vec<&str> {
 /// The programs and the unreadable llmenv commands in `settings`.
 pub(super) fn rendered_programs(settings: &serde_json::Value) -> RenderedPrograms {
     let mut out = RenderedPrograms::default();
+    if let Some(reason) = malformed_shape(settings) {
+        out.unreadable.push(reason.to_string());
+    }
     for command in commands(settings) {
         match classify(command) {
             Command::Llmenv(program) => {
@@ -136,10 +172,31 @@ mod tests {
             rendered_programs(&serde_json::json!({})),
             RenderedPrograms::default()
         );
+    }
+
+    /// A `hooks` or `statusLine` value of the wrong shape is unreadable, not an absent hook, so
+    /// doctor does not report "no llmenv hook command" for a file it could not read (#3509).
+    #[test]
+    fn a_malformed_hooks_or_status_line_is_unreadable() {
+        let hooks = rendered_programs(&serde_json::json!({"hooks": "x"}));
+        assert!(hooks.programs.is_empty(), "{hooks:?}");
+        assert_eq!(hooks.unreadable.len(), 1, "{hooks:?}");
+        let status = rendered_programs(&serde_json::json!({"statusLine": ["x"]}));
+        assert_eq!(status.unreadable.len(), 1, "{status:?}");
+    }
+
+    /// An `env NAME=value` prefix does not hide the program of an llmenv hook command (#3509).
+    #[test]
+    fn an_env_prefix_does_not_hide_the_llmenv_program() {
         assert_eq!(
-            rendered_programs(&serde_json::json!({"hooks": "x"})),
-            RenderedPrograms::default()
+            classify("env CLAUDE_CONFIG_DIR=/x /opt/bin/llmenv hook-run"),
+            Command::Llmenv(PathBuf::from("/opt/bin/llmenv"))
         );
+        assert_eq!(
+            classify("FOO=1 BAR=2 llmenv throttle"),
+            Command::Llmenv(PathBuf::from("llmenv"))
+        );
+        assert_eq!(classify("env FOO=1 cat file"), Command::Other);
     }
 
     /// Each llmenv subcommand that the adapters write into a hook command is in the list.

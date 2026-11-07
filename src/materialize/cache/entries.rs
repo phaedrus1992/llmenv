@@ -74,3 +74,9 @@ mod tests {
         assert!(got[0].1.contains("/cache"), "{got:?}");
     }
 }
+
+/// Whether `p` itself is gone from the disk. A NotFound from a child of a folder that still exists
+/// is not a removal, because the folder is still there to be seen and counted (#3509).
+pub(crate) fn is_gone(p: &Path) -> bool {
+    matches!(std::fs::symlink_metadata(p), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+}

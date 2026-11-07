@@ -17,8 +17,8 @@ pub use gc::gc;
 mod mtime;
 mod owner;
 mod write_bits;
-pub(crate) use entries::is_vanished;
 use entries::{entry_and_type, skip_vanished};
+pub(crate) use entries::{is_gone, is_vanished};
 use write_bits::remove_dir_all_forcing_writable;
 
 pub use crate::materialize::expiry::AgeRule;
@@ -396,8 +396,11 @@ fn remove_dir(p: &Path, dry_run: bool, report: &mut PruneReport) {
         return;
     }
     // An entry that another process removed first is gone, which is the goal (#3423).
-    match skip_vanished(remove_dir_all_forcing_writable(p)) {
-        Ok(_) => report.removed.push(p.to_path_buf()),
+    match remove_dir_all_forcing_writable(p) {
+        Ok(()) => report.removed.push(p.to_path_buf()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && entries::is_gone(p) => {
+            report.removed.push(p.to_path_buf());
+        }
         Err(e) => {
             tracing::error!(
                 path = %p.display(),
