@@ -134,9 +134,8 @@ fn a_child_that_fails_before_it_runs_reaches_the_next_hook() {
         "the child must refuse the checkpoint"
     );
 
+    // The agent gets the fixed notice. The cause stays in the log (#3507).
     let stdout = stop_hook_stdout(dir.path(), &config);
-    assert!(
-        stdout.contains("a detached job failed before it could run"),
-        "{stdout}"
-    );
+    assert!(stdout.contains("a detached job failed. Fix:"), "{stdout}");
+    assert!(!stdout.contains("elsewhere.json"), "{stdout}");
 }

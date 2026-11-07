@@ -8,9 +8,10 @@ use super::*;
 /// Tells the user and the agent that a plugin is not loaded. A plugin with no install
 /// path would load from the marketplace path, which does not hold its payload (#2750).
 ///
-/// The cause is a fixed phrase, or a manifest read error, which names a path and a parse
-/// position only. A payload lookup error can carry a plugin source URL, and that text goes into
-/// the agent's context, so the caller logs that detail and passes a fixed phrase.
+/// The cause is a fixed phrase. A manifest read error is logged by the caller and not passed here,
+/// because a parse error can quote the manifest. A payload lookup error can carry a plugin source
+/// URL, and that text goes into the agent's context, so the caller logs that detail and passes a
+/// fixed phrase.
 fn note_unloaded_plugin(plugin: &str, marketplace: &str, cause: &str) {
     let notice = format!(
         "llmenv: plugin '{plugin}@{marketplace}' was not loaded: {cause}. Fix: run \
@@ -70,10 +71,12 @@ pub(super) fn sync_plugin_payloads(
                         "cannot read marketplace manifest for '{}': {cause}",
                         p.marketplace
                     );
+                    // A serde type error quotes the manifest value, which may come from a cloned
+                    // repo. The detail stays in the log above (#3507).
                     note_unloaded_plugin(
                         &p.plugin,
                         &p.marketplace,
-                        &format!("its marketplace manifest is unreadable: {cause}"),
+                        "its marketplace manifest is unreadable (see the log)",
                     );
                     return None;
                 }
@@ -230,9 +233,10 @@ mod tests {
                 .lines()
                 .find(|line| line.contains(&format!("'{dropped}@unreadable-3447' was not loaded")))
                 .unwrap_or_default();
+            // The notice names the fix, and the parse detail stays in the log (#3507).
             assert!(
-                line.contains("marketplace.json") && line.contains("line 1"),
-                "{dropped} needs a notice with the cause: {notices}"
+                line.contains("(see the log)") && !line.contains("line 1"),
+                "{dropped} needs a fixed notice without the parse detail: {notices}"
             );
         }
     }

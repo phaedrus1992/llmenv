@@ -62,11 +62,13 @@ impl NoticeList {
     /// repeats does not repeat its text. The text is cleaned first: control and bidirectional
     /// characters are removed, line breaks become spaces, and the text is capped, because a
     /// failure text can carry server or URL content and `current` joins notices with newlines.
-    fn record(&mut self, notice: impl Into<String>) {
+    fn record(&mut self, notice: impl Into<String>) -> bool {
         let notice = clean(&notice.into());
-        if !self.notices.contains(&notice) {
-            self.notices.push(notice);
+        if self.notices.contains(&notice) {
+            return false;
         }
+        self.notices.push(notice);
+        true
     }
 
     /// Every notice, one per line, or `None` when there is none.
@@ -82,11 +84,15 @@ static NOTICES: Mutex<NoticeList> = Mutex::new(NoticeList::new());
 /// the notice to the spool, so the next hook run carries it (#3398).
 pub(crate) fn record(notice: impl Into<String>) {
     let notice = clean(&notice.into());
-    spool::write(&notice);
-    NOTICES
+    // A repeat of a notice in this process is not written to the spool again, so it does not use
+    // up the reads of the next hook run (#3507).
+    let fresh = NOTICES
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .record(notice);
+        .record(notice.clone());
+    if fresh {
+        spool::write(&notice);
+    }
 }
 
 /// Log `notice` at error level, which the default filter shows, and add it for the agent. The
@@ -125,14 +131,19 @@ pub(crate) fn no_state_folder(skipped: &str, error: &anyhow::Error) {
     ));
 }
 
-/// Record the top-level error of a detached child, so the next hook run shows it (#3398). Does
-/// nothing in a process that does not spool, where `main` prints the error itself.
+/// The agent notice for a failed detached child. It holds no error text, because the cause is in the
+/// log (#3507).
+pub(crate) const DETACHED_JOB_NOTICE: &str = "llmenv: a detached job failed. Fix: run `llmenv \
+     doctor` to check the state folder and the config. The cause is in the llmenv log.";
+
+/// Record that a detached child failed, so the next hook run shows it (#3398). The agent gets a
+/// fixed text, because the spool is read by whichever project runs the next hook, and the error
+/// chain can quote another project's text (#3507). The chain goes to the log. Does nothing in a
+/// process that does not spool, where `main` prints the error itself.
 pub fn record_detached_job_failure(error: &anyhow::Error) {
+    tracing::error!(error = %format!("{error:#}"), "a detached job failed");
     if spool::active() {
-        record_logged(format!(
-            "llmenv: a detached job failed before it could run: {error:#}. Fix: run `llmenv \
-             doctor` to check the state folder and the config."
-        ));
+        record(DETACHED_JOB_NOTICE);
     }
 }
 

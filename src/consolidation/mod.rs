@@ -36,8 +36,10 @@ use crate::hook_run::mcp_client::McpHttpClient;
 
 mod bullets;
 mod phase;
+mod store_new;
 use phase::{note_phase, notice, saved_summary, settle};
 mod dedup;
+use store_new::store_new_rules;
 
 /// Hard timeout for the LLM backend call.
 const LLM_TIMEOUT: Duration = Duration::from_secs(120);
@@ -506,44 +508,6 @@ async fn store_rule(
     Ok(())
 }
 
-/// Store each rule that no stored rule or earlier rule in `rules` matches.
-/// Returns the number stored and the number skipped as duplicates.
-async fn store_new_rules(
-    client: &McpHttpClient,
-    state_dir: Option<&std::path::Path>,
-    run: &RunScope<'_>,
-    rules: &[&str],
-) -> (usize, usize) {
-    let project = run.project;
-    let mut stored = 0usize;
-    let mut duplicates = 0usize;
-    let mut batch: Vec<&str> = Vec::new();
-    for rule in rules.iter().copied() {
-        match dedup::is_stored(client, project, rule).await {
-            Ok(false) if !dedup::matches_any(rule, batch.iter().copied()) => {}
-            Ok(_) => {
-                duplicates += 1;
-                continue;
-            }
-            Err(e) => {
-                tracing::error!(
-                    project,
-                    "consolidation: duplicate check failed, rule skipped: {e:#}"
-                );
-                continue;
-            }
-        }
-        batch.push(rule);
-        match store_rule(client, state_dir, run, rule).await {
-            Ok(()) => stored += 1,
-            Err(e) => {
-                tracing::error!("consolidation: failed to store rule (fail-soft): {e:#}");
-            }
-        }
-    }
-    (stored, duplicates)
-}
-
 /// The line that a consolidation run logs. A rule whose duplicate check or store failed is
 /// counted, so the log says that the next run tries it again.
 fn summary(
@@ -558,7 +522,7 @@ fn summary(
     );
     if failed > 0 {
         msg.push_str(&format!(
-            ", failed: {failed}, tried again on the next run; the log above names each cause"
+            ", failed: {failed}, tried again on the next run; the notices name each cause"
         ));
     }
     msg.push(')');
@@ -714,6 +678,13 @@ pub(crate) async fn run(
     if rules.is_empty() {
         let msg = format!("consolidation: LLM returned no rules (parsed {records} records)");
         tracing::debug!("{msg}");
+        // A reply with text and no `- ` bullet is a format change, not an empty result. Its
+        // content would be lost with no notice (#3507).
+        if !llm_output.trim().is_empty() {
+            notice(
+                "consolidation: the model reply has no '- ' rule bullets, so nothing was stored",
+            );
+        }
         settle(checkpoint);
         return Ok(msg);
     }
@@ -1212,7 +1183,7 @@ mod tests {
         );
         let failed = summary(9, 3, "Claude", (1, 1, 1));
         assert!(
-            failed.ends_with("duplicates skipped: 1, failed: 1, tried again on the next run; the log above names each cause)"),
+            failed.ends_with("duplicates skipped: 1, failed: 1, tried again on the next run; the notices name each cause)"),
             "{failed}"
         );
     }
