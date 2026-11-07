@@ -54,11 +54,11 @@ mod tests {
     use super::read_dedup_snapshot;
 
     #[test]
-    fn a_cut_snapshot_reads_as_the_text_before_the_cut_character() {
+    fn a_snapshot_cut_inside_a_character_is_unread_so_the_chunk_is_stored_again() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("session_end_dedup");
         std::fs::write(&path, b"chunk \xe2\x82").expect("write snapshot");
-        assert_eq!(read_dedup_snapshot(&path).as_deref(), Some("chunk "));
+        assert_eq!(read_dedup_snapshot(&path), None);
     }
 
     #[test]
@@ -78,7 +78,7 @@ mod tests {
         /// A stored chunk reads back whole, and any cut of it reads as a prefix of the chunk,
         /// never as `None`, so a cut snapshot is compared and replaced, not lost.
         #[test]
-        fn a_stored_chunk_or_any_cut_of_it_reads_as_a_prefix(
+        fn a_cut_inside_a_character_is_unread_and_any_other_cut_is_a_prefix(
             chunk in "\\PC{0,40}",
             cut in proptest::prelude::any::<proptest::sample::Index>(),
         ) {
@@ -87,9 +87,14 @@ mod tests {
             std::fs::write(&path, &chunk).expect("write snapshot");
             proptest::prop_assert_eq!(read_dedup_snapshot(&path), Some(chunk.clone()));
             let bytes = chunk.as_bytes();
-            std::fs::write(&path, &bytes[..cut.index(bytes.len() + 1)]).expect("write cut");
-            let read = read_dedup_snapshot(&path).expect("a cut snapshot still reads");
-            proptest::prop_assert!(chunk.starts_with(&read));
+            let len = cut.index(bytes.len() + 1);
+            std::fs::write(&path, &bytes[..len]).expect("write cut");
+            let read = read_dedup_snapshot(&path);
+            if std::str::from_utf8(&bytes[..len]).is_err() {
+                proptest::prop_assert_eq!(read, None);
+            } else {
+                proptest::prop_assert_eq!(read.as_deref(), Some(&chunk[..len]));
+            }
         }
     }
 }

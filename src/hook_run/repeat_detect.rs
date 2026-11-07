@@ -87,7 +87,7 @@ impl SessionState {
 
     fn load(state_dir: &Path, session_id: &str) -> Self {
         let path = session_state_path(state_dir, session_id);
-        match crate::paths::bounded::state_text_io(&path) {
+        match crate::paths::bounded::state_json_text_io(&path) {
             Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
                 crate::agent_notice::record_logged(format!("llmenv: repeat-detect state {} cannot be parsed ({e}), so it starts fresh. Fix: delete that file to clear this error.", path.display()));
                 Self::new(session_id)
@@ -171,11 +171,11 @@ pub(crate) fn handle_pre_tool_use(
     if !crate::paths::is_valid_short_name(session_id) {
         // A rejected session_id means the hook's own harness sent an unsafe
         // value -- worth surfacing even though the rejection itself is safe.
-        // `error!`, not `warn!`: see the #1133 precedent below. Found during
-        // #1209's pre-pr-review: read_once.rs's identical check already logs.
+        // `error!`, not `warn!`, because the default log filter drops warnings (#1133).
         crate::agent_notice::record_logged(
             "llmenv: the repeat check is off for this event, because the session id is not \
-             safe in a file name.",
+             safe in a file name. Fix: none in this session. If it repeats, report the session \
+             id format to llmenv.",
         );
         return String::new();
     }

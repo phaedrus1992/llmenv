@@ -33,11 +33,18 @@ fn summary_lines(result: &PruneResult) -> Vec<String> {
     let mut lines = vec![
         title.to_owned(),
         format!("  Total records:       {}", result.total),
+    ];
+    // icm returns at most the recall limit, so a full read may hold more records than the summary
+    // counts (#3508).
+    if let Some(note) = crate::memory::recall_json::read_limit_note(result.total) {
+        lines.push(note);
+    }
+    lines.extend([
         format!("  critical (kept):     {}", result.critical),
         format!("  high (kept):         {}", result.high),
         format!("  {medium}{}", result.medium),
         format!("  {low}{}", result.low),
-    ];
+    ]);
     if result.unknown > 0 {
         lines.push(format!(
             "  unknown (kept):      {} (an importance that prune does not know)",
@@ -198,5 +205,15 @@ mod tests {
         };
         let text = joined(&result);
         assert!(text.contains("unknown (kept):      1"), "{text}");
+    }
+
+    #[test]
+    fn a_read_at_the_limit_says_more_may_exist() {
+        let limit = usize::try_from(crate::memory::recall_json::BUDGET_MAX_LIMIT).unwrap_or(0);
+        assert!(crate::memory::recall_json::read_limit_note(limit.saturating_sub(1)).is_none());
+        assert!(
+            crate::memory::recall_json::read_limit_note(limit)
+                .is_some_and(|note| note.contains("more may exist"))
+        );
     }
 }

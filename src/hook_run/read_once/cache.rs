@@ -36,7 +36,7 @@ impl SessionCache {
     /// parse error (fail-soft). A read error also marks the cache so `save` leaves the file alone.
     pub fn load(state_dir: &Path, session_id: &str, ttl_seconds: u64) -> Self {
         let path = session_cache_path(state_dir, session_id);
-        let mut cache: Self = match crate::paths::bounded::state_text_io(&path) {
+        let mut cache: Self = match crate::paths::bounded::state_json_text_io(&path) {
             Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
                 tracing::error!(
                     "failed to parse read-once cache {}, starting empty: {e}",

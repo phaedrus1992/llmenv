@@ -148,8 +148,10 @@ fn a_huge_result_file_is_read_up_to_the_bound() {
     text.push_str(&"x".repeat(200_000));
     text.push_str("\"}");
     std::fs::write(path, text).unwrap();
-    // The bound cuts the JSON, so it does not parse and the line says so.
-    assert!(check(dir.path(), project).1.contains("result not readable"));
+    // The file is over the cap, so the line names the cap and not a JSON error from the cut.
+    let text = check(dir.path(), project).1;
+    assert!(text.contains("over the"), "{text}");
+    assert!(text.contains("-byte cap"), "{text}");
 }
 
 #[test]

@@ -212,4 +212,28 @@ mod lock_notice_tests {
             prop_assert_eq!(lock_holder(&lock).expect("test"), None);
         }
     }
+
+    /// A lock cut inside its last character is an error, not a holder with a shorter pid. A pid
+    /// that reads short could name a live process (#3508).
+    #[test]
+    fn a_lock_cut_inside_its_last_character_is_an_error() {
+        let dir = tempfile::tempdir().expect("test");
+        let lock = dir.path().join("proxy.lock");
+        std::fs::write(&lock, b"4242\xe2\x82").expect("test");
+        let err = lock_holder(&lock).expect_err("a cut lock must not read as a pid");
+        assert!(
+            format!("{err:#}").contains("reading proxy lockfile"),
+            "{err:#}"
+        );
+    }
+
+    /// The same rule for the pidfile: a cut pid is an error, not a shorter pid.
+    #[test]
+    fn a_pidfile_cut_inside_its_last_character_is_an_error() {
+        let dir = tempfile::tempdir().expect("test");
+        let pid = dir.path().join("proxy.pid");
+        std::fs::write(&pid, b"4242\xe2\x82").expect("test");
+        let err = super::super::read_pidfile(&pid).expect_err("a cut pidfile must not read");
+        assert!(matches!(err, super::super::PidfileError::Io(_)), "{err:?}");
+    }
 }

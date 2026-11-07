@@ -40,14 +40,19 @@ pub(super) fn resolve_session_for_add(
         }
         SessionChoice::Resolve(owner) => owner,
         SessionChoice::Checked(session) => {
-            if !session.is_open() || session.project != project {
-                anyhow::bail!(
+            // The caller's copy was read before the store lock. The state is read again here,
+            // under the lock, so a session finished in between is refused.
+            let fresh = session::list_sessions_strict(state_dir)?
+                .into_iter()
+                .find(|s| s.id == session.id);
+            match fresh {
+                Some(s) if s.is_open() && s.project == project => return Ok(s.id),
+                _ => anyhow::bail!(
                     "session '{}' is not an open session of this project. Fix: run `llmenv task \
                      session ls` to list the open sessions.",
                     session.id
-                );
+                ),
             }
-            return Ok(session.id.clone());
         }
     };
     let open = session::open_sessions_strict(state_dir, project)?;
