@@ -348,6 +348,8 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 - Record the caller on the session when `llmenv task session edit`, `note`, or `finish` uses `--other-session`, including a closed session. Before, no record named the caller. [fix:task] [#3596]
 - Pick and check the session for a new task under the same store lock as the add, so an owner change cannot slip in between. [fix:hook] [#3589]
 - Fail a parent change, or `llmenv task start`, when the parent chain loops or names a missing task. The error names the task and the fix. Before, the walk ended without an error. A sub-task with no parent also fails to start. A dangling parent now blocks the change until it is repaired. [fix:task] [#3591]
+- Refuse `llmenv task start` of a task that a loop of done parent links blocks, and name the loop and its fix. Before, the loop looked like no blocker, and the task started. [fix:task] [#3601]
+- Refuse `--parent` for a parent with no session, as `--child-of` already did. Before, `llmenv task add --parent` and `llmenv task edit --parent` accepted an owner-less parent, and starting the child then changed that parent. [fix:task] [#3593]
 
 ### Security
 

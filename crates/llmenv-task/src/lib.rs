@@ -15,7 +15,9 @@ mod branch_failure;
 mod slug;
 pub(crate) use slug::slugify;
 mod ancestors;
+mod blockers;
 pub mod core_text;
+use blockers::{first_undone_in_subtree, is_actionable};
 mod finish_hints;
 mod parent_chain;
 use ancestors::ancestors_to_start;
@@ -706,18 +708,17 @@ pub fn start_task<'a>(
                 .iter()
                 .map(|t| (t.slug.as_str(), t))
                 .collect();
-            let unmet: Vec<String> = task
-                .blocked_on
-                .iter()
-                .filter_map(|blocker| {
-                    let undone = first_undone_in_subtree(blocker, &slug, &by_slug)?;
-                    Some(if undone == blocker.as_str() {
-                        blocker.clone()
-                    } else {
-                        format!("{blocker} (its descendant '{undone}' is not done)")
-                    })
-                })
-                .collect();
+            let mut unmet: Vec<String> = Vec::new();
+            for blocker in &task.blocked_on {
+                let Some(undone) = first_undone_in_subtree(blocker, &slug, &by_slug)? else {
+                    continue;
+                };
+                unmet.push(if undone == blocker.as_str() {
+                    blocker.clone()
+                } else {
+                    format!("{blocker} (its descendant '{undone}' is not done)")
+                });
+            }
             if !unmet.is_empty() {
                 anyhow::bail!(
                     "task '{slug}' is blocked on not-done task(s): {} \
@@ -1379,75 +1380,6 @@ pub fn resolve_next_task(
         .find(|t| is_actionable(t, &by_slug))
 }
 
-/// True when `task` is neither `done` nor `waiting`, and every one of its
-/// `blocked_on` refs is (recursively) done per [`is_done_including_descendants`].
-/// A dangling or not-yet-done blocker keeps the task non-actionable — fail
-/// closed rather than treat an unresolvable reference as satisfied.
-fn is_actionable(task: &Task, by_slug: &HashMap<&str, &Task>) -> bool {
-    !matches!(task.state, TaskState::Done | TaskState::Waiting)
-        && task
-            .blocked_on
-            .iter()
-            .all(|b| is_done_including_descendants(b, &task.slug, by_slug))
-}
-
-/// True when the task named `slug` is `done` and every task transitively
-/// parented under it (its children, their children, …) is also `done` —
-/// the resolution `blocked_on` uses (#1164), so blocking on a parent task
-/// alone covers its whole child set without a block edge per sibling.
-///
-/// A dangling `slug` (no task in `by_slug`) resolves to `false` — fail
-/// closed, same rationale as the old non-recursive check this replaces. A
-/// malformed parent cycle terminates via the `visited` guard (mirroring
-/// [`append_forest`]'s guard) instead of recursing forever; a cycle is
-/// invalid data, not a case this needs to resolve "correctly" for, only
-/// safely.
-///
-/// The walk skips the subtree of `waiter`, the task that is blocked on
-/// `slug`. `task add` chains a new task under the previous one by default,
-/// so the waiter is often a descendant of its own blocker. Its subtree
-/// cannot be done before the waiter starts, and would block it forever (#2300).
-fn is_done_including_descendants(slug: &str, waiter: &str, by_slug: &HashMap<&str, &Task>) -> bool {
-    first_undone_in_subtree(slug, waiter, by_slug).is_none()
-}
-
-/// The first task in `slug`'s subtree (skipping `waiter`'s) that holds
-/// [`is_done_including_descendants`] false: `slug` itself when it is dangling
-/// or not done, else the first undone descendant in slug order. `None` when
-/// the whole subtree is done.
-fn first_undone_in_subtree<'a>(
-    slug: &'a str,
-    waiter: &str,
-    by_slug: &HashMap<&'a str, &'a Task>,
-) -> Option<&'a str> {
-    fn go<'a>(
-        slug: &'a str,
-        waiter: &str,
-        by_slug: &HashMap<&'a str, &'a Task>,
-        visited: &mut HashSet<&'a str>,
-    ) -> Option<&'a str> {
-        if !visited.insert(slug) {
-            return None;
-        }
-        let Some(&task) = by_slug.get(slug) else {
-            return Some(slug);
-        };
-        if task.state != TaskState::Done {
-            return Some(slug);
-        }
-        let mut children: Vec<&'a str> = by_slug
-            .values()
-            .filter(|t| t.parent.as_deref() == Some(slug) && t.slug != waiter)
-            .map(|t| t.slug.as_str())
-            .collect();
-        children.sort_unstable();
-        children
-            .into_iter()
-            .find_map(|child| go(child, waiter, by_slug, visited))
-    }
-    go(slug, waiter, by_slug, &mut HashSet::new())
-}
-
 /// Parent-before-children execution order for a single session's tasks —
 /// [`display_rows`]'s own forest ordering with a single (empty-priority)
 /// group, reused as the walk order for `task show --next`'s parent/child
@@ -1562,6 +1494,7 @@ fn waiting_reminder(tasks: &[Task]) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use super::blockers::is_done_including_descendants;
     use super::session::{StartDecision, StartOutcome, open_sessions_strict, start_session};
     use super::*;
     use tempfile::TempDir;
@@ -2031,6 +1964,40 @@ mod tests {
     // #1164: blocked_on is a hard-block (an explicit dependency the user
     // configured on purpose), unlike parent (soft-block, see cli/mod.rs's
     // Start handler). Starting a task blocked on a not-done task must error.
+    /// A loop of done parent links is a store fault, not a finished blocker: the start names it
+    /// with the fix (#3601).
+    #[test]
+    fn start_task_names_a_loop_of_done_parent_links_with_its_fix() {
+        let dir = TempDir::new().expect("test");
+        let a = mk(dir.path(), "Loop a", None).expect("test");
+        let b = mk(dir.path(), "Loop b", None).expect("test");
+        let waiter = mk(dir.path(), "Waiter", None).expect("test");
+        for slug in [&a.slug, &b.slug] {
+            let mut t = load_task(dir.path(), slug).expect("test");
+            t.state = TaskState::Done;
+            save_task(dir.path(), &t).expect("test");
+        }
+        let mut ta = load_task(dir.path(), &a.slug).expect("test");
+        ta.parent = Some(b.slug.clone());
+        save_task(dir.path(), &ta).expect("test");
+        let mut tb = load_task(dir.path(), &b.slug).expect("test");
+        tb.parent = Some(a.slug.clone());
+        save_task(dir.path(), &tb).expect("test");
+        block_task(dir.path(), &waiter.slug, &a.slug).expect("test");
+
+        let err = start_task(dir.path(), &waiter.slug, false).unwrap_err();
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("loop"),
+            "error should say the links loop: {msg}"
+        );
+        assert!(
+            msg.contains("--no-parent"),
+            "error should give the fix: {msg}"
+        );
+    }
+
     #[test]
     fn start_task_errors_when_blocked_on_open_task() {
         let dir = TempDir::new().expect("test");
@@ -4392,7 +4359,9 @@ mod tests {
                 prop_assume!(!in_subtree(&blocker, &waiter, &tasks));
                 let by_slug: HashMap<&str, &Task> =
                     tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
-                if let Some(undone) = first_undone_in_subtree(&blocker, &waiter, &by_slug) {
+                let first = first_undone_in_subtree(&blocker, &waiter, &by_slug)
+                    .expect("arb_forest has no loop");
+                if let Some(undone) = first {
                     prop_assert!(in_subtree(undone, &blocker, &tasks));
                     prop_assert!(!in_subtree(undone, &waiter, &tasks));
                     prop_assert_ne!(by_slug[undone].state, TaskState::Done);
