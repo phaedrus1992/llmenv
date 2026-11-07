@@ -10,7 +10,7 @@ use crate::materialize::cache::{
 };
 
 /// Remove cache subdirectories that the rule expires, judged by the rule's age source (#3195).
-/// `*.tmp` staging directories are removed regardless of age — they represent
+/// `*.tmp` staging directories are removed when orphaned (see [`staging_is_orphan`]) — they represent
 /// orphaned partial writes from a previous crashed `materialize` call.
 ///
 /// `hashing` controls how folders are identified and whether per-shape
@@ -96,7 +96,40 @@ pub fn gc(
     Ok(report)
 }
 
-/// Collect one cache folder: an orphaned `.tmp` staging folder always, the durable state folder
+/// A staging folder younger than this may still belong to a running materialize, even when its
+/// pid cannot be read. A large tree can take many minutes to write.
+const STAGING_GRACE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Whether a `.tmp` staging folder is an orphan that gc may remove. It is one when its writer is
+/// gone, or when it is older than [`STAGING_GRACE`]. A name with no readable pid is judged by age.
+fn staging_is_orphan(p: &Path, now: SystemTime) -> bool {
+    let alive = staging_pid(p).map(|pid| (pid, crate::mcp::proxy::is_alive(pid)));
+    // A writer that cannot be asked about leaves only the age rule, which is logged (#3509).
+    if let Some((pid, None)) = alive {
+        tracing::error!(
+            pid,
+            path = %p.display(),
+            "cannot ask whether the writer of a staging folder is alive, so its age decides"
+        );
+    }
+    let owner_gone = alive.is_some_and(|(_, state)| state == Some(false));
+    let old = std::fs::symlink_metadata(p)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|m| now.duration_since(m).ok())
+        .is_some_and(|age| age > STAGING_GRACE);
+    owner_gone || old
+}
+
+/// The pid in a staging name `{folder}.{pid}.{nanos}.tmp`, or `None` when the name has no pid.
+fn staging_pid(p: &Path) -> Option<u32> {
+    let name = p.file_name()?.to_str()?.strip_suffix(".tmp")?;
+    let mut parts = name.rsplitn(3, '.');
+    let _nanos = parts.next()?;
+    parts.next()?.parse().ok()
+}
+
+/// Collect one cache folder: an orphaned `.tmp` staging folder, the durable state folder
 /// never, and any other folder when it is older than `rule`. One helper serves the top level and
 /// the shapes of a generation, so the two cannot drift (#3277).
 fn collect_if_expired(
@@ -105,9 +138,14 @@ fn collect_if_expired(
     now: SystemTime,
     report: &mut GcReport,
 ) {
-    // A `.tmp` folder is a partial write from a materialize that crashed.
+    // A `.tmp` folder is a partial write from a materialize that crashed, or one that is still
+    // running. Only the first is removed.
     if p.extension().is_some_and(|e| e == "tmp") {
-        gc_remove_dir(p, report);
+        if staging_is_orphan(p, now) {
+            gc_remove_dir(p, report);
+        } else {
+            report.kept += 1;
+        }
         return;
     }
     // The durable state folder (#175) must outlive every materialization, at the top level and
@@ -224,7 +262,9 @@ mod tests {
             for (i, kind) in kinds.iter().enumerate() {
                 match kind {
                     0 => {
-                        std::fs::create_dir(root.path().join(format!("s{i}.tmp"))).unwrap();
+                        // A writer pid that is gone makes the staging folder an orphan.
+                        std::fs::create_dir(root.path().join(format!("s{i}.2147483647.1.tmp")))
+                            .unwrap();
                         want_removed += 1;
                     }
                     1 => std::fs::write(root.path().join(format!("f{i}")), b"x").unwrap(),
@@ -252,5 +292,34 @@ mod tests {
             proptest::prop_assert_eq!(report.removed.len() + report.kept + report.failed.len(), entries);
             proptest::prop_assert_eq!(report.removed.len(), want_removed);
         }
+    }
+
+    /// The pid of a staging name is the middle field, so a dot in the folder name does not move it.
+    #[test]
+    fn staging_pid_reads_the_field_before_the_nanos() {
+        assert_eq!(staging_pid(Path::new("my.folder.4242.17.tmp")), Some(4242));
+        assert_eq!(staging_pid(Path::new("folder.tmp")), None);
+        assert_eq!(staging_pid(Path::new("folder.x.y.tmp")), None);
+    }
+
+    /// A staging folder whose writer is alive is kept, even though its name says it is a partial
+    /// write. Removing it would break a materialize that is still running.
+    #[test]
+    fn a_staging_folder_of_a_live_writer_is_kept() {
+        let root = tempfile::TempDir::new().unwrap();
+        let staging = root
+            .path()
+            .join(format!("pending.{}.1.tmp", std::process::id()));
+        std::fs::create_dir(&staging).unwrap();
+        assert!(!staging_is_orphan(&staging, SystemTime::now()));
+    }
+
+    /// A staging folder whose writer is gone is an orphan, and gc removes it at once.
+    #[test]
+    fn a_staging_folder_of_a_dead_writer_is_an_orphan() {
+        let root = tempfile::TempDir::new().unwrap();
+        let staging = root.path().join("pending.2147483647.1.tmp");
+        std::fs::create_dir(&staging).unwrap();
+        assert!(staging_is_orphan(&staging, SystemTime::now()));
     }
 }

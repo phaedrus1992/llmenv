@@ -52,3 +52,36 @@ pub(super) fn notice(msg: &str) {
          backend."
     ));
 }
+
+/// [`notice`] for a message whose caller has its own fix. The caller passes the whole text, so
+/// the default fix is never added to it (#3507).
+pub(super) fn notice_with_fix(text: &str) {
+    crate::agent_notice::record_logged(format!("llmenv: {text}"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_notice_gets_the_default_fix() {
+        notice("consolidation: probe-3629a");
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(
+            notices.contains("probe-3629a. Fix: run `llmenv doctor`"),
+            "{notices}"
+        );
+    }
+
+    #[test]
+    fn a_notice_with_its_own_fix_gets_no_second_one() {
+        notice_with_fix("consolidation: probe-3629b. Fix: check the model.");
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        let line = notices
+            .lines()
+            .find(|line| line.contains("probe-3629b"))
+            .unwrap_or_default();
+        assert!(line.contains("Fix: check the model."), "{line}");
+        assert_eq!(line.matches("Fix:").count(), 1, "{line}");
+    }
+}

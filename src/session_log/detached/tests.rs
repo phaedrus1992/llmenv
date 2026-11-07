@@ -110,11 +110,11 @@ fn run_record_rejects_malformed_payload_json_with_a_notice() {
     let err = run_record("not json", None).unwrap_err();
 
     assert!(err.to_string().to_lowercase().contains("expected"));
-    let notices = crate::agent_notice::current().unwrap_or_default();
-    assert!(
-        notices.contains("a session log record was not written") && notices.contains("Fix:"),
-        "the failure must reach the agent as a notice: {notices}"
-    );
+    // The agent gets the fixed notice from `main`. It holds no part of the error, so a payload
+    // cannot leak into another project's session (#3507).
+    let notice = crate::agent_notice::DETACHED_JOB_NOTICE;
+    assert!(notice.contains("Fix:"), "{notice}");
+    assert!(!notice.contains(&err.to_string()), "{notice}");
 }
 
 #[test]

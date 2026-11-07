@@ -133,12 +133,15 @@ pub(super) fn handle_web_fetch_in(
     };
     // Spawns this same binary as a detached child. The path is this process's own image, not input.
     // nosemgrep: rust.lang.security.current-exe.current-exe
-    let Ok(exe) = std::env::current_exe() else {
-        crate::agent_notice::record_logged(
-            "llmenv: the fetched page is not stored in memory, because llmenv cannot find its \
-             own program. Fix: run `llmenv doctor`.",
-        );
-        return None;
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => {
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the fetched page is not stored in memory, because llmenv cannot find its \
+                 own program: {e}. Fix: run `llmenv doctor`."
+            ));
+            return None;
+        }
     };
     let checkpoint = checkpoint::begin(
         state_dir,
@@ -150,9 +153,11 @@ pub(super) fn handle_web_fetch_in(
     redirect_stderr_to_detached_log(&mut cmd, detached_child_log_path);
     crate::mcp::proxy::detach_process_group(&mut cmd);
     let Ok(mut child) = crate::trace::spawn_counted("icm-store", &mut cmd) else {
+        // The checkpoint written above stays, so a later session can run the store again (#3506).
         crate::agent_notice::record_logged(
             "llmenv: the fetched page is not stored in memory, because the store job cannot \
-             start. Fix: run `llmenv doctor`.",
+             start. Its checkpoint stays, so a later session can run it again. Fix: run \
+             `llmenv doctor`.",
         );
         return None;
     };
@@ -163,6 +168,11 @@ pub(super) fn handle_web_fetch_in(
             "llmenv: the fetched page is not stored in memory, because it cannot be sent to the \
              store job: {e}. Fix: run `llmenv doctor`."
         ));
+        // The child would get no page and record a second notice, so it is stopped (#3506).
+        if let Err(kill) = child.kill() {
+            tracing::error!(error = %kill, "cannot stop the store job that got no page");
+        }
+        return None;
     }
     // Not waited on by the caller: the child is process-group-detached and
     // outlives us.

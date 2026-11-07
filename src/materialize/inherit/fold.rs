@@ -162,9 +162,9 @@ fn move_file_at(
 }
 
 /// How the age of `name` in `src_dir` compares to the same name in `dst_dir`: `Greater` when the
-/// source is newer or has no copy. A copy whose age cannot be read counts as older, so the source
-/// wins. `None` for a source whose age cannot be read, which stays. Each read error is logged with
-/// `from`, the source path.
+/// source is newer or has no copy. A copy whose age cannot be read is not compared, so the source
+/// is not migrated over it. `None` for a source whose age cannot be read, which stays. Each read
+/// error is logged with `from`, the source path.
 fn age_order_at(
     src_dir: std::os::fd::BorrowedFd<'_>,
     dst_dir: std::os::fd::BorrowedFd<'_>,
@@ -185,12 +185,14 @@ fn age_order_at(
     match crate::paths::dirfd::mtime_at(dst_dir, name) {
         Ok(Some(dst)) => Some(src.cmp(&dst)),
         Ok(None) => Some(std::cmp::Ordering::Greater),
+        // The copy may be the newer data, so it is not overwritten. Both copies stay (#3509).
         Err(e) => {
             tracing::error!(
-                "inherit: cannot read the age of the copy of {}, so the source wins: {e}",
+                "inherit: cannot read the age of the copy of {}, so it is not migrated and the \
+                 copy is kept: {e}",
                 from.display()
             );
-            Some(std::cmp::Ordering::Greater)
+            None
         }
     }
 }
@@ -395,6 +397,32 @@ mod tests {
         assert!(skipped.is_empty(), "{skipped:?}");
         assert!(!src.join("s.jsonl").exists());
         assert_eq!(std::fs::read_to_string(dst.join("s.jsonl")).unwrap(), "new");
+    }
+
+    /// A copy whose age cannot be read is not compared, so the source does not overwrite it. The
+    /// copy may be the newer data (#3509).
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_whose_age_cannot_be_read_is_not_overwritten() {
+        use std::os::fd::AsFd;
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        write(&src.join("s.jsonl"), "old");
+        write(&dst.join("s.jsonl"), "new");
+        let src_fd = std::fs::File::open(&src).unwrap();
+        let dst_fd = std::fs::File::open(&dst).unwrap();
+        // With search permission gone, the age of the copy cannot be read through the open fd.
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let order = age_order_at(
+            src_fd.as_fd(),
+            dst_fd.as_fd(),
+            std::ffi::OsStr::new("s.jsonl"),
+            &src.join("s.jsonl"),
+        );
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(order, None);
     }
 
     /// Only a move across file systems falls back to a copy. Another rename error, such as a

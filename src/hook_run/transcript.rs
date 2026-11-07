@@ -437,4 +437,18 @@ mod tests {
                 .has_unanswered_question()
         );
     }
+
+    /// A last line longer than the tail window leaves the checks no text, and the agent is told so
+    /// rather than the checks passing silently (#3506).
+    #[test]
+    fn a_last_line_longer_than_the_tail_window_is_named() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let file = dir.path().join("long.jsonl");
+        let len = usize::try_from(super::tail::TAIL_BYTES).unwrap_or(0) + 10;
+        std::fs::write(&file, "x".repeat(len)).expect("write transcript");
+        let text = super::tail::read_tail(&file);
+        assert_eq!(text.as_deref(), Some(""));
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(notices.contains("longer than"), "{notices}");
+    }
 }

@@ -230,9 +230,11 @@ fn native_warning_covers(
     match crate::util::semver::is_release_at_least(&version, NATIVE_RESUME_WARNING_SINCE) {
         Some(newer) => newer && !api_key_helper(),
         None => {
+            // The notice stays on, so the user sees that the version check failed. The engine
+            // drops hook stderr, so only the agent notice reaches them (#3506).
             crate::agent_notice::record_logged(format!(
                 "llmenv: the resume cost notice stays on, because CLAUDE_CODE_VERSION is \
-                 not a version ({version:?}). Fix: none is needed."
+                 not a version ({version:?}). Fix: report the version string to llmenv."
             ));
             false
         }
