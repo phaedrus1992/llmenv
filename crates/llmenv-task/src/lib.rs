@@ -15,14 +15,17 @@ mod branch_failure;
 mod slug;
 pub(crate) use slug::slugify;
 mod ancestors;
+mod block_cycle;
 mod blockers;
 pub mod core_text;
+pub use blockers::block_task;
 use blockers::{first_undone_in_subtree, is_actionable};
 mod finish_hints;
 mod parent_chain;
 use ancestors::ancestors_to_start;
 use parent_chain::reject_cycle;
 mod edit;
+pub use edit::TaskEdit;
 pub use edit::edit_task;
 mod note;
 pub use note::note_task;
@@ -549,8 +552,13 @@ pub fn add_task_with(
     session: SessionChoice<'_>,
     project: &str,
 ) -> anyhow::Result<Task> {
-    let resolved_session = session_choice::resolve_session_for_add(state_dir, session, project)?;
-    let task = add_task_for_session_with(state_dir, new, parent, &resolved_session)?;
+    // The session is resolved under the store lock, so a session that another process finishes
+    // after the check cannot take the new task.
+    let task = with_store_lock(state_dir, || {
+        let resolved_session =
+            session_choice::resolve_session_for_add(state_dir, session, project)?;
+        add_task_for_session_with(state_dir, new, parent, &resolved_session)
+    })?;
     touch_task_session(state_dir, &task);
     Ok(task)
 }
@@ -742,10 +750,12 @@ pub fn start_task<'a>(
         // The ancestors go first: if one cannot start, the sub-task stays `open`.
         let promoted = ancestors_to_start(state_dir, &task, force, &all_tasks)?;
         let now = now_rfc3339();
+        let names: Vec<String> = promoted.iter().map(|a| a.slug.clone()).collect();
         for mut ancestor in promoted {
             ancestor.state = TaskState::Wip;
             ancestor.updated_at = now.clone();
-            save_task(state_dir, &ancestor)?;
+            save_task(state_dir, &ancestor)
+                .map_err(|e| ancestors::promotion_failed(&slug, &names, e))?;
         }
         task.state = TaskState::Wip;
         task.updated_at = now;
@@ -957,68 +967,6 @@ pub fn wait_task<'a>(
     })?;
     touch_task_session(state_dir, &task);
     Ok(task)
-}
-
-/// Record an ordering dependency: `input` is blocked on `on`.
-///
-/// # Errors
-/// Errors if `on` doesn't resolve to an existing task — this is a fresh
-/// write, not a load of possibly-stale state, so it's validated eagerly
-/// (unlike the load-time tolerance for dangling `blocked_on` entries left
-/// behind by a since-deleted task file). Also errors if `input` and `on`
-/// resolve to the same task — a task cannot block itself.
-pub fn block_task<'a>(
-    state_dir: &Path,
-    target: impl Into<TaskTarget<'a>>,
-    on: &str,
-) -> anyhow::Result<Task> {
-    let target = target.into();
-    with_store_lock(state_dir, || {
-        // One strict read resolves both names (#3477).
-        target.check()?;
-        resolve::check_identifier(on)?;
-        let all_tasks = list_tasks_strict(state_dir)?;
-        let slug = target.slug_in(state_dir, &all_tasks)?;
-        let on_slug = resolve::resolve_in(state_dir, on, &all_tasks)?;
-        if slug == on_slug {
-            anyhow::bail!("task '{slug}' cannot be blocked on itself");
-        }
-        let mut task = load_task(state_dir, &slug)?;
-        if !task.blocked_on.contains(&on_slug) {
-            task.blocked_on.push(on_slug);
-        }
-        task.updated_at = now_rfc3339();
-        save_task(state_dir, &task)?;
-        Ok(task)
-    })
-}
-
-/// What to change in an [`edit_task`] call. Every field defaults to "leave
-/// unchanged" / "nothing to add or remove" — a call with every field at its
-/// default is a legal no-op (#930), still bumping `updated_at`.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct TaskEdit<'a> {
-    /// New title, if changing it.
-    pub title: Option<&'a str>,
-    /// Set the parent to this id. Mutually exclusive with `no_parent` — the
-    /// CLI enforces this with `conflicts_with`; if both are set here,
-    /// `parent` wins.
-    pub parent: Option<&'a str>,
-    /// Clear the parent.
-    pub no_parent: bool,
-    /// Ids to add to `blocked_on`. Idempotent — an id already present is a
-    /// no-op, same as `block_task`.
-    pub block_on: &'a [String],
-    /// Ids to remove from `blocked_on`. Idempotent — an id not present is a
-    /// no-op.
-    pub unblock: &'a [String],
-    /// Append a new note.
-    pub add_note: Option<&'a str>,
-    /// Remove a note, identified by its 0-based index or its exact RFC3339
-    /// `at` timestamp.
-    pub delete_note: Option<&'a str>,
-    /// Replace the detail. An empty string clears it.
-    pub detail: Option<&'a str>,
 }
 
 /// Resolve a `--delete-note` argument to an index into `notes`: either a
@@ -4468,3 +4416,6 @@ mod tests {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod reject_cycle_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod store_guard_tests;

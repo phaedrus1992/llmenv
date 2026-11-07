@@ -155,9 +155,9 @@ fn gc_removes_old_entries_and_keeps_fresh_ones() {
 }
 
 #[test]
-fn gc_removes_tmp_stage_dirs_regardless_of_age() {
+fn gc_removes_orphaned_tmp_stage_dirs_regardless_of_age() {
     let tmp = tempdir().expect("tempdir");
-    let stage = tmp.path().join("abcd.tmp");
+    let stage = tmp.path().join("abcd.2147483647.1.tmp");
     std::fs::create_dir_all(&stage).expect("mkdir stage");
     std::fs::write(stage.join("marker"), "x").expect("write marker");
 
@@ -168,7 +168,7 @@ fn gc_removes_tmp_stage_dirs_regardless_of_age() {
         false,
     )
     .expect("gc");
-    assert!(!stage.exists(), "stage dir should always be GC'd");
+    assert!(!stage.exists(), "a stage dir of a dead writer is GC'd");
     assert_eq!(report.removed.len(), 1);
 }
 
@@ -330,7 +330,7 @@ fn gc_dry_run_lists_the_same_entries_and_removes_none() {
     let old_time = SystemTime::now() - Duration::from_secs(60 * 60 * 24 * 30);
     set_mtime(&marker, old_time);
     set_mtime(&old, old_time);
-    let stage = tmp.path().join("abcd.tmp");
+    let stage = tmp.path().join("abcd.2147483647.1.tmp");
     std::fs::create_dir_all(&stage).expect("mkdir stage");
     let fresh = tmp.path().join("fresh");
     std::fs::create_dir_all(&fresh).expect("mkdir fresh");

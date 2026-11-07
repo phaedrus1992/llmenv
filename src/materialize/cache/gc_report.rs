@@ -31,9 +31,16 @@ impl GcReport {
     }
 
     /// Record `path` as failed, with the reason the sweep gave (#3077). A second failure of the
-    /// same path keeps the first cause.
+    /// same path keeps every cause, joined.
     pub(crate) fn record_failure(&mut self, path: PathBuf, cause: String) {
-        self.failed.entry(path).or_insert(cause);
+        // Every cause is kept. A benign first cause must not hide a later permission error (#3509).
+        self.failed
+            .entry(path)
+            .and_modify(|known| {
+                known.push_str("; ");
+                known.push_str(&cause);
+            })
+            .or_insert(cause);
     }
 }
 
@@ -71,9 +78,13 @@ fn gc_remove(
         report.removed.push(p.to_path_buf());
         return;
     }
-    // An entry that another process removed first is gone, which is the goal (#3423).
-    match super::skip_vanished(remove(p)) {
-        Ok(_) => report.removed.push(p.to_path_buf()),
+    // An entry that another process removed first is gone, which is the goal (#3423). A NotFound
+    // while the path still exists is a failure, so the entry is counted (#3509).
+    match remove(p) {
+        Ok(()) => report.removed.push(p.to_path_buf()),
+        Err(e) if super::counts_as_removed(p, &e) => {
+            report.removed.push(p.to_path_buf());
+        }
         Err(e) => {
             let cause = super::owner::removal_cause(p, &e);
             tracing::error!(
@@ -123,14 +134,29 @@ mod tests {
         assert_eq!(report.removed, vec![gone.clone(), gone]);
     }
 
-    /// A path that fails twice is listed once, with its first cause (#3441).
+    /// A path that fails twice is listed once, with both causes (#3441, #3509).
     #[test]
-    fn a_path_that_fails_twice_keeps_its_first_cause() {
+    fn a_path_that_fails_twice_keeps_both_causes() {
         let mut report = GcReport::new(false);
         report.record_failure(PathBuf::from("a"), "first".to_string());
         report.record_failure(PathBuf::from("b"), "other".to_string());
         report.record_failure(PathBuf::from("a"), "second".to_string());
         assert_eq!(report.failed.len(), 2);
-        assert_eq!(report.failed[Path::new("a")], "first");
+        assert_eq!(report.failed[Path::new("a")], "first; second");
+    }
+
+    /// A NotFound from the remove of a path that still exists is a failure, not a removal, so the
+    /// entry is counted once (#3509).
+    #[test]
+    fn a_not_found_while_the_path_still_exists_is_a_failure() {
+        let dir = tempfile::TempDir::new().expect("test");
+        let present = dir.path().join("present");
+        std::fs::write(&present, b"x").expect("test");
+        let mut report = GcReport::new(false);
+        gc_remove(&present, &mut report, "remove", |_| {
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        });
+        assert!(report.removed.is_empty(), "{:?}", report.removed);
+        assert!(report.failed.contains_key(&present), "{:?}", report.failed);
     }
 }

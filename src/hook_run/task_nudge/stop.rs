@@ -50,8 +50,10 @@ pub(super) fn question_reminder(
         }
         first
     });
-    // No usable session id, or a state that cannot be read or locked, keeps the reminder. A failed
-    // lock or read records its own agent notice.
+    // Without a usable session id, or with a state that cannot be read or locked, the reminder is
+    // sent at every Stop. The state is what would stop the repeat, so with no state the choice is
+    // a missed reminder or a repeated one. A missed reminder costs more, so the repeat wins. A
+    // failed lock or read records its own agent notice.
     if first == Some(false) {
         String::new()
     } else {

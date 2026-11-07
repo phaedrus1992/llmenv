@@ -1,9 +1,46 @@
 //! The exclusive lock on the whole task store, which also covers the session files.
 
 use std::cell::RefCell;
+use std::fs::{File, TryLockError};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
+
+/// How long a task command waits for the store lock before it fails. A holder normally keeps the
+/// lock for milliseconds, so ten seconds is far past a normal wait. A stopped holder would
+/// otherwise block every later task hook with no log line.
+const LOCK_WAIT: Duration = Duration::from_secs(10);
+
+/// Time between two attempts to take the lock during the wait.
+const LOCK_POLL: Duration = Duration::from_millis(20);
+
+/// Take the exclusive lock on `file`, retrying until `wait` has passed.
+///
+/// # Errors
+/// Errors when the lock is still held after `wait`, and names the lock path and the fix. Errors
+/// when the lock call itself fails.
+fn lock_with_deadline(file: &File, path: &Path, wait: Duration) -> anyhow::Result<()> {
+    let deadline = Instant::now() + wait;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(LOCK_POLL);
+            }
+            Err(TryLockError::WouldBlock) => anyhow::bail!(
+                "the task store lock {} is still held after {} s. Fix: find the process that \
+                 holds it (a stopped `llmenv task` command), end it, then run the command again.",
+                path.display(),
+                wait.as_secs()
+            ),
+            Err(TryLockError::Error(e)) => {
+                return Err(e)
+                    .with_context(|| format!("cannot lock the task store at {}", path.display()));
+            }
+        }
+    }
+}
 
 thread_local! {
     // The canonical task store folders whose lock this thread holds. Each open of the lock file gets its
@@ -63,9 +100,7 @@ pub fn with_store_lock<T>(
                 lock_path.display()
             )
         })?;
-    lock_file
-        .lock()
-        .with_context(|| format!("cannot lock the task store at {}", lock_path.display()))?;
+    lock_with_deadline(&lock_file, &lock_path, LOCK_WAIT)?;
     HELD.with_borrow_mut(|held| held.push(dir));
     // Declared after `lock_file`, so it drops first: the folder leaves HELD before the unlock.
     let _held = Held;
@@ -162,6 +197,22 @@ mod tests {
                 nest(dir, level + 1, depth, fail_at)
             }
         })
+    }
+
+    #[test]
+    fn a_lock_held_past_the_wait_fails_with_the_path_and_a_fix() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(".lock");
+        let holder = File::create(&path).unwrap();
+        holder.lock().unwrap();
+        let contender = File::create(&path).unwrap();
+        let err = lock_with_deadline(&contender, &path, Duration::from_millis(60)).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("still held"), "{text}");
+        assert!(text.contains(&path.display().to_string()), "{text}");
+        assert!(text.contains("Fix:"), "{text}");
+        holder.unlock().unwrap();
+        lock_with_deadline(&contender, &path, Duration::from_millis(60)).unwrap();
     }
 
     proptest::proptest! {

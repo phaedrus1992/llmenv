@@ -289,9 +289,11 @@ fn metered_auth_keeps_the_llmenv_notice() {
 fn a_version_that_is_not_a_version_keeps_the_notice_and_says_why() {
     let env = env_of(&[("CLAUDE_CODE_VERSION", "nightly-3462")]);
     assert!(resume_notice("SessionStart", &expensive_resume(), env, || false).is_some());
+    // The engine drops hook stderr, so the reason must reach the agent notice (#3506).
     let notices = crate::agent_notice::current().unwrap_or_default();
     assert!(
-        notices.contains("CLAUDE_CODE_VERSION is not a version (\"nightly-3462\")"),
+        notices.contains("CLAUDE_CODE_VERSION is not a version (\"nightly-3462\")")
+            && notices.contains("Fix:"),
         "{notices}"
     );
 }

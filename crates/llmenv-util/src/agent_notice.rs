@@ -62,11 +62,13 @@ impl NoticeList {
     /// repeats does not repeat its text. The text is cleaned first: control and bidirectional
     /// characters are removed, line breaks become spaces, and the text is capped, because a
     /// failure text can carry server or URL content and `current` joins notices with newlines.
-    fn record(&mut self, notice: impl Into<String>) {
+    fn record(&mut self, notice: impl Into<String>) -> bool {
         let notice = clean(&notice.into());
-        if !self.notices.contains(&notice) {
-            self.notices.push(notice);
+        if self.notices.contains(&notice) {
+            return false;
         }
+        self.notices.push(notice);
+        true
     }
 
     /// Every notice, one per line, or `None` when there is none.
@@ -82,11 +84,15 @@ pub(crate) static NOTICES: Mutex<NoticeList> = Mutex::new(NoticeList::new());
 /// the notice to the spool, so the next hook run carries it (#3398).
 pub fn record(notice: impl Into<String>) {
     let notice = clean(&notice.into());
-    spool::write(&notice);
-    NOTICES
+    // A repeat of a notice in this process is not written to the spool again, so it does not use
+    // up the reads of the next hook run (#3507).
+    let fresh = NOTICES
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .record(notice);
+        .record(notice.clone());
+    if fresh {
+        spool::write(&notice);
+    }
 }
 
 /// Every notice of this process, one per line, or `None` when there is none. The list stays set,
@@ -106,14 +112,37 @@ pub fn record_logged(notice: impl Into<String>) {
     record(notice);
 }
 
-/// Record the top-level error of a detached child, so the next hook run shows it (#3398). Does
-/// nothing in a process that does not spool, where `main` prints the error itself.
+/// Record a fixed notice for an error whose chain can quote other text, such as a backend reply or
+/// a project's memory. The chain goes to the log, and the agent gets only `notice`, so the spool
+/// never carries that text to another project (#3507).
+pub fn record_fixed_with_cause(notice: &str, cause: &dyn std::fmt::Display) {
+    tracing::error!(error = %format!("{cause:#}"), "{}", notice);
+    record(notice);
+}
+
+/// The agent notice for a failed detached child. It holds no error text, because the cause is in
+/// the log (#3507).
+pub const DETACHED_JOB_NOTICE: &str = "llmenv: a detached job failed. Fix: run `llmenv \
+     doctor` to check the state folder and the config. The cause is in the llmenv log.";
+
+/// Set once a detached job has recorded its own specific notice in this process.
+static JOB_NOTICED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Record a job's own fixed notice for its failure, so `record_detached_job_failure` adds none.
+pub fn record_job_notice_with_cause(notice: &str, cause: &dyn std::fmt::Display) {
+    JOB_NOTICED.store(true, std::sync::atomic::Ordering::SeqCst);
+    record_fixed_with_cause(notice, cause);
+}
+
+/// Record that a detached child failed, so the next hook run shows it (#3398). The agent gets a
+/// fixed text, because the spool is read by whichever project runs the next hook, and the error
+/// chain can quote another project's text (#3507). The chain goes to the log. Does nothing in a
+/// process that does not spool, where `main` prints the error itself.
 pub fn record_detached_job_failure(error: &dyn std::fmt::Display) {
-    if spool::active() {
-        record_logged(format!(
-            "llmenv: a detached job failed before it could run: {error:#}. Fix: run `llmenv \
-             doctor` to check the state folder and the config."
-        ));
+    tracing::error!(error = %format!("{error:#}"), "a detached job failed");
+    // A job that already noticed its own failure is not noticed twice.
+    if spool::active() && !JOB_NOTICED.load(std::sync::atomic::Ordering::SeqCst) {
+        record(DETACHED_JOB_NOTICE);
     }
 }
 

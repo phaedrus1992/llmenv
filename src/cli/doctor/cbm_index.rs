@@ -116,11 +116,19 @@ fn check(cache_dir: &Path, project_root: &Path) -> (CheckLevel, String) {
     let finished = meta
         .modified()
         .map_or_else(|_| "at an unknown time".to_string(), format_time);
-    // An indexer killed during its write can cut the last character (#3457).
+    // A result over the cap is cut at the cap, so its JSON cannot parse. Name the cap instead of
+    // the cut, because the cut is ours and not a fault of the file.
+    if meta.len() > MAX_RESULT_BYTES {
+        return cannot_read(&format!(
+            "the file is over the {MAX_RESULT_BYTES}-byte cap, so only its first part is read"
+        ));
+    }
+    // An indexer killed during its write can cut the last character (#3457). The result is
+    // read-only here, so the cut character is dropped and the rest is classified.
     let mut bytes = Vec::new();
     let read = std::fs::File::open(&path)
         .and_then(|file| file.take(MAX_RESULT_BYTES).read_to_end(&mut bytes))
-        .and_then(|_| crate::paths::bounded::decode_state_text(bytes));
+        .and_then(|_| crate::paths::bounded::decode_text_cut_at_end(bytes));
     let text = match read {
         Ok(text) => text,
         Err(e) => return cannot_read(&e),
