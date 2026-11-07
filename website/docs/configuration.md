@@ -1369,8 +1369,14 @@ So a transcript can be kept past `retention_days` after such a change, and no lo
 | `retention_days` | no | `transcript` | Stale file-sink transcripts on disk are best-effort removed when older than this many days; `null` = disabled; must be >= 1 |
 
 (changed in v3.14.0) The file sink opens the file without following a symlink.
-A path that is a symlink, a FIFO, or a device fails on each event, so llmenv logs the first failure as an error and later ones at debug level.
-`llmenv doctor` names such a path and the fix.
+The active path must be a regular file.
+A symlink, FIFO, or device is rejected before rotation or append; a rejected symlink and its target are left untouched.
+The error names the path and recommends setting `session_log.file.path` to a regular file or removing the invalid entry.
+Without a path override, the default is `<state_dir>/session-log.jsonl`.
+The first append failure is logged at error level; later failures for the same path are logged at debug level.
+`llmenv doctor` also names an invalid path and its fix.
+On Unix, no-follow prevents symlink substitutions, nonblocking prevents FIFO opens from hanging, and the opened file is verified as regular.
+Other platforms rely on the path check, so a symlink swapped in before open may still be followed and a newly substituted FIFO may block.
 
 Omitting the `session_log:` block entirely enables the transcript sink at
 `info` — ICM transcript logging is **on by default**. To turn logging off

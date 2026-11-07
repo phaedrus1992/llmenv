@@ -40,6 +40,23 @@ fn a_file_under_the_cap_is_not_rotated() {
 }
 
 #[test]
+fn an_inspection_error_names_the_session_log_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().join("not-a-directory");
+    write_bytes(&parent, 1);
+    let path = parent.join("session-log.jsonl");
+
+    let error = rotate_if_full(&path, 10).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("cannot inspect session log path")
+    );
+    assert!(error.to_string().contains(&path.display().to_string()));
+}
+
+#[test]
 fn a_file_at_the_cap_rotates_to_generation_one() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session-log.jsonl");
