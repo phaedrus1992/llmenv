@@ -82,7 +82,7 @@ fn gc_remove(
     // while the path still exists is a failure, so the entry is counted (#3509).
     match remove(p) {
         Ok(()) => report.removed.push(p.to_path_buf()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && super::is_gone(p) => {
+        Err(e) if super::counts_as_removed(p, &e) => {
             report.removed.push(p.to_path_buf());
         }
         Err(e) => {

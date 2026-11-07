@@ -159,3 +159,27 @@ proptest! {
     }
 
 }
+
+proptest! {
+    /// No strict prefix of a complete reply list reads as a shorter list. A cut reply is an error,
+    /// so a caller never stores a partial list as if it were whole (#3508).
+    #[test]
+    fn a_cut_reply_list_never_reads_as_a_shorter_list(
+        count in 1usize..4,
+        text in "[a-z]{1,8}",
+    ) {
+        let values: Vec<serde_json::Value> = (0..count)
+            .map(|i| serde_json::json!({
+                "id": format!("id{i}"),
+                "topic": text.clone(),
+                "summary": text.clone(),
+                "importance": "high",
+            }))
+            .collect();
+        let body = serde_json::to_string(&values).unwrap_or_default();
+        for cut in 0..body.len() {
+            prop_assert!(parse(&body[..cut]).is_err(), "cut at {cut} read as a list");
+        }
+        prop_assert_eq!(parse(&body).map(|records| records.len()).ok(), Some(count));
+    }
+}

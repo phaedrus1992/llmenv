@@ -5,12 +5,21 @@ use std::path::{Path, PathBuf};
 use super::NudgeState;
 
 pub(super) fn state_path(state_dir: &Path, session_id: &str) -> Option<PathBuf> {
-    // A session id becomes a file name, so only a plain name is accepted.
-    crate::paths::is_valid_short_name(session_id).then(|| {
+    // A session id becomes a file name, so only a plain name is accepted. A refused id is
+    // noticed, because the Stop reminder then repeats with no state (#3506).
+    if !crate::paths::is_valid_short_name(session_id) {
+        crate::agent_notice::record_logged(
+            "llmenv: the task reminder cannot keep its state, because the session id is not safe \
+             in a file name. Fix: none in this session. If it repeats, report the session id \
+             format to llmenv.",
+        );
+        return None;
+    }
+    Some(
         state_dir
             .join("task_nudge")
-            .join(format!("{session_id}.json"))
-    })
+            .join(format!("{session_id}.json")),
+    )
 }
 
 /// The state of a session, and whether it was reset. A missing file is a new session. A corrupt

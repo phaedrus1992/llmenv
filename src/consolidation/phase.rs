@@ -47,13 +47,14 @@ pub(super) fn settle(checkpoint: Option<&std::path::Path>) {
 /// Record a consolidation failure for the agent. The job runs as a detached child, so the
 /// notice reaches the agent through the notice spool (#3398).
 pub(super) fn notice(msg: &str) {
-    // A message that carries its own fix is not given a second one (#3507).
-    if msg.contains("Fix:") {
-        crate::agent_notice::record_logged(format!("llmenv: {msg}"));
-        return;
-    }
     crate::agent_notice::record_logged(format!(
         "llmenv: {msg}. Fix: run `llmenv doctor` to check the memory server and the consolidation \
          backend."
     ));
+}
+
+/// [`notice`] for a message whose caller has its own fix. The caller passes the whole text, so
+/// the default fix is never added to it (#3507).
+pub(super) fn notice_with_fix(text: &str) {
+    crate::agent_notice::record_logged(format!("llmenv: {text}"));
 }

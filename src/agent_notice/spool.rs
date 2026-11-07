@@ -99,13 +99,24 @@ pub(crate) fn collect(state_dir: &Path) {
     // The budget counts the notices that were read. An entry that fails here does not use up the
     // reads of the entries after it, so one stuck file cannot starve the rest (#3507).
     let mut read = 0;
+    let mut failed = 0;
     for path in &paths {
-        if read >= MAX_READ {
+        // Failures have their own cap, so a folder of broken entries cannot flood the agent (#3507).
+        if read >= MAX_READ || failed >= MAX_READ {
             break;
         }
         if collect_one(path) {
             read += 1;
+        } else {
+            failed += 1;
         }
+    }
+    if failed >= MAX_READ {
+        super::record_logged(format!(
+            "llmenv: {failed} detached job notice(s) in {} could not be read, so the rest wait \
+             for the next run. Fix: remove the files that cannot be read.",
+            dir.display()
+        ));
     }
 }
 
@@ -122,7 +133,7 @@ fn collect_one(path: &Path) -> bool {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
                 Err(e) => {
                     super::record_logged(format!(
-                        "llmenv: cannot read the detached job notice {}: {e}. Fix: remove the file.",
+                        "llmenv: cannot read the detached job notice {}: {e}. The file is removed, so this notice is lost.",
                         path.display()
                     ));
                     false
@@ -140,7 +151,7 @@ fn collect_one(path: &Path) -> bool {
         }
         Err(e) => {
             super::record_logged(format!(
-                "llmenv: cannot read the detached job notice {}: {e}. Fix: remove the file.",
+                "llmenv: cannot read the detached job notice {}: {e}. The file is removed, so this notice is lost.",
                 path.display()
             ));
             false

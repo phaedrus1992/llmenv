@@ -58,6 +58,12 @@ pub(super) fn skip_vanished<T>(result: std::io::Result<T>) -> std::io::Result<Op
     }
 }
 
+/// Whether a failed removal of `p` counts as removed: the error is NotFound and the path is gone.
+/// A NotFound while the path is still there is a failure (#3509).
+pub(crate) fn counts_as_removed(p: &Path, e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::NotFound && is_gone(p)
+}
+
 /// Whether `p` itself is gone from the disk. A NotFound from a child of a folder that still exists
 /// is not a removal, because the folder is still there to be seen and counted (#3509).
 pub(crate) fn is_gone(p: &Path) -> bool {

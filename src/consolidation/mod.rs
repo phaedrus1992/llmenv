@@ -37,7 +37,7 @@ use crate::hook_run::mcp_client::McpHttpClient;
 mod bullets;
 mod phase;
 mod store_new;
-use phase::{note_phase, notice, saved_summary, settle};
+use phase::{note_phase, notice, notice_with_fix, saved_summary, settle};
 mod dedup;
 use store_new::store_new_rules;
 
@@ -681,8 +681,9 @@ pub(crate) async fn run(
         // A reply with text and no `- ` bullet is a format change, not an empty result. Its
         // content would be lost with no notice (#3507).
         if !llm_output.trim().is_empty() {
-            notice(
-                "consolidation: the model reply has no '- ' rule bullets, so nothing was stored",
+            notice_with_fix(
+                "consolidation: the model reply has no '- ' rule bullets, so nothing was stored. \
+                 Fix: check the consolidation prompt and the model that answers it.",
             );
         }
         settle(checkpoint);

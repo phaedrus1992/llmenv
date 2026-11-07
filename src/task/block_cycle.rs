@@ -83,4 +83,41 @@ mod tests {
         let all = [task("b", &["c"]), task("c", &["b"])];
         reject_block_cycle(&all, "a", "b").unwrap();
     }
+
+    proptest::proptest! {
+        /// The cycle check refuses exactly when a plain walk from the blocker reaches the task.
+        #[test]
+        fn refuses_exactly_when_the_blocker_reaches_the_task(
+            links in proptest::collection::vec((0usize..5, 0usize..5), 0..10),
+            from in 0usize..5,
+            to in 0usize..5,
+        ) {
+            let names = ["t0", "t1", "t2", "t3", "t4"];
+            let mut all: Vec<Task> = names.iter().map(|n| task(n, &[])).collect();
+            for (a, b) in &links {
+                let blocked = names[*b].to_string();
+                if !all[*a].blocked_on.contains(&blocked) {
+                    all[*a].blocked_on.push(blocked);
+                }
+            }
+            let (slug, on) = (names[from], names[to]);
+            // Oracle: a breadth walk over blocked_on from `on`, looking for `slug`.
+            let mut seen = std::collections::HashSet::new();
+            let mut frontier = vec![on.to_string()];
+            let mut reached = false;
+            while let Some(current) = frontier.pop() {
+                if current == slug {
+                    reached = true;
+                    break;
+                }
+                if !seen.insert(current.clone()) {
+                    continue;
+                }
+                if let Some(t) = all.iter().find(|t| t.slug == current) {
+                    frontier.extend(t.blocked_on.iter().cloned());
+                }
+            }
+            proptest::prop_assert_eq!(reject_block_cycle(&all, slug, on).is_err(), reached);
+        }
+    }
 }

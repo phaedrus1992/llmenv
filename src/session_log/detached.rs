@@ -186,10 +186,13 @@ pub(crate) fn run_record(
         started: t0,
         exit: i32::from(result.is_err()),
     });
-    // The child returns this error, and `main` records the one notice for it (#3507). The cause
-    // stays in the log here.
+    // The notice names the setting to check. The cause stays in the log (#3507).
     result.inspect_err(|e| {
-        tracing::error!(error = %format!("{e:#}"), "a session log record was not written");
+        crate::agent_notice::record_job_notice_with_cause(
+            "llmenv: a session log record was not written. Fix: run `llmenv doctor` to check \
+             session_log.file.path. The cause is in the llmenv log.",
+            e,
+        );
     })
 }
 

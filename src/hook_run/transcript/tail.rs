@@ -51,8 +51,8 @@ pub(super) fn read_tail(path: &Path) -> Option<String> {
         None => {
             crate::agent_notice::record_logged(format!(
                 "llmenv: the last line of the transcript {} is longer than {TAIL_BYTES} bytes, so \
-                 the checks that read the tail pass unchecked. Fix: none in this run; report the \
-                 transcript shape to llmenv if the checks must read it.",
+                 the question and task checks skip this turn. Fix: report the transcript line \
+                 length to llmenv, so the tail window can grow.",
                 path.display()
             ));
             Some(String::new())

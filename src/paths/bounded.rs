@@ -325,6 +325,30 @@ mod tests {
         let err = read(&path, 10).unwrap_err().to_string();
         assert!(err.contains("not a regular file"), "{err}");
     }
+
+    proptest::proptest! {
+        /// The cut-tolerant decoder keeps valid text whole, drops only an incomplete last character,
+        /// and refuses any other bad byte (#3508).
+        #[test]
+        fn cut_tolerant_decode_drops_only_an_incomplete_tail(
+            bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..64),
+        ) {
+            match std::str::from_utf8(&bytes) {
+                Ok(text) => {
+                    proptest::prop_assert_eq!(decode_text_cut_at_end(bytes.clone()).unwrap(), text);
+                }
+                Err(e) if e.error_len().is_none() => {
+                    let valid = &bytes[..e.valid_up_to()];
+                    let kept = decode_text_cut_at_end(bytes.clone()).unwrap();
+                    proptest::prop_assert_eq!(kept.as_bytes(), valid);
+                }
+                Err(_) => {
+                    let err = decode_text_cut_at_end(bytes.clone()).unwrap_err();
+                    proptest::prop_assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(all(test, unix))]

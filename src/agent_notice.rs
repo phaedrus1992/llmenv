@@ -131,6 +131,14 @@ pub(crate) fn no_state_folder(skipped: &str, error: &anyhow::Error) {
     ));
 }
 
+/// Record a fixed notice for an error whose chain can quote other text, such as a backend reply or
+/// a project's memory. The chain goes to the log, and the agent gets only `notice`, so the spool
+/// never carries that text to another project (#3507).
+pub(crate) fn record_fixed_with_cause(notice: &str, cause: &anyhow::Error) {
+    tracing::error!(error = %format!("{cause:#}"), "{}", notice);
+    record(notice);
+}
+
 /// The agent notice for a failed detached child. It holds no error text, because the cause is in the
 /// log (#3507).
 pub(crate) const DETACHED_JOB_NOTICE: &str = "llmenv: a detached job failed. Fix: run `llmenv \
@@ -142,9 +150,19 @@ pub(crate) const DETACHED_JOB_NOTICE: &str = "llmenv: a detached job failed. Fix
 /// process that does not spool, where `main` prints the error itself.
 pub fn record_detached_job_failure(error: &anyhow::Error) {
     tracing::error!(error = %format!("{error:#}"), "a detached job failed");
-    if spool::active() {
+    // A job that already noticed its own failure is not noticed twice.
+    if spool::active() && !JOB_NOTICED.load(std::sync::atomic::Ordering::SeqCst) {
         record(DETACHED_JOB_NOTICE);
     }
+}
+
+/// Set once a detached job has recorded its own specific notice in this process.
+static JOB_NOTICED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Record a job's own fixed notice for its failure, so `record_detached_job_failure` adds none.
+pub(crate) fn record_job_notice_with_cause(notice: &str, cause: &anyhow::Error) {
+    JOB_NOTICED.store(true, std::sync::atomic::Ordering::SeqCst);
+    record_fixed_with_cause(notice, cause);
 }
 
 /// Drop the notices that contain `text`, so a test sees only the notices of its own run.

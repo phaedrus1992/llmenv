@@ -103,7 +103,16 @@ const STAGING_GRACE: std::time::Duration = std::time::Duration::from_secs(60 * 6
 /// Whether a `.tmp` staging folder is an orphan that gc may remove. It is one when its writer is
 /// gone, or when it is older than [`STAGING_GRACE`]. A name with no readable pid is judged by age.
 fn staging_is_orphan(p: &Path, now: SystemTime) -> bool {
-    let owner_gone = staging_pid(p).and_then(crate::mcp::proxy::is_alive) == Some(false);
+    let alive = staging_pid(p).map(|pid| (pid, crate::mcp::proxy::is_alive(pid)));
+    // A writer that cannot be asked about leaves only the age rule, which is logged (#3509).
+    if let Some((pid, None)) = alive {
+        tracing::error!(
+            pid,
+            path = %p.display(),
+            "cannot ask whether the writer of a staging folder is alive, so its age decides"
+        );
+    }
+    let owner_gone = alive.is_some_and(|(_, state)| state == Some(false));
     let old = std::fs::symlink_metadata(p)
         .and_then(|m| m.modified())
         .ok()

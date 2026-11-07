@@ -17,8 +17,8 @@ pub use gc::gc;
 mod mtime;
 mod owner;
 mod write_bits;
+pub(crate) use entries::{counts_as_removed, is_gone, is_vanished};
 use entries::{entry_and_type, skip_vanished};
-pub(crate) use entries::{is_gone, is_vanished};
 use write_bits::remove_dir_all_forcing_writable;
 
 pub use crate::materialize::expiry::AgeRule;
@@ -256,9 +256,15 @@ pub struct PruneReport {
 }
 
 impl PruneReport {
-    /// Record `path` as failed. A second failure of the same path keeps the first cause.
+    /// Record `path` as failed. A second failure of the same path keeps both causes (#3509).
     fn record_failure(&mut self, path: PathBuf, cause: String) {
-        self.failed.entry(path).or_insert(cause);
+        self.failed
+            .entry(path)
+            .and_modify(|known| {
+                known.push_str("; ");
+                known.push_str(&cause);
+            })
+            .or_insert(cause);
     }
 }
 
@@ -398,7 +404,7 @@ fn remove_dir(p: &Path, dry_run: bool, report: &mut PruneReport) {
     // An entry that another process removed first is gone, which is the goal (#3423).
     match remove_dir_all_forcing_writable(p) {
         Ok(()) => report.removed.push(p.to_path_buf()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && entries::is_gone(p) => {
+        Err(e) if entries::counts_as_removed(p, &e) => {
             report.removed.push(p.to_path_buf());
         }
         Err(e) => {

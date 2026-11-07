@@ -23,11 +23,12 @@ pub(super) async fn store_new_rules(
             }
             Err(e) => {
                 // The agent is told here, because the summary names the notices (#3507).
-                crate::agent_notice::record_logged(format!(
-                    "llmenv: consolidation could not check a rule for duplicates in project \
-                     {project}, so the rule was skipped: {e:#}. Fix: run `llmenv doctor` to check \
-                     the memory server."
-                ));
+                crate::agent_notice::record_fixed_with_cause(
+                    "llmenv: consolidation could not check a rule for duplicates, so the rule was \
+                     skipped. Fix: run `llmenv doctor` to check the memory server. The cause is in \
+                     the llmenv log.",
+                    &e,
+                );
                 continue;
             }
         }
@@ -35,10 +36,12 @@ pub(super) async fn store_new_rules(
         match store_rule(client, state_dir, run, rule).await {
             Ok(()) => stored += 1,
             Err(e) => {
-                crate::agent_notice::record_logged(format!(
+                crate::agent_notice::record_fixed_with_cause(
                     "llmenv: consolidation could not store a rule, and it is tried again on the \
-                     next run: {e:#}. Fix: run `llmenv doctor` to check the memory server."
-                ));
+                     next run. Fix: run `llmenv doctor` to check the memory server. The cause is in \
+                     the llmenv log.",
+                    &e,
+                );
             }
         }
     }

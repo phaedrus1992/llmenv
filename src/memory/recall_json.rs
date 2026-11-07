@@ -56,6 +56,14 @@ pub(crate) fn parse(body: &str) -> Result<Vec<RecallRecord>, RecallJsonError> {
             });
         }
         Some(Err(e)) => {
+            // The notice carries no reply text. The log gets its first characters, with control
+            // characters replaced so one reply cannot forge a log line (#3508).
+            let sample: String = body
+                .chars()
+                .take(24)
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect();
+            tracing::error!(reply_start = %sample, reason = %e, "icm recall reply is not a JSON list");
             return Err(RecallJsonError::NotAList {
                 reason: e.to_string(),
             });
