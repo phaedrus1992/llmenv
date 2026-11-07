@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 708f8e2c504bd4ece6d6f91011bdc8e25e192f69d08150ac2095eedd6f378a7f # shrinks to state = NudgeState { calls: 0, last_nudge: 0, skill_reminded: false, commit_denied: false, start_reminded: None, boundary_reminded: [], stop_quiet_turns: 0, ownerless_question_reminded: ["😀"] }, cut = Index(17817877798469453266)

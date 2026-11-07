@@ -90,7 +90,7 @@ fn state_path(state_dir: &Path, session_id: Option<&str>) -> Option<PathBuf> {
 }
 
 fn load_last(path: &Path) -> Option<LastReminder> {
-    let text = match crate::paths::bounded::state_text_io(path) {
+    let text = match crate::paths::bounded::state_json_text_io(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(e) => {

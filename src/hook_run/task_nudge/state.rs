@@ -17,7 +17,7 @@ pub(super) fn state_path(state_dir: &Path, session_id: &str) -> Option<PathBuf> 
 /// file is reset, and the caller saves the reset so the next call does not report it again. A
 /// file that exists but cannot be read is an error, and the message names the path.
 pub(super) fn read_state(path: &Path) -> Result<(NudgeState, bool), String> {
-    let text = match crate::paths::bounded::state_text_io(path) {
+    let text = match crate::paths::bounded::state_json_text_io(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok((NudgeState::default(), false));

@@ -87,7 +87,7 @@ impl SessionState {
 
     fn load(state_dir: &Path, session_id: &str) -> Self {
         let path = session_state_path(state_dir, session_id);
-        match crate::paths::bounded::state_text_io(&path) {
+        match crate::paths::bounded::state_json_text_io(&path) {
             Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
                 crate::agent_notice::record_logged(format!("llmenv: repeat-detect state {} cannot be parsed ({e}), so it starts fresh. Fix: delete that file to clear this error.", path.display()));
                 Self::new(session_id)
