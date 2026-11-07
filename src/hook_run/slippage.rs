@@ -203,10 +203,12 @@ pub(crate) fn handle_pre_tool_use(
 pub(super) fn path_key(path: &str) -> String {
     let (key, unresolved) = resolved_key(path);
     if let Some(e) = unresolved {
-        tracing::debug!(
-            path,
-            "slippage: cannot canonicalize, so the literal path is the key: {e}"
-        );
+        // The literal path can miss a read of the same file, so the deny that follows can be
+        // wrong. The notice is logged too, which names the path and the cause (#3506).
+        crate::agent_notice::record_logged(format!(
+            "llmenv: the path {path} cannot be resolved ({e}), so a read of it may not match an \
+             earlier read. Fix: check that the file exists and that its folder is readable."
+        ));
     }
     key
 }

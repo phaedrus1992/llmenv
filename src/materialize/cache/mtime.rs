@@ -36,7 +36,7 @@ pub(crate) fn newest_file_mtime_or_record(
 ) -> Option<SystemTime> {
     match newest_file_mtime(p, source) {
         Ok(m) => Some(m),
-        Err(e) if super::is_vanished(&e) => {
+        Err(e) if super::is_vanished(&e) && super::is_gone(p) => {
             tracing::debug!(path = %p.display(), "cache gc: entry removed during the walk");
             None
         }

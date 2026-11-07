@@ -52,3 +52,9 @@ pub(super) fn notice(msg: &str) {
          backend."
     ));
 }
+
+/// [`notice`] for a message whose caller has its own fix. The caller passes the whole text, so
+/// the default fix is never added to it (#3507).
+pub(super) fn notice_with_fix(text: &str) {
+    crate::agent_notice::record_logged(format!("llmenv: {text}"));
+}

@@ -17,10 +17,10 @@ pub(crate) enum RecallJsonError {
     CutOff { bytes: usize, reason: String },
     /// The reply does not start with a JSON array. icm before 0.11.5 answers in text.
     #[error(
-        "the icm_memory_recall reply is not a JSON list ({reason}); it starts with {start:?}. \
+        "the icm_memory_recall reply is not a JSON list ({reason}). \
          Fix: upgrade icm to 0.11.5 or later"
     )]
-    NotAList { reason: String, start: String },
+    NotAList { reason: String },
     /// One element of the list does not have the fields of an icm record.
     #[error(
         "record {index} of the icm_memory_recall reply is not an icm record ({reason}); it is \

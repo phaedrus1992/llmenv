@@ -46,10 +46,11 @@ pub fn run_icm_store(payload_json: &str, checkpoint: Option<&Path>) -> anyhow::R
     });
     result.inspect_err(|e| {
         // The child runs alone, so the notice reaches the agent through the spool (#3398).
-        crate::agent_notice::record_logged(format!(
-            "llmenv: a memory was not stored in ICM: {e:#}. Fix: run `llmenv doctor` to check \
-             the memory server."
-        ));
+        crate::agent_notice::record_fixed_with_cause(
+            "llmenv: a memory was not stored in ICM. Fix: run `llmenv doctor` to check the memory \
+             server. The cause is in the llmenv log.",
+            e,
+        );
     })
 }
 
@@ -95,11 +96,12 @@ fn run_icm_store_inner(args: serde_json::Value) -> anyhow::Result<()> {
         .build()?;
     let state_dir = crate::paths::state_dir()
         .inspect_err(|e| {
-            crate::agent_notice::record_logged(format!(
+            crate::agent_notice::record_fixed_with_cause(
                 "llmenv: the memory store has no state folder, so it skips the duplicate check \
-                 and a memory can be stored twice: {e:#}. Fix: set HOME, or set \
-                 LLMENV_STATE_DIR to a valid absolute path."
-            ));
+                 and a memory can be stored twice. Fix: set HOME, or set LLMENV_STATE_DIR to a \
+                 valid absolute path. The cause is in the llmenv log.",
+                e,
+            );
         })
         .ok();
     rt.block_on(store_once(&client, state_dir.as_deref(), args))

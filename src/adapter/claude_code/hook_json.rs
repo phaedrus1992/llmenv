@@ -72,17 +72,19 @@ pub(super) fn on_failure_allowed(
     {
         Some(true) => true,
         Some(false) => {
-            tracing::error!(
-                "the hooks {} set on_failure: block, but Claude Code {} does not read onFailure \
-                 before 2.1.295, so llmenv leaves it out and these hooks fail open. Fix: upgrade \
-                 Claude Code, then run `llmenv regenerate`.",
+            // The agent sees the drop too, because it changes what the hooks do (#3506).
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the hooks {} set on_failure: block, but Claude Code {} does not read \
+                 onFailure before 2.1.295, so llmenv leaves it out and these hooks fail open. Fix: \
+                 upgrade Claude Code, then run `llmenv regenerate`.",
                 named.join(", "),
                 version.as_deref().unwrap_or_default()
-            );
+            ));
             false
         }
         None => {
-            tracing::warn!(
+            // An error, not a warning, because the default log filter drops warnings (#3506).
+            tracing::error!(
                 "llmenv cannot read the Claude Code version ({}), so it writes onFailure for the \
                  hooks {} as asked. Claude Code before 2.1.295 does not read the key. Fix: check \
                  that `claude --version` runs from this shell.",

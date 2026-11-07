@@ -99,35 +99,67 @@ pub fn collect(state_dir: &Path) {
         }
     }
     paths.sort();
-    for path in paths.into_iter().take(MAX_READ) {
-        collect_one(&path);
+    // The budget counts the notices that were read. An entry that fails here does not use up the
+    // reads of the entries after it, so one stuck file cannot starve the rest (#3507).
+    let mut read = 0;
+    let mut failed = 0;
+    for path in &paths {
+        // Failures have their own cap, so a folder of broken entries cannot flood the agent (#3507).
+        if read >= MAX_READ || failed >= MAX_READ {
+            break;
+        }
+        if collect_one(path) {
+            read += 1;
+        } else {
+            failed += 1;
+        }
+    }
+    if failed >= MAX_READ {
+        super::record_logged(format!(
+            "llmenv: {failed} detached job notice(s) in {} could not be read, so the rest wait \
+             for the next run. Fix: remove the files that cannot be read.",
+            dir.display()
+        ));
     }
 }
 
-fn collect_one(path: &Path) {
+/// Read one notice and remove its file. Returns `true` when a notice was read.
+fn collect_one(path: &Path) -> bool {
     // A link or another non-file is never read, so a planted link cannot pull in another file.
-    match std::fs::symlink_metadata(path) {
+    let read = match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_file() => {
             match llmenv_paths::read_text_bounded(path, MAX_NOTICE_BYTES) {
-                Ok(Some(text)) => super::record(text),
-                Ok(None) => return,
-                Err(e) => super::record_logged(format!(
-                    "llmenv: cannot read the detached job notice {}: {e}. Fix: remove the file.",
-                    path.display()
-                )),
+                Ok(Some(text)) => {
+                    super::record(text);
+                    true
+                }
+                Ok(None) => return false,
+                Err(e) => {
+                    super::record_logged(format!(
+                        "llmenv: cannot read the detached job notice {}: {e}. The file is removed, so this notice is lost.",
+                        path.display()
+                    ));
+                    false
+                }
             }
         }
         // Another hook run read it first.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
-        Ok(_) => super::record_logged(format!(
-            "llmenv: the detached job notice {} is not a regular file, so it is removed unread.",
-            path.display()
-        )),
-        Err(e) => super::record_logged(format!(
-            "llmenv: cannot read the detached job notice {}: {e}. Fix: remove the file.",
-            path.display()
-        )),
-    }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+        Ok(_) => {
+            super::record_logged(format!(
+                "llmenv: the detached job notice {} is not a regular file, so it is removed unread.",
+                path.display()
+            ));
+            false
+        }
+        Err(e) => {
+            super::record_logged(format!(
+                "llmenv: cannot read the detached job notice {}: {e}. The file is removed, so this notice is lost.",
+                path.display()
+            ));
+            false
+        }
+    };
     if let Err(e) = std::fs::remove_file(path)
         && e.kind() != std::io::ErrorKind::NotFound
     {
@@ -136,6 +168,7 @@ fn collect_one(path: &Path) {
             path.display()
         ));
     }
+    read
 }
 
 #[cfg(test)]

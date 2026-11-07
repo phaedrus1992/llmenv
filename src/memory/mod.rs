@@ -132,10 +132,15 @@ pub(crate) fn list() -> anyhow::Result<()> {
 /// Run the `diff` subcommand: compare the project's records with the last `diff` run, by id.
 pub(crate) fn diff() -> anyhow::Result<()> {
     let snapshot_path = crate::paths::state_dir()?.join(listing::DIFF_SNAPSHOT);
-    let current: Vec<listing::SnapshotRecord> = scope_records()?
-        .iter()
-        .map(listing::SnapshotRecord::from)
-        .collect();
+    let records = scope_records()?;
+    // A recall at the limit holds only the first records. Saving it as the baseline would show the
+    // rest as new on the next run, so the baseline is kept and no diff is shown (#3508).
+    if let Some(note) = recall_json::read_limit_note(records.len()) {
+        println!("{note} The baseline is not changed, so no diff is shown.");
+        return Ok(());
+    }
+    let current: Vec<listing::SnapshotRecord> =
+        records.iter().map(listing::SnapshotRecord::from).collect();
     let Some(previous) = listing::read_snapshot(&snapshot_path)? else {
         listing::write_snapshot(&snapshot_path, &current)?;
         println!("No previous snapshot to diff against. Saved current state as baseline.");

@@ -47,7 +47,9 @@ pub(super) fn update(
     // is the task that changes (#3478). A refused check saves no note.
     let applied = task::with_store_lock(state_dir, || {
         // A refused or unresolved id is a task error, not a store error, so the deny keeps the id hint.
-        let (slug, ownership_note, caller) = match checked_slug(state_dir, project, owner, id) {
+        // A read error of the store is returned with `?`, so it reaches `store_failed` and not
+        // the id hint.
+        let (slug, ownership_note, caller) = match checked_slug(state_dir, project, owner, id)? {
             Ok(checked) => checked,
             Err(e) => return Ok((Err(e), String::new())),
         };
@@ -88,15 +90,21 @@ pub(super) fn update(
 /// The slug that `id` names, when the caller may change that task, with the ownership note and
 /// the caller. The check is the check of the `llmenv task` commands. TaskUpdate has no
 /// `--other-session`, so the note is set only for a task with no session.
+///
+/// The outer error is a store that could not be read. The inner error is an id that does not
+/// resolve, or a task that the caller may not change.
 fn checked_slug(
     state_dir: &Path,
     project: &str,
     owner: &session::EngineIdentity,
     id: &str,
-) -> anyhow::Result<(String, Option<OverrideNote>, Caller)> {
+) -> anyhow::Result<anyhow::Result<(String, Option<OverrideNote>, Caller)>> {
     let caller = task::ownership::caller_session(state_dir, project, owner)?;
-    let (slug, note) = task::ownership::ensure_task_is_ours(state_dir, id, &caller, None)?;
-    Ok((slug, note, caller))
+    task::list_tasks_strict(state_dir)?;
+    Ok(
+        task::ownership::ensure_task_is_ours(state_dir, id, &caller, None)
+            .map(|(slug, note)| (slug, note, caller)),
+    )
 }
 
 /// Records the ownership note of a TaskUpdate after its change saved (#3586). A deleted task

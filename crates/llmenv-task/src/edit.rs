@@ -4,6 +4,34 @@ use std::path::Path;
 
 use super::*;
 
+/// What to change in an [`edit_task`] call. Every field defaults to "leave
+/// unchanged" / "nothing to add or remove" — a call with every field at its
+/// default is a legal no-op (#930), still bumping `updated_at`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TaskEdit<'a> {
+    /// New title, if changing it.
+    pub title: Option<&'a str>,
+    /// Set the parent to this id. Mutually exclusive with `no_parent` — the
+    /// CLI enforces this with `conflicts_with`; if both are set here,
+    /// `parent` wins.
+    pub parent: Option<&'a str>,
+    /// Clear the parent.
+    pub no_parent: bool,
+    /// Ids to add to `blocked_on`. Idempotent — an id already present is a
+    /// no-op, same as `block_task`.
+    pub block_on: &'a [String],
+    /// Ids to remove from `blocked_on`. Idempotent — an id not present is a
+    /// no-op.
+    pub unblock: &'a [String],
+    /// Append a new note.
+    pub add_note: Option<&'a str>,
+    /// Remove a note, identified by its 0-based index or its exact RFC3339
+    /// `at` timestamp.
+    pub delete_note: Option<&'a str>,
+    /// Replace the detail. An empty string clears it.
+    pub detail: Option<&'a str>,
+}
+
 /// Mutate an existing task's title, parent, `blocked_on` set, and notes in a
 /// single load-mutate-save cycle (#930).
 ///
@@ -63,6 +91,7 @@ pub fn edit_task<'a>(
             if on_slug == slug {
                 anyhow::bail!("task '{slug}' cannot be blocked on itself");
             }
+            block_cycle::reject_block_cycle(all_tasks.as_slice(), &slug, &on_slug)?;
             if !task.blocked_on.contains(&on_slug) {
                 task.blocked_on.push(on_slug);
             }

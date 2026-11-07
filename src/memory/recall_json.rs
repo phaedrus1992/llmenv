@@ -34,18 +34,6 @@ pub(crate) struct RecallRecord {
     pub keywords: Vec<String>,
 }
 
-/// Most characters of a reply that is not a list that an error quotes. The quote shows the
-/// shape of the reply, such as `--- <id>` or `No memories`, and little of the memory text.
-const QUOTE_CHARS: usize = 24;
-
-/// The first characters of `text`, on one line, so a quote cannot forge a log line.
-fn quote(text: &str) -> String {
-    text.chars()
-        .take(QUOTE_CHARS)
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect()
-}
-
 /// The records of a JSON recall reply, in icm's rank order.
 ///
 /// icm can append an advisory line after the list, so only the first JSON value is read.
@@ -68,9 +56,16 @@ pub(crate) fn parse(body: &str) -> Result<Vec<RecallRecord>, RecallJsonError> {
             });
         }
         Some(Err(e)) => {
+            // The notice carries no reply text. The log gets its first characters, with control
+            // characters replaced so one reply cannot forge a log line (#3508).
+            let sample: String = body
+                .chars()
+                .take(24)
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect();
+            tracing::error!(reply_start = %sample, reason = %e, "icm recall reply is not a JSON list");
             return Err(RecallJsonError::NotAList {
                 reason: e.to_string(),
-                start: quote(body),
             });
         }
         None => return Err(RecallJsonError::Empty),
@@ -113,3 +108,15 @@ fn record(index: usize, value: serde_json::Value) -> Result<RecallRecord, Recall
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests;
+
+/// The line that says the read reached the recall limit, or `None` below it. icm returns at most
+/// the limit, so a full read may hold more records than the summary counts (#3508).
+pub(crate) fn read_limit_note(total: usize) -> Option<String> {
+    let limit = usize::try_from(BUDGET_MAX_LIMIT).unwrap_or(usize::MAX);
+    (total >= limit).then(|| {
+        format!(
+            "  Read limit reached: this is the first {total} record(s), so more may exist. The \
+             summary is partial."
+        )
+    })
+}

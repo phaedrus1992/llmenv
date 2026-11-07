@@ -17,6 +17,8 @@ use config_guard::extract_hook_file_path;
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
+mod checkpoint_arg;
+use checkpoint_arg::checked_checkpoint;
 mod clean;
 mod config_guard;
 mod env_vars;
@@ -3001,21 +3003,6 @@ fn render_task_session_summary_human(
         }
     }
     out
-}
-
-/// The `--checkpoint` path of a detached child, checked to be a checkpoint file under the state
-/// dir (#2396). The child deletes and trusts the file, so it must not take an arbitrary path.
-/// Every detached child calls this first, so it also spools the child's notices for the next
-/// hook run (#3398).
-fn checked_checkpoint(path: Option<PathBuf>) -> anyhow::Result<Option<PathBuf>> {
-    if let Ok(state_dir) = paths::state_dir() {
-        crate::agent_notice::start_spool(&state_dir);
-    }
-    let Some(path) = path else {
-        return Ok(None);
-    };
-    let state_dir = paths::state_dir()?;
-    crate::hook_run::checkpoint::validated_path(&state_dir, &path).map(Some)
 }
 
 /// Handle `llmenv task <subcommand>` (#231). Thin formatting layer over
