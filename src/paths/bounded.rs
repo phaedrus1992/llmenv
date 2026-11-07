@@ -171,7 +171,7 @@ pub(crate) fn decode_text_cut_at_end(bytes: Vec<u8>) -> std::io::Result<String> 
 ///
 /// # Errors
 /// `InvalidData` for bytes that are not UTF-8, and it names the offset of the first bad byte.
-pub(crate) fn decode_state_text(bytes: Vec<u8>) -> std::io::Result<String> {
+fn decode_state_text(bytes: Vec<u8>) -> std::io::Result<String> {
     String::from_utf8(bytes).map_err(|e| {
         let error = e.utf8_error();
         let valid = error.valid_up_to();

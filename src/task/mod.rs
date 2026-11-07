@@ -25,7 +25,7 @@ mod parent_chain;
 use ancestors::ancestors_to_start;
 use parent_chain::reject_cycle;
 mod edit;
-pub use edit::TaskEdit;
+pub(crate) use edit::TaskEdit;
 pub(crate) use edit::edit_task;
 mod note;
 pub(crate) mod ownership;
