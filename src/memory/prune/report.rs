@@ -24,6 +24,9 @@ pub(super) fn print(result: &PruneResult) {
     };
     println!("{title}");
     println!("  Total records:       {}", result.total);
+    if let Some(note) = crate::memory::recall_json::read_limit_note(result.total) {
+        println!("{note}");
+    }
     println!("  critical (kept):     {}", result.critical);
     println!("  high (kept):         {}", result.high);
     println!("  {medium}{}", result.medium);
@@ -102,5 +105,13 @@ mod tests {
             text.starts_with("2 record(s) that prune cannot place"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_read_at_the_limit_says_more_may_exist() {
+        let limit = usize::try_from(crate::memory::recall_json::BUDGET_MAX_LIMIT).unwrap();
+        assert!(crate::memory::recall_json::read_limit_note(limit - 1).is_none());
+        let note = crate::memory::recall_json::read_limit_note(limit).unwrap();
+        assert!(note.contains("more may exist"), "{note}");
     }
 }
