@@ -109,9 +109,11 @@ mod tests {
 
     #[test]
     fn a_read_at_the_limit_says_more_may_exist() {
-        let limit = usize::try_from(crate::memory::recall_json::BUDGET_MAX_LIMIT).unwrap();
-        assert!(crate::memory::recall_json::read_limit_note(limit - 1).is_none());
-        let note = crate::memory::recall_json::read_limit_note(limit).unwrap();
-        assert!(note.contains("more may exist"), "{note}");
+        let limit = usize::try_from(crate::memory::recall_json::BUDGET_MAX_LIMIT).unwrap_or(0);
+        assert!(crate::memory::recall_json::read_limit_note(limit.saturating_sub(1)).is_none());
+        assert!(
+            crate::memory::recall_json::read_limit_note(limit)
+                .is_some_and(|note| note.contains("more may exist"))
+        );
     }
 }
