@@ -30,7 +30,7 @@ pub(crate) fn engine_can_run_hook(engine: &str, supported_events: &[&str], hook:
     if hook.handler.on_failure.is_some() {
         eprintln!(
             "warning: {engine} adapter does not read on_failure (hook event '{}'), so this hook \
-             fails open when it cannot run. Only Claude Code blocks on a hook failure.",
+             fails open when it cannot run.",
             hook.event
         );
     }

@@ -82,7 +82,8 @@ fn state_path(state_dir: &Path, session_id: Option<&str>) -> Option<PathBuf> {
     if !crate::paths::is_valid_short_name(id) {
         crate::agent_notice::record_logged(
             "llmenv: the stop reminder can repeat, because the session id is not safe in a \
-             file name.",
+             file name. Fix: none in this session. If it repeats, report the session id format \
+             to llmenv.",
         );
         return None;
     }

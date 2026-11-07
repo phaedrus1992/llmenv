@@ -286,14 +286,12 @@ fn metered_auth_keeps_the_llmenv_notice() {
 }
 
 #[test]
-fn a_version_that_is_not_a_version_keeps_the_notice_and_says_why() {
+fn a_version_that_is_not_a_version_keeps_the_notice_and_adds_no_agent_notice() {
     let env = env_of(&[("CLAUDE_CODE_VERSION", "nightly-3462")]);
     assert!(resume_notice("SessionStart", &expensive_resume(), env, || false).is_some());
+    // The fallback is logged, not noticed, because it would repeat at every SessionStart (#3506).
     let notices = crate::agent_notice::current().unwrap_or_default();
-    assert!(
-        notices.contains("CLAUDE_CODE_VERSION is not a version (\"nightly-3462\")"),
-        "{notices}"
-    );
+    assert!(!notices.contains("nightly-3462"), "{notices}");
 }
 
 #[test]

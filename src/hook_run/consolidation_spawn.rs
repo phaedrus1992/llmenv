@@ -32,12 +32,15 @@ pub(super) fn post_session_consolidation() {
 pub(super) fn post_session_consolidation_in(state_dir: Option<&std::path::Path>) {
     // Spawns this same binary as a detached child. The path is this process's own image, not input.
     // nosemgrep: rust.lang.security.current-exe.current-exe
-    let Ok(exe) = std::env::current_exe() else {
-        crate::agent_notice::record_logged(
-            "llmenv: memory consolidation is skipped, because llmenv cannot find its own \
-             program. Fix: run `llmenv doctor`.",
-        );
-        return;
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => {
+            crate::agent_notice::record_logged(format!(
+                "llmenv: memory consolidation is skipped, because llmenv cannot find its own \
+                 program: {e}. Fix: run `llmenv doctor`."
+            ));
+            return;
+        }
     };
     // The run tag keeps two sessions that end in one directory from sharing a checkpoint file, and
     // it scopes the rule ids to this run (#2397).
@@ -51,9 +54,10 @@ pub(super) fn post_session_consolidation_in(state_dir: Option<&std::path::Path>)
     redirect_stderr_to_detached_log(&mut cmd, detached_child_log_path());
     crate::mcp::proxy::detach_process_group(&mut cmd);
     if let Err(e) = crate::trace::spawn_counted("consolidation:run", &mut cmd) {
+        // The checkpoint written above stays, so a later session can run the job again (#3506).
         crate::agent_notice::record_logged(format!(
-            "llmenv: memory consolidation is skipped, because its job cannot start: {e}. Fix: \
-             run `llmenv doctor`."
+            "llmenv: memory consolidation is skipped, because its job cannot start: {e}. Its \
+             checkpoint stays, so a later session can run it again. Fix: run `llmenv doctor`."
         ));
     }
     // Not waited on: the child is process-group-detached and outlives us.

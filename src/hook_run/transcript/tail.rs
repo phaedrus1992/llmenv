@@ -44,9 +44,18 @@ pub(super) fn read_tail(path: &Path) -> Option<String> {
         return Some(text);
     }
     // The first line after the seek is cut in the middle, so it is dropped.
-    Some(
-        text.split_once('\n')
-            .map(|(_, rest)| rest.to_string())
-            .unwrap_or_default(),
-    )
+    match text.split_once('\n') {
+        Some((_, rest)) => Some(rest.to_string()),
+        // No line ends in the window, so the checks get no text. That is a gap, and it is named
+        // (#3506).
+        None => {
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the last line of the transcript {} is longer than {TAIL_BYTES} bytes, so \
+                 the checks that read the tail pass unchecked. Fix: none in this run; report the \
+                 transcript shape to llmenv if the checks must read it.",
+                path.display()
+            ));
+            Some(String::new())
+        }
+    }
 }

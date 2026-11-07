@@ -230,10 +230,12 @@ fn native_warning_covers(
     match crate::util::semver::is_release_at_least(&version, NATIVE_RESUME_WARNING_SINCE) {
         Some(newer) => newer && !api_key_helper(),
         None => {
-            crate::agent_notice::record_logged(format!(
-                "llmenv: the resume cost notice stays on, because CLAUDE_CODE_VERSION is \
-                 not a version ({version:?}). Fix: none is needed."
-            ));
+            // The fallback is benign and would repeat at every SessionStart, so it is logged
+            // and not noticed (#3506).
+            tracing::error!(
+                version = ?version,
+                "the resume cost notice stays on, because CLAUDE_CODE_VERSION is not a version"
+            );
             false
         }
     }
