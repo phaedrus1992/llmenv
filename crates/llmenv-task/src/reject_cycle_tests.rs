@@ -138,8 +138,8 @@ proptest::proptest! {
             let parent = if is_top { None } else { Some(index + 1) };
             write_chain_task(dir.path(), index, parent, !is_top, *is_open);
         }
-        let all = crate::task::list_tasks_strict(dir.path()).unwrap();
-        let child = crate::task::load_task(dir.path(), "p0").unwrap();
+        let all = crate::list_tasks_strict(dir.path()).unwrap();
+        let child = crate::load_task(dir.path(), "p0").unwrap();
         let promoted: Vec<String> = ancestors_to_start(dir.path(), &child, true, &all)
             .unwrap()
             .into_iter()
