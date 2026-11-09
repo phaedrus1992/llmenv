@@ -17,7 +17,7 @@ serde_json = "=1.0.154"
 serde_yaml = { package = "serde_yaml_ng", version = "=0.10.0" }
 # Reads the [package] and [tool.*] tables of scanned Cargo.toml and pyproject.toml files for
 # onboarding (#2785). No writer: onboarding never re-serializes a manifest.
-toml = { version = "=1.2.0", default-features = false, features = ["std", "parse", "serde"] }
+toml = { version = "=1.2.1", default-features = false, features = ["std", "parse", "serde"] }
 thiserror = "=2.0.21"
 tracing = "=0.1.44"
 proptest = "=1.12.0"
