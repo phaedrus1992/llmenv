@@ -367,4 +367,33 @@ mod failure_tests {
             "{notice}"
         );
     }
+
+    // #3746: an entry that the size walk skipped inside a stale folder is counted in the notice.
+    #[test]
+    fn an_entry_skipped_inside_a_stale_folder_is_counted_in_the_hint() {
+        let state = tempfile::tempdir().unwrap();
+        let stale = state.path().join("tmp").join("stale");
+        let locked = stale.join("locked");
+        fs::create_dir_all(&locked).unwrap();
+        fs::write(locked.join("inner"), b"i").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+
+        // A clock 30 days ahead makes the new folder older than the 7-day rule.
+        let later = SystemTime::now() + std::time::Duration::from_secs(30 * 86_400);
+        let notice = stale_tmp_hint(
+            state.path(),
+            168,
+            later,
+            crate::materialize::cache::AgeSource::MtimeOnly,
+            || Ok(Vec::new()),
+        );
+
+        // Restore the mode before any assertion, so the tempdir can be removed.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+        let notice = notice.expect("a stale folder gives a notice");
+        assert!(
+            notice.contains("1 state/tmp entries could not be read"),
+            "{notice}"
+        );
+    }
 }
