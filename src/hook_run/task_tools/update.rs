@@ -66,9 +66,10 @@ pub(super) fn update(
             Ok(())
         }
         .and_then(|()| change(state_dir, task::TaskTarget::Checked(&slug, &tasks), status))
-        .and_then(|msg| {
-            record_check_note(state_dir, &caller, &slug, ownership_note.as_ref(), deleted)
-                .map(|()| msg)
+        .map(|msg| {
+            let noted =
+                record_check_note(state_dir, &caller, &slug, ownership_note.as_ref(), deleted);
+            with_note_outcome(msg, noted)
         });
         // The note is kept when the change fails too, and the deny says where it went.
         let note = note.map_or_else(String::new, |note| {
@@ -114,6 +115,19 @@ fn checked_slug(
         task::ownership::ensure_task_is_ours(state_dir, &tasks, id, &caller, None)
             .map(|(slug, note)| (slug, note, caller, tasks)),
     )
+}
+
+/// The text of a saved change, with the failure of its ownership note beside it. The change is
+/// saved, so a failed note is not a failed change, and a retry of a delete would fail on a task
+/// that is gone (#3755). The error of the note already says that the change is saved.
+fn with_note_outcome(msg: String, noted: anyhow::Result<()>) -> String {
+    match noted {
+        Ok(()) => msg,
+        Err(e) => {
+            tracing::error!(error = %format!("{e:#}"), "task redirect: ownership note not saved");
+            format!("{msg}. {e:#}. Do not repeat the update")
+        }
+    }
 }
 
 /// Records the ownership note of a TaskUpdate after its change saved (#3586). A deleted task
@@ -194,3 +208,24 @@ fn note_outcome(saved: anyhow::Result<task::Task>, target: &str) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests;
+
+#[cfg(test)]
+mod note_outcome_tests {
+    use super::with_note_outcome;
+
+    #[test]
+    fn a_failed_note_is_reported_beside_the_saved_change() {
+        let ok = with_note_outcome("deleted 'a'".to_owned(), Ok(()));
+        assert_eq!(ok, "deleted 'a'");
+        let text = with_note_outcome(
+            "deleted 'a'".to_owned(),
+            Err(anyhow::anyhow!(
+                "the change to task 'a' is saved, but its note is not"
+            )),
+        );
+        assert!(text.starts_with("deleted 'a'."), "{text}");
+        assert!(text.contains("is saved, but its note is not"), "{text}");
+        assert!(text.ends_with("Do not repeat the update"), "{text}");
+        assert!(!text.contains("couldn't update"), "{text}");
+    }
+}

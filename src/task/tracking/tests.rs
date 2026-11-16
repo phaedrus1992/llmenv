@@ -104,3 +104,72 @@ proptest::proptest! {
         proptest::prop_assert!(matches!(tracking_of(&[], &tasks, None), Tracking::NoSession));
     }
 }
+
+/// #3757: the reminder skips an open task whose blocker is not done, and one whose blocker walk
+/// loops, so it never advises a start that the start refuses.
+#[test]
+fn next_skips_a_task_with_an_unmet_or_looping_blocker() {
+    let visible = [open_session_for_test("s0")];
+    let blocker = task("blocker", "s0", TaskState::Wip, 1);
+    let mut blocked = task("blocked", "s0", TaskState::Open, 2);
+    blocked.blocked_on = vec!["blocker".to_owned()];
+    let free = task("free", "s0", TaskState::Open, 3);
+    let tasks = vec![blocker, blocked, free];
+    let Tracking::Tracked { next, queued, .. } = tracking_of(&visible, &tasks, None) else {
+        unreachable!("tasks are tracked");
+    };
+    assert_eq!(next.as_deref(), Some("free"));
+    assert_eq!(queued, 2, "queued still counts every open task");
+
+    // A blocker that waits on a task of its own parent loop is never done, so the task is skipped.
+    let mut a = task("a", "s0", TaskState::Open, 1);
+    let mut b = task("b", "s0", TaskState::Open, 2);
+    a.blocked_on = vec!["b".to_owned()];
+    b.blocked_on = vec!["a".to_owned()];
+    let Tracking::Tracked { next, .. } = tracking_of(&visible, &[a, b], None) else {
+        unreachable!("tasks are tracked");
+    };
+    assert_eq!(next, None);
+}
+
+proptest::proptest! {
+    /// With blocker edges, `next` is the earliest open task whose blockers are all done, and
+    /// `queued` still counts every open task. These tasks have no sub-tasks, so a blocker is done
+    /// when its own state is `done`. A task that blocks on a missing slug is not actionable (#3757).
+    #[test]
+    fn next_is_the_earliest_open_task_with_every_blocker_done(
+        rows in proptest::collection::vec((0u8..4, proptest::option::of(0usize..12), 0u8..50), 1..10),
+    ) {
+        let visible = [open_session_for_test("s0")];
+        let tasks: Vec<Task> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, (st, blocker, at))| {
+                let mut t = task(&format!("t{i}"), "s0", state_of(*st), *at);
+                if let Some(b) = blocker {
+                    t.blocked_on = vec![format!("t{b}")];
+                }
+                t
+            })
+            .collect();
+        let blockers_done = |t: &Task| {
+            t.blocked_on.iter().all(|b| {
+                tasks.iter().any(|o| &o.slug == b && o.state == TaskState::Done && o.slug != t.slug)
+            })
+        };
+        let open: Vec<&Task> = tasks.iter().filter(|t| t.state == TaskState::Open).collect();
+        let want = open
+            .iter()
+            .filter(|t| blockers_done(t))
+            .min_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.slug.cmp(&b.slug)))
+            .map(|t| t.slug.clone());
+        match tracking_of(&visible, &tasks, None) {
+            Tracking::NoTasks => proptest::prop_assert!(tasks.iter().all(|t| t.state == TaskState::Done)),
+            Tracking::Tracked { next, queued, .. } => {
+                proptest::prop_assert_eq!(next, want);
+                proptest::prop_assert_eq!(queued, open.len());
+            }
+            other => proptest::prop_assert!(false, "unexpected {other:?}"),
+        }
+    }
+}

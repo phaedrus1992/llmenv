@@ -425,3 +425,49 @@ proptest::proptest! {
         proptest::prop_assert_eq!(stored.resume.context.as_deref(), want);
     }
 }
+
+// #3755: one rule covers every command that records an audit note after its change. When the
+// note fails, the error says the change is saved, and it says what to do instead of a retry.
+#[test]
+fn every_failed_note_says_the_change_is_saved() {
+    let dir = TempDir::new().expect("tempdir");
+    let missing = "no-such-session";
+    let audit = SessionOverride {
+        session_id: missing.to_owned(),
+        text: Some("note".to_owned()),
+    };
+    let notes: Vec<(&str, anyhow::Error)> = vec![
+        (
+            "session command",
+            audit
+                .record(dir.path())
+                .expect_err("no session to hold the note"),
+        ),
+        (
+            "task clear",
+            super::record_cleared_override(dir.path(), missing, "caller", &["a".to_owned()])
+                .expect_err("no session to hold the note"),
+        ),
+        (
+            "task command",
+            OverrideNote {
+                slug: "gone-task".to_owned(),
+                text: "note".to_owned(),
+                owner_less: false,
+            }
+            .record(dir.path())
+            .expect_err("no task to hold the note"),
+        ),
+    ];
+    for (command, err) in notes {
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("saved") || text.contains("cleared") || text.contains("deleted"),
+            "{command}: the error must say the change happened: {text}"
+        );
+        assert!(
+            text.contains("do not retry") || text.contains("Fix:"),
+            "{command}: the error must say what to do: {text}"
+        );
+    }
+}

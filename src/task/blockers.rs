@@ -101,38 +101,42 @@ pub(super) fn first_undone_in_subtree<'a>(
     waiter: &str,
     by_slug: &HashMap<&'a str, &'a Task>,
 ) -> anyhow::Result<Option<&'a str>> {
-    fn go<'a>(
-        slug: &'a str,
-        waiter: &str,
-        by_slug: &HashMap<&'a str, &'a Task>,
-        visited: &mut HashSet<&'a str>,
-    ) -> anyhow::Result<Option<&'a str>> {
-        if !visited.insert(slug) {
+    ensure_waiter_chain_ends(waiter, by_slug)?;
+    // A dangling or undone root needs no child index, which keeps the common answer cheap.
+    match by_slug.get(slug) {
+        Some(task) if task.state == TaskState::Done => {}
+        _ => return Ok(Some(slug)),
+    }
+    // One parent-to-children index serves the whole walk, and an explicit stack replaces the
+    // recursion, so a deep chain of done tasks costs O(n) time and no call stack (#3757).
+    let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
+    for t in by_slug.values().filter(|t| t.slug != waiter) {
+        if let Some(parent) = t.parent.as_deref() {
+            children.entry(parent).or_default().push(t.slug.as_str());
+        }
+    }
+    for list in children.values_mut() {
+        list.sort_unstable_by(|a, b| b.cmp(a));
+    }
+    let mut visited: HashSet<&str> = HashSet::new();
+    let mut stack: Vec<&str> = vec![slug];
+    while let Some(current) = stack.pop() {
+        if !visited.insert(current) {
             anyhow::bail!(
-                "the parent links of task '{slug}' loop, so its blocker walk cannot end. {LOOP_FIX}"
+                "the parent links of task '{current}' loop, so its blocker walk cannot end. \
+                 {LOOP_FIX}"
             );
         }
-        let Some(&task) = by_slug.get(slug) else {
-            return Ok(Some(slug));
-        };
-        if task.state != TaskState::Done {
-            return Ok(Some(slug));
+        match by_slug.get(current) {
+            Some(task) if task.state == TaskState::Done => {}
+            _ => return Ok(Some(current)),
         }
-        let mut children: Vec<&'a str> = by_slug
-            .values()
-            .filter(|t| t.parent.as_deref() == Some(slug) && t.slug != waiter)
-            .map(|t| t.slug.as_str())
-            .collect();
-        children.sort_unstable();
-        for child in children {
-            if let Some(undone) = go(child, waiter, by_slug, visited)? {
-                return Ok(Some(undone));
-            }
+        // The lists hold the children in reverse slug order, so the stack pops the first one first.
+        if let Some(list) = children.get(current) {
+            stack.extend(list.iter().copied());
         }
-        Ok(None)
     }
-    ensure_waiter_chain_ends(waiter, by_slug)?;
-    go(slug, waiter, by_slug, &mut HashSet::new())
+    Ok(None)
 }
 
 /// The fix that every loop error of the blocker walk ends with.
