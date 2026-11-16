@@ -46,7 +46,8 @@ pub(crate) async fn start_session(
 /// id, for forward compatibility with the backend: its first line is the id.
 ///
 /// # Errors
-/// The reply is a JSON object with no string `session_id`.
+/// The reply is a JSON object with no string `session_id`, or it starts with `{` or `[` and is
+/// not a complete JSON object.
 fn session_id_from_reply(raw: &str) -> anyhow::Result<String> {
     match serde_json::Deserializer::from_str(raw)
         .into_iter::<Value>()
@@ -61,6 +62,11 @@ fn session_id_from_reply(raw: &str) -> anyhow::Result<String> {
                     "{START_TOOL} returned a reply with no `session_id` string: {raw:?}"
                 )
             }),
+        // A reply that starts like JSON but is not an object is a damaged reply. It is an error,
+        // because the first line would become a wrong id that fails later, far from the cause.
+        _ if raw.starts_with(['{', '[']) => Err(anyhow::anyhow!(
+            "{START_TOOL} returned a reply that is not a JSON object with a `session_id`: {raw:?}"
+        )),
         _ => Ok(raw.lines().next().unwrap_or_default().trim().to_string()),
     }
 }
@@ -174,17 +180,6 @@ mod tests {
     }
 
     #[test]
-    fn a_hint_line_after_the_json_object_is_ignored() {
-        let reply = "{\"session_id\":\"01M7JV17C1MPXQ7DHRX184B2QD\"}\n[ICM: 550 tool calls since \
-                     last store. Consider saving important context with icm_memory_store before it \
-                     is lost.]";
-        assert_eq!(
-            session_id_from_reply(reply).unwrap(),
-            "01M7JV17C1MPXQ7DHRX184B2QD"
-        );
-    }
-
-    #[test]
     fn a_bare_id_keeps_only_its_first_line() {
         assert_eq!(
             session_id_from_reply("sess-42\n[ICM: 10 tool calls since last store.]").unwrap(),
@@ -223,7 +218,42 @@ mod tests {
         assert_eq!(id, "01M7JV17C1MPXQ7DHRX184B2QD");
     }
 
+    #[test]
+    fn a_damaged_json_reply_is_an_error_and_not_an_id() {
+        for reply in [r#"{"session_id":"01KXE"#, r#"["01KXE"]"#, "{"] {
+            let err = session_id_from_reply(reply).unwrap_err();
+            assert!(
+                err.to_string().contains("not a JSON object"),
+                "{reply}: {err}"
+            );
+        }
+    }
+
     proptest::proptest! {
+        /// A reply that does not start like JSON is a bare id: its trimmed first line.
+        #[test]
+        fn a_bare_reply_gives_its_first_line(
+            first in "[0-9A-Za-z_-][ -~]{0,30}",
+            tail in "(\\n[ -~]{0,40}){0,3}",
+        ) {
+            let reply = format!("{first}{tail}");
+            proptest::prop_assert_eq!(
+                session_id_from_reply(&reply).unwrap(),
+                first.trim().to_owned()
+            );
+        }
+
+        /// An object with no string `session_id` is an error, whatever its other keys hold.
+        #[test]
+        fn an_object_without_a_string_id_is_an_error(
+            key in "[a-z]{1,8}",
+            number in 0u32..1000,
+        ) {
+            proptest::prop_assume!(key != "session_id");
+            let reply = serde_json::json!({ key: number, "session_id": number }).to_string();
+            proptest::prop_assert!(session_id_from_reply(&reply).is_err());
+        }
+
         /// Whatever text follows the JSON object, the id is the one in the object.
         #[test]
         fn text_after_the_object_never_changes_the_id(
