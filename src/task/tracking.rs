@@ -28,6 +28,9 @@ pub(crate) enum Tracking {
         waiting: Vec<String>,
         next: Option<String>,
         queued: usize,
+        /// Set when `next` is `None` and a task is still `open`: the slug of the first open task
+        /// and why its blockers keep it from starting, so the reminder gives the reason (#3763).
+        stuck: Option<(String, String)>,
     },
 }
 
@@ -110,12 +113,24 @@ fn tracking_of(visible: &[session::Session], tasks: &[Task], caller: Option<&str
         .iter()
         .filter(|t| t.state == TaskState::Open)
         .count();
+    let stuck = if next.is_none() {
+        let mut open: Vec<&Task> = unfinished
+            .iter()
+            .copied()
+            .filter(|t| t.state == TaskState::Open)
+            .collect();
+        open.sort_by(|a, b| queue_order(a, b));
+        super::blockers::first_obstacle(open.into_iter(), &by_slug)
+    } else {
+        None
+    };
     Tracking::Tracked {
         wip,
         wip_ownerless,
         waiting,
         next,
         queued,
+        stuck,
     }
 }
 

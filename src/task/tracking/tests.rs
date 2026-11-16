@@ -126,10 +126,16 @@ fn next_skips_a_task_with_an_unmet_or_looping_blocker() {
     let mut b = task("b", "s0", TaskState::Open, 2);
     a.blocked_on = vec!["b".to_owned()];
     b.blocked_on = vec!["a".to_owned()];
-    let Tracking::Tracked { next, .. } = tracking_of(&visible, &[a, b], None) else {
+    let Tracking::Tracked { next, stuck, .. } = tracking_of(&visible, &[a, b], None) else {
         unreachable!("tasks are tracked");
     };
     assert_eq!(next, None);
+    // #3763: the reminder gets the reason, and the reason names the first open task.
+    let Some((slug, why)) = stuck else {
+        unreachable!("a stuck reason is set")
+    };
+    assert_eq!(slug, "a");
+    assert!(!why.is_empty());
 }
 
 proptest::proptest! {

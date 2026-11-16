@@ -76,6 +76,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Add a notice when a hook payload parses but names no event, and name the fallback that is used. [fix:hook-run] [#3766]
+- Show the reason when no task can start. The Stop reminder and the idle-session reminder name the first open task and its unmet or looping blocker, and no longer advise a start that fails. [fix:task] [#3763] [#3764]
+- Render the task tree with an explicit stack, so a chain of 100000 sub-tasks cannot overflow the stack. [fix:task] [#3767]
 - Add a notice when the throttle hook gets a payload with no `hook_event_name`, or an event that maps to no name. [fix:hook] [#3760]
 - Name the sessions already abandoned, and the tasks already untagged, when `llmenv task session start --replace` fails part way. [fix:task] [#3759]
 - Make the Stop reminder name only a next task that can start. A task with an unmet or looping blocker is skipped. The blocker walk no longer recurses, so a chain of 100000 done tasks cannot overflow the stack. [fix:task] [#3757]

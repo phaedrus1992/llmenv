@@ -139,6 +139,37 @@ pub(super) fn first_undone_in_subtree<'a>(
     Ok(None)
 }
 
+/// Why `task` cannot start because of its blockers: the text of a loop in a blocker walk, else
+/// the first blocker that is not done. `None` when no blocker stops it (#3763, #3764).
+fn start_obstacle(task: &Task, by_slug: &HashMap<&str, &Task>) -> Option<String> {
+    if let Some(error) = blocker_walk_error(task, by_slug) {
+        return Some(error);
+    }
+    task.blocked_on
+        .iter()
+        .find(|b| !is_done_including_descendants(b, &task.slug, by_slug))
+        .map(|b| {
+            format!(
+                "it waits on '{b}', which is not done or does not exist. Fix: finish '{b}' first"
+            )
+        })
+}
+
+/// The first task of `open`, in the order given, that a blocker keeps from starting, and why. A
+/// loop in a blocker walk comes before a plain unmet blocker, because a loop is damaged data that
+/// the user must repair, and a wait ends by itself (#3618, #3763, #3764).
+pub(super) fn first_obstacle<'a>(
+    open: impl Iterator<Item = &'a Task> + Clone,
+    by_slug: &HashMap<&str, &Task>,
+) -> Option<(String, String)> {
+    open.clone()
+        .find_map(|t| blocker_walk_error(t, by_slug).map(|why| (t.slug.clone(), why)))
+        .or_else(|| {
+            open.into_iter()
+                .find_map(|t| start_obstacle(t, by_slug).map(|why| (t.slug.clone(), why)))
+        })
+}
+
 /// The fix that every loop error of the blocker walk ends with.
 const LOOP_FIX: &str =
     "Fix: clear the parent of one task in the loop with `llmenv task edit <task> --no-parent`";
