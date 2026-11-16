@@ -99,12 +99,19 @@ pub(super) fn ancestors_to_start(
 }
 
 /// The error of a failed save of the promoted ancestors in `start`. The saves are not one write,
-/// so a failure can leave some ancestors `wip` while the task stays `open`. The message names the
-/// whole set, so the user can see which ones may have moved.
-pub(super) fn promotion_failed(slug: &str, names: &[String], err: anyhow::Error) -> anyhow::Error {
+/// so a failure can leave the first `saved` ancestors of `names` `wip` while the task stays
+/// `open`. The message names the ones that were saved and the one that failed.
+pub(super) fn promotion_failed(
+    slug: &str,
+    names: &[String],
+    saved: usize,
+    err: anyhow::Error,
+) -> anyhow::Error {
+    let done = names.get(..saved).unwrap_or(names).join(", ");
+    let failed = names.get(saved).map_or("", String::as_str);
     err.context(format!(
-        "cannot start '{slug}': saving the ancestors {} as wip failed, and '{slug}' stays open. \
-         Fix: run `llmenv task start {slug}` again once the store is writable",
-        names.join(", ")
+        "cannot start '{slug}': saving the ancestor '{failed}' as wip failed, and '{slug}' stays \
+         open. Ancestors already saved as wip: [{done}]. Fix: run `llmenv task start {slug}` again \
+         once the store is writable"
     ))
 }

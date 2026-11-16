@@ -766,11 +766,11 @@ pub(crate) fn start_task<'a>(
         let promoted = ancestors_to_start(state_dir, &task, force, all_tasks)?;
         let now = now_rfc3339();
         let names: Vec<String> = promoted.iter().map(|a| a.slug.clone()).collect();
-        for mut ancestor in promoted {
+        for (saved, mut ancestor) in promoted.into_iter().enumerate() {
             ancestor.state = TaskState::Wip;
             ancestor.updated_at = now.clone();
             save_task(state_dir, &ancestor)
-                .map_err(|e| ancestors::promotion_failed(&slug, &names, e))?;
+                .map_err(|e| ancestors::promotion_failed(&slug, &names, saved, e))?;
         }
         task.state = TaskState::Wip;
         task.updated_at = now;
