@@ -41,16 +41,24 @@ fn untag_with(
         task.updated_at = now.to_string();
         if let Err(e) = save(&task) {
             let source = e.context(format!(
-                "untagging task '{}' from session '{session_id}'; {} earlier task(s) are already \
-                 untagged",
+                "cannot untag task '{}' from session '{session_id}'; already untagged: [{}]. \
+                 Fix: run `llmenv task session finish {session_id} --abandon-open` again",
                 task.slug,
-                untagged.len()
+                slugs(&untagged)
             ));
             return Err(PartialWrite::error(untagged, source));
         }
         untagged.push(task);
     }
     Ok(untagged)
+}
+
+fn slugs(tasks: &[Task]) -> String {
+    tasks
+        .iter()
+        .map(|t| t.slug.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// What [`finish_session`] did.
@@ -119,8 +127,9 @@ pub(crate) fn finish_session(
         session.finished_at = Some(now);
         if let Err(e) = save_session(state_dir, &session) {
             let source = e.context(format!(
-                "session '{id}' stays open, but {} unfinished task(s) are already untagged from it",
-                abandoned.len()
+                "session '{id}' stays open, but these unfinished tasks are already untagged from \
+                 it: [{}]. Fix: run `llmenv task session finish {id}` again",
+                slugs(&abandoned)
             ));
             return Err(PartialWrite::error(abandoned, source));
         }

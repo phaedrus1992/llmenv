@@ -278,10 +278,16 @@ impl SessionOverride {
         if super::partial::changed_before_failure(&error).is_empty() {
             return error;
         }
+        let slugs: Vec<&str> = super::partial::changed_before_failure(&error)
+            .iter()
+            .map(|t| t.slug.as_str())
+            .collect();
+        let tasks = slugs.join(", ");
         match self.record(state_dir) {
             Ok(()) => error,
             Err(note) => error.context(format!(
-                "the audit note for the tasks that did change was not saved either: {note:#}"
+                "the audit note for the changed tasks [{tasks}] was not saved either: {note:#}. \
+                 Fix: run `llmenv task session note` to record the override by hand"
             )),
         }
     }

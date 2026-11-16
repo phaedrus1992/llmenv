@@ -2939,30 +2939,22 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                     crate::task::reopen::reopen_resolved(&state_dir, &guarded.tasks, &slugs);
                 // A failed save leaves the earlier tasks reopened, so their notes are still
                 // recorded (#3749).
-                let changed: Vec<String> = match &result {
-                    Ok(tasks) => tasks.iter().map(|t| t.slug.clone()).collect(),
-                    Err(e) => crate::task::partial::changed_before_failure(e)
-                        .iter()
-                        .map(|t| t.slug.clone())
-                        .collect(),
+                let saved: &[crate::task::Task] = match &result {
+                    Ok(tasks) => tasks,
+                    Err(e) => crate::task::partial::changed_before_failure(e),
                 };
                 // Every note is tried, so one failed note does not hide the others. The notes
                 // come before the print: a closed stdout makes `println!` panic.
                 let failed: Vec<String> = slugs
                     .iter()
                     .zip(audits)
-                    .filter(|(slug, _)| changed.contains(slug))
+                    .filter(|(slug, _)| saved.iter().any(|t| &t.slug == *slug))
                     .filter_map(|(_, audit)| record_override(&state_dir, audit).err())
                     .map(|e| format!("{e:#}"))
                     .collect();
                 let reopened = match result {
                     Ok(tasks) => tasks,
-                    Err(mut e) => {
-                        for note in failed {
-                            e = e.context(note);
-                        }
-                        return Err(e);
-                    }
+                    Err(e) => return Err(failed.into_iter().fold(e, |e, note| e.context(note))),
                 };
                 for task in reopened {
                     println!("Reopened '{}' — now {:?}", task.slug, task.state);

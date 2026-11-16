@@ -138,3 +138,57 @@ fn a_failed_second_untag_returns_the_task_already_untagged() {
         Some(session.as_str())
     );
 }
+
+fn json_task(slug: &str, state: &str) -> Task {
+    serde_json::from_value(serde_json::json!({
+        "slug": slug,
+        "title": slug,
+        "state": state,
+        "session": "s",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+    }))
+    .unwrap()
+}
+
+proptest! {
+    // With a save that fails at the k-th unfinished task, the error holds exactly the k tasks
+    // before it, and no save runs after the failure (#3749).
+    #[test]
+    fn a_failed_save_returns_exactly_the_tasks_before_it(
+        states in proptest::collection::vec(
+            prop_oneof![Just("open"), Just("wip"), Just("waiting"), Just("done")],
+            0..8,
+        ),
+        fail_at in 0usize..8,
+    ) {
+        use crate::task::partial::changed_before_failure;
+        let tasks: Vec<Task> = states
+            .iter()
+            .enumerate()
+            .map(|(n, st)| json_task(&format!("t{n}"), st))
+            .collect();
+        let unfinished: Vec<String> = tasks
+            .iter()
+            .filter(|t| t.state != TaskState::Done)
+            .map(|t| t.slug.clone())
+            .collect();
+        let mut saves = 0usize;
+        let result = super::untag_with("s", tasks, "now", "note", |_| {
+            saves += 1;
+            if saves == fail_at + 1 { anyhow::bail!("disk full") }
+            Ok(())
+        });
+        if fail_at >= unfinished.len() {
+            prop_assert_eq!(result.unwrap().len(), unfinished.len());
+        } else {
+            let err = result.unwrap_err();
+            let got: Vec<String> =
+                changed_before_failure(&err).iter().map(|t| t.slug.clone()).collect();
+            prop_assert_eq!(got, unfinished[..fail_at].to_vec());
+            prop_assert_eq!(saves, fail_at + 1);
+            let text = format!("{err:#}");
+            prop_assert!(text.contains("Fix: run"), "{}", text);
+        }
+    }
+}

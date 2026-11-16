@@ -395,3 +395,33 @@ fn record_after_failure_writes_the_note_only_when_a_task_changed() {
     let stored = load_existing_session(dir.path(), &session).expect("session");
     assert_eq!(stored.resume.context.as_deref(), Some("override note"));
 }
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(12))]
+
+    // The audit note is written exactly when the error holds a changed task, under any number of
+    // context layers, and the error keeps its message (#3749).
+    #[test]
+    fn the_note_is_written_exactly_when_a_task_changed(changed in 0usize..3, layers in 0usize..4) {
+        use crate::task::partial::PartialWrite;
+        use crate::task::session::load_existing_session;
+        let dir = TempDir::new().expect("tempdir");
+        let (slug, session) = open_task_in_session(dir.path());
+        let task = load_task(dir.path(), &slug).expect("task");
+        let mut error = if changed == 0 {
+            anyhow::anyhow!("save failed")
+        } else {
+            PartialWrite::error(vec![task; changed], anyhow::anyhow!("save failed"))
+        };
+        for n in 0..layers {
+            error = error.context(format!("layer {n}"));
+        }
+        let audit = SessionOverride { session_id: session.clone(), text: Some("note".to_owned()) };
+        let err = audit.record_after_failure(dir.path(), error);
+        let text = format!("{err:#}");
+        proptest::prop_assert!(text.contains("save failed"), "{}", text);
+        let stored = load_existing_session(dir.path(), &session).expect("session");
+        let want = (changed > 0).then_some("note");
+        proptest::prop_assert_eq!(stored.resume.context.as_deref(), want);
+    }
+}

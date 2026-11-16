@@ -2,9 +2,9 @@
 
 use anyhow::Context as _;
 
-/// Add each title through `add`, and return the slugs that were added. The session is already
-/// started when this runs, so a failure names the tasks added before it. Without that list the
-/// user cannot tell which tasks exist (#3750).
+/// Add each title through `add`. The session is already started when this runs, so a failure
+/// names the tasks added before it. Without that list the user cannot tell which tasks exist
+/// (#3750).
 ///
 /// # Errors
 /// Errors on the first title that `add` rejects.
@@ -12,34 +12,31 @@ pub(super) fn add_session_tasks(
     session_id: &str,
     titles: &[String],
     mut add: impl FnMut(&str) -> anyhow::Result<crate::task::Task>,
-) -> anyhow::Result<Vec<crate::task::Task>> {
-    let mut added: Vec<crate::task::Task> = Vec::new();
+) -> anyhow::Result<()> {
+    let mut added: Vec<String> = Vec::new();
     for title in titles {
         match add(title) {
-            Ok(task) => added.push(task),
+            Ok(task) => added.push(task.slug),
             Err(e) => {
-                let done = if added.is_empty() {
-                    "no task was added".to_owned()
-                } else {
-                    let slugs: Vec<&str> = added.iter().map(|t| t.slug.as_str()).collect();
-                    format!("tasks already added: {}", slugs.join(", "))
-                };
                 return Err(e).with_context(|| {
                     format!(
-                        "session '{session_id}' started, but task '{title}' was not added \
-                         ({done}). Fix: add the rest with `llmenv task add`."
+                        "session '{session_id}' started, but task '{title}' was not added; tasks \
+                         already added: [{}]. Fix: add the rest with `llmenv task add --session \
+                         {session_id} <title>`.",
+                        added.join(", ")
                     )
                 });
             }
         }
     }
-    Ok(added)
+    Ok(())
 }
 
 #[cfg(test)]
 #[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn task(slug: &str) -> crate::task::Task {
         serde_json::from_value(serde_json::json!({
@@ -65,15 +62,29 @@ mod tests {
         .unwrap_err();
         let text = format!("{err:#}");
         assert!(text.contains("task 'two' was not added"), "{text}");
-        assert!(text.contains("tasks already added: one"), "{text}");
+        assert!(text.contains("tasks already added: [one]"), "{text}");
+        assert!(text.contains("--session s"), "{text}");
         assert!(text.contains("save failed"), "{text}");
         assert_eq!(calls, 2, "the loop must stop at the first failure");
     }
 
-    #[test]
-    fn a_failed_first_add_says_none_were_added() {
-        let titles = vec!["one".to_owned()];
-        let err = add_session_tasks("s", &titles, |_| anyhow::bail!("boom")).unwrap_err();
-        assert!(format!("{err:#}").contains("no task was added"));
+    proptest! {
+        /// The error names exactly the tasks added before the failing title.
+        #[test]
+        fn the_error_names_the_tasks_before_the_failure(count in 1usize..6, fail_at in 0usize..6) {
+            let titles: Vec<String> = (0..count).map(|n| format!("t{n}")).collect();
+            let result = add_session_tasks("s", &titles, |t| {
+                if t == format!("t{fail_at}") { anyhow::bail!("boom") }
+                Ok(task(t))
+            });
+            if fail_at >= count {
+                prop_assert!(result.is_ok());
+            } else {
+                let text = format!("{:#}", result.unwrap_err());
+                let before = titles[..fail_at].join(", ");
+                let want = format!("tasks already added: [{before}]");
+                prop_assert!(text.contains(&want), "{}", text);
+            }
+        }
     }
 }

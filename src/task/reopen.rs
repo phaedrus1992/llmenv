@@ -134,7 +134,8 @@ fn reopen_saving(
             if let Err(e) = save(state_dir, &task) {
                 let names: Vec<&str> = reopened.iter().map(|t| t.slug.as_str()).collect();
                 let source = e.context(format!(
-                    "cannot save task '{}'; already reopened: [{}]",
+                    "cannot save task '{}'; already reopened: [{}]. Fix: run `llmenv task reopen` \
+                     again for the tasks that are not in that list",
                     task.slug,
                     names.join(", ")
                 ));
@@ -481,5 +482,41 @@ mod tests {
             after, before,
             "the session of the saved task must be touched"
         );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(8))]
+
+        // With a save that fails at the k-th task, the error holds exactly the k tasks before it,
+        // those k are open on disk, and the rest stay done (#3749).
+        #[test]
+        fn a_failed_save_leaves_exactly_the_tasks_before_it_reopened(
+            count in 1usize..5,
+            fail_at in 0usize..5,
+        ) {
+            let dir = TempDir::new().unwrap();
+            let slugs: Vec<String> =
+                (0..count).map(|n| done(dir.path(), &format!("Task number {n}")).slug).collect();
+            let targets: Vec<TaskTarget<'_>> = slugs.iter().map(TaskTarget::from).collect();
+            let mut saves = 0usize;
+            let result = reopen_saving(dir.path(), &targets, |state_dir, task| {
+                saves += 1;
+                if saves == fail_at + 1 { anyhow::bail!("disk full") }
+                save_task(state_dir, task)
+            });
+            let reopened = fail_at.min(count);
+            if fail_at >= count {
+                proptest::prop_assert_eq!(result.unwrap().len(), count);
+            } else {
+                let err = result.unwrap_err();
+                proptest::prop_assert_eq!(changed_before_failure(&err).len(), reopened);
+                let text = format!("{err:#}");
+                proptest::prop_assert!(text.contains("Fix: run"), "{}", text);
+            }
+            for (n, slug) in slugs.iter().enumerate() {
+                let want = if n < reopened { TaskState::Open } else { TaskState::Done };
+                proptest::prop_assert_eq!(load_task(dir.path(), slug).unwrap().state, want);
+            }
+        }
     }
 }
