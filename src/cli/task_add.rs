@@ -58,6 +58,7 @@ pub(super) fn run(state_dir: &Path, args: &AddArgs<'_>) -> anyhow::Result<()> {
         detail: args.detail,
         placement,
         after: args.after,
+        note: None,
     };
     let task = add_task_with(state_dir, &new, parent_spec, choice, &project)?;
     println!("Added task '{}' ({})", task.slug, task.title);

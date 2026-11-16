@@ -3,6 +3,8 @@
 
 use std::path::Path;
 
+use anyhow::Context as _;
+
 use super::SessionChoice;
 use super::ownership;
 use super::session;
@@ -40,7 +42,13 @@ pub(super) fn resolve_session_for_add(
             // The caller's copy may be older than the file. One session file is read again, under
             // the lock, so a session finished in between is refused (#3474). That reads one file,
             // not the whole session store.
-            let fresh = session::load_existing_session(state_dir, &session.id)?;
+            let fresh = session::load_existing_session(state_dir, &session.id).with_context(|| {
+                format!(
+                    "session '{}' could not be read again while the task was being added, so no \
+                     task was added. Fix: run `llmenv task session ls`",
+                    session.id
+                )
+            })?;
             if !fresh.is_open() || fresh.project != project {
                 anyhow::bail!(
                     "session '{}' is not an open session of this project. Fix: run `llmenv task \
@@ -82,8 +90,8 @@ fn resolve_named(
     owner: &session::EngineIdentity,
     other_session: Option<&str>,
 ) -> anyhow::Result<ResolvedSession> {
-    // Strict `list_sessions_strict`: an unreadable store or a corrupt session file must error out
-    // here rather than be misread as "no such session" (#1112, #2665).
+    // Strict `list_sessions_strict`: an unreadable store or a corrupt session file, a sibling
+    // included, must error out here rather than be misread as "no such session" (#1112, #2665).
     let sessions = session::list_sessions_strict(state_dir)?;
     let overridden =
         ownership::ensure_named_session_takes_tasks(&sessions, id, owner, other_session)?;

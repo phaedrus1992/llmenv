@@ -359,12 +359,10 @@ pub(crate) fn ensure_named_session_takes_tasks(
     let Some(target) = sessions.iter().find(|s| s.id == session_id) else {
         return Ok(false);
     };
-    if target.may_take_tasks(owner.session_id.as_deref()) {
-        return Ok(false);
-    }
-    match other_session {
-        Some(named) if named == session_id => Ok(true),
-        _ => anyhow::bail!(foreign_session_message(session_id)),
+    match check_takes_tasks(target, owner) {
+        Ok(()) => Ok(false),
+        Err(_) if other_session == Some(session_id) => Ok(true),
+        Err(refusal) => Err(refusal),
     }
 }
 

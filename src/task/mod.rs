@@ -528,6 +528,9 @@ pub(crate) struct NewTask<'a> {
     pub(crate) placement: Placement<'a>,
     /// A task that must be done before this one starts: written as a `blocked_on` edge.
     pub(crate) after: Option<&'a str>,
+    /// A progress note that the task starts with, written in the same save that creates the task
+    /// (#3617).
+    pub(crate) note: Option<&'a str>,
 }
 
 /// [`add_task`] for a task that starts with a detail (#2339).
@@ -543,25 +546,25 @@ pub(crate) fn add_task_with(
 ) -> anyhow::Result<Task> {
     // The session is resolved under the store lock, so a session that another process finishes
     // after the check cannot take the new task.
-    let (task, overridden) = with_store_lock(state_dir, || {
+    let task = with_store_lock(state_dir, || {
         let resolved = session_choice::resolve_session_for_add(state_dir, session, project)?;
-        let task = add_task_for_session_with(state_dir, new, parent, &resolved.id)?;
-        Ok((task, resolved.overridden))
-    })?;
-    touch_task_session(state_dir, &task);
-    if overridden {
+        // The `--other-session` note is part of the one save that creates the task, so a failed
+        // note cannot leave a task that joined another conversation's session with no record.
         let text = format!(
             "Added with --other-session, which names the owner of session '{}'.",
-            task.session.as_deref().unwrap_or_default()
+            resolved.id
         );
-        note_task(state_dir, task.slug.as_str(), &text).map_err(|err| {
-            anyhow::anyhow!(
-                "task '{}' was added, but its --other-session note was not saved: {err:#}. Do not \
-                 retry the add, or it creates a duplicate task.",
-                task.slug
-            )
-        })?;
-    }
+        let new = NewTask {
+            note: if resolved.overridden {
+                Some(text.as_str())
+            } else {
+                new.note
+            },
+            ..*new
+        };
+        add_task_for_session_with(state_dir, &new, parent, &resolved.id)
+    })?;
+    touch_task_session(state_dir, &task);
     Ok(task)
 }
 
@@ -667,7 +670,14 @@ fn add_task_for_session_with(
             relation,
             parallel,
             blocked_on,
-            notes: Vec::new(),
+            notes: new
+                .note
+                .map(|text| TaskNote {
+                    at: now.clone(),
+                    text: text.to_string(),
+                })
+                .into_iter()
+                .collect(),
             detail: new.detail.filter(|d| !d.is_empty()).map(str::to_string),
             session: Some(session_id.to_string()),
             created_at: now.clone(),

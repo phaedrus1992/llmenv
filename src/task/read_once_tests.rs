@@ -231,57 +231,60 @@ mod writer_ownership {
     }
 
     #[test]
-    fn a_named_session_of_another_conversation_is_refused() {
+    fn a_session_of_another_conversation_is_refused_for_every_choice() {
         let dir = TempDir::new().expect("tempdir");
         let session = owned_session(dir.path(), &conversation("conv-a"));
         let intruder = conversation("conv-b");
-        let err = add(
-            dir.path(),
-            SessionChoice::Named {
-                id: &session.id,
-                owner: &intruder,
-                other_session: None,
-            },
-        )
-        .expect_err("a foreign session must refuse the task");
-        assert!(
-            format!("{err:#}").contains("another conversation"),
-            "{err:#}"
-        );
-        assert_eq!(task_count(dir.path()), 0);
+        let choices = [
+            (
+                "named",
+                SessionChoice::Named {
+                    id: &session.id,
+                    owner: &intruder,
+                    other_session: None,
+                },
+            ),
+            (
+                "checked",
+                SessionChoice::Checked {
+                    session: &session,
+                    owner: &intruder,
+                },
+            ),
+            // The sole open session of another conversation is not the default.
+            ("resolved", SessionChoice::Resolve(&intruder)),
+        ];
+        for (name, choice) in choices {
+            let err = add(dir.path(), choice).expect_err("a foreign session must refuse the task");
+            assert!(
+                format!("{err:#}").contains("another conversation"),
+                "{name}: {err:#}"
+            );
+            assert_eq!(task_count(dir.path()), 0, "{name}");
+        }
     }
 
     #[test]
-    fn a_checked_session_of_another_conversation_is_refused() {
+    fn a_checked_session_that_vanished_names_the_failed_add() {
         let dir = TempDir::new().expect("tempdir");
-        let session = owned_session(dir.path(), &conversation("conv-a"));
-        let intruder = conversation("conv-b");
+        let me = conversation("conv-a");
+        let session = owned_session(dir.path(), &me);
+        std::fs::remove_file(
+            dir.path()
+                .join("tasks")
+                .join("sessions")
+                .join(format!("{}.json", session.id)),
+        )
+        .expect("remove the session file");
         let err = add(
             dir.path(),
             SessionChoice::Checked {
                 session: &session,
-                owner: &intruder,
+                owner: &me,
             },
         )
-        .expect_err("a foreign session must refuse the task");
-        assert!(
-            format!("{err:#}").contains("another conversation"),
-            "{err:#}"
-        );
-        assert_eq!(task_count(dir.path()), 0);
-    }
-
-    #[test]
-    fn a_resolved_session_of_another_conversation_is_refused() {
-        let dir = TempDir::new().expect("tempdir");
-        owned_session(dir.path(), &conversation("conv-a"));
-        let intruder = conversation("conv-b");
-        let err = add(dir.path(), SessionChoice::Resolve(&intruder))
-            .expect_err("the sole open session of another conversation is not the default");
-        assert!(
-            format!("{err:#}").contains("another conversation"),
-            "{err:#}"
-        );
+        .expect_err("a session without a file takes no task");
+        assert!(format!("{err:#}").contains("no task was added"), "{err:#}");
         assert_eq!(task_count(dir.path()), 0);
     }
 
