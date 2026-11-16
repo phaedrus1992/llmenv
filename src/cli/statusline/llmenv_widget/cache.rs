@@ -8,15 +8,13 @@ pub(super) fn render_cache(data: &StatusData, cfg: Option<&llmenv_config::Widget
         return String::new();
     };
     // `None` means the size could not be read. The marker keeps the field visible.
-    // A partial total is a floor, so "at least" keeps it from reading as exact (#3069).
+    // A partial total is a floor, so "at least" keeps it from reading as exact. The count tells
+    // the user how many entries to look at (#3069, #3110).
     let humanized = cache.prunable_bytes.map_or_else(
         || UNKNOWN_MARKER.to_string(),
-        |bytes| {
-            if cache.prunable_partial {
-                format!("at least {}", humanize_bytes(bytes))
-            } else {
-                humanize_bytes(bytes)
-            }
+        |bytes| match cache.unreadable {
+            0 => humanize_bytes(bytes),
+            n => format!("at least {} ({n} unreadable)", humanize_bytes(bytes)),
         },
     );
     let raw = cache
@@ -30,8 +28,7 @@ pub(super) fn render_cache(data: &StatusData, cfg: Option<&llmenv_config::Widget
         .replace("{prunable_raw}", &raw)
 }
 
-/// Shown in place of a size that could not be read.
-pub(super) const UNKNOWN_MARKER: &str = "?";
+pub(super) use crate::cli::statusline::UNKNOWN_MARKER;
 
 #[cfg(test)]
 mod tests {
@@ -39,11 +36,11 @@ mod tests {
     use crate::cli::statusline::data::CacheData;
     use proptest::prelude::*;
 
-    fn data(prunable_bytes: Option<u64>, prunable_partial: bool) -> StatusData {
+    fn data(prunable_bytes: Option<u64>, unreadable: u64) -> StatusData {
         StatusData {
             cache: Some(CacheData {
                 prunable_bytes,
-                prunable_partial,
+                unreadable,
             }),
             ..Default::default()
         }
@@ -55,7 +52,7 @@ mod tests {
         #[test]
         fn a_format_replaces_only_its_placeholders(
             bytes in proptest::option::of(any::<u64>()),
-            partial in any::<bool>(),
+            unreadable in 0u64..5,
             parts in proptest::collection::vec(
                 prop_oneof![
                     Just("{prunable}".to_string()),
@@ -72,7 +69,10 @@ mod tests {
             };
             let (human, raw) = match bytes {
                 None => (UNKNOWN_MARKER.to_string(), UNKNOWN_MARKER.to_string()),
-                Some(b) if partial => (format!("at least {}", humanize_bytes(b)), b.to_string()),
+                Some(b) if unreadable > 0 => (
+                    format!("at least {} ({unreadable} unreadable)", humanize_bytes(b)),
+                    b.to_string(),
+                ),
                 Some(b) => (humanize_bytes(b), b.to_string()),
             };
             // The oracle maps each generated part, so it does not share the replace chain.
@@ -84,8 +84,8 @@ mod tests {
                     literal => literal,
                 })
                 .collect();
-            prop_assert_eq!(render_cache(&data(bytes, partial), Some(&cfg)), want);
-            prop_assert_eq!(render_cache(&data(bytes, partial), None), human);
+            prop_assert_eq!(render_cache(&data(bytes, unreadable), Some(&cfg)), want);
+            prop_assert_eq!(render_cache(&data(bytes, unreadable), None), human);
         }
     }
 

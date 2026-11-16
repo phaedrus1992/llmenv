@@ -10,6 +10,8 @@ use jiff::Timestamp;
 use jiff::civil::Weekday;
 use jiff::tz::TimeZone;
 
+use super::UNKNOWN_MARKER;
+
 /// The zone whose wall clock sets the peak window.
 const PEAK_ZONE: &str = "America/Los_Angeles";
 
@@ -36,29 +38,41 @@ fn now_unix() -> anyhow::Result<i64> {
 /// Render the `peak` widget: `△ peak 3h03m` in peak, `▽ off-peak 2h` otherwise.
 /// `{symbol}` / `{label}` / `{countdown}` are the format placeholders.
 pub fn render_peak(cfg: Option<&llmenv_config::WidgetConfig>) -> String {
-    let peak = match now_unix().and_then(is_peak_time) {
-        Ok(peak) => peak,
-        Err(e) => {
-            tracing::error!("peak widget: cannot compute the window for {PEAK_ZONE}: {e:#}");
-            return "unknown".to_owned();
+    render_peak_info(cfg, now_unix().and_then(is_peak_time))
+}
+
+/// [`render_peak`] for a window that the caller computed. When the window cannot be computed,
+/// the configured format stays and each placeholder shows the unknown marker (#3071).
+fn render_peak_info(
+    cfg: Option<&llmenv_config::WidgetConfig>,
+    peak: anyhow::Result<PeakInfo>,
+) -> String {
+    let (symbol, label, countdown) = match peak {
+        Ok(peak) => {
+            let (symbol, label) = if peak.is_peak {
+                ("\u{25b3}", "peak") // △
+            } else {
+                ("\u{25bd}", "off-peak") // ▽
+            };
+            let countdown = if peak.countdown_secs > 0 {
+                humanize(peak.countdown_secs)
+            } else {
+                String::new()
+            };
+            (symbol.to_owned(), label.to_owned(), countdown)
         }
-    };
-    let (symbol, label) = if peak.is_peak {
-        ("\u{25b3}", "peak") // △
-    } else {
-        ("\u{25bd}", "off-peak") // ▽
-    };
-    let countdown = if peak.countdown_secs > 0 {
-        humanize(peak.countdown_secs)
-    } else {
-        String::new()
+        Err(e) => {
+            tracing::warn!("peak widget: cannot compute the window for {PEAK_ZONE}: {e:#}");
+            let marker = || UNKNOWN_MARKER.to_owned();
+            (marker(), marker(), marker())
+        }
     };
     let format = cfg
         .and_then(|c| c.format.as_deref())
         .unwrap_or("{symbol} {label} {countdown}");
     format
-        .replace("{symbol}", symbol)
-        .replace("{label}", label)
+        .replace("{symbol}", &symbol)
+        .replace("{label}", &label)
         .replace("{countdown}", &countdown)
         .trim_end()
         .to_string()
@@ -155,6 +169,21 @@ mod tests {
         let peak = is_peak_time(1_772_827_200).unwrap();
         assert!(!peak.is_peak);
         assert_eq!(peak.countdown_secs, 64 * 3600);
+    }
+
+    #[test]
+    fn an_unreadable_zone_database_keeps_the_format_and_shows_the_marker() {
+        let failed = || Err(anyhow::anyhow!("no zone database"));
+        let logs = crate::test_log_capture::capture_logs(|| {
+            assert_eq!(render_peak_info(None, failed()), "? ? ?");
+            let cfg = llmenv_config::WidgetConfig {
+                format: Some("{label} in {countdown}".to_string()),
+                ..Default::default()
+            };
+            assert_eq!(render_peak_info(Some(&cfg), failed()), "? in ?");
+        });
+        assert_eq!(logs.matches("WARN").count(), 2, "{logs}");
+        assert!(logs.contains("no zone database"), "{logs}");
     }
 
     #[test]

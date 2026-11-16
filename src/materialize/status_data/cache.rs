@@ -14,7 +14,7 @@ use crate::materialize::dir_size::{DirSize, dir_size};
 pub(super) fn collect_cache(cache_root: &Path, hashing: HashingMode) -> CacheData {
     let unknown = CacheData {
         prunable_bytes: None,
-        prunable_partial: false,
+        unreadable: 0,
     };
     let current_version =
         matches!(hashing, HashingMode::Normal).then(crate::materialize::cache::version_major);
@@ -52,7 +52,7 @@ pub(super) fn collect_cache(cache_root: &Path, hashing: HashingMode) -> CacheDat
     match total {
         Ok(total) => CacheData {
             prunable_bytes: Some(total.bytes),
-            prunable_partial: total.skipped > 0,
+            unreadable: total.skipped,
         },
         Err(e) => {
             tracing::warn!(
@@ -80,7 +80,7 @@ mod tests {
             result,
             CacheData {
                 prunable_bytes: Some(0),
-                prunable_partial: false,
+                unreadable: 0,
             }
         );
     }
@@ -103,7 +103,31 @@ mod tests {
             result,
             CacheData {
                 prunable_bytes: None,
-                prunable_partial: false,
+                unreadable: 0,
+            }
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_cache_counts_the_entries_it_could_not_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join("0.0.1-old-deadbeef");
+        let locked = stale.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(stale.join("file.txt"), b"0123456789").unwrap();
+        std::fs::write(locked.join("hidden"), b"abc").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = collect_cache(dir.path(), HashingMode::Strict);
+
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            result,
+            CacheData {
+                prunable_bytes: Some(10),
+                unreadable: 1,
             }
         );
     }
@@ -145,7 +169,7 @@ mod tests {
 
             proptest::prop_assert_eq!(
                 result,
-                CacheData { prunable_bytes: Some(total), prunable_partial: false }
+                CacheData { prunable_bytes: Some(total), unreadable: 0 }
             );
             for path in &paths {
                 proptest::prop_assert!(path.exists(), "{} was deleted", path.display());
@@ -166,7 +190,7 @@ mod tests {
             result,
             CacheData {
                 prunable_bytes: Some(10),
-                prunable_partial: false,
+                unreadable: 0,
             }
         );
         // dry_run: the stale folder must still be on disk afterward.
