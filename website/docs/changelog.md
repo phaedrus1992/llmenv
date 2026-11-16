@@ -39,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Show how many entries a partial cache size left out. The `cache` widget reads `at least 1.2 GiB (3 unreadable)`, the status data holds the count in `unreadable` (it replaces `prunable_partial`), and the first cause of a run is logged at `info`. [feat:statusline] [#3110]
+- Make the `peak` widget and the `{reset}` clock of `usage_5h` and `usage_7d` keep the configured format when the time zone cannot be read. Each shows `?` where the value goes, and logs a warning. The peak widget showed `unknown` and the usage widget showed the countdown. [feat:statusline] [#3071]
 - Refuse a session log path that is a symbolic link when the file sink starts, with a notice that names the path. Rotation measured the link target but renamed the link. [fix:session-log] [#3117]
 - Save the repeat-detect counter and the recall health ring without a disk flush. The flush (`fsync`) costs about 5 ms per write on macOS, so a `PreToolUse` hook runs about 5 ms faster. A power loss can leave one of these two files empty, and the next hook replaces it with a fresh one. Other state files keep the flush. [perf:hook-run] [#3127]
 - Scan the repeat-detect state directory for stale files once per session, on the first save, and not on every tool call. [perf:hook-run] [#3127]
