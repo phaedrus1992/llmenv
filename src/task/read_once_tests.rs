@@ -160,3 +160,41 @@ fn done_counts_the_closed_task_from_its_saved_state() {
     closed.session = None;
     assert_eq!(progress_after_close(&tasks, &closed), None);
 }
+
+fn open_session(dir: &Path) -> String {
+    let project = crate::task::project::current_tag().expect("project tag");
+    let outcome = session::start_session(dir, None, None, &project, session::StartDecision::New)
+        .expect("start session");
+    let session::StartOutcome::Created(session) = outcome else {
+        panic!("expected a new session");
+    };
+    session.id
+}
+
+#[test]
+fn session_finish_reads_the_task_store_once() {
+    let dir = TempDir::new().expect("tempdir");
+    let id = open_session(dir.path());
+    let task = add_task_for_session(dir.path(), "Step", ParentSpec::Detached, &id).expect("add");
+    done_task(dir.path(), &task.slug).expect("close");
+    let before = StrictTasks::reads_on_this_thread();
+    session::finish_session(dir.path(), &id, false).expect("finish");
+    assert_eq!(StrictTasks::reads_on_this_thread() - before, 1);
+}
+
+#[test]
+fn clear_session_reads_the_task_store_once() {
+    let dir = TempDir::new().expect("tempdir");
+    let id = open_session(dir.path());
+    mk_in(dir.path(), "Step A", &id);
+    mk_in(dir.path(), "Step B", &id);
+    let before = StrictTasks::reads_on_this_thread();
+    let outcome = session::delete_tasks_in_session(dir.path(), &id).expect("delete");
+    assert_eq!(StrictTasks::reads_on_this_thread() - before, 1);
+    assert_eq!(outcome.deleted.len(), 2);
+    assert!(outcome.failure.is_none());
+}
+
+fn mk_in(dir: &Path, title: &str, session_id: &str) -> Task {
+    add_task_for_session(dir, title, ParentSpec::Detached, session_id).expect("add task")
+}

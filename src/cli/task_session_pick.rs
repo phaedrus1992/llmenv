@@ -1,6 +1,5 @@
 //! Picks the session a `llmenv task session` command acts on when no id is named.
 
-use super::caller_session_for_task;
 use crate::task::ownership::ensure_session_is_ours;
 
 /// Resolve an explicit-or-omitted session id the same way `add_task` does:
@@ -11,14 +10,27 @@ pub(super) fn resolve_session_id(
     project: &str,
     id: Option<String>,
 ) -> anyhow::Result<String> {
-    use crate::task::session::{self, EngineIdentity, PickError};
     if let Some(id) = id {
         return Ok(id);
     }
+    let (picked, _caller) = pick_session(state_dir, project)?;
+    Ok(picked)
+}
+
+/// Pick the open session of the project, and the caller that the same pick means. One read of
+/// the session store serves both (#3743).
+fn pick_session(
+    state_dir: &std::path::Path,
+    project: &str,
+) -> anyhow::Result<(String, crate::task::ownership::Caller)> {
+    use crate::task::session::{self, EngineIdentity, PickError};
     // Fallible read: an unreadable store must not read as "no open session" (#1112).
     let open = session::open_sessions_strict(state_dir, project)?;
-    match session::pick_open_session(open, &EngineIdentity::from_env()?) {
-        Ok(session) => Ok(session.id),
+    let owner = EngineIdentity::from_env()?;
+    let pick = session::pick_open_session(open, &owner);
+    let caller = crate::task::ownership::caller_for_pick(&pick, &owner);
+    match pick {
+        Ok(session) => Ok((session.id, caller)),
         Err(PickError::NoneOpen) => {
             anyhow::bail!("no open session for this project — pass an id explicitly")
         }
@@ -41,8 +53,7 @@ pub(super) fn resolve_session_for_read(
     if let Some(id) = id {
         return Ok(id);
     }
-    let picked = resolve_session_id(state_dir, project, None)?;
-    let caller = caller_session_for_task(state_dir)?;
+    let (picked, caller) = pick_session(state_dir, project)?;
     // The read names its own fix. The write guard's text names `--other-session`, which these
     // commands do not take.
     ensure_session_is_ours(&picked, &caller, None).map_err(|_| {
@@ -52,4 +63,33 @@ pub(super) fn resolve_session_for_read(
         )
     })?;
     Ok(picked)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    /// A read of a session without an id picks and checks the caller from one read of the
+    /// session store (#3743). The answer depends on the engine identity of the host, so the test
+    /// counts the reads and not the answer.
+    #[test]
+    fn a_read_without_an_id_reads_the_session_store_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = crate::task::project::current_tag().expect("project tag");
+        crate::task::session::start_session(
+            dir.path(),
+            None,
+            None,
+            &project,
+            crate::task::session::StartDecision::New,
+        )
+        .expect("start session");
+        let before = crate::task::session::session_reads_on_this_thread();
+        let _ = resolve_session_for_read(dir.path(), &project, None);
+        assert_eq!(
+            crate::task::session::session_reads_on_this_thread() - before,
+            1
+        );
+    }
 }
