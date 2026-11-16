@@ -33,12 +33,15 @@ use plugin_check::check_selected_plugins;
 use plugin_payloads::sync_plugin_payloads;
 
 mod doctor;
+mod hook_event;
 mod init_cmd;
 mod task_add;
 mod task_clear;
 mod task_guard;
 mod task_session_pick;
 mod task_session_start;
+
+use hook_event::hook_event_name_from;
 use task_guard::{guard_task, guard_tasks, record_override};
 use task_session_pick::{guard_session_for_write, resolve_session_for_read};
 use task_session_start::add_session_tasks;
@@ -2349,31 +2352,6 @@ pub(crate) fn run_check_stale(use_color: bool, auto_fix: bool) -> anyhow::Result
     Ok(())
 }
 
-/// The hook event that the engine sent on stdin. Empty stdin is the SessionStart hook run by
-/// hand, so it gets `SessionStart`. Any other input must be a JSON object with a string
-/// `hook_event_name`, because a made-up event name would mislead the engine (#3752).
-fn hook_event_name_from(stdin: &str) -> anyhow::Result<String> {
-    if stdin.trim().is_empty() {
-        return Ok("SessionStart".to_owned());
-    }
-    let shown: String = stdin.chars().take(80).collect();
-    let value: serde_json::Value = serde_json::from_str(stdin).map_err(|e| {
-        anyhow::anyhow!(
-            "config-context: stdin is not JSON ({e}): {shown:?}. Fix: the engine must send a \
-             hook payload with a string \"hook_event_name\"."
-        )
-    })?;
-    value["hook_event_name"]
-        .as_str()
-        .map(str::to_owned)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "config-context: stdin has no string \"hook_event_name\": {shown:?}. Fix: the \
-                 engine must send a hook payload with a string \"hook_event_name\"."
-            )
-        })
-}
-
 /// `llmenv config-context`: emit source config paths into SessionStart context (#289).
 ///
 /// Exits 0 for every failure except an unusable hook payload (#3752). Warns to stderr if paths cannot be resolved so
@@ -2382,9 +2360,14 @@ fn run_config_context() -> anyhow::Result<()> {
     use std::io::Read;
 
     let mut stdin_buf = String::new();
-    if let Err(e) = std::io::stdin().read_to_string(&mut stdin_buf) {
-        eprintln!("llmenv config-context: failed to read stdin: {e}");
-    }
+    std::io::stdin()
+        .read_to_string(&mut stdin_buf)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "config-context: cannot read stdin ({e}). Fix: the engine must send its hook \
+             payload on stdin."
+            )
+        })?;
     let hook_event_name = hook_event_name_from(&stdin_buf)?;
 
     let emit = |ctx: &str| {
