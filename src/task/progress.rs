@@ -5,11 +5,26 @@ use std::path::Path;
 
 use super::{Task, TaskState, UnreadablePolicy, most_recently_updated, read_tasks};
 
+thread_local! {
+    /// How many task files this thread has written or deleted. A read of the store is stale
+    /// once this number moves past the one the read saw.
+    static WRITES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
+    static READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Every task of the store, read so that a task file that cannot be read is an error, not a
 /// skipped entry. The field is private and [`StrictTasks::read`] is the one constructor, so a
 /// count over this type can never see a partial store (#2608, #2687, #3469).
-#[derive(Debug)]
-pub(crate) struct StrictTasks(Vec<Task>);
+#[derive(Debug, Clone)]
+pub(crate) struct StrictTasks {
+    tasks: Vec<Task>,
+    /// The write count of the thread when the read ran.
+    written_at: u64,
+}
 
 impl StrictTasks {
     /// Read every task of the store at `state_dir`.
@@ -17,23 +32,55 @@ impl StrictTasks {
     /// # Errors
     /// The task directory or a task file cannot be read or parsed.
     pub(crate) fn read(state_dir: &Path) -> anyhow::Result<Self> {
-        Ok(Self(read_tasks(state_dir, UnreadablePolicy::Fail)?))
+        let written_at = WRITES.with(std::cell::Cell::get);
+        Ok(Self {
+            tasks: read_tasks(state_dir, UnreadablePolicy::Fail)?,
+            written_at,
+        })
+    }
+
+    /// Record that this thread wrote or deleted a task file, under the store lock. A read made
+    /// before this call is then stale (#3485).
+    pub(crate) fn record_write() {
+        WRITES.with(|writes| writes.set(writes.get() + 1));
+    }
+
+    /// True while this thread has written no task file since the read. A command may use a
+    /// current read in place of a new one.
+    pub(crate) fn is_current(&self) -> bool {
+        self.written_at == WRITES.with(std::cell::Cell::get)
+    }
+
+    /// Count one read of the task directory. A test diffs [`Self::reads_on_this_thread`] to
+    /// count the reads of one command (#3485).
+    #[cfg(test)]
+    pub(super) fn count_read() {
+        READS.with(|reads| reads.set(reads.get() + 1));
+    }
+
+    /// How many reads of the task directory this thread has made.
+    #[cfg(test)]
+    pub(crate) fn reads_on_this_thread() -> usize {
+        READS.with(std::cell::Cell::get)
     }
 
     /// The tasks, for a caller that only reads them.
     pub(crate) fn as_slice(&self) -> &[Task] {
-        &self.0
+        &self.tasks
     }
 
     /// The tasks, for a caller that keeps or filters them.
     pub(crate) fn into_vec(self) -> Vec<Task> {
-        self.0
+        self.tasks
     }
 
     /// A store that a test builds from tasks it made.
     #[cfg(test)]
     pub(crate) fn from_vec_for_test(tasks: Vec<Task>) -> Self {
-        Self(tasks)
+        Self {
+            tasks,
+            written_at: WRITES.with(std::cell::Cell::get),
+        }
     }
 }
 
@@ -46,6 +93,28 @@ pub(crate) fn progress_in(tasks: &StrictTasks, session_id: &str) -> (u64, u64) {
         .collect();
     let done = mine.iter().filter(|t| t.state == TaskState::Done).count();
     (done as u64, mine.len() as u64)
+}
+
+/// [`progress_in`] for the session of `closed`, with `closed` counted in its saved state, not in
+/// the state that the read holds. `task done` uses it so the hint does not depend on which
+/// files the close wrote (#3482).
+pub(crate) fn progress_after_close(tasks: &StrictTasks, closed: &Task) -> Option<(u64, u64)> {
+    let session_id = closed.session.as_deref()?;
+    let mine = tasks
+        .as_slice()
+        .iter()
+        .filter(|t| t.session.as_deref() == Some(session_id));
+    let (mut done, mut total) = (0, 0);
+    for task in mine {
+        let state = if task.slug == closed.slug {
+            closed.state
+        } else {
+            task.state
+        };
+        total += 1;
+        done += u64::from(state == TaskState::Done);
+    }
+    Some((done, total))
 }
 
 /// The title of the most recently updated `wip` or `waiting` task in `session_ids`, for the

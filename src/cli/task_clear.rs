@@ -6,9 +6,9 @@ use std::path::Path;
 use anyhow::Context;
 
 use super::caller_session_for_task;
-use super::task_guard::{guard_session, guard_tasks};
+use super::task_guard::guard_tasks;
 use crate::task::ownership::{
-    Caller, OverrideNote, check_owner_less_delete, record_owner_less_delete,
+    Caller, OverrideNote, check_owner_less_delete, ensure_session_is_ours, record_owner_less_delete,
 };
 use crate::task::session::append_override_note;
 
@@ -23,18 +23,22 @@ pub(super) fn run(
     session: Option<&str>,
     other_session: Option<&str>,
 ) -> anyhow::Result<()> {
+    if session.is_none() && ids.is_empty() {
+        anyhow::bail!("specify one or more task ids, or --session <id>")
+    }
+    // One caller read serves both guards and the notes. It runs before the first delete, because
+    // a read error after a delete would leave cleared tasks with no note (#3481).
+    let caller = caller_session_for_task(state_dir)?;
     let session_note = match session {
-        Some(named) => guard_session(state_dir, named, other_session)?,
-        None if ids.is_empty() => {
-            anyhow::bail!("specify one or more task ids, or --session <id>")
-        }
+        Some(named) => ensure_session_is_ours(named, &caller, other_session)?,
         None => None,
     };
     // `clear` deletes the task, so a pending override note has nowhere to live.
-    let checked = guard_tasks(state_dir, ids, other_session)?;
-    // Read the caller before the first delete. A read error after a delete would leave cleared
-    // tasks with no note (#3481).
-    let caller = caller_session_for_task(state_dir)?;
+    let checked = if ids.is_empty() {
+        Vec::new()
+    } else {
+        guard_tasks(state_dir, &caller, ids, other_session)?.items
+    };
     if checked
         .iter()
         .any(|(_, note)| note.as_ref().is_some_and(OverrideNote::is_owner_less))

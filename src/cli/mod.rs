@@ -2896,24 +2896,22 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             other_session,
         } => {
             crate::task::with_store_lock(&state_dir, || {
-                let (slug, audit) = guard_task(&state_dir, &id, other_session.as_deref())?;
+                let mut guarded = guard_task(&state_dir, &id, other_session.as_deref())?;
+                let audit = guarded.audit.take();
                 if reopen {
-                    crate::task::reopen_task(&state_dir, crate::task::TaskTarget::Resolved(&slug))?;
+                    crate::task::reopen_task(&state_dir, guarded.target())?;
                 }
-                let task = crate::task::start_task(
-                    &state_dir,
-                    crate::task::TaskTarget::Resolved(&slug),
-                    force,
-                )
-                .map_err(|e| {
-                    if reopen {
-                        e.context(format!(
-                            "task '{id}' is now reopened (open), but it did not start"
-                        ))
-                    } else {
-                        e
-                    }
-                })?;
+                // The reopen writes, so the start reads the store again.
+                let task =
+                    crate::task::start_task(&state_dir, guarded.target(), force).map_err(|e| {
+                        if reopen {
+                            e.context(format!(
+                                "task '{id}' is now reopened (open), but it did not start"
+                            ))
+                        } else {
+                            e
+                        }
+                    })?;
                 // The audit note comes first: a closed stdout makes `println!` panic.
                 record_override(&state_dir, audit)?;
                 println!("Started '{}' — now {:?}", task.slug, task.state);
@@ -2927,11 +2925,11 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
         } => task_done::run(&state_dir, &id, force, other_session.as_deref())?,
         TaskCommand::Reopen { ids, other_session } => {
             crate::task::with_store_lock(&state_dir, || {
-                let (slugs, audits): (Vec<String>, Vec<_>) =
-                    guard_tasks(&state_dir, &ids, other_session.as_deref())?
-                        .into_iter()
-                        .unzip();
-                let reopened = crate::task::reopen::reopen_resolved(&state_dir, &slugs)?;
+                let caller = caller_session_for_task(&state_dir)?;
+                let guarded = guard_tasks(&state_dir, &caller, &ids, other_session.as_deref())?;
+                let (slugs, audits): (Vec<String>, Vec<_>) = guarded.items.into_iter().unzip();
+                let reopened =
+                    crate::task::reopen::reopen_resolved(&state_dir, &guarded.tasks, &slugs)?;
                 // Every note is tried, so one failed note does not hide the others. The notes
                 // come before the print: a closed stdout makes `println!` panic.
                 let failed: Vec<String> = audits
@@ -3039,14 +3037,10 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 }
             };
             crate::task::with_store_lock(&state_dir, || {
-                let (slug, audit) = guard_task(&state_dir, &id, other_session.as_deref())?;
-                let task = crate::task::note_task(
-                    &state_dir,
-                    crate::task::TaskTarget::Resolved(&slug),
-                    &text,
-                )?;
+                let guarded = guard_task(&state_dir, &id, other_session.as_deref())?;
+                let task = crate::task::note_task(&state_dir, guarded.target(), &text)?;
                 // The audit note comes first: a closed stdout makes `println!` panic.
-                record_override(&state_dir, audit)?;
+                record_override(&state_dir, guarded.audit)?;
                 println!("Noted on '{}'", task.slug);
                 Ok(())
             })?;
@@ -3067,14 +3061,10 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 }
             };
             crate::task::with_store_lock(&state_dir, || {
-                let (slug, audit) = guard_task(&state_dir, &id, other_session.as_deref())?;
-                let task = crate::task::wait_task(
-                    &state_dir,
-                    crate::task::TaskTarget::Resolved(&slug),
-                    &reason,
-                )?;
+                let guarded = guard_task(&state_dir, &id, other_session.as_deref())?;
+                let task = crate::task::wait_task(&state_dir, guarded.target(), &reason)?;
                 // The audit note comes first: a closed stdout makes `println!` panic.
-                record_override(&state_dir, audit)?;
+                record_override(&state_dir, guarded.audit)?;
                 println!("Marked '{}' waiting", task.slug);
                 Ok(())
             })?;
@@ -3085,14 +3075,10 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             other_session,
         } => {
             crate::task::with_store_lock(&state_dir, || {
-                let (slug, audit) = guard_task(&state_dir, &id, other_session.as_deref())?;
-                let task = crate::task::block_task(
-                    &state_dir,
-                    crate::task::TaskTarget::Resolved(&slug),
-                    &on,
-                )?;
+                let guarded = guard_task(&state_dir, &id, other_session.as_deref())?;
+                let task = crate::task::block_task(&state_dir, guarded.target(), &on)?;
                 // The audit note comes first: a closed stdout makes `println!` panic.
-                record_override(&state_dir, audit)?;
+                record_override(&state_dir, guarded.audit)?;
                 println!(
                     "'{}' is now blocked on: {}",
                     task.slug,
@@ -3136,14 +3122,10 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 detail: detail.as_deref(),
             };
             crate::task::with_store_lock(&state_dir, || {
-                let (slug, audit) = guard_task(&state_dir, &id, other_session.as_deref())?;
-                let task = crate::task::edit_task(
-                    &state_dir,
-                    crate::task::TaskTarget::Resolved(&slug),
-                    &edit,
-                )?;
+                let guarded = guard_task(&state_dir, &id, other_session.as_deref())?;
+                let task = crate::task::edit_task(&state_dir, guarded.target(), &edit)?;
                 // The audit note comes first: a closed stdout makes `println!` panic.
-                record_override(&state_dir, audit)?;
+                record_override(&state_dir, guarded.audit)?;
                 println!("Updated '{}'", task.slug);
                 Ok(())
             })?;

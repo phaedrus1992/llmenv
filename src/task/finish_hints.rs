@@ -1,9 +1,7 @@
 //! Reminders for a session whose tasks are all done, and the hint `task done` prints for the
 //! last one (#2987).
 
-use std::path::Path;
-
-use super::{Stored, Task, for_current_project, session, store_for_reminder, store_warning_text};
+use super::{Completed, Stored, for_current_project, store_for_reminder, store_warning_text};
 
 /// For every session open for the current project (resolved from the
 /// process's actual cwd — hooks run with cwd set to the project directory)
@@ -62,28 +60,25 @@ fn finish_reminder_lines(
 /// The hint `task done` prints when the closed task was the last one not done in its session
 /// (#2987). The agent decides here whether the work goes on, so the hint names the next step.
 /// `None` while the session still holds a task that is not done, or when the task has no session.
-///
-/// # Errors
-/// Errors if the session's task files cannot be read.
-pub(crate) fn last_task_hint(state_dir: &Path, task: &Task) -> anyhow::Result<Option<String>> {
-    let Some(session_id) = task.session.as_deref() else {
-        return Ok(None);
-    };
-    let (done, total) = session::try_session_progress(state_dir, session_id)?;
+/// It uses the counts that the close read, so it reads no file (#3482).
+pub(crate) fn last_task_hint(completed: &Completed) -> Option<String> {
+    let (done, total) = completed.session_progress?;
     if total == 0 || done < total {
-        return Ok(None);
+        return None;
     }
-    Ok(Some(
+    Some(
         "The session has no open task left. If the work goes on (next skill phase, review, \
          push, PR, merge, CI), add that step now with `llmenv task add <title>` and continue. \
          Finish the session only when nothing is left."
             .to_string(),
-    ))
+    )
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use std::path::Path;
+
     use tempfile::TempDir;
 
     use super::*;
@@ -110,7 +105,7 @@ mod tests {
             .expect("test");
         let done = complete_task(dir.path(), &first.slug, true).expect("test");
         assert_eq!(
-            last_task_hint(dir.path(), &done.task).expect("test"),
+            last_task_hint(&done),
             None,
             "one task is still open, so there is no hint"
         );
@@ -123,9 +118,7 @@ mod tests {
         let only = add_task_for_session(dir.path(), "Only", ParentSpec::Detached, &session_id)
             .expect("test");
         let done = complete_task(dir.path(), &only.slug, true).expect("test");
-        let hint = last_task_hint(dir.path(), &done.task)
-            .expect("test")
-            .expect("the last task must produce a hint");
+        let hint = last_task_hint(&done).expect("the last task must produce a hint");
         assert!(hint.contains("no open task left"));
         assert!(hint.contains("llmenv task add <title>"));
     }
@@ -136,11 +129,9 @@ mod tests {
         let session_id = new_session(dir.path());
         let only = add_task_for_session(dir.path(), "Only", ParentSpec::Detached, &session_id)
             .expect("test");
-        let mut done = complete_task(dir.path(), &only.slug, true)
-            .expect("test")
-            .task;
-        done.session = None;
-        assert_eq!(last_task_hint(dir.path(), &done).expect("test"), None);
+        let mut done = complete_task(dir.path(), &only.slug, true).expect("test");
+        done.session_progress = None;
+        assert_eq!(last_task_hint(&done), None);
     }
 
     #[test]

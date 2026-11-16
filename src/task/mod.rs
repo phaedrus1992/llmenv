@@ -49,7 +49,7 @@ use finish_hints::session_finish_reminders;
 mod tracking;
 pub(crate) use tracking::{Tracking, tracking, tracking_in};
 pub mod session;
-pub(crate) use progress::{StrictTasks, progress_in, wip_title_in};
+pub(crate) use progress::{StrictTasks, progress_after_close, progress_in, wip_title_in};
 pub(crate) use reopen::reopen_task;
 pub(crate) use resolve::resolve_identifier;
 
@@ -181,6 +181,7 @@ pub(crate) fn save_task(state_dir: &Path, task: &Task) -> anyhow::Result<()> {
     crate::paths::create_dir_owner_only(&dir)?;
     let json = serde_json::to_string_pretty(task)?;
     crate::paths::write_owner_only_atomic(&task_path(state_dir, &task.slug), json.as_bytes())?;
+    StrictTasks::record_write();
     Ok(())
 }
 
@@ -241,6 +242,8 @@ enum UnreadablePolicy {
 }
 
 fn read_tasks(state_dir: &Path, policy: UnreadablePolicy) -> anyhow::Result<Vec<Task>> {
+    #[cfg(test)]
+    StrictTasks::count_read();
     let dir = tasks_dir(state_dir);
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
@@ -680,8 +683,9 @@ pub(crate) fn start_task<'a>(
     let task = with_store_lock(state_dir, || {
         // One strict read feeds the name lookup, the blocker check, and the queue check (#3474).
         target.check()?;
-        let all_tasks = list_tasks_strict(state_dir)?;
-        let slug = target.slug_in(state_dir, &all_tasks)?;
+        let snapshot = target.tasks(state_dir)?;
+        let all_tasks: &StrictTasks = &snapshot;
+        let slug = target.slug_in(state_dir, all_tasks)?;
         let mut task = load_task(state_dir, &slug)?;
         if task.state == TaskState::Done {
             anyhow::bail!(
@@ -727,7 +731,7 @@ pub(crate) fn start_task<'a>(
             anyhow::bail!("{block}");
         }
         // The ancestors go first: if one cannot start, the sub-task stays `open`.
-        let promoted = ancestors_to_start(state_dir, &task, force, &all_tasks)?;
+        let promoted = ancestors_to_start(state_dir, &task, force, all_tasks)?;
         let now = now_rfc3339();
         let names: Vec<String> = promoted.iter().map(|a| a.slug.clone()).collect();
         for mut ancestor in promoted {
@@ -778,6 +782,7 @@ pub(crate) fn delete_task<'a>(
         let slug = target.slug(state_dir)?;
         let task = load_task(state_dir, &slug)?;
         std::fs::remove_file(task_path(state_dir, &slug))?;
+        StrictTasks::record_write();
         Ok(task)
     })
 }
@@ -797,6 +802,9 @@ pub(crate) struct Completed {
     prior: TaskState,
     /// Sub-tasks that were not done when `--force` closed the parent (#2455).
     undone_children: Vec<String>,
+    /// The done and total counts of the task's session after the close, from the read that the
+    /// close made. `None` for a task with no session (#3482).
+    session_progress: Option<(u64, u64)>,
 }
 
 impl Completed {
@@ -867,8 +875,9 @@ fn close_task(
     let completed = with_store_lock(state_dir, || {
         // One strict read feeds the name lookup and the sub-task check (#3471, #3474).
         target.check()?;
-        let all_tasks = list_tasks_strict(state_dir)?;
-        let slug = target.slug_in(state_dir, &all_tasks)?;
+        let snapshot = target.tasks(state_dir)?;
+        let all_tasks: &StrictTasks = &snapshot;
+        let slug = target.slug_in(state_dir, all_tasks)?;
         let mut task = load_task(state_dir, &slug)?;
         let prior = task.state;
         if prior == TaskState::Open && !force {
@@ -877,7 +886,7 @@ fn close_task(
                  the work, or pass --force if it is done."
             );
         }
-        let undone = relation::undone_descendants(&slug, &all_tasks);
+        let undone = relation::undone_descendants(&slug, all_tasks);
         if !force && !undone.is_empty() {
             anyhow::bail!("{}", relation::undone_children_message(&slug, &undone));
         }
@@ -897,10 +906,12 @@ fn close_task(
             task.updated_at = now;
             save_task(state_dir, &task)?;
         }
+        let session_progress = progress_after_close(all_tasks, &task);
         Ok(Completed {
             task,
             prior,
             undone_children,
+            session_progress,
         })
     })?;
     touch_task_session(state_dir, &completed.task);
@@ -4367,6 +4378,9 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod read_once_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod reject_cycle_tests;

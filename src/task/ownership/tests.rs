@@ -4,7 +4,7 @@ use super::super::session::{StartRequest, start_session_as};
 use super::super::{ParentSpec, SessionChoice, TaskState, add_task, load_task, save_task};
 use super::{
     Caller, OverrideNote, caller_session, ensure_parent_in_session, ensure_session_is_ours,
-    ensure_tasks_are_ours,
+    ensure_tasks_are_ours, read_for_check,
 };
 
 /// The check for one name, as the commands with one id run it.
@@ -14,8 +14,9 @@ fn ensure_task_is_ours(
     caller: &Caller,
     other_session: Option<&str>,
 ) -> anyhow::Result<Option<OverrideNote>> {
+    let tasks = read_for_check(state_dir, &[input])?;
     Ok(
-        ensure_tasks_are_ours(state_dir, &[input], caller, other_session)?
+        ensure_tasks_are_ours(state_dir, &tasks, &[input], caller, other_session)?
             .pop()
             .and_then(|(_, note)| note),
     )
@@ -96,13 +97,10 @@ fn several_names_resolve_in_order_to_the_checked_slugs() {
     let dir = TempDir::new().expect("tempdir");
     let (slug, owner) = open_task_in_session(dir.path());
     let prefix = &slug[..slug.len() - 1];
-    let checked = ensure_tasks_are_ours(
-        dir.path(),
-        &[slug.as_str(), prefix],
-        &Caller::Session(owner),
-        None,
-    )
-    .expect("the owning session must pass");
+    let names = [slug.as_str(), prefix];
+    let tasks = read_for_check(dir.path(), &names).expect("read");
+    let checked = ensure_tasks_are_ours(dir.path(), &tasks, &names, &Caller::Session(owner), None)
+        .expect("the owning session must pass");
     let slugs: Vec<&str> = checked.iter().map(|(s, _)| s.as_str()).collect();
     assert_eq!(slugs, [slug.as_str(), slug.as_str()]);
 }

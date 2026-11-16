@@ -1,0 +1,162 @@
+//! Tests that one task command reads the task store once, from the ownership check to the change
+//! (#3485, #3482).
+
+use tempfile::TempDir;
+
+use super::ownership::{Caller, ensure_task_is_ours, read_for_check};
+use super::*;
+
+const SESSION: &str = "test-session";
+
+fn mk(dir: &Path, title: &str) -> Task {
+    add_task_for_session(dir, title, ParentSpec::Detached, SESSION).expect("add task")
+}
+
+/// The strict reads that `command` makes. The command gets the slug and the read of the
+/// ownership check, as the CLI commands do.
+fn reads_of<T>(
+    dir: &Path,
+    input: &str,
+    command: impl FnOnce(TaskTarget<'_>) -> anyhow::Result<T>,
+) -> usize {
+    let caller = Caller::Session(SESSION.to_string());
+    let before = StrictTasks::reads_on_this_thread();
+    let tasks = read_for_check(dir, &[input]).expect("read for the check");
+    let (slug, _) = ensure_task_is_ours(dir, &tasks, input, &caller, None).expect("check");
+    command(TaskTarget::Checked(&slug, &tasks)).expect("command");
+    StrictTasks::reads_on_this_thread() - before
+}
+
+#[test]
+fn start_reads_the_store_once() {
+    let dir = TempDir::new().expect("tempdir");
+    let a = mk(dir.path(), "Task A");
+    assert_eq!(
+        reads_of(dir.path(), &a.slug, |t| start_task(dir.path(), t, false)),
+        1
+    );
+}
+
+#[test]
+fn done_reads_the_store_once() {
+    let dir = TempDir::new().expect("tempdir");
+    let a = mk(dir.path(), "Task A");
+    let caller = Caller::Session(SESSION.to_string());
+    assert_eq!(
+        reads_of(dir.path(), &a.slug, |t| complete_task_by(
+            dir.path(),
+            t,
+            true,
+            &caller
+        )),
+        1
+    );
+}
+
+#[test]
+fn block_reads_the_store_once() {
+    let dir = TempDir::new().expect("tempdir");
+    let a = mk(dir.path(), "Task A");
+    let b = mk(dir.path(), "Task B");
+    assert_eq!(
+        reads_of(dir.path(), &a.slug, |t| block_task(dir.path(), t, &b.slug)),
+        1
+    );
+}
+
+#[test]
+fn edit_reads_the_store_once() {
+    let dir = TempDir::new().expect("tempdir");
+    let a = mk(dir.path(), "Task A");
+    let b = mk(dir.path(), "Task B");
+    let block_on = [b.slug.clone()];
+    let edit = TaskEdit {
+        title: Some("Renamed"),
+        block_on: &block_on,
+        ..TaskEdit::default()
+    };
+    assert_eq!(
+        reads_of(dir.path(), &a.slug, |t| edit_task(dir.path(), t, &edit)),
+        1
+    );
+}
+
+#[test]
+fn reopen_reads_the_store_once() {
+    let dir = TempDir::new().expect("tempdir");
+    let a = mk(dir.path(), "Task A");
+    done_task(dir.path(), &a.slug).expect("close");
+    let caller = Caller::Session(SESSION.to_string());
+    let before = StrictTasks::reads_on_this_thread();
+    let tasks = read_for_check(dir.path(), &[&a.slug]).expect("read");
+    let checked = ownership::ensure_tasks_are_ours(dir.path(), &tasks, &[&a.slug], &caller, None)
+        .expect("check");
+    let slugs: Vec<String> = checked.into_iter().map(|(slug, _)| slug).collect();
+    reopen::reopen_resolved(dir.path(), &tasks, &slugs).expect("reopen");
+    assert_eq!(StrictTasks::reads_on_this_thread() - before, 1);
+}
+
+#[test]
+fn a_read_that_a_target_does_not_carry_is_made_by_the_command() {
+    let dir = TempDir::new().expect("tempdir");
+    let a = mk(dir.path(), "Task A");
+    let before = StrictTasks::reads_on_this_thread();
+    start_task(dir.path(), TaskTarget::Resolved(&a.slug), false).expect("start");
+    assert_eq!(StrictTasks::reads_on_this_thread() - before, 1);
+}
+
+#[test]
+fn done_reports_the_session_progress_after_the_close() {
+    let dir = TempDir::new().expect("tempdir");
+    let a = mk(dir.path(), "Task A");
+    let b = mk(dir.path(), "Task B");
+    let first = complete_task(dir.path(), &a.slug, true).expect("close a");
+    assert_eq!(first.session_progress, Some((1, 2)));
+    let second = complete_task(dir.path(), &b.slug, true).expect("close b");
+    assert_eq!(second.session_progress, Some((2, 2)));
+    let repeat = complete_task(dir.path(), &b.slug, true).expect("close b again");
+    assert_eq!(
+        repeat.session_progress,
+        Some((2, 2)),
+        "a repeat done counts the task once"
+    );
+}
+
+#[test]
+fn a_read_error_of_the_close_keeps_its_text() {
+    let dir = TempDir::new().expect("tempdir");
+    let a = mk(dir.path(), "Task A");
+    std::fs::write(task_path(dir.path(), "broken"), "{not json").expect("write");
+    let err = complete_task(dir.path(), &a.slug, true).expect_err("a broken file is an error");
+    assert!(format!("{err:#}").contains("broken"), "{err:#}");
+}
+
+#[test]
+fn a_read_that_a_write_made_stale_is_not_used() {
+    let dir = TempDir::new().expect("tempdir");
+    let a = mk(dir.path(), "Task A");
+    done_task(dir.path(), &a.slug).expect("close");
+    let caller = Caller::Session(SESSION.to_string());
+    let before = StrictTasks::reads_on_this_thread();
+    let tasks = read_for_check(dir.path(), &[&a.slug]).expect("read");
+    let (slug, _) = ensure_task_is_ours(dir.path(), &tasks, &a.slug, &caller, None).expect("check");
+    // `start --reopen`: the reopen writes, so the start must not use the read of the check.
+    reopen_task(dir.path(), TaskTarget::Checked(&slug, &tasks)).expect("reopen");
+    let started = start_task(dir.path(), TaskTarget::Checked(&slug, &tasks), false)
+        .expect("start after the reopen");
+    assert_eq!(started.state, TaskState::Wip);
+    assert_eq!(StrictTasks::reads_on_this_thread() - before, 2);
+}
+
+#[test]
+fn done_counts_the_closed_task_from_its_saved_state() {
+    let dir = TempDir::new().expect("tempdir");
+    let a = mk(dir.path(), "Task A");
+    mk(dir.path(), "Task B");
+    let tasks = StrictTasks::read(dir.path()).expect("read");
+    let mut closed = load_task(dir.path(), &a.slug).expect("load");
+    closed.state = TaskState::Done;
+    assert_eq!(progress_after_close(&tasks, &closed), Some((1, 2)));
+    closed.session = None;
+    assert_eq!(progress_after_close(&tasks, &closed), None);
+}

@@ -49,10 +49,11 @@ pub(super) fn update(
         // A refused or unresolved id is a task error, not a store error, so the deny keeps the id hint.
         // A read error of the store is returned with `?`, so it reaches `store_failed` and not
         // the id hint.
-        let (slug, ownership_note, caller) = match checked_slug(state_dir, project, owner, id)? {
-            Ok(checked) => checked,
-            Err(e) => return Ok((Err(e), String::new())),
-        };
+        let (slug, ownership_note, caller, tasks) =
+            match checked_slug(state_dir, project, owner, id)? {
+                Ok(checked) => checked,
+                Err(e) => return Ok((Err(e), String::new())),
+            };
         // The delete of an owner-less task needs a caller session to hold its record. The check
         // runs before the delete.
         let owner_less_delete = deleted
@@ -64,7 +65,7 @@ pub(super) fn update(
         } else {
             Ok(())
         }
-        .and_then(|()| change(state_dir, &slug, status))
+        .and_then(|()| change(state_dir, task::TaskTarget::Checked(&slug, &tasks), status))
         .and_then(|msg| {
             record_check_note(state_dir, &caller, &slug, ownership_note.as_ref(), deleted)
                 .map(|()| msg)
@@ -87,6 +88,10 @@ pub(super) fn update(
     }
 }
 
+/// The slug that `id` names, with its ownership note, the caller, and the strict read of the
+/// store that the check made. The change uses that read, so the redirect reads the store once.
+type CheckedUpdate = (String, Option<OverrideNote>, Caller, task::StrictTasks);
+
 /// The slug that `id` names, when the caller may change that task, with the ownership note and
 /// the caller. The check is the check of the `llmenv task` commands. TaskUpdate has no
 /// `--other-session`, so the note is set only for a task with no session.
@@ -98,12 +103,16 @@ fn checked_slug(
     project: &str,
     owner: &session::EngineIdentity,
     id: &str,
-) -> anyhow::Result<anyhow::Result<(String, Option<OverrideNote>, Caller)>> {
+) -> anyhow::Result<anyhow::Result<CheckedUpdate>> {
     let caller = task::ownership::caller_session(state_dir, project, owner)?;
-    task::list_tasks_strict(state_dir)?;
+    // A bad id gets its own deny, even when the store cannot be read.
+    if let Err(e) = task::ownership::check_names(&[id]) {
+        return Ok(Err(e));
+    }
+    let tasks = task::list_tasks_strict(state_dir)?;
     Ok(
-        task::ownership::ensure_task_is_ours(state_dir, id, &caller, None)
-            .map(|(slug, note)| (slug, note, caller)),
+        task::ownership::ensure_task_is_ours(state_dir, &tasks, id, &caller, None)
+            .map(|(slug, note)| (slug, note, caller, tasks)),
     )
 }
 
@@ -125,9 +134,13 @@ fn record_check_note(
     }
 }
 
-/// Run the status change on the checked `slug`, and return the text that names it.
-fn change(state_dir: &Path, slug: &str, status: Option<&str>) -> anyhow::Result<String> {
-    let target = task::TaskTarget::Resolved(slug);
+/// Run the status change on the checked `target`, and return the text that names it.
+fn change(
+    state_dir: &Path,
+    target: task::TaskTarget<'_>,
+    status: Option<&str>,
+) -> anyhow::Result<String> {
+    let slug = target.slug(state_dir)?;
     match status {
         // force=false: the redirect enforces the hard block on an unmet `blocked_on` (#1164)
         // that `llmenv task start` enforces, so the native tool is no bypass.

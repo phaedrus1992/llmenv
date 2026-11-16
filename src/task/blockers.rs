@@ -22,9 +22,10 @@ pub(crate) fn block_task<'a>(
         // One strict read resolves both names (#3477).
         target.check()?;
         resolve::check_identifier(on)?;
-        let all_tasks = list_tasks_strict(state_dir)?;
-        let slug = target.slug_in(state_dir, &all_tasks)?;
-        let on_slug = resolve::resolve_in(state_dir, on, &all_tasks)?;
+        let snapshot = target.tasks(state_dir)?;
+        let all_tasks: &StrictTasks = &snapshot;
+        let slug = target.slug_in(state_dir, all_tasks)?;
+        let on_slug = resolve::resolve_in(state_dir, on, all_tasks)?;
         if slug == on_slug {
             anyhow::bail!("task '{slug}' cannot be blocked on itself");
         }
