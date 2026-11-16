@@ -139,36 +139,20 @@ fn overridden_slugs(
     }
 }
 
-/// Deletes every task of `named`, and records the deleted slugs. A failure stops the delete, so
-/// the slugs that left the store are found by reading it again.
+/// Deletes every task of `named`, and records the deleted slugs. A failure stops the delete, and
+/// the error holds the tasks that left the store before it, so the store is read once.
 fn clear_session(state_dir: &Path, named: &str, deleted: &mut Vec<String>) -> anyhow::Result<()> {
-    let before = session_slugs(state_dir, named)?;
     match crate::task::session::delete_tasks_in_session(state_dir, named) {
         Ok(cleared) => {
             println!("Cleared {} task(s) from session '{named}'", cleared.len());
             deleted.extend(cleared.into_iter().map(|task| task.slug));
             Ok(())
         }
-        Err(error) => match session_slugs(state_dir, named) {
-            Ok(remaining) => {
-                deleted.extend(before.into_iter().filter(|slug| !remaining.contains(slug)));
-                Err(error)
-            }
-            Err(read) => Err(error.context(format!(
-                "some tasks may be deleted, and the store could not be read to note them: {read:#}"
-            ))),
-        },
+        Err(error) => {
+            deleted.extend(error.deleted.into_iter().map(|task| task.slug));
+            Err(error.source)
+        }
     }
-}
-
-/// The slugs of the tasks tagged to session `named`.
-fn session_slugs(state_dir: &Path, named: &str) -> anyhow::Result<Vec<String>> {
-    Ok(crate::task::list_tasks_strict(state_dir)?
-        .as_slice()
-        .iter()
-        .filter(|task| task.session.as_deref() == Some(named))
-        .map(|task| task.slug.clone())
-        .collect())
 }
 
 /// Deletes the checked tasks one by one. A failure stops the loop, and the error names the

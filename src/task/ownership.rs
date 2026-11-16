@@ -42,11 +42,23 @@ pub(crate) fn caller_session(
 ) -> anyhow::Result<Caller> {
     // Strict read: a corrupt session file must not hide the open session that owns this caller (#2665).
     let open = session::open_sessions_strict(state_dir, project)?;
-    Ok(match session::pick_open_session(open, owner) {
+    Ok(caller_for_pick(
+        &session::pick_open_session(open, owner),
+        owner,
+    ))
+}
+
+/// The caller that a pick of the open sessions means. A command that already picked a session
+/// uses this, so it does not read the session store a second time (#3743).
+pub(crate) fn caller_for_pick(
+    pick: &Result<Session, session::PickError>,
+    owner: &EngineIdentity,
+) -> Caller {
+    match pick {
         // A caller with no conversation id is not the owner of an owned session. The write
         // guards must refuse it, as `task add` does (#3480).
         Ok(picked) if picked.may_take_tasks(owner.session_id.as_deref()) => {
-            Caller::Session(picked.id)
+            Caller::Session(picked.id.clone())
         }
         Ok(picked) if owner.session_id.is_none() => Caller::Unidentified(format!(
             "the only open session '{}' belongs to another conversation, and this caller has no \
@@ -63,7 +75,7 @@ pub(crate) fn caller_session(
             )
             .unwrap_or_else(|| "no session of yours is open in this project".to_string()),
         ),
-    })
+    }
 }
 
 /// The audit note for an `--other-session` override. The caller records it with
