@@ -3321,7 +3321,11 @@ fn run_task_session_command(
                     state_dir,
                     &new,
                     crate::task::ParentSpec::Detached,
-                    crate::task::SessionChoice::Named(&session_id),
+                    crate::task::SessionChoice::Named {
+                        id: &session_id,
+                        owner: &owner,
+                        other_session: None,
+                    },
                     &project,
                 )
                 .with_context(|| {

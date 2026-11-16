@@ -473,16 +473,24 @@ pub enum ParentSpec<'a> {
 /// Which session a new task joins.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum SessionChoice<'a> {
-    /// `--session <id>` given explicitly.
-    Named(&'a str),
+    /// `--session <id>` given explicitly. The writer refuses a session of another conversation
+    /// unless `other_session` names its owner (#3486, #3617).
+    Named {
+        id: &'a str,
+        owner: &'a session::EngineIdentity,
+        other_session: Option<&'a str>,
+    },
     /// No `--session`: the project's only open session, else the one the
     /// caller owns ([`session::pick_open_session`], #2365).
     Resolve(&'a session::EngineIdentity),
-    /// An open session of the project that the caller read in the same command, so the session
-    /// files are not read again (#3474). A `Session` comes only from a read or a start, so a
-    /// caller cannot name an arbitrary id here. The session can close between that read and the
-    /// write, as with `Resolve`, which also reads before the store lock.
-    Checked(&'a session::Session),
+    /// An open session of the project that the caller read in the same command, under the same
+    /// store lock as the write, so the session files are not read again (#3474). A `Session`
+    /// comes only from a read or a start, so a caller cannot name an arbitrary id here. The
+    /// writer refuses it when it is closed, of another project, or of another conversation.
+    Checked {
+        session: &'a session::Session,
+        owner: &'a session::EngineIdentity,
+    },
 }
 
 /// Create a new task in `open` state and persist it, tagged to a resolved
@@ -535,12 +543,25 @@ pub(crate) fn add_task_with(
 ) -> anyhow::Result<Task> {
     // The session is resolved under the store lock, so a session that another process finishes
     // after the check cannot take the new task.
-    let task = with_store_lock(state_dir, || {
-        let resolved_session =
-            session_choice::resolve_session_for_add(state_dir, session, project)?;
-        add_task_for_session_with(state_dir, new, parent, &resolved_session)
+    let (task, overridden) = with_store_lock(state_dir, || {
+        let resolved = session_choice::resolve_session_for_add(state_dir, session, project)?;
+        let task = add_task_for_session_with(state_dir, new, parent, &resolved.id)?;
+        Ok((task, resolved.overridden))
     })?;
     touch_task_session(state_dir, &task);
+    if overridden {
+        let text = format!(
+            "Added with --other-session, which names the owner of session '{}'.",
+            task.session.as_deref().unwrap_or_default()
+        );
+        note_task(state_dir, task.slug.as_str(), &text).map_err(|err| {
+            anyhow::anyhow!(
+                "task '{}' was added, but its --other-session note was not saved: {err:#}. Do not \
+                 retry the add, or it creates a duplicate task.",
+                task.slug
+            )
+        })?;
+    }
     Ok(task)
 }
 
@@ -3643,7 +3664,11 @@ mod tests {
             dir.path(),
             "Do thing",
             ParentSpec::Detached,
-            SessionChoice::Named(&session.id),
+            SessionChoice::Named {
+                id: &session.id,
+                owner: &session::EngineIdentity::from_session_id(None),
+                other_session: None,
+            },
             PROJECT,
         )
         .expect("test");
@@ -3658,7 +3683,11 @@ mod tests {
                 dir.path(),
                 "Do thing",
                 ParentSpec::Detached,
-                SessionChoice::Named("no-such-session"),
+                SessionChoice::Named {
+                    id: "no-such-session",
+                    owner: &session::EngineIdentity::from_session_id(None),
+                    other_session: None,
+                },
                 PROJECT
             )
             .is_err()
@@ -3760,7 +3789,11 @@ mod tests {
             dir.path(),
             "Do thing",
             ParentSpec::Detached,
-            SessionChoice::Named(&session.id),
+            SessionChoice::Named {
+                id: &session.id,
+                owner: &session::EngineIdentity::from_session_id(None),
+                other_session: None,
+            },
             PROJECT,
         )
         .expect("test");

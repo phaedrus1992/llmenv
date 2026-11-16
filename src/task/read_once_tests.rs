@@ -193,3 +193,171 @@ fn clear_session_reads_the_task_store_once() {
     assert_eq!(StrictTasks::reads_on_this_thread() - before, 1);
     assert_eq!(deleted.len(), 2);
 }
+
+mod writer_ownership {
+    use super::*;
+    use crate::task::session::{
+        EngineIdentity, StartDecision, StartOutcome, StartRequest, session_reads_on_this_thread,
+        start_session_as,
+    };
+
+    const PROJECT_TAG: &str = "writer-ownership-0000";
+
+    fn conversation(id: &str) -> EngineIdentity {
+        EngineIdentity::from_session_id(Some(id))
+    }
+
+    /// An open session that conversation `owner` started.
+    fn owned_session(dir: &Path, owner: &EngineIdentity) -> session::Session {
+        let request = StartRequest {
+            name: Some("owned"),
+            description: None,
+            project: PROJECT_TAG,
+            owner,
+            resume: &resume::ResumeContext::default(),
+        };
+        match start_session_as(dir, &request, StartDecision::New).expect("start session") {
+            StartOutcome::Created(session) => session,
+            other => panic!("expected a new session, got {other:?}"),
+        }
+    }
+
+    fn add(dir: &Path, choice: SessionChoice<'_>) -> anyhow::Result<Task> {
+        add_task(dir, "Step", ParentSpec::Detached, choice, PROJECT_TAG)
+    }
+
+    fn task_count(dir: &Path) -> usize {
+        try_list_tasks(dir).expect("list tasks").len()
+    }
+
+    #[test]
+    fn a_named_session_of_another_conversation_is_refused() {
+        let dir = TempDir::new().expect("tempdir");
+        let session = owned_session(dir.path(), &conversation("conv-a"));
+        let intruder = conversation("conv-b");
+        let err = add(
+            dir.path(),
+            SessionChoice::Named {
+                id: &session.id,
+                owner: &intruder,
+                other_session: None,
+            },
+        )
+        .expect_err("a foreign session must refuse the task");
+        assert!(
+            format!("{err:#}").contains("another conversation"),
+            "{err:#}"
+        );
+        assert_eq!(task_count(dir.path()), 0);
+    }
+
+    #[test]
+    fn a_checked_session_of_another_conversation_is_refused() {
+        let dir = TempDir::new().expect("tempdir");
+        let session = owned_session(dir.path(), &conversation("conv-a"));
+        let intruder = conversation("conv-b");
+        let err = add(
+            dir.path(),
+            SessionChoice::Checked {
+                session: &session,
+                owner: &intruder,
+            },
+        )
+        .expect_err("a foreign session must refuse the task");
+        assert!(
+            format!("{err:#}").contains("another conversation"),
+            "{err:#}"
+        );
+        assert_eq!(task_count(dir.path()), 0);
+    }
+
+    #[test]
+    fn a_resolved_session_of_another_conversation_is_refused() {
+        let dir = TempDir::new().expect("tempdir");
+        owned_session(dir.path(), &conversation("conv-a"));
+        let intruder = conversation("conv-b");
+        let err = add(dir.path(), SessionChoice::Resolve(&intruder))
+            .expect_err("the sole open session of another conversation is not the default");
+        assert!(
+            format!("{err:#}").contains("another conversation"),
+            "{err:#}"
+        );
+        assert_eq!(task_count(dir.path()), 0);
+    }
+
+    #[test]
+    fn the_named_owner_override_adds_the_task_and_records_its_note() {
+        let dir = TempDir::new().expect("tempdir");
+        let session = owned_session(dir.path(), &conversation("conv-a"));
+        let intruder = conversation("conv-b");
+        let task = add(
+            dir.path(),
+            SessionChoice::Named {
+                id: &session.id,
+                owner: &intruder,
+                other_session: Some(&session.id),
+            },
+        )
+        .expect("the override names the owner");
+        assert_eq!(task.session.as_deref(), Some(session.id.as_str()));
+        let saved = load_task(dir.path(), &task.slug).expect("load");
+        assert!(
+            saved
+                .notes
+                .iter()
+                .any(|n| n.text.contains("--other-session")),
+            "{:?}",
+            saved.notes
+        );
+    }
+
+    #[test]
+    fn a_session_of_the_caller_takes_the_task_for_every_choice() {
+        let dir = TempDir::new().expect("tempdir");
+        let me = conversation("conv-a");
+        let session = owned_session(dir.path(), &me);
+        for choice in [
+            SessionChoice::Named {
+                id: &session.id,
+                owner: &me,
+                other_session: None,
+            },
+            SessionChoice::Checked {
+                session: &session,
+                owner: &me,
+            },
+            SessionChoice::Resolve(&me),
+        ] {
+            let task = add(dir.path(), choice).expect("the owner may add");
+            assert_eq!(task.session.as_deref(), Some(session.id.as_str()));
+        }
+    }
+
+    #[test]
+    fn a_named_add_reads_the_session_store_once_and_a_checked_add_not_at_all() {
+        let dir = TempDir::new().expect("tempdir");
+        let me = conversation("conv-a");
+        let session = owned_session(dir.path(), &me);
+        let before = session_reads_on_this_thread();
+        add(
+            dir.path(),
+            SessionChoice::Named {
+                id: &session.id,
+                owner: &me,
+                other_session: None,
+            },
+        )
+        .expect("named add");
+        assert_eq!(session_reads_on_this_thread() - before, 1);
+        let before = session_reads_on_this_thread();
+        add(
+            dir.path(),
+            SessionChoice::Checked {
+                session: &session,
+                owner: &me,
+            },
+        )
+        .expect("checked add");
+        assert_eq!(session_reads_on_this_thread() - before, 0);
+    }
+}

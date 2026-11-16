@@ -154,7 +154,10 @@ fn create_under_lock(
         state_dir,
         subject,
         task::ParentSpec::Detached,
-        task::SessionChoice::Checked(&session),
+        task::SessionChoice::Checked {
+            session: &session,
+            owner,
+        },
         project,
     ) {
         Ok(t) => {

@@ -343,18 +343,18 @@ pub(crate) fn record_cleared_override(
 /// `--other-session` names that session's owner (#3486). A session with no recorded owner, or one
 /// that the caller owns, takes the task without a check.
 ///
-/// Returns `true` when the override was used, so the caller can record it.
+/// `sessions` is the read of the session store that the caller made. Returns `true` when the
+/// override was used, so the writer can record it.
 ///
 /// # Errors
-/// Errors if the session store cannot be read, or if the session belongs to another
-/// conversation and `other_session` does not name its owner.
+/// Errors if the session belongs to another conversation and `other_session` does not name its
+/// owner.
 pub(crate) fn ensure_named_session_takes_tasks(
-    state_dir: &Path,
+    sessions: &[Session],
     session_id: &str,
     owner: &EngineIdentity,
     other_session: Option<&str>,
 ) -> anyhow::Result<bool> {
-    let sessions = session::list_sessions_strict(state_dir)?;
     // A missing or closed session is reported by the add resolver, with its own message.
     let Some(target) = sessions.iter().find(|s| s.id == session_id) else {
         return Ok(false);

@@ -76,6 +76,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Refuse a session of another conversation in the task writer for every session choice, not only in the callers. A new caller of the writer can no longer add a task to a foreign session by naming it, and the `--other-session` note is written by the writer. `task add --session` reads the session store once, and the TaskCreate redirect reads one session file for its freshness check, not the whole store. [fix:task] [#3587] [#3617] [#3748]
 - Make `llmenv upgrade --beta` offer a pre-release. A tag such as `v3.3.0-beta.1` did not parse, so the command compared it as equal to the installed version and said "Already at latest". A tag that is not a version is now an error that names the tag. [#3510]
 - Refuse a task blocker that would close a loop, from `task block` and `task edit --block-on`. [fix:task] [#3505]
 - Check the session of `task add` under the task store lock, wait at most ten seconds for that lock, and name every promoted ancestor when a `task start` save fails. [fix:task] [#3505]

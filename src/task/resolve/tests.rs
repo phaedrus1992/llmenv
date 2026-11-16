@@ -235,7 +235,10 @@ fn a_checked_session_that_closed_is_refused() {
         dir.path(),
         "Late",
         crate::task::ParentSpec::Detached,
-        crate::task::SessionChoice::Checked(closed),
+        crate::task::SessionChoice::Checked {
+            session: closed,
+            owner: &session::EngineIdentity::from_session_id(None),
+        },
         PROJECT,
     )
     .unwrap_err();
@@ -260,7 +263,10 @@ fn a_checked_session_that_closes_after_the_read_is_refused() {
         dir.path(),
         "Too late",
         crate::task::ParentSpec::Detached,
-        crate::task::SessionChoice::Checked(stale_open),
+        crate::task::SessionChoice::Checked {
+            session: stale_open,
+            owner: &session::EngineIdentity::from_session_id(None),
+        },
         PROJECT,
     )
     .unwrap_err();
