@@ -195,14 +195,14 @@ pub(crate) fn run_throttle_hook(event: &str) {
     write_output(&hook_event_name, &note, &notices);
 }
 
-/// The engine name of the hook event in `stdin`. Text that is not JSON, or JSON with no name,
-/// falls back to the name that `event` maps to. A fallback adds a notice, and so does a name
-/// that stays empty.
+/// The engine name of the hook event in `stdin`. Text that is not JSON, or JSON with no name or an
+/// empty name, falls back to the name that `event` maps to, and adds a notice. Empty stdin is a
+/// hook run by hand: it falls back with no notice. A name that stays empty adds a notice too.
 fn hook_event_name(stdin: &str, event: &str, notices: &mut Vec<String>) -> String {
     let parsed = match serde_json::from_str::<serde_json::Value>(stdin) {
         Ok(v) => match &v["hook_event_name"] {
-            serde_json::Value::String(name) => Some(name.clone()),
-            serde_json::Value::Null => {
+            serde_json::Value::String(name) if !name.is_empty() => Some(name.clone()),
+            serde_json::Value::Null | serde_json::Value::String(_) => {
                 notices.push(
                     "llmenv: the throttle hook got a payload with no hook_event_name. Fix: run \
                      `llmenv regenerate` so the hook matches this engine."
