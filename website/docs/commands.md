@@ -1201,6 +1201,8 @@ Poll the usage backend and sleep an adaptive delay, to stay under rate limits.
 The auto-registered `PreToolUse` (`pre-tool`) and `UserPromptSubmit` (`prompt`) hooks run it when a `features.throttle`
 block is set.
 Invoked automatically — not normally run by users.
+(changed in v3.14.0) The hook reads the event name from its stdin payload.
+A payload with no `hook_event_name`, or an event that maps to no name, adds a notice that names the fix.
 See [`features.throttle:`](configuration.md#featuresthrottle).
 
 ## `upgrade`

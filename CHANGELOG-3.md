@@ -67,6 +67,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Add a notice when the throttle hook gets a payload with no `hook_event_name`, or an event that maps to no name. [fix:hook] [#3760]
+- Name the sessions already abandoned, and the tasks already untagged, when `llmenv task session start --replace` fails part way. [fix:task] [#3759]
+- Make the Stop reminder name only a next task that can start. A task with an unmet or looping blocker is skipped. The blocker walk no longer recurses, so a chain of 100000 done tasks cannot overflow the stack. [fix:task] [#3757]
+- Report a failed `--other-session` note of a `TaskUpdate` redirect next to the saved change, and not as a failed update. [fix:hook] [#3755]
 - Read the session id that `icm_transcript_start_session` returns when the reply has a hint line after the JSON object. The reply was rejected as a malformed id. [fix:session-log] [#3754]
 - Fail `llmenv config-context` with an error that names the input when stdin is not JSON or has no `hook_event_name`. It used to print a made-up `SessionStart`. Empty stdin still means `SessionStart`. [fix:cli] [#3752]
 - Name the tasks that `llmenv task session start --task` already added when a later add fails. [fix:task] [#3750]
