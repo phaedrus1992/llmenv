@@ -8,9 +8,9 @@ use anyhow::Context;
 use super::caller_session_for_task;
 use super::task_guard::guard_tasks;
 use crate::task::ownership::{
-    Caller, OverrideNote, check_owner_less_delete, ensure_session_is_ours, record_owner_less_delete,
+    Caller, OverrideNote, SessionOverride, check_owner_less_delete, ensure_session_is_ours,
+    record_cleared_override, record_owner_less_delete,
 };
-use crate::task::session::append_override_note;
 
 /// A task that passed the ownership check, with the override note when the check needed one.
 type Checked = (String, Option<OverrideNote>);
@@ -30,7 +30,7 @@ pub(super) fn run(
     // a read error after a delete would leave cleared tasks with no note (#3481).
     let caller = caller_session_for_task(state_dir)?;
     let session_note = match session {
-        Some(named) => ensure_session_is_ours(named, &caller, other_session)?,
+        Some(named) => Some(ensure_session_is_ours(named, &caller, other_session)?),
         None => None,
     };
     // `clear` deletes the task, so a pending override note has nowhere to live.
@@ -56,9 +56,9 @@ pub(super) fn run(
         caller: &caller,
         checked: &checked,
         deleted: &deleted,
-        session_note: session_note.as_deref(),
+        session_note,
     };
-    match (outcome, record_notes(state_dir, &plan)) {
+    match (outcome, record_notes(state_dir, plan)) {
         (Ok(()), note) => note,
         (Err(error), Ok(())) => Err(error),
         (Err(error), Err(note)) => Err(error.context(format!(
@@ -74,14 +74,13 @@ struct NotePlan<'a> {
     caller: &'a Caller,
     checked: &'a [Checked],
     deleted: &'a [String],
-    /// The note of `clear --session`, set when the override was used. It is kept even when no
-    /// task was deleted (#3481).
-    session_note: Option<&'a str>,
+    /// The note of `clear --session`. It is kept even when no task was deleted (#3481).
+    session_note: Option<SessionOverride>,
 }
 
 /// Records the notes of a clear: the deletes of tasks with no session on the caller's session,
 /// and the `--other-session` override on the owning session.
-fn record_notes(state_dir: &Path, plan: &NotePlan<'_>) -> anyhow::Result<()> {
+fn record_notes(state_dir: &Path, plan: NotePlan<'_>) -> anyhow::Result<()> {
     let owner_less: Vec<String> = plan
         .deleted
         .iter()
@@ -92,18 +91,33 @@ fn record_notes(state_dir: &Path, plan: &NotePlan<'_>) -> anyhow::Result<()> {
         })
         .cloned()
         .collect();
-    if !owner_less.is_empty() {
-        record_owner_less_delete(state_dir, plan.caller, &owner_less)?;
+    // Both notes are tried, so a failed first note does not hide the second.
+    let first = if owner_less.is_empty() {
+        Ok(())
+    } else {
+        record_owner_less_delete(state_dir, plan.caller, &owner_less)
+    };
+    let second = record_override_notes(state_dir, plan);
+    match (first, second) {
+        (Ok(()), second) => second,
+        (Err(first), Ok(())) => Err(first),
+        (Err(first), Err(second)) => Err(first.context(format!(
+            "the override note was not saved either: {second:#}"
+        ))),
     }
+}
+
+/// Records the `--other-session` override on the owning session.
+fn record_override_notes(state_dir: &Path, plan: NotePlan<'_>) -> anyhow::Result<()> {
     let Some(owner) = plan.other_session else {
         return Ok(());
     };
     let covered = overridden_slugs(plan.session, owner, plan.caller, plan.checked, plan.deleted);
     if !covered.is_empty() {
-        return record_override(state_dir, owner, &plan.caller.describe(), &covered);
+        return record_cleared_override(state_dir, owner, &plan.caller.describe(), &covered);
     }
     match (plan.session, plan.session_note) {
-        (Some(named), Some(text)) => append_override_note(state_dir, named, Some(text)).with_context(|| {
+        (Some(named), Some(note)) => note.record(state_dir).with_context(|| {
             format!(
                 "the session '{named}' was cleared, but its override note was not saved; do not \
                  retry the clear"
@@ -175,27 +189,4 @@ fn clear_ids(
         deleted.push(task.slug);
     }
     Ok(())
-}
-
-/// Appends a note to the owning session that names the caller and the deleted tasks (#3481).
-///
-/// # Errors
-/// Errors if the owning session cannot be written. The deletes are already saved when this runs,
-/// so the error says so.
-fn record_override(
-    state_dir: &Path,
-    owner: &str,
-    caller: &str,
-    deleted: &[String],
-) -> anyhow::Result<()> {
-    let text = format!(
-        "Cleared with --other-session by {caller}. Deleted tasks: {}.",
-        deleted.join(", ")
-    );
-    append_override_note(state_dir, owner, Some(&text)).with_context(|| {
-        format!(
-            "the tasks were cleared, but the note on session '{owner}' was not saved; \
-                 do not retry the clear"
-        )
-    })
 }

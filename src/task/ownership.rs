@@ -69,11 +69,11 @@ pub(crate) fn caller_for_pick(
             "the only open session '{}' belongs to another conversation",
             picked.id
         )),
-        Err(err) => Caller::Unidentified(
-            err.ambiguity_message(
-                "set CLAUDE_CODE_SESSION_ID, or pass --other-session <SESSION_ID>",
-            )
-            .unwrap_or_else(|| "no session of yours is open in this project".to_string()),
+        Err(session::PickError::NoneOpen) => {
+            Caller::Unidentified("no session of yours is open in this project".to_string())
+        }
+        Err(err @ session::PickError::Ambiguous { .. }) => Caller::Unidentified(
+            err.message("set CLAUDE_CODE_SESSION_ID, or pass --other-session <SESSION_ID>"),
         ),
     }
 }
@@ -239,11 +239,40 @@ fn ownership_note(
     }
 }
 
+/// The audit note of a command that acts on a session of another conversation with
+/// `--other-session` (#3596). Only [`ensure_session_is_ours`] makes one, so a note exists only for
+/// a session that passed the guard. The command records it once its change has saved. A caller
+/// that drops it gets a compiler warning (#3602).
+#[must_use = "record the override note once the command has succeeded"]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct SessionOverride {
+    session_id: String,
+    /// `None` when the caller owns the session, so no override applied.
+    text: Option<String>,
+}
+
+impl SessionOverride {
+    /// The note text, or `None` when no override applied.
+    #[cfg(test)]
+    pub(crate) fn text(&self) -> Option<&str> {
+        self.text.as_deref()
+    }
+
+    /// Append the note to the session. Nothing is written when no override applied. The command
+    /// runs this after its change has saved, under the same store lock.
+    ///
+    /// # Errors
+    /// Errors if the session cannot be read or written. The change itself is already saved.
+    pub(crate) fn record(self, state_dir: &Path) -> anyhow::Result<()> {
+        session::append_override_note(state_dir, &self.session_id, self.text.as_deref())
+    }
+}
+
 /// Refuse a command that acts on session `session_id` (`clear --session`, `session edit`,
 /// `session note`, `session finish`) when the caller is not that session.
 ///
-/// Returns the note text when `--other-session` was needed and used. The caller appends it to
-/// the session once the command has succeeded (#3596). Returns `None` when no override applied.
+/// The result holds the note when `--other-session` was needed and used. The caller records it
+/// once the command has succeeded (#3596).
 ///
 /// # Errors
 /// Errors if the caller is another session and `other_session` does not name
@@ -252,23 +281,62 @@ pub(crate) fn ensure_session_is_ours(
     session_id: &str,
     caller: &Caller,
     other_session: Option<&str>,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<SessionOverride> {
+    let own = |text: Option<String>| SessionOverride {
+        session_id: session_id.to_string(),
+        text,
+    };
     if matches!(caller, Caller::Session(id) if id == session_id) {
-        return Ok(None);
+        return Ok(own(None));
     }
     match other_session {
-        Some(named) if named == session_id => Ok(Some(format!(
+        Some(named) if named == session_id => Ok(own(Some(format!(
             "acted on with --other-session {session_id}; caller: {}",
             caller.describe()
-        ))),
+        )))),
         Some(named) => anyhow::bail!("this command acts on session '{session_id}', not '{named}'"),
-        None => refuse_unless_caller(
-            session_id,
-            caller,
-            &format!("this command acts on session '{session_id}'"),
-        )
-        .map(|()| None),
+        None => ensure_session_is_callers(session_id, caller).map(|()| own(None)),
     }
+}
+
+/// [`ensure_session_is_ours`] for a read, which takes no `--other-session`, so no note exists.
+///
+/// # Errors
+/// Errors if the caller is not session `session_id`.
+pub(crate) fn ensure_session_is_callers(session_id: &str, caller: &Caller) -> anyhow::Result<()> {
+    if matches!(caller, Caller::Session(id) if id == session_id) {
+        return Ok(());
+    }
+    refuse_unless_caller(
+        session_id,
+        caller,
+        &format!("this command acts on session '{session_id}'"),
+    )
+}
+
+/// Records that `clear` with `--other-session` deleted `deleted` tasks of session `owner`, as
+/// caller `by`. The deletes are saved when this runs (#3481).
+///
+/// # Errors
+/// Errors if the owning session cannot be written. The deletes are already saved, so the error
+/// says so.
+pub(crate) fn record_cleared_override(
+    state_dir: &Path,
+    owner: &str,
+    by: &str,
+    deleted: &[String],
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let text = format!(
+        "Cleared with --other-session by {by}. Deleted tasks: {}.",
+        deleted.join(", ")
+    );
+    session::append_override_note(state_dir, owner, Some(&text)).with_context(|| {
+        format!(
+            "the tasks were cleared, but the note on session '{owner}' was not saved; \
+             do not retry the clear"
+        )
+    })
 }
 
 /// Refuses a `task add --session <id>` that names a session of another conversation, unless

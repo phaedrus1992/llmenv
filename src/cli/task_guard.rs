@@ -2,7 +2,7 @@
 //! conversation is refused unless `--other-session` names its owner.
 
 use super::caller_session_for_task;
-use crate::task::ownership::{Caller, OverrideNote};
+use crate::task::ownership::{Caller, OverrideNote, SessionOverride};
 use crate::task::{StrictTasks, TaskTarget};
 
 /// A task that passed the ownership check, with the strict read of the store that the check made.
@@ -68,7 +68,7 @@ pub(super) fn guard_session(
     state_dir: &std::path::Path,
     id: &str,
     other_session: Option<&str>,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<SessionOverride> {
     let caller = caller_session_for_task(state_dir)?;
     crate::task::ownership::ensure_session_is_ours(id, &caller, other_session)
 }

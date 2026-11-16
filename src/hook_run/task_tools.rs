@@ -232,9 +232,7 @@ fn ensure_session(
     if !open_sessions.is_empty() {
         // The one read of the session files picks the session the task goes to (#3474).
         let picked = session::pick_open_session(open_sessions, owner).map_err(|e| {
-            let cause = e
-                .ambiguity_message("pass --session <id>, or see `llmenv task session ls`")
-                .unwrap_or_else(|| "the task session could not be picked".to_string());
+            let cause = e.message("pass --session <id>, or see `llmenv task session ls`");
             tracing::error!(cause = %cause, "task redirect: couldn't pick the task session");
             deny(&format!(
                 "couldn't pick the task session ({cause}); track this with `llmenv task` manually."

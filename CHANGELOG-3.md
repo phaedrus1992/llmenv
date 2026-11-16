@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Read tool versions with the `semver` crate. A version with a leading zero, such as `2.01.0`, or an empty pre-release is no longer a version. [refactor:util] [#3510]
+- Return the `--other-session` audit note of a session command as a type that must be used, so a command cannot drop the note without a compiler warning. A pick that cannot name its cause now has a message for every case. [refactor:task] [#3602] [#3603]
 - Read the task store once in `llmenv task clear --session`, and the session store once in `llmenv task session show`, `summary`, `edit`, `note`, and `finish` with no id. `clear --session` takes the deleted tasks from the delete itself, so a failed delete no longer reads the store again. [perf:task] [#3743]
 - Show how many entries a partial cache size left out. The `cache` widget reads `at least 1.2 GiB (3 unreadable)`, the status data holds the count in `unreadable` (it replaces `prunable_partial`), and the first cause of a run is logged at `info`. [feat:statusline] [#3110]
 - Make the `peak` widget and the `{reset}` clock of `usage_5h` and `usage_7d` keep the configured format when the time zone cannot be read. Each shows `?` where the value goes, and logs a warning. The peak widget showed `unknown` and the usage widget showed the countdown. [feat:statusline] [#3071]
@@ -65,6 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Make `llmenv upgrade --beta` offer a pre-release. A tag such as `v3.3.0-beta.1` did not parse, so the command compared it as equal to the installed version and said "Already at latest". A tag that is not a version is now an error that names the tag. [#3510]
 - Refuse a task blocker that would close a loop, from `task block` and `task edit --block-on`. [fix:task] [#3505]
 - Check the session of `task add` under the task store lock, wait at most ten seconds for that lock, and name every promoted ancestor when a `task start` save fails. [fix:task] [#3505]
 - Say that the task store cannot be read when a TaskUpdate fails on it, not that the id is wrong. [fix:hook] [#3505]

@@ -3346,7 +3346,7 @@ fn run_task_session_command(
                 let (id, audit) =
                     guard_session_for_write(state_dir, &project, id, other_session.as_deref())?;
                 let session = session::update_resume(state_dir, &id, |r| r.apply(&update))?;
-                session::append_override_note(state_dir, &id, audit.as_deref())?;
+                audit.record(state_dir)?;
                 Ok(session)
             })?;
             println!("Updated resume context for session '{}'", session.id);
@@ -3369,7 +3369,7 @@ fn run_task_session_command(
                 let (id, audit) =
                     guard_session_for_write(state_dir, &project, id, other_session.as_deref())?;
                 let session = session::update_resume(state_dir, &id, |r| r.append_note(text))?;
-                session::append_override_note(state_dir, &id, audit.as_deref())?;
+                audit.record(state_dir)?;
                 Ok(session)
             })?;
             println!("Noted session '{}'", session.id);
@@ -3383,7 +3383,7 @@ fn run_task_session_command(
                 let (id, audit) =
                     guard_session_for_write(state_dir, &project, id, other_session.as_deref())?;
                 let outcome = session::finish_session(state_dir, &id, abandon_open)?;
-                session::append_override_note(state_dir, &id, audit.as_deref())?;
+                audit.record(state_dir)?;
                 Ok(outcome)
             })?;
             let (done, total) = (outcome.done, outcome.total);

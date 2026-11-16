@@ -122,32 +122,27 @@ pub(crate) enum PickError {
 }
 
 impl PickError {
-    /// The error text for [`Self::Ambiguous`], ending in `fix` (the caller's
-    /// own "pass an id" wording). `None` for [`Self::NoneOpen`], whose text
-    /// each caller words itself.
+    /// The error text, ending in `fix` (the caller's own "pass an id" wording). A caller that
+    /// words [`Self::NoneOpen`] itself matches it first. Every variant has a text, so a new
+    /// variant cannot reach a fixed fallback.
     #[must_use]
-    pub(crate) fn ambiguity_message(self, fix: &str) -> Option<String> {
-        let Self::Ambiguous {
-            open,
-            owned,
-            identified,
-        } = self
-        else {
-            return None;
-        };
-        Some(if !identified {
-            format!("{open} open sessions for this project — {fix}")
-        } else if owned == 0 {
-            format!(
+    pub(crate) fn message(self, fix: &str) -> String {
+        match self {
+            Self::NoneOpen => format!("no open session for this project — {fix}"),
+            Self::Ambiguous {
+                open,
+                identified: false,
+                ..
+            } => format!("{open} open sessions for this project — {fix}"),
+            Self::Ambiguous { open, owned: 0, .. } => format!(
                 "{open} open sessions for this project, and none of them is owned by this \
                  conversation — {fix}"
-            )
-        } else {
-            format!(
+            ),
+            Self::Ambiguous { open, owned, .. } => format!(
                 "{open} open sessions for this project, and this conversation owns {owned} of \
                  them — {fix}"
-            )
-        })
+            ),
+        }
     }
 }
 
@@ -265,7 +260,8 @@ use finish::untag_unfinished;
 #[cfg(test)]
 use resume_text::MAX_REMINDER_CONTEXT_CHARS;
 pub(crate) use resume_text::resume_reminder_lines;
-pub(crate) use resume_write::{append_override_note, update_resume};
+pub(in crate::task) use resume_write::append_override_note;
+pub(crate) use resume_write::update_resume;
 
 fn sessions_dir(state_dir: &Path) -> PathBuf {
     tasks_dir(state_dir).join("sessions")
@@ -1293,16 +1289,37 @@ mod tests {
         );
     }
 
+    proptest::proptest! {
+        /// Every pick failure has a text that ends with the fix of the caller. An ambiguous pick
+        /// names the open count, and says that the conversation owns some only when it does.
+        #[test]
+        fn a_pick_failure_text_ends_with_the_fix_and_names_the_count(
+            open in 2usize..50,
+            owned in 0usize..50,
+            identified in proptest::bool::ANY,
+            fix in "[a-z <>-]{1,20}",
+        ) {
+            let none = PickError::NoneOpen.message(&fix);
+            proptest::prop_assert!(none.ends_with(&fix));
+            let owned = owned.min(open);
+            let text = PickError::Ambiguous { open, owned, identified }.message(&fix);
+            proptest::prop_assert!(text.ends_with(&fix));
+            let prefix = format!("{open} open sessions");
+            proptest::prop_assert!(text.starts_with(&prefix), "{}", text);
+            let says_owns = text.contains("this conversation owns");
+            proptest::prop_assert_eq!(says_owns, identified && owned > 0, "{}", text);
+        }
+    }
+
     #[test]
-    fn ambiguity_message_names_the_real_cause() {
+    fn message_names_the_real_cause() {
         let msg = |owned, identified| {
             PickError::Ambiguous {
                 open: 3,
                 owned,
                 identified,
             }
-            .ambiguity_message("pass --session <id>")
-            .expect("ambiguous has a message")
+            .message("pass --session <id>")
         };
         assert!(msg(0, true).contains("none of them is owned by this conversation"));
         let two = msg(2, true);
@@ -1311,7 +1328,10 @@ mod tests {
         let anon = msg(0, false);
         assert!(!anon.contains("conversation"), "{anon}");
         assert!(anon.ends_with("pass --session <id>"), "{anon}");
-        assert!(PickError::NoneOpen.ambiguity_message("x").is_none());
+        assert_eq!(
+            PickError::NoneOpen.message("x"),
+            "no open session for this project — x"
+        );
     }
 
     fn after_clear(name: Option<&'static str>) -> StartRequest<'static> {

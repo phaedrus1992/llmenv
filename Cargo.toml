@@ -87,6 +87,7 @@ anyhow = "=1.0.104"
 walkdir = { workspace = true }
 sha2 = { workspace = true }
 shell-words = "=1.1.1"
+semver = "=1.0.28"
 hex = "=0.4.3"
 humantime = { workspace = true }
 jiff = { version = "=0.2.41", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
