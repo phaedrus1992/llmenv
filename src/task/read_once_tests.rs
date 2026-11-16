@@ -130,3 +130,33 @@ fn a_read_error_of_the_close_keeps_its_text() {
     let err = complete_task(dir.path(), &a.slug, true).expect_err("a broken file is an error");
     assert!(format!("{err:#}").contains("broken"), "{err:#}");
 }
+
+#[test]
+fn a_read_that_a_write_made_stale_is_not_used() {
+    let dir = TempDir::new().expect("tempdir");
+    let a = mk(dir.path(), "Task A");
+    done_task(dir.path(), &a.slug).expect("close");
+    let caller = Caller::Session(SESSION.to_string());
+    let before = StrictTasks::reads_on_this_thread();
+    let tasks = read_for_check(dir.path(), &[&a.slug]).expect("read");
+    let (slug, _) = ensure_task_is_ours(dir.path(), &tasks, &a.slug, &caller, None).expect("check");
+    // `start --reopen`: the reopen writes, so the start must not use the read of the check.
+    reopen_task(dir.path(), TaskTarget::Checked(&slug, &tasks)).expect("reopen");
+    let started = start_task(dir.path(), TaskTarget::Checked(&slug, &tasks), false)
+        .expect("start after the reopen");
+    assert_eq!(started.state, TaskState::Wip);
+    assert_eq!(StrictTasks::reads_on_this_thread() - before, 2);
+}
+
+#[test]
+fn done_counts_the_closed_task_from_its_saved_state() {
+    let dir = TempDir::new().expect("tempdir");
+    let a = mk(dir.path(), "Task A");
+    mk(dir.path(), "Task B");
+    let tasks = StrictTasks::read(dir.path()).expect("read");
+    let mut closed = load_task(dir.path(), &a.slug).expect("load");
+    closed.state = TaskState::Done;
+    assert_eq!(progress_after_close(&tasks, &closed), Some((1, 2)));
+    closed.session = None;
+    assert_eq!(progress_after_close(&tasks, &closed), None);
+}

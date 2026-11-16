@@ -9,7 +9,7 @@ use crate::task::{StrictTasks, TaskTarget};
 /// The command acts on [`Guarded::target`], so it does not read the store again (#3485).
 pub(super) struct Guarded {
     tasks: StrictTasks,
-    pub(super) slug: String,
+    slug: String,
     pub(super) audit: Option<OverrideNote>,
 }
 
@@ -63,22 +63,14 @@ pub(super) fn guard_tasks(
 }
 
 /// Refuse `clear --session <id>` when that session is not the caller's. Returns the override
-/// note when `--other-session` was used. `caller` is the caller that the command already read.
-pub(super) fn guard_session_as(
-    caller: &Caller,
-    id: &str,
-    other_session: Option<&str>,
-) -> anyhow::Result<Option<String>> {
-    crate::task::ownership::ensure_session_is_ours(id, caller, other_session)
-}
-
-/// [`guard_session_as`] for a command that has not read the caller yet.
+/// note when `--other-session` was used.
 pub(super) fn guard_session(
     state_dir: &std::path::Path,
     id: &str,
     other_session: Option<&str>,
 ) -> anyhow::Result<Option<String>> {
-    guard_session_as(&caller_session_for_task(state_dir)?, id, other_session)
+    let caller = caller_session_for_task(state_dir)?;
+    crate::task::ownership::ensure_session_is_ours(id, &caller, other_session)
 }
 
 /// Appends the pending `--other-session` note, once the command has succeeded.

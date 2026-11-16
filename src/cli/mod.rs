@@ -2898,26 +2898,20 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             crate::task::with_store_lock(&state_dir, || {
                 let mut guarded = guard_task(&state_dir, &id, other_session.as_deref())?;
                 let audit = guarded.audit.take();
-                // The reopen writes, so the read of the check is stale after it. The start then
-                // reads the store again.
-                let target = if reopen {
-                    crate::task::reopen_task(
-                        &state_dir,
-                        crate::task::TaskTarget::Resolved(&guarded.slug),
-                    )?;
-                    crate::task::TaskTarget::Resolved(&guarded.slug)
-                } else {
-                    guarded.target()
-                };
-                let task = crate::task::start_task(&state_dir, target, force).map_err(|e| {
-                    if reopen {
-                        e.context(format!(
-                            "task '{id}' is now reopened (open), but it did not start"
-                        ))
-                    } else {
-                        e
-                    }
-                })?;
+                if reopen {
+                    crate::task::reopen_task(&state_dir, guarded.target())?;
+                }
+                // The reopen writes, so the start reads the store again.
+                let task =
+                    crate::task::start_task(&state_dir, guarded.target(), force).map_err(|e| {
+                        if reopen {
+                            e.context(format!(
+                                "task '{id}' is now reopened (open), but it did not start"
+                            ))
+                        } else {
+                            e
+                        }
+                    })?;
                 // The audit note comes first: a closed stdout makes `println!` panic.
                 record_override(&state_dir, audit)?;
                 println!("Started '{}' — now {:?}", task.slug, task.state);

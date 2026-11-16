@@ -49,7 +49,7 @@ use finish_hints::session_finish_reminders;
 mod tracking;
 pub(crate) use tracking::{Tracking, tracking, tracking_in};
 pub mod session;
-pub(crate) use progress::{StrictTasks, progress_in, wip_title_in};
+pub(crate) use progress::{StrictTasks, progress_after_close, progress_in, wip_title_in};
 pub(crate) use reopen::reopen_task;
 pub(crate) use resolve::resolve_identifier;
 
@@ -181,6 +181,7 @@ pub(crate) fn save_task(state_dir: &Path, task: &Task) -> anyhow::Result<()> {
     crate::paths::create_dir_owner_only(&dir)?;
     let json = serde_json::to_string_pretty(task)?;
     crate::paths::write_owner_only_atomic(&task_path(state_dir, &task.slug), json.as_bytes())?;
+    StrictTasks::record_write();
     Ok(())
 }
 
@@ -241,6 +242,8 @@ enum UnreadablePolicy {
 }
 
 fn read_tasks(state_dir: &Path, policy: UnreadablePolicy) -> anyhow::Result<Vec<Task>> {
+    #[cfg(test)]
+    StrictTasks::count_read();
     let dir = tasks_dir(state_dir);
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
@@ -681,7 +684,7 @@ pub(crate) fn start_task<'a>(
         // One strict read feeds the name lookup, the blocker check, and the queue check (#3474).
         target.check()?;
         let snapshot = target.tasks(state_dir)?;
-        let all_tasks = snapshot.get();
+        let all_tasks: &StrictTasks = &snapshot;
         let slug = target.slug_in(state_dir, all_tasks)?;
         let mut task = load_task(state_dir, &slug)?;
         if task.state == TaskState::Done {
@@ -779,6 +782,7 @@ pub(crate) fn delete_task<'a>(
         let slug = target.slug(state_dir)?;
         let task = load_task(state_dir, &slug)?;
         std::fs::remove_file(task_path(state_dir, &slug))?;
+        StrictTasks::record_write();
         Ok(task)
     })
 }
@@ -872,7 +876,7 @@ fn close_task(
         // One strict read feeds the name lookup and the sub-task check (#3471, #3474).
         target.check()?;
         let snapshot = target.tasks(state_dir)?;
-        let all_tasks = snapshot.get();
+        let all_tasks: &StrictTasks = &snapshot;
         let slug = target.slug_in(state_dir, all_tasks)?;
         let mut task = load_task(state_dir, &slug)?;
         let prior = task.state;
@@ -902,11 +906,7 @@ fn close_task(
             task.updated_at = now;
             save_task(state_dir, &task)?;
         }
-        // The read holds the task as it was before the close, so a close counts as one more done.
-        let session_progress = task.session.as_deref().map(|session_id| {
-            let (done, total) = progress_in(all_tasks, session_id);
-            (done + u64::from(prior != TaskState::Done), total)
-        });
+        let session_progress = progress_after_close(all_tasks, &task);
         Ok(Completed {
             task,
             prior,

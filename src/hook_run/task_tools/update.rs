@@ -105,6 +105,10 @@ fn checked_slug(
     id: &str,
 ) -> anyhow::Result<anyhow::Result<CheckedUpdate>> {
     let caller = task::ownership::caller_session(state_dir, project, owner)?;
+    // A bad id gets its own deny, even when the store cannot be read.
+    if let Err(e) = task::ownership::check_names(&[id]) {
+        return Ok(Err(e));
+    }
     let tasks = task::list_tasks_strict(state_dir)?;
     Ok(
         task::ownership::ensure_task_is_ours(state_dir, &tasks, id, &caller, None)

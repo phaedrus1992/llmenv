@@ -6,9 +6,9 @@ use std::path::Path;
 use anyhow::Context;
 
 use super::caller_session_for_task;
-use super::task_guard::{guard_session_as, guard_tasks};
+use super::task_guard::guard_tasks;
 use crate::task::ownership::{
-    Caller, OverrideNote, check_owner_less_delete, record_owner_less_delete,
+    Caller, OverrideNote, check_owner_less_delete, ensure_session_is_ours, record_owner_less_delete,
 };
 use crate::task::session::append_override_note;
 
@@ -30,7 +30,7 @@ pub(super) fn run(
     // a read error after a delete would leave cleared tasks with no note (#3481).
     let caller = caller_session_for_task(state_dir)?;
     let session_note = match session {
-        Some(named) => guard_session_as(&caller, named, other_session)?,
+        Some(named) => ensure_session_is_ours(named, &caller, other_session)?,
         None => None,
     };
     // `clear` deletes the task, so a pending override note has nowhere to live.

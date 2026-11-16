@@ -126,10 +126,16 @@ pub(crate) fn ensure_task_is_ours(
 /// # Errors
 /// A name is not a valid task identifier, or the store cannot be read.
 pub(crate) fn read_for_check(state_dir: &Path, inputs: &[&str]) -> anyhow::Result<StrictTasks> {
-    for input in inputs {
-        check_identifier(input)?;
-    }
+    check_names(inputs)?;
     super::list_tasks_strict(state_dir)
+}
+
+/// Refuse a name that cannot be a task slug, before any read of the store.
+///
+/// # Errors
+/// A name is not a valid task identifier.
+pub(crate) fn check_names(inputs: &[&str]) -> anyhow::Result<()> {
+    inputs.iter().try_for_each(|input| check_identifier(input))
 }
 
 /// Refuse to act on each task of `inputs` that belongs to a session other than the
@@ -154,9 +160,9 @@ pub(crate) fn ensure_tasks_are_ours(
     caller: &Caller,
     other_session: Option<&str>,
 ) -> anyhow::Result<Vec<(String, Option<OverrideNote>)>> {
-    for input in inputs {
-        check_identifier(input)?;
-    }
+    // `resolve_in` needs checked names. The check is cheap, and a caller that did not use
+    // `read_for_check` still gets it.
+    check_names(inputs)?;
     inputs
         .iter()
         .map(|input| {

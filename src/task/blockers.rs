@@ -23,7 +23,7 @@ pub(crate) fn block_task<'a>(
         target.check()?;
         resolve::check_identifier(on)?;
         let snapshot = target.tasks(state_dir)?;
-        let all_tasks = snapshot.get();
+        let all_tasks: &StrictTasks = &snapshot;
         let slug = target.slug_in(state_dir, all_tasks)?;
         let on_slug = resolve::resolve_in(state_dir, on, all_tasks)?;
         if slug == on_slug {

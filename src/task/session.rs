@@ -681,6 +681,7 @@ pub(crate) fn delete_tasks_in_session(
         let tasks = try_tasks_in_session(state_dir, session_id)?;
         for (done, t) in tasks.iter().enumerate() {
             let path = task_path(state_dir, &t.slug);
+            super::StrictTasks::record_write();
             std::fs::remove_file(&path).with_context(|| {
                 format!(
                     "cannot delete task '{}' ({}); {done} of {} task(s) of session '{session_id}' \

@@ -270,3 +270,31 @@ fn a_status_change_reads_the_task_store_once() {
         );
     }
 }
+
+#[test]
+fn a_description_and_a_delete_keep_the_one_read() {
+    for input in [
+        |slug: &str| json!({ "taskId": slug, "status": "in_progress", "description": "begun" }),
+        |slug: &str| json!({ "taskId": slug, "status": "deleted" }),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (mine, _) = two_conversations(dir.path());
+        let before = task::StrictTasks::reads_on_this_thread();
+        update_as(dir.path(), "conv-me", &input(&mine));
+        assert_eq!(task::StrictTasks::reads_on_this_thread() - before, 1);
+    }
+}
+
+#[test]
+fn a_bad_id_gets_the_id_deny_even_when_the_store_cannot_be_read() {
+    let dir = tempfile::tempdir().unwrap();
+    two_conversations(dir.path());
+    std::fs::write(dir.path().join("tasks").join("broken.json"), "{not json").unwrap();
+    let out = update_as(
+        dir.path(),
+        "conv-me",
+        &json!({ "taskId": "../escape", "status": "completed" }),
+    );
+    assert!(out.contains("not a valid task identifier"), "{out}");
+    assert!(!out.contains("task store is unavailable"), "{out}");
+}

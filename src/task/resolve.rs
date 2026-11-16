@@ -4,6 +4,7 @@
 //! A later session that adds the same title gets a `-2` suffix. A bare slug typed in that
 //! later session must reach the later session's task first (#2501).
 
+use std::borrow::Cow;
 use std::path::Path;
 
 use anyhow::Context as _;
@@ -58,29 +59,9 @@ pub(crate) enum TaskTarget<'a> {
     /// A slug that a lookup in this command returned.
     Resolved(&'a str),
     /// A slug that the ownership check returned, with the strict read of the store that the
-    /// check made. The command uses that read and does not read the store again (#3485). The
-    /// read is valid only until the command's first write, so a command that writes before it
-    /// reads again MUST use [`Self::Resolved`] after that write.
+    /// check made. The command uses that read and does not read the store again (#3485). A read
+    /// that a write has made stale is not used: [`TaskTarget::tasks`] reads the store again.
     Checked(&'a str, &'a super::StrictTasks),
-}
-
-/// The strict read of the store that a command uses: the read of the ownership check, or a new
-/// one.
-pub(crate) enum Snapshot<'a> {
-    /// The read that the ownership check made.
-    Checked(&'a super::StrictTasks),
-    /// A read that this command made.
-    Fresh(super::StrictTasks),
-}
-
-impl Snapshot<'_> {
-    /// The tasks of the read.
-    pub(crate) fn get(&self) -> &super::StrictTasks {
-        match self {
-            Self::Checked(tasks) => tasks,
-            Self::Fresh(tasks) => tasks,
-        }
-    }
 }
 
 impl<'a> From<&'a str> for TaskTarget<'a> {
@@ -108,15 +89,17 @@ impl<'a> TaskTarget<'a> {
         }
     }
 
-    /// The strict read for this command: the read of the ownership check when the target has
-    /// one, else a new read.
+    /// The strict read for this command: the read of the ownership check when the target has one
+    /// and no task file was written since, else a new read.
     ///
     /// # Errors
     /// The store cannot be read.
-    pub(crate) fn tasks(self, state_dir: &Path) -> anyhow::Result<Snapshot<'a>> {
+    pub(crate) fn tasks(self, state_dir: &Path) -> anyhow::Result<Cow<'a, super::StrictTasks>> {
         match self {
-            Self::Checked(_, tasks) => Ok(Snapshot::Checked(tasks)),
-            Self::Input(_) | Self::Resolved(_) => list_tasks_strict(state_dir).map(Snapshot::Fresh),
+            Self::Checked(_, tasks) if tasks.is_current() => Ok(Cow::Borrowed(tasks)),
+            Self::Input(_) | Self::Resolved(_) | Self::Checked(..) => {
+                list_tasks_strict(state_dir).map(Cow::Owned)
+            }
         }
     }
 

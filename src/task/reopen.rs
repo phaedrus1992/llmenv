@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use super::TaskTarget;
-use super::resolve::Snapshot;
+use std::borrow::Cow;
 
 use anyhow::Context;
 
@@ -96,9 +96,9 @@ fn reopen_targets(state_dir: &Path, targets: &[TaskTarget<'_>]) -> anyhow::Resul
         // The targets of one command share one read: that of the ownership check, or a new one.
         let snapshot = match targets.first() {
             Some(target) => target.tasks(state_dir)?,
-            None => Snapshot::Fresh(super::list_tasks_strict(state_dir)?),
+            None => Cow::Owned(super::list_tasks_strict(state_dir)?),
         };
-        let all_tasks = snapshot.get();
+        let all_tasks: &super::StrictTasks = &snapshot;
         let mut tasks: Vec<Task> = Vec::new();
         for target in targets {
             let slug = target.slug_in(state_dir, all_tasks)?;
