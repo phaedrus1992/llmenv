@@ -482,13 +482,10 @@ pub(crate) fn start_session_as(
                     .partition(|t| t.session.as_deref() == Some(session.id.as_str()));
                 tasks = rest;
                 let id = session.id.to_owned();
-                let done = abandoned.len();
-                abandoned.push(abandon_session(state_dir, session, own).with_context(|| {
-                    format!(
-                        "cannot abandon session '{id}'; {done} earlier session(s) are already \
-                         abandoned and no new session is started"
-                    )
-                })?);
+                match abandon_session(state_dir, session, own) {
+                    Ok(stamped) => abandoned.push(stamped),
+                    Err(e) => return Err(abandon_failed(&id, &abandoned, e)),
+                }
             }
             let session = create_session(state_dir, request)?;
             Ok(StartOutcome::Replaced { session, abandoned })
@@ -554,6 +551,24 @@ fn try_tasks_in_session(state_dir: &Path, session_id: &str) -> anyhow::Result<Ve
         .into_iter()
         .filter(|t| t.session.as_deref() == Some(session_id))
         .collect())
+}
+
+/// The error of a failed abandon in `session start --replace`. It names the sessions that were
+/// abandoned before it, and the tasks that the failed session had already untagged, because no new
+/// session is started and the user must know what changed (#3759).
+fn abandon_failed(id: &str, abandoned: &[Session], error: anyhow::Error) -> anyhow::Error {
+    let sessions: Vec<&str> = abandoned.iter().map(|s| s.id.as_str()).collect();
+    let untagged: Vec<String> = super::partial::changed_before_failure(&error)
+        .iter()
+        .map(|t| t.slug.clone())
+        .collect();
+    error.context(format!(
+        "cannot abandon session '{id}', and no new session is started. Already abandoned \
+         sessions: [{}]. Tasks already untagged from '{id}': [{}]. Fix: run `llmenv task session \
+         start --replace` again once the store is writable",
+        sessions.join(", "),
+        untagged.join(", ")
+    ))
 }
 
 /// Abandon `session`: stamps `abandoned_at`, and for every one of its tasks
@@ -1749,6 +1764,42 @@ mod tests {
 
         let reloaded_done = load_task(dir.path(), &done_task_.slug).expect("test");
         assert_eq!(reloaded_done.session, Some(first.id));
+    }
+
+    /// #3759: a failed abandon names the sessions already abandoned and the tasks already untagged.
+    #[test]
+    fn a_failed_abandon_names_the_sessions_and_tasks_that_changed() {
+        let dir = TempDir::new().expect("test");
+        let first = match start_session(
+            dir.path(),
+            Some("one"),
+            None,
+            PROJECT_A,
+            StartDecision::Auto,
+        )
+        .expect("test")
+        {
+            StartOutcome::Created(s) => s,
+            other => panic!("expected Created, got {other:?}"),
+        };
+        let task =
+            add_task_for_session(dir.path(), "A", ParentSpec::Detached, &first.id).expect("test");
+        let cause = super::super::partial::PartialWrite::error(
+            vec![task.clone()],
+            anyhow::anyhow!("disk full"),
+        );
+        let err = abandon_failed("second", std::slice::from_ref(&first), cause);
+        let text = format!("{err:#}");
+        assert!(
+            text.contains(&format!("abandoned sessions: [{}]", first.id)),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("untagged from 'second': [{}]", task.slug)),
+            "{text}"
+        );
+        assert!(text.contains("Fix: run"), "{text}");
+        assert!(text.contains("disk full"), "{text}");
     }
 
     /// One read of the task store serves every abandoned session: each session's own tasks are
