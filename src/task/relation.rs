@@ -91,6 +91,10 @@ fn children<'a>(parent: &str, all: &'a [Task]) -> Vec<&'a Task> {
 
 /// Every sub-task below `slug`, at any depth, that is not `done`. `all` is a strict read, so an
 /// unreadable sub-task is never missed (#3471).
+///
+/// A loop in the parent links does not hide a sub-task: each task is added once, the first time
+/// the walk sees it, and the revisit is skipped. The refusal needs the undone tasks only, so it
+/// does not report the loop. The blocker walk reports it (#3618, #3757).
 pub(super) fn undone_descendants<'a>(slug: &str, all: &'a super::StrictTasks) -> Vec<&'a Task> {
     let all = all.as_slice();
     let mut found: Vec<&Task> = Vec::new();

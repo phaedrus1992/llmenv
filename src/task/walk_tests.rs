@@ -495,3 +495,38 @@ proptest! {
         }
     }
 }
+
+// #3757: the blocker walk is iterative, so a deep chain of done tasks neither overflows the stack
+// nor costs a scan of every task for each level.
+#[test]
+fn a_chain_of_100000_done_tasks_walks_to_the_end() {
+    const DEPTH: usize = 100_000;
+    let mut tasks: Vec<Task> = Vec::with_capacity(DEPTH + 1);
+    for n in 0..DEPTH {
+        let parent = (n > 0).then(|| format!("t{}", n - 1));
+        tasks.push(task(
+            &format!("t{n}"),
+            TaskState::Done,
+            parent.as_deref(),
+            &[],
+        ));
+    }
+    let by_slug = index(&tasks);
+    assert_eq!(
+        first_undone_in_subtree("t0", "waiter", &by_slug).unwrap(),
+        None
+    );
+
+    let mut open = tasks.clone();
+    open.push(task(
+        "tail",
+        TaskState::Open,
+        Some(&format!("t{}", DEPTH - 1)),
+        &[],
+    ));
+    let by_slug = index(&open);
+    assert_eq!(
+        first_undone_in_subtree("t0", "waiter", &by_slug).unwrap(),
+        Some("tail")
+    );
+}
