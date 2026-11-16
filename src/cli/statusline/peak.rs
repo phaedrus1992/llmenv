@@ -59,20 +59,19 @@ fn render_peak_info(
             } else {
                 String::new()
             };
-            (symbol.to_owned(), label.to_owned(), countdown)
+            (symbol, label, countdown)
         }
         Err(e) => {
             tracing::warn!("peak widget: cannot compute the window for {PEAK_ZONE}: {e:#}");
-            let marker = || UNKNOWN_MARKER.to_owned();
-            (marker(), marker(), marker())
+            (UNKNOWN_MARKER, UNKNOWN_MARKER, UNKNOWN_MARKER.to_owned())
         }
     };
     let format = cfg
         .and_then(|c| c.format.as_deref())
         .unwrap_or("{symbol} {label} {countdown}");
     format
-        .replace("{symbol}", &symbol)
-        .replace("{label}", &label)
+        .replace("{symbol}", symbol)
+        .replace("{label}", label)
         .replace("{countdown}", &countdown)
         .trim_end()
         .to_string()

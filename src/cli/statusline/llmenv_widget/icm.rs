@@ -1,6 +1,6 @@
 //! The `icm` widget: the memory count and the concept count from the ICM stats.
 
-use super::cache::UNKNOWN_MARKER;
+use crate::cli::statusline::UNKNOWN_MARKER;
 use crate::cli::statusline::data::StatusData;
 
 pub(super) fn render_icm(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {

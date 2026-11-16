@@ -63,38 +63,23 @@ pub(super) fn humanize_until(resets_at: i64, now: i64) -> String {
 
 /// The `{reset}` text. The default is the countdown from [`humanize_until`].
 /// `display: clock_24h` and `display: clock_12h` show the local clock time at
-/// reset instead. A window longer than a day adds the weekday. When the system
-/// time zone or the reset time cannot be read, the label is the unknown marker and a
-/// warning is logged, so the label is never a clock time in the wrong zone (#3071).
+/// reset instead. A window longer than a day adds the weekday. `zone` reads the system time
+/// zone, and runs only for a clock display. When the zone or the reset time cannot be read, the
+/// label is the unknown marker and a warning is logged, so the label is never a clock time in the
+/// wrong zone (#3071).
 fn reset_label(
     resets_at: i64,
     now: i64,
     window_secs: i64,
     cfg: Option<&llmenv_config::WidgetConfig>,
-) -> String {
-    reset_label_in(
-        resets_at,
-        now,
-        window_secs,
-        cfg,
-        jiff::tz::TimeZone::try_system(),
-    )
-}
-
-/// [`reset_label`] for a system zone that the caller read.
-fn reset_label_in(
-    resets_at: i64,
-    now: i64,
-    window_secs: i64,
-    cfg: Option<&llmenv_config::WidgetConfig>,
-    zone: Result<jiff::tz::TimeZone, jiff::Error>,
+    zone: impl FnOnce() -> Result<jiff::tz::TimeZone, jiff::Error>,
 ) -> String {
     let style = match cfg.and_then(|c| c.display.as_deref()) {
         Some("clock_24h") => ClockStyle::TwentyFourHour,
         Some("clock_12h") => ClockStyle::TwelveHour,
         _ => return humanize_until(resets_at, now),
     };
-    let tz = match zone {
+    let tz = match zone() {
         Ok(tz) => tz,
         Err(e) => {
             tracing::warn!(
@@ -153,7 +138,15 @@ pub(super) fn render_usage(
     let width = resolve_bar_width(cfg, DEFAULT_BAR_WIDTH);
     let reset = window
         .resets_at
-        .map(|r| reset_label(r, args.now, args.window_secs, cfg))
+        .map(|r| {
+            reset_label(
+                r,
+                args.now,
+                args.window_secs,
+                cfg,
+                jiff::tz::TimeZone::try_system,
+            )
+        })
         .unwrap_or_default();
     let (pace, marker) = match window.resets_at {
         Some(r) => pace_and_target(pct, r, args.window_secs, args.now, width),
@@ -222,6 +215,22 @@ mod tests {
     /// Fixed clock for the tests. Only the offsets from it are asserted.
     const NOW: i64 = 1_000_000_000;
 
+    /// [`super::reset_label`] with the system time zone, as production reads it.
+    fn reset_label(
+        resets_at: i64,
+        now: i64,
+        window_secs: i64,
+        cfg: Option<&llmenv_config::WidgetConfig>,
+    ) -> String {
+        super::reset_label(
+            resets_at,
+            now,
+            window_secs,
+            cfg,
+            jiff::tz::TimeZone::try_system,
+        )
+    }
+
     fn display_cfg(display: &str) -> llmenv_config::WidgetConfig {
         llmenv_config::WidgetConfig {
             display: Some(display.to_string()),
@@ -276,10 +285,24 @@ mod tests {
         let zone_error = jiff::tz::TimeZone::get("No/Such_Zone").expect_err("not a zone");
         let mut label = String::new();
         let logs = crate::test_log_capture::capture_logs(|| {
-            label = reset_label_in(NOW + 7200, NOW, FIVE_HOUR_SECS, Some(&cfg), Err(zone_error));
+            label = super::reset_label(NOW + 7200, NOW, FIVE_HOUR_SECS, Some(&cfg), || {
+                Err(zone_error)
+            });
         });
         assert_eq!(label, UNKNOWN_MARKER);
         assert!(logs.contains("WARN"), "{logs}");
+        assert!(logs.contains("No/Such_Zone"), "the cause is named: {logs}");
+    }
+
+    #[test]
+    fn the_countdown_does_not_read_the_system_zone() {
+        let read = std::cell::Cell::new(false);
+        let label = super::reset_label(NOW + 1380, NOW, FIVE_HOUR_SECS, None, || {
+            read.set(true);
+            jiff::tz::TimeZone::try_system()
+        });
+        assert!(!read.get(), "the countdown needs no zone");
+        assert_eq!(label, "23m");
     }
 
     #[test]

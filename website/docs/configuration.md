@@ -1537,9 +1537,9 @@ Notes:
   stdin. `{countdown}` counts down to the window boundary (peak ending, or the
   next peak starting). When the zone database cannot be read, the widget keeps its
   format and shows `?` for each placeholder, and logs a warning (changed in v3.14.0).
-- When a widget cannot compute a value, it keeps the configured `format`, shows `?` where the value
-  goes, and logs a warning. The `peak` widget and the `{reset}` clock of `usage_5h` and `usage_7d`
-  follow this rule when the time zone cannot be read (changed in v3.14.0).
+- When the time zone cannot be read, a widget keeps the configured `format`, shows `?` where the
+  value goes, and logs a warning. The `peak` widget and the `{reset}` clock of `usage_5h` and
+  `usage_7d` follow this rule (changed in v3.14.0).
 - `pr` is colored by `{review_state}` when the engine sends one: `approved`
   green, `changes_requested` red, `pending`/`review_required` yellow. When a PR
   URL is present and color is on, `pr` (and the `branch` widget) render as an

@@ -183,8 +183,8 @@ fn render_tasks(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) ->
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::cache::UNKNOWN_MARKER;
     use super::*;
+    use crate::cli::statusline::UNKNOWN_MARKER;
     use crate::cli::statusline::data::{
         CacheData, CountData, IcmData, ScopesData, SessionProgress, StatusData, TasksData,
         ThrottleData,

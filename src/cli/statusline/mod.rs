@@ -19,8 +19,8 @@ pub use llmenv_widget::render_llmenv_widget;
 pub use template::{TemplateToken, parse_template};
 pub use widget::render_engine_widget;
 
-/// Shown where a widget value cannot be computed. Every widget keeps its configured format and
-/// puts this marker in place of the value, and logs a warning (#3071).
+/// Shown where a widget value cannot be computed. A widget that fails on the time zone keeps its
+/// configured format, puts this marker in place of the value, and logs a warning (#3071).
 const UNKNOWN_MARKER: &str = "?";
 
 const DEFAULT_ROW: &str = "{model} │ {folder} │ {branch} │ {context} │ {budget}";
