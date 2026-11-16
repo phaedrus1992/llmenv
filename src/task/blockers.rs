@@ -109,8 +109,7 @@ pub(super) fn first_undone_in_subtree<'a>(
     ) -> anyhow::Result<Option<&'a str>> {
         if !visited.insert(slug) {
             anyhow::bail!(
-                "the parent links of task '{slug}' loop, so its blocker walk cannot end. Fix: \
-                 clear the parent of one task in the loop with `llmenv task edit <task> --no-parent`"
+                "the parent links of task '{slug}' loop, so its blocker walk cannot end. {LOOP_FIX}"
             );
         }
         let Some(&task) = by_slug.get(slug) else {
@@ -132,5 +131,47 @@ pub(super) fn first_undone_in_subtree<'a>(
         }
         Ok(None)
     }
+    ensure_waiter_chain_ends(waiter, by_slug)?;
     go(slug, waiter, by_slug, &mut HashSet::new())
+}
+
+/// The fix that every loop error of the blocker walk ends with.
+const LOOP_FIX: &str =
+    "Fix: clear the parent of one task in the loop with `llmenv task edit <task> --no-parent`";
+
+/// Errors when the parent links above `waiter` loop. The child walk skips the subtree of
+/// `waiter`, so it never enters a loop that passes through `waiter`. This check reports that
+/// loop (#3618).
+fn ensure_waiter_chain_ends(waiter: &str, by_slug: &HashMap<&str, &Task>) -> anyhow::Result<()> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut current = Some(waiter);
+    while let Some(slug) = current {
+        anyhow::ensure!(
+            seen.insert(slug),
+            "the parent links of task '{slug}' loop, so the blocker walk of '{waiter}' cannot \
+             end. {LOOP_FIX}"
+        );
+        current = by_slug.get(slug).and_then(|t| t.parent.as_deref());
+    }
+    Ok(())
+}
+
+/// [`ensure_waiter_chain_ends`] for the tests of other modules.
+#[cfg(test)]
+pub(super) fn ensure_waiter_chain_ends_for_test(
+    waiter: &str,
+    by_slug: &HashMap<&str, &Task>,
+) -> anyhow::Result<()> {
+    ensure_waiter_chain_ends(waiter, by_slug)
+}
+
+/// The text of the first blocker walk of `task` that fails, or `None` when every walk ends. A
+/// task with such a walk is never offered as the next step, and the reminder names the loop
+/// (#3618).
+pub(super) fn blocker_walk_error(task: &Task, by_slug: &HashMap<&str, &Task>) -> Option<String> {
+    task.blocked_on.iter().find_map(|blocker| {
+        first_undone_in_subtree(blocker, &task.slug, by_slug)
+            .err()
+            .map(|err| format!("{err:#}"))
+    })
 }
