@@ -29,21 +29,7 @@ pub(crate) async fn start_session(
     let text = client
         .call_tool(START_TOOL, start_session_args(agent, project, metadata))
         .await?;
-    let raw = text.trim();
-    // ICM returns the session id as a JSON object like `{"session_id":"01KXE..."}`,
-    // not as a bare id. Parse it; fall back to the raw text for forward compat
-    // with backend changes.
-    let id = serde_json::from_str::<Value>(raw)
-        .inspect_err(|e| {
-            tracing::warn!("failed to parse ICM session id response: {e}");
-        })
-        .ok()
-        .and_then(|v| {
-            v.get("session_id")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .unwrap_or_else(|| raw.to_string());
+    let id = session_id_from_reply(text.trim())?;
     if id.is_empty() {
         anyhow::bail!("{START_TOOL} returned an empty session id");
     }
@@ -51,6 +37,32 @@ pub(crate) async fn start_session(
         anyhow::bail!("{START_TOOL} returned a malformed session id: {id:?}");
     }
     Ok(id)
+}
+
+/// The session id in the reply of `icm_transcript_start_session`. ICM returns a JSON object like
+/// `{"session_id":"01KXE..."}`, and it appends a hint line such as `[ICM: 10 tool calls since
+/// last store...]` to a reply once a session has made enough calls without a store (#3754). The
+/// first JSON value is read and whatever follows it is ignored. A reply that is not JSON is a bare
+/// id, for forward compatibility with the backend: its first line is the id.
+///
+/// # Errors
+/// The reply is a JSON object with no string `session_id`.
+fn session_id_from_reply(raw: &str) -> anyhow::Result<String> {
+    match serde_json::Deserializer::from_str(raw)
+        .into_iter::<Value>()
+        .next()
+    {
+        Some(Ok(Value::Object(object))) => object
+            .get("session_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{START_TOOL} returned a reply with no `session_id` string: {raw:?}"
+                )
+            }),
+        _ => Ok(raw.lines().next().unwrap_or_default().trim().to_string()),
+    }
 }
 
 /// The text ICM puts in its tool error when `session_id` is unknown. ICM has no typed
@@ -159,6 +171,68 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(id, "01KXE1FNZCF1A0EAHK5X207RBW");
+    }
+
+    #[test]
+    fn a_hint_line_after_the_json_object_is_ignored() {
+        let reply = "{\"session_id\":\"01M7JV17C1MPXQ7DHRX184B2QD\"}\n[ICM: 550 tool calls since \
+                     last store. Consider saving important context with icm_memory_store before it \
+                     is lost.]";
+        assert_eq!(
+            session_id_from_reply(reply).unwrap(),
+            "01M7JV17C1MPXQ7DHRX184B2QD"
+        );
+    }
+
+    #[test]
+    fn a_bare_id_keeps_only_its_first_line() {
+        assert_eq!(
+            session_id_from_reply("sess-42\n[ICM: 10 tool calls since last store.]").unwrap(),
+            "sess-42"
+        );
+        assert_eq!(session_id_from_reply("12345").unwrap(), "12345");
+        assert_eq!(session_id_from_reply("").unwrap(), "");
+    }
+
+    #[test]
+    fn a_json_object_with_no_session_id_names_the_reply() {
+        let err = session_id_from_reply(r#"{"id":"x"}"#).unwrap_err();
+        assert!(err.to_string().contains("no `session_id` string"), "{err}");
+        let err = session_id_from_reply(r#"{"session_id":42}"#).unwrap_err();
+        assert!(err.to_string().contains("no `session_id` string"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn start_session_accepts_a_reply_with_a_hint_line() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(text_result(
+                "{\"session_id\":\"01M7JV17C1MPXQ7DHRX184B2QD\"}\n[ICM: 550 tool calls since last store.]",
+            )))
+            .mount(&server)
+            .await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
+        let id = start_session(
+            &client,
+            "claude_code",
+            Some("llmenv"),
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(id, "01M7JV17C1MPXQ7DHRX184B2QD");
+    }
+
+    proptest::proptest! {
+        /// Whatever text follows the JSON object, the id is the one in the object.
+        #[test]
+        fn text_after_the_object_never_changes_the_id(
+            id in "[0-9A-Z]{8,26}",
+            tail in "(\\n[^\\x00]{0,60})?",
+        ) {
+            let reply = format!("{{\"session_id\":\"{id}\"}}{tail}");
+            proptest::prop_assert_eq!(session_id_from_reply(&reply).unwrap(), id);
+        }
     }
 
     #[tokio::test]
