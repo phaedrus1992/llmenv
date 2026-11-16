@@ -74,6 +74,31 @@ fn hook_event_name_reads_stdin_and_falls_back_with_a_notice() {
     assert_eq!(engine_event_name("other"), "");
 }
 
+// #3760: a payload with no name, and an event that maps to no name, each add a notice.
+#[test]
+fn a_payload_with_no_event_name_adds_a_notice() {
+    let mut notices = Vec::new();
+    let got = hook_event_name(r#"{"session_id":"x"}"#, "prompt", &mut notices);
+    assert_eq!(got, "UserPromptSubmit");
+    assert!(
+        notices.len() == 1
+            && notices[0].contains("no hook_event_name")
+            && notices[0].contains("Fix:"),
+        "{notices:?}"
+    );
+}
+
+#[test]
+fn an_unknown_event_with_no_payload_name_adds_a_notice() {
+    let mut notices = Vec::new();
+    let got = hook_event_name("", "other", &mut notices);
+    assert_eq!(got, "");
+    assert!(
+        notices.len() == 1 && notices[0].contains("not a known event"),
+        "{notices:?}"
+    );
+}
+
 #[test]
 fn penalized_returns_max_wait() {
     let d = compute_delay(&snap(Some(100), true), &cfg(300, 20));

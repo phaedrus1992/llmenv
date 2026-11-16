@@ -196,12 +196,20 @@ pub(crate) fn run_throttle_hook(event: &str) {
 }
 
 /// The engine name of the hook event in `stdin`. Text that is not JSON, or JSON with no name,
-/// falls back to the name that `event` maps to. Text that is not JSON adds a notice.
+/// falls back to the name that `event` maps to. A fallback adds a notice, and so does a name
+/// that stays empty.
 fn hook_event_name(stdin: &str, event: &str, notices: &mut Vec<String>) -> String {
     let parsed = match serde_json::from_str::<serde_json::Value>(stdin) {
         Ok(v) => match &v["hook_event_name"] {
             serde_json::Value::String(name) => Some(name.clone()),
-            serde_json::Value::Null => None,
+            serde_json::Value::Null => {
+                notices.push(
+                    "llmenv: the throttle hook got a payload with no hook_event_name. Fix: run \
+                     `llmenv regenerate` so the hook matches this engine."
+                        .to_owned(),
+                );
+                None
+            }
             other => {
                 notices.push(format!(
                     "llmenv: the throttle hook got a hook_event_name that is not a string ({other}). \
@@ -219,9 +227,16 @@ fn hook_event_name(stdin: &str, event: &str, notices: &mut Vec<String>) -> Strin
         }
         Err(_) => None,
     };
-    parsed
+    let name = parsed
         .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| engine_event_name(event))
+        .unwrap_or_else(|| engine_event_name(event));
+    if name.is_empty() {
+        notices.push(format!(
+            "llmenv: the throttle hook has no event name, and `{event}` is not a known event. Fix: \
+             run `llmenv regenerate` so the hook command is valid."
+        ));
+    }
+    name
 }
 
 /// The Claude Code event that runs `llmenv throttle <event>`. Empty for an unknown event.
