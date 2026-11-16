@@ -61,10 +61,12 @@ pub(super) fn ancestors_to_start(
         }
         if parent.state == TaskState::Open {
             // A link made before the #3480 and #3593 refusals can cross sessions. Promoting that
-            // ancestor would change the task of another session (#3619). An ancestor with no
-            // session is promoted as before sessions existed (#3586).
+            // ancestor would change the task of another session (#3619). Every hop is compared
+            // with the task that the caller starts, so a foreign ancestor above a `wip`
+            // intermediate parent is refused too. An ancestor with no session is promoted as
+            // before sessions existed (#3586).
             if let Some(owner) = parent.session.as_deref()
-                && Some(owner) != current.session.as_deref()
+                && Some(owner) != child.session.as_deref()
             {
                 anyhow::bail!(
                     "cannot start '{}': its ancestor '{parent_slug}' belongs to session \

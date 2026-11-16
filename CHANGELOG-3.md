@@ -67,8 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- Refuse `llmenv task start` for a sub-task whose open parent belongs to another session, which links made before v3.14.0 allowed. The error names the parent and the fix, `llmenv task edit <task> --no-parent`. [fix:task] [#3619]
-- Report a loop in the parent links on the next-task path. A task that waits on a blocker with a loop is not offered as the next step, and the idle-session reminder and `llmenv task show --next` name the loop and the fix. A loop that passes through the waiting task is an error too, and `llmenv task start` reports it. [fix:task] [#3618]
+- Refuse `llmenv task start` for a sub-task whose open ancestor, at any level, belongs to another session, which links made before v3.14.0 allowed. The error names the parent and the fix, `llmenv task edit <task> --no-parent`. [fix:task] [#3619]
+- Report a loop in the parent links on the next-task path. A task that waits on a blocker with a loop is not offered as the next step, and the idle-session reminder and `llmenv task show --next` name each such task, the loop, and the fix. A loop that passes through the waiting task is an error too, and `llmenv task start` reports it. [fix:task] [#3618]
 - Refuse a session of another conversation in the task writer for every session choice, not only in the callers. A new caller of the writer can no longer add a task to a foreign session by naming it, and the writer saves the `--other-session` note in the same write as the task. `task add --session` reads the session store once, and the TaskCreate redirect reads one session file for its freshness check, not the whole store. [fix:task] [#3587] [#3617] [#3748]
 - Make `llmenv upgrade --beta` offer a pre-release. A tag such as `v3.3.0-beta.1` did not parse, so the command compared it as equal to the installed version and said "Already at latest". A tag that is not a version is now an error that names the tag. [#3510]
 - Refuse a task blocker that would close a loop, from `task block` and `task edit --block-on`. [fix:task] [#3505]

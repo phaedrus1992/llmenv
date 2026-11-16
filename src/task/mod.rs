@@ -1128,9 +1128,10 @@ struct IdleSession {
     /// order, else the first `open` task when every one is blocked.
     next: Task,
     open_count: usize,
-    /// Set when no task is actionable and `next` has a blocker walk that loops. `next` cannot
-    /// start, so the reminder names the loop and its fix instead of advising a start (#3618).
-    loop_error: Option<String>,
+    /// Set when no task is actionable and an open task has a blocker walk that loops: the slug
+    /// of the first such task and the text of the loop. The reminder names the loop and its fix
+    /// instead of advising a start that cannot run (#3618).
+    loop_error: Option<(String, String)>,
 }
 
 /// Every open session for `project` that [`IdleSession`] describes. Kept
@@ -1162,7 +1163,9 @@ fn idle_sessions(open: Vec<Session>, all_tasks: &[Task]) -> Vec<IdleSession> {
             let next = actionable.or_else(|| open.first())?;
             let loop_error = match actionable {
                 Some(_) => None,
-                None => blockers::blocker_walk_error(next, &by_slug),
+                None => open.iter().find_map(|t| {
+                    blockers::blocker_walk_error(t, &by_slug).map(|why| (t.slug.clone(), why))
+                }),
             };
             Some(IdleSession {
                 next: (*next).clone(),
@@ -1197,14 +1200,12 @@ fn idle_reminder_lines(project: &str, caller: Option<&str>, stored: &Stored) -> 
         .map(|idle| {
             let id = &idle.session.id;
             let label = idle.session.name.as_deref().unwrap_or(id.as_str());
-            if let Some(loop_error) = &idle.loop_error {
+            if let Some((looped, why)) = &idle.loop_error {
                 return format!(
                     "Session '{label}' ({id}) has {count} open task(s) and none in progress, but \
-                     '{next}' ({title}) cannot start: {loop_error}. If you don't recognize the \
-                     session, it belongs to a different session — leave it alone.",
+                     '{looped}' cannot start: {why}. If you don't recognize the session, it \
+                     belongs to a different session — leave it alone.",
                     count = idle.open_count,
-                    next = idle.next.slug,
-                    title = idle.next.title,
                 );
             }
             format!(
@@ -1365,23 +1366,26 @@ pub(crate) fn resolve_next_task(
         .find(|t| is_actionable(t, &by_slug))
 }
 
-/// The first task after `current` that `task show --next` cannot offer because its blocker walk
-/// loops, with the text of the loop and its fix. `resolve_next_task` returns `None` for that case
-/// and for "nothing is left", so the caller asks this when it gets `None` (#3618).
+/// Every task after `current` that `task show --next` cannot offer because its blocker walk
+/// loops, each with the text of the loop and its fix, in execution order. `resolve_next_task`
+/// skips such a task with no sign, so the caller asks this to name each one (#3618).
 #[must_use]
-pub(crate) fn next_task_loop(
+pub(crate) fn next_task_loops(
     all_tasks: &[Task],
     session_tasks: &[Task],
     current: &Task,
-) -> Option<(String, String)> {
+) -> Vec<(String, String)> {
     let order = execution_order(session_tasks);
-    let pos = order.iter().position(|t| t.slug == current.slug)?;
+    let Some(pos) = order.iter().position(|t| t.slug == current.slug) else {
+        return Vec::new();
+    };
     let by_slug: HashMap<&str, &Task> = all_tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
     order
         .iter()
         .skip(pos + 1)
         .filter(|t| !matches!(t.state, TaskState::Done | TaskState::Waiting))
-        .find_map(|t| blockers::blocker_walk_error(t, &by_slug).map(|e| (t.slug.clone(), e)))
+        .filter_map(|t| blockers::blocker_walk_error(t, &by_slug).map(|e| (t.slug.clone(), e)))
+        .collect()
 }
 
 /// Parent-before-children execution order for a single session's tasks —

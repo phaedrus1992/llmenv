@@ -3224,19 +3224,17 @@ fn run_task_show_current_or_next(state_dir: &Path, target: ShowTarget) -> anyhow
                     crate::task::resolve_next_task(&all_tasks, &session_tasks, &cur)
                 }
             });
-        match resolved {
-            Some(task) => println!("{}", serde_json::to_string_pretty(&task)?),
-            None => {
-                println!("No {} task.", target.label());
-                // On stderr so the JSON on stdout stays machine-readable. A loop in the links of
-                // a task is the one cause that the user can fix (#3618).
-                if matches!(target, ShowTarget::Next)
-                    && let Some(current) = crate::task::resolve_current_task(&session_tasks)
-                    && let Some((slug, why)) =
-                        crate::task::next_task_loop(&all_tasks, &session_tasks, &current)
-                {
-                    eprintln!("llmenv: task '{slug}' is not offered as the next task: {why}");
-                }
+        match &resolved {
+            Some(task) => println!("{}", serde_json::to_string_pretty(task)?),
+            None => println!("No {} task.", target.label()),
+        }
+        // On stderr so the JSON on stdout stays machine-readable. A task that the next-task
+        // choice skips because its links loop is named, with the fix (#3618).
+        if matches!(target, ShowTarget::Next)
+            && let Some(current) = crate::task::resolve_current_task(&session_tasks)
+        {
+            for (slug, why) in crate::task::next_task_loops(&all_tasks, &session_tasks, &current) {
+                eprintln!("llmenv: task '{slug}' is not offered as the next task: {why}");
             }
         }
         // On stderr so the JSON on stdout stays machine-readable (#2339).

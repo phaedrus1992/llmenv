@@ -143,12 +143,13 @@ fn the_only_open_task_with_a_looping_blocker_is_not_offered() {
 
     assert_eq!(idle.len(), 1);
     assert_eq!(idle[0].next.slug, "a");
-    let why = idle[0].loop_error.as_deref().expect("the loop is named");
+    let (looped, why) = idle[0].loop_error.as_ref().expect("the loop is named");
+    assert_eq!(looped, "a");
     assert!(why.contains("--no-parent"), "{why}");
 }
 
 #[test]
-fn next_task_loop_names_the_task_that_next_cannot_offer() {
+fn next_task_loops_names_the_task_that_next_cannot_offer() {
     let tasks = vec![
         task("cur", TaskState::Wip, None, &[]),
         task("z", TaskState::Open, None, &["b"]),
@@ -157,19 +158,100 @@ fn next_task_loop_names_the_task_that_next_cannot_offer() {
     ];
     let current = tasks[0].clone();
     assert!(resolve_next_task(&tasks, &tasks, &current).is_none());
-    let (slug, why) = next_task_loop(&tasks, &tasks, &current).expect("the loop is named");
-    assert_eq!(slug, "z");
-    assert!(why.contains("loop"), "{why}");
+    let loops = next_task_loops(&tasks, &tasks, &current);
+    assert_eq!(loops.len(), 1);
+    assert_eq!(loops[0].0, "z");
+    assert!(loops[0].1.contains("loop"), "{}", loops[0].1);
 }
 
 #[test]
-fn next_task_loop_is_none_when_nothing_is_left() {
+fn next_task_loops_names_a_looped_task_even_when_a_later_task_is_offered() {
+    let tasks = vec![
+        task("cur", TaskState::Wip, None, &[]),
+        task("looped", TaskState::Open, None, &["b"]),
+        task("offered", TaskState::Open, None, &[]),
+        task("b", TaskState::Done, Some("c"), &[]),
+        task("c", TaskState::Done, Some("b"), &[]),
+    ];
+    let current = tasks[0].clone();
+    assert_eq!(
+        resolve_next_task(&tasks, &tasks, &current).map(|t| t.slug),
+        Some("offered".to_string())
+    );
+    let loops = next_task_loops(&tasks, &tasks, &current);
+    assert_eq!(
+        loops.iter().map(|l| l.0.as_str()).collect::<Vec<_>>(),
+        ["looped"]
+    );
+}
+
+#[test]
+fn the_idle_reminder_names_a_looped_task_that_is_not_the_first_open_task() {
+    // `first` is blocked on an undone task, and `second` waits on a loop.
+    let mut tasks = vec![
+        task("first", TaskState::Open, None, &["undone"]),
+        task("second", TaskState::Open, None, &["b"]),
+        task("undone", TaskState::Wip, None, &[]),
+        task("b", TaskState::Done, Some("c"), &[]),
+        task("c", TaskState::Done, Some("b"), &[]),
+    ];
+    tasks[2].session = Some("other".to_string());
+    let dir = TempDir::new().expect("tempdir");
+    let project = project::current_tag().expect("project tag");
+    let started = session::start_session(
+        dir.path(),
+        None,
+        None,
+        &project,
+        session::StartDecision::New,
+    )
+    .expect("start session");
+    let session::StartOutcome::Created(created) = started else {
+        panic!("expected a new session");
+    };
+    for t in &mut tasks[..2] {
+        t.session = Some(created.id.clone());
+    }
+    let open = session::open_sessions_strict(dir.path(), &project).expect("open sessions");
+    let idle = idle_sessions(open, &tasks);
+    let (looped, _) = idle[0].loop_error.as_ref().expect("the loop is named");
+    assert_eq!(looped, "second");
+}
+
+#[test]
+fn a_start_refuses_a_foreign_ancestor_above_an_intermediate_parent() {
+    let dir = TempDir::new().expect("tempdir");
+    let grand = saved(dir.path(), "Grand", "session-b");
+    let mut middle = saved(dir.path(), "Middle", "session-b");
+    let mut child = saved(dir.path(), "Child", "session-a");
+    middle.parent = Some(grand.slug.clone());
+    middle.relation = Relation::Child;
+    middle.state = TaskState::Wip;
+    child.parent = Some(middle.slug.clone());
+    child.relation = Relation::Child;
+    save_task(dir.path(), &middle).expect("save");
+    save_task(dir.path(), &child).expect("save");
+
+    let err = start_task(dir.path(), &child.slug, false).expect_err("a foreign grandparent");
+
+    assert!(
+        format!("{err:#}").contains("belongs to session 'session-b'"),
+        "{err:#}"
+    );
+    assert_eq!(
+        load_task(dir.path(), &grand.slug).expect("load").state,
+        TaskState::Open
+    );
+}
+
+#[test]
+fn next_task_loops_is_empty_when_nothing_is_left() {
     let tasks = vec![
         task("cur", TaskState::Wip, None, &[]),
         task("d", TaskState::Done, None, &[]),
     ];
     let current = tasks[0].clone();
-    assert!(next_task_loop(&tasks, &tasks, &current).is_none());
+    assert!(next_task_loops(&tasks, &tasks, &current).is_empty());
 }
 
 /// A forest of up to eight tasks: each task has no parent or one earlier task as its parent, a
@@ -291,4 +373,125 @@ fn a_start_names_a_missing_parent_and_an_unreadable_parent_apart() {
     let unreadable = start_task(dir.path(), &child.slug, false).expect_err("an unreadable parent");
     let text = format!("{unreadable:#}");
     assert!(!text.contains("missing from the task store"), "{text}");
+}
+
+/// Tasks `t0..tN` whose parent is any task, itself included, so the links can loop or lead into a
+/// loop.
+fn parent_graph() -> impl Strategy<Value = Vec<Task>> {
+    proptest::collection::vec(
+        (
+            proptest::option::of(0usize..6),
+            proptest::collection::vec(0usize..6, 0..3),
+            proptest::bool::ANY,
+        ),
+        1..6,
+    )
+    .prop_map(|specs| {
+        let count = specs.len();
+        specs
+            .iter()
+            .enumerate()
+            .map(|(i, (parent, blockers, done))| {
+                let parent = parent.map(|p| format!("t{}", p % count));
+                let blocked: Vec<String> =
+                    blockers.iter().map(|b| format!("t{}", b % count)).collect();
+                let blocked: Vec<&str> = blocked.iter().map(String::as_str).collect();
+                let state = if *done {
+                    TaskState::Done
+                } else {
+                    TaskState::Open
+                };
+                task(&format!("t{i}"), state, parent.as_deref(), &blocked)
+            })
+            .collect()
+    })
+}
+
+proptest! {
+    /// The check above a waiter fails exactly when the parent links, followed from the waiter,
+    /// revisit a task, and it always returns.
+    #[test]
+    fn the_waiter_chain_check_fails_exactly_when_the_links_revisit_a_task(tasks in parent_graph()) {
+        let by_slug = index(&tasks);
+        for waiter in &tasks {
+            let mut seen = Vec::new();
+            let mut at = Some(waiter.slug.as_str());
+            let mut loops = false;
+            while let Some(slug) = at {
+                if seen.contains(&slug) {
+                    loops = true;
+                    break;
+                }
+                seen.push(slug);
+                at = by_slug.get(slug).and_then(|t| t.parent.as_deref());
+            }
+            prop_assert_eq!(
+                super::blockers::ensure_waiter_chain_ends_for_test(&waiter.slug, &by_slug).is_err(),
+                loops,
+                "{}", waiter.slug
+            );
+        }
+    }
+
+    /// A task has a blocker walk error exactly when one of its blocker walks fails, on any graph.
+    #[test]
+    fn a_task_has_a_walk_error_exactly_when_one_of_its_walks_fails(tasks in parent_graph()) {
+        let by_slug = index(&tasks);
+        for task in &tasks {
+            let any_fails = task
+                .blocked_on
+                .iter()
+                .any(|b| first_undone_in_subtree(b, &task.slug, &by_slug).is_err());
+            prop_assert_eq!(blocker_walk_error(task, &by_slug).is_some(), any_fails, "{}", task.slug);
+        }
+    }
+
+    /// `next_task_loops` names only tasks that are neither done nor waiting and have a walk error,
+    /// and never a task that `resolve_next_task` returns.
+    #[test]
+    fn next_task_loops_names_only_blocked_open_tasks(tasks in parent_graph()) {
+        let by_slug = index(&tasks);
+        let current = tasks[0].clone();
+        let loops = next_task_loops(&tasks, &tasks, &current);
+        let next = resolve_next_task(&tasks, &tasks, &current);
+        for (slug, _) in &loops {
+            let task = tasks.iter().find(|t| &t.slug == slug).expect("a named task exists");
+            prop_assert!(!matches!(task.state, TaskState::Done | TaskState::Waiting));
+            prop_assert!(blocker_walk_error(task, &by_slug).is_some());
+            prop_assert_ne!(next.as_ref().map(|t| &t.slug), Some(slug));
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(24))]
+    /// A start changes an open ancestor only when that ancestor belongs to the session of the
+    /// task that starts. Another session's ancestor stays as it was, and the error names it.
+    #[test]
+    fn a_start_promotes_an_open_parent_only_of_its_own_session(
+        parent_session in proptest::option::of(0u8..2),
+        child_session in 0u8..2,
+    ) {
+        let dir = TempDir::new().expect("tempdir");
+        let mut parent = saved(dir.path(), "Parent", "base");
+        parent.session = parent_session.map(|n| format!("session-{n}"));
+        save_task(dir.path(), &parent).expect("save parent");
+        let mut child = saved(dir.path(), "Child", &format!("session-{child_session}"));
+        child.parent = Some(parent.slug.clone());
+        child.relation = Relation::Child;
+        save_task(dir.path(), &child).expect("save child");
+
+        let result = start_task(dir.path(), &child.slug, false);
+
+        let foreign = parent_session.is_some_and(|p| p != child_session);
+        let after = load_task(dir.path(), &parent.slug).expect("load parent");
+        if foreign {
+            let err = result.expect_err("a foreign open parent must refuse the start");
+            prop_assert!(format!("{err:#}").contains("belongs to session"), "{err:#}");
+            prop_assert_eq!(after.state, TaskState::Open);
+        } else {
+            result.expect("an own or session-less open parent is promoted");
+            prop_assert_eq!(after.state, TaskState::Wip);
+        }
+    }
 }
