@@ -178,6 +178,27 @@ pub(super) fn engine_event_for(stdin_name: Option<&str>, event: &str) -> String 
         .to_string()
 }
 
+/// The notice for a payload that parsed but names no event, or an empty one. The argv event then
+/// supplies `used`, and without the notice the agent cannot tell that the engine sent no name
+/// (#3766). Unparseable stdin has its own notice, so `None` payload adds none here.
+pub(super) fn missing_name_notice(
+    payload: Option<&serde_json::Value>,
+    event: &str,
+    used: &str,
+) -> Option<String> {
+    let json = payload?;
+    if json["hook_event_name"]
+        .as_str()
+        .is_some_and(|n| !n.is_empty())
+    {
+        return None;
+    }
+    Some(format!(
+        "llmenv hook-run: the payload for `{event}` has no hook_event_name, so `{used}` is used. \
+         Fix: check that the engine sends the event name."
+    ))
+}
+
 #[cfg(test)]
 mod event_name_tests {
     use super::engine_event_for;
@@ -200,5 +221,23 @@ mod event_name_tests {
     #[test]
     fn an_event_without_a_native_name_gives_an_empty_name() {
         assert_eq!(engine_event_for(None, "post_session"), "");
+    }
+
+    #[test]
+    fn a_parsed_payload_with_no_name_adds_a_notice_that_names_the_fallback() {
+        use super::missing_name_notice;
+        let no_name = serde_json::json!({"session_id": "s"});
+        let empty = serde_json::json!({"hook_event_name": ""});
+        let named = serde_json::json!({"hook_event_name": "Stop"});
+        for payload in [&no_name, &empty] {
+            let notice = missing_name_notice(Some(payload), "session_start", "SessionStart")
+                .expect("a notice");
+            assert!(
+                notice.contains("`SessionStart` is used") && notice.contains("Fix:"),
+                "{notice}"
+            );
+        }
+        assert_eq!(missing_name_notice(Some(&named), "stop", "Stop"), None);
+        assert_eq!(missing_name_notice(None, "stop", "Stop"), None);
     }
 }
