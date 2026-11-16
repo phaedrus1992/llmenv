@@ -6,7 +6,7 @@ use std::path::Path;
 
 use super::resolve::{check_identifier, resolve_in};
 use super::session::{self, EngineIdentity, Session};
-use super::{Task, TaskState};
+use super::{StrictTasks, Task, TaskState};
 
 /// Which session the calling conversation works in.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,14 +108,28 @@ impl OverrideNote {
 /// The errors of [`ensure_tasks_are_ours`].
 pub(crate) fn ensure_task_is_ours(
     state_dir: &Path,
+    tasks: &StrictTasks,
     input: &str,
     caller: &Caller,
     other_session: Option<&str>,
 ) -> anyhow::Result<(String, Option<OverrideNote>)> {
-    ensure_tasks_are_ours(state_dir, &[input], caller, other_session)?
+    ensure_tasks_are_ours(state_dir, tasks, &[input], caller, other_session)?
         .into_iter()
         .next()
         .ok_or_else(|| anyhow::anyhow!("no task was checked for '{input}'"))
+}
+
+/// The strict read of the store for an ownership check. Each name is checked first, so a bad
+/// name gets its own error even when the store is unreadable. The command passes the read to
+/// the check and then to the change, so one command reads the store once (#3485).
+///
+/// # Errors
+/// A name is not a valid task identifier, or the store cannot be read.
+pub(crate) fn read_for_check(state_dir: &Path, inputs: &[&str]) -> anyhow::Result<StrictTasks> {
+    for input in inputs {
+        check_identifier(input)?;
+    }
+    super::list_tasks_strict(state_dir)
 }
 
 /// Refuse to act on each task of `inputs` that belongs to a session other than the
@@ -125,16 +139,17 @@ pub(crate) fn ensure_task_is_ours(
 /// override applies only when that id is the task's owner. It returns the note
 /// that records the override. This function writes nothing itself.
 ///
-/// All names share one strict read of the store. The result holds the resolved slug of each
-/// name with its override note, in order, so the command acts on the tasks that were checked
-/// and does not look the names up again (#3477).
+/// All names share the strict read `all_tasks`, which the caller made with [`read_for_check`].
+/// The result holds the resolved slug of each name with its override note, in order, so the
+/// command acts on the tasks that were checked and does not look the names up again (#3477).
 ///
 /// # Errors
-/// For the first name that fails: it does not resolve to a task, the store cannot be read, the
-/// task belongs to another session and no matching `other_session` is given, or the named
-/// `other_session` is not the owner.
+/// For the first name that fails: it does not resolve to a task, the task belongs to another
+/// session and no matching `other_session` is given, or the named `other_session` is not the
+/// owner.
 pub(crate) fn ensure_tasks_are_ours(
     state_dir: &Path,
+    all_tasks: &StrictTasks,
     inputs: &[&str],
     caller: &Caller,
     other_session: Option<&str>,
@@ -142,11 +157,10 @@ pub(crate) fn ensure_tasks_are_ours(
     for input in inputs {
         check_identifier(input)?;
     }
-    let all_tasks = super::list_tasks_strict(state_dir)?;
     inputs
         .iter()
         .map(|input| {
-            let slug = resolve_in(state_dir, input, &all_tasks)?;
+            let slug = resolve_in(state_dir, input, all_tasks)?;
             let task = all_tasks
                 .as_slice()
                 .iter()

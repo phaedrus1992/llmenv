@@ -60,9 +60,10 @@ pub(crate) fn edit_task<'a>(
         {
             resolve::check_identifier(name)?;
         }
-        let all_tasks = list_tasks_strict(state_dir)?;
-        let resolve = |name: &str| resolve::resolve_in(state_dir, name, &all_tasks);
-        let slug = target.slug_in(state_dir, &all_tasks)?;
+        let snapshot = target.tasks(state_dir)?;
+        let all_tasks = snapshot.get();
+        let resolve = |name: &str| resolve::resolve_in(state_dir, name, all_tasks);
+        let slug = target.slug_in(state_dir, all_tasks)?;
         let mut task = load_task(state_dir, &slug)?;
 
         if let Some(title) = edit.title {

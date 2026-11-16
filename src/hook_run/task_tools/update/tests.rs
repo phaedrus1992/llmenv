@@ -249,3 +249,24 @@ fn only_a_delete_with_a_description_says_that_the_description_is_not_saved() {
     assert!(!run(Some("in_progress"), Some("why")).contains(said));
     assert!(!run(None, Some("why")).contains(said));
 }
+
+/// The task store is read once for the check and the change (#3485).
+#[test]
+fn a_status_change_reads_the_task_store_once() {
+    for status in ["in_progress", "completed"] {
+        let dir = tempfile::tempdir().unwrap();
+        let (mine, _) = two_conversations(dir.path());
+        let before = task::StrictTasks::reads_on_this_thread();
+        let out = update_as(
+            dir.path(),
+            "conv-me",
+            &json!({ "taskId": mine, "status": status }),
+        );
+        assert!(out.contains(&format!("'{mine}'")), "{out}");
+        assert_eq!(
+            task::StrictTasks::reads_on_this_thread() - before,
+            1,
+            "{status}"
+        );
+    }
+}

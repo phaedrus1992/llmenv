@@ -65,8 +65,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Read the task store once per Stop and SessionStart hook run and once per status line render, not once for each reminder and each session. [perf:task] [#3466]
 - Read the session files once per Stop and SessionStart hook run, not once for each reminder. [perf:task] [#3468]
 - Share that read with the task tracking check of the Stop hook, which read both stores again. [perf:hook] [#3472]
-- Read each store once in the TaskCreate redirect. `llmenv task start`, `llmenv task done`, and the TaskUpdate redirect read the task store twice (#3485). A failed TaskUpdate now says `couldn't update task '<id>'` with the full cause, for a bad id and a refused change alike, and says which task got its note. [perf:task] [#3474]
-- Read the task store once in `llmenv task note`, `wait`, `clear`, `add`, and `ls`. `start`, `block`, `edit`, and `reopen` still read it twice (#3485). The ownership check now hands its resolved task to the command, so the check and the change always act on the same task. [perf:task] [#3477]
+- Read each store once in the TaskCreate redirect. `llmenv task start`, `llmenv task done`, and the TaskUpdate redirect read the task store once, and `task done` reads the session counts for its hint from the same read (#3485, #3482). A failed TaskUpdate now says `couldn't update task '<id>'` with the full cause, for a bad id and a refused change alike, and says which task got its note. [perf:task] [#3474]
+- Read the task store once in `llmenv task note`, `wait`, `clear`, `add`, `ls`, `start`, `block`, `edit`, and `reopen`. `start --reopen` reads it a second time after the reopen writes. `clear` reads the caller once (#3485). The ownership check now hands its resolved task to the command, so the check and the change always act on the same task. [perf:task] [#3477]
 - Read the task store once in `llmenv task session start --replace` and `llmenv task session finish`, and the session files once in `llmenv task ls --current-project`. Before, `--replace` read the whole store once for each session that it abandoned. [perf:task] [#3479]
 
 ### Fixed

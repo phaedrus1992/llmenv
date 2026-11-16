@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use super::TaskTarget;
+use super::resolve::Snapshot;
 
 use anyhow::Context;
 
@@ -74,8 +75,15 @@ fn reopen_tasks(state_dir: &Path, inputs: &[String]) -> anyhow::Result<Vec<Task>
 ///
 /// # Errors
 /// The errors of [`reopen_tasks`].
-pub(crate) fn reopen_resolved(state_dir: &Path, slugs: &[String]) -> anyhow::Result<Vec<Task>> {
-    let targets: Vec<TaskTarget<'_>> = slugs.iter().map(|s| TaskTarget::Resolved(s)).collect();
+pub(crate) fn reopen_resolved(
+    state_dir: &Path,
+    checked: &super::StrictTasks,
+    slugs: &[String],
+) -> anyhow::Result<Vec<Task>> {
+    let targets: Vec<TaskTarget<'_>> = slugs
+        .iter()
+        .map(|s| TaskTarget::Checked(s, checked))
+        .collect();
     reopen_targets(state_dir, &targets)
 }
 
@@ -85,10 +93,15 @@ fn reopen_targets(state_dir: &Path, targets: &[TaskTarget<'_>]) -> anyhow::Resul
         for target in targets {
             target.check()?;
         }
-        let all_tasks = super::list_tasks_strict(state_dir)?;
+        // The targets of one command share one read: that of the ownership check, or a new one.
+        let snapshot = match targets.first() {
+            Some(target) => target.tasks(state_dir)?,
+            None => Snapshot::Fresh(super::list_tasks_strict(state_dir)?),
+        };
+        let all_tasks = snapshot.get();
         let mut tasks: Vec<Task> = Vec::new();
         for target in targets {
-            let slug = target.slug_in(state_dir, &all_tasks)?;
+            let slug = target.slug_in(state_dir, all_tasks)?;
             if tasks.iter().all(|t| t.slug != slug) {
                 tasks.push(load_task(state_dir, &slug)?);
             }

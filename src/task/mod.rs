@@ -680,8 +680,9 @@ pub(crate) fn start_task<'a>(
     let task = with_store_lock(state_dir, || {
         // One strict read feeds the name lookup, the blocker check, and the queue check (#3474).
         target.check()?;
-        let all_tasks = list_tasks_strict(state_dir)?;
-        let slug = target.slug_in(state_dir, &all_tasks)?;
+        let snapshot = target.tasks(state_dir)?;
+        let all_tasks = snapshot.get();
+        let slug = target.slug_in(state_dir, all_tasks)?;
         let mut task = load_task(state_dir, &slug)?;
         if task.state == TaskState::Done {
             anyhow::bail!(
@@ -727,7 +728,7 @@ pub(crate) fn start_task<'a>(
             anyhow::bail!("{block}");
         }
         // The ancestors go first: if one cannot start, the sub-task stays `open`.
-        let promoted = ancestors_to_start(state_dir, &task, force, &all_tasks)?;
+        let promoted = ancestors_to_start(state_dir, &task, force, all_tasks)?;
         let now = now_rfc3339();
         let names: Vec<String> = promoted.iter().map(|a| a.slug.clone()).collect();
         for mut ancestor in promoted {
@@ -797,6 +798,9 @@ pub(crate) struct Completed {
     prior: TaskState,
     /// Sub-tasks that were not done when `--force` closed the parent (#2455).
     undone_children: Vec<String>,
+    /// The done and total counts of the task's session after the close, from the read that the
+    /// close made. `None` for a task with no session (#3482).
+    session_progress: Option<(u64, u64)>,
 }
 
 impl Completed {
@@ -867,8 +871,9 @@ fn close_task(
     let completed = with_store_lock(state_dir, || {
         // One strict read feeds the name lookup and the sub-task check (#3471, #3474).
         target.check()?;
-        let all_tasks = list_tasks_strict(state_dir)?;
-        let slug = target.slug_in(state_dir, &all_tasks)?;
+        let snapshot = target.tasks(state_dir)?;
+        let all_tasks = snapshot.get();
+        let slug = target.slug_in(state_dir, all_tasks)?;
         let mut task = load_task(state_dir, &slug)?;
         let prior = task.state;
         if prior == TaskState::Open && !force {
@@ -877,7 +882,7 @@ fn close_task(
                  the work, or pass --force if it is done."
             );
         }
-        let undone = relation::undone_descendants(&slug, &all_tasks);
+        let undone = relation::undone_descendants(&slug, all_tasks);
         if !force && !undone.is_empty() {
             anyhow::bail!("{}", relation::undone_children_message(&slug, &undone));
         }
@@ -897,10 +902,16 @@ fn close_task(
             task.updated_at = now;
             save_task(state_dir, &task)?;
         }
+        // The read holds the task as it was before the close, so a close counts as one more done.
+        let session_progress = task.session.as_deref().map(|session_id| {
+            let (done, total) = progress_in(all_tasks, session_id);
+            (done + u64::from(prior != TaskState::Done), total)
+        });
         Ok(Completed {
             task,
             prior,
             undone_children,
+            session_progress,
         })
     })?;
     touch_task_session(state_dir, &completed.task);
@@ -4367,6 +4378,9 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod read_once_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod reject_cycle_tests;

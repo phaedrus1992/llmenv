@@ -5,6 +5,11 @@ use std::path::Path;
 
 use super::{Task, TaskState, UnreadablePolicy, most_recently_updated, read_tasks};
 
+#[cfg(test)]
+thread_local! {
+    static READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Every task of the store, read so that a task file that cannot be read is an error, not a
 /// skipped entry. The field is private and [`StrictTasks::read`] is the one constructor, so a
 /// count over this type can never see a partial store (#2608, #2687, #3469).
@@ -17,7 +22,16 @@ impl StrictTasks {
     /// # Errors
     /// The task directory or a task file cannot be read or parsed.
     pub(crate) fn read(state_dir: &Path) -> anyhow::Result<Self> {
+        #[cfg(test)]
+        READS.with(|reads| reads.set(reads.get() + 1));
         Ok(Self(read_tasks(state_dir, UnreadablePolicy::Fail)?))
+    }
+
+    /// How many strict reads this thread has made. A test diffs two values to count the reads
+    /// of one command (#3485).
+    #[cfg(test)]
+    pub(crate) fn reads_on_this_thread() -> usize {
+        READS.with(std::cell::Cell::get)
     }
 
     /// The tasks, for a caller that only reads them.

@@ -57,6 +57,30 @@ pub(crate) enum TaskTarget<'a> {
     Input(&'a str),
     /// A slug that a lookup in this command returned.
     Resolved(&'a str),
+    /// A slug that the ownership check returned, with the strict read of the store that the
+    /// check made. The command uses that read and does not read the store again (#3485). The
+    /// read is valid only until the command's first write, so a command that writes before it
+    /// reads again MUST use [`Self::Resolved`] after that write.
+    Checked(&'a str, &'a super::StrictTasks),
+}
+
+/// The strict read of the store that a command uses: the read of the ownership check, or a new
+/// one.
+pub(crate) enum Snapshot<'a> {
+    /// The read that the ownership check made.
+    Checked(&'a super::StrictTasks),
+    /// A read that this command made.
+    Fresh(super::StrictTasks),
+}
+
+impl Snapshot<'_> {
+    /// The tasks of the read.
+    pub(crate) fn get(&self) -> &super::StrictTasks {
+        match self {
+            Self::Checked(tasks) => tasks,
+            Self::Fresh(tasks) => tasks,
+        }
+    }
 }
 
 impl<'a> From<&'a str> for TaskTarget<'a> {
@@ -71,14 +95,28 @@ impl<'a> From<&'a String> for TaskTarget<'a> {
     }
 }
 
-impl TaskTarget<'_> {
+impl<'a> TaskTarget<'a> {
     /// Refuse an input that cannot be a slug, before any read of the store.
     ///
     /// # Errors
     /// The input is not a valid task identifier.
     pub(crate) fn check(self) -> anyhow::Result<()> {
         match self {
-            Self::Input(name) | Self::Resolved(name) => check_identifier(name),
+            Self::Input(name) | Self::Resolved(name) | Self::Checked(name, _) => {
+                check_identifier(name)
+            }
+        }
+    }
+
+    /// The strict read for this command: the read of the ownership check when the target has
+    /// one, else a new read.
+    ///
+    /// # Errors
+    /// The store cannot be read.
+    pub(crate) fn tasks(self, state_dir: &Path) -> anyhow::Result<Snapshot<'a>> {
+        match self {
+            Self::Checked(_, tasks) => Ok(Snapshot::Checked(tasks)),
+            Self::Input(_) | Self::Resolved(_) => list_tasks_strict(state_dir).map(Snapshot::Fresh),
         }
     }
 
@@ -91,7 +129,9 @@ impl TaskTarget<'_> {
             Self::Input(input) => resolve_identifier(state_dir, input),
             // A slug comes from a task file, which a person can edit, so it is checked before it
             // becomes a path.
-            Self::Resolved(slug) => check_identifier(slug).map(|()| slug.to_string()),
+            Self::Resolved(slug) | Self::Checked(slug, _) => {
+                check_identifier(slug).map(|()| slug.to_string())
+            }
         }
     }
 
@@ -109,7 +149,9 @@ impl TaskTarget<'_> {
                 check_identifier(input)?;
                 resolve_in(state_dir, input, tasks)
             }
-            Self::Resolved(slug) => check_identifier(slug).map(|()| slug.to_string()),
+            Self::Resolved(slug) | Self::Checked(slug, _) => {
+                check_identifier(slug).map(|()| slug.to_string())
+            }
         }
     }
 }
