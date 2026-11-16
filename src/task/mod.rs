@@ -29,6 +29,7 @@ pub(crate) use edit::TaskEdit;
 pub(crate) use edit::edit_task;
 mod note;
 pub(crate) mod ownership;
+pub(crate) mod partial;
 pub(crate) mod progress;
 mod session_choice;
 pub(crate) use note::note_task;

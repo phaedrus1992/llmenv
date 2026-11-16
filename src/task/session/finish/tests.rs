@@ -105,3 +105,36 @@ proptest! {
         }
     }
 }
+
+// #3749: a failed second save returns the first untagged task, and the task that failed stays
+// tagged on disk.
+#[test]
+fn a_failed_second_untag_returns_the_task_already_untagged() {
+    use crate::task::partial::changed_before_failure;
+    let dir = TempDir::new().unwrap();
+    let session = start(dir.path(), PROJECT_A, StartDecision::Auto);
+    let first = add_in(dir.path(), 1, &session, TaskState::Open);
+    let second = add_in(dir.path(), 2, &session, TaskState::Open);
+    let tasks = vec![first.clone(), second.clone()];
+    let mut saves = 0;
+    let err = super::untag_with(&session, tasks, "now", "dropped", |task| {
+        saves += 1;
+        if saves == 2 {
+            anyhow::bail!("disk full")
+        }
+        save_task(dir.path(), task)
+    })
+    .unwrap_err();
+    let changed = changed_before_failure(&err);
+    assert_eq!(changed.len(), 1);
+    assert_eq!(changed[0].slug, first.slug);
+    assert!(format!("{err:#}").contains("disk full"));
+    assert_eq!(load_task(dir.path(), &first.slug).unwrap().session, None);
+    assert_eq!(
+        load_task(dir.path(), &second.slug)
+            .unwrap()
+            .session
+            .as_deref(),
+        Some(session.as_str())
+    );
+}

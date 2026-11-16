@@ -3,8 +3,8 @@ use super::super::session::{EngineIdentity, StartDecision, StartOutcome, start_s
 use super::super::session::{StartRequest, start_session_as};
 use super::super::{ParentSpec, SessionChoice, TaskState, add_task, load_task, save_task};
 use super::{
-    Caller, OverrideNote, caller_session, ensure_parent_in_session, ensure_session_is_ours,
-    ensure_tasks_are_ours, read_for_check,
+    Caller, OverrideNote, SessionOverride, caller_session, ensure_parent_in_session,
+    ensure_session_is_ours, ensure_tasks_are_ours, read_for_check,
 };
 
 /// The check for one name, as the commands with one id run it.
@@ -369,4 +369,29 @@ fn an_explicit_parent_with_no_session_is_refused_like_child_of() {
         ensure_parent_in_session(Some(&parent), &slug, None).is_err(),
         "a session-less parent is refused for a session-less child too"
     );
+}
+
+// #3749: a command that failed after it changed tasks still records its audit note.
+#[test]
+fn record_after_failure_writes_the_note_only_when_a_task_changed() {
+    use crate::task::partial::PartialWrite;
+    use crate::task::session::load_existing_session;
+    let dir = TempDir::new().expect("tempdir");
+    let (slug, session) = open_task_in_session(dir.path());
+    let changed = load_task(dir.path(), &slug).expect("task");
+    let audit = |text: &str| SessionOverride {
+        session_id: session.clone(),
+        text: Some(text.to_owned()),
+    };
+
+    let plain = audit("not written").record_after_failure(dir.path(), anyhow::anyhow!("boom"));
+    assert_eq!(format!("{plain:#}"), "boom");
+    let stored = load_existing_session(dir.path(), &session).expect("session");
+    assert_eq!(stored.resume.context, None, "no task changed, so no note");
+
+    let partial = PartialWrite::error(vec![changed], anyhow::anyhow!("second save failed"));
+    let err = audit("override note").record_after_failure(dir.path(), partial);
+    assert!(format!("{err:#}").contains("second save failed"));
+    let stored = load_existing_session(dir.path(), &session).expect("session");
+    assert_eq!(stored.resume.context.as_deref(), Some("override note"));
 }

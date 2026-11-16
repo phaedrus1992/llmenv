@@ -266,6 +266,25 @@ impl SessionOverride {
     pub(crate) fn record(self, state_dir: &Path) -> anyhow::Result<()> {
         session::append_override_note(state_dir, &self.session_id, self.text.as_deref())
     }
+
+    /// Record the note for a command that failed after it had changed some tasks, then give back
+    /// the command's error. Nothing is written when the error holds no changed task, because
+    /// the command then changed nothing. A failed note is added to the error text (#3749).
+    pub(crate) fn record_after_failure(
+        self,
+        state_dir: &Path,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        if super::partial::changed_before_failure(&error).is_empty() {
+            return error;
+        }
+        match self.record(state_dir) {
+            Ok(()) => error,
+            Err(note) => error.context(format!(
+                "the audit note for the tasks that did change was not saved either: {note:#}"
+            )),
+        }
+    }
 }
 
 /// Refuse a command that acts on session `session_id` (`clear --session`, `session edit`,
