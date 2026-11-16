@@ -38,8 +38,8 @@ mod task_add;
 mod task_clear;
 mod task_guard;
 mod task_session_pick;
-use task_guard::{guard_session, guard_task, guard_tasks, record_override};
-use task_session_pick::{resolve_session_for_read, resolve_session_id};
+use task_guard::{guard_task, guard_tasks, record_override};
+use task_session_pick::{guard_session_for_write, resolve_session_for_read};
 #[cfg(test)]
 mod init_run_tests;
 #[cfg(test)]
@@ -3343,8 +3343,8 @@ fn run_task_session_command(
         } => {
             let update = resume_context.into_context()?;
             let session = crate::task::with_store_lock(state_dir, || {
-                let id = resolve_session_id(state_dir, &project, id)?;
-                let audit = guard_session(state_dir, &id, other_session.as_deref())?;
+                let (id, audit) =
+                    guard_session_for_write(state_dir, &project, id, other_session.as_deref())?;
                 let session = session::update_resume(state_dir, &id, |r| r.apply(&update))?;
                 session::append_override_note(state_dir, &id, audit.as_deref())?;
                 Ok(session)
@@ -3366,8 +3366,8 @@ fn run_task_session_command(
                 "the note is empty: pass text or pipe it on stdin"
             );
             let session = crate::task::with_store_lock(state_dir, || {
-                let id = resolve_session_id(state_dir, &project, id)?;
-                let audit = guard_session(state_dir, &id, other_session.as_deref())?;
+                let (id, audit) =
+                    guard_session_for_write(state_dir, &project, id, other_session.as_deref())?;
                 let session = session::update_resume(state_dir, &id, |r| r.append_note(text))?;
                 session::append_override_note(state_dir, &id, audit.as_deref())?;
                 Ok(session)
@@ -3380,8 +3380,8 @@ fn run_task_session_command(
             other_session,
         } => {
             let outcome = crate::task::with_store_lock(state_dir, || {
-                let id = resolve_session_id(state_dir, &project, id)?;
-                let audit = guard_session(state_dir, &id, other_session.as_deref())?;
+                let (id, audit) =
+                    guard_session_for_write(state_dir, &project, id, other_session.as_deref())?;
                 let outcome = session::finish_session(state_dir, &id, abandon_open)?;
                 session::append_override_note(state_dir, &id, audit.as_deref())?;
                 Ok(outcome)

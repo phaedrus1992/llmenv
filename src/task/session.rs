@@ -685,31 +685,47 @@ pub(crate) fn session_summary(
     })
 }
 
-/// What [`delete_tasks_in_session`] deleted. A failed delete stops the loop, and `deleted` holds
-/// the tasks that left the store before it, so the caller does not read the store again to find
-/// them (#3743).
+/// Why [`delete_tasks_in_session`] failed, with the tasks that left the store before it. A caller
+/// that uses `?` still gets the failure, and a caller that needs the deleted tasks reads
+/// `deleted` (#3743).
 #[derive(Debug)]
-pub(crate) struct SessionDelete {
+pub(crate) struct SessionDeleteError {
+    /// The tasks that were deleted before the failure. Empty when the store could not be read.
     pub(crate) deleted: Vec<Task>,
-    /// Why the delete stopped before the last task, or `None` when every task is deleted.
-    pub(crate) failure: Option<anyhow::Error>,
+    pub(crate) source: anyhow::Error,
 }
 
-/// Delete every task tagged with `session_id` outright. Doesn't touch the session record itself.
+impl std::fmt::Display for SessionDeleteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.source)
+    }
+}
+
+impl std::error::Error for SessionDeleteError {}
+
+/// Delete every task tagged with `session_id` outright. Returns the deleted tasks. Doesn't touch
+/// the session record itself.
 ///
 /// # Errors
-/// The store cannot be read, so no task is deleted. A delete that fails later is not an error
-/// here. It is the `failure` of the result, next to the tasks that were already deleted.
+/// The store cannot be read, or a delete fails. The error holds the tasks that were already
+/// deleted.
 pub(crate) fn delete_tasks_in_session(
     state_dir: &Path,
     session_id: &str,
-) -> anyhow::Result<SessionDelete> {
-    super::with_store_lock(state_dir, || {
+) -> Result<Vec<Task>, SessionDeleteError> {
+    let outcome = super::with_store_lock(state_dir, || {
         let tasks = try_tasks_in_session(state_dir, session_id)?;
         Ok(delete_listed(state_dir, session_id, tasks, |path| {
             std::fs::remove_file(path)
         }))
-    })
+    });
+    match outcome {
+        Err(source) => Err(SessionDeleteError {
+            deleted: Vec::new(),
+            source,
+        }),
+        Ok(result) => result,
+    }
 }
 
 /// Delete `tasks` in order with `remove`, and stop at the first failure.
@@ -718,32 +734,28 @@ fn delete_listed(
     session_id: &str,
     tasks: Vec<Task>,
     mut remove: impl FnMut(&Path) -> std::io::Result<()>,
-) -> SessionDelete {
+) -> Result<Vec<Task>, SessionDeleteError> {
     let total = tasks.len();
     let mut deleted = Vec::with_capacity(total);
     for task in tasks {
         let path = task_path(state_dir, &task.slug);
         super::StrictTasks::record_write();
         if let Err(error) = remove(&path) {
-            let failure = anyhow::Error::new(error).context(format!(
+            let gone: Vec<&str> = deleted.iter().map(|t: &Task| t.slug.as_str()).collect();
+            let source = anyhow::Error::new(error).context(format!(
                 "cannot delete task '{}' ({}); {} of {total} task(s) of session \
-                 '{session_id}' are already deleted. Fix: make the file writable, then run the \
-                 command again",
+                 '{session_id}' are already deleted [{}]. Fix: make the file writable, then run \
+                 the command again",
                 task.slug,
                 path.display(),
-                deleted.len()
+                gone.len(),
+                gone.join(", ")
             ));
-            return SessionDelete {
-                deleted,
-                failure: Some(failure),
-            };
+            return Err(SessionDeleteError { deleted, source });
         }
         deleted.push(task);
     }
-    SessionDelete {
-        deleted,
-        failure: None,
-    }
+    Ok(deleted)
 }
 
 #[cfg(test)]
@@ -2445,20 +2457,74 @@ mod tests {
             })
             .collect();
         let second = task_path(dir.path(), &tasks[1].slug);
-        let outcome = delete_listed(dir.path(), &session.id, tasks.clone(), |path| {
+        let error = delete_listed(dir.path(), &session.id, tasks.clone(), |path| {
             if path == second {
                 Err(std::io::Error::other("disk is read-only"))
             } else {
                 std::fs::remove_file(path)
             }
-        });
-        let slugs: Vec<&str> = outcome.deleted.iter().map(|t| t.slug.as_str()).collect();
+        })
+        .expect_err("the second delete fails");
+        let slugs: Vec<&str> = error.deleted.iter().map(|t| t.slug.as_str()).collect();
         assert_eq!(slugs, [tasks[0].slug.as_str()]);
-        let failure = format!("{:#}", outcome.failure.expect("the delete failed"));
+        let failure = format!("{error}");
         assert!(failure.contains("1 of 3"), "{failure}");
+        assert!(
+            failure.contains(&format!("[{}]", tasks[0].slug)),
+            "{failure}"
+        );
         assert!(failure.contains("disk is read-only"), "{failure}");
         assert!(load_task(dir.path(), &tasks[0].slug).is_err());
         assert!(load_task(dir.path(), &tasks[1].slug).is_ok());
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(24))]
+        /// `delete_listed` deletes the tasks in order, stops at the first failed remove, and hands
+        /// back the tasks before it (#3743).
+        #[test]
+        fn delete_listed_stops_at_the_first_failure_and_returns_the_prefix(
+            count in 0usize..8,
+            fail_at in proptest::option::of(0usize..8),
+        ) {
+            let dir = TempDir::new().expect("test");
+            let tasks: Vec<Task> = (0..count)
+                .map(|i| {
+                    add_task_for_session(
+                        dir.path(),
+                        &format!("Task {i}"),
+                        ParentSpec::Detached,
+                        "s",
+                    )
+                    .expect("test")
+                })
+                .collect();
+            let failing = fail_at.filter(|k| *k < count);
+            let failing_path = failing.map(|k| task_path(dir.path(), &tasks[k].slug));
+            let result = delete_listed(dir.path(), "s", tasks.clone(), |path| {
+                if Some(path) == failing_path.as_deref() {
+                    Err(std::io::Error::other("injected"))
+                } else {
+                    Ok(())
+                }
+            });
+            let want = failing.unwrap_or(count);
+            let want_slugs: Vec<&str> = tasks[..want].iter().map(|t| t.slug.as_str()).collect();
+            match result {
+                Ok(deleted) => {
+                    proptest::prop_assert!(failing.is_none());
+                    let got: Vec<&str> = deleted.iter().map(|t| t.slug.as_str()).collect();
+                    proptest::prop_assert_eq!(got, want_slugs);
+                }
+                Err(error) => {
+                    proptest::prop_assert!(failing.is_some());
+                    let got: Vec<&str> = error.deleted.iter().map(|t| t.slug.as_str()).collect();
+                    proptest::prop_assert_eq!(got, want_slugs);
+                    let text = error.to_string();
+                    proptest::prop_assert!(text.contains(&format!("{want} of {count}")), "{}", text);
+                }
+            }
+        }
     }
 
     #[test]
@@ -2481,10 +2547,9 @@ mod tests {
             &session.id,
         )
         .expect("test");
-        let outcome = delete_tasks_in_session(dir.path(), &session.id).expect("test");
-        assert!(outcome.failure.is_none());
-        assert_eq!(outcome.deleted.len(), 1);
-        assert_eq!(outcome.deleted[0].slug, in_session.slug);
+        let deleted = delete_tasks_in_session(dir.path(), &session.id).expect("test");
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(deleted[0].slug, in_session.slug);
         assert!(load_task(dir.path(), &in_session.slug).is_err());
     }
 

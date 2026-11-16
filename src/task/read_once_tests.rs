@@ -186,15 +186,10 @@ fn session_finish_reads_the_task_store_once() {
 fn clear_session_reads_the_task_store_once() {
     let dir = TempDir::new().expect("tempdir");
     let id = open_session(dir.path());
-    mk_in(dir.path(), "Step A", &id);
-    mk_in(dir.path(), "Step B", &id);
+    add_task_for_session(dir.path(), "Step A", ParentSpec::Detached, &id).expect("add");
+    add_task_for_session(dir.path(), "Step B", ParentSpec::Detached, &id).expect("add");
     let before = StrictTasks::reads_on_this_thread();
-    let outcome = session::delete_tasks_in_session(dir.path(), &id).expect("delete");
+    let deleted = session::delete_tasks_in_session(dir.path(), &id).expect("delete");
     assert_eq!(StrictTasks::reads_on_this_thread() - before, 1);
-    assert_eq!(outcome.deleted.len(), 2);
-    assert!(outcome.failure.is_none());
-}
-
-fn mk_in(dir: &Path, title: &str, session_id: &str) -> Task {
-    add_task_for_session(dir, title, ParentSpec::Detached, session_id).expect("add task")
+    assert_eq!(deleted.len(), 2);
 }

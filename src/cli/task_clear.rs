@@ -140,17 +140,18 @@ fn overridden_slugs(
 }
 
 /// Deletes every task of `named`, and records the deleted slugs. A failure stops the delete, and
-/// the slugs that left the store before it come with the failure, so the store is read once.
+/// the error holds the tasks that left the store before it, so the store is read once.
 fn clear_session(state_dir: &Path, named: &str, deleted: &mut Vec<String>) -> anyhow::Result<()> {
-    let outcome = crate::task::session::delete_tasks_in_session(state_dir, named)?;
-    let cleared = outcome.deleted.len();
-    deleted.extend(outcome.deleted.into_iter().map(|task| task.slug));
-    match outcome.failure {
-        None => {
-            println!("Cleared {cleared} task(s) from session '{named}'");
+    match crate::task::session::delete_tasks_in_session(state_dir, named) {
+        Ok(cleared) => {
+            println!("Cleared {} task(s) from session '{named}'", cleared.len());
+            deleted.extend(cleared.into_iter().map(|task| task.slug));
             Ok(())
         }
-        Some(failure) => Err(failure),
+        Err(error) => {
+            deleted.extend(error.deleted.into_iter().map(|task| task.slug));
+            Err(error.source)
+        }
     }
 }
 
