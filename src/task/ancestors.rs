@@ -60,6 +60,20 @@ pub(super) fn ancestors_to_start(
             );
         }
         if parent.state == TaskState::Open {
+            // A link made before the #3480 and #3593 refusals can cross sessions. Promoting that
+            // ancestor would change the task of another session (#3619). An ancestor with no
+            // session is promoted as before sessions existed (#3586).
+            if let Some(owner) = parent.session.as_deref()
+                && Some(owner) != current.session.as_deref()
+            {
+                anyhow::bail!(
+                    "cannot start '{}': its ancestor '{parent_slug}' belongs to session \
+                     '{owner}', so starting would change a task of another session. Fix: clear \
+                     the parent with `llmenv task edit {} --no-parent`",
+                    child.slug,
+                    current.slug
+                );
+            }
             // An open ancestor with no session has no queue to check. It is promoted as before
             // sessions existed (#3586).
             if !force

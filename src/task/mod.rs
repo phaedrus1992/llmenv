@@ -1128,6 +1128,9 @@ struct IdleSession {
     /// order, else the first `open` task when every one is blocked.
     next: Task,
     open_count: usize,
+    /// Set when no task is actionable and `next` has a blocker walk that loops. `next` cannot
+    /// start, so the reminder names the loop and its fix instead of advising a start (#3618).
+    loop_error: Option<String>,
 }
 
 /// Every open session for `project` that [`IdleSession`] describes. Kept
@@ -1155,13 +1158,16 @@ fn idle_sessions(open: Vec<Session>, all_tasks: &[Task]) -> Vec<IdleSession> {
                 .iter()
                 .filter(|t| t.state == TaskState::Open)
                 .collect();
-            let next = open
-                .iter()
-                .find(|t| is_actionable(t, &by_slug))
-                .or_else(|| open.first())?;
+            let actionable = open.iter().find(|t| is_actionable(t, &by_slug));
+            let next = actionable.or_else(|| open.first())?;
+            let loop_error = match actionable {
+                Some(_) => None,
+                None => blockers::blocker_walk_error(next, &by_slug),
+            };
             Some(IdleSession {
                 next: (*next).clone(),
                 open_count: open.len(),
+                loop_error,
                 session,
             })
         })
@@ -1191,6 +1197,16 @@ fn idle_reminder_lines(project: &str, caller: Option<&str>, stored: &Stored) -> 
         .map(|idle| {
             let id = &idle.session.id;
             let label = idle.session.name.as_deref().unwrap_or(id.as_str());
+            if let Some(loop_error) = &idle.loop_error {
+                return format!(
+                    "Session '{label}' ({id}) has {count} open task(s) and none in progress, but \
+                     '{next}' ({title}) cannot start: {loop_error}. If you don't recognize the \
+                     session, it belongs to a different session — leave it alone.",
+                    count = idle.open_count,
+                    next = idle.next.slug,
+                    title = idle.next.title,
+                );
+            }
             format!(
                 "Session '{label}' ({id}) has {count} open task(s) and none in progress. If \
                  you recognize this as your own session, run `llmenv task start {next}` \
@@ -1347,6 +1363,25 @@ pub(crate) fn resolve_next_task(
         .into_iter()
         .skip(pos + 1)
         .find(|t| is_actionable(t, &by_slug))
+}
+
+/// The first task after `current` that `task show --next` cannot offer because its blocker walk
+/// loops, with the text of the loop and its fix. `resolve_next_task` returns `None` for that case
+/// and for "nothing is left", so the caller asks this when it gets `None` (#3618).
+#[must_use]
+pub(crate) fn next_task_loop(
+    all_tasks: &[Task],
+    session_tasks: &[Task],
+    current: &Task,
+) -> Option<(String, String)> {
+    let order = execution_order(session_tasks);
+    let pos = order.iter().position(|t| t.slug == current.slug)?;
+    let by_slug: HashMap<&str, &Task> = all_tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
+    order
+        .iter()
+        .skip(pos + 1)
+        .filter(|t| !matches!(t.state, TaskState::Done | TaskState::Waiting))
+        .find_map(|t| blockers::blocker_walk_error(t, &by_slug).map(|e| (t.slug.clone(), e)))
 }
 
 /// Parent-before-children execution order for a single session's tasks —
@@ -4433,3 +4468,6 @@ mod reject_cycle_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod store_guard_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod walk_tests;
