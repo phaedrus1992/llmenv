@@ -104,3 +104,30 @@ proptest::proptest! {
         proptest::prop_assert!(matches!(tracking_of(&[], &tasks, None), Tracking::NoSession));
     }
 }
+
+/// #3757: the reminder skips an open task whose blocker is not done, and one whose blocker walk
+/// loops, so it never advises a start that the start refuses.
+#[test]
+fn next_skips_a_task_with_an_unmet_or_looping_blocker() {
+    let visible = [open_session_for_test("s0")];
+    let blocker = task("blocker", "s0", TaskState::Wip, 1);
+    let mut blocked = task("blocked", "s0", TaskState::Open, 2);
+    blocked.blocked_on = vec!["blocker".to_owned()];
+    let free = task("free", "s0", TaskState::Open, 3);
+    let tasks = vec![blocker, blocked, free];
+    let Tracking::Tracked { next, queued, .. } = tracking_of(&visible, &tasks, None) else {
+        unreachable!("tasks are tracked");
+    };
+    assert_eq!(next.as_deref(), Some("free"));
+    assert_eq!(queued, 2, "queued still counts every open task");
+
+    // A blocker that waits on a task of its own parent loop is never done, so the task is skipped.
+    let mut a = task("a", "s0", TaskState::Open, 1);
+    let mut b = task("b", "s0", TaskState::Open, 2);
+    a.blocked_on = vec!["b".to_owned()];
+    b.blocked_on = vec!["a".to_owned()];
+    let Tracking::Tracked { next, .. } = tracking_of(&visible, &[a, b], None) else {
+        unreachable!("tasks are tracked");
+    };
+    assert_eq!(next, None);
+}

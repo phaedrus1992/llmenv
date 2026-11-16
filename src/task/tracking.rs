@@ -95,10 +95,15 @@ fn tracking_of(visible: &[session::Session], tasks: &[Task], caller: Option<&str
         .filter(|t| t.state == TaskState::Waiting)
         .map(|t| t.slug.clone())
         .collect();
-    // The queue runs in creation order, so the next task is the earliest open one.
+    // The queue runs in creation order, so the next task is the earliest open one that can start.
+    // A task with an unmet or looping blocker is skipped, so the advice never names a start that
+    // the start then refuses (#3757).
+    let by_slug: std::collections::HashMap<&str, &Task> =
+        tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
     let next = unfinished
         .iter()
         .filter(|t| t.state == TaskState::Open)
+        .filter(|t| super::blockers::is_actionable(t, &by_slug))
         .min_by(|a, b| queue_order(a, b))
         .map(|t| t.slug.clone());
     let queued = unfinished
