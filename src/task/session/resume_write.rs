@@ -50,6 +50,9 @@ pub(in crate::task) fn append_override_note(
         save_session(state_dir, &session)
     })
     .with_context(|| {
-        format!("the change to session '{id}' is saved, but its override note was not written")
+        format!(
+            "the change to session '{id}' is saved, but its override note was not written; do not \
+             retry the command"
+        )
     })
 }

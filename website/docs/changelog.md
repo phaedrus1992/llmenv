@@ -76,6 +76,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Make `llmenv upgrade --beta` offer a pre-release. A tag such as `v3.3.0-beta.1` did not parse, so the command compared it as equal to the installed version and said "Already at latest". A tag that is not a version is now an error that names the tag. [#3510]
 - Refuse a task blocker that would close a loop, from `task block` and `task edit --block-on`. [fix:task] [#3505]
 - Check the session of `task add` under the task store lock, wait at most ten seconds for that lock, and name every promoted ancestor when a `task start` save fails. [fix:task] [#3505]
 - Say that the task store cannot be read when a TaskUpdate fails on it, not that the id is wrong. [fix:hook] [#3505]

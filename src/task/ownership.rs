@@ -252,6 +252,12 @@ pub(crate) struct SessionOverride {
 }
 
 impl SessionOverride {
+    /// The note text, or `None` when no override applied.
+    #[cfg(test)]
+    pub(crate) fn text(&self) -> Option<&str> {
+        self.text.as_deref()
+    }
+
     /// Append the note to the session. Nothing is written when no override applied. The command
     /// runs this after its change has saved, under the same store lock.
     ///
@@ -289,13 +295,23 @@ pub(crate) fn ensure_session_is_ours(
             caller.describe()
         )))),
         Some(named) => anyhow::bail!("this command acts on session '{session_id}', not '{named}'"),
-        None => refuse_unless_caller(
-            session_id,
-            caller,
-            &format!("this command acts on session '{session_id}'"),
-        )
-        .map(|()| own(None)),
+        None => ensure_session_is_callers(session_id, caller).map(|()| own(None)),
     }
+}
+
+/// [`ensure_session_is_ours`] for a read, which takes no `--other-session`, so no note exists.
+///
+/// # Errors
+/// Errors if the caller is not session `session_id`.
+pub(crate) fn ensure_session_is_callers(session_id: &str, caller: &Caller) -> anyhow::Result<()> {
+    if matches!(caller, Caller::Session(id) if id == session_id) {
+        return Ok(());
+    }
+    refuse_unless_caller(
+        session_id,
+        caller,
+        &format!("this command acts on session '{session_id}'"),
+    )
 }
 
 /// Records that `clear` with `--other-session` deleted `deleted` tasks of session `owner`, as

@@ -69,7 +69,6 @@ proptest! {
             (Some(o), Some(c)) => o == c,
             (Some(_), None) => false,
         };
-        prop_assert_eq!(session.may_take_tasks(identity.session_id.as_deref()), want);
         prop_assert_eq!(check_takes_tasks(&session, &identity).is_ok(), want);
         if want {
             prop_assert!(session.visible_to(identity.session_id.as_deref()));
@@ -170,5 +169,36 @@ proptest! {
                 "{:?}", got
             ),
         }
+    }
+}
+
+proptest! {
+    /// A command on a session passes only for the session of the caller, or for the named owner
+    /// of that session. The note exists exactly for the second case and names the caller.
+    #[test]
+    fn a_session_command_passes_only_for_the_callers_session_or_the_named_owner(
+        caller_session in proptest::option::of(0u8..3),
+        session in 0u8..3,
+        other in proptest::option::of(0u8..3),
+    ) {
+        use super::ownership::{Caller, ensure_session_is_callers, ensure_session_is_ours};
+        let caller = match caller_session {
+            Some(n) => Caller::Session(format!("s{n}")),
+            None => Caller::Unidentified("no identity".to_string()),
+        };
+        let id = format!("s{session}");
+        let other = other.map(|n| format!("s{n}"));
+        let result = ensure_session_is_ours(&id, &caller, other.as_deref());
+        let own = caller_session == Some(session);
+        let named = other.as_deref() == Some(id.as_str());
+        prop_assert_eq!(result.is_ok(), own || named, "{:?}", result);
+        if let Ok(note) = result {
+            // Own session: no note. Another session named by its id: a note naming the caller.
+            prop_assert_eq!(note.text().is_some(), !own);
+            if let Some(text) = note.text() {
+                prop_assert!(text.contains(&caller.describe()), "{}", text);
+            }
+        }
+        prop_assert_eq!(ensure_session_is_callers(&id, &caller).is_ok(), own);
     }
 }

@@ -91,9 +91,24 @@ fn record_notes(state_dir: &Path, plan: NotePlan<'_>) -> anyhow::Result<()> {
         })
         .cloned()
         .collect();
-    if !owner_less.is_empty() {
-        record_owner_less_delete(state_dir, plan.caller, &owner_less)?;
+    // Both notes are tried, so a failed first note does not hide the second.
+    let first = if owner_less.is_empty() {
+        Ok(())
+    } else {
+        record_owner_less_delete(state_dir, plan.caller, &owner_less)
+    };
+    let second = record_override_notes(state_dir, plan);
+    match (first, second) {
+        (Ok(()), second) => second,
+        (Err(first), Ok(())) => Err(first),
+        (Err(first), Err(second)) => Err(first.context(format!(
+            "the override note was not saved either: {second:#}"
+        ))),
     }
+}
+
+/// Records the `--other-session` override on the owning session.
+fn record_override_notes(state_dir: &Path, plan: NotePlan<'_>) -> anyhow::Result<()> {
     let Some(owner) = plan.other_session else {
         return Ok(());
     };

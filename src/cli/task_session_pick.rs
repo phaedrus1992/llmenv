@@ -1,7 +1,7 @@
 //! Picks the session a `llmenv task session` command acts on when no id is named.
 
 use super::task_guard::guard_session;
-use crate::task::ownership::{SessionOverride, ensure_session_is_ours};
+use crate::task::ownership::{SessionOverride, ensure_session_is_callers, ensure_session_is_ours};
 
 /// The session a write command (`session edit`, `note`, `finish`) acts on, and the override note
 /// when `--other-session` was needed. An omitted id resolves through
@@ -32,7 +32,7 @@ fn pick_session(
     state_dir: &std::path::Path,
     project: &str,
 ) -> anyhow::Result<(String, crate::task::ownership::Caller)> {
-    use crate::task::session::{self, EngineIdentity, PickError};
+    use crate::task::session::{self, EngineIdentity};
     // Fallible read: an unreadable store must not read as "no open session" (#1112).
     let open = session::open_sessions_strict(state_dir, project)?;
     let owner = EngineIdentity::from_env()?;
@@ -40,9 +40,6 @@ fn pick_session(
     let caller = crate::task::ownership::caller_for_pick(&pick, &owner);
     match pick {
         Ok(session) => Ok((session.id, caller)),
-        Err(PickError::NoneOpen) => {
-            anyhow::bail!("no open session for this project — pass an id explicitly")
-        }
         Err(e) => anyhow::bail!("{}", e.message("pass an id explicitly")),
     }
 }
@@ -61,8 +58,7 @@ pub(super) fn resolve_session_for_read(
     let (picked, caller) = pick_session(state_dir, project)?;
     // The read names its own fix. The write guard's text names `--other-session`, which these
     // commands do not take.
-    // A read takes no `--other-session`, so the guard makes no note to record.
-    let _ = ensure_session_is_ours(&picked, &caller, None).map_err(|_| {
+    ensure_session_is_callers(&picked, &caller).map_err(|_| {
         anyhow::anyhow!(
             "session '{picked}' belongs to another conversation. Fix: pass its id as an argument \
              to read it, for example `llmenv task session show {picked}`"

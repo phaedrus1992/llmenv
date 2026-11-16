@@ -24,9 +24,8 @@ pub(crate) fn parse_semver_triple(text: &str) -> Option<(u64, u64, u64)> {
 /// pre-release of `since` itself, such as `2.1.295-beta` for 2.1.295, sorts before the release,
 /// so it is `false`.
 pub(crate) fn is_release_at_least(version: &str, since: (u64, u64, u64)) -> Option<bool> {
-    let parsed = parse(version)?;
-    let triple = (parsed.major, parsed.minor, parsed.patch);
-    Some(triple > since || (triple == since && parsed.pre.is_empty()))
+    // Semver sorts a pre-release below the release of the same numbers.
+    Some(parse(version)? >= semver::Version::new(since.0, since.1, since.2))
 }
 
 #[cfg(test)]
@@ -89,6 +88,34 @@ mod tests {
             if parse_semver_triple(&text).is_some() {
                 prop_assert!(text.starts_with(|c: char| c.is_ascii_digit() || c == 'v'));
             }
+        }
+    }
+
+    proptest! {
+        /// A part above the cap is not a version, in any of the three places.
+        #[test]
+        fn a_part_above_the_cap_is_not_a_version(
+            big in 1_000_000_000u64..=u64::MAX,
+            place in 0usize..3,
+        ) {
+            let mut parts = [1u64, 2, 3];
+            parts[place] = big;
+            let text = format!("{}.{}.{}", parts[0], parts[1], parts[2]);
+            prop_assert_eq!(parse_semver_triple(&text), None);
+        }
+
+        /// A `+build` suffix does not change the answer of the release gate.
+        #[test]
+        fn a_build_suffix_does_not_change_the_release_gate(
+            a in 0u64..4, b in 0u64..12, c in 0u64..400,
+            pre in any::<bool>(),
+        ) {
+            let base = if pre { format!("{a}.{b}.{c}-beta") } else { format!("{a}.{b}.{c}") };
+            let since = (2, 1, 304);
+            prop_assert_eq!(
+                is_release_at_least(&format!("{base}+build.7"), since),
+                is_release_at_least(&base, since)
+            );
         }
     }
 

@@ -1289,6 +1289,28 @@ mod tests {
         );
     }
 
+    proptest::proptest! {
+        /// Every pick failure has a text that ends with the fix of the caller. An ambiguous pick
+        /// names the open count, and says that the conversation owns some only when it does.
+        #[test]
+        fn a_pick_failure_text_ends_with_the_fix_and_names_the_count(
+            open in 2usize..50,
+            owned in 0usize..50,
+            identified in proptest::bool::ANY,
+            fix in "[a-z <>-]{1,20}",
+        ) {
+            let none = PickError::NoneOpen.message(&fix);
+            proptest::prop_assert!(none.ends_with(&fix));
+            let owned = owned.min(open);
+            let text = PickError::Ambiguous { open, owned, identified }.message(&fix);
+            proptest::prop_assert!(text.ends_with(&fix));
+            let prefix = format!("{open} open sessions");
+            proptest::prop_assert!(text.starts_with(&prefix), "{}", text);
+            let says_owns = text.contains("this conversation owns");
+            proptest::prop_assert_eq!(says_owns, identified && owned > 0, "{}", text);
+        }
+    }
+
     #[test]
     fn message_names_the_real_cause() {
         let msg = |owned, identified| {
