@@ -33,13 +33,18 @@ use plugin_check::check_selected_plugins;
 use plugin_payloads::sync_plugin_payloads;
 
 mod doctor;
+mod hook_event;
 mod init_cmd;
 mod task_add;
 mod task_clear;
 mod task_guard;
 mod task_session_pick;
+mod task_session_start;
+
+use hook_event::hook_event_name_from;
 use task_guard::{guard_task, guard_tasks, record_override};
 use task_session_pick::{guard_session_for_write, resolve_session_for_read};
+use task_session_start::add_session_tasks;
 #[cfg(test)]
 mod init_run_tests;
 #[cfg(test)]
@@ -925,7 +930,7 @@ pub fn run() -> anyhow::Result<()> {
             guard::dispatch_check_stale(use_color, auto_fix, &engine)?;
         }
         Some(Command::ConfigContext { engine }) => {
-            guard::dispatch_config_context(&engine);
+            guard::dispatch_config_context(&engine)?;
         }
         Some(Command::ConfigGuard { engine }) => {
             guard::dispatch_config_guard(&engine);
@@ -2349,20 +2354,21 @@ pub(crate) fn run_check_stale(use_color: bool, auto_fix: bool) -> anyhow::Result
 
 /// `llmenv config-context`: emit source config paths into SessionStart context (#289).
 ///
-/// Always exits 0 (fail-soft). Warns to stderr if paths cannot be resolved so
+/// Exits 0 for every failure except an unusable hook payload (#3752). Warns to stderr if paths cannot be resolved so
 /// the operator can diagnose the failure; never silently substitutes wrong paths.
-fn run_config_context() {
+fn run_config_context() -> anyhow::Result<()> {
     use std::io::Read;
 
     let mut stdin_buf = String::new();
-    if let Err(e) = std::io::stdin().read_to_string(&mut stdin_buf) {
-        eprintln!("llmenv config-context: failed to read stdin: {e}");
-    }
-    let hook_event_name = serde_json::from_str::<serde_json::Value>(&stdin_buf)
-        .inspect_err(|e| tracing::warn!(error = %e, "failed to parse config-context stdin JSON; falling back to SessionStart"))
-        .ok()
-        .and_then(|v| v["hook_event_name"].as_str().map(str::to_owned))
-        .unwrap_or_else(|| "SessionStart".to_owned());
+    std::io::stdin()
+        .read_to_string(&mut stdin_buf)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "config-context: cannot read stdin ({e}). Fix: the engine must send its hook \
+             payload on stdin."
+            )
+        })?;
+    let hook_event_name = hook_event_name_from(&stdin_buf)?;
 
     let emit = |ctx: &str| {
         println!(
@@ -2384,7 +2390,7 @@ fn run_config_context() {
                 "llmenv config-context: could not resolve config path ({e:#}). \
                  Run `llmenv doctor` to diagnose."
             ));
-            return;
+            return Ok(());
         }
     };
     let bundles_dir = match paths::config_dir() {
@@ -2395,7 +2401,7 @@ fn run_config_context() {
                 "llmenv config-context: could not resolve config dir ({e:#}). \
                  Run `llmenv doctor` to diagnose."
             ));
-            return;
+            return Ok(());
         }
     };
 
@@ -2466,6 +2472,7 @@ fn run_config_context() {
     }
 
     emit(&text);
+    Ok(())
 }
 
 /// Sync one marketplace and fill `rm.install_location` + `rm.head`.
@@ -2928,15 +2935,27 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 let caller = caller_session_for_task(&state_dir)?;
                 let guarded = guard_tasks(&state_dir, &caller, &ids, other_session.as_deref())?;
                 let (slugs, audits): (Vec<String>, Vec<_>) = guarded.items.into_iter().unzip();
-                let reopened =
-                    crate::task::reopen::reopen_resolved(&state_dir, &guarded.tasks, &slugs)?;
+                let result =
+                    crate::task::reopen::reopen_resolved(&state_dir, &guarded.tasks, &slugs);
+                // A failed save leaves the earlier tasks reopened, so their notes are still
+                // recorded (#3749).
+                let saved: &[crate::task::Task] = match &result {
+                    Ok(tasks) => tasks,
+                    Err(e) => crate::task::partial::changed_before_failure(e),
+                };
                 // Every note is tried, so one failed note does not hide the others. The notes
                 // come before the print: a closed stdout makes `println!` panic.
-                let failed: Vec<String> = audits
-                    .into_iter()
-                    .filter_map(|audit| record_override(&state_dir, audit).err())
+                let failed: Vec<String> = slugs
+                    .iter()
+                    .zip(audits)
+                    .filter(|(slug, _)| saved.iter().any(|t| &t.slug == *slug))
+                    .filter_map(|(_, audit)| record_override(&state_dir, audit).err())
                     .map(|e| format!("{e:#}"))
                     .collect();
+                let reopened = match result {
+                    Ok(tasks) => tasks,
+                    Err(e) => return Err(failed.into_iter().fold(e, |e, note| e.context(note))),
+                };
                 for task in reopened {
                     println!("Reopened '{}' — now {:?}", task.slug, task.state);
                 }
@@ -3321,7 +3340,7 @@ fn run_task_session_command(
             if nudge {
                 println!("{}", crate::task::resume::MISSING_CONTEXT_NUDGE);
             }
-            for title in &tasks {
+            add_session_tasks(&session_id, &tasks, |title| {
                 let new = crate::task::NewTask {
                     title,
                     ..crate::task::NewTask::default()
@@ -3336,12 +3355,10 @@ fn run_task_session_command(
                         other_session: None,
                     },
                     &project,
-                )
-                .with_context(|| {
-                    format!("session '{session_id}' started, but task '{title}' was not added")
-                })?;
+                )?;
                 println!("Added task '{}' ({})", task.slug, task.title);
-            }
+                Ok(task)
+            })?;
             if tasks.is_empty() {
                 // Known steps added now let the idle reminders catch a step that never starts (#2987).
                 println!(
@@ -3395,7 +3412,10 @@ fn run_task_session_command(
             let outcome = crate::task::with_store_lock(state_dir, || {
                 let (id, audit) =
                     guard_session_for_write(state_dir, &project, id, other_session.as_deref())?;
-                let outcome = session::finish_session(state_dir, &id, abandon_open)?;
+                let outcome = match session::finish_session(state_dir, &id, abandon_open) {
+                    Ok(outcome) => outcome,
+                    Err(e) => return Err(audit.record_after_failure(state_dir, e)),
+                };
                 audit.record(state_dir)?;
                 Ok(outcome)
             })?;

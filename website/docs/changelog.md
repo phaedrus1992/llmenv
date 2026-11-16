@@ -76,6 +76,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Read the session id that `icm_transcript_start_session` returns when the reply has a hint line after the JSON object. The reply was rejected as a malformed id. [fix:session-log] [#3754]
+- Fail `llmenv config-context` with an error that names the input when stdin is not JSON or has no `hook_event_name`. It used to print a made-up `SessionStart`. Empty stdin still means `SessionStart`. [fix:cli] [#3752]
+- Name the tasks that `llmenv task session start --task` already added when a later add fails. [fix:task] [#3750]
+- Record the `--other-session` audit note and touch the sessions of the tasks that changed when `session finish --abandon-open` or `task reopen` fails on a later save. [fix:task] [#3749]
+- Count the entries that the size walk skipped inside a stale `state/tmp` folder in the "could not be read" count of the session notice. [fix:materialize] [#3746]
 - Refuse `llmenv task start` for a sub-task whose open ancestor, at any level, belongs to another session, which links made before v3.14.0 allowed. The error names the parent and the fix, `llmenv task edit <task> --no-parent`. [fix:task] [#3619]
 - Report a loop in the parent links on the next-task path. A task that waits on a blocker with a loop is not offered as the next step, and the idle-session reminder and `llmenv task show --next` name each such task, the loop, and the fix. A loop that passes through the waiting task is an error too, and `llmenv task start` reports it. [fix:task] [#3618]
 - Refuse a session of another conversation in the task writer for every session choice, not only in the callers. A new caller of the writer can no longer add a task to a foreign session by naming it, and the writer saves the `--other-session` note in the same write as the task. `task add --session` reads the session store once, and the TaskCreate redirect reads one session file for its freshness check, not the whole store. [fix:task] [#3587] [#3617] [#3748]

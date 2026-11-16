@@ -6,9 +6,8 @@
 use std::path::Path;
 
 use super::TaskTarget;
+use super::partial::{PartialWrite, changed_before_failure};
 use std::borrow::Cow;
-
-use anyhow::Context;
 
 use crate::task::{
     Relation, Task, TaskNote, TaskState, load_task, now_rfc3339, save_task, touch_task_session,
@@ -88,7 +87,18 @@ pub(crate) fn reopen_resolved(
 }
 
 fn reopen_targets(state_dir: &Path, targets: &[TaskTarget<'_>]) -> anyhow::Result<Vec<Task>> {
-    let tasks = with_store_lock(state_dir, || {
+    reopen_saving(state_dir, targets, save_task)
+}
+
+/// [`reopen_targets`] with the save as a parameter, so a test can fail one save. A failed save
+/// returns a [`PartialWrite`] that holds the tasks already reopened. Their sessions are touched
+/// before the error returns.
+fn reopen_saving(
+    state_dir: &Path,
+    targets: &[TaskTarget<'_>],
+    mut save: impl FnMut(&Path, &Task) -> anyhow::Result<()>,
+) -> anyhow::Result<Vec<Task>> {
+    let result = with_store_lock(state_dir, || {
         // One strict read resolves every name (#3477).
         for target in targets {
             target.check()?;
@@ -118,22 +128,29 @@ fn reopen_targets(state_dir: &Path, targets: &[TaskTarget<'_>]) -> anyhow::Resul
             );
         }
         refuse_done_parents(state_dir, &tasks)?;
-        let mut reopened: Vec<String> = Vec::new();
-        for task in &mut tasks {
-            mark_reopened(task, "task reopen");
-            save_task(state_dir, task).with_context(|| {
-                format!(
-                    "cannot save task '{}'; already reopened: [{}]",
+        let mut reopened: Vec<Task> = Vec::new();
+        for mut task in tasks {
+            mark_reopened(&mut task, "task reopen");
+            if let Err(e) = save(state_dir, &task) {
+                let names: Vec<&str> = reopened.iter().map(|t| t.slug.as_str()).collect();
+                let source = e.context(format!(
+                    "cannot save task '{}'; already reopened: [{}]. Fix: run `llmenv task reopen` \
+                     again for the tasks that are not in that list",
                     task.slug,
-                    reopened.join(", ")
-                )
-            })?;
-            reopened.push(task.slug.clone());
+                    names.join(", ")
+                ));
+                return Err(PartialWrite::error(reopened, source));
+            }
+            reopened.push(task);
         }
-        Ok(tasks)
-    })?;
+        Ok(reopened)
+    });
+    let saved: &[Task] = match &result {
+        Ok(tasks) => tasks,
+        Err(e) => changed_before_failure(e),
+    };
     let mut touched: Vec<&str> = Vec::new();
-    for task in &tasks {
+    for task in saved {
         if let Some(id) = task.session.as_deref()
             && !touched.contains(&id)
         {
@@ -141,7 +158,7 @@ fn reopen_targets(state_dir: &Path, targets: &[TaskTarget<'_>]) -> anyhow::Resul
             touch_task_session(state_dir, task);
         }
     }
-    Ok(tasks)
+    result
 }
 
 /// Refuse a sub-task whose parent is `done` and is not in `tasks`. `complete_task` never lets a
@@ -179,7 +196,7 @@ fn refuse_done_parents(state_dir: &Path, tasks: &[Task]) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::unwrap_used, clippy::panic)]
     use super::*;
     use crate::task::{
         NewTask, ParentSpec, Placement, add_task_for_session, add_task_for_session_with,
@@ -406,6 +423,100 @@ mod tests {
                 .iter()
                 .any(|(index, _)| parents[*index].0 && !parents[*index].1);
             proptest::prop_assert_eq!(reopen_tasks(dir.path(), &batch).is_err(), refused);
+        }
+    }
+
+    // #3749: a failed second save returns the first reopened task, and the session of that task
+    // is still touched.
+    #[test]
+    fn a_failed_second_reopen_save_returns_the_first_task_and_touches_its_session() {
+        use crate::task::session::{StartDecision, StartOutcome, load_existing_session};
+        let dir = TempDir::new().unwrap();
+        let session = match crate::task::session::start_session(
+            dir.path(),
+            Some("s"),
+            None,
+            "reopen-test",
+            StartDecision::Auto,
+        )
+        .unwrap()
+        {
+            StartOutcome::Created(s) => s,
+            other => panic!("expected Created, got {other:?}"),
+        };
+        let mut slugs = Vec::new();
+        for title in ["Alpha task", "Bravo task"] {
+            let task =
+                add_task_for_session(dir.path(), title, ParentSpec::Detached, &session.id).unwrap();
+            complete_task(dir.path(), &task.slug, true).unwrap();
+            slugs.push(task.slug);
+        }
+        let before = load_existing_session(dir.path(), &session.id)
+            .unwrap()
+            .last_activity;
+        let targets: Vec<TaskTarget<'_>> = slugs.iter().map(TaskTarget::from).collect();
+        let mut saves = 0;
+        let err = reopen_saving(dir.path(), &targets, |state_dir, task| {
+            saves += 1;
+            if saves == 2 {
+                anyhow::bail!("disk full")
+            }
+            save_task(state_dir, task)
+        })
+        .unwrap_err();
+        let changed = changed_before_failure(&err);
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].slug, slugs[0]);
+        assert_eq!(
+            load_task(dir.path(), &slugs[0]).unwrap().state,
+            TaskState::Open
+        );
+        assert_eq!(
+            load_task(dir.path(), &slugs[1]).unwrap().state,
+            TaskState::Done
+        );
+        let after = load_existing_session(dir.path(), &session.id)
+            .unwrap()
+            .last_activity;
+        assert_ne!(
+            after, before,
+            "the session of the saved task must be touched"
+        );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(8))]
+
+        // With a save that fails at the k-th task, the error holds exactly the k tasks before it,
+        // those k are open on disk, and the rest stay done (#3749).
+        #[test]
+        fn a_failed_save_leaves_exactly_the_tasks_before_it_reopened(
+            count in 1usize..5,
+            fail_at in 0usize..5,
+        ) {
+            let dir = TempDir::new().unwrap();
+            let slugs: Vec<String> =
+                (0..count).map(|n| done(dir.path(), &format!("Task number {n}")).slug).collect();
+            let targets: Vec<TaskTarget<'_>> = slugs.iter().map(TaskTarget::from).collect();
+            let mut saves = 0usize;
+            let result = reopen_saving(dir.path(), &targets, |state_dir, task| {
+                saves += 1;
+                if saves == fail_at + 1 { anyhow::bail!("disk full") }
+                save_task(state_dir, task)
+            });
+            let reopened = fail_at.min(count);
+            if fail_at >= count {
+                proptest::prop_assert_eq!(result.unwrap().len(), count);
+            } else {
+                let err = result.unwrap_err();
+                proptest::prop_assert_eq!(changed_before_failure(&err).len(), reopened);
+                let text = format!("{err:#}");
+                proptest::prop_assert!(text.contains("Fix: run"), "{}", text);
+            }
+            for (n, slug) in slugs.iter().enumerate() {
+                let want = if n < reopened { TaskState::Open } else { TaskState::Done };
+                proptest::prop_assert_eq!(load_task(dir.path(), slug).unwrap().state, want);
+            }
         }
     }
 }

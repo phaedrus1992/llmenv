@@ -755,6 +755,8 @@ project's hook.
   clear`, or pass `--abandon-open` to untag them (each gets a note) and finish
   anyway; the output lists what it dropped. A task that is `done` keeps its
   session tag as a historical record.
+  (changed in v3.14.0) When a save fails part way, the error names the tasks that
+  were already untagged, and the `--other-session` audit note is still recorded.
 - `task session show [<id>]` — print a session's progress; auto-resolves
   like `finish`.
 - `task session summary [<id>] [--format json]` — (added in v3.10.0) roll up
@@ -1171,6 +1173,11 @@ llmenv config-context
 Print source config paths as agent context (used by the auto-registered
 `SessionStart` hook). Prints the paths of `config.yaml` and the `bundles/`
 directory so the agent knows where to direct config edits. Invoked automatically — not normally run by users.
+
+The command reads the hook payload on stdin and uses its `hook_event_name` as the event of its output.
+Empty stdin means `SessionStart`.
+(changed in v3.14.0) A payload that is not JSON, or has no string `hook_event_name`,
+makes the command exit non-zero with an error that names the input.
 
 ## `config-guard`
 
