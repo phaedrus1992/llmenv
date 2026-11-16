@@ -154,7 +154,10 @@ fn create_under_lock(
         state_dir,
         subject,
         task::ParentSpec::Detached,
-        task::SessionChoice::Checked(&session),
+        task::SessionChoice::Checked {
+            session: &session,
+            owner,
+        },
         project,
     ) {
         Ok(t) => {
@@ -189,8 +192,11 @@ fn create_under_lock(
         // --session <id>"), so surface it rather than re-suggesting a bare `add`
         // that would hit the same error.
         Err(e) => {
-            tracing::error!(error = %e, "task redirect: couldn't record the task");
-            deny(&format!("couldn't record the task ({e})."))
+            tracing::error!(error = %format!("{e:#}"), "task redirect: couldn't record the task");
+            deny(&format!(
+                "couldn't record the task ({e:#}); no task was added. Fix: run `llmenv task \
+                 session ls`, then retry TaskCreate or use `llmenv task add`."
+            ))
         }
     }
 }

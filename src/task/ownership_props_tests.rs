@@ -122,13 +122,14 @@ proptest! {
         }
         let identity = conversation(caller);
         let picked = resolve_session_for_add(dir.path(), SessionChoice::Resolve(&identity), PROJECT);
-        if let Ok(id) = &picked {
+        if let Ok(resolved) = &picked {
+            let id = &resolved.id;
             let session = made.iter().find(|s| &s.id == id).expect("the id names an open session");
             prop_assert!(session.may_take_tasks(identity.session_id.as_deref()), "{}", id);
         }
         // One open session with no owner is always the answer.
         if let [None] = owners.as_slice() {
-            let id = picked.expect("one open session with no owner is picked");
+            let id = picked.expect("one open session with no owner is picked").id;
             prop_assert_eq!(id, made[0].id.clone());
         }
     }

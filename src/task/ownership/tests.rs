@@ -35,7 +35,11 @@ fn open_task_in_session(dir: &std::path::Path) -> (String, String) {
         dir,
         "Owned step",
         ParentSpec::Detached,
-        SessionChoice::Named(&session.id),
+        SessionChoice::Named {
+            id: &session.id,
+            owner: &EngineIdentity::from_session_id(None),
+            other_session: None,
+        },
         PROJECT,
     )
     .expect("add task");
