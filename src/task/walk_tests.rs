@@ -572,3 +572,22 @@ proptest! {
         prop_assert_eq!(got, first_undone_recursive("t00", &waiter, &tasks));
     }
 }
+
+// #3767: the tree render is iterative, so a chain of 100000 sub-tasks neither overflows the stack
+// nor drops a row, and each row is one level deeper than the one before.
+#[test]
+fn a_chain_of_100000_sub_tasks_renders_every_row() {
+    const DEPTH: usize = 100_000;
+    let tasks: Vec<Task> = (0..DEPTH)
+        .map(|n| {
+            let parent = (n > 0).then(|| format!("t{}", n - 1));
+            let mut t = task(&format!("t{n}"), TaskState::Open, parent.as_deref(), &[]);
+            t.created_at = format!("2026-10-02T00:00:00.{n:09}Z");
+            t
+        })
+        .collect();
+    let rows = display_rows(tasks, &[]);
+    assert_eq!(rows.len(), DEPTH);
+    assert_eq!(rows[0].depth, 0);
+    assert_eq!(rows[DEPTH - 1].depth, DEPTH - 1);
+}

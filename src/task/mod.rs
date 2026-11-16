@@ -431,6 +431,8 @@ fn append_forest(group: &[&Task], rows: &mut Vec<DisplayRow>) {
     }
 }
 
+/// Push the rows of `task` and of everything below it in pre-order. An explicit stack replaces
+/// the recursion, so a deep chain of sub-tasks cannot overflow the call stack (#3767).
 fn visit<'a>(
     task: &'a Task,
     depth: usize,
@@ -438,16 +440,18 @@ fn visit<'a>(
     visited: &mut HashSet<&'a str>,
     rows: &mut Vec<DisplayRow>,
 ) {
-    if !visited.insert(task.slug.as_str()) {
-        return;
-    }
-    rows.push(DisplayRow {
-        depth,
-        task: task.clone(),
-    });
-    if let Some(kids) = children.get(task.slug.as_str()) {
-        for child in kids {
-            visit(child, depth + 1, children, visited, rows);
+    let mut stack: Vec<(&'a Task, usize)> = vec![(task, depth)];
+    while let Some((current, depth)) = stack.pop() {
+        if !visited.insert(current.slug.as_str()) {
+            continue;
+        }
+        rows.push(DisplayRow {
+            depth,
+            task: current.clone(),
+        });
+        if let Some(kids) = children.get(current.slug.as_str()) {
+            // Reversed, so the stack pops the first child first.
+            stack.extend(kids.iter().rev().map(|child| (*child, depth + 1)));
         }
     }
 }

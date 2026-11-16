@@ -200,6 +200,7 @@ pub(super) fn missing_name_notice(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod event_name_tests {
     use super::engine_event_for;
 
