@@ -131,3 +131,45 @@ fn next_skips_a_task_with_an_unmet_or_looping_blocker() {
     };
     assert_eq!(next, None);
 }
+
+proptest::proptest! {
+    /// With blocker edges, `next` is the earliest open task whose blockers are all done, and
+    /// `queued` still counts every open task. These tasks have no sub-tasks, so a blocker is done
+    /// when its own state is `done`. A task that blocks on a missing slug is not actionable (#3757).
+    #[test]
+    fn next_is_the_earliest_open_task_with_every_blocker_done(
+        rows in proptest::collection::vec((0u8..4, proptest::option::of(0usize..12), 0u8..50), 1..10),
+    ) {
+        let visible = [open_session_for_test("s0")];
+        let tasks: Vec<Task> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, (st, blocker, at))| {
+                let mut t = task(&format!("t{i}"), "s0", state_of(*st), *at);
+                if let Some(b) = blocker {
+                    t.blocked_on = vec![format!("t{b}")];
+                }
+                t
+            })
+            .collect();
+        let blockers_done = |t: &Task| {
+            t.blocked_on.iter().all(|b| {
+                tasks.iter().any(|o| &o.slug == b && o.state == TaskState::Done && o.slug != t.slug)
+            })
+        };
+        let open: Vec<&Task> = tasks.iter().filter(|t| t.state == TaskState::Open).collect();
+        let want = open
+            .iter()
+            .filter(|t| blockers_done(t))
+            .min_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.slug.cmp(&b.slug)))
+            .map(|t| t.slug.clone());
+        match tracking_of(&visible, &tasks, None) {
+            Tracking::NoTasks => proptest::prop_assert!(tasks.iter().all(|t| t.state == TaskState::Done)),
+            Tracking::Tracked { next, queued, .. } => {
+                proptest::prop_assert_eq!(next, want);
+                proptest::prop_assert_eq!(queued, open.len());
+            }
+            other => proptest::prop_assert!(false, "unexpected {other:?}"),
+        }
+    }
+}

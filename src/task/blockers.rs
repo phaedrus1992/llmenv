@@ -102,6 +102,11 @@ pub(super) fn first_undone_in_subtree<'a>(
     by_slug: &HashMap<&'a str, &'a Task>,
 ) -> anyhow::Result<Option<&'a str>> {
     ensure_waiter_chain_ends(waiter, by_slug)?;
+    // A dangling or undone root needs no child index, which keeps the common answer cheap.
+    match by_slug.get(slug) {
+        Some(task) if task.state == TaskState::Done => {}
+        _ => return Ok(Some(slug)),
+    }
     // One parent-to-children index serves the whole walk, and an explicit stack replaces the
     // recursion, so a deep chain of done tasks costs O(n) time and no call stack (#3757).
     let mut children: HashMap<&str, Vec<&str>> = HashMap::new();

@@ -123,7 +123,10 @@ fn checked_slug(
 fn with_note_outcome(msg: String, noted: anyhow::Result<()>) -> String {
     match noted {
         Ok(()) => msg,
-        Err(e) => format!("{msg}. {e:#}. Do not repeat the update"),
+        Err(e) => {
+            tracing::error!(error = %format!("{e:#}"), "task redirect: ownership note not saved");
+            format!("{msg}. {e:#}. Do not repeat the update")
+        }
     }
 }
 

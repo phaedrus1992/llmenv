@@ -530,3 +530,45 @@ fn a_chain_of_100000_done_tasks_walks_to_the_end() {
         Some("tail")
     );
 }
+
+/// The first task that is not done in the subtree of `slug`, by a recursive walk that visits the
+/// children in ascending slug order and skips the subtree of `waiter`. The oracle for the
+/// iterative walk.
+fn first_undone_recursive<'a>(slug: &'a str, waiter: &str, tasks: &'a [Task]) -> Option<&'a str> {
+    let node = tasks.iter().find(|t| t.slug == slug)?;
+    if node.state != TaskState::Done {
+        return Some(slug);
+    }
+    let mut kids: Vec<&str> = tasks
+        .iter()
+        .filter(|t| t.parent.as_deref() == Some(slug) && t.slug != waiter)
+        .map(|t| t.slug.as_str())
+        .collect();
+    kids.sort_unstable();
+    kids.into_iter()
+        .find_map(|k| first_undone_recursive(k, waiter, tasks))
+}
+
+proptest! {
+    // On a forest, the iterative walk returns the same task as the recursive walk: the first
+    // undone task in slug-ordered pre-order (#3757).
+    #[test]
+    fn the_iterative_walk_returns_what_the_recursive_walk_returns(
+        rows in proptest::collection::vec((any::<bool>(), any::<u8>(), any::<bool>()), 1..14),
+        waiter_index in 0usize..14,
+    ) {
+        let tasks: Vec<Task> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, (done, parent, has_parent))| {
+                let parent = (i > 0 && *has_parent).then(|| format!("t{:02}", *parent as usize % i));
+                let state = if *done { TaskState::Done } else { TaskState::Open };
+                task(&format!("t{i:02}"), state, parent.as_deref(), &[])
+            })
+            .collect();
+        let waiter = format!("t{:02}", waiter_index % tasks.len());
+        let by_slug = index(&tasks);
+        let got = first_undone_in_subtree("t00", &waiter, &by_slug).unwrap();
+        prop_assert_eq!(got, first_undone_recursive("t00", &waiter, &tasks));
+    }
+}
