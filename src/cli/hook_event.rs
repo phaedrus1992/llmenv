@@ -26,6 +26,7 @@ pub(super) fn hook_event_name_from(stdin: &str) -> anyhow::Result<String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::hook_event_name_from;
     use proptest::prelude::*;
