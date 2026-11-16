@@ -1,7 +1,7 @@
 //! Picks the session a `llmenv task session` command acts on when no id is named.
 
 use super::task_guard::guard_session;
-use crate::task::ownership::ensure_session_is_ours;
+use crate::task::ownership::{SessionOverride, ensure_session_is_ours};
 
 /// The session a write command (`session edit`, `note`, `finish`) acts on, and the override note
 /// when `--other-session` was needed. An omitted id resolves through
@@ -12,7 +12,7 @@ pub(super) fn guard_session_for_write(
     project: &str,
     id: Option<String>,
     other_session: Option<&str>,
-) -> anyhow::Result<(String, Option<String>)> {
+) -> anyhow::Result<(String, SessionOverride)> {
     match id {
         Some(id) => {
             let audit = guard_session(state_dir, &id, other_session)?;
@@ -43,15 +43,11 @@ fn pick_session(
         Err(PickError::NoneOpen) => {
             anyhow::bail!("no open session for this project — pass an id explicitly")
         }
-        Err(e) => anyhow::bail!(
-            "{}",
-            e.ambiguity_message("pass an id explicitly")
-                .unwrap_or_else(|| "more than one session is open".to_string())
-        ),
+        Err(e) => anyhow::bail!("{}", e.message("pass an id explicitly")),
     }
 }
 
-/// [`resolve_session_id`] for a read (`session show`, `session summary`). An omitted id
+/// The session that a read (`session show`, `session summary`) acts on. An omitted id
 /// must not pick another conversation's session, so the pick passes the ownership guard.
 /// An explicit id is read as given, because the caller named it (#3588).
 pub(super) fn resolve_session_for_read(
@@ -65,7 +61,8 @@ pub(super) fn resolve_session_for_read(
     let (picked, caller) = pick_session(state_dir, project)?;
     // The read names its own fix. The write guard's text names `--other-session`, which these
     // commands do not take.
-    ensure_session_is_ours(&picked, &caller, None).map_err(|_| {
+    // A read takes no `--other-session`, so the guard makes no note to record.
+    let _ = ensure_session_is_ours(&picked, &caller, None).map_err(|_| {
         anyhow::anyhow!(
             "session '{picked}' belongs to another conversation. Fix: pass its id as an argument \
              to read it, for example `llmenv task session show {picked}`"

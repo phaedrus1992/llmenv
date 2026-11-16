@@ -322,13 +322,17 @@ fn an_other_session_override_returns_a_session_note_naming_the_caller() {
     let caller = Caller::Session("some-other-session".to_string());
 
     let note = ensure_session_is_ours(&owner, &caller, Some(&owner))
-        .expect("the named owner may be acted on")
-        .expect("the override must return a note");
+        .expect("the named owner may be acted on");
 
+    let text = note
+        .text
+        .as_deref()
+        .expect("the override must carry a note");
     assert!(
-        note.contains("some-other-session"),
+        text.contains("some-other-session"),
         "note must name the caller"
     );
+    assert_eq!(note.session_id, owner);
 }
 
 #[test]
@@ -339,7 +343,7 @@ fn the_caller_own_session_returns_no_note() {
 
     let note = ensure_session_is_ours(&owner, &caller, None).expect("own session is allowed");
 
-    assert!(note.is_none(), "no override applied, so no note");
+    assert!(note.text.is_none(), "no override applied, so no note");
 }
 
 /// A parent with no session is refused for a child of a session, the same as `child_of` refuses

@@ -67,8 +67,7 @@ pub(super) fn resolve_session_for_add(
         ),
         Err(e) => anyhow::bail!(
             "{}",
-            e.ambiguity_message("pass --session <id>, or see `llmenv task session ls`")
-                .unwrap_or_else(|| "more than one session is open, so none was chosen".to_string())
+            e.message("pass --session <id>, or see `llmenv task session ls`")
         ),
     }
 }
