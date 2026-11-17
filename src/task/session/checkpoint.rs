@@ -29,7 +29,7 @@ pub(super) fn only_own_session<'a>(
 }
 
 fn active_since(session: &Session, start: SystemTime) -> bool {
-    humantime::parse_rfc3339(&session.last_activity).is_ok_and(|at| at >= start)
+    crate::util::time::parse_rfc3339(&session.last_activity).is_ok_and(|at| at >= start)
 }
 
 /// When the engine process `pid` started, from its elapsed time in `ps`. `None` when `ps` cannot
@@ -196,12 +196,10 @@ pub(super) fn resume(
 #[must_use]
 pub(crate) fn idle_display(last_activity: &str) -> String {
     let now = std::time::SystemTime::now();
-    humantime::parse_rfc3339(last_activity)
+    crate::util::time::parse_rfc3339(last_activity)
         .ok()
         .and_then(|t| now.duration_since(t).ok())
-        .map(|d| {
-            humantime::format_duration(std::time::Duration::from_secs(d.as_secs())).to_string()
-        })
+        .map(|d| crate::util::time::format_age(std::time::Duration::from_secs(d.as_secs())))
         .unwrap_or_else(|| "unknown".to_string())
 }
 

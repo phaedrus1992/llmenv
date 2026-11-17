@@ -9,7 +9,6 @@ yanked = "deny"
 # #2677. Re-check this ignore by 2026-11-30 (cargo-deny 0.19 has no expiry key).
 ignore = [
     { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml via serde_yaml_ng; see #2677" },
-    { id = "RUSTSEC-2026-0542", reason = "humantime is unmaintained, with no safe upgrade; see #3790" },
 ]
 
 [licenses]
