@@ -50,10 +50,7 @@ pub(super) fn render_branch_with(
         // (#3745).
         Err(e) => {
             tracing::error!("statusline branch cannot be read: {e}");
-            return cfg
-                .and_then(|c| c.format.as_deref())
-                .unwrap_or("\u{1f33f} {name}")
-                .replace("{name}", super::super::UNKNOWN_MARKER);
+            return super::super::fill_unknown(cfg, "\u{1f33f} {name}", &["{name}"]);
         }
     };
     let name = super::super::sanitize(&name); // untrusted (stdin / git ref)

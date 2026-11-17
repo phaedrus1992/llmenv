@@ -988,7 +988,7 @@ Throttling is fail-soft: any error (missing config, network failure) skips the
 delay rather than blocking the session.
 The throttle state file is `throttle.json` in the state directory (changed in v3.12.2).
 A file that cannot be read or removed is reported with its path.
-A `throttle.json` that exists but cannot be parsed shows `throttle unreadable` in the statusline, not throttling off (changed in v3.13.0).
+A `throttle.json` that exists but cannot be parsed keeps the `throttle` widget format and shows `?` in place of the value, not throttling off (changed in v3.13.0; changed in v3.14.0 to keep the format).
 Two throttle entries active at once show `throttle conflict`, a different label from an unreadable state file (changed in v3.13.0).
 A failed read or parse of the statusline data file is logged at error level, and a missing file stays empty (changed in v3.13.0).
 A stale file that cannot be removed fails the export, instead of leaving throttling on.

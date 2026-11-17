@@ -143,7 +143,10 @@ pub fn render_engine_widget(
                     tracing::error!("statusline pr cannot read the branch: {cause}");
                 }
                 // The format stays and the marker takes the value (#3745). The cause goes to the log.
-                tracing::warn!("statusline pr has no answer: {}", e.label());
+                tracing::error!(
+                    "statusline pr has no answer: {}. Fix: run `gh auth status`.",
+                    e.label()
+                );
                 let raw = render_pr_unknown(cfg);
                 return Some(super::finish(name, raw, cfg, None, use_color));
             }
@@ -503,11 +506,11 @@ fn render_pr_unknown(cfg: Option<&llmenv_config::WidgetConfig>) -> String {
         Some("url") => "{url}",
         _ => "#{number}",
     };
-    cfg.and_then(|c| c.format.as_deref())
-        .unwrap_or(default_format)
-        .replace("{number}", super::UNKNOWN_MARKER)
-        .replace("{url}", super::UNKNOWN_MARKER)
-        .replace("{review_state}", super::UNKNOWN_MARKER)
+    super::fill_unknown(
+        cfg,
+        default_format,
+        &["{number}", "{url}", "{review_state}"],
+    )
 }
 
 /// Color the `pr` widget by review state: approved green, changes-requested

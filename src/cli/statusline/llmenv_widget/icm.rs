@@ -10,9 +10,11 @@ pub(super) fn render_icm(data: &StatusData, cfg: Option<&llmenv_config::WidgetCo
     let Some(icm) = &data.icm else {
         // A failed query keeps the format and shows the marker. No backend shows nothing (#3745).
         return if data.icm_failed {
-            format
-                .replace("{memories}", UNKNOWN_MARKER)
-                .replace("{concepts}", UNKNOWN_MARKER)
+            crate::cli::statusline::fill_unknown(
+                cfg,
+                "🧠 {memories}",
+                &["{memories}", "{concepts}"],
+            )
         } else {
             String::new()
         };
