@@ -6,6 +6,7 @@
 //! once the note is written. A file whose process is gone is the trace of a crash, and the next
 //! `llmenv task` command writes its note, marked as recovered.
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -29,15 +30,19 @@ enum Target {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Entry {
-    pid: u32,
     target: Target,
     text: String,
 }
 
 /// A journal file that exists until the note is written, or until the command ends without one.
+/// The command holds an exclusive lock on the file while it lives. The system releases the lock
+/// when the process dies, so a file that can be locked belongs to a command that is gone. This
+/// needs no process id, and a reused id cannot fool it.
 #[derive(Debug)]
 pub(crate) struct Pending {
     path: PathBuf,
+    /// The open file that holds the lock. It closes when the value drops.
+    _lock: Option<File>,
 }
 
 impl Pending {
@@ -79,23 +84,31 @@ impl Pending {
         let path = dir.join(format!("{name}.json"));
         let hidden = dir.join(format!(".{name}.tmp"));
         let entry = Entry {
-            pid,
             target,
             text: text.to_owned(),
         };
         let bytes = serde_json::to_vec(&entry).context("cannot encode the note journal entry")?;
-        let written = write_new(&hidden, &bytes).and_then(|()| std::fs::rename(&hidden, &path));
-        if let Err(e) = written {
-            let _ = std::fs::remove_file(&hidden);
-            return Err(e).with_context(|| {
-                format!(
-                    "cannot write the note journal {}. Fix: make the folder writable, then run \
-                     the command again",
-                    path.display()
-                )
-            });
-        }
-        Ok(Self { path })
+        let written = write_locked(&hidden, &bytes).and_then(|file| {
+            std::fs::rename(&hidden, &path)?;
+            Ok(file)
+        });
+        let file = match written {
+            Ok(file) => file,
+            Err(e) => {
+                let _ = std::fs::remove_file(&hidden);
+                return Err(e).with_context(|| {
+                    format!(
+                        "cannot write the note journal {}. Fix: make the folder writable, then \
+                         run the command again",
+                        path.display()
+                    )
+                });
+            }
+        };
+        Ok(Self {
+            path,
+            _lock: Some(file),
+        })
     }
 
     /// Remove the journal file. The note is written, or the command ended without it. Calling it
@@ -123,7 +136,9 @@ fn journal_dir(state_dir: &Path) -> PathBuf {
     state_dir.join("pending-notes")
 }
 
-fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+/// Write a new file and keep it locked. The lock is taken before the entry has its final name,
+/// so a reader never sees an unlocked entry of a live command.
+fn write_locked(path: &Path, bytes: &[u8]) -> std::io::Result<File> {
     use std::io::Write;
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -132,36 +147,10 @@ fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    options.open(path)?.write_all(bytes)
-}
-
-/// Whether the system reports no process with this id. A process of another user still exists, so
-/// it is not gone. A process that cannot be asked about counts as alive, and its entry stays.
-fn process_is_gone(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        let Some(pid) = i32::try_from(pid)
-            .ok()
-            .and_then(rustix::process::Pid::from_raw)
-        else {
-            return false;
-        };
-        matches!(
-            rustix::process::test_kill_process(pid),
-            Err(rustix::io::Errno::SRCH)
-        )
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        false
-    }
-}
-
-/// [`recover`] for the processes that the system reports as gone. Each result is a note that
-/// could not be written.
-pub(crate) fn recover_crashed(state_dir: &Path) -> Vec<String> {
-    recover(state_dir, process_is_gone)
+    let mut file = options.open(path)?;
+    file.try_lock().map_err(std::io::Error::other)?;
+    file.write_all(bytes)?;
+    Ok(file)
 }
 
 /// The entries of the journal folder, in name order. A hidden file and a claimed file are not
@@ -224,25 +213,51 @@ fn read_entry(path: &Path) -> Option<Entry> {
     }
 }
 
-/// Write the note of every journal entry whose process is gone, and remove the entry. A note that
+/// Lock an entry for a replay. `None` when a live command holds it, when another command replays
+/// it, or when the entry is gone, which are all reasons to skip it. A lock on a file that was
+/// removed after the open is no lock, so the path must still name the locked file.
+fn lock_entry(path: &Path) -> Option<File> {
+    let file = File::open(path).ok()?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => return None,
+        Err(std::fs::TryLockError::Error(e)) => {
+            tracing::warn!(path = %path.display(), "cannot lock a note journal entry: {e}");
+            return None;
+        }
+    }
+    let still_there = match (std::fs::metadata(path), file.metadata()) {
+        (Ok(named), Ok(opened)) => same_file(&named, &opened),
+        _ => false,
+    };
+    still_there.then_some(file)
+}
+
+#[cfg(unix)]
+fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    (a.dev(), a.ino()) == (b.dev(), b.ino())
+}
+
+#[cfg(not(unix))]
+fn same_file(_a: &std::fs::Metadata, _b: &std::fs::Metadata) -> bool {
+    true
+}
+
+/// Write the note of every journal entry whose command is gone, and remove the entry. A note that
 /// cannot be written is kept as `.failed` beside the journal, and the result names it with the
-/// text. A live process keeps its entry: its command is still running.
-///
-/// `is_gone` answers whether a process id has no process.
-pub(in crate::task) fn recover(state_dir: &Path, is_gone: impl Fn(u32) -> bool) -> Vec<String> {
+/// text. An entry that a live command holds stays: that command is still running.
+pub(crate) fn recover(state_dir: &Path) -> Vec<String> {
     let mut lost = Vec::new();
     for path in entry_paths(state_dir) {
+        // The lock is held to the end of the replay, so two commands replay one entry once, and a
+        // command that dies in the replay leaves the entry for the next command.
+        let Some(_lock) = lock_entry(&path) else {
+            continue;
+        };
         let Some(entry) = read_entry(&path) else {
             continue;
         };
-        if !is_gone(entry.pid) {
-            continue;
-        }
-        // The rename is the claim: two commands that start together replay one entry once.
-        let claimed = path.with_extension(format!("claim-{}", std::process::id()));
-        if std::fs::rename(&path, &claimed).is_err() {
-            continue;
-        }
         let text = format!("{RECOVERED}{}", entry.text);
         let written = match &entry.target {
             Target::Task(slug) => {
@@ -250,23 +265,36 @@ pub(in crate::task) fn recover(state_dir: &Path, is_gone: impl Fn(u32) -> bool) 
             }
             Target::Session(id) => super::session::append_override_note(state_dir, id, Some(&text)),
         };
-        match written {
-            Ok(()) => {
-                let _ = std::fs::remove_file(&claimed);
-            }
-            Err(e) => {
-                let kept = path.with_extension("failed");
-                let _ = std::fs::rename(&claimed, &kept);
-                lost.push(format!(
-                    "an --other-session note from a crashed command could not be written: {e:#}. \
-                     The entry is kept as {}. The note text was: {}",
-                    kept.display(),
-                    entry.text
-                ));
-            }
+        let kept = path.with_extension("failed");
+        let ended = match written {
+            Ok(()) => std::fs::remove_file(&path).map_err(|e| {
+                format!(
+                    "the entry {} could not be removed ({e}), so the note may be written again",
+                    path.display()
+                )
+            }),
+            Err(e) => Err(match std::fs::rename(&path, &kept) {
+                Ok(()) => format!("{e:#}. The entry is kept as {}", kept.display()),
+                Err(rename) => format!("{e:#}. The entry stays at {} ({rename})", path.display()),
+            }),
+        };
+        if let Err(why) = ended {
+            lost.push(format!(
+                "an --other-session note from a crashed command: {why}. The note text was: {}",
+                entry.text
+            ));
         }
     }
     lost
+}
+
+#[cfg(test)]
+impl Pending {
+    /// Simulate a crash: the lock is released and the entry stays.
+    pub(in crate::task) fn crash(self) {
+        let mut me = std::mem::ManuallyDrop::new(self);
+        drop(me._lock.take());
+    }
 }
 
 #[cfg(test)]

@@ -493,9 +493,9 @@ fn a_crash_after_the_guard_leaves_the_note_for_recovery() {
     let note = ensure_task_is_ours(dir.path(), &slug, &caller, Some(&owner))
         .expect("the named owner may be acted on")
         .expect("an override needs a note");
-    std::mem::forget(note);
+    note.pending.crash();
 
-    let lost = super::super::pending_note::recover(dir.path(), |_| true);
+    let lost = super::super::pending_note::recover(dir.path());
 
     assert!(lost.is_empty(), "{lost:?}");
     let task = load_task(dir.path(), &slug).expect("task");
@@ -514,7 +514,7 @@ fn a_refused_command_leaves_no_journal() {
     let caller = Caller::Session("some-other-session".to_string());
     drop(ensure_task_is_ours(dir.path(), &slug, &caller, Some(&owner)).expect("allowed"));
 
-    let lost = super::super::pending_note::recover(dir.path(), |_| true);
+    let lost = super::super::pending_note::recover(dir.path());
 
     assert!(lost.is_empty(), "{lost:?}");
     assert!(load_task(dir.path(), &slug).expect("task").notes.is_empty());
@@ -537,10 +537,10 @@ fn a_crash_after_a_delete_leaves_the_note_on_the_callers_session() {
         .journal_for_delete(dir.path(), &caller)
         .expect("journal")
         .expect("a session journal");
-    std::mem::forget(journal);
+    journal.crash();
     drop(note);
 
-    let lost = super::super::pending_note::recover(dir.path(), |_| true);
+    let lost = super::super::pending_note::recover(dir.path());
 
     assert!(lost.is_empty(), "{lost:?}");
     let stored =

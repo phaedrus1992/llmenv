@@ -79,9 +79,8 @@ const LOG_TAIL_BYTES: u64 = 8 * 1024;
 /// stale pidfile unrecoverable and let a dead pid be recorded as the listener.
 /// The pidfile answers "who do I signal", and is reconciled (cleared when it
 /// names a process that is not running) on the cold-start paths. The fast path
-/// deliberately skips that: it runs on every shell prompt, and judging a pid
-/// costs a fork+exec of `kill` — far more than the probe it would follow — while
-/// a stale pid is inert once liveness no longer consults it.
+/// deliberately skips that: it runs on every shell prompt, the loopback probe
+/// already answers liveness, and a stale pid is inert once liveness no longer consults it.
 ///
 /// The pid is written only *after* the bind is confirmed and the child is
 /// confirmed still alive, so a child that has *already* exited — losing the port
@@ -101,7 +100,7 @@ const LOG_TAIL_BYTES: u64 = 8 * 1024;
 /// invoking `mcp-proxy`. Production callers pass [`spawn_mcp_proxy`]. It returns
 /// a [`Child`] rather than a bare pid because `Child::try_wait` is the only
 /// reliable way to tell a running child from one that has already exited — a
-/// `kill -0` check reports an unreaped child as alive (#1085).
+/// signal check reports an unreaped child as alive (#1085).
 ///
 /// # Errors
 /// Returns an error if the parent directory cannot be created, the spawn
@@ -134,9 +133,8 @@ where
     // the proxy is up regardless of what the pidfile says (#1085).
     //
     // Deliberately does not reconcile the pidfile. This runs on every shell
-    // prompt on the server host, and `is_alive` costs a fork+exec of `kill`
-    // (~7 ms measured) — far more than the loopback probe it would follow. A
-    // stale pid is harmless now that nothing reads it for liveness, so it is
+    // prompt on the server host, and the loopback probe already answers
+    // liveness. A stale pid is harmless now that nothing reads it for liveness, so it is
     // reconciled on the paths that are already paying for a spawn instead.
     if probe_tcp(bind, LIVENESS_TCP_TIMEOUT_MS) {
         return Ok(EnsureOutcome::AlreadyRunning);
@@ -196,7 +194,7 @@ where
         }
         anyhow::bail!(
             "another llmenv process (pid {holder}) holds {} but nothing is serving {bind} \
-             after {budget_ms}ms",
+             after {budget_ms}ms. Fix: if no llmenv process runs, remove the lock file",
             lock_path.display()
         );
     }
@@ -963,13 +961,12 @@ pub fn probe_tcp(bind: &str, timeout_ms: u64) -> bool {
     TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(timeout_ms)).is_ok()
 }
 
-/// Whether `pid` is a live process, via a `kill -0` signal-0 check.
+/// Whether `pid` is a live process, via a signal-0 check.
 ///
 /// `Some(true)` alive, `Some(false)` definitely not running, `None` when the
 /// check itself couldn't be performed. The three-way answer matters because
-/// callers act destructively on "not running": collapsing an unusable `kill` (not
-/// on `PATH`, or `fork` failing under process exhaustion) into `false` would make
-/// them treat every live process as dead.
+/// callers act destructively on "not running": collapsing an unusable check into `false` would
+/// make them treat every live process as dead. A process of another user is alive.
 ///
 /// # Note on TOCTOU
 /// Subject to PID-reuse races: a recycled pid belonging to an unrelated process
@@ -977,7 +974,7 @@ pub fn probe_tcp(bind: &str, timeout_ms: u64) -> bool {
 /// to the bind address should prefer [`probe_tcp`], which proves the proxy is
 /// actually serving.
 ///
-/// Returns `None` on non-Unix platforms, where there is no `kill` to consult.
+/// Returns `None` on non-Unix platforms, where there is no signal check to make.
 #[must_use]
 pub fn is_alive(pid: u32) -> Option<bool> {
     #[cfg(unix)]
@@ -989,15 +986,14 @@ pub fn is_alive(pid: u32) -> Option<bool> {
         if pid_i32 <= 0 {
             return None;
         }
-        // We avoid pulling libc as a dependency by going through std::process
-        // — std doesn't expose kill(2) with sig=0 directly.
-        Command::new("kill")
-            .arg("-0")
-            .arg(pid_i32.to_string())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .ok()
-            .map(|s| s.success())
+        let pid = rustix::process::Pid::from_raw(pid_i32)?;
+        // Only ESRCH means that no such process exists. EPERM is a live process of another
+        // user, so `kill -0` and its exit status cannot tell the two apart (#3782).
+        match rustix::process::test_kill_process(pid) {
+            Ok(()) | Err(rustix::io::Errno::PERM) => Some(true),
+            Err(rustix::io::Errno::SRCH) => Some(false),
+            Err(_) => None,
+        }
     }
     #[cfg(not(unix))]
     {
@@ -1515,6 +1511,15 @@ mod tests {
             None,
             "a dead pid must be cleared"
         );
+    }
+
+    /// A live process of another user is alive, not gone (#3782). Process 1 belongs to root, so a
+    /// caller without root meets EPERM from it.
+    #[cfg(unix)]
+    #[test]
+    fn a_process_of_another_user_is_alive() {
+        assert_eq!(super::is_alive(1), Some(true));
+        assert_eq!(super::is_alive(std::process::id()), Some(true));
     }
 
     /// An unparseable pidfile is cleared rather than left to fail every later read.
