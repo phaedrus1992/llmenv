@@ -18,6 +18,10 @@ pub struct StatusData {
     pub plugins: Option<CountData>,
     pub mcps: Option<CountData>,
     pub icm: Option<IcmData>,
+    /// Set when the ICM stats call failed or its reply had no count. The widget then keeps its
+    /// format and shows the marker. A scope with no backend leaves this unset.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub icm_failed: bool,
     pub throttle: Option<ThrottleData>,
     /// Set when the stored throttle state exists but cannot be read. The
     /// widget shows this instead of reporting throttling as off.
@@ -259,6 +263,7 @@ mod tests {
                     plugins: plugins.map(|(total, errors)| CountData { total, errors }),
                     mcps: None,
                     icm: None,
+                    icm_failed: false,
                     throttle: throttle.map(|(backend, cooldown_secs)| ThrottleData {
                         backend,
                         cooldown_secs,

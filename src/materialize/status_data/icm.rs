@@ -13,40 +13,48 @@ const ICM_STATS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2)
 /// active for the current scope, the MCP call fails or times out, or the
 /// response can't be parsed — every one of those is an expected, non-error
 /// condition (most sessions have no ICM backend configured at all).
-pub(super) fn collect_icm() -> Option<IcmData> {
-    icm_data_from(crate::memory::stats_json_with_timeout(ICM_STATS_TIMEOUT))
+pub(super) fn collect_icm() -> (Option<IcmData>, bool) {
+    icm_reading_from(crate::memory::stats_json_with_timeout(ICM_STATS_TIMEOUT))
 }
 
-/// The status data for the result of the stats call. A scope with no backend is normal and logs at
-/// debug. Any other failure, and a reply with no readable count, log at warn, so an empty field
-/// has a visible cause (#3062).
+/// [`icm_reading_from`] without the failure flag.
+#[cfg(test)]
 fn icm_data_from(reply: anyhow::Result<String>) -> Option<IcmData> {
+    icm_reading_from(reply).0
+}
+
+/// The status data for the result of the stats call, and whether the call failed. A scope with no
+/// backend is normal and logs at debug. Any other failure, and a reply with no readable count,
+/// log at warn, so an empty field has a visible cause (#3062). The flag lets the widget show the
+/// marker for a failure and nothing for a scope with no backend (#3745).
+fn icm_reading_from(reply: anyhow::Result<String>) -> (Option<IcmData>, bool) {
     let raw = match reply {
         Ok(raw) => raw,
         // Most scopes have no ICM backend, so that case is not a problem to report.
         Err(e) if crate::memory::is_no_backend(&e) => {
             tracing::debug!("icm stat collection skipped, no memory backend for this scope: {e}");
-            return None;
+            return (None, false);
         }
         Err(e) => {
             tracing::warn!(
-                "icm stat collection failed, so the ICM field is empty: {e:#}. Fix: check that \
-                 the ICM backend is running and reachable."
+                "icm stat collection failed, so the ICM field shows a marker: {e:#}. Fix: check \
+                 that the ICM backend is running and reachable."
             );
-            return None;
+            return (None, true);
         }
     };
     let parsed = parse_icm_stats(&raw);
     if parsed.is_none() {
-        // The status field is empty without this line, so a format change in ICM's reply is
+        // The status field has no count without this line, so a format change in ICM's reply is
         // visible instead of silent. The reply is cut to keep the log short.
         let head: String = raw.chars().take(200).collect();
         tracing::warn!(
-            "icm stat reply has no readable Memories line, so the ICM field is empty. Reply \
+            "icm stat reply has no readable Memories line, so the ICM field shows a marker. Reply \
              starts: {head:?}. Fix: check that the ICM backend returns the stats text."
         );
     }
-    parsed
+    let failed = parsed.is_none();
+    (parsed, failed)
 }
 
 /// Pure text-extraction half of `collect_icm`, split out so it's testable

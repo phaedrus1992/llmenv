@@ -4,6 +4,7 @@
 
 use std::path::Path;
 
+use super::note_not_saved;
 use super::pending_note::Pending;
 use super::resolve::{check_identifier, resolve_in};
 use super::session::{self, EngineIdentity, Session};
@@ -133,15 +134,15 @@ impl OverrideNote {
         use anyhow::Context;
         let written = super::note_task(state_dir, &self.slug, &self.text);
         self.pending.finish();
-        written.with_context(|| {
+        let noted = written.with_context(|| {
             format!(
                 "the change to task '{}' is saved, but its --other-session note is not. Fix: add \
                  the note with `llmenv task note {} <text>`, where the text is the next line \
                  (data, not a command):\n{}",
                 self.slug, self.slug, self.text
             )
-        })?;
-        Ok(())
+        });
+        note_not_saved::mark_result(noted.map(drop))
     }
 }
 
@@ -307,7 +308,7 @@ impl SessionOverride {
         if let Some(pending) = &self.pending {
             pending.finish();
         }
-        written
+        note_not_saved::mark_result(written)
     }
 
     /// Record the note for a command that failed after it had changed some tasks, then give back
@@ -407,12 +408,13 @@ pub(crate) fn record_cleared_override(
         "Cleared with --other-session by {by}. Deleted tasks: {}.",
         deleted.join(", ")
     );
-    session::append_override_note(state_dir, owner, Some(&text)).with_context(|| {
+    let written = session::append_override_note(state_dir, owner, Some(&text)).with_context(|| {
         format!(
             "the tasks were cleared, but the note on session '{owner}' was not saved; \
              do not retry the clear"
         )
-    })
+    });
+    note_not_saved::mark_result(written)
 }
 
 /// Refuses a `task add --session <id>` that names a session of another conversation, unless
@@ -580,10 +582,11 @@ pub(crate) fn record_owner_less_delete(
         slugs.join(", "),
         caller.describe()
     );
-    session::append_override_note(state_dir, id, Some(&text)).with_context(|| {
+    let written = session::append_override_note(state_dir, id, Some(&text)).with_context(|| {
         format!(
             "the tasks were deleted, but the note on session '{id}' was not saved; do not retry \
              the delete"
         )
-    })
+    });
+    note_not_saved::mark_result(written)
 }

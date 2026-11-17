@@ -30,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Statusline `tasks`, `branch`, `pr`, `icm`, and usage-delta widgets keep their format and show `?` when their data cannot be read, as the zone widgets do. They no longer swap in a text label such as `pr: gh failed`; the cause goes to the log. See [the statusline docs](https://phaedrus1992.github.io/llmenv/docs/configuration). [feat:statusline] [#3745]
 - Read tool versions with the `semver` crate. A version with a leading zero, such as `2.01.0`, or an empty pre-release is no longer a version. [refactor:util] [#3510]
 - Return the `--other-session` audit note of a session command as a type that must be used, so a command cannot drop the note without a compiler warning. A pick that cannot name its cause now has a message for every case. [refactor:task] [#3602] [#3603]
 - Read the task store once in `llmenv task clear --session`, and the session store once in `llmenv task session show`, `summary`, `edit`, `note`, and `finish` with no id. `clear --session` takes the deleted tasks from the delete itself, so a failed delete no longer reads the store again. [perf:task] [#3743]
@@ -70,6 +71,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Report a task that `llmenv task show --next` skips because of a missing parent, a parent loop, or a parent of another session, on stderr with its fix. [fix:task] [#3777]
 - Keep the `--other-session` audit note when a command crashes after its change: the note is journaled first, and the next `llmenv task` command writes it. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#task). [fix:task] [#3762]
 - Do not follow a link at the project `.claude` folder or at its settings files in the subscription-auth check, and do not follow a linked session log in the record count. A linked settings file now keeps the llmenv resume notice. See [configuration](https://phaedrus1992.github.io/llmenv/docs/configuration). [fix:hook] [#3785]
+- Exit with status 3 when a task command saved its change but could not write the `--other-session` audit note. A failed change still exits with status 1. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#task). [fix:task] [#3765]
 - Pass a re-read through when the file size changed, even when the modification time did not. Read-once compared only the modification time before. See [configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#featuresread_once). [fix:hook] [#3226]
 - Show a dropped detached-trace line, a failed trace rotation, skipped stranded transcripts, a failed status-line plugin or session-log read, and a skipped inherit copy as agent notices with a fix, and log each notice once. [fix:notice] [#3226]
 - Refuse a named pipe or a linked folder at a bundle cache target, and remove a partial `.llmenv-upgrade.bak` after a failed backup in `llmenv upgrade`. [fix:materialize] [#3226]

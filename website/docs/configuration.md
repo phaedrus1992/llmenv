@@ -1588,17 +1588,18 @@ All nine honor `format:`.
 | `session_log` | `{icon} {entries}` | `📝 8` | `icon`, `entries` |
 | `tasks` | `☑ {done}/{total}` (summed across the current project's open sessions, #905); renders empty when no session is open for this project. In a project with several conversations, the widget counts only the sessions that the current conversation owns, plus sessions with no owner (changed in v3.14.0) | `☑ 2/5` | `done`, `total` (summed across every session open for the current project), `current` (title of the task currently `wip`/`waiting` among those sessions; empty when none). The default doesn't show `current` — combine it yourself, e.g. `format: "{done}/{total} — {current}"` |
 
-The `tasks` widget shows `tasks: unreadable` in place of its count when a session or task file cannot be read, so a read error never looks like no work (changed in v3.13.0).
+When a session or task file cannot be read, the `tasks` widget keeps its format and shows `?` in place of each count, so a read error never looks like no work (changed in v3.13.0; changed in v3.14.0 to keep the format).
 
-The `branch` widget shows `branch: unreadable` when the repository's `HEAD` exists but cannot be read, instead of hiding the branch (changed in v3.13.0).
+When the repository's `HEAD` exists but cannot be read, the `branch` widget keeps its format and shows `?` in place of the name, instead of hiding the branch (changed in v3.13.0; changed in v3.14.0 to keep the format).
 
-The `pr` widget shows `pr: unreadable` when the branch cannot be read, instead of hiding itself (changed in v3.13.0).
-When `gh` gives no answer, the `pr` widget names the cause: `pr: gh missing` when `gh` is not installed, `pr: gh not logged in` when its login failed or expired, and `pr: gh failed` for a timeout or another error (changed in v3.13.0).
-The cause stays cached for the same 60 seconds as a PR answer.
-A branch with no open PR shows nothing in the `pr` widget, and it does not show `pr: gh failed` (fixed in v3.14.0).
+When the branch cannot be read, or `gh` gives no answer, the `pr` widget keeps its format and shows `?` in place of `{number}`, `{url}`, and `{review_state}` (changed in v3.14.0; it showed `pr: unreadable`, `pr: gh missing`, `pr: gh not logged in`, or `pr: gh failed` before).
+The cause is written to the log, and it stays cached for the same 60 seconds as a PR answer.
+A branch with no open PR shows nothing in the `pr` widget, and it does not show `?` (fixed in v3.14.0).
 The "no PR" answer needs `gh` exit code 1 with its no-PR message, as gh 2.103.3 writes it.
-The same message with another exit, or a `gh` killed by a signal, shows `pr: gh failed` (changed in v3.14.0).
+The same message with another exit, or a `gh` killed by a signal, shows `?` (changed in v3.14.0).
 A branch with no open PR, or a repository with no GitHub remote, still shows nothing.
+The `icm` widget shows `?` in place of `{memories}` and `{concepts}` when the ICM stats call fails, and it shows nothing when no ICM backend is configured.
+The usage `{delta}` shows `(?)` after a space when its state file cannot be read (all added in v3.14.0).
 
 An unrecognized placeholder inside a custom `format` string (e.g. `{title}`
 on `pr`, or `{count}` on `scopes`) is left in the output literally rather than
