@@ -46,10 +46,11 @@ pub(super) fn render_branch_with(
     let name = match resolve_branch_name(data) {
         Ok(Some(name)) => name,
         Ok(None) => return String::new(),
-        // Same label as the other unreadable widgets. The segment is never hidden silently.
+        // The segment keeps its format and shows the marker, so it is never hidden silently
+        // (#3745).
         Err(e) => {
             tracing::error!("statusline branch cannot be read: {e}");
-            return "branch: unreadable".to_string();
+            return super::super::fill_unknown(cfg, "\u{1f33f} {name}", &["{name}"]);
         }
     };
     let name = super::super::sanitize(&name); // untrusted (stdin / git ref)

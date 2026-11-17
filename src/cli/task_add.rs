@@ -3,9 +3,8 @@
 
 use std::path::Path;
 
-use crate::task::ownership::ensure_named_session_takes_tasks;
 use crate::task::session::EngineIdentity;
-use crate::task::{NewTask, ParentSpec, Placement, SessionChoice, add_task_with, note_task};
+use crate::task::{NewTask, ParentSpec, Placement, SessionChoice, add_task_with};
 
 use super::current_project_tag;
 
@@ -43,12 +42,12 @@ pub(super) fn run(state_dir: &Path, args: &AddArgs<'_>) -> anyhow::Result<()> {
     };
     let project = current_project_tag()?;
     let owner = EngineIdentity::from_env()?;
-    let overridden = match args.session {
-        Some(id) => ensure_named_session_takes_tasks(state_dir, id, &owner, args.other_session)?,
-        None => false,
-    };
     let choice = match args.session {
-        Some(id) => SessionChoice::Named(id),
+        Some(id) => SessionChoice::Named {
+            id,
+            owner: &owner,
+            other_session: args.other_session,
+        },
         None => SessionChoice::Resolve(&owner),
     };
     if args.detail.is_some_and(str::is_empty) {
@@ -59,18 +58,9 @@ pub(super) fn run(state_dir: &Path, args: &AddArgs<'_>) -> anyhow::Result<()> {
         detail: args.detail,
         placement,
         after: args.after,
+        note: None,
     };
     let task = add_task_with(state_dir, &new, parent_spec, choice, &project)?;
-    if let (true, Some(id)) = (overridden, args.session) {
-        let text = format!("Added with --other-session, which names the owner of session '{id}'.");
-        note_task(state_dir, task.slug.as_str(), &text).map_err(|err| {
-            anyhow::anyhow!(
-                "task '{}' was added, but its --other-session note was not saved: {err:#}. Do not \
-                 retry the add, or it creates a duplicate task.",
-                task.slug
-            )
-        })?;
-    }
     println!("Added task '{}' ({})", task.slug, task.title);
     Ok(())
 }

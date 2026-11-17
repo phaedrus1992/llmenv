@@ -92,7 +92,7 @@ proptest! {
                 (add_in(dir.path(), n, session, *s), abandoned)
             })
             .collect();
-        start_session(dir.path(), None, None, PROJECT_A, StartDecision::Replace).unwrap();
+        start_session(dir.path(), None, None, PROJECT_A, StartDecision::Replace(Vec::new())).unwrap();
         for (task, in_abandoned) in &added {
             let now = load_task(dir.path(), &task.slug).unwrap();
             if *in_abandoned && task.state != TaskState::Done {
@@ -102,6 +102,93 @@ proptest! {
                 prop_assert_eq!(&now.session, &task.session);
                 prop_assert!(now.notes.is_empty());
             }
+        }
+    }
+}
+
+// #3749: a failed second save returns the first untagged task, and the task that failed stays
+// tagged on disk.
+#[test]
+fn a_failed_second_untag_returns_the_task_already_untagged() {
+    use crate::partial::changed_before_failure;
+    let dir = TempDir::new().unwrap();
+    let session = start(dir.path(), PROJECT_A, StartDecision::Auto);
+    let first = add_in(dir.path(), 1, &session, TaskState::Open);
+    let second = add_in(dir.path(), 2, &session, TaskState::Open);
+    let tasks = vec![first.clone(), second.clone()];
+    let mut saves = 0;
+    let err = super::untag_with(&session, tasks, "now", "dropped", |task| {
+        saves += 1;
+        if saves == 2 {
+            anyhow::bail!("disk full")
+        }
+        save_task(dir.path(), task)
+    })
+    .unwrap_err();
+    let changed = changed_before_failure(&err);
+    assert_eq!(changed.len(), 1);
+    assert_eq!(changed[0].slug, first.slug);
+    assert!(format!("{err:#}").contains("disk full"));
+    assert_eq!(load_task(dir.path(), &first.slug).unwrap().session, None);
+    assert_eq!(
+        load_task(dir.path(), &second.slug)
+            .unwrap()
+            .session
+            .as_deref(),
+        Some(session.as_str())
+    );
+}
+
+fn json_task(slug: &str, state: &str) -> Task {
+    serde_json::from_value(serde_json::json!({
+        "slug": slug,
+        "title": slug,
+        "state": state,
+        "session": "s",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+    }))
+    .unwrap()
+}
+
+proptest! {
+    // With a save that fails at the k-th unfinished task, the error holds exactly the k tasks
+    // before it, and no save runs after the failure (#3749).
+    #[test]
+    fn a_failed_save_returns_exactly_the_tasks_before_it(
+        states in proptest::collection::vec(
+            prop_oneof![Just("open"), Just("wip"), Just("waiting"), Just("done")],
+            0..8,
+        ),
+        fail_at in 0usize..8,
+    ) {
+        use crate::partial::changed_before_failure;
+        let tasks: Vec<Task> = states
+            .iter()
+            .enumerate()
+            .map(|(n, st)| json_task(&format!("t{n}"), st))
+            .collect();
+        let unfinished: Vec<String> = tasks
+            .iter()
+            .filter(|t| t.state != TaskState::Done)
+            .map(|t| t.slug.clone())
+            .collect();
+        let mut saves = 0usize;
+        let result = super::untag_with("s", tasks, "now", "note", |_| {
+            saves += 1;
+            if saves == fail_at + 1 { anyhow::bail!("disk full") }
+            Ok(())
+        });
+        if fail_at >= unfinished.len() {
+            prop_assert_eq!(result.unwrap().len(), unfinished.len());
+        } else {
+            let err = result.unwrap_err();
+            let got: Vec<String> =
+                changed_before_failure(&err).iter().map(|t| t.slug.clone()).collect();
+            prop_assert_eq!(got, unfinished[..fail_at].to_vec());
+            prop_assert_eq!(saves, fail_at + 1);
+            let text = format!("{err:#}");
+            prop_assert!(text.contains("Fix: run"), "{}", text);
         }
     }
 }

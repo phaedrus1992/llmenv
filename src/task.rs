@@ -1,11 +1,12 @@
 pub use llmenv_task::{
     Completed, DisplayRow, NewTask, ParentSpec, Placement, SessionChoice, Stored, StrictTasks,
     Task, TaskEdit, TaskState, TaskTarget, Tracking, add_task, add_task_for_session, add_task_with,
-    block_task, complete_task, complete_task_by, delete_task, display_rows, edit_task,
+    block_task, complete_task, complete_task_by, delete_task, display_rows, edit_task, exit_code,
     filter_by_state, filter_tasks_for_project, last_task_hint, list_tasks, list_tasks_strict,
-    load_task, note_task, progress_in, render_task_list, reopen_task, resolve_current_task,
-    resolve_identifier, resolve_next_task, session_start_reminder, start_task, stop_hook_reminder,
-    tasks_dir, tracking, tracking_in, try_list_tasks, wait_task, wip_title_in, with_store_lock,
+    load_task, next_task_loops, note_task, progress_after_close, progress_in,
+    recover_crashed_notes, render_task_list, reopen_task, resolve_current_task, resolve_identifier,
+    resolve_next_task, session_start_reminder, start_task, stop_hook_reminder, tasks_dir, tracking,
+    tracking_in, try_list_tasks, wait_task, wip_title_in, with_store_lock,
 };
 
 /// Test setup writes a task file directly.
@@ -18,10 +19,23 @@ pub mod core_text {
 
 pub mod ownership {
     pub use llmenv_task::ownership::{
-        Caller, OverrideNote, caller_session, check_owner_less_delete, check_takes_tasks,
-        ensure_named_session_takes_tasks, ensure_session_is_ours, ensure_task_is_ours,
-        ensure_tasks_are_ours, record_owner_less_delete,
+        Caller, OverrideNote, SessionOverride, caller_for_pick, caller_session, check_names,
+        check_owner_less_delete, check_takes_tasks, ensure_named_session_takes_tasks,
+        ensure_session_is_callers, ensure_session_is_ours, ensure_task_is_ours,
+        ensure_tasks_are_ours, read_for_check, record_cleared_override, record_owner_less_delete,
     };
+}
+
+pub mod note_not_saved {
+    pub use llmenv_task::note_not_saved::{EXIT_SAVED_WITHOUT_NOTE, mark, mark_result};
+}
+
+pub mod partial {
+    pub use llmenv_task::partial::{PartialWrite, changed_before_failure};
+}
+
+pub mod pending_note {
+    pub use llmenv_task::pending_note::Pending;
 }
 
 pub mod reopen {
@@ -45,7 +59,8 @@ pub mod session {
         EngineIdentity, PickError, Session, SessionSummary, SessionSummaryTask, StartDecision,
         StartOutcome, StartRequest, append_override_note, delete_tasks_in_session, finish_session,
         idle_display, list_sessions_strict, load_existing_session, open_sessions_strict,
-        pick_open_session, session_summary, session_summary_with_agent, start_session,
-        start_session_as, touch_last_activity, try_session_progress, update_resume,
+        pick_open_session, session_reads_on_this_thread, session_summary,
+        session_summary_with_agent, start_session, start_session_as, touch_last_activity,
+        try_session_progress, update_resume,
     };
 }

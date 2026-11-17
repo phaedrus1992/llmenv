@@ -53,7 +53,7 @@ pub(super) fn boundary_reminder(
     state.boundary_reminded.push(key);
     let start = next
         .as_deref()
-        .map_or_else(String::new, |n| format!(" {}", start_next(n)));
+        .map_or_else(String::new, |n| format!(" After that, {}", start_next(n)));
     format!(
         "llmenv task tracker: `{event}` ends a step, but '{slug}' is still in progress, with \
          {queued} task(s) queued behind it. If '{slug}' is done, run `llmenv task done {slug}`.{start}"

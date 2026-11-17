@@ -940,12 +940,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
-name = "humantime"
-version = "2.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15cdd26707701c53297e2fa6afb323d55fbc1d0810c3aec078ae3ef0424c3c15"
-
-[[package]]
 name = "hybrid-array"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1181,9 +1175,9 @@ checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
 name = "jiff"
-version = "0.2.43"
+version = "0.2.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26699905cc795a23e3949585cc7ba3ee8ade090872a27e4316304a777297894a"
+checksum = "ac63a5a611e9d720726d6ab6ee2ee19e6f620503554ea5d303c7cb294ff40c12"
 dependencies = [
  "jiff-core",
  "jiff-static",
@@ -1205,9 +1199,9 @@ dependencies = [
 
 [[package]]
 name = "jiff-static"
-version = "0.2.43"
+version = "0.2.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b4ff49b2887190c760b86207b55cdcaabbdecaf7a0660d68aa2ed6f652abf0a"
+checksum = "9f9c27796c21cc8b33ce490f148d53fe41d679b887885bf0ef8f662cdb9b35c0"
 dependencies = [
  "jiff-core",
  "proc-macro2",
@@ -1339,7 +1333,6 @@ dependencies = [
  "hmac",
  "http",
  "http-body-util",
- "humantime",
  "hyper",
  "hyper-util",
  "insta",
@@ -1361,6 +1354,7 @@ dependencies = [
  "rustix",
  "schemars",
  "security-framework",
+ "semver",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -1463,17 +1457,18 @@ name = "llmenv-task"
 version = "5.0.0-alpha.1"
 dependencies = [
  "anyhow",
- "humantime",
  "llmenv-git",
  "llmenv-paths",
  "llmenv-scope",
  "llmenv-util",
  "proptest",
+ "rustix",
  "serde",
  "serde_json",
  "serde_yaml_ng",
  "sha2",
  "tempfile",
+ "thiserror",
  "tracing",
 ]
 
@@ -1482,6 +1477,8 @@ name = "llmenv-util"
 version = "5.0.0-alpha.1"
 dependencies = [
  "anstyle",
+ "anyhow",
+ "jiff",
  "llmenv-paths",
  "proptest",
  "serde_json",

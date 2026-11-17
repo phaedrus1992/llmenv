@@ -22,11 +22,19 @@ fn snap(remaining: Option<u64>, penalized: bool) -> UsageSnapshot {
 }
 
 proptest::proptest! {
+    // Whatever the stdin and the event, the call never panics. The name is empty only for an
+    // unknown event with no usable payload name, and an empty name always adds a notice.
     #[test]
-    fn hook_event_name_never_panics_and_always_names_an_event(stdin in "\\PC{0,64}") {
+    fn hook_event_name_never_panics_and_notices_an_empty_name(
+        stdin in "\\PC{0,64}",
+        event in prop_oneof![Just("prompt"), Just("pre-tool"), Just("other")],
+    ) {
         let mut notices = Vec::new();
-        let name = hook_event_name(&stdin, "prompt", &mut notices);
-        proptest::prop_assert!(!name.is_empty());
+        let name = hook_event_name(&stdin, event, &mut notices);
+        if name.is_empty() {
+            proptest::prop_assert!(!notices.is_empty());
+            proptest::prop_assert_eq!(event, "other");
+        }
     }
 
     #[test]
@@ -72,6 +80,31 @@ fn hook_event_name_reads_stdin_and_falls_back_with_a_notice() {
     assert_eq!(notices.len(), 1);
     assert!(notices[0].contains("not valid JSON") && notices[0].contains("Fix:"));
     assert_eq!(engine_event_name("other"), "");
+}
+
+// #3760: a payload with no name, and an event that maps to no name, each add a notice.
+#[test]
+fn a_payload_with_no_event_name_adds_a_notice() {
+    let mut notices = Vec::new();
+    let got = hook_event_name(r#"{"session_id":"x"}"#, "prompt", &mut notices);
+    assert_eq!(got, "UserPromptSubmit");
+    assert!(
+        notices.len() == 1
+            && notices[0].contains("no hook_event_name")
+            && notices[0].contains("Fix:"),
+        "{notices:?}"
+    );
+}
+
+#[test]
+fn an_unknown_event_with_no_payload_name_adds_a_notice() {
+    let mut notices = Vec::new();
+    let got = hook_event_name("", "other", &mut notices);
+    assert_eq!(got, "");
+    assert!(
+        notices.len() == 1 && notices[0].contains("not a known event"),
+        "{notices:?}"
+    );
 }
 
 #[test]
@@ -387,4 +420,15 @@ fn a_fifo_throttle_state_fails_at_once() {
     assert!(made.success());
     let err = read_active_throttle_with_state_dir(dir.path()).unwrap_err();
     assert!(format!("{err:#}").contains("not a regular file"), "{err:#}");
+}
+
+#[test]
+fn an_empty_event_name_falls_back_with_a_notice() {
+    let mut notices = Vec::new();
+    let got = hook_event_name(r#"{"hook_event_name":""}"#, "pre-tool", &mut notices);
+    assert_eq!(got, "PreToolUse");
+    assert!(
+        notices.len() == 1 && notices[0].contains("no hook_event_name"),
+        "{notices:?}"
+    );
 }

@@ -96,7 +96,7 @@ pub fn materialize_with_mode(
         // Strict mode: a content-hashed folder that already exists is
         // byte-identical, so reuse it untouched.
         // A file at this path is not a cached folder, so it must not be reused (#2657).
-        HashingMode::Strict if dest.is_dir() => {
+        HashingMode::Strict if is_real_dir(&dest) => {
             crate::cache_trace::emit_cache_trace("content_hash", true, cache_start.elapsed(), None);
             return Ok(Rendered { path: dest, hash });
         }
@@ -136,7 +136,8 @@ pub fn materialize_with_mode(
                 tracing::error!("cannot remove staging dir {}: {rm}", staging.display());
             }
             // Only a directory is a copy that can be used. A file at `dest` is an error (#2657).
-            if dest.is_dir() {
+            // A link to a directory is not a copy that this pass wrote, so it is an error too.
+            if is_real_dir(&dest) {
                 // A concurrent writer that won the race is a normal outcome, so this is debug only.
                 tracing::debug!(
                     "rename into {} failed, so the copy already there is used: {e}",
@@ -144,7 +145,11 @@ pub fn materialize_with_mode(
                 );
                 Ok(Rendered { path: dest, hash })
             } else {
-                Err(e.into())
+                Err(anyhow::Error::new(e).context(format!(
+                    "cannot move the staged bundle to {}. Fix: remove what is at that path, then \
+                     regenerate.",
+                    dest.display()
+                )))
             }
         }
     }
@@ -182,6 +187,11 @@ fn write_in_place(m: &MergedManifest, dest: &Path) -> anyhow::Result<()> {
     }
     prune_empty_dirs(dest)?;
     Ok(())
+}
+
+/// Whether `path` is a directory and not a link to one.
+fn is_real_dir(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
 }
 
 /// Write one `m.files` entry into `dest`, replacing whatever is at the

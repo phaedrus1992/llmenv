@@ -824,7 +824,9 @@ Flags:
 
 - `--all` — remove **every** cache folder unconditionally (the next `export` re-materializes).
 - `--older-than DUR` — in the cache-folder step, remove only current-version cache folders older than `DUR`.
-  Examples: `14d`, `1w`.
+  Examples: `14d`, `1w`, `90 days`, `1h30m`.
+  (changed in v3.14.0) A month or a year has no fixed length, so `1mo` and `1y` are refused.
+  Use weeks or days, such as `52w`.
   The age-based sweeps still use `cache_retention_hours`.
   `--all` and `--older-than` cannot be used together.
   A bad value stops the command before anything is removed.
@@ -900,7 +902,7 @@ llmenv task edit <id> [--title <t>] [--parent SLUG | --no-parent]
   [--block-on <id>]... [--unblock <id>]... [--add-note <text>] [--delete-note <index-or-timestamp>]
   [--detail <text> | --detail-file <path>]
 llmenv task clear <id>... | --session <id>
-llmenv task session start [name] [--description <text>] [--resume <id> | --replace | --new]
+llmenv task session start [name] [--description <text>] [--resume <id> | --replace [--other-session <id>]... | --new]
   [--task <title>]...
   [--context <text> | --context-file <path>] [--issue <n>]... [--branch <b>] [--base <b>]
   [--memory-topic <t>]... [--doc <path>]...
@@ -924,7 +926,9 @@ Only when the open session has no match does the search cover the whole project.
   order): it cannot start
   until the task ahead of it is `done` or `waiting`, and until no other queued task is in progress.
   `--child-of SLUG` makes it a **sub-task** instead. Sub-tasks run in parallel, starting one puts every `open`
-  ancestor in progress (a queued ancestor must be allowed to start, and a `done` parent refuses). The parent
+  ancestor in progress (a queued ancestor must be allowed to start, and a `done` parent refuses).
+  (added in v3.14.0) A sub-task whose open ancestor, at any level, belongs to another session is refused, and the
+  error names the parent and the fix `llmenv task edit <task> --no-parent`. The parent
   cannot be marked `done` before every sub-task is. A sub-task needs an
   unfinished parent in its own session. `--parallel` takes a top-level task out of the queue, so it runs beside the
   head. `--after SLUG` records that another task must be done first, which `task start` enforces like
@@ -960,9 +964,19 @@ Only when the open session has no match does the search cover the whole project.
   the same way.
   The refusal names the owning session. To act on the task anyway, pass `--other-session <owner-id>`,
   where `<owner-id>` is that owning session's id. A different id is refused. A bare `--other-session`
-  is a usage error. Each override appends a task note that names the calling session,
-  once the command succeeds. `clear` deletes its tasks, so it writes a note on the owning
-  session instead (#3481).
+  is a usage error. Each override leaves a task note that names the calling session. The command journals the
+  note before it changes anything, so the note survives a crash or a failed later save (details below).
+  `clear` deletes its tasks, so it writes a note on the owning session instead (#3481).
+  (added in v3.14.0) The command journals the note in `pending-notes/` of the state directory before it changes
+  anything.
+  A crash between the change and the note leaves the journal, and the next `llmenv task` command writes the note
+  with the prefix "recovered after a crash, the change may not have completed".
+  The running command holds a lock on its journal file, so a file that can be locked belongs to a command that is
+  gone, and a reused process id cannot hide it.
+  A note that cannot be written is kept as a `.failed` file in the journal folder, and it is logged with its text.
+  (added in v3.14.0) A command whose change is saved but whose audit note could not be written exits with status 3.
+  A command whose change failed exits with status 1, as before.
+  A script or an agent that retries on a failure can then tell the two apart, and it does not repeat the saved change.
   `task add --session <id>` refuses a session of another conversation the same way, and a
   `--parent` in another session is refused (#3480, #3486). An owned session takes a new task
   only from its owner. A caller with no conversation id is refused for that session.
@@ -1019,7 +1033,12 @@ Only when the open session has no match does the search cover the whole project.
   (falling back to the most recently updated non-`done` task) in each open
   session for the current project; `--next` is the next actionable task after
   it, in the same parent-before-children order `task ls` displays, skipping
-  `done` tasks and any task whose `blocked_on` refs aren't all `done`. A
+  `done` tasks and any task whose `blocked_on` refs aren't all `done`.
+  (changed in v3.14.0) It also skips a task that `task start` refuses for the
+  queue or for an ancestor.
+  A task that is skipped for a damaged parent link, a parent loop, a parent of another session, or a blocker loop is
+  reported on stderr as `task '<slug>' is not offered as the next task: <why>`. The JSON on stdout does not change.
+  A
   single open session prints the same bare JSON as `task show <id>`; two or
   more each get a `# <name> (<id>)` header, separated by a `---` rule. Errors
   if no session is open for the current project. `--current` (changed in
@@ -1086,6 +1105,10 @@ project's hook.
   - `--replace` — abandon every open session for this project (untagging
     their still-incomplete tasks with an orphan note; already-`done` tasks
     keep their tag as a historical record), then start fresh.
+    (changed in v3.14.0) A session that another conversation started is refused, and
+    nothing is changed. Repeat `--other-session <id>` with that session's id to abandon it
+    anyway. A session with no owner, and your own sessions, need no flag. `--resume` stays
+    open to any conversation.
   - `--new` — create a new session anyway, leaving the existing one(s) open
     — true concurrency for two windows genuinely working in parallel.
 
@@ -1118,6 +1141,8 @@ project's hook.
   clear`, or pass `--abandon-open` to untag them (each gets a note) and finish
   anyway; the output lists what it dropped. A task that is `done` keeps its
   session tag as a historical record.
+  (changed in v3.14.0) When a save fails part way, the error names the tasks that
+  were already untagged, and the `--other-session` audit note is still recorded.
 - `task session show [<id>]` — print a session's progress; auto-resolves
   like `finish`.
 - `task session summary [<id>] [--format json]` — (added in v3.10.0) roll up
@@ -1246,6 +1271,13 @@ Nothing turns off the third item.
   whether or not the turn ends with a question.
   It offers `llmenv task start <slug>` to begin the step, and `llmenv task wait <slug> "<reason>"` for a step that needs
   the user or an outside event first. The first reminder carries both commands.
+  (changed in v3.14.0) The next task is the first open task that `task start` accepts.
+  Its blockers are done, the queue does not hold it, and no ancestor refuses it.
+  When no open task can start, the reminder names the first open task and says why.
+  (changed in v3.14.0) When the next task is a sub-task of the task in progress, the Stop reminder says
+  the task in progress stays open until its open sub-tasks are done, and names the sub-task to start.
+  The cause is a blocker that is not done, blocker links that loop, the queue,
+  or a parent that is done, missing, or in another session.
 - An open session with no task at all is named in the Stop and SessionStart reminders.
   It is an error state: add a task, or finish the session.
 - When the agent asks the user a question (the `AskUserQuestion` tool, or a turn that ends with `?`) while a task is
@@ -1535,6 +1567,11 @@ Print source config paths as agent context (used by the auto-registered
 `SessionStart` hook). Prints the paths of `config.yaml` and the `bundles/`
 directory so the agent knows where to direct config edits. Invoked automatically — not normally run by users.
 
+The command reads the hook payload on stdin and uses its `hook_event_name` as the event of its output.
+Empty stdin means `SessionStart`.
+(changed in v3.14.0) A payload that is not JSON, or has no string `hook_event_name`,
+makes the command exit non-zero with an error that names the input.
+
 ## `config-guard`
 
 ```text
@@ -1557,6 +1594,8 @@ Poll the usage backend and sleep an adaptive delay, to stay under rate limits.
 The auto-registered `PreToolUse` (`pre-tool`) and `UserPromptSubmit` (`prompt`) hooks run it when a `features.throttle`
 block is set.
 Invoked automatically — not normally run by users.
+(changed in v3.14.0) The hook reads the event name from its stdin payload.
+A payload with no `hook_event_name`, or an event that maps to no name, adds a notice that names the fix.
 See [`features.throttle:`](configuration.md#featuresthrottle).
 
 ## `upgrade`

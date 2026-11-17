@@ -788,7 +788,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 ## Community Data License Agreement Permissive 2.0 (CDLA-Permissive-2.0)
 
 Used by:
-- [webpki-root-certs 1.0.11](https://github.com/rustls/webpki-roots)
+- [webpki-root-certs 1.0.12](https://github.com/rustls/webpki-roots)
 
 ```
 # Community Data License Agreement - Permissive - Version 2.0
@@ -880,7 +880,7 @@ Used by:
 ## ISC License (ISC)
 
 Used by:
-- [rustls-webpki 0.103.16](https://github.com/rustls/webpki)
+- [rustls-webpki 0.103.17](https://github.com/rustls/webpki)
 
 ```
 Except as otherwise noted, this project is licensed under the following
@@ -1126,7 +1126,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [cc 1.11.0](https://github.com/rust-lang/cc-rs)
+- [cc 1.11.2](https://github.com/rust-lang/cc-rs)
 - [cfg-if 1.0.5](https://github.com/rust-lang/cfg-if)
 - [cmake 0.1.58](https://github.com/rust-lang/cmake-rs)
 - [filetime 0.2.29](https://github.com/alexcrichton/filetime)
@@ -1176,7 +1176,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [mio 1.2.4](https://github.com/tokio-rs/mio)
+- [mio 1.2.5](https://github.com/tokio-rs/mio)
 
 ```
 Copyright (c) 2014 Carl Lerche and other MIO contributors
@@ -1204,7 +1204,7 @@ THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [errno 0.3.14](https://github.com/lambda-fairy/rust-errno)
+- [errno 0.3.15](https://github.com/lambda-fairy/rust-errno)
 
 ```
 Copyright (c) 2014 Chris Wong
@@ -1945,41 +1945,6 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [humantime 2.4.0](https://github.com/chronotope/humantime)
-
-```
-Copyright (c) 2016 The humantime Developers
-
-Includes parts of http date with the following copyright:
-Copyright (c) 2016 Pyfisch
-
-Includes portions of musl libc with the following copyright:
-Copyright © 2005-2013 Rich Felker
-
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-```
-
-## MIT License (MIT)
-
-Used by:
 - [shell-words 1.1.1](https://github.com/tmiasko/shell-words)
 
 ```
@@ -2522,7 +2487,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [smallvec 1.16.4](https://github.com/servo/rust-smallvec)
+- [smallvec 1.16.5](https://github.com/servo/rust-smallvec)
 
 ```
 Copyright (c) 2018 The Servo Project Developers
@@ -2948,7 +2913,7 @@ SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [bumpalo 3.20.3](https://github.com/fitzgen/bumpalo)
+- [bumpalo 3.20.4](https://github.com/fitzgen/bumpalo)
 
 ```
 Copyright (c) 2019 Nick Fitzgerald
@@ -3160,7 +3125,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [const-oid 0.10.2](https://github.com/RustCrypto/formats)
+- [const-oid 0.10.3](https://github.com/RustCrypto/formats)
 - [cpufeatures 0.3.1](https://github.com/RustCrypto/utils)
 
 ```
@@ -3264,7 +3229,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [rustls-pki-types 1.15.1](https://github.com/rustls/pki-types)
+- [rustls-pki-types 1.16.0](https://github.com/rustls/pki-types)
 
 ```
 Copyright (c) 2023 Dirkjan Ochtman <dirkjan@ochtman.nl>
@@ -3299,7 +3264,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 - [bit-set 0.11.1](https://github.com/contain-rs/bit-vec)
-- [bit-vec 0.10.1](https://github.com/contain-rs/bit-vec)
+- [bit-vec 0.10.2](https://github.com/contain-rs/bit-vec)
 
 ```
 Copyright (c) 2023 The Rust Project Developers
@@ -3433,17 +3398,17 @@ Used by:
 - [clap_builder 4.6.7](https://github.com/clap-rs/clap)
 - [clap_complete 4.6.11](https://github.com/clap-rs/clap)
 - [clap_derive 4.6.7](https://github.com/clap-rs/clap)
-- [clap_lex 1.1.1](https://github.com/clap-rs/clap)
+- [clap_lex 1.1.2](https://github.com/clap-rs/clap)
 - [colorchoice 1.0.5](https://github.com/rust-cli/anstyle.git)
 - [is_terminal_polyfill 1.70.2](https://github.com/polyfill-rs/is_terminal_polyfill)
 - [once_cell_polyfill 1.70.2](https://github.com/polyfill-rs/once_cell_polyfill)
 - [predicates-core 1.0.10](https://github.com/assert-rs/predicates-rs)
 - [predicates-tree 1.0.13](https://github.com/assert-rs/predicates-rs)
 - [predicates 3.1.4](https://github.com/assert-rs/predicates-rs)
-- [serde_spanned 1.1.2](https://github.com/toml-rs/toml)
+- [serde_spanned 1.1.3](https://github.com/toml-rs/toml)
 - [termtree 0.5.1](https://github.com/rust-cli/termtree)
-- [toml 1.1.8+spec-1.1.0](https://github.com/toml-rs/toml)
-- [toml_datetime 1.1.2+spec-1.1.0](https://github.com/toml-rs/toml)
+- [toml 1.2.1+spec-1.1.0](https://github.com/toml-rs/toml)
+- [toml_datetime 1.1.3+spec-1.1.0](https://github.com/toml-rs/toml)
 - [toml_parser 1.1.5+spec-1.1.0](https://github.com/toml-rs/toml)
 - [toml_writer 1.2.0+spec-1.1.0](https://github.com/toml-rs/toml)
 
@@ -3573,7 +3538,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ## MIT License (MIT)
 
 Used by:
-- [rand 0.10.3](https://github.com/rust-random/rand)
+- [rand 0.10.4](https://github.com/rust-random/rand)
 - [rand_xorshift 0.5.0](https://github.com/rust-random/rngs)
 
 ```
@@ -4049,7 +4014,7 @@ Used by:
 - [dyn-clone 1.0.20](https://github.com/dtolnay/dyn-clone)
 - [fastrand 2.5.0](https://github.com/smol-rs/fastrand)
 - [hermit-abi 0.5.3](https://github.com/hermit-os/hermit-rs)
-- [itoa 1.0.18](https://github.com/dtolnay/itoa)
+- [itoa 1.0.19](https://github.com/dtolnay/itoa)
 - [lazy_static 1.5.1](https://github.com/rust-lang-nursery/lazy-static.rs)
 - [linux-raw-sys 0.12.1](https://github.com/sunfishcode/linux-raw-sys)
 - [once_cell 1.21.4](https://github.com/matklad/once_cell)
@@ -4070,7 +4035,7 @@ Used by:
 - [serde_json 1.0.154](https://github.com/serde-rs/json)
 - [simd_cesu8 1.2.0](https://github.com/seancroach/simd_cesu8)
 - [syn 2.0.119](https://github.com/dtolnay/syn)
-- [syn 3.0.9](https://github.com/dtolnay/syn)
+- [syn 3.0.10](https://github.com/dtolnay/syn)
 - [thiserror-impl 2.0.21](https://github.com/dtolnay/thiserror)
 - [thiserror 2.0.21](https://github.com/dtolnay/thiserror)
 - [unicode-ident 1.0.27](https://github.com/dtolnay/unicode-ident)
@@ -4256,8 +4221,8 @@ THE SOFTWARE.
 Used by:
 - [aho-corasick 1.1.5](https://github.com/BurntSushi/aho-corasick)
 - [globset 0.4.21](https://github.com/BurntSushi/ripgrep/tree/master/crates/globset)
-- [jiff-core 0.1.2](https://github.com/BurntSushi/jiff)
-- [jiff 0.2.39](https://github.com/BurntSushi/jiff)
+- [jiff-core 0.1.8](https://github.com/BurntSushi/jiff)
+- [jiff 0.2.44](https://github.com/BurntSushi/jiff)
 - [memchr 2.8.3](https://github.com/BurntSushi/memchr)
 - [walkdir 2.5.0](https://github.com/BurntSushi/walkdir)
 

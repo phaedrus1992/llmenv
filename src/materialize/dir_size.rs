@@ -78,11 +78,22 @@ fn skip_entry(err: &walkdir::Error, root: &Path) -> anyhow::Result<()> {
         );
     }
     if !is_not_found(err) {
-        // The status line renders on every prompt, and `skipped` already marks the total as a
-        // floor, so the entry is logged at debug to keep each render quiet.
-        tracing::debug!("{err}; that entry is left out of the size estimate");
+        // The status line renders on every prompt. The first cause of a run is logged at info,
+        // so the user who looks finds it. The others stay at debug to keep each render quiet
+        // (#3110).
+        if FIRST_CAUSE_LOGGED.replace(true) {
+            tracing::debug!("{err}; that entry is left out of the size estimate");
+        } else {
+            tracing::info!("{err}; that entry is left out of the size estimate");
+        }
     }
     Ok(())
+}
+
+thread_local! {
+    /// True once this run has logged the first cause of an entry that was left out. A run is one
+    /// process, and the status line renders on one thread.
+    static FIRST_CAUSE_LOGGED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn is_not_found(err: &walkdir::Error) -> bool {
@@ -149,6 +160,46 @@ mod tests {
         assert_eq!(
             size.skipped, 1,
             "the locked subdirectory is counted as skipped"
+        );
+    }
+
+    #[test]
+    fn the_first_cause_of_a_run_is_logged_at_info_and_the_next_ones_at_debug() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let locked = ["first", "second"].map(|name| dir.path().join(name));
+        for path in &locked {
+            std::fs::create_dir(path).expect("create locked dir");
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000))
+                .expect("lock the directory");
+        }
+        FIRST_CAUSE_LOGGED.set(false);
+
+        let mut got = None;
+        let logs = crate::test_log_capture::capture_logs(|| got = Some(dir_size(dir.path())));
+
+        for path in &locked {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+                .expect("unlock the directory");
+        }
+        assert_eq!(
+            got.expect("dir_size ran")
+                .expect("root is readable")
+                .skipped,
+            2
+        );
+        assert_eq!(
+            logs.lines().filter(|l| l.contains("INFO")).count(),
+            1,
+            "{logs}"
+        );
+        assert_eq!(
+            logs.lines().filter(|l| l.contains("DEBUG")).count(),
+            1,
+            "{logs}"
+        );
+        assert!(
+            logs.contains("Permission denied"),
+            "the cause is named: {logs}"
         );
     }
 

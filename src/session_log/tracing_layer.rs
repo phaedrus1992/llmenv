@@ -110,6 +110,7 @@ pub(crate) fn capture_file_logs_at<R>(
     f: impl FnOnce() -> R,
 ) -> R {
     use tracing_subscriber::prelude::*;
+    crate::test_log_capture::ensure_global_registry();
     let sub = tracing_subscriber::registry()
         .with(FileLogLayer::new(FileSink::new(log_path.to_path_buf())).with_filter(level));
     tracing::subscriber::with_default(sub, f)
@@ -191,11 +192,29 @@ mod reentry_tests {
     use super::*;
     use tracing_subscriber::prelude::*;
 
+    const CHILD_FLAG: &str = "LLMENV_REENTRY_CHILD";
+    const TEST_PATH: &str = "session_log::tracing_layer::reentry_tests::a_failing_append_through_the_global_layer_returns";
+
     // The global dispatcher has no re-entry guard, but a scoped `with_default` one has.
-    // `main.rs` installs the layer globally, so the test must too. nextest runs each test
-    // in its own process, so the global default does not leak into other tests.
+    // `main.rs` installs the layer globally, so the test must too. A process takes one global
+    // default, and `capture_logs` installs one in any process that runs it, so the test runs
+    // itself again in a child process that holds only this test.
     #[test]
     fn a_failing_append_through_the_global_layer_returns() {
+        if std::env::var_os(CHILD_FLAG).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([TEST_PATH, "--exact", "--test-threads=1"])
+                .env(CHILD_FLAG, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(output.status.success(), "child failed: {stdout}");
+            assert!(
+                stdout.contains("1 passed"),
+                "the child ran no test: {stdout}"
+            );
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("real.jsonl");
         std::fs::write(&target, "").unwrap();
