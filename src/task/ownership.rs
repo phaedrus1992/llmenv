@@ -82,7 +82,7 @@ pub(crate) fn caller_for_pick(
 /// The audit note for an `--other-session` override. The caller records it with
 /// [`OverrideNote::record`] after the command succeeds, so a refused or failed
 /// command leaves no note behind.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) struct OverrideNote {
     slug: String,
     text: String,
@@ -254,7 +254,7 @@ fn ownership_note(
 /// a session that passed the guard. The command records it once its change has saved. A caller
 /// that drops it gets a compiler warning (#3602).
 #[must_use = "record the override note once the command has succeeded"]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) struct SessionOverride {
     session_id: String,
     /// `None` when the caller owns the session, so no override applied.
