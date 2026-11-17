@@ -33,6 +33,16 @@ done
 cd "$(git rev-parse --show-toplevel)"
 
 npm ci --prefix "$dir"
-# The advisory for picomatch has no fixed version (#3792), so only a critical advisory fails.
-npm audit --prefix "$dir" --audit-level=critical
+# The advisory for picomatch has no fixed version (#3792). It is the only advisory that may pass.
+# Any other advisory in the tree fails the run.
+known_advisory="https://github.com/advisories/GHSA-fc5q-39xc-vjpf"
+others=$({ npm audit --prefix "$dir" --json || true; } |
+    jq -r --arg known "$known_advisory" \
+        '[.vulnerabilities[].via[] | select(type == "object") | .url | select(. != $known)] | unique | .[]')
+if [ -n "$others" ]; then
+    echo "opencode-js-test.sh: npm audit found advisories other than the known one:" >&2
+    echo "$others" >&2
+    echo "Fix: update the toolchain in $dir, or review the advisory and add it here." >&2
+    exit 1
+fi
 "$dir/node_modules/.bin/vitest" run ${coverage[@]+"${coverage[@]}"} --config "$dir/vitest.config.js"
