@@ -644,12 +644,8 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
             .and_then(|v| v["hook_event_name"].as_str()),
         event,
     );
-    // Crush hook payloads are not verified to carry an event name, so a missing name there is not
-    // reported (#3769). Claude Code and opencode always send one.
-    if engine != "crush"
-        && let Some(notice) =
-            event::missing_name_notice(stdin_json.as_ref(), event, &hook_event_name)
-    {
+    // Claude Code, opencode, and Crush (v0.101.0 hook docs) all send the event name (#3769).
+    if let Some(notice) = event::missing_name_notice(stdin_json.as_ref(), event, &hook_event_name) {
         crate::agent_notice::record(notice);
     }
     let claude_session_id: Option<&str> =
