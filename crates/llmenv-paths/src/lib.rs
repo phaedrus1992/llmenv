@@ -19,11 +19,23 @@ pub use bounded_read::{check_regular_file, read_file_bounded, read_open_file, re
 pub use names::{
     cwd_under_prefix, has_parent_component, is_unsafe_join_target, is_valid_short_name,
 };
+#[cfg(unix)]
+pub use owner_only::is_nofollow_refusal;
 pub use owner_only::{
     create_dir_owner_only, create_dir_owner_only_refusing_unreadable, is_executable,
     open_append_owner_only, write_owner_only, write_owner_only_executable, write_owner_only_like,
 };
 pub use unsynced_write::write_owner_only_atomic_unsynced;
+
+/// The folder that holds `path`. A bare file name has an empty parent, so it names the current
+/// folder.
+#[must_use]
+pub fn parent_or_cwd(path: &Path) -> &Path {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    }
+}
 
 /// `read_dir` that treats a missing directory as "nothing to iterate":
 /// returns `Ok(None)` on `NotFound` but propagates every other I/O error (e.g.
@@ -743,5 +755,18 @@ mod tests {
                 prop_assert_eq!(mode & 0o077, 0, "group/other bits set after overwrite: {:o}", mode);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod parent_tests {
+    use super::parent_or_cwd;
+    use std::path::Path;
+
+    #[test]
+    fn a_bare_name_has_the_current_folder_as_its_parent() {
+        assert_eq!(parent_or_cwd(Path::new("log.txt")), Path::new("."));
+        assert_eq!(parent_or_cwd(Path::new("a/log.txt")), Path::new("a"));
+        assert_eq!(parent_or_cwd(Path::new("/log.txt")), Path::new("/"));
     }
 }

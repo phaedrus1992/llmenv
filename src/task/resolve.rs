@@ -4,6 +4,7 @@
 //! A later session that adds the same title gets a `-2` suffix. A bare slug typed in that
 //! later session must reach the later session's task first (#2501).
 
+use std::borrow::Cow;
 use std::path::Path;
 
 use anyhow::Context as _;
@@ -57,6 +58,10 @@ pub(crate) enum TaskTarget<'a> {
     Input(&'a str),
     /// A slug that a lookup in this command returned.
     Resolved(&'a str),
+    /// A slug that the ownership check returned, with the strict read of the store that the
+    /// check made. The command uses that read and does not read the store again (#3485). A read
+    /// that a write has made stale is not used: [`TaskTarget::tasks`] reads the store again.
+    Checked(&'a str, &'a super::StrictTasks),
 }
 
 impl<'a> From<&'a str> for TaskTarget<'a> {
@@ -71,14 +76,30 @@ impl<'a> From<&'a String> for TaskTarget<'a> {
     }
 }
 
-impl TaskTarget<'_> {
+impl<'a> TaskTarget<'a> {
     /// Refuse an input that cannot be a slug, before any read of the store.
     ///
     /// # Errors
     /// The input is not a valid task identifier.
     pub(crate) fn check(self) -> anyhow::Result<()> {
         match self {
-            Self::Input(name) | Self::Resolved(name) => check_identifier(name),
+            Self::Input(name) | Self::Resolved(name) | Self::Checked(name, _) => {
+                check_identifier(name)
+            }
+        }
+    }
+
+    /// The strict read for this command: the read of the ownership check when the target has one
+    /// and no task file was written since, else a new read.
+    ///
+    /// # Errors
+    /// The store cannot be read.
+    pub(crate) fn tasks(self, state_dir: &Path) -> anyhow::Result<Cow<'a, super::StrictTasks>> {
+        match self {
+            Self::Checked(_, tasks) if tasks.is_current() => Ok(Cow::Borrowed(tasks)),
+            Self::Input(_) | Self::Resolved(_) | Self::Checked(..) => {
+                list_tasks_strict(state_dir).map(Cow::Owned)
+            }
         }
     }
 
@@ -91,7 +112,9 @@ impl TaskTarget<'_> {
             Self::Input(input) => resolve_identifier(state_dir, input),
             // A slug comes from a task file, which a person can edit, so it is checked before it
             // becomes a path.
-            Self::Resolved(slug) => check_identifier(slug).map(|()| slug.to_string()),
+            Self::Resolved(slug) | Self::Checked(slug, _) => {
+                check_identifier(slug).map(|()| slug.to_string())
+            }
         }
     }
 
@@ -109,7 +132,9 @@ impl TaskTarget<'_> {
                 check_identifier(input)?;
                 resolve_in(state_dir, input, tasks)
             }
-            Self::Resolved(slug) => check_identifier(slug).map(|()| slug.to_string()),
+            Self::Resolved(slug) | Self::Checked(slug, _) => {
+                check_identifier(slug).map(|()| slug.to_string())
+            }
         }
     }
 }

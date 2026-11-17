@@ -22,37 +22,20 @@ fn platform_asset_name() -> Result<&'static str> {
     }
 }
 
-/// Minimal 3-component semver for comparison.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct Version {
-    major: u64,
-    minor: u64,
-    patch: u64,
+/// Parse a release version, with or without a leading `v`. A pre-release such as `3.3.0-beta.1`
+/// is a version, and sorts before the release of the same numbers.
+fn parse_version(s: &str) -> Result<semver::Version> {
+    semver::Version::parse(s.strip_prefix('v').unwrap_or(s))
+        .with_context(|| format!("invalid version string: \"{s}\""))
 }
 
-fn parse_version(s: &str) -> Result<Version> {
-    let stripped = s.strip_prefix('v').unwrap_or(s);
-    let parts: Vec<&str> = stripped.splitn(3, '.').collect();
-    anyhow::ensure!(parts.len() == 3, "invalid version string: \"{s}\"");
-    Ok(Version {
-        major: parts[0].parse().context("invalid major version")?,
-        minor: parts[1].parse().context("invalid minor version")?,
-        patch: parts[2].parse().context("invalid patch version")?,
-    })
-}
-
-fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
-    let Ok(va) = parse_version(a).inspect_err(|e| {
-        tracing::warn!(version = %a, error = %e, "failed to parse version string in comparison")
-    }) else {
-        return std::cmp::Ordering::Equal;
-    };
-    let Ok(vb) = parse_version(b).inspect_err(|e| {
-        tracing::warn!(version = %b, error = %e, "failed to parse version string in comparison")
-    }) else {
-        return std::cmp::Ordering::Equal;
-    };
-    va.cmp(&vb)
+/// Order two versions by semver precedence.
+///
+/// # Errors
+/// Errors when a text is not a version. A tag that cannot be read must not look like "the same
+/// version", because the user would then see "Already at latest" for a release that exists.
+fn compare_versions(a: &str, b: &str) -> Result<std::cmp::Ordering> {
+    Ok(parse_version(a)?.cmp(&parse_version(b)?))
 }
 
 /// GitHub release asset.
@@ -228,7 +211,10 @@ pub(super) fn run_upgrade(track: Option<String>, check_only: bool) -> Result<()>
         .strip_prefix('v')
         .unwrap_or(&release.tag_name);
 
-    match compare_versions(release_version, current_version) {
+    let ordering = compare_versions(release_version, current_version).with_context(|| {
+        format!("cannot compare the release {release_version} with the installed {current_version}")
+    })?;
+    match ordering {
         std::cmp::Ordering::Greater => {
             if check_only {
                 println!(
@@ -295,30 +281,29 @@ mod tests {
 
     // -- Version parsing
 
+    /// [`super::compare_versions`] for versions that parse.
+    fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+        super::compare_versions(a, b).unwrap()
+    }
+
     #[test]
     fn parse_version_three_component() {
         let v = parse_version("3.2.0").unwrap();
-        assert_eq!(
-            v,
-            Version {
-                major: 3,
-                minor: 2,
-                patch: 0
-            }
-        );
+        assert_eq!(v, semver::Version::new(3, 2, 0));
     }
 
     #[test]
     fn parse_version_with_v_prefix() {
         let v = parse_version("v3.2.1").unwrap();
-        assert_eq!(
-            v,
-            Version {
-                major: 3,
-                minor: 2,
-                patch: 1
-            }
-        );
+        assert_eq!(v, semver::Version::new(3, 2, 1));
+    }
+
+    #[test]
+    fn a_beta_release_is_a_version_that_sorts_before_its_release() {
+        use std::cmp::Ordering::{Greater, Less};
+        assert_eq!(compare_versions("3.3.0-beta.1", "3.2.0"), Greater);
+        assert_eq!(compare_versions("v3.3.0-beta.1", "3.3.0"), Less);
+        assert_eq!(compare_versions("3.3.0-beta.2", "3.3.0-beta.1"), Greater);
     }
 
     #[test]
@@ -348,11 +333,9 @@ mod tests {
     }
 
     #[test]
-    fn compare_versions_invalid_returns_equal() {
-        assert_eq!(
-            compare_versions("invalid", "3.2.0"),
-            std::cmp::Ordering::Equal
-        );
+    fn compare_versions_names_a_text_that_is_not_a_version() {
+        let error = super::compare_versions("invalid", "3.2.0").unwrap_err();
+        assert!(format!("{error:#}").contains("invalid version string: \"invalid\""));
     }
 
     // -- Property-based tests
@@ -400,8 +383,8 @@ mod tests {
 
         #[test]
         fn compare_versions_no_panic_on_any_string(s in ".*") {
-            let _ = compare_versions(&s, "1.0.0");
-            let _ = compare_versions("1.0.0", &s);
+            let _ = super::compare_versions(&s, "1.0.0");
+            let _ = super::compare_versions("1.0.0", &s);
         }
     }
 

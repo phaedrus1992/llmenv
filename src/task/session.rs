@@ -122,32 +122,27 @@ pub(crate) enum PickError {
 }
 
 impl PickError {
-    /// The error text for [`Self::Ambiguous`], ending in `fix` (the caller's
-    /// own "pass an id" wording). `None` for [`Self::NoneOpen`], whose text
-    /// each caller words itself.
+    /// The error text, ending in `fix` (the caller's own "pass an id" wording). A caller that
+    /// words [`Self::NoneOpen`] itself matches it first. Every variant has a text, so a new
+    /// variant cannot reach a fixed fallback.
     #[must_use]
-    pub(crate) fn ambiguity_message(self, fix: &str) -> Option<String> {
-        let Self::Ambiguous {
-            open,
-            owned,
-            identified,
-        } = self
-        else {
-            return None;
-        };
-        Some(if !identified {
-            format!("{open} open sessions for this project — {fix}")
-        } else if owned == 0 {
-            format!(
+    pub(crate) fn message(self, fix: &str) -> String {
+        match self {
+            Self::NoneOpen => format!("no open session for this project — {fix}"),
+            Self::Ambiguous {
+                open,
+                identified: false,
+                ..
+            } => format!("{open} open sessions for this project — {fix}"),
+            Self::Ambiguous { open, owned: 0, .. } => format!(
                 "{open} open sessions for this project, and none of them is owned by this \
                  conversation — {fix}"
-            )
-        } else {
-            format!(
+            ),
+            Self::Ambiguous { open, owned, .. } => format!(
                 "{open} open sessions for this project, and this conversation owns {owned} of \
                  them — {fix}"
-            )
-        })
+            ),
+        }
     }
 }
 
@@ -265,7 +260,8 @@ use finish::untag_unfinished;
 #[cfg(test)]
 use resume_text::MAX_REMINDER_CONTEXT_CHARS;
 pub(crate) use resume_text::resume_reminder_lines;
-pub(crate) use resume_write::{append_override_note, update_resume};
+pub(in crate::task) use resume_write::append_override_note;
+pub(crate) use resume_write::update_resume;
 
 fn sessions_dir(state_dir: &Path) -> PathBuf {
     tasks_dir(state_dir).join("sessions")
@@ -319,6 +315,18 @@ pub(crate) fn load_existing_session(state_dir: &Path, id: &str) -> anyhow::Resul
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    static SESSION_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many strict reads of the session store this thread has made. A test diffs two values to
+/// count the reads of one command (#3743).
+#[cfg(test)]
+pub(crate) fn session_reads_on_this_thread() -> usize {
+    SESSION_READS.with(std::cell::Cell::get)
+}
+
 /// Every session in the store, failing on any file that cannot be read or parsed. A corrupt
 /// file is an error that names the file, not a skipped entry.
 /// The Stop reminder needs the full set, so a missing task in it must come from a real absence
@@ -327,6 +335,8 @@ pub(crate) fn load_existing_session(state_dir: &Path, id: &str) -> anyhow::Resul
 /// # Errors
 /// Returns an error if the store cannot be read or any session file is corrupt.
 pub(crate) fn list_sessions_strict(state_dir: &Path) -> anyhow::Result<Vec<Session>> {
+    #[cfg(test)]
+    SESSION_READS.with(|reads| reads.set(reads.get() + 1));
     let dir = sessions_dir(state_dir);
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -472,13 +482,10 @@ pub(crate) fn start_session_as(
                     .partition(|t| t.session.as_deref() == Some(session.id.as_str()));
                 tasks = rest;
                 let id = session.id.to_owned();
-                let done = abandoned.len();
-                abandoned.push(abandon_session(state_dir, session, own).with_context(|| {
-                    format!(
-                        "cannot abandon session '{id}'; {done} earlier session(s) are already \
-                         abandoned and no new session is started"
-                    )
-                })?);
+                match abandon_session(state_dir, session, own) {
+                    Ok(stamped) => abandoned.push(stamped),
+                    Err(e) => return Err(abandon_failed(&id, &abandoned, e)),
+                }
             }
             let session = create_session(state_dir, request)?;
             Ok(StartOutcome::Replaced { session, abandoned })
@@ -546,6 +553,31 @@ fn try_tasks_in_session(state_dir: &Path, session_id: &str) -> anyhow::Result<Ve
         .collect())
 }
 
+/// The error of a failed abandon in `session start --replace`. It names the sessions that were
+/// abandoned before it, and the tasks that the failed session had already untagged, because no new
+/// session is started and the user must know what changed (#3759).
+fn abandon_failed(id: &str, abandoned: &[Session], error: anyhow::Error) -> anyhow::Error {
+    let sessions: Vec<&str> = abandoned.iter().map(|s| s.id.as_str()).collect();
+    let untagged: Vec<String> = super::partial::changed_before_failure(&error)
+        .iter()
+        .map(|t| t.slug.clone())
+        .collect();
+    // An error with no list may still follow an untag, so an empty list reads as "none known".
+    let untagged = if untagged.is_empty() {
+        "none known".to_owned()
+    } else {
+        untagged.join(", ")
+    };
+    error.context(format!(
+        "cannot abandon session '{id}', and no new session is started. Already abandoned \
+         sessions: [{}]. Tasks already untagged from '{id}': [{untagged}]. Fix: run `llmenv task \
+         session start --replace` again once the store is writable",
+        sessions.join(", "),
+    ))
+}
+
+use super::partial::PartialWrite;
+
 /// Abandon `session`: stamps `abandoned_at`, and for every one of its tasks
 /// that isn't already `done`, clears the `session` tag and appends an
 /// orphaning note. Already-`done` tasks keep their tag — a legitimate
@@ -564,9 +596,10 @@ fn abandon_session(
          before this task was finished."
     );
     // The stamp comes last, so a failed untag leaves the session open and a retry finds it.
-    untag_unfinished(state_dir, &session.id, tasks, &now, &note)?;
+    let untagged = untag_unfinished(state_dir, &session.id, tasks, &now, &note)?;
     session.abandoned_at = Some(now);
-    save_session(state_dir, &session)?;
+    // The tasks are untagged when this save fails, so the error carries them (#3759).
+    save_session(state_dir, &session).map_err(|e| PartialWrite::error(untagged, e))?;
     Ok(session)
 }
 
@@ -671,28 +704,77 @@ pub(crate) fn session_summary(
     })
 }
 
-/// Delete every task tagged with `session_id` outright. Returns the deleted
-/// tasks. Doesn't touch the session record itself.
+/// Why [`delete_tasks_in_session`] failed, with the tasks that left the store before it. A caller
+/// that uses `?` still gets the failure, and a caller that needs the deleted tasks reads
+/// `deleted` (#3743).
+#[derive(Debug)]
+pub(crate) struct SessionDeleteError {
+    /// The tasks that were deleted before the failure. Empty when the store could not be read.
+    pub(crate) deleted: Vec<Task>,
+    pub(crate) source: anyhow::Error,
+}
+
+impl std::fmt::Display for SessionDeleteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.source)
+    }
+}
+
+impl std::error::Error for SessionDeleteError {}
+
+/// Delete every task tagged with `session_id` outright. Returns the deleted tasks. Doesn't touch
+/// the session record itself.
+///
+/// # Errors
+/// The store cannot be read, or a delete fails. The error holds the tasks that were already
+/// deleted.
 pub(crate) fn delete_tasks_in_session(
     state_dir: &Path,
     session_id: &str,
-) -> anyhow::Result<Vec<Task>> {
-    super::with_store_lock(state_dir, || {
+) -> Result<Vec<Task>, SessionDeleteError> {
+    let outcome = super::with_store_lock(state_dir, || {
         let tasks = try_tasks_in_session(state_dir, session_id)?;
-        for (done, t) in tasks.iter().enumerate() {
-            let path = task_path(state_dir, &t.slug);
-            std::fs::remove_file(&path).with_context(|| {
-                format!(
-                    "cannot delete task '{}' ({}); {done} of {} task(s) of session '{session_id}' \
-                     are already deleted. Fix: make the file writable, then run the command again",
-                    t.slug,
-                    path.display(),
-                    tasks.len()
-                )
-            })?;
+        Ok(delete_listed(state_dir, session_id, tasks, |path| {
+            std::fs::remove_file(path)
+        }))
+    });
+    match outcome {
+        Err(source) => Err(SessionDeleteError {
+            deleted: Vec::new(),
+            source,
+        }),
+        Ok(result) => result,
+    }
+}
+
+/// Delete `tasks` in order with `remove`, and stop at the first failure.
+fn delete_listed(
+    state_dir: &Path,
+    session_id: &str,
+    tasks: Vec<Task>,
+    mut remove: impl FnMut(&Path) -> std::io::Result<()>,
+) -> Result<Vec<Task>, SessionDeleteError> {
+    let total = tasks.len();
+    let mut deleted = Vec::with_capacity(total);
+    for task in tasks {
+        let path = task_path(state_dir, &task.slug);
+        super::StrictTasks::record_write();
+        if let Err(error) = remove(&path) {
+            let gone: Vec<&str> = deleted.iter().map(|t: &Task| t.slug.as_str()).collect();
+            let source = anyhow::Error::new(error).context(format!(
+                "cannot delete task '{}' ({}); {} of {total} task(s) of session \
+                 '{session_id}' are already deleted [{}]. Fix: make the file writable, then run \
+                 the command again",
+                task.slug,
+                path.display(),
+                gone.len(),
+                gone.join(", ")
+            ));
+            return Err(SessionDeleteError { deleted, source });
         }
-        Ok(tasks)
-    })
+        deleted.push(task);
+    }
+    Ok(deleted)
 }
 
 #[cfg(test)]
@@ -1230,16 +1312,37 @@ mod tests {
         );
     }
 
+    proptest::proptest! {
+        /// Every pick failure has a text that ends with the fix of the caller. An ambiguous pick
+        /// names the open count, and says that the conversation owns some only when it does.
+        #[test]
+        fn a_pick_failure_text_ends_with_the_fix_and_names_the_count(
+            open in 2usize..50,
+            owned in 0usize..50,
+            identified in proptest::bool::ANY,
+            fix in "[a-z <>-]{1,20}",
+        ) {
+            let none = PickError::NoneOpen.message(&fix);
+            proptest::prop_assert!(none.ends_with(&fix));
+            let owned = owned.min(open);
+            let text = PickError::Ambiguous { open, owned, identified }.message(&fix);
+            proptest::prop_assert!(text.ends_with(&fix));
+            let prefix = format!("{open} open sessions");
+            proptest::prop_assert!(text.starts_with(&prefix), "{}", text);
+            let says_owns = text.contains("this conversation owns");
+            proptest::prop_assert_eq!(says_owns, identified && owned > 0, "{}", text);
+        }
+    }
+
     #[test]
-    fn ambiguity_message_names_the_real_cause() {
+    fn message_names_the_real_cause() {
         let msg = |owned, identified| {
             PickError::Ambiguous {
                 open: 3,
                 owned,
                 identified,
             }
-            .ambiguity_message("pass --session <id>")
-            .expect("ambiguous has a message")
+            .message("pass --session <id>")
         };
         assert!(msg(0, true).contains("none of them is owned by this conversation"));
         let two = msg(2, true);
@@ -1248,7 +1351,10 @@ mod tests {
         let anon = msg(0, false);
         assert!(!anon.contains("conversation"), "{anon}");
         assert!(anon.ends_with("pass --session <id>"), "{anon}");
-        assert!(PickError::NoneOpen.ambiguity_message("x").is_none());
+        assert_eq!(
+            PickError::NoneOpen.message("x"),
+            "no open session for this project — x"
+        );
     }
 
     fn after_clear(name: Option<&'static str>) -> StartRequest<'static> {
@@ -1666,6 +1772,107 @@ mod tests {
 
         let reloaded_done = load_task(dir.path(), &done_task_.slug).expect("test");
         assert_eq!(reloaded_done.session, Some(first.id));
+    }
+
+    /// #3759: when the session save fails after the untag, the error holds the untagged tasks.
+    #[test]
+    fn a_failed_session_save_after_the_untag_names_the_untagged_tasks() {
+        let dir = TempDir::new().expect("test");
+        let session = match start_session(
+            dir.path(),
+            Some("one"),
+            None,
+            PROJECT_A,
+            StartDecision::Auto,
+        )
+        .expect("test")
+        {
+            StartOutcome::Created(s) => s,
+            other => panic!("expected Created, got {other:?}"),
+        };
+        let task =
+            add_task_for_session(dir.path(), "A", ParentSpec::Detached, &session.id).expect("test");
+        // A folder where the session file belongs makes the save fail after the untag.
+        let path = session_path(dir.path(), &session.id);
+        std::fs::remove_file(&path).expect("test");
+        std::fs::create_dir(&path).expect("test");
+        let err = abandon_session(dir.path(), session, vec![task.clone()]).unwrap_err();
+        let listed: Vec<&str> = crate::task::partial::changed_before_failure(&err)
+            .iter()
+            .map(|t| t.slug.as_str())
+            .collect();
+        assert_eq!(listed, [task.slug.as_str()]);
+        assert!(
+            load_task(dir.path(), &task.slug)
+                .expect("test")
+                .session
+                .is_none()
+        );
+    }
+
+    proptest::proptest! {
+        /// Every abandoned id and untagged slug is in the message, and the cause stays in it.
+        #[test]
+        fn a_failed_abandon_lists_every_changed_name(
+            ids in proptest::collection::vec("[a-z]{3,8}", 0..4),
+            slugs in proptest::collection::vec("[a-z]{3,8}", 0..4),
+        ) {
+            let abandoned: Vec<Session> =
+                ids.iter().map(|id| filter::open_session_for_test(id)).collect();
+            let tasks: Vec<Task> = slugs
+                .iter()
+                .map(|s| {
+                    serde_json::from_value(serde_json::json!({
+                        "slug": s, "title": s,
+                        "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+                    }))
+                    .expect("test")
+                })
+                .collect();
+            let cause = super::super::partial::PartialWrite::error(tasks, anyhow::anyhow!("cause-text"));
+            let text = format!("{:#}", abandon_failed("failing", &abandoned, cause));
+            for name in ids.iter().chain(slugs.iter()) {
+                proptest::prop_assert!(text.contains(name.as_str()), "{}", text);
+            }
+            proptest::prop_assert!(text.contains("cause-text"), "{}", text);
+            proptest::prop_assert_eq!(slugs.is_empty(), text.contains("none known"));
+        }
+    }
+
+    /// #3759: a failed abandon names the sessions already abandoned and the tasks already untagged.
+    #[test]
+    fn a_failed_abandon_names_the_sessions_and_tasks_that_changed() {
+        let dir = TempDir::new().expect("test");
+        let first = match start_session(
+            dir.path(),
+            Some("one"),
+            None,
+            PROJECT_A,
+            StartDecision::Auto,
+        )
+        .expect("test")
+        {
+            StartOutcome::Created(s) => s,
+            other => panic!("expected Created, got {other:?}"),
+        };
+        let task =
+            add_task_for_session(dir.path(), "A", ParentSpec::Detached, &first.id).expect("test");
+        let cause = super::super::partial::PartialWrite::error(
+            vec![task.clone()],
+            anyhow::anyhow!("disk full"),
+        );
+        let err = abandon_failed("second", std::slice::from_ref(&first), cause);
+        let text = format!("{err:#}");
+        assert!(
+            text.contains(&format!("abandoned sessions: [{}]", first.id)),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("untagged from 'second': [{}]", task.slug)),
+            "{text}"
+        );
+        assert!(text.contains("Fix: run"), "{text}");
+        assert!(text.contains("disk full"), "{text}");
     }
 
     /// One read of the task store serves every abandoned session: each session's own tasks are
@@ -2371,6 +2578,97 @@ mod tests {
             format!("{err:#}").contains(&corrupt.display().to_string()),
             "{err:#}"
         );
+    }
+
+    #[test]
+    fn a_failed_delete_returns_the_tasks_that_left_the_store() {
+        let dir = TempDir::new().expect("test");
+        let StartOutcome::Created(session) = start_session(
+            dir.path(),
+            Some("sprint 1"),
+            None,
+            PROJECT_A,
+            StartDecision::Auto,
+        )
+        .expect("test") else {
+            panic!("expected Created");
+        };
+        let tasks: Vec<Task> = ["A", "B", "C"]
+            .iter()
+            .map(|title| {
+                add_task_for_session(dir.path(), title, ParentSpec::Detached, &session.id)
+                    .expect("test")
+            })
+            .collect();
+        let second = task_path(dir.path(), &tasks[1].slug);
+        let error = delete_listed(dir.path(), &session.id, tasks.clone(), |path| {
+            if path == second {
+                Err(std::io::Error::other("disk is read-only"))
+            } else {
+                std::fs::remove_file(path)
+            }
+        })
+        .expect_err("the second delete fails");
+        let slugs: Vec<&str> = error.deleted.iter().map(|t| t.slug.as_str()).collect();
+        assert_eq!(slugs, [tasks[0].slug.as_str()]);
+        let failure = format!("{error}");
+        assert!(failure.contains("1 of 3"), "{failure}");
+        assert!(
+            failure.contains(&format!("[{}]", tasks[0].slug)),
+            "{failure}"
+        );
+        assert!(failure.contains("disk is read-only"), "{failure}");
+        assert!(load_task(dir.path(), &tasks[0].slug).is_err());
+        assert!(load_task(dir.path(), &tasks[1].slug).is_ok());
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(24))]
+        /// `delete_listed` deletes the tasks in order, stops at the first failed remove, and hands
+        /// back the tasks before it (#3743).
+        #[test]
+        fn delete_listed_stops_at_the_first_failure_and_returns_the_prefix(
+            count in 0usize..8,
+            fail_at in proptest::option::of(0usize..8),
+        ) {
+            let dir = TempDir::new().expect("test");
+            let tasks: Vec<Task> = (0..count)
+                .map(|i| {
+                    add_task_for_session(
+                        dir.path(),
+                        &format!("Task {i}"),
+                        ParentSpec::Detached,
+                        "s",
+                    )
+                    .expect("test")
+                })
+                .collect();
+            let failing = fail_at.filter(|k| *k < count);
+            let failing_path = failing.map(|k| task_path(dir.path(), &tasks[k].slug));
+            let result = delete_listed(dir.path(), "s", tasks.clone(), |path| {
+                if Some(path) == failing_path.as_deref() {
+                    Err(std::io::Error::other("injected"))
+                } else {
+                    Ok(())
+                }
+            });
+            let want = failing.unwrap_or(count);
+            let want_slugs: Vec<&str> = tasks[..want].iter().map(|t| t.slug.as_str()).collect();
+            match result {
+                Ok(deleted) => {
+                    proptest::prop_assert!(failing.is_none());
+                    let got: Vec<&str> = deleted.iter().map(|t| t.slug.as_str()).collect();
+                    proptest::prop_assert_eq!(got, want_slugs);
+                }
+                Err(error) => {
+                    proptest::prop_assert!(failing.is_some());
+                    let got: Vec<&str> = error.deleted.iter().map(|t| t.slug.as_str()).collect();
+                    proptest::prop_assert_eq!(got, want_slugs);
+                    let text = error.to_string();
+                    proptest::prop_assert!(text.contains(&format!("{want} of {count}")), "{}", text);
+                }
+            }
+        }
     }
 
     #[test]

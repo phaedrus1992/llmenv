@@ -3,7 +3,7 @@ use crate::hook_run::shell_split::{
     MAX_SUBSTITUTION_DEPTH, NestingTooDeep, split_substitutions, take_until_close,
 };
 use crate::task::session::{StartDecision, StartOutcome, start_session};
-use crate::task::{NewTask, ParentSpec, SessionChoice, add_task_with, done_task, start_task};
+use crate::task::{ParentSpec, done_task, start_task};
 use proptest::prelude::*;
 use tempfile::TempDir;
 mod boundary;
@@ -28,19 +28,11 @@ fn open_session(dir: &Path) -> String {
 }
 
 fn add(dir: &Path, session: &str, title: &str) -> String {
-    let new = NewTask {
-        title,
-        ..NewTask::default()
-    };
-    add_task_with(
-        dir,
-        &new,
-        ParentSpec::Detached,
-        SessionChoice::Named(session),
-        &project(),
-    )
-    .unwrap()
-    .slug
+    // The session id is already known, so the task skips the ownership check of the writer: a
+    // test adds a task to a session of any conversation.
+    crate::task::add_task_for_session(dir, title, ParentSpec::Detached, session)
+        .unwrap()
+        .slug
 }
 
 fn bash(command: &str) -> serde_json::Value {

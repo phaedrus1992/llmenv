@@ -82,7 +82,7 @@ static NOTICES: Mutex<NoticeList> = Mutex::new(NoticeList::new());
 
 /// Add a notice for the agent. See `NoticeList::record`. A detached child that spools also writes
 /// the notice to the spool, so the next hook run carries it (#3398).
-pub(crate) fn record(notice: impl Into<String>) {
+pub(crate) fn record(notice: impl Into<String>) -> bool {
     let notice = clean(&notice.into());
     // A repeat of a notice in this process is not written to the spool again, so it does not use
     // up the reads of the next hook run (#3507).
@@ -93,14 +93,29 @@ pub(crate) fn record(notice: impl Into<String>) {
     if fresh {
         spool::write(&notice);
     }
+    fresh
 }
 
 /// Log `notice` at error level, which the default filter shows, and add it for the agent. The
-/// engine drops a hook's stderr, so the log alone reaches no one.
+/// engine drops a hook's stderr, so the log alone reaches no one. A notice that the process raised
+/// before is not logged again, so a check that runs on every pass logs once (#3226).
 pub(crate) fn record_logged(notice: impl Into<String>) {
     let notice = notice.into();
-    tracing::error!("{notice}");
-    record(notice);
+    if record(notice.clone()) {
+        tracing::error!("{notice}");
+    } else {
+        // The repeat is not an error line again, but it stays in the debug log.
+        tracing::debug!("repeat of a notice: {notice}");
+    }
+}
+
+/// Test helper: every part is in the notices of this process, and the notices name a fix.
+#[cfg(test)]
+pub(crate) fn assert_noticed(parts: &[&str]) {
+    let notices = current().unwrap_or_default();
+    for part in parts.iter().chain(&["Fix:"]) {
+        assert!(notices.contains(part), "{part:?} is missing from {notices}");
+    }
 }
 
 /// Every notice of this process, one per line, or `None` when there is none. The list stays set,

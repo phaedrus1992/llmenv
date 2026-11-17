@@ -31,6 +31,7 @@ concurrency:
 jobs:
   forward-merge:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Stops the cascade's own push from re-triggering this workflow on the
     # target branch. The anti-recursion rule does not cover these pushes:
     # since #2796 they go out as the phaedrus-sync App. The loop stays closed

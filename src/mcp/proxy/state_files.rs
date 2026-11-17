@@ -6,7 +6,9 @@
 use std::path::Path;
 use std::process::Stdio;
 
-use crate::mcp::proxy::{PidfileError, is_alive, log_path_for, open_proxy_log, read_pidfile};
+use crate::mcp::proxy::{
+    PidfileError, is_own_process_alive, log_path_for, open_proxy_log, read_pidfile,
+};
 
 /// Delete a stale pidfile. A failed delete is recorded with its path, not dropped.
 fn clear_pidfile(pid_path: &Path, reason: &str) {
@@ -26,7 +28,7 @@ fn clear_pidfile(pid_path: &Path, reason: &str) {
 /// Called once the port has proved a proxy is up. A pidfile naming a dead or
 /// recycled pid is worse than no pidfile — the old fast path read any non-empty
 /// pidfile as proof of life, so a wrong pid could never be recovered from
-/// (#1085). A pid that *is* alive is left alone: `kill -0` cannot prove which
+/// (#1085). A pid that *is* alive is left alone: a signal check cannot prove which
 /// process owns the port, so the running pid is the best available answer to
 /// "who do I signal".
 ///
@@ -40,7 +42,7 @@ pub(super) fn reconcile_pidfile(pid_path: &Path) {
         // means the check itself failed, and deleting on a guess would discard a
         // valid pid.
         Ok(Some(pid)) => {
-            if is_alive(pid) == Some(false) {
+            if is_own_process_alive(pid) == Some(false) {
                 clear_pidfile(pid_path, &format!("pid {pid} is not running"));
             }
         }
@@ -101,9 +103,7 @@ mod notice_tests {
         let pid_path = dir.path().join("pidfile-3217-stuck.pid");
         std::fs::create_dir(&pid_path).expect("test");
         clear_pidfile(&pid_path, "pid 1 is not running");
-        let notices = crate::agent_notice::current().unwrap_or_default();
-        assert!(notices.contains("pidfile-3217-stuck"), "{notices}");
-        assert!(notices.contains("Fix:"), "{notices}");
+        crate::agent_notice::assert_noticed(&["pidfile-3217-stuck"]);
     }
 
     /// A pidfile that cannot be read is named for the agent. A directory at the path makes the
@@ -114,9 +114,7 @@ mod notice_tests {
         let pid_path = dir.path().join("pidfile-3217-unreadable.pid");
         std::fs::create_dir(&pid_path).expect("test");
         reconcile_pidfile(&pid_path);
-        let notices = crate::agent_notice::current().unwrap_or_default();
-        assert!(notices.contains("pidfile-3217-unreadable"), "{notices}");
-        assert!(notices.contains("Fix:"), "{notices}");
+        crate::agent_notice::assert_noticed(&["pidfile-3217-unreadable"]);
     }
 
     /// A pidfile temp that cannot be removed is named for the agent (#3217).
@@ -126,9 +124,7 @@ mod notice_tests {
         let tmp = dir.path().join("pidfile-3217-temp.tmp");
         std::fs::create_dir(&tmp).expect("test");
         discard_pidfile_temp(&tmp);
-        let notices = crate::agent_notice::current().unwrap_or_default();
-        assert!(notices.contains("pidfile-3217-temp"), "{notices}");
-        assert!(notices.contains("Fix:"), "{notices}");
+        crate::agent_notice::assert_noticed(&["pidfile-3217-temp"]);
     }
 
     /// A pidfile temp that is already gone is not a leftover, so it gives no notice.
@@ -152,8 +148,6 @@ mod notice_tests {
         let log = log_path_for(&pid_path);
         std::fs::create_dir(&log).expect("test");
         drop(proxy_stderr(&pid_path));
-        let notices = crate::agent_notice::current().unwrap_or_default();
-        assert!(notices.contains(&log.display().to_string()), "{notices}");
-        assert!(notices.contains("Fix:"), "{notices}");
+        crate::agent_notice::assert_noticed(&[&log.display().to_string()]);
     }
 }

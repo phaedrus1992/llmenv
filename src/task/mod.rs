@@ -14,11 +14,13 @@
 mod branch_failure;
 mod slug;
 pub(crate) use slug::slugify;
+mod add;
+use add::add_task_for_session_with;
 mod ancestors;
 mod block_cycle;
 mod blockers;
 pub(crate) use blockers::block_task;
-use blockers::{first_undone_in_subtree, is_actionable};
+use blockers::first_undone_in_subtree;
 pub(crate) mod core_text;
 mod finish_hints;
 mod parent_chain;
@@ -29,8 +31,12 @@ pub(crate) use edit::TaskEdit;
 pub(crate) use edit::edit_task;
 mod note;
 pub(crate) mod ownership;
+pub(crate) mod partial;
+pub(crate) mod pending_note;
+pub(crate) use pending_note::recover as recover_crashed_notes;
 pub(crate) mod progress;
 mod session_choice;
+mod startability;
 pub(crate) use note::note_task;
 pub(crate) use resolve::TaskTarget;
 mod store_lock;
@@ -49,7 +55,7 @@ use finish_hints::session_finish_reminders;
 mod tracking;
 pub(crate) use tracking::{Tracking, tracking, tracking_in};
 pub mod session;
-pub(crate) use progress::{StrictTasks, progress_in, wip_title_in};
+pub(crate) use progress::{StrictTasks, progress_after_close, progress_in, wip_title_in};
 pub(crate) use reopen::reopen_task;
 pub(crate) use resolve::resolve_identifier;
 
@@ -181,6 +187,7 @@ pub(crate) fn save_task(state_dir: &Path, task: &Task) -> anyhow::Result<()> {
     crate::paths::create_dir_owner_only(&dir)?;
     let json = serde_json::to_string_pretty(task)?;
     crate::paths::write_owner_only_atomic(&task_path(state_dir, &task.slug), json.as_bytes())?;
+    StrictTasks::record_write();
     Ok(())
 }
 
@@ -241,6 +248,8 @@ enum UnreadablePolicy {
 }
 
 fn read_tasks(state_dir: &Path, policy: UnreadablePolicy) -> anyhow::Result<Vec<Task>> {
+    #[cfg(test)]
+    StrictTasks::count_read();
     let dir = tasks_dir(state_dir);
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
@@ -427,6 +436,8 @@ fn append_forest(group: &[&Task], rows: &mut Vec<DisplayRow>) {
     }
 }
 
+/// Push the rows of `task` and of everything below it in pre-order. An explicit stack replaces
+/// the recursion, so a deep chain of sub-tasks cannot overflow the call stack (#3767).
 fn visit<'a>(
     task: &'a Task,
     depth: usize,
@@ -434,16 +445,18 @@ fn visit<'a>(
     visited: &mut HashSet<&'a str>,
     rows: &mut Vec<DisplayRow>,
 ) {
-    if !visited.insert(task.slug.as_str()) {
-        return;
-    }
-    rows.push(DisplayRow {
-        depth,
-        task: task.clone(),
-    });
-    if let Some(kids) = children.get(task.slug.as_str()) {
-        for child in kids {
-            visit(child, depth + 1, children, visited, rows);
+    let mut stack: Vec<(&'a Task, usize)> = vec![(task, depth)];
+    while let Some((current, depth)) = stack.pop() {
+        if !visited.insert(current.slug.as_str()) {
+            continue;
+        }
+        rows.push(DisplayRow {
+            depth,
+            task: current.clone(),
+        });
+        if let Some(kids) = children.get(current.slug.as_str()) {
+            // Reversed, so the stack pops the first child first.
+            stack.extend(kids.iter().rev().map(|child| (*child, depth + 1)));
         }
     }
 }
@@ -470,16 +483,24 @@ pub enum ParentSpec<'a> {
 /// Which session a new task joins.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum SessionChoice<'a> {
-    /// `--session <id>` given explicitly.
-    Named(&'a str),
+    /// `--session <id>` given explicitly. The writer refuses a session of another conversation
+    /// unless `other_session` names its owner (#3486, #3617).
+    Named {
+        id: &'a str,
+        owner: &'a session::EngineIdentity,
+        other_session: Option<&'a str>,
+    },
     /// No `--session`: the project's only open session, else the one the
     /// caller owns ([`session::pick_open_session`], #2365).
     Resolve(&'a session::EngineIdentity),
-    /// An open session of the project that the caller read in the same command, so the session
-    /// files are not read again (#3474). A `Session` comes only from a read or a start, so a
-    /// caller cannot name an arbitrary id here. The session can close between that read and the
-    /// write, as with `Resolve`, which also reads before the store lock.
-    Checked(&'a session::Session),
+    /// An open session of the project that the caller read in the same command, under the same
+    /// store lock as the write, so the session files are not read again (#3474). A `Session`
+    /// comes only from a read or a start, so a caller cannot name an arbitrary id here. The
+    /// writer refuses it when it is closed, of another project, or of another conversation.
+    Checked {
+        session: &'a session::Session,
+        owner: &'a session::EngineIdentity,
+    },
 }
 
 /// Create a new task in `open` state and persist it, tagged to a resolved
@@ -517,6 +538,9 @@ pub(crate) struct NewTask<'a> {
     pub(crate) placement: Placement<'a>,
     /// A task that must be done before this one starts: written as a `blocked_on` edge.
     pub(crate) after: Option<&'a str>,
+    /// A progress note that the task starts with, written in the same save that creates the task
+    /// (#3617).
+    pub(crate) note: Option<&'a str>,
 }
 
 /// [`add_task`] for a task that starts with a detail (#2339).
@@ -533,9 +557,22 @@ pub(crate) fn add_task_with(
     // The session is resolved under the store lock, so a session that another process finishes
     // after the check cannot take the new task.
     let task = with_store_lock(state_dir, || {
-        let resolved_session =
-            session_choice::resolve_session_for_add(state_dir, session, project)?;
-        add_task_for_session_with(state_dir, new, parent, &resolved_session)
+        let resolved = session_choice::resolve_session_for_add(state_dir, session, project)?;
+        // The `--other-session` note is part of the one save that creates the task, so a failed
+        // note cannot leave a task that joined another conversation's session with no record.
+        let text = format!(
+            "Added with --other-session, which names the owner of session '{}'.",
+            resolved.id
+        );
+        let new = NewTask {
+            note: if resolved.overridden {
+                Some(text.as_str())
+            } else {
+                new.note
+            },
+            ..*new
+        };
+        add_task_for_session_with(state_dir, &new, parent, &resolved.id)
     })?;
     touch_task_session(state_dir, &task);
     Ok(task)
@@ -561,99 +598,6 @@ pub(crate) fn add_task_for_session(
     add_task_for_session_with(state_dir, &new, parent, session_id)
 }
 
-/// [`add_task_for_session`] for a task that starts with a detail (#2339).
-///
-/// # Errors
-/// The same errors as [`add_task_for_session`].
-fn add_task_for_session_with(
-    state_dir: &Path,
-    new: &NewTask<'_>,
-    parent: ParentSpec<'_>,
-    session_id: &str,
-) -> anyhow::Result<Task> {
-    let title = new.title;
-    with_store_lock(state_dir, || {
-        let dir = tasks_dir(state_dir);
-        // One strict read resolves every name that the new task refers to (#3477). Each name is
-        // checked first, so a bad name gets its own error even when the store is unreadable.
-        let names = [
-            match parent {
-                ParentSpec::Explicit(p) => Some(p),
-                ParentSpec::Detached => None,
-            },
-            match new.placement {
-                Placement::Child(p) => Some(p),
-                Placement::Queue | Placement::Parallel => None,
-            },
-            new.after,
-        ];
-        for name in names.iter().flatten() {
-            resolve::check_identifier(name)?;
-        }
-        let all_tasks = names
-            .iter()
-            .any(Option::is_some)
-            .then(|| list_tasks_strict(state_dir))
-            .transpose()?;
-        let resolve = |name: &str| -> anyhow::Result<String> {
-            let all = all_tasks
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("the task store was not read to find '{name}'"))?;
-            resolve::resolve_in(state_dir, name, all)
-        };
-        let explicit_parent = match parent {
-            ParentSpec::Explicit(p) => {
-                let slug = resolve(p)?;
-                let parent_task = all_tasks
-                    .as_ref()
-                    .and_then(|all| all.as_slice().iter().find(|t| t.slug == slug));
-                ownership::ensure_parent_in_session(parent_task, &slug, Some(session_id))?;
-                Some(slug)
-            }
-            ParentSpec::Detached => None,
-        };
-        let (parent_slug, relation, parallel) = match new.placement {
-            Placement::Queue => (explicit_parent, Relation::Queued, false),
-            Placement::Parallel => (explicit_parent, Relation::Queued, true),
-            Placement::Child(p) => {
-                let slug = resolve(p)?;
-                ownership::check_child_parent(&load_task(state_dir, &slug)?, session_id)?;
-                (Some(slug), Relation::Child, false)
-            }
-        };
-        let blocked_on = match new.after {
-            Some(after) => vec![resolve(after)?],
-            None => Vec::new(),
-        };
-        let now = now_rfc3339();
-        let mut base_slug = slugify(title);
-        if base_slug.is_empty() {
-            // A title with no ASCII-alphanumeric characters at all (e.g. a
-            // CJK-only title, or pure punctuation) would otherwise collapse
-            // to an empty slug — a hidden `.json` file that's awkward to
-            // reference. Fall back to a timestamp-derived slug instead.
-            base_slug = format!("task-{}", now.replace([':', '-'], ""));
-        }
-        let slug = unique_slug(&dir, &base_slug);
-        let task = Task {
-            slug,
-            title: title.to_string(),
-            state: TaskState::Open,
-            parent: parent_slug,
-            relation,
-            parallel,
-            blocked_on,
-            notes: Vec::new(),
-            detail: new.detail.filter(|d| !d.is_empty()).map(str::to_string),
-            session: Some(session_id.to_string()),
-            created_at: now.clone(),
-            updated_at: now,
-        };
-        save_task(state_dir, &task)?;
-        Ok(task)
-    })
-}
-
 /// Claim a task, transitioning it to `wip`.
 ///
 /// `blocked_on` is a hard-block (#1164): an explicit dependency the user
@@ -668,7 +612,7 @@ fn add_task_for_session_with(
 /// Errors if the task is already `done`, or if any `blocked_on` reference
 /// isn't (recursively) done and `force` is `false`. A dangling `blocked_on`
 /// reference (deleted/corrupt blocker file) fails closed — treated as
-/// unmet, same rationale as [`is_actionable`]'s dangling-blocker handling.
+/// unmet, same rationale as [`blockers::unmet_blocker`]'s dangling-blocker handling.
 /// `force` overrides both cases — the agent may know better than the
 /// ordering hint.
 pub(crate) fn start_task<'a>(
@@ -680,8 +624,9 @@ pub(crate) fn start_task<'a>(
     let task = with_store_lock(state_dir, || {
         // One strict read feeds the name lookup, the blocker check, and the queue check (#3474).
         target.check()?;
-        let all_tasks = list_tasks_strict(state_dir)?;
-        let slug = target.slug_in(state_dir, &all_tasks)?;
+        let snapshot = target.tasks(state_dir)?;
+        let all_tasks: &StrictTasks = &snapshot;
+        let slug = target.slug_in(state_dir, all_tasks)?;
         let mut task = load_task(state_dir, &slug)?;
         if task.state == TaskState::Done {
             anyhow::bail!(
@@ -727,14 +672,14 @@ pub(crate) fn start_task<'a>(
             anyhow::bail!("{block}");
         }
         // The ancestors go first: if one cannot start, the sub-task stays `open`.
-        let promoted = ancestors_to_start(state_dir, &task, force, &all_tasks)?;
+        let promoted = ancestors_to_start(state_dir, &task, force, all_tasks)?;
         let now = now_rfc3339();
         let names: Vec<String> = promoted.iter().map(|a| a.slug.clone()).collect();
-        for mut ancestor in promoted {
+        for (saved, mut ancestor) in promoted.into_iter().enumerate() {
             ancestor.state = TaskState::Wip;
             ancestor.updated_at = now.clone();
             save_task(state_dir, &ancestor)
-                .map_err(|e| ancestors::promotion_failed(&slug, &names, e))?;
+                .map_err(|e| ancestors::promotion_failed(&slug, &names, saved, e))?;
         }
         task.state = TaskState::Wip;
         task.updated_at = now;
@@ -778,6 +723,7 @@ pub(crate) fn delete_task<'a>(
         let slug = target.slug(state_dir)?;
         let task = load_task(state_dir, &slug)?;
         std::fs::remove_file(task_path(state_dir, &slug))?;
+        StrictTasks::record_write();
         Ok(task)
     })
 }
@@ -797,6 +743,9 @@ pub(crate) struct Completed {
     prior: TaskState,
     /// Sub-tasks that were not done when `--force` closed the parent (#2455).
     undone_children: Vec<String>,
+    /// The done and total counts of the task's session after the close, from the read that the
+    /// close made. `None` for a task with no session (#3482).
+    session_progress: Option<(u64, u64)>,
 }
 
 impl Completed {
@@ -867,17 +816,30 @@ fn close_task(
     let completed = with_store_lock(state_dir, || {
         // One strict read feeds the name lookup and the sub-task check (#3471, #3474).
         target.check()?;
-        let all_tasks = list_tasks_strict(state_dir)?;
-        let slug = target.slug_in(state_dir, &all_tasks)?;
+        let snapshot = target.tasks(state_dir)?;
+        let all_tasks: &StrictTasks = &snapshot;
+        let slug = target.slug_in(state_dir, all_tasks)?;
         let mut task = load_task(state_dir, &slug)?;
         let prior = task.state;
         if prior == TaskState::Open && !force {
-            anyhow::bail!(
-                "'{slug}' was never started (open). Run `llmenv task start {slug}` and finish \
-                 the work, or pass --force if it is done."
-            );
+            // The advice names a start only when the start would be accepted (#3773).
+            let by_slug: HashMap<&str, &Task> = all_tasks
+                .as_slice()
+                .iter()
+                .map(|t| (t.slug.as_str(), t))
+                .collect();
+            match startability::refusal(&task, all_tasks.as_slice(), &by_slug, false) {
+                Some(why) => anyhow::bail!(
+                    "'{slug}' was never started (open), and the start is refused: {why}. Pass \
+                     --force if it is done."
+                ),
+                None => anyhow::bail!(
+                    "'{slug}' was never started (open). Run `llmenv task start {slug}` and \
+                     finish the work, or pass --force if it is done."
+                ),
+            }
         }
-        let undone = relation::undone_descendants(&slug, &all_tasks);
+        let undone = relation::undone_descendants(&slug, all_tasks);
         if !force && !undone.is_empty() {
             anyhow::bail!("{}", relation::undone_children_message(&slug, &undone));
         }
@@ -897,10 +859,12 @@ fn close_task(
             task.updated_at = now;
             save_task(state_dir, &task)?;
         }
+        let session_progress = progress_after_close(all_tasks, &task);
         Ok(Completed {
             task,
             prior,
             undone_children,
+            session_progress,
         })
     })?;
     touch_task_session(state_dir, &completed.task);
@@ -1082,10 +1046,14 @@ pub(crate) fn stop_hook_reminder(stored: &Stored, caller: Option<&str>) -> Strin
 #[derive(Debug, Clone)]
 struct IdleSession {
     session: session::Session,
-    /// The task to start next: the first actionable `open` task in execution
-    /// order, else the first `open` task when every one is blocked.
-    next: Task,
+    /// The task to start next: the first `open` task in execution order that `task start`
+    /// accepts. `None` when the start refuses every open task, and `loop_error` then says why.
+    next: Option<Task>,
     open_count: usize,
+    /// Set when no task is actionable: the slug of the first open task that a blocker keeps from
+    /// starting, and why (a loop in the blocker walk, or a blocker that is not done). The reminder
+    /// names the reason instead of advising a start that cannot run (#3618, #3764).
+    loop_error: Option<(String, String)>,
 }
 
 /// Every open session for `project` that [`IdleSession`] describes. Kept
@@ -1113,13 +1081,18 @@ fn idle_sessions(open: Vec<Session>, all_tasks: &[Task]) -> Vec<IdleSession> {
                 .iter()
                 .filter(|t| t.state == TaskState::Open)
                 .collect();
-            let next = open
-                .iter()
-                .find(|t| is_actionable(t, &by_slug))
-                .or_else(|| open.first())?;
+            if open.is_empty() {
+                return None;
+            }
+            let next = startability::first_startable(&open, all_tasks, &by_slug);
+            let loop_error = match next {
+                Some(_) => None,
+                None => blockers::first_obstacle(&open, all_tasks, &by_slug),
+            };
             Some(IdleSession {
-                next: (*next).clone(),
+                next: next.map(Task::to_owned),
                 open_count: open.len(),
+                loop_error,
                 session,
             })
         })
@@ -1149,6 +1122,21 @@ fn idle_reminder_lines(project: &str, caller: Option<&str>, stored: &Stored) -> 
         .map(|idle| {
             let id = &idle.session.id;
             let label = idle.session.name.as_deref().unwrap_or(id.as_str());
+            if let Some((looped, why)) = &idle.loop_error {
+                return format!(
+                    "Session '{label}' ({id}) has {count} open task(s) and none in progress, but \
+                     '{looped}' cannot start: {why}. If you don't recognize the session, it \
+                     belongs to a different session — leave it alone.",
+                    count = idle.open_count,
+                );
+            }
+            let Some(next) = &idle.next else {
+                return format!(
+                    "Session '{label}' ({id}) has {count} open task(s) and none in progress, but \
+                     the start refuses every one of them. Run `llmenv task ls` to see why.",
+                    count = idle.open_count,
+                );
+            };
             format!(
                 "Session '{label}' ({id}) has {count} open task(s) and none in progress. If \
                  you recognize this as your own session, run `llmenv task start {next}` \
@@ -1157,8 +1145,8 @@ fn idle_reminder_lines(project: &str, caller: Option<&str>, stored: &Stored) -> 
                  The session cannot be closed while any task is open. If you don't \
                  recognize it, it belongs to a different session — leave it alone.",
                 count = idle.open_count,
-                next = idle.next.slug,
-                title = idle.next.title,
+                next = next.slug,
+                title = next.title,
             )
         })
         .collect::<Vec<_>>();
@@ -1290,8 +1278,10 @@ pub(crate) fn resolve_current_task(tasks: &[Task]) -> Option<Task> {
 /// agent's control, not a legitimate "next" step — see [`TaskState::Waiting`])
 /// and any task whose `blocked_on` refs aren't all `done` (resolved against
 /// `all_tasks`, since a blocker can live in a different session than the
-/// task it blocks). `None` if `current` isn't found in `session_tasks`, or
-/// nothing after it qualifies.
+/// task it blocks), and any task that `task start` refuses for the queue or an ancestor, as
+/// [`startability::refusal`] decides (#3773). A task with a damaged parent link is skipped with no
+/// message here. `None` if `current` isn't found in `session_tasks`, or nothing after it
+/// qualifies.
 #[must_use]
 pub(crate) fn resolve_next_task(
     all_tasks: &[Task],
@@ -1301,10 +1291,37 @@ pub(crate) fn resolve_next_task(
     let order = execution_order(session_tasks);
     let pos = order.iter().position(|t| t.slug == current.slug)?;
     let by_slug: HashMap<&str, &Task> = all_tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
+    order.into_iter().skip(pos + 1).find(|t| {
+        !matches!(t.state, TaskState::Done | TaskState::Waiting)
+            && startability::refusal(t, all_tasks, &by_slug, true).is_none()
+    })
+}
+
+/// Every task after `current` that `task show --next` cannot offer because its blocker walk
+/// loops or a parent link is damaged (#3777), each with the text of the loop and its fix, in
+/// execution order. `resolve_next_task` skips such a task with no sign, so the caller asks this to
+/// name each one (#3618).
+#[must_use]
+pub(crate) fn next_task_loops(
+    all_tasks: &[Task],
+    session_tasks: &[Task],
+    current: &Task,
+) -> Vec<(String, String)> {
+    let order = execution_order(session_tasks);
+    let Some(pos) = order.iter().position(|t| t.slug == current.slug) else {
+        return Vec::new();
+    };
+    let by_slug: HashMap<&str, &Task> = all_tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
     order
-        .into_iter()
+        .iter()
         .skip(pos + 1)
-        .find(|t| is_actionable(t, &by_slug))
+        .filter(|t| !matches!(t.state, TaskState::Done | TaskState::Waiting))
+        .filter_map(|t| {
+            blockers::blocker_walk_error(t, &by_slug)
+                .or_else(|| ancestors::ancestor_damage(t, all_tasks))
+                .map(|e| (t.slug.clone(), e))
+        })
+        .collect()
 }
 
 /// Parent-before-children execution order for a single session's tasks —
@@ -2053,7 +2070,7 @@ mod tests {
         done_task(dir.path(), &a.slug).expect("test");
         let tasks = list_tasks(dir.path());
         let by_slug: HashMap<&str, &Task> = tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
-        assert!(is_actionable(by_slug[b.slug.as_str()], &by_slug));
+        assert!(blockers::unmet_blocker(by_slug[b.slug.as_str()], &by_slug).is_none());
     }
 
     #[test]
@@ -2487,7 +2504,7 @@ mod tests {
     }
 
     // A dangling blocked_on reference (deleted/corrupt blocker file) fails
-    // closed -- same rationale as is_actionable's dangling-blocker handling
+    // closed -- same rationale as unmet_blocker's dangling-blocker handling
     // for `task show --next` -- rather than silently treating it as resolved.
     #[test]
     fn start_task_errors_when_blocked_on_deleted_task() {
@@ -2683,6 +2700,40 @@ mod tests {
         );
     }
 
+    // #3764: an idle session whose only open task waits on an undone blocker names the reason, and
+    // it does not advise a start that the start refuses.
+    #[test]
+    fn an_idle_reminder_names_the_unmet_blocker_and_not_a_start() {
+        let dir = TempDir::new().expect("test");
+        let session_id = session_for_project(dir.path(), &current_project());
+        let waiter = add_task_for_session(dir.path(), "Waiter", ParentSpec::Detached, &session_id)
+            .expect("test");
+        let mut blocker = add_task_for_session(
+            dir.path(),
+            "Elsewhere",
+            ParentSpec::Detached,
+            "other-session",
+        )
+        .expect("test");
+        blocker.state = TaskState::Wip;
+        save_task(dir.path(), &blocker).expect("test");
+        block_task(dir.path(), &waiter.slug, &blocker.slug).expect("test");
+
+        let reminder = stop_hook_reminder(&Stored::read(dir.path()), None);
+        assert!(
+            reminder.contains(&format!("'{}' cannot start", waiter.slug)),
+            "{reminder}"
+        );
+        assert!(
+            reminder.contains(&format!("waits on '{}'", blocker.slug)),
+            "{reminder}"
+        );
+        assert!(
+            !reminder.contains(&format!("llmenv task start {}", waiter.slug)),
+            "{reminder}"
+        );
+    }
+
     // #2608: an unreadable store must say so in the reminder, not print that no session is open.
     #[test]
     fn unreadable_store_reminder_warns_instead_of_reporting_no_work() {
@@ -2747,7 +2798,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_sessions_prefers_first_unblocked_open_task() {
+    fn idle_sessions_name_the_obstacle_when_a_blocker_and_the_queue_refuse_every_task() {
         let dir = TempDir::new().expect("test");
         let project = current_project();
         let (session_id, first, second) = idle_session_in_project(dir.path(), &project);
@@ -2757,7 +2808,16 @@ mod tests {
         let idle = idle_sessions(open, &list_tasks(dir.path()));
         assert_eq!(idle.len(), 1);
         assert_eq!(idle[0].session.id, session_id);
-        assert_eq!(idle[0].next.slug, second.slug);
+        // The first task waits on the second, and the queue holds the second behind the first, so
+        // the start refuses both. The reminder keeps the first task and names why it cannot
+        // start (#3770), where it used to advise a start of the second that the queue refused.
+        assert!(idle[0].next.is_none());
+        let (slug, why) = idle[0].loop_error.as_ref().expect("an obstacle is named");
+        assert_eq!(slug, &first.slug);
+        assert!(
+            why.contains(&format!("waits on '{}'", second.slug)),
+            "{why}"
+        );
         assert_eq!(idle[0].open_count, 2);
     }
 
@@ -3019,8 +3079,12 @@ mod tests {
                 .collect();
             proptest::prop_assert_eq!(got, expected);
             for i in &idle {
-                proptest::prop_assert_eq!(i.next.state, TaskState::Open);
-                proptest::prop_assert_eq!(i.next.session.as_deref(), Some(i.session.id.as_str()));
+                // Either a task to start, or the reason that none can start.
+                proptest::prop_assert_eq!(i.next.is_some(), i.loop_error.is_none());
+                if let Some(next) = &i.next {
+                    proptest::prop_assert_eq!(next.state, TaskState::Open);
+                    proptest::prop_assert_eq!(next.session.as_deref(), Some(i.session.id.as_str()));
+                }
             }
         }
     }
@@ -3632,7 +3696,11 @@ mod tests {
             dir.path(),
             "Do thing",
             ParentSpec::Detached,
-            SessionChoice::Named(&session.id),
+            SessionChoice::Named {
+                id: &session.id,
+                owner: &session::EngineIdentity::from_session_id(None),
+                other_session: None,
+            },
             PROJECT,
         )
         .expect("test");
@@ -3647,7 +3715,11 @@ mod tests {
                 dir.path(),
                 "Do thing",
                 ParentSpec::Detached,
-                SessionChoice::Named("no-such-session"),
+                SessionChoice::Named {
+                    id: "no-such-session",
+                    owner: &session::EngineIdentity::from_session_id(None),
+                    other_session: None,
+                },
                 PROJECT
             )
             .is_err()
@@ -3749,7 +3821,11 @@ mod tests {
             dir.path(),
             "Do thing",
             ParentSpec::Detached,
-            SessionChoice::Named(&session.id),
+            SessionChoice::Named {
+                id: &session.id,
+                owner: &session::EngineIdentity::from_session_id(None),
+                other_session: None,
+            },
             PROJECT,
         )
         .expect("test");
@@ -4369,7 +4445,16 @@ mod tests {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod ownership_props_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod read_once_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod reject_cycle_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod store_guard_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod walk_tests;

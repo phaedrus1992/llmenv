@@ -70,14 +70,21 @@ for value in "$per_shard" "$max_shards"; do
 done
 
 diff_file="$(mktemp)"
-trap 'rm -f "$diff_file"' EXIT
+list_out="$(mktemp)"
+list_err="$(mktemp)"
+trap 'rm -f "$diff_file" "$list_out" "$list_err"' EXIT
 git diff "origin/${base_ref}...HEAD" >"$diff_file"
 
 count=0
 if git diff --name-only "origin/${base_ref}...HEAD" | grep -q '\.rs$'; then
-    # cargo-mutants exits non-zero when the diff holds no mutable code; that
-    # means zero mutants, not a failure.
-    count="$(cargo mutants --list --workspace --in-diff "$diff_file" 2>/dev/null | grep -c . || true)"
+    # cargo-mutants 27 exits 0 for a diff with no mutable code, so a non-zero exit is a real
+    # failure. Counting it as zero mutants would skip the mutation run and pass the check (#3569).
+    if ! cargo mutants --list --workspace --in-diff "$diff_file" >"$list_out" 2>"$list_err"; then
+        echo "mutants-plan: 'cargo mutants --list' failed, so the plan cannot count mutants:" >&2
+        cat "$list_err" >&2
+        exit 1
+    fi
+    count="$(grep -c . "$list_out" || true)"
 fi
 
 shards=$(((count + per_shard - 1) / per_shard))

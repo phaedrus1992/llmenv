@@ -91,6 +91,9 @@ It goes to you, not to the agent.
 Claude Code sends these values on a `resume` or `fork` start, and no notice is shown when a value is missing.
 (changed in v3.14.0) On subscription auth with Claude Code 2.1.304 or later, llmenv shows no notice, because Claude Code warns itself when a resume would use a noticeable share of the 5-hour limit on a Pro or Max plan.
 llmenv counts a session as subscription auth when `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_BASE_URL` are unset or empty, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, and `CLAUDE_CODE_USE_FOUNDRY` are unset, empty, `0`, or `false`, and no `apiKeyHelper` is set in the rendered settings or in the project's `.claude/settings.json` or `.claude/settings.local.json`.
+(changed in v3.14.0) llmenv does not follow a link at the project `.claude` folder or at either settings file, because a cloned repository controls them.
+A link, a pipe, or a file that cannot be read keeps the llmenv resume notice, and the agent gets a notice that names the path and the fix.
+To stop the second notice for a settings file that is a link on purpose, replace the link with a regular copy.
 It cannot see the plan, so a Team or Enterprise plan on subscription auth also gets no llmenv notice.
 An API key, gateway, or cloud provider session keeps the notice, as does a session whose Claude Code version llmenv cannot read, and a pre-release of 2.1.304.
 llmenv reads the Claude Code version when it renders the config, so after a Claude Code upgrade or downgrade the notice follows the new version from the next `llmenv regenerate`.
@@ -1168,6 +1171,8 @@ The same reset applies to the `read_before_edit` record of `features.slippage` a
 (changed in v3.13.0) Each subagent has its own cache, apart from the main agent and from other subagents, because it does not see the files that the others read.
 The same split applies to the `read_before_edit` record and the counters of `features.slippage`, to the task-tracker nudge and commit-gate state, and to the `repeat_detect` counter.
 A `/clear` resets the state of the main agent only. The state of a subagent is deleted after 7 days.
+(changed in v3.14.0) A file counts as unchanged only when both its modification time and its size match the first read.
+A file that is rewritten to a different size within the same second is read again.
 
 ```yaml
 features:
@@ -1458,7 +1463,7 @@ Each entry under `widgets:` accepts:
 | `format` | Custom display template for the widget's own placeholders (see the table below). Only honored by widgets marked "yes" in the **Format?** column — set on a widget that doesn't support it, it's silently ignored |
 | `max_len` | Max character length; longer output is truncated with `…` (U+2026), UTF-8-safe. Default: no limit |
 | `style` | ANSI style string applied to the widget's entire rendered output — see [Style tokens](#style-tokens) below. Every widget has a sensible **default colour** when this is unset; set it to `none` (or `""`) to render that one widget in plain text |
-| `display` | Named display mode for widgets that offer presets instead of a free-form `format`: `model` accepts `short` (family only, `Opus`), `version` (family + version, `Opus 4.8`, the default), or `full` (verbatim `display_name`); `pr` accepts `number` (`#834`, default) or `url` (full PR URL, falling back to `#<number>` when the engine sends none). `usage_5h` and `usage_7d` accept `clock_24h` (`04:20`) or `clock_12h` (`12:40pm`) to show the local clock time when the window resets, instead of the countdown (added in v3.14.0). A 7-day window adds the weekday before the time (`mon 04:20`). The default is the countdown. A value that the widget does not accept fails config load, and the error lists the allowed values (added in v3.14.0). Overridden by `format` when both are set; ignored by widgets without a display mode |
+| `display` | Named display mode for widgets that offer presets instead of a free-form `format`: `model` accepts `short` (family only, `Opus`), `version` (family + version, `Opus 4.8`, the default), or `full` (verbatim `display_name`); `pr` accepts `number` (`#834`, default) or `url` (full PR URL, falling back to `#<number>` when the engine sends none). `usage_5h` and `usage_7d` accept `clock_24h` (`04:20`) or `clock_12h` (`12:40pm`) to show the local clock time when the window resets, instead of the countdown (added in v3.14.0). When the system time zone cannot be read, `{reset}` shows `?`. A 7-day window adds the weekday before the time (`mon 04:20`). The default is the countdown. A value that the widget does not accept fails config load, and the error lists the allowed values (added in v3.14.0). Overridden by `format` when both are set; ignored by widgets without a display mode |
 | `width` | Bar cell width for `context`/`cache_usage`/`usage_5h`/`usage_7d` (default `10`). Ignored by other widgets |
 | `thresholds` | Two ascending percentages `[warn, crit]` for value-based coloring. Ignored by widgets without threshold coloring |
 
@@ -1535,8 +1540,11 @@ Notes:
 - `peak` is computed entirely from the local clock (Anthropic's peak window is
   weekdays 05:00–11:00 America/Los_Angeles) — Claude Code sends no peak data on
   stdin. `{countdown}` counts down to the window boundary (peak ending, or the
-  next peak starting). When the zone database cannot be read, the widget shows
-  `unknown` and logs an error.
+  next peak starting). When the zone database cannot be read, the widget keeps its
+  format and shows `?` for each placeholder, and logs a warning (changed in v3.14.0).
+- When the time zone cannot be read, a widget keeps the configured `format`, shows `?` where the
+  value goes, and logs a warning. The `peak` widget and the `{reset}` clock of `usage_5h` and
+  `usage_7d` follow this rule (changed in v3.14.0).
 - `pr` is colored by `{review_state}` when the engine sends one: `approved`
   green, `changes_requested` red, `pending`/`review_required` yellow. When a PR
   URL is present and color is on, `pr` (and the `branch` widget) render as an
@@ -1574,7 +1582,7 @@ All nine honor `format:`.
 | `plugins` | `🔌 {total}` | `🔌 12` | `total`, `errors` |
 | `mcps` | `MCP {total}` | `MCP 12` | `total`, `errors` |
 | `icm` | `🧠 {memories}` | `🧠 142` | `memories`, `concepts` (`concepts` shows `?` when the ICM stats have no Topics line, added in v3.14.0) |
-| `cache` | `{prunable}` | `15 MB` | `prunable` (humanized), `prunable_raw` (bytes). Both show `?` when the size cannot be read (added in v3.14.0) |
+| `cache` | `{prunable}` | `15 MB` | `prunable` (humanized), `prunable_raw` (bytes). Both show `?` when the size cannot be read (added in v3.14.0). When some entries cannot be read, the size is a floor, and `prunable` reads `at least 1.2 GiB (3 unreadable)`. The status data holds the count in `unreadable`, and the first cause of a run is logged at `info` (added in v3.14.0) |
 | `config_stale` | `{stale_icon} stale` | `⚙️ stale` | `stale_icon` (resolves from the icon set, gear emoji by default — a `statusline.icons.config_stale` override applies even without a custom `format`). Config out of date — relaunch to reload. Renders empty when the config isn't stale — there's no "fresh" variant |
 | `throttle` | `{raw}` | `umans: 45s` | `raw` (`"<backend>: <cooldown_secs>s"`), `cooldown_secs`, `reason` (the backend name) |
 | `session_log` | `{icon} {entries}` | `📝 8` | `icon`, `entries` |

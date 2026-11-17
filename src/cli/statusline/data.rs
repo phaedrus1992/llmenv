@@ -63,14 +63,15 @@ pub struct ThrottleData {
 
 /// Prunable cache size. `prunable_bytes` is `None` when the size could not be
 /// read, so the status line shows an unknown marker rather than a zero.
-/// `prunable_partial` is true when some entry was left out, so the total is a
-/// floor and the status line shows it as "at least" (#3069). Older status data
-/// has no such field, and it reads as an exact figure.
+/// `unreadable` counts the entries that were left out of a known total. A count above zero makes
+/// the total a floor, and the status line shows it as "at least" with the count (#3069, #3110).
+/// It is zero when `prunable_bytes` is `None`, because the total is then unknown, not a floor.
+/// Older status data has no such field, and it reads as an exact figure.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 pub struct CacheData {
     pub prunable_bytes: Option<u64>,
     #[serde(default)]
-    pub prunable_partial: bool,
+    pub unreadable: u64,
 }
 
 /// Task-tracker progress, scoped to sessions open for the current project
@@ -133,6 +134,21 @@ impl StatusData {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// A status file of an older binary names `prunable_partial`. It reads as an exact figure,
+    /// as the struct documents, and the next status write replaces it.
+    #[test]
+    fn an_old_partial_flag_reads_as_an_exact_figure() {
+        let old = r#"{"prunable_bytes": 10, "prunable_partial": true}"#;
+        let cache: CacheData = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            cache,
+            CacheData {
+                prunable_bytes: Some(10),
+                unreadable: 0
+            }
+        );
+    }
 
     #[test]
     fn load_parses_full_example() {

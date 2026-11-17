@@ -79,7 +79,10 @@ async fn probe_stdio(
     );
     // Reap the probe process now. `kill_on_drop` is only the backstop for an early return.
     if let Err(e) = child.kill().await {
-        tracing::warn!(command, error = %e, "cannot stop the MCP health probe process");
+        crate::agent_notice::record_logged(format!(
+            "llmenv: cannot stop the MCP health probe process for `{command}`: {e}. Fix: end that \
+             process by hand."
+        ));
     }
     answered.unwrap_or_else(|_| {
         Err(anyhow!(

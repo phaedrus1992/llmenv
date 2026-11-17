@@ -201,3 +201,117 @@ fn the_next_file_edit_after_a_task_is_done_nudges_the_next_start() {
     let text = post();
     assert!(text.contains("llmenv task start step-two"), "{text}");
 }
+
+// #3763: when every open task is blocked, the Stop reminder says which task cannot start and why,
+// and it does not advise a start that the start refuses.
+#[test]
+fn a_stop_with_every_task_blocked_names_the_reason() {
+    let dir = TempDir::new().unwrap();
+    let session = open_session(dir.path());
+    let waiter = add(dir.path(), &session, "Step one");
+    let blocker = crate::task::add_task_for_session(
+        dir.path(),
+        "Elsewhere",
+        ParentSpec::Detached,
+        "other-session",
+    )
+    .unwrap();
+    let mut blocker = blocker;
+    blocker.state = crate::task::TaskState::Wip;
+    crate::task::save_task(dir.path(), &blocker).unwrap();
+    crate::task::block_task(dir.path(), &waiter, &blocker.slug).unwrap();
+    let stop = serde_json::json!({ "last_assistant_message": "Done." });
+    let text = handle_stop_read(&TaskTracker::default(), &stop, Some("s1"), dir.path());
+    assert!(text.contains("'step-one' cannot start"), "{text}");
+    assert!(
+        text.contains(&format!("waits on '{}'", blocker.slug)),
+        "{text}"
+    );
+    assert!(!text.contains("llmenv task start step-one"), "{text}");
+}
+
+// #3776: with a task in progress and every queued task blocked, the Stop reminder gives the reason
+// and names no start, and with a startable task it names that task.
+#[test]
+fn a_stop_with_a_task_in_progress_and_every_queued_task_blocked_names_the_reason() {
+    let dir = TempDir::new().unwrap();
+    let session = open_session(dir.path());
+    let current = add(dir.path(), &session, "Current");
+    let waiter = add(dir.path(), &session, "Waiter");
+    let elsewhere = add(dir.path(), "other-session", "Elsewhere");
+    crate::task::block_task(dir.path(), &waiter, &elsewhere).unwrap();
+    crate::task::start_task(dir.path(), &current, false).unwrap();
+    let stop = serde_json::json!({ "last_assistant_message": "Done." });
+    let text = handle_stop_read(&TaskTracker::default(), &stop, Some("s1"), dir.path());
+    assert!(text.contains("'waiter' cannot start"), "{text}");
+    assert!(text.contains(&format!("waits on '{elsewhere}'")), "{text}");
+    assert!(!text.contains("llmenv task start <slug>"), "{text}");
+}
+
+#[test]
+fn how_to_track_names_the_reason_when_every_task_is_stuck() {
+    let tracking = crate::task::Tracking::Tracked {
+        wip: None,
+        wip_ownerless: false,
+        waiting: Vec::new(),
+        next: None,
+        queued: 1,
+        stuck: Some(("waiter".to_owned(), "it waits on 'x'".to_owned())),
+        next_in_wip: false,
+    };
+    let text = super::super::how_to_track(&tracking);
+    assert!(
+        text.contains("'waiter' cannot start: it waits on 'x'"),
+        "{text}"
+    );
+    assert!(!text.contains("llmenv task add"), "{text}");
+}
+
+// A refusal text can end in a period, and a nudge that wraps it must not double the period.
+#[test]
+fn a_cannot_start_sentence_has_one_period() {
+    let text = super::super::cannot_start("step", "it is queued behind 'a'. Pass --force.");
+    assert_eq!(
+        text,
+        "'step' cannot start: it is queued behind 'a'. Pass --force."
+    );
+    let plain = super::super::cannot_start("step", "it waits on 'x'");
+    assert_eq!(plain, "'step' cannot start: it waits on 'x'.");
+}
+
+// #3780: the next task is a sub-task of the task in progress. `done` refuses the parent while the
+// sub-task is open, so the reminder does not tell the agent to close the parent first.
+#[test]
+fn a_stop_with_the_next_task_below_the_wip_task_puts_the_sub_task_first() {
+    let dir = TempDir::new().unwrap();
+    let session = open_session(dir.path());
+    let parent = add(dir.path(), &session, "Parent");
+    crate::task::start_task(dir.path(), parent.as_str(), false).unwrap();
+    let new = crate::task::NewTask {
+        title: "Child",
+        placement: crate::task::Placement::Child(&parent),
+        ..crate::task::NewTask::default()
+    };
+    let owner = crate::task::session::EngineIdentity::default();
+    let choice = crate::task::SessionChoice::Named {
+        id: &session,
+        owner: &owner,
+        other_session: None,
+    };
+    let child =
+        crate::task::add_task_with(dir.path(), &new, ParentSpec::Detached, choice, "proj").unwrap();
+    let stop = serde_json::json!({ "last_assistant_message": "Done." });
+    let text = handle_stop_read(&TaskTracker::default(), &stop, Some("s1"), dir.path());
+    assert!(
+        text.contains("stays open until its open sub-tasks are done"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("llmenv task start {}", child.slug)),
+        "{text}"
+    );
+    assert!(
+        !text.contains(&format!("llmenv task done {parent}")),
+        "{text}"
+    );
+}

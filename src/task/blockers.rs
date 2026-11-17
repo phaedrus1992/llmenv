@@ -22,9 +22,10 @@ pub(crate) fn block_task<'a>(
         // One strict read resolves both names (#3477).
         target.check()?;
         resolve::check_identifier(on)?;
-        let all_tasks = list_tasks_strict(state_dir)?;
-        let slug = target.slug_in(state_dir, &all_tasks)?;
-        let on_slug = resolve::resolve_in(state_dir, on, &all_tasks)?;
+        let snapshot = target.tasks(state_dir)?;
+        let all_tasks: &StrictTasks = &snapshot;
+        let slug = target.slug_in(state_dir, all_tasks)?;
+        let on_slug = resolve::resolve_in(state_dir, on, all_tasks)?;
         if slug == on_slug {
             anyhow::bail!("task '{slug}' cannot be blocked on itself");
         }
@@ -37,18 +38,6 @@ pub(crate) fn block_task<'a>(
         save_task(state_dir, &task)?;
         Ok(task)
     })
-}
-
-/// True when `task` is neither `done` nor `waiting`, and every one of its
-/// `blocked_on` refs is (recursively) done per [`is_done_including_descendants`].
-/// A dangling or not-yet-done blocker keeps the task non-actionable — fail
-/// closed rather than treat an unresolvable reference as satisfied.
-pub(super) fn is_actionable(task: &Task, by_slug: &HashMap<&str, &Task>) -> bool {
-    !matches!(task.state, TaskState::Done | TaskState::Waiting)
-        && task
-            .blocked_on
-            .iter()
-            .all(|b| is_done_including_descendants(b, &task.slug, by_slug))
 }
 
 /// True when the task named `slug` is `done` and every task transitively
@@ -100,36 +89,119 @@ pub(super) fn first_undone_in_subtree<'a>(
     waiter: &str,
     by_slug: &HashMap<&'a str, &'a Task>,
 ) -> anyhow::Result<Option<&'a str>> {
-    fn go<'a>(
-        slug: &'a str,
-        waiter: &str,
-        by_slug: &HashMap<&'a str, &'a Task>,
-        visited: &mut HashSet<&'a str>,
-    ) -> anyhow::Result<Option<&'a str>> {
-        if !visited.insert(slug) {
+    ensure_waiter_chain_ends(waiter, by_slug)?;
+    // A dangling or undone root needs no child index, which keeps the common answer cheap.
+    match by_slug.get(slug) {
+        Some(task) if task.state == TaskState::Done => {}
+        _ => return Ok(Some(slug)),
+    }
+    // One parent-to-children index serves the whole walk, and an explicit stack replaces the
+    // recursion, so a deep chain of done tasks costs O(n) time and no call stack (#3757).
+    let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
+    for t in by_slug.values().filter(|t| t.slug != waiter) {
+        if let Some(parent) = t.parent.as_deref() {
+            children.entry(parent).or_default().push(t.slug.as_str());
+        }
+    }
+    for list in children.values_mut() {
+        list.sort_unstable_by(|a, b| b.cmp(a));
+    }
+    let mut visited: HashSet<&str> = HashSet::new();
+    let mut stack: Vec<&str> = vec![slug];
+    while let Some(current) = stack.pop() {
+        if !visited.insert(current) {
             anyhow::bail!(
-                "the parent links of task '{slug}' loop, so its blocker walk cannot end. Fix: \
-                 clear the parent of one task in the loop with `llmenv task edit <task> --no-parent`"
+                "the parent links of task '{current}' loop, so its blocker walk cannot end. \
+                 {LOOP_FIX}"
             );
         }
-        let Some(&task) = by_slug.get(slug) else {
-            return Ok(Some(slug));
-        };
-        if task.state != TaskState::Done {
-            return Ok(Some(slug));
+        match by_slug.get(current) {
+            Some(task) if task.state == TaskState::Done => {}
+            _ => return Ok(Some(current)),
         }
-        let mut children: Vec<&'a str> = by_slug
-            .values()
-            .filter(|t| t.parent.as_deref() == Some(slug) && t.slug != waiter)
-            .map(|t| t.slug.as_str())
-            .collect();
-        children.sort_unstable();
-        for child in children {
-            if let Some(undone) = go(child, waiter, by_slug, visited)? {
-                return Ok(Some(undone));
-            }
+        // The lists hold the children in reverse slug order, so the stack pops the first one first.
+        if let Some(list) = children.get(current) {
+            stack.extend(list.iter().copied());
         }
-        Ok(None)
     }
-    go(slug, waiter, by_slug, &mut HashSet::new())
+    Ok(None)
+}
+
+/// Why a blocker keeps `task` from starting: the first blocker that is not done. A blocker that
+/// does not exist has nothing to finish, so its fix is to remove it. `None` when every blocker is
+/// done. The caller has already checked the blocker walks for loops.
+pub(super) fn unmet_blocker(task: &Task, by_slug: &HashMap<&str, &Task>) -> Option<String> {
+    let blocker = task
+        .blocked_on
+        .iter()
+        .find(|b| !is_done_including_descendants(b, &task.slug, by_slug))?;
+    Some(if by_slug.contains_key(blocker.as_str()) {
+        format!("it waits on '{blocker}', which is not done. Fix: finish '{blocker}' first")
+    } else {
+        format!(
+            "it waits on '{blocker}', which does not exist. Fix: remove it with `llmenv task edit \
+             {} --unblock {blocker}`",
+            task.slug
+        )
+    })
+}
+
+/// The first task of `open`, in the order given, that `llmenv task start` would refuse, and why. A
+/// loop in a blocker walk comes before any other refusal, because a loop is damaged data that the
+/// user must repair, and a wait ends by itself (#3618, #3763, #3764, #3770). `all` is every task
+/// of the store, as [`super::startability::refusal`] needs it.
+pub(super) fn first_obstacle(
+    open: &[&Task],
+    all: &[Task],
+    by_slug: &HashMap<&str, &Task>,
+) -> Option<(String, String)> {
+    open.iter()
+        .find_map(|t| blocker_walk_error(t, by_slug).map(|why| (t.slug.to_owned(), why)))
+        .or_else(|| {
+            open.iter().find_map(|t| {
+                super::startability::refusal(t, all, by_slug, true)
+                    .map(|why| (t.slug.to_owned(), why))
+            })
+        })
+}
+
+/// The fix that every loop error of the blocker walk ends with.
+const LOOP_FIX: &str =
+    "Fix: clear the parent of one task in the loop with `llmenv task edit <task> --no-parent`";
+
+/// Errors when the parent links above `waiter` loop. The child walk skips the subtree of
+/// `waiter`, so it never enters a loop that passes through `waiter`. This check reports that
+/// loop (#3618).
+fn ensure_waiter_chain_ends(waiter: &str, by_slug: &HashMap<&str, &Task>) -> anyhow::Result<()> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut current = Some(waiter);
+    while let Some(slug) = current {
+        anyhow::ensure!(
+            seen.insert(slug),
+            "the parent links of task '{slug}' loop, so the blocker walk of '{waiter}' cannot \
+             end. {LOOP_FIX}"
+        );
+        current = by_slug.get(slug).and_then(|t| t.parent.as_deref());
+    }
+    Ok(())
+}
+
+/// [`ensure_waiter_chain_ends`] for the tests of other modules.
+#[cfg(test)]
+pub(super) fn ensure_waiter_chain_ends_for_test(
+    waiter: &str,
+    by_slug: &HashMap<&str, &Task>,
+) -> anyhow::Result<()> {
+    ensure_waiter_chain_ends(waiter, by_slug)
+}
+
+/// The text of the first blocker walk of `task` that fails, or `None` when every walk ends. A
+/// task with such a walk is never offered as the next step, and the reminder names the loop
+/// (#3618).
+pub(super) fn blocker_walk_error(task: &Task, by_slug: &HashMap<&str, &Task>) -> Option<String> {
+    task.blocked_on.iter().find_map(|blocker| {
+        first_undone_in_subtree(blocker, &task.slug, by_slug)
+            .err()
+            .map(|err| format!("{err:#}"))
+    })
 }

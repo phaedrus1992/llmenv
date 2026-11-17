@@ -331,12 +331,11 @@ mod tests {
     }
 
     #[test]
-    #[expect(clippy::panic, reason = "test code: the worker must panic")]
     fn a_worker_that_panics_is_not_reported_as_a_timeout() {
-        // The panic hook prints a backtrace before the sender drops. On a loaded machine that
-        // can take longer than a short deadline, so the deadline must not race it.
-        let lost = with_deadline(Duration::from_secs(60), || -> u8 {
-            panic!("worker failed")
+        // `resume_unwind` skips the panic hook. The hook of a plain `panic!` can symbolicate a
+        // backtrace for longer than any short deadline under load (#3483).
+        let lost = with_deadline(Duration::from_secs(10), || -> u8 {
+            std::panic::resume_unwind(Box::new("worker failed"))
         });
         assert_eq!(lost, Err(NoAnswer::WorkerLost));
     }

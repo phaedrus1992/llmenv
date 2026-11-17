@@ -178,9 +178,34 @@ pub(super) fn engine_event_for(stdin_name: Option<&str>, event: &str) -> String 
         .to_string()
 }
 
+/// The notice for a payload that parsed but names no event, or an empty one. The argv event then
+/// supplies `used`, and without the notice the agent cannot tell that the engine sent no name
+/// (#3766). Unparseable stdin has its own notice, so `None` payload adds none here.
+pub(super) fn missing_name_notice(
+    payload: Option<&serde_json::Value>,
+    event: &str,
+    used: &str,
+) -> Option<String> {
+    let json = payload?;
+    // An event with no native name has no fallback, and a payload with no name is its normal state.
+    if used.is_empty()
+        || json["hook_event_name"]
+            .as_str()
+            .is_some_and(|n| !n.is_empty())
+    {
+        return None;
+    }
+    Some(format!(
+        "llmenv hook-run: the payload for `{event}` has no hook_event_name, so `{used}` is used. \
+         Fix: check that the engine sends the event name."
+    ))
+}
+
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod event_name_tests {
     use super::engine_event_for;
+    use proptest::strategy::Strategy as _;
 
     #[test]
     fn the_payload_name_wins_over_the_argv_event() {
@@ -200,5 +225,53 @@ mod event_name_tests {
     #[test]
     fn an_event_without_a_native_name_gives_an_empty_name() {
         assert_eq!(engine_event_for(None, "post_session"), "");
+    }
+
+    #[test]
+    fn a_parsed_payload_with_no_name_adds_a_notice_that_names_the_fallback() {
+        use super::missing_name_notice;
+        let no_name = serde_json::json!({"session_id": "s"});
+        let empty = serde_json::json!({"hook_event_name": ""});
+        let named = serde_json::json!({"hook_event_name": "Stop"});
+        for payload in [&no_name, &empty] {
+            let notice = missing_name_notice(Some(payload), "session_start", "SessionStart")
+                .expect("a notice");
+            assert!(
+                notice.contains("`SessionStart` is used") && notice.contains("Fix:"),
+                "{notice}"
+            );
+        }
+        assert_eq!(missing_name_notice(Some(&named), "stop", "Stop"), None);
+        assert_eq!(missing_name_notice(None, "stop", "Stop"), None);
+        assert_eq!(
+            missing_name_notice(Some(&no_name), "post_tool_batch", ""),
+            None
+        );
+    }
+
+    proptest::proptest! {
+        /// The notice is `None` exactly when the payload holds a non-empty string name or the
+        /// event has no fallback name. Otherwise it names the fallback and the fix.
+        #[test]
+        fn the_notice_follows_the_payload_name(
+            value in proptest::prop_oneof![
+                proptest::strategy::Just(serde_json::Value::Null),
+                proptest::prelude::any::<bool>().prop_map(serde_json::Value::from),
+                (0u32..100).prop_map(serde_json::Value::from),
+                "[A-Za-z]{0,8}".prop_map(serde_json::Value::from),
+            ],
+            used in "[A-Za-z]{0,8}",
+        ) {
+            use super::missing_name_notice;
+            let payload = serde_json::json!({ "hook_event_name": value });
+            let named = value.as_str().is_some_and(|n| !n.is_empty());
+            let notice = missing_name_notice(Some(&payload), "evt", &used);
+            if named || used.is_empty() {
+                proptest::prop_assert_eq!(notice, None);
+            } else {
+                let text = notice.unwrap_or_default();
+                proptest::prop_assert!(text.contains(&used) && text.contains("Fix:"), "{}", text);
+            }
+        }
     }
 }

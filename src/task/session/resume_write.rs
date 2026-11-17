@@ -36,7 +36,7 @@ pub(crate) fn update_resume(
 ///
 /// # Errors
 /// Errors if the session cannot be read or written. The change itself is already saved.
-pub(crate) fn append_override_note(
+pub(in crate::task) fn append_override_note(
     state_dir: &Path,
     id: &str,
     note: Option<&str>,
@@ -50,6 +50,9 @@ pub(crate) fn append_override_note(
         save_session(state_dir, &session)
     })
     .with_context(|| {
-        format!("the change to session '{id}' is saved, but its override note was not written")
+        format!(
+            "the change to session '{id}' is saved, but its override note was not written; do not \
+             retry the command"
+        )
     })
 }

@@ -18,11 +18,17 @@ pub(super) fn run(
         // One caller read serves the check and the close note. It runs before the close, so a
         // failure here leaves the task open.
         let caller = caller_session_for_task(state_dir)?;
-        let (slug, audit) =
-            crate::task::ownership::ensure_task_is_ours(state_dir, id, &caller, other_session)?;
+        let tasks = crate::task::ownership::read_for_check(state_dir, &[id])?;
+        let (slug, audit) = crate::task::ownership::ensure_task_is_ours(
+            state_dir,
+            &tasks,
+            id,
+            &caller,
+            other_session,
+        )?;
         let completed = crate::task::complete_task_by(
             state_dir,
-            crate::task::TaskTarget::Resolved(&slug),
+            crate::task::TaskTarget::Checked(&slug, &tasks),
             force,
             &caller,
         )?;
@@ -39,14 +45,8 @@ pub(super) fn run(
     if let Some(note) = completed.undone_children_note() {
         println!("{note}");
     }
-    match crate::task::last_task_hint(state_dir, &completed.task) {
-        Ok(Some(hint)) => println!("{hint}"),
-        Ok(None) => {}
-        // A failed hint does not undo a close that succeeded. The warning names the fix.
-        Err(e) => println!(
-            "Warning: '{}' is closed, but the next-step hint could not be read: {e:#}. Fix: run `llmenv task ls --session <id>`.",
-            completed.task.slug
-        ),
+    if let Some(hint) = crate::task::last_task_hint(&completed) {
+        println!("{hint}");
     }
     audit_result
 }

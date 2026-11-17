@@ -28,6 +28,12 @@ pub(crate) enum Tracking {
         waiting: Vec<String>,
         next: Option<String>,
         queued: usize,
+        /// Set when `next` is `None` and a task is still `open`: the slug of the first open task
+        /// and why its blockers keep it from starting, so the reminder gives the reason (#3763).
+        stuck: Option<(String, String)>,
+        /// True when `next` is a sub-task of `wip`. The task in progress cannot close before its
+        /// open sub-tasks do, so the reminder does not tell the agent to close it first (#3780).
+        next_in_wip: bool,
     },
 }
 
@@ -95,22 +101,38 @@ fn tracking_of(visible: &[session::Session], tasks: &[Task], caller: Option<&str
         .filter(|t| t.state == TaskState::Waiting)
         .map(|t| t.slug.clone())
         .collect();
-    // The queue runs in creation order, so the next task is the earliest open one.
-    let next = unfinished
+    // The queue runs in creation order, so the next task is the earliest open one that the start
+    // accepts: no blocker loop, no unmet blocker, no queue hold, and no refusing ancestor. The
+    // advice never names a start that the start then refuses (#3757, #3770).
+    let by_slug: std::collections::HashMap<&str, &Task> =
+        tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
+    let mut open: Vec<&Task> = unfinished
         .iter()
+        .copied()
         .filter(|t| t.state == TaskState::Open)
-        .min_by(|a, b| queue_order(a, b))
-        .map(|t| t.slug.clone());
-    let queued = unfinished
-        .iter()
-        .filter(|t| t.state == TaskState::Open)
-        .count();
+        .collect();
+    open.sort_by(|a, b| queue_order(a, b));
+    let queued = open.len();
+    let next = super::startability::first_startable(&open, tasks, &by_slug).map(|t| t.slug.clone());
+    let next_in_wip = match (&wip, &next) {
+        (Some(wip), Some(next)) => super::relation::undone_descendants_in(wip, tasks)
+            .iter()
+            .any(|t| &t.slug == next),
+        _ => false,
+    };
+    let stuck = if next.is_none() {
+        super::blockers::first_obstacle(&open, tasks, &by_slug)
+    } else {
+        None
+    };
     Tracking::Tracked {
         wip,
         wip_ownerless,
         waiting,
         next,
         queued,
+        stuck,
+        next_in_wip,
     }
 }
 

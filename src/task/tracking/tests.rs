@@ -104,3 +104,151 @@ proptest::proptest! {
         proptest::prop_assert!(matches!(tracking_of(&[], &tasks, None), Tracking::NoSession));
     }
 }
+
+/// #3757: the reminder skips an open task whose blocker is not done, and one whose blocker walk
+/// loops, so it never advises a start that the start refuses.
+#[test]
+fn next_skips_a_task_with_an_unmet_or_looping_blocker() {
+    let visible = [open_session_for_test("s0")];
+    let blocker = task("blocker", "s0", TaskState::Wip, 1);
+    let mut blocked = task("blocked", "s0", TaskState::Open, 2);
+    blocked.blocked_on = vec!["blocker".to_owned()];
+    let free = task("free", "s0", TaskState::Open, 3);
+    // Parallel tasks sit outside the queue, so only the blockers decide in this test.
+    let tasks: Vec<Task> = [blocker, blocked, free]
+        .into_iter()
+        .map(|mut t| {
+            t.parallel = true;
+            t
+        })
+        .collect();
+    let Tracking::Tracked { next, queued, .. } = tracking_of(&visible, &tasks, None) else {
+        unreachable!("tasks are tracked");
+    };
+    assert_eq!(next.as_deref(), Some("free"));
+    assert_eq!(queued, 2, "queued still counts every open task");
+
+    // A blocker that waits on a task of its own parent loop is never done, so the task is skipped.
+    let mut a = task("a", "s0", TaskState::Open, 1);
+    let mut b = task("b", "s0", TaskState::Open, 2);
+    a.blocked_on = vec!["b".to_owned()];
+    b.blocked_on = vec!["a".to_owned()];
+    a.parallel = true;
+    b.parallel = true;
+    let Tracking::Tracked { next, stuck, .. } = tracking_of(&visible, &[a, b], None) else {
+        unreachable!("tasks are tracked");
+    };
+    assert_eq!(next, None);
+    // #3763: the reminder gets the reason, and the reason names the first open task.
+    let Some((slug, why)) = stuck else {
+        unreachable!("a stuck reason is set")
+    };
+    assert_eq!(slug, "a");
+    assert!(!why.is_empty());
+}
+
+proptest::proptest! {
+    /// With blocker edges, `next` is the earliest open task whose blockers are all done, and
+    /// `queued` still counts every open task. These tasks have no sub-tasks, so a blocker is done
+    /// when its own state is `done`. A task that blocks on a missing slug is not actionable (#3757).
+    #[test]
+    fn next_is_the_earliest_open_task_with_every_blocker_done(
+        rows in proptest::collection::vec((0u8..4, proptest::option::of(0usize..12), 0u8..50), 1..10),
+    ) {
+        let visible = [open_session_for_test("s0")];
+        let tasks: Vec<Task> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, (st, blocker, at))| {
+                let mut t = task(&format!("t{i}"), "s0", state_of(*st), *at);
+                if let Some(b) = blocker {
+                    t.blocked_on = vec![format!("t{b}")];
+                }
+                t.parallel = true;
+                t
+            })
+            .collect();
+        let blockers_done = |t: &Task| {
+            t.blocked_on.iter().all(|b| {
+                tasks.iter().any(|o| &o.slug == b && o.state == TaskState::Done && o.slug != t.slug)
+            })
+        };
+        let open: Vec<&Task> = tasks.iter().filter(|t| t.state == TaskState::Open).collect();
+        let want = open
+            .iter()
+            .filter(|t| blockers_done(t))
+            .min_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.slug.cmp(&b.slug)))
+            .map(|t| t.slug.clone());
+        match tracking_of(&visible, &tasks, None) {
+            Tracking::NoTasks => proptest::prop_assert!(tasks.iter().all(|t| t.state == TaskState::Done)),
+            Tracking::Tracked { next, queued, .. } => {
+                proptest::prop_assert_eq!(next, want);
+                proptest::prop_assert_eq!(queued, open.len());
+            }
+            other => proptest::prop_assert!(false, "unexpected {other:?}"),
+        }
+    }
+}
+
+proptest::proptest! {
+    /// `stuck` is set only when there is no next task and a task is still open, and it names the
+    /// first open task that a blocker stops. With a next task it is `None` (#3763).
+    #[test]
+    fn stuck_is_set_only_when_no_task_can_start(
+        rows in proptest::collection::vec((0u8..4, proptest::option::of(0usize..12), 0u8..50), 1..10),
+    ) {
+        let visible = [open_session_for_test("s0")];
+        let tasks: Vec<Task> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, (st, blocker, at))| {
+                let mut t = task(&format!("t{i}"), "s0", state_of(*st), *at);
+                if let Some(b) = blocker {
+                    t.blocked_on = vec![format!("t{b}")];
+                }
+                t.parallel = true;
+                t
+            })
+            .collect();
+        if let Tracking::Tracked { next, queued, stuck, .. } = tracking_of(&visible, &tasks, None) {
+            proptest::prop_assert_eq!(stuck.is_some(), next.is_none() && queued > 0);
+            if let Some((slug, why)) = stuck {
+                proptest::prop_assert!(!why.is_empty());
+                proptest::prop_assert!(tasks.iter().any(|t| t.slug == slug && t.state == TaskState::Open));
+            }
+        }
+    }
+}
+
+proptest::proptest! {
+    /// With queued tasks, blockers, and parents, `next` is the earliest open task that the shared
+    /// startability check accepts, and `stuck` is set exactly when none is accepted (#3770).
+    #[test]
+    fn next_follows_the_startability_check_with_the_queue_on(
+        rows in proptest::collection::vec((0u8..4, proptest::option::of(0usize..12), 0u8..50), 1..10),
+    ) {
+        let visible = [open_session_for_test("s0")];
+        let tasks: Vec<Task> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, (st, blocker, at))| {
+                let mut t = task(&format!("t{i}"), "s0", state_of(*st), *at);
+                if let Some(b) = blocker {
+                    t.blocked_on = vec![format!("t{b}")];
+                }
+                t
+            })
+            .collect();
+        let by_slug: std::collections::HashMap<&str, &Task> =
+            tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
+        let mut open: Vec<&Task> = tasks.iter().filter(|t| t.state == TaskState::Open).collect();
+        open.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.slug.cmp(&b.slug)));
+        let want = crate::task::startability::first_startable(&open, &tasks, &by_slug)
+            .map(|t| t.slug.clone());
+        if let Tracking::Tracked { next, stuck, queued, .. } = tracking_of(&visible, &tasks, None) {
+            proptest::prop_assert_eq!(&next, &want);
+            proptest::prop_assert_eq!(queued, open.len());
+            proptest::prop_assert_eq!(stuck.is_some(), want.is_none() && !open.is_empty());
+        }
+    }
+}

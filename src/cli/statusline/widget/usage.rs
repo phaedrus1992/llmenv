@@ -2,6 +2,7 @@
 //! percentage, the bar, the reset label, and the pace marker for one
 //! rate-limit window.
 
+use super::super::UNKNOWN_MARKER;
 use super::reset_clock::{ClockStyle, format_reset_clock};
 use super::usage_state::usage_delta;
 use super::usage_state::usage_state_dir;
@@ -62,36 +63,38 @@ pub(super) fn humanize_until(resets_at: i64, now: i64) -> String {
 
 /// The `{reset}` text. The default is the countdown from [`humanize_until`].
 /// `display: clock_24h` and `display: clock_12h` show the local clock time at
-/// reset instead. A window longer than a day adds the weekday. When the system
-/// time zone or the reset time cannot be read, the countdown is shown and a
-/// warning is logged, so the label is never a clock time in the wrong zone.
+/// reset instead. A window longer than a day adds the weekday. `zone` reads the system time
+/// zone, and runs only for a clock display. When the zone or the reset time cannot be read, the
+/// label is the unknown marker and a warning is logged, so the label is never a clock time in the
+/// wrong zone (#3071).
 fn reset_label(
     resets_at: i64,
     now: i64,
     window_secs: i64,
     cfg: Option<&llmenv_config::WidgetConfig>,
+    zone: impl FnOnce() -> Result<jiff::tz::TimeZone, jiff::Error>,
 ) -> String {
     let style = match cfg.and_then(|c| c.display.as_deref()) {
         Some("clock_24h") => ClockStyle::TwentyFourHour,
         Some("clock_12h") => ClockStyle::TwelveHour,
         _ => return humanize_until(resets_at, now),
     };
-    let tz = match jiff::tz::TimeZone::try_system() {
+    let tz = match zone() {
         Ok(tz) => tz,
         Err(e) => {
             tracing::warn!(
-                "usage reset: cannot read the system time zone, so the countdown is shown: {e}"
+                "usage reset: cannot read the system time zone, so the reset shows `{UNKNOWN_MARKER}`: {e}"
             );
-            return humanize_until(resets_at, now);
+            return UNKNOWN_MARKER.to_owned();
         }
     };
     match format_reset_clock(resets_at, &tz, style, window_secs > ONE_DAY_SECS) {
         Some(label) => label,
         None => {
             tracing::warn!(
-                "usage reset time {resets_at} is out of range, so the countdown is shown"
+                "usage reset time {resets_at} is out of range, so the reset shows `{UNKNOWN_MARKER}`"
             );
-            humanize_until(resets_at, now)
+            UNKNOWN_MARKER.to_owned()
         }
     }
 }
@@ -135,7 +138,15 @@ pub(super) fn render_usage(
     let width = resolve_bar_width(cfg, DEFAULT_BAR_WIDTH);
     let reset = window
         .resets_at
-        .map(|r| reset_label(r, args.now, args.window_secs, cfg))
+        .map(|r| {
+            reset_label(
+                r,
+                args.now,
+                args.window_secs,
+                cfg,
+                jiff::tz::TimeZone::try_system,
+            )
+        })
         .unwrap_or_default();
     let (pace, marker) = match window.resets_at {
         Some(r) => pace_and_target(pct, r, args.window_secs, args.now, width),
@@ -204,6 +215,22 @@ mod tests {
     /// Fixed clock for the tests. Only the offsets from it are asserted.
     const NOW: i64 = 1_000_000_000;
 
+    /// [`super::reset_label`] with the system time zone, as production reads it.
+    fn reset_label(
+        resets_at: i64,
+        now: i64,
+        window_secs: i64,
+        cfg: Option<&llmenv_config::WidgetConfig>,
+    ) -> String {
+        super::reset_label(
+            resets_at,
+            now,
+            window_secs,
+            cfg,
+            jiff::tz::TimeZone::try_system,
+        )
+    }
+
     fn display_cfg(display: &str) -> llmenv_config::WidgetConfig {
         llmenv_config::WidgetConfig {
             display: Some(display.to_string()),
@@ -241,7 +268,7 @@ mod tests {
             window in 1i64..(14 * 86_400),
             twelve_hour in proptest::bool::ANY,
         ) {
-            // With no system time zone, the label is the countdown by design.
+            // With no system time zone, the label is the unknown marker by design.
             proptest::prop_assume!(jiff::tz::TimeZone::try_system().is_ok());
             let cfg = display_cfg(if twelve_hour { "clock_12h" } else { "clock_24h" });
             let label = reset_label(NOW + ahead, NOW, window, Some(&cfg));
@@ -250,6 +277,32 @@ mod tests {
                 .is_some_and(|(day, _)| ["mon", "tue", "wed", "thu", "fri", "sat", "sun"].contains(&day));
             proptest::prop_assert_eq!(weekday, window > ONE_DAY_SECS, "{}", label);
         }
+    }
+
+    #[test]
+    fn an_unreadable_zone_database_keeps_the_format_and_shows_the_marker() {
+        let cfg = display_cfg("clock_24h");
+        let zone_error = jiff::tz::TimeZone::get("No/Such_Zone").expect_err("not a zone");
+        let mut label = String::new();
+        let logs = crate::test_log_capture::capture_logs(|| {
+            label = super::reset_label(NOW + 7200, NOW, FIVE_HOUR_SECS, Some(&cfg), || {
+                Err(zone_error)
+            });
+        });
+        assert_eq!(label, UNKNOWN_MARKER);
+        assert!(logs.contains("WARN"), "{logs}");
+        assert!(logs.contains("No/Such_Zone"), "the cause is named: {logs}");
+    }
+
+    #[test]
+    fn the_countdown_does_not_read_the_system_zone() {
+        let read = std::cell::Cell::new(false);
+        let label = super::reset_label(NOW + 1380, NOW, FIVE_HOUR_SECS, None, || {
+            read.set(true);
+            jiff::tz::TimeZone::try_system()
+        });
+        assert!(!read.get(), "the countdown needs no zone");
+        assert_eq!(label, "23m");
     }
 
     #[test]

@@ -183,8 +183,8 @@ fn render_tasks(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) ->
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::cache::UNKNOWN_MARKER;
     use super::*;
+    use crate::cli::statusline::UNKNOWN_MARKER;
     use crate::cli::statusline::data::{
         CacheData, CountData, IcmData, ScopesData, SessionProgress, StatusData, TasksData,
         ThrottleData,
@@ -242,7 +242,7 @@ mod tests {
         let data = StatusData {
             cache: Some(CacheData {
                 prunable_bytes: Some(15_728_640),
-                prunable_partial: false,
+                unreadable: 0,
             }),
             ..Default::default()
         };
@@ -255,12 +255,12 @@ mod tests {
         let data = StatusData {
             cache: Some(CacheData {
                 prunable_bytes: Some(15_728_640),
-                prunable_partial: true,
+                unreadable: 2,
             }),
             ..Default::default()
         };
         let out = render_llmenv_widget("cache", &data, None, &icons(), false).unwrap();
-        assert_eq!(out, "at least 15 MB");
+        assert_eq!(out, "at least 15 MB (2 unreadable)");
     }
 
     #[test]
@@ -348,7 +348,7 @@ mod tests {
         let data = StatusData {
             cache: Some(CacheData {
                 prunable_bytes: Some(2048),
-                prunable_partial: false,
+                unreadable: 0,
             }),
             ..Default::default()
         };
@@ -360,7 +360,7 @@ mod tests {
         let data = StatusData {
             cache: Some(CacheData {
                 prunable_bytes: Some(512),
-                prunable_partial: false,
+                unreadable: 0,
             }),
             ..Default::default()
         };
@@ -375,7 +375,7 @@ mod tests {
         let data = StatusData {
             cache: Some(CacheData {
                 prunable_bytes: None,
-                prunable_partial: false,
+                unreadable: 0,
             }),
             ..Default::default()
         };
@@ -476,7 +476,7 @@ mod tests {
         let data = StatusData {
             cache: Some(CacheData {
                 prunable_bytes: Some(2048),
-                prunable_partial: false,
+                unreadable: 0,
             }),
             ..Default::default()
         };
@@ -684,7 +684,7 @@ mod tests {
             }),
             cache: Some(CacheData {
                 prunable_bytes: Some(15_728_640),
-                prunable_partial: false,
+                unreadable: 0,
             }),
             config_stale: Some(true),
             throttle: Some(ThrottleData {
