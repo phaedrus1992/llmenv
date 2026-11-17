@@ -72,14 +72,21 @@ pub(crate) fn matches_content_all<'a>(
         walker = walker.max_depth(depth);
     }
 
-    let mut walk_failed = false;
+    // The shallowest depth at which the walk could not read an entry. A scope whose `depth` limit
+    // stops above the entries below that depth cannot have matched there, so it is not unknown.
+    let mut shallowest_failure: Option<usize> = None;
     for entry in walker {
         if pending.is_empty() {
             break;
         }
-        let Ok(entry) = entry.inspect_err(|e| report_walk_error(e, cwd)) else {
-            walk_failed = true;
-            continue;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                report_walk_error(&e, cwd);
+                shallowest_failure =
+                    Some(shallowest_failure.map_or(e.depth(), |d| d.min(e.depth())));
+                continue;
+            }
         };
         if entry.file_type().is_dir() {
             continue;
@@ -107,11 +114,13 @@ pub(crate) fn matches_content_all<'a>(
             }
         });
     }
-    let unknown = if walk_failed {
-        pending.iter().map(|(id, _, _)| *id).collect()
-    } else {
-        std::collections::BTreeSet::new()
-    };
+    let unknown = shallowest_failure.map_or_else(std::collections::BTreeSet::new, |failed_at| {
+        pending
+            .iter()
+            .filter(|(_, _, depth)| depth.is_none_or(|d| d > failed_at))
+            .map(|(id, _, _)| *id)
+            .collect()
+    });
     ContentMatches { matched, unknown }
 }
 
@@ -226,10 +235,11 @@ mod tests {
                 .enumerate()
                 .map(|(i, (g, d))| scope(&format!("s{i}"), GLOBS[*g], DEPTHS[*d]))
                 .collect();
-            prop_assert_eq!(
-                matches_content_all(&scopes, dir.path()).matched,
-                naive_matches(&scopes, dir.path())
-            );
+            let found = matches_content_all(&scopes, dir.path());
+            prop_assert_eq!(&found.matched, &naive_matches(&scopes, dir.path()));
+            // A readable tree leaves no scope unknown, and no scope is both matched and unknown.
+            prop_assert!(found.unknown.is_empty());
+            prop_assert!(found.matched.is_disjoint(&found.unknown));
         }
     }
 
@@ -271,5 +281,28 @@ mod tests {
         }
         assert_eq!(found.matched, BTreeSet::from(["rs"]));
         assert_eq!(found.unknown, BTreeSet::from(["md"]));
+    }
+
+    // #3330: an unreadable folder at depth 1 hides entries at depth 2 and below. A scope whose depth
+    // limit stops at 1 could not have matched there, so it is not unknown.
+    #[cfg(unix)]
+    #[test]
+    fn a_depth_limit_above_the_unreadable_folder_leaves_the_scope_not_unknown() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).expect("fixture");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("fixture");
+        let scopes = [
+            scope("shallow", "*.md", Some(1)),
+            scope("deep", "*.md", Some(3)),
+            scope("open", "*.md", None),
+        ];
+        let found = matches_content_all(&scopes, dir.path());
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).expect("fixture");
+        if found.unknown.is_empty() {
+            return; // running as root: the mode does not block the read
+        }
+        assert_eq!(found.unknown, BTreeSet::from(["deep", "open"]));
     }
 }

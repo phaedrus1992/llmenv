@@ -127,12 +127,14 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
     if cwd.exists() && !cfg.scope.content.is_empty() {
         let found = matcher::matches_content_all(&cfg.scope.content, cwd);
         if !found.unknown.is_empty() {
-            // An unknown scope stays inactive, as before. The log names it, so the missing
+            // An unknown scope stays inactive, as before. The notice names it, so the missing
             // scope has a cause (#3330).
-            tracing::warn!(
-                scopes = ?found.unknown,
-                "content scopes are unknown because part of the working directory cannot be read"
-            );
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the content scopes {:?} did not match, and part of the working directory \
+                 cannot be read, so they may match there. Fix: check the permissions of the \
+                 folders that the log names.",
+                found.unknown
+            ));
         }
         for s in &cfg.scope.content {
             if found.matched.contains(s.id.as_str()) {
