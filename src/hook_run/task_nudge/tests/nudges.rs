@@ -265,3 +265,15 @@ fn how_to_track_names_the_reason_when_every_task_is_stuck() {
     );
     assert!(!text.contains("llmenv task add"), "{text}");
 }
+
+// A refusal text can end in a period, and a nudge that wraps it must not double the period.
+#[test]
+fn a_cannot_start_sentence_has_one_period() {
+    let text = super::super::cannot_start("step", "it is queued behind 'a'. Pass --force.");
+    assert_eq!(
+        text,
+        "'step' cannot start: it is queued behind 'a'. Pass --force."
+    );
+    let plain = super::super::cannot_start("step", "it waits on 'x'");
+    assert_eq!(plain, "'step' cannot start: it waits on 'x'.");
+}

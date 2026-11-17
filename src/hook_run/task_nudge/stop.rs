@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use super::{NudgeState, after_current, load, queued_reminder, save, state_path};
+use super::{NudgeState, after_current, cannot_start, load, queued_reminder, save, state_path};
 use crate::config::TaskTracker;
 use crate::hook_run::session_state::lock_state_file;
 use crate::task::Tracking;
@@ -106,8 +106,8 @@ pub(crate) fn handle_stop(
             stuck: Some((slug, why)),
             ..
         } => format!(
-            "llmenv task tracker: {queued} task(s) are open and none is in progress, but '{slug}' \
-             cannot start: {why}."
+            "llmenv task tracker: {queued} task(s) are open and none is in progress, but {}",
+            cannot_start(slug, why)
         ),
         Tracking::Tracked {
             wip: Some(slug),
