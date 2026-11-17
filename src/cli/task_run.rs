@@ -362,7 +362,7 @@ fn edit(state_dir: &Path, command: TaskCommand) -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, clippy::expect_used, reason = "test scaffolding")]
+#[expect(clippy::unwrap_used, clippy::panic, reason = "test scaffolding")]
 mod tests {
     use super::*;
     use crate::task::session::{EngineIdentity, StartDecision, StartOutcome, start_session};
