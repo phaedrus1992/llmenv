@@ -572,3 +572,133 @@ proptest! {
         prop_assert_eq!(got, first_undone_recursive("t00", &waiter, &tasks));
     }
 }
+
+// #3767: the tree render is iterative, so a chain of 100000 sub-tasks neither overflows the stack
+// nor drops a row, and each row is one level deeper than the one before.
+#[test]
+fn a_chain_of_100000_sub_tasks_renders_every_row() {
+    const DEPTH: usize = 100_000;
+    let tasks: Vec<Task> = (0..DEPTH)
+        .map(|n| {
+            let parent = (n > 0).then(|| format!("t{}", n - 1));
+            let mut t = task(&format!("t{n}"), TaskState::Open, parent.as_deref(), &[]);
+            t.created_at = format!("2026-10-02T00:00:00.{n:09}Z");
+            t
+        })
+        .collect();
+    let rows = display_rows(tasks, &[]);
+    assert_eq!(rows.len(), DEPTH);
+    assert_eq!(rows[0].depth, 0);
+    assert_eq!(rows[DEPTH - 1].depth, DEPTH - 1);
+}
+
+/// The rows of a recursive pre-order walk of `tasks`: roots first, then each task's children, all
+/// in creation order. The oracle for the iterative render.
+fn preorder_reference(tasks: &[Task]) -> Vec<(String, usize)> {
+    fn walk(slug: &str, depth: usize, tasks: &[Task], out: &mut Vec<(String, usize)>) {
+        out.push((slug.to_owned(), depth));
+        for kid in tasks.iter().filter(|t| t.parent.as_deref() == Some(slug)) {
+            walk(&kid.slug, depth + 1, tasks, out);
+        }
+    }
+    let mut out = Vec::new();
+    for root in tasks.iter().filter(|t| t.parent.is_none()) {
+        walk(&root.slug, 0, tasks, &mut out);
+    }
+    out
+}
+
+proptest! {
+    // On a forest, the iterative render gives the rows of the recursive pre-order walk, with the
+    // same depths (#3767). The tasks are in creation order, so the reference needs no sort.
+    #[test]
+    fn the_iterative_render_matches_the_recursive_preorder(
+        rows in proptest::collection::vec((any::<u8>(), any::<bool>()), 1..14),
+    ) {
+        let tasks: Vec<Task> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, (parent, has_parent))| {
+                let parent = (i > 0 && *has_parent).then(|| format!("t{:02}", *parent as usize % i));
+                let mut t = task(&format!("t{i:02}"), TaskState::Open, parent.as_deref(), &[]);
+                t.created_at = format!("2026-10-02T00:00:{i:02}Z");
+                t
+            })
+            .collect();
+        let got: Vec<(String, usize)> = display_rows(tasks.clone(), &[])
+            .into_iter()
+            .map(|r| (r.task.slug, r.depth))
+            .collect();
+        prop_assert_eq!(got, preorder_reference(&tasks));
+    }
+}
+
+#[test]
+fn a_two_task_parent_cycle_renders_each_task_once() {
+    let tasks = vec![
+        task("a", TaskState::Open, Some("b"), &[]),
+        task("b", TaskState::Open, Some("a"), &[]),
+    ];
+    let rows = display_rows(tasks, &[]);
+    let mut slugs: Vec<&str> = rows.iter().map(|r| r.task.slug.as_str()).collect();
+    slugs.sort_unstable();
+    assert_eq!(slugs, ["a", "b"]);
+}
+
+proptest! {
+    // The first obstacle is None exactly when every open task is actionable. A loop in a blocker
+    // walk wins over a plain unmet blocker, and the named task is the first one with that cause
+    // (#3763, #3764). The parent links may loop.
+    #[test]
+    fn the_first_obstacle_follows_actionability_and_prefers_a_loop(
+        rows in proptest::collection::vec(
+            (0u8..4, proptest::option::of(0usize..8), proptest::option::of(0usize..8)),
+            1..8,
+        ),
+    ) {
+        let n = rows.len();
+        let tasks: Vec<Task> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, (state, parent, blocker))| {
+                let state = match state {
+                    0 => TaskState::Open,
+                    1 => TaskState::Wip,
+                    2 => TaskState::Done,
+                    _ => TaskState::Open,
+                };
+                let parent = parent.filter(|p| *p < n).map(|p| format!("t{p}"));
+                let blocked: Vec<String> =
+                    blocker.filter(|b| *b < n).map(|b| format!("t{b}")).into_iter().collect();
+                let blocked_refs: Vec<&str> = blocked.iter().map(String::as_str).collect();
+                task(&format!("t{i}"), state, parent.as_deref(), &blocked_refs)
+            })
+            .collect();
+        let by_slug = index(&tasks);
+        let open: Vec<&Task> = tasks.iter().filter(|t| t.state == TaskState::Open).collect();
+        let got = super::blockers::first_obstacle(&open, &by_slug);
+        prop_assert_eq!(got.is_none(), open.iter().all(|t| is_actionable(t, &by_slug)));
+        let first_loop = open
+            .iter()
+            .find(|t| blocker_walk_error(t, &by_slug).is_some())
+            .map(|t| t.slug.clone());
+        if let (Some(loop_slug), Some((slug, _))) = (first_loop, &got) {
+            prop_assert_eq!(&loop_slug, slug);
+        }
+    }
+}
+
+#[test]
+fn a_blocker_that_does_not_exist_gets_a_remove_fix_and_a_real_one_a_finish_fix() {
+    let tasks = [
+        task("gone-waiter", TaskState::Open, None, &["missing"]),
+        task("slow-waiter", TaskState::Open, None, &["slow"]),
+        task("slow", TaskState::Wip, None, &[]),
+    ];
+    let by_slug = index(&tasks);
+    let (_, missing) =
+        super::blockers::first_obstacle(&[&tasks[0]], &by_slug).expect("an obstacle");
+    assert!(missing.contains("--unblock missing"), "{missing}");
+    let (_, slow) = super::blockers::first_obstacle(&[&tasks[1]], &by_slug).expect("an obstacle");
+    assert!(slow.contains("finish 'slow' first"), "{slow}");
+}

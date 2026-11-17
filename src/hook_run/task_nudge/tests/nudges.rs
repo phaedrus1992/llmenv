@@ -201,3 +201,31 @@ fn the_next_file_edit_after_a_task_is_done_nudges_the_next_start() {
     let text = post();
     assert!(text.contains("llmenv task start step-two"), "{text}");
 }
+
+// #3763: when every open task is blocked, the Stop reminder says which task cannot start and why,
+// and it does not advise a start that the start refuses.
+#[test]
+fn a_stop_with_every_task_blocked_names_the_reason() {
+    let dir = TempDir::new().unwrap();
+    let session = open_session(dir.path());
+    let waiter = add(dir.path(), &session, "Step one");
+    let blocker = crate::task::add_task_for_session(
+        dir.path(),
+        "Elsewhere",
+        ParentSpec::Detached,
+        "other-session",
+    )
+    .unwrap();
+    let mut blocker = blocker;
+    blocker.state = crate::task::TaskState::Wip;
+    crate::task::save_task(dir.path(), &blocker).unwrap();
+    crate::task::block_task(dir.path(), &waiter, &blocker.slug).unwrap();
+    let stop = serde_json::json!({ "last_assistant_message": "Done." });
+    let text = handle_stop_read(&TaskTracker::default(), &stop, Some("s1"), dir.path());
+    assert!(text.contains("'step-one' cannot start"), "{text}");
+    assert!(
+        text.contains(&format!("waits on '{}'", blocker.slug)),
+        "{text}"
+    );
+    assert!(!text.contains("llmenv task start step-one"), "{text}");
+}

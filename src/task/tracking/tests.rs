@@ -126,10 +126,16 @@ fn next_skips_a_task_with_an_unmet_or_looping_blocker() {
     let mut b = task("b", "s0", TaskState::Open, 2);
     a.blocked_on = vec!["b".to_owned()];
     b.blocked_on = vec!["a".to_owned()];
-    let Tracking::Tracked { next, .. } = tracking_of(&visible, &[a, b], None) else {
+    let Tracking::Tracked { next, stuck, .. } = tracking_of(&visible, &[a, b], None) else {
         unreachable!("tasks are tracked");
     };
     assert_eq!(next, None);
+    // #3763: the reminder gets the reason, and the reason names the first open task.
+    let Some((slug, why)) = stuck else {
+        unreachable!("a stuck reason is set")
+    };
+    assert_eq!(slug, "a");
+    assert!(!why.is_empty());
 }
 
 proptest::proptest! {
@@ -170,6 +176,35 @@ proptest::proptest! {
                 proptest::prop_assert_eq!(queued, open.len());
             }
             other => proptest::prop_assert!(false, "unexpected {other:?}"),
+        }
+    }
+}
+
+proptest::proptest! {
+    /// `stuck` is set only when there is no next task and a task is still open, and it names the
+    /// first open task that a blocker stops. With a next task it is `None` (#3763).
+    #[test]
+    fn stuck_is_set_only_when_no_task_can_start(
+        rows in proptest::collection::vec((0u8..4, proptest::option::of(0usize..12), 0u8..50), 1..10),
+    ) {
+        let visible = [open_session_for_test("s0")];
+        let tasks: Vec<Task> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, (st, blocker, at))| {
+                let mut t = task(&format!("t{i}"), "s0", state_of(*st), *at);
+                if let Some(b) = blocker {
+                    t.blocked_on = vec![format!("t{b}")];
+                }
+                t
+            })
+            .collect();
+        if let Tracking::Tracked { next, queued, stuck, .. } = tracking_of(&visible, &tasks, None) {
+            proptest::prop_assert_eq!(stuck.is_some(), next.is_none() && queued > 0);
+            if let Some((slug, why)) = stuck {
+                proptest::prop_assert!(!why.is_empty());
+                proptest::prop_assert!(tasks.iter().any(|t| t.slug == slug && t.state == TaskState::Open));
+            }
         }
     }
 }

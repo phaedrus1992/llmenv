@@ -431,6 +431,8 @@ fn append_forest(group: &[&Task], rows: &mut Vec<DisplayRow>) {
     }
 }
 
+/// Push the rows of `task` and of everything below it in pre-order. An explicit stack replaces
+/// the recursion, so a deep chain of sub-tasks cannot overflow the call stack (#3767).
 fn visit<'a>(
     task: &'a Task,
     depth: usize,
@@ -438,16 +440,18 @@ fn visit<'a>(
     visited: &mut HashSet<&'a str>,
     rows: &mut Vec<DisplayRow>,
 ) {
-    if !visited.insert(task.slug.as_str()) {
-        return;
-    }
-    rows.push(DisplayRow {
-        depth,
-        task: task.clone(),
-    });
-    if let Some(kids) = children.get(task.slug.as_str()) {
-        for child in kids {
-            visit(child, depth + 1, children, visited, rows);
+    let mut stack: Vec<(&'a Task, usize)> = vec![(task, depth)];
+    while let Some((current, depth)) = stack.pop() {
+        if !visited.insert(current.slug.as_str()) {
+            continue;
+        }
+        rows.push(DisplayRow {
+            depth,
+            task: current.clone(),
+        });
+        if let Some(kids) = children.get(current.slug.as_str()) {
+            // Reversed, so the stack pops the first child first.
+            stack.extend(kids.iter().rev().map(|child| (*child, depth + 1)));
         }
     }
 }
@@ -1129,9 +1133,9 @@ struct IdleSession {
     /// order, else the first `open` task when every one is blocked.
     next: Task,
     open_count: usize,
-    /// Set when no task is actionable and an open task has a blocker walk that loops: the slug
-    /// of the first such task and the text of the loop. The reminder names the loop and its fix
-    /// instead of advising a start that cannot run (#3618).
+    /// Set when no task is actionable: the slug of the first open task that a blocker keeps from
+    /// starting, and why (a loop in the blocker walk, or a blocker that is not done). The reminder
+    /// names the reason instead of advising a start that cannot run (#3618, #3764).
     loop_error: Option<(String, String)>,
 }
 
@@ -1164,9 +1168,7 @@ fn idle_sessions(open: Vec<Session>, all_tasks: &[Task]) -> Vec<IdleSession> {
             let next = actionable.or_else(|| open.first())?;
             let loop_error = match actionable {
                 Some(_) => None,
-                None => open.iter().find_map(|t| {
-                    blockers::blocker_walk_error(t, &by_slug).map(|why| (t.slug.clone(), why))
-                }),
+                None => blockers::first_obstacle(&open, &by_slug),
             };
             Some(IdleSession {
                 next: (*next).clone(),
@@ -2762,6 +2764,40 @@ mod tests {
         assert!(
             reminder.contains("recognize"),
             "must not presume ownership: {reminder}"
+        );
+    }
+
+    // #3764: an idle session whose only open task waits on an undone blocker names the reason, and
+    // it does not advise a start that the start refuses.
+    #[test]
+    fn an_idle_reminder_names_the_unmet_blocker_and_not_a_start() {
+        let dir = TempDir::new().expect("test");
+        let session_id = session_for_project(dir.path(), &current_project());
+        let waiter = add_task_for_session(dir.path(), "Waiter", ParentSpec::Detached, &session_id)
+            .expect("test");
+        let mut blocker = add_task_for_session(
+            dir.path(),
+            "Elsewhere",
+            ParentSpec::Detached,
+            "other-session",
+        )
+        .expect("test");
+        blocker.state = TaskState::Wip;
+        save_task(dir.path(), &blocker).expect("test");
+        block_task(dir.path(), &waiter.slug, &blocker.slug).expect("test");
+
+        let reminder = stop_hook_reminder(&Stored::read(dir.path()), None);
+        assert!(
+            reminder.contains(&format!("'{}' cannot start", waiter.slug)),
+            "{reminder}"
+        );
+        assert!(
+            reminder.contains(&format!("waits on '{}'", blocker.slug)),
+            "{reminder}"
+        );
+        assert!(
+            !reminder.contains(&format!("llmenv task start {}", waiter.slug)),
+            "{reminder}"
         );
     }
 

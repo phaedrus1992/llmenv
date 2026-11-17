@@ -100,6 +100,16 @@ pub(crate) fn handle_stop(
             ..
         } => queued_reminder(slug),
         Tracking::Tracked {
+            wip: None,
+            next: None,
+            queued,
+            stuck: Some((slug, why)),
+            ..
+        } => format!(
+            "llmenv task tracker: {queued} task(s) are open and none is in progress, but '{slug}' \
+             cannot start: {why}."
+        ),
+        Tracking::Tracked {
             wip: Some(slug),
             queued,
             ..
