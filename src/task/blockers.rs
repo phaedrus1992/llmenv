@@ -40,6 +40,7 @@ pub(crate) fn block_task<'a>(
     })
 }
 
+#[cfg(test)]
 /// True when `task` is neither `done` nor `waiting`, and every one of its
 /// `blocked_on` refs is (recursively) done per [`is_done_including_descendants`].
 /// A dangling or not-yet-done blocker keeps the task non-actionable — fail

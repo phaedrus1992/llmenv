@@ -166,13 +166,18 @@ fn next_task_loops_names_the_task_that_next_cannot_offer() {
 
 #[test]
 fn next_task_loops_names_a_looped_task_even_when_a_later_task_is_offered() {
-    let tasks = vec![
+    let mut tasks = vec![
         task("cur", TaskState::Wip, None, &[]),
         task("looped", TaskState::Open, None, &["b"]),
         task("offered", TaskState::Open, None, &[]),
         task("b", TaskState::Done, Some("c"), &[]),
         task("c", TaskState::Done, Some("b"), &[]),
     ];
+    // Parallel tasks sit outside the queue, so only the blocker walk decides in this test.
+    for t in &mut tasks[..3] {
+        t.relation = Relation::Queued;
+        t.parallel = true;
+    }
     let current = tasks[0].clone();
     assert_eq!(
         resolve_next_task(&tasks, &tasks, &current).map(|t| t.slug),
@@ -708,4 +713,64 @@ fn a_blocker_that_does_not_exist_gets_a_remove_fix_and_a_real_one_a_finish_fix()
     assert!(missing.contains("--unblock missing"), "{missing}");
     let slow = super::blockers::unmet_blocker(&tasks[1], &by_slug).expect("an obstacle");
     assert!(slow.contains("finish 'slow' first"), "{slow}");
+}
+
+// #3773: `task done` on an open task names a start only when the start would be accepted, and
+// `task show --next` offers only a task that the start accepts.
+#[test]
+fn the_done_refusal_names_a_start_only_when_the_start_works() {
+    let dir = TempDir::new().expect("tempdir");
+    let first = saved(dir.path(), "First", "s");
+    let second = saved(dir.path(), "Second", "s");
+    let err = complete_task(dir.path(), &second.slug, false).expect_err("an open task is refused");
+    let text = format!("{err:#}");
+    assert!(text.contains("cannot start"), "{text}");
+    assert!(
+        text.contains(&format!("queued behind '{}'", first.slug)),
+        "{text}"
+    );
+    assert!(!text.contains("Run `llmenv task start"), "{text}");
+    let err = complete_task(dir.path(), &first.slug, false).expect_err("an open task is refused");
+    let text = format!("{err:#}");
+    assert!(
+        text.contains(&format!("Run `llmenv task start {}`", first.slug)),
+        "{text}"
+    );
+}
+
+fn queued(slug: &str, state: TaskState, at: u8) -> Task {
+    let mut t = task(slug, state, None, &[]);
+    t.relation = Relation::Queued;
+    t.created_at = format!("2026-10-02T00:00:{at:02}Z");
+    t
+}
+
+#[test]
+fn show_next_skips_a_queued_task_behind_an_open_one() {
+    let cur = queued("cur", TaskState::Wip, 0);
+    let tasks = vec![
+        cur.to_owned(),
+        queued("a", TaskState::Open, 1),
+        queued("b", TaskState::Open, 2),
+    ];
+    let next = resolve_next_task(&tasks, &tasks, &cur).map(|t| t.slug);
+    assert_eq!(next.as_deref(), Some("a"));
+    // With `a` open and blocked, `b` stays refused behind it, so nothing is offered.
+    let mut blocked = queued("a", TaskState::Open, 1);
+    blocked.blocked_on = vec!["elsewhere".to_owned()];
+    let tasks = vec![cur.to_owned(), blocked, queued("b", TaskState::Open, 2)];
+    assert_eq!(resolve_next_task(&tasks, &tasks, &cur), None);
+}
+
+#[test]
+fn show_next_skips_a_sub_task_with_a_missing_parent() {
+    let cur = queued("cur", TaskState::Wip, 0);
+    let mut orphan = task("orphan", TaskState::Open, Some("gone"), &[]);
+    orphan.relation = Relation::Child;
+    orphan.created_at = "2026-10-02T00:00:01Z".to_owned();
+    let mut free = queued("free", TaskState::Open, 2);
+    free.parallel = true;
+    let tasks = vec![cur.to_owned(), orphan, free];
+    let next = resolve_next_task(&tasks, &tasks, &cur).map(|t| t.slug);
+    assert_eq!(next.as_deref(), Some("free"));
 }

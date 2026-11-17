@@ -67,6 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Make `llmenv task show --next` offer only a task that `task start` accepts, and make the `task done` refusal for an open task name a start only when the start would work. Otherwise it names the refusal. [fix:task] [#3773]
 - Make the Stop, idle-session, and stalled-parent reminders name only a task that `llmenv task start` accepts. They now check the blockers, the queue, and the ancestors, as the start does, and name the refusal when no task can start. [fix:task] [#3770]
 - Report a hook payload with no event name for Crush too, as for the other engines. [fix:hook-run] [#3769]
 - Add a notice when a hook payload parses but names no event, and name the fallback that is used. [fix:hook-run] [#3766]

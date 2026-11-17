@@ -18,7 +18,7 @@ mod ancestors;
 mod block_cycle;
 mod blockers;
 pub(crate) use blockers::block_task;
-use blockers::{first_undone_in_subtree, is_actionable};
+use blockers::first_undone_in_subtree;
 pub(crate) mod core_text;
 mod finish_hints;
 mod parent_chain;
@@ -918,10 +918,22 @@ fn close_task(
         let mut task = load_task(state_dir, &slug)?;
         let prior = task.state;
         if prior == TaskState::Open && !force {
-            anyhow::bail!(
-                "'{slug}' was never started (open). Run `llmenv task start {slug}` and finish \
-                 the work, or pass --force if it is done."
-            );
+            // The advice names a start only when the start would be accepted (#3773).
+            let by_slug: HashMap<&str, &Task> = all_tasks
+                .as_slice()
+                .iter()
+                .map(|t| (t.slug.as_str(), t))
+                .collect();
+            match startability::refusal_now(&task, all_tasks.as_slice(), &by_slug) {
+                Some(why) => anyhow::bail!(
+                    "'{slug}' was never started (open), and it cannot start: {why}. Pass --force \
+                     if it is done."
+                ),
+                None => anyhow::bail!(
+                    "'{slug}' was never started (open). Run `llmenv task start {slug}` and \
+                     finish the work, or pass --force if it is done."
+                ),
+            }
         }
         let undone = relation::undone_descendants(&slug, all_tasks);
         if !force && !undone.is_empty() {
@@ -1373,10 +1385,10 @@ pub(crate) fn resolve_next_task(
     let order = execution_order(session_tasks);
     let pos = order.iter().position(|t| t.slug == current.slug)?;
     let by_slug: HashMap<&str, &Task> = all_tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
-    order
-        .into_iter()
-        .skip(pos + 1)
-        .find(|t| is_actionable(t, &by_slug))
+    order.into_iter().skip(pos + 1).find(|t| {
+        !matches!(t.state, TaskState::Done | TaskState::Waiting)
+            && startability::refusal(t, all_tasks, &by_slug).is_none()
+    })
 }
 
 /// Every task after `current` that `task show --next` cannot offer because its blocker walk
@@ -2147,7 +2159,7 @@ mod tests {
         done_task(dir.path(), &a.slug).expect("test");
         let tasks = list_tasks(dir.path());
         let by_slug: HashMap<&str, &Task> = tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
-        assert!(is_actionable(by_slug[b.slug.as_str()], &by_slug));
+        assert!(blockers::is_actionable(by_slug[b.slug.as_str()], &by_slug));
     }
 
     #[test]

@@ -10,24 +10,44 @@ use std::collections::HashMap;
 use super::{Task, TaskState, ancestors, blockers, relation, session};
 
 /// Why starting `task` would be refused, or `None` when it would start. `all` is every task of the
-/// store, and `by_slug` indexes it.
+/// store, and `by_slug` indexes it. A task in progress counts as done for the queue, because a
+/// reminder names the start that follows the current task.
 pub(super) fn refusal(task: &Task, all: &[Task], by_slug: &HashMap<&str, &Task>) -> Option<String> {
+    refusal_with(task, all, by_slug, true)
+}
+
+/// [`refusal`] for a start that runs now: a task in progress holds the queue.
+pub(super) fn refusal_now(
+    task: &Task,
+    all: &[Task],
+    by_slug: &HashMap<&str, &Task>,
+) -> Option<String> {
+    refusal_with(task, all, by_slug, false)
+}
+
+fn refusal_with(
+    task: &Task,
+    all: &[Task],
+    by_slug: &HashMap<&str, &Task>,
+    wip_is_done: bool,
+) -> Option<String> {
     blockers::blocker_walk_error(task, by_slug)
-        .or_else(|| queue_refusal(task, all))
+        .or_else(|| queue_refusal(task, all, wip_is_done))
         .or_else(|| ancestors::ancestor_refusal(task, all))
         .or_else(|| blockers::unmet_blocker(task, by_slug))
 }
 
-/// The refusal of the queue of the session of `task`, as if the tasks in progress were done. A
-/// reminder names the task to start after the current one ends, so a task that waits only for a
-/// task in progress is not refused (#3770). A task with no session has no queue.
-fn queue_refusal(task: &Task, all: &[Task]) -> Option<String> {
+/// The refusal of the queue of the session of `task`. With `wip_is_done`, the tasks in progress
+/// count as done. A task with no session has no queue.
+fn queue_refusal(task: &Task, all: &[Task], wip_is_done: bool) -> Option<String> {
     let id = task.session.as_ref()?;
     let mut session_tasks =
         session::filter::tasks_in_sessions(all, &std::iter::once(id.to_owned()).collect());
-    for t in &mut session_tasks {
-        if t.state == TaskState::Wip {
-            t.state = TaskState::Done;
+    if wip_is_done {
+        for t in &mut session_tasks {
+            if t.state == TaskState::Wip {
+                t.state = TaskState::Done;
+            }
         }
     }
     relation::queue_block(task, &session_tasks)
