@@ -25,6 +25,10 @@ pub struct ReadEntry {
     pub path: String,
     /// File mtime as unix seconds when first read.
     pub mtime_unix: i64,
+    /// File size in bytes when first read. A cache from an older version has none, so it reads
+    /// as `0` and a non-empty file is read again (#3226).
+    #[serde(default)]
+    pub size: u64,
     /// Unix timestamp of the first read in this session.
     pub first_read_at: i64,
     /// How many times this path was re-read (cache hits).
@@ -145,7 +149,10 @@ pub(crate) fn handle_pre_tool_use(
     let lookup_start = std::time::Instant::now();
     let extra = format!("path={file_path}");
     if let Some(entry) = cache.entries.get_mut(&path_key) {
-        if entry.mtime_unix == mtime && within_ttl(now, entry.first_read_at, config.ttl_seconds) {
+        if entry.mtime_unix == mtime
+            && entry.size == file_size
+            && within_ttl(now, entry.first_read_at, config.ttl_seconds)
+        {
             // Cache hit within TTL — warn or deny.
             // Don't save on hit — hits/tokens_saved are advisory stats that
             // get accurately written on the next miss-path save.
@@ -168,8 +175,9 @@ pub(crate) fn handle_pre_tool_use(
                 msg
             };
         }
-        // Cache miss (mtime changed or TTL expired) — update entry
+        // Cache miss (mtime or size changed, or TTL expired) — update entry
         entry.mtime_unix = mtime;
+        entry.size = file_size;
         entry.first_read_at = now;
         entry.hits = 0;
         entry.tokens_saved = 0;
@@ -180,6 +188,7 @@ pub(crate) fn handle_pre_tool_use(
             ReadEntry {
                 path: file_path.to_string(),
                 mtime_unix: mtime,
+                size: file_size,
                 first_read_at: now,
                 hits: 0,
                 tokens_saved: 0,

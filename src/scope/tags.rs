@@ -142,3 +142,43 @@ mod notice_tests {
         assert!(notices.contains("Fix:"), "{notices}");
     }
 }
+
+#[cfg(test)]
+mod properties {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// The tags of a source, with a mix of valid and invalid text.
+    fn raw_tags() -> impl Strategy<Value = Vec<String>> {
+        proptest::collection::vec(
+            prop_oneof![
+                "[a-z0-9_-]{1,12}",
+                "[a-z0-9_-]{1,12}".prop_map(|s| format!("{s} x")),
+                "[a-z]{60,80}",
+                "\\PC{0,8}",
+            ],
+            0..100,
+        )
+    }
+
+    proptest! {
+        /// The result is the first valid tags of the input, in order, and no more than the cap.
+        #[test]
+        fn sanitizing_keeps_the_first_valid_tags_in_order(raw in raw_tags()) {
+            let expected: Vec<String> = raw
+                .iter()
+                .filter(|t| is_valid_tag_charset(t) && t.len() <= MAX_TAG_LEN)
+                .take(MAX_TAGS_PER_SOURCE)
+                .cloned()
+                .collect();
+            prop_assert_eq!(sanitize_tags(raw, "source-3226-prop"), expected);
+        }
+
+        /// Sanitizing the result again changes nothing.
+        #[test]
+        fn sanitizing_twice_equals_sanitizing_once(raw in raw_tags()) {
+            let once = sanitize_tags(raw, "source-3226-idem");
+            prop_assert_eq!(sanitize_tags(once.clone(), "source-3226-idem"), once);
+        }
+    }
+}
