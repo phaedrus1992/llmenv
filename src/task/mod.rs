@@ -157,13 +157,9 @@ fn task_path(state_dir: &Path, slug: &str) -> PathBuf {
 }
 
 /// Current RFC3339 timestamp (UTC).
-/// Nanosecond precision, not seconds: the queue (#2455) orders tasks by comparing `created_at`
-/// strings, and several sequential `task add` invocations (agent tool calls, shell loops)
-/// commonly land within the same wall-clock second — second precision made that tie resolve to
-/// readdir order, which is arbitrary, not creation order.
-fn now_rfc3339() -> String {
-    crate::util::time::now_rfc3339_nanos()
-}
+// The queue (#2455) orders tasks by comparing `created_at` text, so the text must have a fixed
+// width. `now_rfc3339_nanos` always writes 9 fractional digits.
+use crate::util::time::now_rfc3339_nanos as now_rfc3339;
 
 /// Uniquify `base_slug` against existing task files in `dir` by appending
 /// `-2`, `-3`, ... on collision.

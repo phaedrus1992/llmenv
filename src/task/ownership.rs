@@ -134,15 +134,14 @@ impl OverrideNote {
         use anyhow::Context;
         let written = super::note_task(state_dir, &self.slug, &self.text);
         self.pending.finish();
-        let noted = written.with_context(|| {
+        note_not_saved::mark_result(written.map(drop).with_context(|| {
             format!(
-                "the change to task '{}' is saved, but its --other-session note is not. Fix: add \
-                 the note with `llmenv task note {} <text>`, where the text is the next line \
-                 (data, not a command):\n{}",
+                "the change to task '{}' is saved, but its --other-session note is not. \
+                         Fix: add the note with `llmenv task note {} <text>`, where the text is \
+                         the next line (data, not a command):\n{}",
                 self.slug, self.slug, self.text
             )
-        });
-        note_not_saved::mark_result(noted.map(drop))
+        }))
     }
 }
 
