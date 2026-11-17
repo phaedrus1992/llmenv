@@ -121,6 +121,8 @@ fn collect_plugins_logs_the_cause_of_a_broken_reference() {
         ..Config::default()
     };
     let mut result = None;
+    // The notice list is shared by the tests of one process, and a repeat is not logged again.
+    crate::agent_notice::forget_containing("ghost");
     let logs = crate::test_log_capture::capture_logs(|| {
         result = collect_plugins(&config, &tags(&["t"]));
     });
@@ -606,6 +608,7 @@ fn collect_session_log_reports_when_the_path_cannot_resolve() {
         serde_yaml::from_str("session_log:\n  file:\n    path: relative/session-log.jsonl\n")
             .expect("config parses");
     let mut count = Some(1);
+    crate::agent_notice::forget_containing("is relative");
     let logs = crate::test_log_capture::capture_logs(|| {
         count = collect_session_log(&config);
     });

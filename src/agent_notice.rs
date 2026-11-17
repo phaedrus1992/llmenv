@@ -103,6 +103,9 @@ pub(crate) fn record_logged(notice: impl Into<String>) {
     let notice = notice.into();
     if record(notice.clone()) {
         tracing::error!("{notice}");
+    } else {
+        // The repeat is not an error line again, but it stays in the debug log.
+        tracing::debug!("repeat of a notice: {notice}");
     }
 }
 

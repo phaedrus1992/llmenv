@@ -23,7 +23,8 @@ use state::cache_key;
 pub struct ReadEntry {
     /// The file path as reported by the tool call (canonicalized for the key).
     pub path: String,
-    /// File mtime as unix seconds when first read.
+    /// File mtime as unix seconds when first read. The unit is seconds, so a same-size rewrite in
+    /// the same second is not seen as a change.
     pub mtime_unix: i64,
     /// File size in bytes when first read. A cache from an older version has none, so it reads
     /// as `0` and a non-empty file is read again (#3226).
