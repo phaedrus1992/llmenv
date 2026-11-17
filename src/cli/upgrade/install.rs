@@ -27,13 +27,17 @@ pub(super) fn install_binary(data: &[u8]) -> Result<()> {
 
     // The backup and the temp file sit beside the binary, so the rename stays on one filesystem.
     let backup = current_dir.join(".llmenv-upgrade.bak");
-    copy_refusing_symlink(&current_exe, &backup).with_context(|| {
-        format!(
-            "failed to back up {} to {}",
-            current_exe.display(),
-            backup.display()
-        )
-    })?;
+    if let Err(e) = copy_refusing_symlink(&current_exe, &backup) {
+        // A cut-short backup must not stay: a later restore would put a broken binary back.
+        remove_leftover(&backup, "partial backup");
+        return Err(e).with_context(|| {
+            format!(
+                "failed to back up {} to {}",
+                current_exe.display(),
+                backup.display()
+            )
+        });
+    }
 
     let temp = current_dir.join(".llmenv-upgrade.new");
     if let Err(e) = stage_binary(&temp, data) {

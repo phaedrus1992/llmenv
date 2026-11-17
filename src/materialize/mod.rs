@@ -134,7 +134,8 @@ pub fn materialize_with_mode(
                 tracing::error!("cannot remove staging dir {}: {rm}", staging.display());
             }
             // Only a directory is a copy that can be used. A file at `dest` is an error (#2657).
-            if dest.is_dir() {
+            // A link to a directory is not a copy that this pass wrote, so it is an error too.
+            if is_real_dir(&dest) {
                 // A concurrent writer that won the race is a normal outcome, so this is debug only.
                 tracing::debug!(
                     "rename into {} failed, so the copy already there is used: {e}",
@@ -187,6 +188,11 @@ fn write_in_place(m: &MergedManifest, dest: &Path) -> anyhow::Result<()> {
 
 /// Copy one bundle file to `out` with its executable bit, because a skill or a hook can run a
 /// script of the bundle directly.
+/// Whether `path` is a directory and not a link to one.
+fn is_real_dir(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
+}
+
 fn write_bundle_file(abs: &Path, out: &Path) -> anyhow::Result<()> {
     use std::io::Write as _;
     let content = crate::paths::bounded::asset(abs)?;
@@ -194,14 +200,29 @@ fn write_bundle_file(abs: &Path, out: &Path) -> anyhow::Result<()> {
     // swapped in after the open cannot redirect either step (#3203).
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
-    let mut file = crate::paths::refuse_symlink(&mut opts)
-        .open(out)
-        .with_context(|| {
-            format!(
-                "cannot write {}. Fix: remove the link at this path, then retry.",
-                out.display()
-            )
-        })?;
+    // O_NOFOLLOW refuses a link. O_NONBLOCK keeps the open of a named pipe at `out` from waiting
+    // for a reader, and the check after the open refuses anything that is not a regular file.
+    // `custom_flags` replaces the earlier flags, so one call sets both.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;
+        opts.custom_flags(flags.bits().cast_signed());
+    }
+    #[cfg(not(unix))]
+    crate::paths::refuse_symlink(&mut opts);
+    let mut file = opts.open(out).with_context(|| {
+        format!(
+            "cannot write {}. Fix: remove the link at this path, then retry.",
+            out.display()
+        )
+    })?;
+    if !file.metadata()?.is_file() {
+        anyhow::bail!(
+            "cannot write {}: it is not a regular file. Fix: remove it, then retry.",
+            out.display()
+        );
+    }
     file.write_all(&content)?;
     #[cfg(unix)]
     if crate::paths::is_executable(abs)? {
@@ -470,6 +491,37 @@ mod tests {
             "a link at the destination must fail"
         );
         assert_eq!(std::fs::read(&victim).expect("read the victim"), b"keep me");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_bundle_file_refuses_a_named_pipe_without_waiting() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("source.sh");
+        std::fs::write(&source, b"echo new\n").expect("write the source");
+        let out = dir.path().join("out.sh");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&out)
+            .status()
+            .expect("run mkfifo");
+        assert!(made.success(), "mkfifo must work");
+        assert!(
+            write_bundle_file(&source, &out).is_err(),
+            "a named pipe at the destination must fail, not block"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_directory_is_not_a_real_directory() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).expect("make the directory");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("make the link");
+        assert!(is_real_dir(&real));
+        assert!(!is_real_dir(&link));
+        assert!(!is_real_dir(&dir.path().join("missing")));
     }
 
     #[cfg(unix)]
