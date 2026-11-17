@@ -461,7 +461,9 @@ Flags:
 
 - `--all` — remove **every** cache folder unconditionally (the next `export` re-materializes).
 - `--older-than DUR` — in the cache-folder step, remove only current-version cache folders older than `DUR`.
-  Examples: `14d`, `1w`.
+  Examples: `14d`, `1w`, `90 days`, `1h30m`.
+  (changed in v3.14.0) A month or a year has no fixed length, so `1mo` and `1y` are refused.
+  Use weeks or days, such as `52w`.
   The age-based sweeps still use `cache_retention_hours`.
   `--all` and `--older-than` cannot be used together.
   A bad value stops the command before anything is removed.

@@ -162,7 +162,7 @@ fn task_path(state_dir: &Path, slug: &str) -> PathBuf {
 /// commonly land within the same wall-clock second — second precision made that tie resolve to
 /// readdir order, which is arbitrary, not creation order.
 fn now_rfc3339() -> String {
-    humantime::format_rfc3339_nanos(std::time::SystemTime::now()).to_string()
+    crate::util::time::now_rfc3339_nanos()
 }
 
 /// Uniquify `base_slug` against existing task files in `dir` by appending
