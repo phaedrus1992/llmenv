@@ -2,7 +2,9 @@
 
 use std::path::Path;
 
-use super::{NudgeState, after_current, cannot_start, load, queued_reminder, save, state_path};
+use super::{
+    NudgeState, after_current, cannot_start, load, queued_reminder, save, start_next, state_path,
+};
 use crate::config::TaskTracker;
 use crate::hook_run::session_state::lock_state_file;
 use crate::task::Tracking;
@@ -114,13 +116,24 @@ pub(crate) fn handle_stop(
             queued,
             next,
             stuck,
+            next_in_wip,
             ..
         } if *queued > 0 => {
-            let message = format!(
-                "llmenv task tracker: '{slug}' is in progress, and {queued} task(s) are queued \
-                 behind it. If '{slug}' is done, run `llmenv task done {slug}`. {}",
-                after_current(next.as_deref(), stuck.as_ref())
-            );
+            let message = if let (true, Some(next)) = (*next_in_wip, next) {
+                // `done` refuses a task whose sub-tasks are open, so the sub-task comes first.
+                format!(
+                    "llmenv task tracker: '{slug}' is in progress, and {queued} task(s) are queued \
+                     behind it. '{slug}' cannot close before its open sub-tasks do. Finish or \
+                     park them first: {}",
+                    start_next(next)
+                )
+            } else {
+                format!(
+                    "llmenv task tracker: '{slug}' is in progress, and {queued} task(s) are queued \
+                     behind it. If '{slug}' is done, run `llmenv task done {slug}`. {}",
+                    after_current(next.as_deref(), stuck.as_ref())
+                )
+            };
             stop_wip_reminder(tracker, &message, caller, state_dir)
         }
         // The nudges cannot run, so the agent hears why at the end of each turn.

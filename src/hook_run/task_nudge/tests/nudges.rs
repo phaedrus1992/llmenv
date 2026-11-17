@@ -257,6 +257,7 @@ fn how_to_track_names_the_reason_when_every_task_is_stuck() {
         next: None,
         queued: 1,
         stuck: Some(("waiter".to_owned(), "it waits on 'x'".to_owned())),
+        next_in_wip: false,
     };
     let text = super::super::how_to_track(&tracking);
     assert!(
@@ -276,4 +277,35 @@ fn a_cannot_start_sentence_has_one_period() {
     );
     let plain = super::super::cannot_start("step", "it waits on 'x'");
     assert_eq!(plain, "'step' cannot start: it waits on 'x'.");
+}
+
+// #3780: the next task is a sub-task of the task in progress. `done` refuses the parent while the
+// sub-task is open, so the reminder does not tell the agent to close the parent first.
+#[test]
+fn a_stop_with_the_next_task_below_the_wip_task_puts_the_sub_task_first() {
+    let dir = TempDir::new().unwrap();
+    let session = open_session(dir.path());
+    let parent = add(dir.path(), &session, "Parent");
+    crate::task::start_task(dir.path(), parent.as_str(), false).unwrap();
+    let child = crate::task::add_task_for_session(
+        dir.path(),
+        "Child",
+        ParentSpec::Explicit(&parent),
+        &session,
+    )
+    .unwrap();
+    let stop = serde_json::json!({ "last_assistant_message": "Done." });
+    let text = handle_stop_read(&TaskTracker::default(), &stop, Some("s1"), dir.path());
+    assert!(
+        text.contains("cannot close before its open sub-tasks"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("llmenv task start {}", child.slug)),
+        "{text}"
+    );
+    assert!(
+        !text.contains(&format!("llmenv task done {parent}")),
+        "{text}"
+    );
 }
