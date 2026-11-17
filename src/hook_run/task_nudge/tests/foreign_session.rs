@@ -70,6 +70,7 @@ fn a_task_of_another_conversation_does_not_count_as_tracked_work() {
             next: None,
             queued: 0,
             stuck: None,
+            next_in_wip: false,
         }
     );
 }

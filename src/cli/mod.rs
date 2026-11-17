@@ -2870,6 +2870,9 @@ fn render_task_session_summary_human(
 /// `crate::task`, which owns the store logic.
 fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()> {
     let state_dir = crate::paths::state_dir()?;
+    for lost in crate::task::recover_crashed_notes(&state_dir) {
+        tracing::warn!("{lost}");
+    }
     match command {
         TaskCommand::Add {
             title,
@@ -2909,16 +2912,22 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                     crate::task::reopen_task(&state_dir, guarded.target())?;
                 }
                 // The reopen writes, so the start reads the store again.
-                let task =
-                    crate::task::start_task(&state_dir, guarded.target(), force).map_err(|e| {
-                        if reopen {
-                            e.context(format!(
-                                "task '{id}' is now reopened (open), but it did not start"
-                            ))
-                        } else {
-                            e
-                        }
-                    })?;
+                let task = match crate::task::start_task(&state_dir, guarded.target(), force) {
+                    Ok(task) => task,
+                    Err(e) if reopen => {
+                        // The reopen is saved, so its audit note is written before the error.
+                        let e = e.context(format!(
+                            "task '{id}' is now reopened (open), but it did not start"
+                        ));
+                        return Err(match record_override(&state_dir, audit) {
+                            Ok(()) => e,
+                            Err(note) => {
+                                e.context(format!("its audit note was not saved: {note:#}"))
+                            }
+                        });
+                    }
+                    Err(e) => return Err(e),
+                };
                 // The audit note comes first: a closed stdout makes `println!` panic.
                 record_override(&state_dir, audit)?;
                 println!("Started '{}' — now {:?}", task.slug, task.state);

@@ -2,7 +2,9 @@
 
 use std::path::Path;
 
-use super::{NudgeState, after_current, cannot_start, load, queued_reminder, save, state_path};
+use super::{
+    NudgeState, after_current, cannot_start, load, queued_reminder, save, start_next, state_path,
+};
 use crate::config::TaskTracker;
 use crate::hook_run::session_state::lock_state_file;
 use crate::task::Tracking;
@@ -114,12 +116,24 @@ pub(crate) fn handle_stop(
             queued,
             next,
             stuck,
+            next_in_wip,
             ..
         } if *queued > 0 => {
+            let after = match next.as_deref().filter(|_| *next_in_wip) {
+                // `done` refuses a task whose sub-tasks are open, so the sub-task comes first.
+                Some(sub) => format!(
+                    "'{slug}' stays open until its open sub-tasks are done. Finish or park them \
+                     first: {}",
+                    start_next(sub)
+                ),
+                None => format!(
+                    "If '{slug}' is done, run `llmenv task done {slug}`. {}",
+                    after_current(next.as_deref(), stuck.as_ref())
+                ),
+            };
             let message = format!(
                 "llmenv task tracker: '{slug}' is in progress, and {queued} task(s) are queued \
-                 behind it. If '{slug}' is done, run `llmenv task done {slug}`. {}",
-                after_current(next.as_deref(), stuck.as_ref())
+                 behind it. {after}"
             );
             stop_wip_reminder(tracker, &message, caller, state_dir)
         }
