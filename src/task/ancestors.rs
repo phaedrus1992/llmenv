@@ -18,6 +18,35 @@ pub(super) fn ancestors_to_start(
     })
 }
 
+/// A refusal that comes from a damaged link, not from a wait: no parent, a loop, a missing
+/// parent, or a parent of another session. The user must repair the store, so `task show --next`
+/// reports it (#3777). Its text is the text of the refusal.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct Damaged(String);
+
+/// Return a [`Damaged`] error with the formatted text.
+macro_rules! damaged {
+    ($($arg:tt)*) => {
+        return Err(anyhow::Error::new(Damaged(format!($($arg)*))))
+    };
+}
+
+/// The text of the damaged link that stops `child` from starting, or `None` when no link is
+/// damaged. A wait, such as a queue hold or a done parent, is not damage.
+pub(super) fn ancestor_damage(child: &Task, all: &[Task]) -> Option<String> {
+    let error = walk_ancestors(child, false, all, |slug| {
+        all.iter()
+            .find(|t| t.slug == slug)
+            .map(Task::to_owned)
+            .ok_or_else(|| anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::NotFound)))
+    })
+    .err()?;
+    error
+        .downcast_ref::<Damaged>()
+        .map(|damaged| damaged.to_string())
+}
+
 /// The text of the refusal that starting `child` meets at an ancestor, or `None` when no ancestor
 /// refuses. The parents come from `all`, so a reminder asks the same question as the start does
 /// and never names a start that the start refuses (#3770). `all` must come from a strict read,
@@ -46,7 +75,7 @@ fn walk_ancestors(
     let mut current = child.clone();
     while current.relation == Relation::Child {
         let Some(parent_slug) = current.parent.clone() else {
-            anyhow::bail!(
+            damaged!(
                 "cannot start '{}': sub-task '{}' has no parent. Fix: repair the task file of '{}' \
                  so that its parent link matches its relation",
                 child.slug,
@@ -55,7 +84,7 @@ fn walk_ancestors(
             );
         };
         if seen.contains(&parent_slug) {
-            anyhow::bail!(
+            damaged!(
                 "cannot start '{}': its ancestors loop at '{parent_slug}'. Fix: clear the parent \
                  of one task in that loop with `llmenv task edit <task> --no-parent`",
                 child.slug
@@ -66,7 +95,7 @@ fn walk_ancestors(
         // never run blind.
         let parent = match lookup(&parent_slug) {
             Ok(parent) => parent,
-            Err(e) if is_not_found(&e) => anyhow::bail!(
+            Err(e) if is_not_found(&e) => damaged!(
                 "cannot start '{}': its parent '{parent_slug}' is missing from the task store. \
                  Fix: clear the parent with `llmenv task edit {} --no-parent`",
                 child.slug,
@@ -96,7 +125,7 @@ fn walk_ancestors(
             if let Some(owner) = parent.session.as_deref()
                 && Some(owner) != child.session.as_deref()
             {
-                anyhow::bail!(
+                damaged!(
                     "cannot start '{}': its ancestor '{parent_slug}' belongs to session \
                      '{owner}', so starting would change a task of another session. Fix: clear \
                      the parent with `llmenv task edit {} --no-parent`",

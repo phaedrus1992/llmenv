@@ -459,7 +459,8 @@ proptest! {
         }
     }
 
-    /// `next_task_loops` names only tasks that are neither done nor waiting and have a walk error,
+    /// `next_task_loops` names only tasks that are neither done nor waiting and have a walk error or a
+    /// damaged parent link,
     /// and never a task that `resolve_next_task` returns.
     #[test]
     fn next_task_loops_names_only_blocked_open_tasks(tasks in parent_graph()) {
@@ -470,7 +471,10 @@ proptest! {
         for (slug, _) in &loops {
             let task = tasks.iter().find(|t| &t.slug == slug).expect("a named task exists");
             prop_assert!(!matches!(task.state, TaskState::Done | TaskState::Waiting));
-            prop_assert!(blocker_walk_error(task, &by_slug).is_some());
+            prop_assert!(
+                blocker_walk_error(task, &by_slug).is_some()
+                    || super::ancestors::ancestor_damage(task, &tasks).is_some()
+            );
             prop_assert_ne!(next.as_ref().map(|t| &t.slug), Some(slug));
         }
     }
@@ -781,4 +785,41 @@ fn show_next_skips_a_sub_task_with_a_missing_parent() {
     let tasks = vec![cur.to_owned(), orphan, free];
     let next = resolve_next_task(&tasks, &tasks, &cur).map(|t| t.slug);
     assert_eq!(next.as_deref(), Some("free"));
+}
+
+// #3777: `task show --next` reports a skipped task with a damaged parent link, and does not report
+// an ordinary wait such as a done parent or a queue hold.
+#[test]
+fn next_task_loops_reports_a_damaged_parent_and_not_a_wait() {
+    let cur = queued("cur", TaskState::Wip, 0);
+    let mut missing = task("missing-parent", TaskState::Open, Some("gone"), &[]);
+    missing.relation = Relation::Child;
+    let mut ring_a = task("ring-a", TaskState::Open, Some("ring-b"), &[]);
+    ring_a.relation = Relation::Child;
+    let mut ring_b = task("ring-b", TaskState::Open, Some("ring-a"), &[]);
+    ring_b.relation = Relation::Child;
+    let done_parent = queued("done-parent", TaskState::Done, 1);
+    let mut under_done = task("under-done", TaskState::Open, Some("done-parent"), &[]);
+    under_done.relation = Relation::Child;
+    let waiting_behind = queued("behind", TaskState::Open, 2);
+    let tasks = vec![
+        cur.to_owned(),
+        missing,
+        ring_a,
+        ring_b,
+        done_parent,
+        under_done,
+        waiting_behind,
+    ];
+    let reported: Vec<String> = next_task_loops(&tasks, &tasks, &cur)
+        .into_iter()
+        .map(|(slug, _)| slug)
+        .collect();
+    assert!(
+        reported.contains(&"missing-parent".to_owned()),
+        "{reported:?}"
+    );
+    assert!(reported.contains(&"ring-a".to_owned()), "{reported:?}");
+    assert!(!reported.contains(&"under-done".to_owned()), "{reported:?}");
+    assert!(!reported.contains(&"behind".to_owned()), "{reported:?}");
 }

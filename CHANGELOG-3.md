@@ -67,6 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Report a task that `llmenv task show --next` skips because of a missing parent, a parent loop, or a parent of another session, on stderr with its fix. [fix:task] [#3777]
+- Make the Stop reminder with a task in progress, the commit gate, and the repeat reminder name a start only when it works, and give the reason when no queued task can start. [fix:hook] [#3776]
 - Make `llmenv task show --next` offer only a task that `task start` accepts, and make the `task done` refusal for an open task name a start only when the start would work. Otherwise it names the refusal. [fix:task] [#3773]
 - Make the Stop, idle-session, and stalled-parent reminders name only a task that `llmenv task start` accepts. They now check the blockers, the queue, and the ancestors, as the start does, and name the refusal when no task can start. [fix:task] [#3770]
 - Report a hook payload with no event name for Crush too, as for the other engines. [fix:hook-run] [#3769]
