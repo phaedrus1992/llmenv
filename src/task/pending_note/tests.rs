@@ -1,4 +1,9 @@
-#![expect(clippy::unwrap_used, clippy::panic, reason = "test scaffolding")]
+#![expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::expect_used,
+    reason = "test scaffolding"
+)]
 use super::*;
 use crate::task::{ParentSpec, add_task_for_session, list_tasks};
 use proptest::prelude::*;
