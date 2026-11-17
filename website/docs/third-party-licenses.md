@@ -4066,7 +4066,7 @@ Used by:
 - [aho-corasick 1.1.5](https://github.com/BurntSushi/aho-corasick)
 - [globset 0.4.21](https://github.com/BurntSushi/ripgrep/tree/master/crates/globset)
 - [jiff-core 0.1.8](https://github.com/BurntSushi/jiff)
-- [jiff 0.2.43](https://github.com/BurntSushi/jiff)
+- [jiff 0.2.44](https://github.com/BurntSushi/jiff)
 - [memchr 2.8.3](https://github.com/BurntSushi/memchr)
 - [walkdir 2.5.0](https://github.com/BurntSushi/walkdir)
 
