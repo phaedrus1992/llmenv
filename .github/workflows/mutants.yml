@@ -86,6 +86,8 @@ jobs:
         # comes from strategy.job-index, not from the label.
         label: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
+      # The setup steps count against the shard budget (#3569).
+      - run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
@@ -106,13 +108,8 @@ jobs:
         run: |
           git diff "origin/${BASE_REF}"...HEAD > mutants-pr.diff
           wc -l mutants-pr.diff
-      # Surviving mutants on lines this PR touched are the actionable case: the
-      # PR added or changed logic no test distinguishes from a wrong version.
-      #
-      # The script runs cargo-mutants inside a time budget below the job limit
-      # (#3569). A shard that runs out of budget says so in an annotation and in
-      # the step summary and does not fail, because the job limit would cancel it
-      # with no finding. The weekly sweep covers the mutants it did not reach.
+      # Surviving mutants on lines this PR touched are the actionable case. The budget and the
+      # incomplete-shard report are in scripts/mutants-shard.sh (#3569).
       - env:
           SHARD: ${{ strategy.job-index }}
           SHARDS: ${{ needs.plan.outputs.shards }}

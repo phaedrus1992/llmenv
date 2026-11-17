@@ -10,22 +10,10 @@ use std::collections::HashMap;
 use super::{Task, TaskState, ancestors, blockers, relation, session};
 
 /// Why starting `task` would be refused, or `None` when it would start. `all` is every task of the
-/// store, and `by_slug` indexes it. A task in progress counts as done for the queue, because a
-/// reminder names the start that follows the current task.
-pub(super) fn refusal(task: &Task, all: &[Task], by_slug: &HashMap<&str, &Task>) -> Option<String> {
-    refusal_with(task, all, by_slug, true)
-}
-
-/// [`refusal`] for a start that runs now: a task in progress holds the queue.
-pub(super) fn refusal_now(
-    task: &Task,
-    all: &[Task],
-    by_slug: &HashMap<&str, &Task>,
-) -> Option<String> {
-    refusal_with(task, all, by_slug, false)
-}
-
-fn refusal_with(
+/// store, and `by_slug` indexes it. With `wip_is_done`, a task in progress counts as done for the
+/// queue, because a reminder names the start that follows the current task. Without it, a task in
+/// progress holds the queue, as it does for a start that runs now.
+pub(super) fn refusal(
     task: &Task,
     all: &[Task],
     by_slug: &HashMap<&str, &Task>,
@@ -61,7 +49,7 @@ pub(super) fn first_startable<'a>(
 ) -> Option<&'a Task> {
     open.iter()
         .copied()
-        .find(|t| refusal(t, all, by_slug).is_none())
+        .find(|t| refusal(t, all, by_slug, true).is_none())
 }
 
 #[cfg(test)]
@@ -91,7 +79,7 @@ mod tests {
     fn refusal_of(slug: &str, tasks: &[Task]) -> Option<String> {
         let by_slug: HashMap<&str, &Task> = tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
         let task = tasks.iter().find(|t| t.slug == slug).unwrap();
-        refusal(task, tasks, &by_slug)
+        refusal(task, tasks, &by_slug, true)
     }
 
     #[test]
@@ -146,6 +134,7 @@ mod tests {
             all.iter().find(|t| t.slug == second.slug).unwrap(),
             &all,
             &by_slug,
+            false,
         );
         assert!(refused.is_some());
         assert!(start_task(dir.path(), &second.slug, false).is_err());
@@ -153,6 +142,7 @@ mod tests {
             all.iter().find(|t| t.slug == first.slug).unwrap(),
             &all,
             &by_slug,
+            false,
         );
         assert_eq!(accepted, None);
         assert!(start_task(dir.path(), &first.slug, false).is_ok());
@@ -166,7 +156,7 @@ mod tests {
         let all = crate::task::list_tasks(dir.path());
         let by_slug: HashMap<&str, &Task> = all.iter().map(|t| (t.slug.as_str(), t)).collect();
         let child = all.iter().find(|t| t.slug == child.slug).unwrap();
-        assert!(refusal(child, &all, &by_slug).is_some());
+        assert!(refusal(child, &all, &by_slug, false).is_some());
         assert!(start_task(dir.path(), &child.slug, false).is_err());
     }
 
@@ -232,14 +222,14 @@ mod tests {
                 for t in &tasks {
                     save_task(dir.path(), t).unwrap();
                 }
-                let accepted = refusal(task, &tasks, &by_slug).is_none();
+                let accepted = refusal(task, &tasks, &by_slug, false).is_none();
                 let started = start_task(dir.path(), &task.slug, false).is_ok();
                 proptest::prop_assert_eq!(
                     accepted,
                     started,
                     "task {} refusal {:?} in {:?}",
                     task.slug,
-                    refusal(task, &tasks, &by_slug),
+                    refusal(task, &tasks, &by_slug, false),
                     tasks.iter().map(|t| (&t.slug, t.state, &t.parent, t.parallel, &t.blocked_on)).collect::<Vec<_>>()
                 );
             }

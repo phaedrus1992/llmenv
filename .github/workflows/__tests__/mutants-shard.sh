@@ -14,13 +14,15 @@ if [[ -z "$SCRATCH" || ! -d "$SCRATCH" ]]; then
 fi
 trap 'trash "$SCRATCH" 2>/dev/null || true' EXIT
 
-mkdir -p "$SCRATCH/bin" || exit 1
+mkdir -p "$SCRATCH/bin" "$SCRATCH/nobin" "$SCRATCH/work" || exit 1
 cat >"$SCRATCH/bin/timeout" <<'STUB'
 #!/usr/bin/env bash
 exit "${FAKE_STATUS:-0}"
 STUB
 chmod +x "$SCRATCH/bin/timeout"
+ln -s "$(command -v date)" "$SCRATCH/nobin/date"
 export PATH="$SCRATCH/bin:$PATH"
+cd "$SCRATCH/work" || exit 1
 echo "diff" >"$SCRATCH/pr.diff"
 
 PASS=0
@@ -53,6 +55,23 @@ check "a shard out of budget annotates a warning" "1" \
 check "the annotation names the shard as one-based" "1" \
   "$(grep -c 'shard 2/3' <<<"$out")"
 check "the step summary says INCOMPLETE" "1" "$(grep -c 'INCOMPLETE' "$summary")"
+check "the marker file is written" "1" "$(grep -c 'INCOMPLETE shard 2/3' mutants.out/INCOMPLETE)"
+
+FAKE_STATUS=137 bash "$SHARD" 1 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
+check "a shard that needed the KILL is incomplete, not failed" "0" "$?"
+
+echo "src/lib.rs:1: replace foo with ()" >mutants.out/missed.txt
+FAKE_STATUS=124 bash "$SHARD" 1 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
+check "a survivor before the stop still fails the shard" "2" "$?"
+rm -f mutants.out/missed.txt
+
+old_start=$(($(date +%s) - 2350))
+out="$(JOB_START="$old_start" FAKE_STATUS=0 bash "$SHARD" 0 3 "$SCRATCH/pr.diff" 2>/dev/null)"
+check "a shard with no time left after the setup does not start" "0" "$?"
+check "the late shard says why" "1" "$(grep -c 'did not start' <<<"$out")"
+
+PATH="$SCRATCH/nobin" /bin/bash "$SHARD" 0 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
+check "a runner without timeout is refused" "2" "$?"
 
 bash "$SHARD" 3 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
 check "a shard index at the shard count is refused" "2" "$?"

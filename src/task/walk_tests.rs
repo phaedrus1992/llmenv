@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use proptest::prelude::*;
 use tempfile::TempDir;
 
-use super::blockers::{blocker_walk_error, first_undone_in_subtree, is_actionable};
+use super::blockers::{blocker_walk_error, first_undone_in_subtree, unmet_blocker};
 use super::*;
 
 fn task(slug: &str, state: TaskState, parent: Option<&str>, blocked_on: &[&str]) -> Task {
@@ -24,6 +24,14 @@ fn task(slug: &str, state: TaskState, parent: Option<&str>, blocked_on: &[&str])
         created_at: "2026-10-02T00:00:00Z".to_string(),
         updated_at: "2026-10-02T00:00:00Z".to_string(),
     }
+}
+
+/// The blockers-only view of whether a task can start: not `done` or `waiting`, no loop in a
+/// blocker walk, and every blocker done with its subtree.
+fn is_actionable(task: &Task, by_slug: &HashMap<&str, &Task>) -> bool {
+    !matches!(task.state, TaskState::Done | TaskState::Waiting)
+        && blocker_walk_error(task, by_slug).is_none()
+        && unmet_blocker(task, by_slug).is_none()
 }
 
 fn index(tasks: &[Task]) -> HashMap<&str, &Task> {
@@ -684,12 +692,12 @@ proptest! {
         let got = super::blockers::first_obstacle(&open, &tasks, &by_slug);
         let all_start = open
             .iter()
-            .all(|t| super::startability::refusal(t, &tasks, &by_slug).is_none());
+            .all(|t| super::startability::refusal(t, &tasks, &by_slug, true).is_none());
         prop_assert_eq!(got.is_none(), all_start);
         // The reminder never names a task that the check accepts.
         if let Some((slug, _)) = &got {
             prop_assert!(open.iter().any(|t| &t.slug == slug
-                && super::startability::refusal(t, &tasks, &by_slug).is_some()));
+                && super::startability::refusal(t, &tasks, &by_slug, true).is_some()));
         }
         let first_loop = open
             .iter()
@@ -724,7 +732,7 @@ fn the_done_refusal_names_a_start_only_when_the_start_works() {
     let second = saved(dir.path(), "Second", "s");
     let err = complete_task(dir.path(), &second.slug, false).expect_err("an open task is refused");
     let text = format!("{err:#}");
-    assert!(text.contains("cannot start"), "{text}");
+    assert!(text.contains("the start is refused"), "{text}");
     assert!(
         text.contains(&format!("queued behind '{}'", first.slug)),
         "{text}"

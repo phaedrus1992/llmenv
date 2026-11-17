@@ -222,7 +222,7 @@ pub(super) fn stalled_parent_lines(all: &[Task], session_ids: &[String]) -> Vec<
                     Some(first) => format!(
                         "Its sub-task '{}' cannot start: {}.",
                         first.slug,
-                        super::startability::refusal(first, all, &by_slug)
+                        super::startability::refusal(first, all, &by_slug, true)
                             .unwrap_or_else(|| "the start refuses it".to_owned())
                     ),
                     None => "None of its sub-tasks can start.".to_owned(),
