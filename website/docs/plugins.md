@@ -81,7 +81,13 @@ An unpinned plugin is pulled.
 A malformed entry is skipped with a warning that names the entry, the value, and the fix.
 This covers a `repo` that is not `owner/name`, a `sha` that is not a full commit id,
 a `ref` that is empty or unsafe, and a `path` that is not a relative folder inside the repo.
-The `archive` and `command` kinds are skipped with a warning that names the kind, because llmenv does not fetch them.
+The `archive` kind is skipped with a warning that names the kind, because llmenv does not fetch it.
+A `command` source, such as the `xcode` plugin of the official marketplace, stays in the list (added in v3.14.0).
+Claude Code runs the command, shows you the command to accept, and loads the directory that the command prints.
+llmenv runs nothing, so a marketplace cannot make llmenv execute a command.
+A `command` source with no `command` string is skipped with a warning.
+`llmenv plugin-sync` prints the command of each such plugin, so you see what Claude Code will ask you to accept.
+A plain string source that starts with `npm:` or `command:` is skipped with a warning, because llmenv reserves those prefixes for object sources.
 An object with neither `url` nor a github `repo` is skipped with a warning.
 
 ## Plugin collections
