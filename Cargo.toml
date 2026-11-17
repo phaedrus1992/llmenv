@@ -90,7 +90,7 @@ shell-words = "=1.1.1"
 semver = "=1.0.28"
 hex = "=0.4.3"
 humantime = { workspace = true }
-jiff = { version = "=0.2.41", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
+jiff = { version = "=0.2.43", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 anstyle = { workspace = true }
 globset = { workspace = true }
 schemars = "=1.2.3"
