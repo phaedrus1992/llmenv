@@ -18,6 +18,7 @@ jobs:
   build-binaries:
     name: Build binaries
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     permissions:
       contents: read
       # Required by actions/attest-build-provenance: `id-token` to get the OIDC
@@ -144,6 +145,7 @@ jobs:
   publish-crate:
     name: Publish to crates.io
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: build-binaries
     permissions:
       contents: read
@@ -304,6 +306,7 @@ jobs:
     # blocks the GitHub Release too — otherwise this job ran in parallel and
     # published a release with a placeholder "no user-facing changes" body
     # instead of failing, masking exactly the gap #1507 added the check for.
+    timeout-minutes: 30
     needs: [build-binaries, publish-crate]
     permissions:
       contents: write
@@ -485,6 +488,7 @@ jobs:
   update-homebrew:
     name: Update Homebrew formula
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [publish-crate, create-release]
     if: startsWith(github.ref, 'refs/tags/v') && needs.create-release.result == 'success' && needs.create-release.outputs.is_prerelease == 'false'
     permissions:

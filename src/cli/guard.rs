@@ -27,9 +27,9 @@ pub(super) fn dispatch_check_stale(
 }
 
 /// Dispatch `config-context`. Called from the CLI `run` match arm.
-pub(super) fn dispatch_config_context(engine: &str) {
+pub(super) fn dispatch_config_context(engine: &str) -> anyhow::Result<()> {
     dispatch_guard_command(engine, "config-context");
-    timed("config-context", crate::cli::run_config_context);
+    timed("config-context", crate::cli::run_config_context)
 }
 
 /// Dispatch `config-guard`. Called from the CLI `run` match arm.

@@ -720,7 +720,7 @@ mod tests {
             content_scope("no-match", "*.go", None),
         ];
 
-        let matched = matches_content_all(&scopes, root);
+        let matched = matches_content_all(&scopes, root).matched;
         assert!(matched.contains("rust"));
         assert!(matched.contains("markdown"));
         assert!(!matched.contains("no-match"));
@@ -740,7 +740,7 @@ mod tests {
         let deep = content_scope("deep", "*.py", None);
 
         let scopes = [shallow, deep];
-        let matched = matches_content_all(&scopes, root);
+        let matched = matches_content_all(&scopes, root).matched;
         assert!(!matched.contains("shallow"));
         assert!(matched.contains("deep"));
     }
@@ -756,7 +756,7 @@ mod tests {
             content_scope("good", "*.rs", None),
         ];
 
-        let matched = matches_content_all(&scopes, root);
+        let matched = matches_content_all(&scopes, root).matched;
         assert!(!matched.contains("bad"));
         assert!(matched.contains("good"));
     }
@@ -764,7 +764,7 @@ mod tests {
     #[test]
     fn matches_content_all_empty_scopes_returns_empty() {
         let temp_dir = tempfile::TempDir::new().expect("tempdir");
-        let matched = matches_content_all(&[], temp_dir.path());
+        let matched = matches_content_all(&[], temp_dir.path()).matched;
         assert!(matched.is_empty());
     }
 

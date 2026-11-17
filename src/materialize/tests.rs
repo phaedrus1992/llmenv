@@ -278,7 +278,50 @@ fn write_bundle_file_does_not_write_through_a_link_at_the_destination() {
     assert_eq!(copy, b"echo new\n");
 }
 
-/// A bundle script keeps its executable bit when it is written under a new folder (#3203).
+/// A named pipe at the destination is replaced by a regular file, and the write does not wait for
+/// a reader (#3203).
+#[cfg(unix)]
+#[test]
+fn write_bundle_file_replaces_a_named_pipe_without_waiting() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("source.sh");
+    std::fs::write(&source, b"echo new\n").expect("write the source");
+    let out = dir.path().join("out.sh");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&out)
+        .status()
+        .expect("run mkfifo");
+    assert!(made.success(), "mkfifo must work");
+    write_bundle_file(dir.path(), Path::new("out.sh"), &source)
+        .expect("a named pipe is replaced, not waited on");
+    assert_eq!(std::fs::read(&out).expect("read the copy"), b"echo new\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn write_bundle_file_replaces_a_longer_file_without_a_tail() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("source.sh");
+    std::fs::write(&source, b"new\n").expect("write the source");
+    let out = dir.path().join("out.sh");
+    std::fs::write(&out, b"a much longer old content\n").expect("write the old file");
+    write_bundle_file(dir.path(), Path::new("out.sh"), &source).expect("replace the file");
+    assert_eq!(std::fs::read(&out).expect("read"), b"new\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_to_a_directory_is_not_a_real_directory() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).expect("make the directory");
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("make the link");
+    assert!(is_real_dir(&real));
+    assert!(!is_real_dir(&link));
+    assert!(!is_real_dir(&dir.path().join("missing")));
+}
+
 #[cfg(unix)]
 #[test]
 fn write_bundle_file_copies_content_and_keeps_the_executable_bit() {

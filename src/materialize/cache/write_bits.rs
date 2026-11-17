@@ -29,10 +29,8 @@ pub(super) fn remove_dir_all_forcing_writable(p: &Path) -> std::io::Result<()> {
 /// matches. A file under a file is not a link, so it still reaches the log.
 #[cfg(unix)]
 fn refused_as_link(e: &std::io::Error, dir: &Path) -> bool {
-    let refusal = [rustix::io::Errno::LOOP, rustix::io::Errno::NOTDIR]
-        .iter()
-        .any(|errno| e.raw_os_error() == Some(errno.raw_os_error()));
-    refusal && std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink())
+    llmenv_paths::is_nofollow_refusal(e)
+        && std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink())
 }
 
 /// Add the owner `rwx` bits to `dir` and every directory beneath it.

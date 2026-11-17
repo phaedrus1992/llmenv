@@ -47,6 +47,9 @@ pub fn append_override_note(state_dir: &Path, id: &str, note: Option<&str>) -> a
         save_session(state_dir, &session)
     })
     .with_context(|| {
-        format!("the change to session '{id}' is saved, but its override note was not written")
+        format!(
+            "the change to session '{id}' is saved, but its override note was not written; do not \
+             retry the command"
+        )
     })
 }

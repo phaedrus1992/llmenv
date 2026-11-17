@@ -275,8 +275,9 @@ pub fn handle_stop(
     } else if consecutive >= threshold {
         format!(
             "{reminder}\n\nThis exact reminder has repeated {consecutive} times in a row with no \
-             progress. If a listed task is your own, run `llmenv task start <slug>` to work on \
-             it, or `llmenv task wait <slug> \"<reason>\"` if you are blocked on something \
+             progress. Run `llmenv task show --next` to see the task that can start. If it names a \
+             listed task that is your own, run `llmenv task start <slug>` to work on it. Run \
+             `llmenv task wait <slug> \"<reason>\"` if you are blocked on something \
              outside your control — that silences this nag until the blocker clears. If none \
              of the listed tasks are yours (a different, possibly still-active session owns \
              them), this repeat is expected and needs no action from you — it clears on its \

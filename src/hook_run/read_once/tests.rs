@@ -92,9 +92,7 @@ fn a_deprecated_file_path_key_is_noticed_to_the_agent() {
         &test_config_warn(),
         dir.path(),
     );
-    let notice = crate::agent_notice::current().unwrap_or_default();
-    assert!(notice.contains("deprecated 'filePath' key"), "{notice}");
-    assert!(notice.contains("Fix:"), "{notice}");
+    crate::agent_notice::assert_noticed(&["deprecated 'filePath' key"]);
 }
 
 #[test]
@@ -176,11 +174,7 @@ fn notice_when_file_path_missing() {
         dir.path(),
     );
     assert!(result.is_empty());
-    let notice = crate::agent_notice::current().unwrap_or_default();
-    assert!(
-        notice.contains("file_path text"),
-        "the agent must see the skipped read cache: {notice}"
-    );
+    crate::agent_notice::assert_noticed(&["file_path text"]);
 }
 
 // Found during #1209's pre-pr-review: the identical "required field
@@ -197,11 +191,7 @@ fn notice_when_tool_input_not_an_object() {
         dir.path(),
     );
     assert!(result.is_empty());
-    let notice = crate::agent_notice::current().unwrap_or_default();
-    assert!(
-        notice.contains("tool_input is not an object"),
-        "the agent must see the skipped read cache: {notice}"
-    );
+    crate::agent_notice::assert_noticed(&["tool_input is not an object"]);
 }
 
 // Found during #1209's pre-pr-review: a rejected session_id means the
@@ -217,9 +207,7 @@ fn logs_error_when_session_id_fails_path_safety_check() {
     let result = handle_pre_tool_use(&payload, Some("../escape"), &test_config_warn(), dir.path());
     assert!(result.is_empty());
     // The agent notice is the result; a captured log can miss the line under parallel tests (#3394).
-    let notice = crate::agent_notice::current().unwrap_or_default();
-    assert!(notice.contains("rejected the session id"), "{notice}");
-    assert!(notice.contains("Fix:"), "{notice}");
+    crate::agent_notice::assert_noticed(&["rejected the session id"]);
 }
 
 #[test]
@@ -452,6 +440,39 @@ fn a_busy_read_once_cache_lock_is_an_agent_notice() {
         &test_config_warn(),
         dir.path(),
     );
-    let notice = crate::agent_notice::current().unwrap_or_default();
-    assert!(notice.contains("the read-once cache lock"), "{notice}");
+    crate::agent_notice::assert_noticed(&["the read-once cache lock"]);
+}
+
+fn pin_mtime(path: &std::path::Path, secs: u64) {
+    let file = fs::OpenOptions::new().write(true).open(path).expect("test");
+    file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+        .expect("test");
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(24))]
+
+    /// The second read of a file is denied only when both its size and its mtime are unchanged
+    /// (#3226). Any change of either one passes the read through.
+    #[test]
+    fn a_read_is_denied_only_when_size_and_mtime_match(
+        first in 0usize..64,
+        second in 0usize..64,
+        same_time in proptest::prelude::any::<bool>(),
+    ) {
+        let dir = TempDir::new().expect("test");
+        let path = dir.path().join("prop.txt");
+        fs::write(&path, vec![b'x'; first]).expect("test");
+        pin_mtime(&path, 1_000_000);
+        let payload = read_payload(path.to_str().expect("test"));
+        let config = test_config_deny();
+        let one = handle_pre_tool_use(&payload, Some("prop-session"), &config, dir.path());
+        proptest::prop_assert!(one.is_empty(), "the first read passes: {}", one);
+
+        fs::write(&path, vec![b'y'; second]).expect("test");
+        pin_mtime(&path, if same_time { 1_000_000 } else { 1_000_005 });
+        let two = handle_pre_tool_use(&payload, Some("prop-session"), &config, dir.path());
+        let unchanged = first == second && same_time;
+        proptest::prop_assert_eq!(two.starts_with("__DENY__:"), unchanged, "{}", two);
+    }
 }

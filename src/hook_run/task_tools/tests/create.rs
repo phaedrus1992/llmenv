@@ -132,3 +132,26 @@ fn create_without_subject_denies_with_guidance() {
     assert!(out.contains("llmenv task add"));
     assert!(task::list_tasks(dir.path()).is_empty());
 }
+
+/// A TaskCreate with an open session picks the session and adds the task from one read of the
+/// session store (#3748).
+#[test]
+fn create_with_an_open_session_reads_the_session_store_once() {
+    let dir = tmp();
+    handle_inner(
+        "TaskCreate",
+        Some(&json!({ "subject": "first" })),
+        dir.path(),
+        PROJECT,
+    );
+    let before = task::session::session_reads_on_this_thread();
+    let out = handle_inner(
+        "TaskCreate",
+        Some(&json!({ "subject": "second" })),
+        dir.path(),
+        PROJECT,
+    );
+    assert!(out.starts_with("__DENY__:"), "{out}");
+    assert_eq!(task::list_tasks(dir.path()).len(), 2, "{out}");
+    assert_eq!(task::session::session_reads_on_this_thread() - before, 1);
+}

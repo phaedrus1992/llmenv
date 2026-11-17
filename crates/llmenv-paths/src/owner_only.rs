@@ -97,14 +97,23 @@ fn harden_existing_dir(dir: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Whether `cause` is the answer of an open that refuses a link (`O_NOFOLLOW`): `ELOOP` on Linux,
+/// and `ENOTDIR` on a platform that reports a link as a non-folder. A file used as a folder gives
+/// `ENOTDIR` too, so a caller that must tell the two apart also checks the path.
+#[cfg(unix)]
+#[must_use]
+pub fn is_nofollow_refusal(cause: &std::io::Error) -> bool {
+    cause.raw_os_error().is_some_and(|code| {
+        code == rustix::io::Errno::LOOP.raw_os_error()
+            || code == rustix::io::Errno::NOTDIR.raw_os_error()
+    })
+}
+
 /// The error for an owner-only folder that cannot be used. A link (`ELOOP`) or a non-folder
 /// (`ENOTDIR`) names the fix that matters. Any other error names the path and the cause.
 #[cfg(unix)]
 fn path_error(dir: &Path, action: &str, cause: &std::io::Error) -> std::io::Error {
-    let not_a_folder = cause.raw_os_error().is_some_and(|code| {
-        code == rustix::io::Errno::LOOP.raw_os_error()
-            || code == rustix::io::Errno::NOTDIR.raw_os_error()
-    });
+    let not_a_folder = is_nofollow_refusal(cause);
     let fix = if not_a_folder {
         "Fix: make it a real folder, not a link."
     } else {

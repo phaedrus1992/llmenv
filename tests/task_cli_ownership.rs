@@ -206,3 +206,42 @@ fn add_to_an_unowned_session_needs_no_other_session() {
         .assert()
         .success();
 }
+
+// #3762: `start --reopen` saves the reopen and then the start can refuse. The audit note of the
+// override is written before the error, so the change on another session's task has a record.
+#[test]
+fn a_refused_start_after_a_reopen_still_notes_the_override() {
+    let dir = TempDir::new().unwrap();
+    let old = |args: &[&str]| {
+        llmenv(dir.path())
+            .env("CLAUDE_CODE_SESSION_ID", "conv-old")
+            .args(args)
+            .assert()
+            .success();
+    };
+    old(&["task", "session", "start", "first"]);
+    old(&["task", "add", "front"]);
+    old(&["task", "add", "behind"]);
+    old(&["task", "done", "behind", "--force"]);
+
+    llmenv(dir.path())
+        .env("CLAUDE_CODE_SESSION_ID", "conv-new")
+        .args([
+            "task",
+            "start",
+            "behind",
+            "--reopen",
+            "--other-session",
+            "first",
+        ])
+        .assert()
+        .failure();
+
+    let shown = llmenv(dir.path())
+        .env("CLAUDE_CODE_SESSION_ID", "conv-old")
+        .args(["task", "show", "behind"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&shown.stdout);
+    assert!(text.contains("--other-session first"), "{text}");
+}

@@ -27,11 +27,12 @@ pub(crate) fn migrate_stranded_projects(
         let skipped = move_dir_newest_wins(&src, &target)
             .with_context(|| format!("folding stranded transcripts from {}", src.display()))?;
         if !skipped.is_empty() {
-            tracing::warn!(
-                "{} entries stay in {}, which the fold does not move",
+            crate::agent_notice::record_logged(format!(
+                "llmenv: {} entries stay in {}, which the fold does not move. Fix: move or remove \
+                 them by hand.",
                 skipped.len(),
                 src.display()
-            );
+            ));
         }
         folded = folded.saturating_add(1);
     }

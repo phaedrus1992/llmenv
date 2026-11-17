@@ -20,8 +20,9 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 anyhow = { workspace = true }
 sha2 = { workspace = true }
-humantime = { workspace = true }
 tracing = { workspace = true }
+thiserror = { workspace = true }
+rustix = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
