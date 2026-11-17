@@ -1,3 +1,7 @@
+// The worker unwinds with `resume_unwind`, which does not run the panic hook. With
+// RUST_BACKTRACE=1, the hook of a plain `panic!` symbolicates a backtrace before the thread
+// drops its sender. Measured: 0.3 s alone, and over 60 s with 64 parallel test processes
+// beside a CPU load. The same run with `resume_unwind` answered in under 10 ms (#3483).
 //! Tests for the keychain write seam. A fake setter stands in for the Security framework, so no real
 //! keychain item is written.
 

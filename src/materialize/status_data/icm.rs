@@ -113,8 +113,11 @@ mod tests {
     fn a_good_reply_logs_no_warning() {
         let mut data = None;
         let logs = capture_logs(|| {
+            // The control line proves the capture works, so a missing WARN is not a lost log.
+            tracing::info!("capture-control");
             data = icm_data_from(Ok("Memories: 12\nTopics: 3\n".to_owned()));
         });
+        assert!(logs.contains("capture-control"), "{logs}");
         assert_eq!(data.map(|d| d.memories), Some(12));
         assert!(!logs.contains("WARN"), "{logs}");
     }
