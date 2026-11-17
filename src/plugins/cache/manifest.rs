@@ -111,6 +111,15 @@ fn parse_plugin_entry(entry: &serde_json::Value) -> Result<Option<MarketplacePlu
     };
     let mut subdir = None;
     let source = if let Some(s) = raw.as_str() {
+        // The sentinels are built from object sources only. A plain string with one of these
+        // prefixes would skip the checks of its object form (#3584).
+        if s.starts_with("npm:") || s.starts_with("command:") {
+            eprintln!(
+                "warning: marketplace entry '{name}': the plain source {s:?} uses a prefix that \
+                 llmenv reserves for object sources — skipping entry"
+            );
+            return Ok(None);
+        }
         s.to_string()
     } else if raw.get("source").and_then(|v| v.as_str()) == Some("npm") {
         // #1014: an npm-source object ({"source": "npm", "package": ...,
@@ -130,6 +139,20 @@ fn parse_plugin_entry(entry: &serde_json::Value) -> Result<Option<MarketplacePlu
                     "warning: marketplace entry '{}': npm-source object has no \
                      string 'package' field (source = {:?}) — skipping entry",
                     name, raw
+                );
+                return Ok(None);
+            }
+        }
+    } else if raw.get("source").and_then(|v| v.as_str()) == Some("command") {
+        // #3584: Claude Code runs the command itself, shows the user the command to accept, and
+        // loads the directory that it prints. llmenv runs nothing, so a marketplace cannot make
+        // llmenv execute a command. The entry stays in the list as a source that needs no fetch.
+        match raw.get("command").and_then(|v| v.as_str()) {
+            Some(command) if !command.trim().is_empty() => format!("command:{command}"),
+            _ => {
+                eprintln!(
+                    "warning: marketplace entry '{name}': command-source object has no \
+                     non-empty string 'command' field (source = {raw:?}) — skipping entry"
                 );
                 return Ok(None);
             }
@@ -293,6 +316,52 @@ mod error_tests {
             if let Ok(Some(parsed)) = super::parse_plugin_entry(&entry) {
                 prop_assert!(!parsed.name.is_empty());
             }
+        }
+
+        /// A command source keeps its command text as `command:<cmd>`, and it needs no fetch.
+        #[test]
+        fn a_command_source_encodes_any_non_blank_command(command in "[ -~]{0,40}") {
+            let entry = serde_json::json!({
+                "name": "p",
+                "source": {"source": "command", "command": command.clone()},
+            });
+            let parsed = super::parse_plugin_entry(&entry).expect("a well-formed entry parses");
+            if command.trim().is_empty() {
+                prop_assert!(parsed.is_none());
+            } else {
+                let parsed = parsed.expect("a non-blank command is kept");
+                prop_assert_eq!(&parsed.source, &format!("command:{command}"));
+                prop_assert!(!crate::plugins::cache::is_external_plugin_source(&parsed.source));
+            }
+        }
+
+        /// Object sources of every kind never panic, whatever their fields hold.
+        #[test]
+        fn object_sources_never_panic(
+            kind in prop::sample::select(vec![
+                "npm", "command", "archive", "git-subdir", "github", "url", "other",
+            ]),
+            field in proptest::option::of(".{0,20}"),
+        ) {
+            let mut source = serde_json::Map::new();
+            source.insert("source".into(), kind.into());
+            if let Some(f) = field {
+                for key in ["package", "command", "url", "repo", "path"] {
+                    source.insert(key.into(), f.clone().into());
+                }
+            }
+            let entry = serde_json::json!({"name": "p", "source": source});
+            let _ = super::parse_plugin_entry(&entry);
+        }
+
+        /// A plain string with a reserved prefix is never kept.
+        #[test]
+        fn a_plain_string_with_a_reserved_prefix_is_skipped(
+            prefix in prop::sample::select(vec!["npm:", "command:"]),
+            rest in "[ -~]{0,20}",
+        ) {
+            let entry = serde_json::json!({"name": "p", "source": format!("{prefix}{rest}")});
+            prop_assert!(super::parse_plugin_entry(&entry).expect("a well-formed entry parses").is_none());
         }
     }
 }
