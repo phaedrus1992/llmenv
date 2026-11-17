@@ -611,10 +611,7 @@ fn rotate_full_log(
 #[cfg(unix)]
 fn open_log_file(path: &Path, max_bytes: u64, harden_dir: bool) -> anyhow::Result<std::fs::File> {
     use std::os::fd::AsFd as _;
-    let parent = match path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
-    };
+    let parent = llmenv_paths::parent_or_cwd(path);
     let name = path
         .file_name()
         .ok_or_else(|| anyhow::anyhow!("log path {} has no file name", path.display()))?;

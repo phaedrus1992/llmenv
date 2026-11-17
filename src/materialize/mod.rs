@@ -91,7 +91,7 @@ pub fn materialize_with_mode(
         // Strict mode: a content-hashed folder that already exists is
         // byte-identical, so reuse it untouched.
         // A file at this path is not a cached folder, so it must not be reused (#2657).
-        HashingMode::Strict if dest.is_dir() => {
+        HashingMode::Strict if is_real_dir(&dest) => {
             crate::cache_trace::emit_cache_trace("content_hash", true, cache_start.elapsed(), None);
             return Ok(Rendered { path: dest, hash });
         }
@@ -143,7 +143,11 @@ pub fn materialize_with_mode(
                 );
                 Ok(Rendered { path: dest, hash })
             } else {
-                Err(e.into())
+                Err(anyhow::Error::new(e).context(format!(
+                    "cannot move the staged bundle to {}. Fix: remove what is at that path, then \
+                     regenerate.",
+                    dest.display()
+                )))
             }
         }
     }
@@ -196,13 +200,32 @@ fn is_real_dir(path: &Path) -> bool {
 fn write_bundle_file(abs: &Path, out: &Path) -> anyhow::Result<()> {
     use std::io::Write as _;
     let content = crate::paths::bounded::asset(abs)?;
+    let cannot = |why: &dyn std::fmt::Display| {
+        format!(
+            "cannot write {}: {why}. Fix: check the free space and the permissions of its folder, \
+             then retry.",
+            out.display()
+        )
+    };
+    // A node that is not a regular file is refused before the open. A named pipe is then not
+    // opened, and a file is not emptied for a node that the open would refuse. A link has its own
+    // refusal at the open.
+    if let Ok(meta) = std::fs::symlink_metadata(out)
+        && !meta.is_file()
+        && !meta.file_type().is_symlink()
+    {
+        anyhow::bail!(
+            "cannot write {}: it is not a regular file. Fix: remove it, then retry.",
+            out.display()
+        );
+    }
     // The open refuses a link at `out`, and the mode change runs on the same handle, so a link
-    // swapped in after the open cannot redirect either step (#3203).
+    // swapped in after the open cannot redirect either step (#3203). The open does not truncate:
+    // the file is emptied only after the type check, so a refused node keeps its content.
     let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    // O_NOFOLLOW refuses a link. O_NONBLOCK keeps the open of a named pipe at `out` from waiting
-    // for a reader, and the check after the open refuses anything that is not a regular file.
-    // `custom_flags` replaces the earlier flags, so one call sets both.
+    opts.write(true).create(true);
+    // O_NOFOLLOW refuses a link. O_NONBLOCK keeps the open of a node that appears after the check
+    // from waiting for a reader. `custom_flags` replaces the earlier flags, so one call sets both.
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
@@ -217,18 +240,30 @@ fn write_bundle_file(abs: &Path, out: &Path) -> anyhow::Result<()> {
             out.display()
         )
     })?;
-    if !file.metadata()?.is_file() {
+    if !file
+        .metadata()
+        .with_context(|| cannot(&"it cannot be inspected"))?
+        .is_file()
+    {
         anyhow::bail!(
             "cannot write {}: it is not a regular file. Fix: remove it, then retry.",
             out.display()
         );
     }
-    file.write_all(&content)?;
+    file.set_len(0)
+        .with_context(|| cannot(&"it cannot be emptied"))?;
+    file.write_all(&content)
+        .with_context(|| cannot(&"the copy failed"))?;
     #[cfg(unix)]
     if crate::paths::is_executable(abs)? {
         use std::os::unix::fs::PermissionsExt as _;
-        let mode = file.metadata()?.permissions().mode();
-        file.set_permissions(std::fs::Permissions::from_mode(mode | 0o100))?;
+        let mode = file
+            .metadata()
+            .with_context(|| cannot(&"it cannot be inspected"))?
+            .permissions()
+            .mode();
+        file.set_permissions(std::fs::Permissions::from_mode(mode | 0o100))
+            .with_context(|| cannot(&"its executable bit cannot be set"))?;
     }
     Ok(())
 }
@@ -505,10 +540,20 @@ mod tests {
             .status()
             .expect("run mkfifo");
         assert!(made.success(), "mkfifo must work");
-        assert!(
-            write_bundle_file(&source, &out).is_err(),
-            "a named pipe at the destination must fail, not block"
-        );
+        let err = write_bundle_file(&source, &out).expect_err("a named pipe must fail, not block");
+        assert!(format!("{err:#}").contains("not a regular file"), "{err:#}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_bundle_file_replaces_a_longer_file_without_a_tail() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("source.sh");
+        std::fs::write(&source, b"new\n").expect("write the source");
+        let out = dir.path().join("out.sh");
+        std::fs::write(&out, b"a much longer old content\n").expect("write the old file");
+        write_bundle_file(&source, &out).expect("replace the file");
+        assert_eq!(std::fs::read(&out).expect("read"), b"new\n");
     }
 
     #[cfg(unix)]
