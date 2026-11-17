@@ -86,6 +86,8 @@ A `command` source, such as the `xcode` plugin of the official marketplace, stay
 Claude Code runs the command, shows you the command to accept, and loads the directory that the command prints.
 llmenv runs nothing, so a marketplace cannot make llmenv execute a command.
 A `command` source with no `command` string is skipped with a warning.
+`llmenv plugin-sync` prints the command of each such plugin, so you see what Claude Code will ask you to accept.
+A plain string source that starts with `npm:` or `command:` is skipped with a warning, because llmenv reserves those prefixes for object sources.
 An object with neither `url` nor a github `repo` is skipped with a warning.
 
 ## Plugin collections

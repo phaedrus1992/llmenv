@@ -508,6 +508,15 @@ pub(crate) fn is_external_plugin_source(source: &str) -> bool {
         && source != ".."
 }
 
+/// The command of a command source (#3584), cleaned of control characters, or `None` for any
+/// other source. Claude Code runs the command, so llmenv only shows it.
+#[must_use]
+pub(crate) fn command_of_source(source: &str) -> Option<String> {
+    source
+        .strip_prefix("command:")
+        .map(crate::util::escape_control)
+}
+
 /// Sync an external-sourced plugin payload to the stable llmenv cache.
 ///
 /// # Errors
