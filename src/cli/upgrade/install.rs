@@ -12,8 +12,26 @@ use std::time::Duration;
 fn copy_refusing_symlink(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
     let mut input = std::fs::File::open(src)?;
     let mut output = crate::paths::create_refusing_symlink(dst)?;
-    std::io::copy(&mut input, &mut output)?;
-    output.set_permissions(input.metadata()?.permissions())
+    let copied = std::io::copy(&mut input, &mut output)
+        .and_then(|_| output.set_permissions(input.metadata()?.permissions()));
+    if let Err(e) = copied {
+        // A cut-short backup must not stay: a later restore would put a broken binary back. The
+        // cleanup runs after the destination exists, so an earlier backup is not touched when
+        // the source cannot be opened.
+        drop(output);
+        return Err(match std::fs::remove_file(dst) {
+            Ok(()) => e,
+            Err(rm) => std::io::Error::new(
+                e.kind(),
+                format!(
+                    "{e}; the partial backup {} could not be removed ({rm}). Fix: delete it \
+                     before any restore",
+                    dst.display()
+                ),
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Install `data` as the new binary. The original stays in a backup until the new binary runs.

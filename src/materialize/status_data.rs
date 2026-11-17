@@ -138,10 +138,10 @@ fn collect_plugins(config: &Config, active_tags: &BTreeSet<String>) -> Option<Co
         }),
         Err(e) => {
             // The status line shows only a count, so the cause goes to the log (#3109).
-            tracing::warn!(
-                "cannot resolve plugins for the status line: {e:#}. Fix: correct the plugin \
-                 references in config.yaml."
-            );
+            crate::agent_notice::record_logged(format!(
+                "llmenv: cannot resolve plugins for the status line: {e:#}. Fix: correct the \
+                 plugin references in config.yaml."
+            ));
             Some(CountData {
                 total: 0,
                 errors: 1,
@@ -284,10 +284,11 @@ fn collect_session_log(config: &Config) -> Option<u64> {
     let path = match crate::session_log::resolve_file_path(configured.file_path()) {
         Ok(path) => path,
         Err(e) => {
-            tracing::warn!(
-                "session log stat collection failed, so the line count is empty: {e:#}. Fix: \
-                 check session_log.file.path, and that the session log folder is readable."
-            );
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the session log line count is empty, because its path cannot be \
+                 resolved: {e:#}. Fix: check session_log.file.path, and that the session log \
+                 folder is readable."
+            ));
             return None;
         }
     };

@@ -173,10 +173,11 @@ fn api_key_helper_set(config_dir: Option<&std::path::Path>, cwd: Option<&std::pa
             Ok(None) => false,
             // A repo can plant a pipe, a link, or a huge file here. The notice stays on.
             Err(e) => {
-                tracing::warn!(
-                    "cannot read {}: {e}, so the helper counts as set",
+                crate::agent_notice::record_logged(format!(
+                    "llmenv: cannot read {}: {e}, so the apiKeyHelper counts as set. Fix: remove \
+                     the pipe, link, or large file at that path.",
                     file.display()
-                );
+                ));
                 true
             }
         }
