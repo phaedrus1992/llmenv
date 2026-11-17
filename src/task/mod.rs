@@ -1168,7 +1168,7 @@ fn idle_sessions(open: Vec<Session>, all_tasks: &[Task]) -> Vec<IdleSession> {
             let next = actionable.or_else(|| open.first())?;
             let loop_error = match actionable {
                 Some(_) => None,
-                None => blockers::first_obstacle(open.iter().copied(), &by_slug),
+                None => blockers::first_obstacle(&open, &by_slug),
             };
             Some(IdleSession {
                 next: (*next).clone(),

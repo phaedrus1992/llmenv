@@ -187,9 +187,11 @@ pub(super) fn missing_name_notice(
     used: &str,
 ) -> Option<String> {
     let json = payload?;
-    if json["hook_event_name"]
-        .as_str()
-        .is_some_and(|n| !n.is_empty())
+    // An event with no native name has no fallback, and a payload with no name is its normal state.
+    if used.is_empty()
+        || json["hook_event_name"]
+            .as_str()
+            .is_some_and(|n| !n.is_empty())
     {
         return None;
     }
@@ -203,6 +205,7 @@ pub(super) fn missing_name_notice(
 #[allow(clippy::expect_used)]
 mod event_name_tests {
     use super::engine_event_for;
+    use proptest::strategy::Strategy as _;
 
     #[test]
     fn the_payload_name_wins_over_the_argv_event() {
@@ -240,5 +243,35 @@ mod event_name_tests {
         }
         assert_eq!(missing_name_notice(Some(&named), "stop", "Stop"), None);
         assert_eq!(missing_name_notice(None, "stop", "Stop"), None);
+        assert_eq!(
+            missing_name_notice(Some(&no_name), "post_tool_batch", ""),
+            None
+        );
+    }
+
+    proptest::proptest! {
+        /// The notice is `None` exactly when the payload holds a non-empty string name or the
+        /// event has no fallback name. Otherwise it names the fallback and the fix.
+        #[test]
+        fn the_notice_follows_the_payload_name(
+            value in proptest::prop_oneof![
+                proptest::strategy::Just(serde_json::Value::Null),
+                proptest::prelude::any::<bool>().prop_map(serde_json::Value::from),
+                (0u32..100).prop_map(serde_json::Value::from),
+                "[A-Za-z]{0,8}".prop_map(serde_json::Value::from),
+            ],
+            used in "[A-Za-z]{0,8}",
+        ) {
+            use super::missing_name_notice;
+            let payload = serde_json::json!({ "hook_event_name": value });
+            let named = value.as_str().is_some_and(|n| !n.is_empty());
+            let notice = missing_name_notice(Some(&payload), "evt", &used);
+            if named || used.is_empty() {
+                proptest::prop_assert_eq!(notice, None);
+            } else {
+                let text = notice.unwrap_or_default();
+                proptest::prop_assert!(text.contains(&used) && text.contains("Fix:"), "{}", text);
+            }
+        }
     }
 }

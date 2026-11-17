@@ -179,3 +179,32 @@ proptest::proptest! {
         }
     }
 }
+
+proptest::proptest! {
+    /// `stuck` is set only when there is no next task and a task is still open, and it names the
+    /// first open task that a blocker stops. With a next task it is `None` (#3763).
+    #[test]
+    fn stuck_is_set_only_when_no_task_can_start(
+        rows in proptest::collection::vec((0u8..4, proptest::option::of(0usize..12), 0u8..50), 1..10),
+    ) {
+        let visible = [open_session_for_test("s0")];
+        let tasks: Vec<Task> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, (st, blocker, at))| {
+                let mut t = task(&format!("t{i}"), "s0", state_of(*st), *at);
+                if let Some(b) = blocker {
+                    t.blocked_on = vec![format!("t{b}")];
+                }
+                t
+            })
+            .collect();
+        if let Tracking::Tracked { next, queued, stuck, .. } = tracking_of(&visible, &tasks, None) {
+            proptest::prop_assert_eq!(stuck.is_some(), next.is_none() && queued > 0);
+            if let Some((slug, why)) = stuck {
+                proptest::prop_assert!(!why.is_empty());
+                proptest::prop_assert!(tasks.iter().any(|t| t.slug == slug && t.state == TaskState::Open));
+            }
+        }
+    }
+}

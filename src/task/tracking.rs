@@ -120,7 +120,7 @@ fn tracking_of(visible: &[session::Session], tasks: &[Task], caller: Option<&str
             .filter(|t| t.state == TaskState::Open)
             .collect();
         open.sort_by(|a, b| queue_order(a, b));
-        super::blockers::first_obstacle(open.into_iter(), &by_slug)
+        super::blockers::first_obstacle(&open, &by_slug)
     } else {
         None
     };
