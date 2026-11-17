@@ -14,6 +14,8 @@
 mod branch_failure;
 mod slug;
 pub(crate) use slug::slugify;
+mod add;
+use add::add_task_for_session_with;
 mod ancestors;
 mod block_cycle;
 mod blockers;
@@ -594,106 +596,6 @@ pub(crate) fn add_task_for_session(
         ..NewTask::default()
     };
     add_task_for_session_with(state_dir, &new, parent, session_id)
-}
-
-/// [`add_task_for_session`] for a task that starts with a detail (#2339).
-///
-/// # Errors
-/// The same errors as [`add_task_for_session`].
-fn add_task_for_session_with(
-    state_dir: &Path,
-    new: &NewTask<'_>,
-    parent: ParentSpec<'_>,
-    session_id: &str,
-) -> anyhow::Result<Task> {
-    let title = new.title;
-    with_store_lock(state_dir, || {
-        let dir = tasks_dir(state_dir);
-        // One strict read resolves every name that the new task refers to (#3477). Each name is
-        // checked first, so a bad name gets its own error even when the store is unreadable.
-        let names = [
-            match parent {
-                ParentSpec::Explicit(p) => Some(p),
-                ParentSpec::Detached => None,
-            },
-            match new.placement {
-                Placement::Child(p) => Some(p),
-                Placement::Queue | Placement::Parallel => None,
-            },
-            new.after,
-        ];
-        for name in names.iter().flatten() {
-            resolve::check_identifier(name)?;
-        }
-        let all_tasks = names
-            .iter()
-            .any(Option::is_some)
-            .then(|| list_tasks_strict(state_dir))
-            .transpose()?;
-        let resolve = |name: &str| -> anyhow::Result<String> {
-            let all = all_tasks
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("the task store was not read to find '{name}'"))?;
-            resolve::resolve_in(state_dir, name, all)
-        };
-        let explicit_parent = match parent {
-            ParentSpec::Explicit(p) => {
-                let slug = resolve(p)?;
-                let parent_task = all_tasks
-                    .as_ref()
-                    .and_then(|all| all.as_slice().iter().find(|t| t.slug == slug));
-                ownership::ensure_parent_in_session(parent_task, &slug, Some(session_id))?;
-                Some(slug)
-            }
-            ParentSpec::Detached => None,
-        };
-        let (parent_slug, relation, parallel) = match new.placement {
-            Placement::Queue => (explicit_parent, Relation::Queued, false),
-            Placement::Parallel => (explicit_parent, Relation::Queued, true),
-            Placement::Child(p) => {
-                let slug = resolve(p)?;
-                ownership::check_child_parent(&load_task(state_dir, &slug)?, session_id)?;
-                (Some(slug), Relation::Child, false)
-            }
-        };
-        let blocked_on = match new.after {
-            Some(after) => vec![resolve(after)?],
-            None => Vec::new(),
-        };
-        let now = now_rfc3339();
-        let mut base_slug = slugify(title);
-        if base_slug.is_empty() {
-            // A title with no ASCII-alphanumeric characters at all (e.g. a
-            // CJK-only title, or pure punctuation) would otherwise collapse
-            // to an empty slug — a hidden `.json` file that's awkward to
-            // reference. Fall back to a timestamp-derived slug instead.
-            base_slug = format!("task-{}", now.replace([':', '-'], ""));
-        }
-        let slug = unique_slug(&dir, &base_slug);
-        let task = Task {
-            slug,
-            title: title.to_string(),
-            state: TaskState::Open,
-            parent: parent_slug,
-            relation,
-            parallel,
-            blocked_on,
-            notes: new
-                .note
-                .map(|text| TaskNote {
-                    at: now.clone(),
-                    text: text.to_string(),
-                })
-                .into_iter()
-                .collect(),
-            detail: new.detail.filter(|d| !d.is_empty()).map(str::to_string),
-            session: Some(session_id.to_string()),
-            created_at: now.clone(),
-            updated_at: now,
-        };
-        save_task(state_dir, &task)?;
-        Ok(task)
-    })
 }
 
 /// Claim a task, transitioning it to `wip`.
