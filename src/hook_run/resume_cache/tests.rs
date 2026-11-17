@@ -354,6 +354,45 @@ fn an_api_key_helper_in_any_settings_file_counts() {
     assert!(!api_key_helper_set(None, None));
 }
 
+// #3785: a link at the project's `.claude` folder or at a settings file is not followed. It keeps
+// the notice, and the agent hears why.
+#[cfg(unix)]
+#[test]
+fn a_linked_project_setting_is_not_followed_and_keeps_the_notice() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(project.join(".claude")).unwrap();
+    // A target with no helper: following the link would give `false`.
+    let plain = dir.path().join("plain.json");
+    std::fs::write(&plain, r#"{"hooks":{}}"#).unwrap();
+    std::os::unix::fs::symlink(&plain, project.join(".claude/settings.json")).unwrap();
+    assert!(api_key_helper_set(None, Some(&project)), "a linked file");
+
+    let other = dir.path().join("other");
+    std::fs::create_dir_all(other.join("real")).unwrap();
+    std::fs::write(other.join("real/settings.json"), r#"{"hooks":{}}"#).unwrap();
+    std::os::unix::fs::symlink(other.join("real"), other.join(".claude")).unwrap();
+    assert!(api_key_helper_set(None, Some(&other)), "a linked folder");
+    crate::agent_notice::assert_noticed(&["does not follow"]);
+}
+
+// A repo file named `.claude` is not a link, and the notice does not call it one.
+#[cfg(unix)]
+#[test]
+fn a_project_claude_file_is_not_called_a_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project-3785-file");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join(".claude"), "not a folder").unwrap();
+    assert!(api_key_helper_set(None, Some(&project)));
+    let notices = crate::agent_notice::current().unwrap_or_default();
+    let ours = notices
+        .lines()
+        .find(|l| l.contains("project-3785-file"))
+        .unwrap_or_default();
+    assert!(!ours.contains("is a link"), "{ours}");
+}
+
 #[test]
 fn a_prerelease_of_2_1_304_keeps_the_notice() {
     let env = env_of(&[("CLAUDE_CODE_VERSION", "2.1.304-beta")]);

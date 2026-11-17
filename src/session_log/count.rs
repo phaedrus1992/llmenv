@@ -19,8 +19,14 @@ fn count_with(path: &Path, report: impl FnOnce(&str)) -> Option<u64> {
 
 fn count_or_failure(path: &Path) -> Result<Option<u64>, String> {
     let failure = |step: &str, e: std::io::Error| {
+        // The open refuses a link, as the session sink does, and the raw text does not say so.
+        let cause = if e.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()) {
+            "it is a link, and the session log does not use a link".to_owned()
+        } else {
+            e.to_string()
+        };
         format!(
-            "session log stat collection cannot {step} {}, so the record count is empty: {e}. \
+            "session log stat collection cannot {step} {}, so the record count is empty: {cause}. \
              Fix: run `llmenv doctor` to check session_log.file.path.",
             path.display()
         )
@@ -44,6 +50,20 @@ fn count_or_failure(path: &Path) -> Result<Option<u64>, String> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_link_is_reported_as_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("real.jsonl");
+        std::fs::write(&file, "{}\n").unwrap();
+        let link = dir.path().join("s.jsonl");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        let mut reported = None;
+        assert_eq!(count_with(&link, |f| reported = Some(f.to_string())), None);
+        let failure = reported.unwrap();
+        assert!(failure.contains("it is a link"), "{failure}");
+        assert!(failure.contains("Fix:"), "{failure}");
+    }
 
     #[test]
     fn a_fifo_is_reported_with_its_path_and_the_fix() {
