@@ -70,7 +70,7 @@ pub(super) fn guard_session(
     other_session: Option<&str>,
 ) -> anyhow::Result<SessionOverride> {
     let caller = caller_session_for_task(state_dir)?;
-    crate::task::ownership::ensure_session_is_ours(id, &caller, other_session)
+    crate::task::ownership::ensure_session_is_ours(state_dir, id, &caller, other_session)
 }
 
 /// Appends the pending `--other-session` note, once the command has succeeded.

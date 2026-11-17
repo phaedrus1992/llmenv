@@ -244,21 +244,23 @@ fn several_open_sessions_and_no_identity_is_unidentified() {
 
 #[test]
 fn clearing_another_sessions_tasks_is_refused() {
+    let dir = TempDir::new().expect("tempdir");
     let caller = Caller::Session("mine".to_string());
 
-    let err = ensure_session_is_ours("theirs", &caller, None)
+    let err = ensure_session_is_ours(dir.path(), "theirs", &caller, None)
         .expect_err("clear --session of another session must be refused");
 
     assert!(format!("{err:#}").contains("theirs"), "{err:#}");
-    assert!(ensure_session_is_ours("mine", &caller, None).is_ok());
+    assert!(ensure_session_is_ours(dir.path(), "mine", &caller, None).is_ok());
 }
 
 #[test]
 fn clearing_another_session_needs_its_own_id_as_the_flag_value() {
+    let dir = TempDir::new().expect("tempdir");
     let caller = Caller::Session("mine".to_string());
 
-    assert!(ensure_session_is_ours("theirs", &caller, Some("theirs")).is_ok());
-    assert!(ensure_session_is_ours("theirs", &caller, Some("mine")).is_err());
+    assert!(ensure_session_is_ours(dir.path(), "theirs", &caller, Some("theirs")).is_ok());
+    assert!(ensure_session_is_ours(dir.path(), "theirs", &caller, Some("mine")).is_err());
 }
 
 proptest::proptest! {
@@ -325,7 +327,7 @@ fn an_other_session_override_returns_a_session_note_naming_the_caller() {
     let (_task, owner) = open_task_in_session(dir.path());
     let caller = Caller::Session("some-other-session".to_string());
 
-    let note = ensure_session_is_ours(&owner, &caller, Some(&owner))
+    let note = ensure_session_is_ours(dir.path(), &owner, &caller, Some(&owner))
         .expect("the named owner may be acted on");
 
     let text = note
@@ -345,7 +347,8 @@ fn the_caller_own_session_returns_no_note() {
     let (_task, owner) = open_task_in_session(dir.path());
     let caller = Caller::Session(owner.clone());
 
-    let note = ensure_session_is_ours(&owner, &caller, None).expect("own session is allowed");
+    let note =
+        ensure_session_is_ours(dir.path(), &owner, &caller, None).expect("own session is allowed");
 
     assert!(note.text.is_none(), "no override applied, so no note");
 }
@@ -382,6 +385,7 @@ fn record_after_failure_writes_the_note_only_when_a_task_changed() {
     let audit = |text: &str| SessionOverride {
         session_id: session.clone(),
         text: Some(text.to_owned()),
+        pending: None,
     };
 
     let plain = audit("not written").record_after_failure(dir.path(), anyhow::anyhow!("boom"));
@@ -416,7 +420,7 @@ proptest::proptest! {
         for n in 0..layers {
             error = error.context(format!("layer {n}"));
         }
-        let audit = SessionOverride { session_id: session.clone(), text: Some("note".to_owned()) };
+        let audit = SessionOverride { session_id: session.clone(), text: Some("note".to_owned()), pending: None };
         let err = audit.record_after_failure(dir.path(), error);
         let text = format!("{err:#}");
         proptest::prop_assert!(text.contains("save failed"), "{}", text);
@@ -435,6 +439,7 @@ fn every_failed_note_says_the_change_is_saved() {
     let audit = SessionOverride {
         session_id: missing.to_owned(),
         text: Some("note".to_owned()),
+        pending: None,
     };
     let notes: Vec<(&str, anyhow::Error)> = vec![
         (
@@ -454,6 +459,12 @@ fn every_failed_note_says_the_change_is_saved() {
                 slug: "gone-task".to_owned(),
                 text: "note".to_owned(),
                 owner_less: false,
+                pending: super::super::pending_note::Pending::for_task(
+                    dir.path(),
+                    "gone-task",
+                    "note",
+                )
+                .expect("journal"),
             }
             .record(dir.path())
             .expect_err("no task to hold the note"),
@@ -470,4 +481,41 @@ fn every_failed_note_says_the_change_is_saved() {
             "{command}: the error must say what to do: {text}"
         );
     }
+}
+
+// #3762: the guard journals the note before the change. A crash between the change and the note
+// leaves the entry, and the next command writes the note.
+#[test]
+fn a_crash_after_the_guard_leaves_the_note_for_recovery() {
+    let dir = TempDir::new().expect("tempdir");
+    let (slug, owner) = open_task_in_session(dir.path());
+    let caller = Caller::Session("some-other-session".to_string());
+    let note = ensure_task_is_ours(dir.path(), &slug, &caller, Some(&owner))
+        .expect("the named owner may be acted on")
+        .expect("an override needs a note");
+    std::mem::forget(note);
+
+    let lost = super::super::pending_note::recover(dir.path(), |_| true);
+
+    assert!(lost.is_empty(), "{lost:?}");
+    let task = load_task(dir.path(), &slug).expect("task");
+    assert_eq!(task.notes.len(), 1, "{:?}", task.notes);
+    assert!(
+        task.notes[0].text.contains("some-other-session"),
+        "{:?}",
+        task.notes
+    );
+}
+
+#[test]
+fn a_refused_command_leaves_no_journal() {
+    let dir = TempDir::new().expect("tempdir");
+    let (slug, owner) = open_task_in_session(dir.path());
+    let caller = Caller::Session("some-other-session".to_string());
+    drop(ensure_task_is_ours(dir.path(), &slug, &caller, Some(&owner)).expect("allowed"));
+
+    let lost = super::super::pending_note::recover(dir.path(), |_| true);
+
+    assert!(lost.is_empty(), "{lost:?}");
+    assert!(load_task(dir.path(), &slug).expect("task").notes.is_empty());
 }

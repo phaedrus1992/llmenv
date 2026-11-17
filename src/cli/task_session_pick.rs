@@ -20,7 +20,7 @@ pub(super) fn guard_session_for_write(
         }
         None => {
             let (picked, caller) = pick_session(state_dir, project)?;
-            let audit = ensure_session_is_ours(&picked, &caller, other_session)?;
+            let audit = ensure_session_is_ours(state_dir, &picked, &caller, other_session)?;
             Ok((picked, audit))
         }
     }

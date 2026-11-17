@@ -189,7 +189,8 @@ proptest! {
         };
         let id = format!("s{session}");
         let other = other.map(|n| format!("s{n}"));
-        let result = ensure_session_is_ours(&id, &caller, other.as_deref());
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let result = ensure_session_is_ours(dir.path(), &id, &caller, other.as_deref());
         let own = caller_session == Some(session);
         let named = other.as_deref() == Some(id.as_str());
         prop_assert_eq!(result.is_ok(), own || named, "{:?}", result);

@@ -2870,6 +2870,9 @@ fn render_task_session_summary_human(
 /// `crate::task`, which owns the store logic.
 fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()> {
     let state_dir = crate::paths::state_dir()?;
+    for lost in crate::task::recover_crashed_notes(&state_dir) {
+        tracing::warn!("{lost}");
+    }
     match command {
         TaskCommand::Add {
             title,

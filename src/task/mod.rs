@@ -30,6 +30,8 @@ pub(crate) use edit::edit_task;
 mod note;
 pub(crate) mod ownership;
 pub(crate) mod partial;
+pub(crate) mod pending_note;
+pub(crate) use pending_note::recover_crashed as recover_crashed_notes;
 pub(crate) mod progress;
 mod session_choice;
 mod startability;

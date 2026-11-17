@@ -4,6 +4,7 @@
 
 use std::path::Path;
 
+use super::pending_note::Pending;
 use super::resolve::{check_identifier, resolve_in};
 use super::session::{self, EngineIdentity, Session};
 use super::{StrictTasks, Task, TaskState};
@@ -87,6 +88,8 @@ pub(crate) struct OverrideNote {
     text: String,
     /// True for a task with no session. Such a task has no session to hold its note.
     owner_less: bool,
+    /// The journal of the note, so a crash before [`OverrideNote::record`] leaves a trace (#3762).
+    pending: Pending,
 }
 
 impl OverrideNote {
@@ -102,7 +105,9 @@ impl OverrideNote {
     /// Errors if the task cannot be read or written.
     pub(crate) fn record(&self, state_dir: &Path) -> anyhow::Result<()> {
         use anyhow::Context;
-        super::note_task(state_dir, &self.slug, &self.text).with_context(|| {
+        let written = super::note_task(state_dir, &self.slug, &self.text);
+        self.pending.finish();
+        written.with_context(|| {
             format!(
                 "the change to task '{}' is saved, but its --other-session note is not. Fix: add \
                  the note with `llmenv task note {} <text>`, where the text is the next line \
@@ -184,7 +189,7 @@ pub(crate) fn ensure_tasks_are_ours(
                 .iter()
                 .find(|t| t.slug == slug)
                 .ok_or_else(|| anyhow::anyhow!("task '{slug}' is not in the task store"))?;
-            let note = ownership_note(&slug, task, caller, other_session)?;
+            let note = ownership_note(state_dir, &slug, task, caller, other_session)?;
             Ok((slug, note))
         })
         .collect()
@@ -192,6 +197,7 @@ pub(crate) fn ensure_tasks_are_ours(
 
 /// The override note for acting on `task`, or `None` when the caller may act on it.
 fn ownership_note(
+    state_dir: &Path,
     slug: &str,
     task: &Task,
     caller: &Caller,
@@ -205,10 +211,12 @@ fn ownership_note(
             "acted on a task with no session; caller: {}",
             caller.describe()
         );
+        let pending = Pending::for_task(state_dir, &slug, &text)?;
         return Ok(Some(OverrideNote {
             slug,
             text,
             owner_less: true,
+            pending,
         }));
     };
     if matches!(caller, Caller::Session(id) if id == owner) {
@@ -220,10 +228,12 @@ fn ownership_note(
                 "acted on with --other-session {owner}; caller: {}",
                 caller.describe()
             );
+            let pending = Pending::for_task(state_dir, &slug, &text)?;
             Ok(Some(OverrideNote {
                 slug,
                 text,
                 owner_less: false,
+                pending,
             }))
         }
         Some(named) => anyhow::bail!(
@@ -249,6 +259,8 @@ pub(crate) struct SessionOverride {
     session_id: String,
     /// `None` when the caller owns the session, so no override applied.
     text: Option<String>,
+    /// The journal of the note, present when a note exists (#3762).
+    pending: Option<Pending>,
 }
 
 impl SessionOverride {
@@ -264,7 +276,12 @@ impl SessionOverride {
     /// # Errors
     /// Errors if the session cannot be read or written. The change itself is already saved.
     pub(crate) fn record(self, state_dir: &Path) -> anyhow::Result<()> {
-        session::append_override_note(state_dir, &self.session_id, self.text.as_deref())
+        let written =
+            session::append_override_note(state_dir, &self.session_id, self.text.as_deref());
+        if let Some(pending) = &self.pending {
+            pending.finish();
+        }
+        written
     }
 
     /// Record the note for a command that failed after it had changed some tasks, then give back
@@ -303,24 +320,32 @@ impl SessionOverride {
 /// Errors if the caller is another session and `other_session` does not name
 /// `session_id`.
 pub(crate) fn ensure_session_is_ours(
+    state_dir: &Path,
     session_id: &str,
     caller: &Caller,
     other_session: Option<&str>,
 ) -> anyhow::Result<SessionOverride> {
-    let own = |text: Option<String>| SessionOverride {
-        session_id: session_id.to_string(),
-        text,
+    let own = |text: Option<String>| -> anyhow::Result<SessionOverride> {
+        let pending = text
+            .as_deref()
+            .map(|t| Pending::for_session(state_dir, session_id, t))
+            .transpose()?;
+        Ok(SessionOverride {
+            session_id: session_id.to_string(),
+            text,
+            pending,
+        })
     };
     if matches!(caller, Caller::Session(id) if id == session_id) {
-        return Ok(own(None));
+        return own(None);
     }
     match other_session {
-        Some(named) if named == session_id => Ok(own(Some(format!(
+        Some(named) if named == session_id => own(Some(format!(
             "acted on with --other-session {session_id}; caller: {}",
             caller.describe()
-        )))),
+        ))),
         Some(named) => anyhow::bail!("this command acts on session '{session_id}', not '{named}'"),
-        None => ensure_session_is_callers(session_id, caller).map(|()| own(None)),
+        None => ensure_session_is_callers(session_id, caller).and_then(|()| own(None)),
     }
 }
 

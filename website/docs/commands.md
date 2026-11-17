@@ -600,6 +600,11 @@ Only when the open session has no match does the search cover the whole project.
   is a usage error. Each override appends a task note that names the calling session,
   once the command succeeds. `clear` deletes its tasks, so it writes a note on the owning
   session instead (#3481).
+  (added in v3.14.0) The command journals the note in `pending-notes/` of the state directory before it changes
+  anything.
+  A crash between the change and the note leaves the journal, and the next `llmenv task` command writes the note
+  with the prefix "recovered after a crash, the change may not have completed". A note that cannot be written is
+  logged with its text.
   `task add --session <id>` refuses a session of another conversation the same way, and a
   `--parent` in another session is refused (#3480, #3486). An owned session takes a new task
   only from its owner. A caller with no conversation id is refused for that session.
@@ -890,6 +895,8 @@ Nothing turns off the third item.
   (changed in v3.14.0) The next task is the first open task that `task start` accepts.
   Its blockers are done, the queue does not hold it, and no ancestor refuses it.
   When no open task can start, the reminder names the first open task and says why.
+  (changed in v3.14.0) When the next task is a sub-task of the task in progress, the Stop reminder says
+  the task in progress cannot close before its open sub-tasks do, and names the sub-task to start.
   The cause is a blocker that is not done, blocker links that loop, the queue,
   or a parent that is done, missing, or in another session.
 - An open session with no task at all is named in the Stop and SessionStart reminders.

@@ -30,7 +30,12 @@ pub(super) fn run(
     // a read error after a delete would leave cleared tasks with no note (#3481).
     let caller = caller_session_for_task(state_dir)?;
     let session_note = match session {
-        Some(named) => Some(ensure_session_is_ours(named, &caller, other_session)?),
+        Some(named) => Some(ensure_session_is_ours(
+            state_dir,
+            named,
+            &caller,
+            other_session,
+        )?),
         None => None,
     };
     // `clear` deletes the task, so a pending override note has nowhere to live.
@@ -45,6 +50,9 @@ pub(super) fn run(
     {
         check_owner_less_delete(&caller)?;
     }
+    // The deletes leave no task to hold a note. The note of the override goes to the owning
+    // session, and its journal exists before the first delete, so a crash leaves a trace (#3762).
+    let _journal = journal_planned_clear(state_dir, other_session, &caller, &checked)?;
     let mut deleted = Vec::new();
     let outcome = match session {
         Some(named) => clear_session(state_dir, named, &mut deleted),
@@ -65,6 +73,29 @@ pub(super) fn run(
             "the owning session's note was not saved either: {note:#}"
         ))),
     }
+}
+
+/// The journal of the note for the tasks that a clear with `--other-session` is about to delete.
+fn journal_planned_clear(
+    state_dir: &Path,
+    other_session: Option<&str>,
+    caller: &Caller,
+    checked: &[Checked],
+) -> anyhow::Result<Option<crate::task::pending_note::Pending>> {
+    let planned: Vec<&str> = checked
+        .iter()
+        .filter(|(_, note)| note.as_ref().is_some_and(|n| !n.is_owner_less()))
+        .map(|(slug, _)| slug.as_str())
+        .collect();
+    let Some(owner) = other_session.filter(|_| !planned.is_empty()) else {
+        return Ok(None);
+    };
+    let text = format!(
+        "Cleared with --other-session by {}. Planned deletes: {}.",
+        caller.describe(),
+        planned.join(", ")
+    );
+    crate::task::pending_note::Pending::for_session(state_dir, owner, &text).map(Some)
 }
 
 /// What the notes of one clear record, once the deletes have run.
