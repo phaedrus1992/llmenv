@@ -14,6 +14,9 @@ pub const EXIT_SAVED_WITHOUT_NOTE: i32 = 3;
 struct NoteNotSaved(String);
 
 /// Mark `error` as the failure of an audit note after a saved change. The text does not change.
+///
+/// A context added around a marked error keeps the status, so mark only a failure of the note
+/// after the change was saved. Never wrap the error of a failed change.
 pub(crate) fn mark(error: &anyhow::Error) -> anyhow::Error {
     anyhow::Error::new(NoteNotSaved(format!("{error:#}")))
 }

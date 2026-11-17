@@ -139,6 +139,28 @@ mod tests {
     }
 
     proptest! {
+        /// Stored text reads back to the same instant, and text order follows time order.
+        #[test]
+        fn rfc3339_text_round_trips_and_sorts(
+            a in 0i64..4_000_000_000, an in 0u32..1_000_000_000,
+            b in 0i64..4_000_000_000, bn in 0u32..1_000_000_000,
+        ) {
+            let at = |s: i64, n: u32| Timestamp::new(s, i32::try_from(n).expect("nanos")).expect("in range");
+            let (ta, tb) = (at(a, an), at(b, bn));
+            let (xa, xb) = (format_nanos(ta), format_nanos(tb));
+            prop_assert_eq!(parse_rfc3339(&xa).expect("parse"), SystemTime::from(ta));
+            prop_assert_eq!(ta.cmp(&tb), xa.cmp(&xb));
+        }
+
+        /// Any input gives a value or an error that names the input. An `Ok` value is a duration.
+        #[test]
+        fn parse_age_never_panics_and_names_a_bad_input(raw in "\\PC{0,24}") {
+            match parse_age(&raw) {
+                Ok(_) => {}
+                Err(e) => prop_assert!(e.to_string().contains(&format!("{raw:?}")), "{e}"),
+            }
+        }
+
         #[test]
         fn age_text_ends_in_a_unit_and_reads_back(secs in 0u64..10_000_000_000) {
             let text = format_age(Duration::from_secs(secs));

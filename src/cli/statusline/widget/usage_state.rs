@@ -115,3 +115,40 @@ pub(super) fn usage_state_dir_with_env(
         .filter(|d| !d.is_empty())
         .map(|d| PathBuf::from(d).join("statusline-state"))
 }
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test code")]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+    proptest! {
+        /// Whatever the state file holds, reading it never panics, and a `Sample` only comes from two
+        /// numbers.
+        #[test]
+        fn usage_state_read_never_panics_on_any_text(text in "\\PC{0,40}") {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("state");
+            std::fs::write(&path, &text).unwrap();
+            if let UsageState::Sample(_, _) = read_usage_state(&path) {
+                let mut words = text.split_whitespace();
+                prop_assert!(words.next().and_then(|w| w.parse::<f64>().ok()).is_some());
+                prop_assert!(words.next().and_then(|w| w.parse::<i64>().ok()).is_some());
+            }
+        }
+
+        /// A written reading reads back as the same sample.
+        #[test]
+        fn usage_state_write_then_read_round_trips(pct in -1.0e6f64..1.0e6, now in 0i64..4_000_000_000) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("state");
+            write_usage_state(&path, pct, now);
+            match read_usage_state(&path) {
+                UsageState::Sample(p, t) => {
+                    prop_assert_eq!(p.to_bits(), pct.to_bits());
+                    prop_assert_eq!(t, now);
+                }
+                _ => prop_assert!(false, "a written reading must read back"),
+            }
+        }
+    }
+}
