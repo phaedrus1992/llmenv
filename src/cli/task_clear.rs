@@ -53,6 +53,11 @@ pub(super) fn run(
     // The deletes leave no task to hold a note. The note of the override goes to the owning
     // session, and its journal exists before the first delete, so a crash leaves a trace (#3762).
     let _journal = journal_planned_clear(state_dir, other_session, &caller, &checked)?;
+    let _deletes = checked
+        .iter()
+        .filter_map(|(_, note)| note.as_ref())
+        .map(|note| note.journal_for_delete(state_dir, &caller))
+        .collect::<anyhow::Result<Vec<_>>>()?;
     let mut deleted = Vec::new();
     let outcome = match session {
         Some(named) => clear_session(state_dir, named, &mut deleted),

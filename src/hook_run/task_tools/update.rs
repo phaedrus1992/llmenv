@@ -60,17 +60,22 @@ pub(super) fn update(
             && ownership_note
                 .as_ref()
                 .is_some_and(OverrideNote::is_owner_less);
-        let change = if owner_less_delete {
-            check_owner_less_delete(&caller)
-        } else {
-            Ok(())
-        }
-        .and_then(|()| change(state_dir, task::TaskTarget::Checked(&slug, &tasks), status))
-        .map(|msg| {
-            let noted =
-                record_check_note(state_dir, &caller, &slug, ownership_note.as_ref(), deleted);
-            with_note_outcome(msg, noted)
-        });
+        // The journal of the delete note exists before the delete, so a crash leaves a trace.
+        let journal = match ownership_note.as_ref().filter(|_| owner_less_delete) {
+            Some(note) => check_owner_less_delete(&caller)
+                .and_then(|()| note.journal_for_delete(state_dir, &caller)),
+            None => Ok(None),
+        };
+        let change = journal
+            .and_then(|journal| {
+                change(state_dir, task::TaskTarget::Checked(&slug, &tasks), status)
+                    .map(|msg| (msg, journal))
+            })
+            .map(|(msg, _journal)| {
+                let noted =
+                    record_check_note(state_dir, &caller, &slug, ownership_note.as_ref(), deleted);
+                with_note_outcome(msg, noted)
+            });
         // The note is kept when the change fails too, and the deny says where it went.
         let note = note.map_or_else(String::new, |note| {
             note_outcome(

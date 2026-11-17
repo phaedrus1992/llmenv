@@ -519,3 +519,35 @@ fn a_refused_command_leaves_no_journal() {
     assert!(lost.is_empty(), "{lost:?}");
     assert!(load_task(dir.path(), &slug).expect("task").notes.is_empty());
 }
+
+// #3762: a delete of an owner-less task notes the caller's session, so the journal of that note
+// names the session and not the task that is about to be gone.
+#[test]
+fn a_crash_after_a_delete_leaves_the_note_on_the_callers_session() {
+    let dir = TempDir::new().expect("tempdir");
+    let (slug, session) = open_task_in_session(dir.path());
+    let mut task = load_task(dir.path(), &slug).expect("task");
+    task.session = None;
+    save_task(dir.path(), &task).expect("save");
+    let caller = Caller::Session(session.clone());
+    let note = ensure_task_is_ours(dir.path(), &slug, &caller, None)
+        .expect("an owner-less task is allowed")
+        .expect("an owner-less task needs a note");
+    let journal = note
+        .journal_for_delete(dir.path(), &caller)
+        .expect("journal")
+        .expect("a session journal");
+    std::mem::forget(journal);
+    drop(note);
+
+    let lost = super::super::pending_note::recover(dir.path(), |_| true);
+
+    assert!(lost.is_empty(), "{lost:?}");
+    let stored =
+        super::super::session::load_existing_session(dir.path(), &session).expect("session");
+    let context = stored.resume.context.unwrap_or_default();
+    assert!(
+        context.contains("Deleted tasks with no session"),
+        "{context}"
+    );
+}

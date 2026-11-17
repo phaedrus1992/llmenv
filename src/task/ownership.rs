@@ -98,6 +98,32 @@ impl OverrideNote {
         self.owner_less
     }
 
+    /// For a command that deletes the task. The task cannot hold the note, so the journal of the
+    /// task note ends here. The note of an owner-less task goes to the caller's session, and the
+    /// journal for that note is returned. Keep it until the note is written (#3762).
+    ///
+    /// # Errors
+    /// The journal cannot be written. The command must stop before it deletes.
+    pub(crate) fn journal_for_delete(
+        &self,
+        state_dir: &Path,
+        caller: &Caller,
+    ) -> anyhow::Result<Option<Pending>> {
+        let journal = match (self.owner_less, caller) {
+            (true, Caller::Session(id)) => {
+                let text = format!(
+                    "Deleted tasks with no session: {}. Caller: {}.",
+                    self.slug,
+                    caller.describe()
+                );
+                Some(Pending::for_session(state_dir, id, &text)?)
+            }
+            _ => None,
+        };
+        self.pending.finish();
+        Ok(journal)
+    }
+
     /// Appends the note to the task. The command change is already saved when this runs, so the
     /// error says so: a retry must not repeat the change.
     ///
