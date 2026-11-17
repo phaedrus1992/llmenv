@@ -40,6 +40,10 @@ pub struct StatusData {
     pub plugins: Option<CountData>,
     pub mcps: Option<CountData>,
     pub icm: Option<IcmData>,
+    /// Set when the ICM stats call failed or its reply had no count. The widget then keeps its
+    /// format and shows the marker. A scope with no backend leaves this unset.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub icm_failed: bool,
     pub throttle: Option<ThrottleData>,
     /// Set when the stored throttle state exists but cannot be read. The
     /// widget shows this instead of reporting throttling as off.
@@ -85,14 +89,15 @@ pub struct ThrottleData {
 
 /// Prunable cache size. `prunable_bytes` is `None` when the size could not be
 /// read, so the status line shows an unknown marker rather than a zero.
-/// `prunable_partial` is true when some entry was left out, so the total is a
-/// floor and the status line shows it as "at least" (#3069). Older status data
-/// has no such field, and it reads as an exact figure.
+/// `unreadable` counts the entries that were left out of a known total. A count above zero makes
+/// the total a floor, and the status line shows it as "at least" with the count (#3069, #3110).
+/// It is zero when `prunable_bytes` is `None`, because the total is then unknown, not a floor.
+/// Older status data has no such field, and it reads as an exact figure.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 pub struct CacheData {
     pub prunable_bytes: Option<u64>,
     #[serde(default)]
-    pub prunable_partial: bool,
+    pub unreadable: u64,
 }
 
 /// Task-tracker progress, scoped to sessions open for the current project
@@ -200,6 +205,7 @@ pub fn collect_status_data(
     cache_root: &Path,
     hashing: HashingMode,
 ) -> StatusDataJson {
+    let (icm, icm_failed) = collect_icm();
     let (throttle, throttle_fault) = collect_throttle(throttle_configs, &active.tags);
     let (throttle_error, throttle_conflict) = match throttle_fault {
         None => (None, None),
@@ -216,7 +222,8 @@ pub fn collect_status_data(
             }),
             plugins: collect_plugins(config, &active.tags),
             mcps: collect_mcps(config, bundle_mcp, &active.tags),
-            icm: collect_icm(),
+            icm,
+            icm_failed,
             throttle,
             throttle_error,
             throttle_conflict,
@@ -266,10 +273,10 @@ pub(crate) fn collect_plugins(
         }),
         Err(e) => {
             // The status line shows only a count, so the cause goes to the log (#3109).
-            tracing::warn!(
-                "cannot resolve plugins for the status line: {e:#}. Fix: correct the plugin \
-                 references in config.yaml."
-            );
+            crate::agent_notice::record_logged(format!(
+                "llmenv: cannot resolve plugins for the status line: {e:#}. Fix: correct the \
+                 plugin references in config.yaml."
+            ));
             Some(CountData {
                 total: 0,
                 errors: 1,
@@ -412,10 +419,11 @@ fn collect_session_log(config: &Config) -> Option<u64> {
     let path = match crate::session_log::resolve_file_path(configured.file_path()) {
         Ok(path) => path,
         Err(e) => {
-            tracing::warn!(
-                "session log stat collection failed, so the line count is empty: {e:#}. Fix: \
-                 check session_log.file.path, and that the session log folder is readable."
-            );
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the session log line count is empty, because its path cannot be \
+                 resolved: {e:#}. Fix: check session_log.file.path, and that the session log \
+                 folder is readable."
+            ));
             return None;
         }
     };

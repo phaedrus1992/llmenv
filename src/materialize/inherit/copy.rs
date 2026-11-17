@@ -71,7 +71,11 @@ pub(super) fn is_real_file(path: &Path) -> bool {
         Ok(meta) => meta.is_file(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "inherit: could not stat file, skipping");
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the inherit pass skips {} because it cannot be read: {e}. Fix: check \
+                 the permissions of the file.",
+                path.display()
+            ));
             false
         }
     }
@@ -87,10 +91,11 @@ pub(super) fn dest_already_present(path: &Path) -> bool {
     match std::fs::symlink_metadata(path) {
         Ok(meta) => {
             if meta.file_type().is_symlink() {
-                tracing::warn!(
-                    path = %path.display(),
-                    "inherit: skipping copy — destination is a symlink"
-                );
+                crate::agent_notice::record_logged(format!(
+                    "llmenv: the inherit pass does not copy to {}, because it is a symlink. Fix: \
+                     remove the link, so the next pass can copy the file.",
+                    path.display()
+                ));
             }
             true
         }

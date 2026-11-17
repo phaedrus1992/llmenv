@@ -19,6 +19,10 @@ mkdir -p "$SCRATCH/bin" "$SCRATCH/work" || exit 1
 cat >"$SCRATCH/bin/cargo" <<'STUB'
 #!/usr/bin/env bash
 for ((i = 0; i < ${FAKE_MUTANTS:-0}; i++)); do echo "src/lib.rs:$i: mutant"; done
+if [[ -n "${FAKE_LIST_EXIT:-}" ]]; then
+  echo "error: cargo-mutants list failed" >&2
+  exit "$FAKE_LIST_EXIT"
+fi
 STUB
 chmod +x "$SCRATCH/bin/cargo"
 export PATH="$SCRATCH/bin:$PATH"
@@ -65,6 +69,11 @@ out="$(FAKE_MUTANTS=100 bash "$PLAN" main --per-shard 6 --max-shards 2 2>/dev/nu
 check "max-shards caps the label total" \
   'matrix=["1/2","2/2"]' \
   "$(sed -n 2p <<<"$out")"
+
+err="$(FAKE_LIST_EXIT=1 bash "$PLAN" main 2>&1 >/dev/null)"
+status=$?
+check "a failing cargo mutants --list fails the plan" "1" "$status"
+check "the failure shows the cargo stderr" "1" "$(grep -c 'cargo-mutants list failed' <<<"$err")"
 
 echo "$PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

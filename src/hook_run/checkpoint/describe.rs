@@ -11,13 +11,9 @@ pub(crate) fn describe(checkpoint: &Checkpoint, now: u64, log: &Path) -> String 
     format!(
         "{} started {} ago, {}/{MAX_ATTEMPTS} attempts, phase {}; log: {}",
         checkpoint.kind.as_str(),
-        format_age(age),
+        crate::util::time::format_age(std::time::Duration::from_secs(age)),
         checkpoint.attempts,
         checkpoint.phase,
         log.display()
     )
-}
-
-pub(super) fn format_age(secs: u64) -> String {
-    humantime::format_duration(std::time::Duration::from_secs(secs)).to_string()
 }

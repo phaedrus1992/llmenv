@@ -2,9 +2,8 @@
 
 use std::path::Path;
 
-use anyhow::Context;
-
 use super::{Session, load_existing_session, save_session, try_tasks_in_session};
+use crate::partial::PartialWrite;
 use crate::{Task, TaskNote, TaskState, now_rfc3339};
 
 /// Clear the `session` tag from every task of `tasks` that is not `done`
@@ -18,6 +17,20 @@ pub(super) fn untag_unfinished(
     now: &str,
     note: &str,
 ) -> anyhow::Result<Vec<Task>> {
+    untag_with(session_id, tasks, now, note, |task| {
+        crate::save_task(state_dir, task)
+    })
+}
+
+/// [`untag_unfinished`] with the save as a parameter, so a test can fail one save. A failed save
+/// returns a [`PartialWrite`] that holds the tasks already untagged.
+fn untag_with(
+    session_id: &str,
+    tasks: Vec<Task>,
+    now: &str,
+    note: &str,
+    mut save: impl FnMut(&Task) -> anyhow::Result<()>,
+) -> anyhow::Result<Vec<Task>> {
     let mut untagged = Vec::new();
     for mut task in tasks.into_iter().filter(|t| t.state != TaskState::Done) {
         task.notes.push(TaskNote {
@@ -26,16 +39,26 @@ pub(super) fn untag_unfinished(
         });
         task.session = None;
         task.updated_at = now.to_string();
-        crate::save_task(state_dir, &task).with_context(|| {
-            format!(
-                "untagging task '{}' from session '{session_id}'; {} earlier task(s) are already untagged",
+        if let Err(e) = save(&task) {
+            let source = e.context(format!(
+                "cannot untag task '{}' from session '{session_id}'; already untagged: [{}]. \
+                 Fix: run `llmenv task session finish {session_id} --abandon-open` again",
                 task.slug,
-                untagged.len()
-            )
-        })?;
+                slugs(&untagged)
+            ));
+            return Err(PartialWrite::error(untagged, source));
+        }
         untagged.push(task);
     }
     Ok(untagged)
+}
+
+fn slugs(tasks: &[Task]) -> String {
+    tasks
+        .iter()
+        .map(|t| t.slug.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// What [`finish_session`] did.
@@ -102,12 +125,14 @@ pub fn finish_session(
         );
         let abandoned = untag_unfinished(state_dir, &session.id, tasks, &now, &note)?;
         session.finished_at = Some(now);
-        save_session(state_dir, &session).with_context(|| {
-            format!(
-                "session '{id}' stays open, but {} unfinished task(s) are already untagged from it",
-                abandoned.len()
-            )
-        })?;
+        if let Err(e) = save_session(state_dir, &session) {
+            let source = e.context(format!(
+                "session '{id}' stays open, but these unfinished tasks are already untagged from \
+                 it: [{}]. Fix: run `llmenv task session finish {id}` again",
+                slugs(&abandoned)
+            ));
+            return Err(PartialWrite::error(abandoned, source));
+        }
         Ok(FinishOutcome {
             session,
             done,

@@ -9,3 +9,5 @@ mutants.out*/
 .claude/worktrees
 .yaks/
 __pycache__/
+coverage/
+node_modules/

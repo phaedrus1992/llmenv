@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc c37242257f1529f5568025e3ad3c3775bc30da602e1a74c27f0c87b23415b3e1 # shrinks to root = "/a", dirs = ["a"], file = "a.sh", glue = "a"
+cc 4e7d3e523dfb13b6075134e2dd740cb19d9c26af4e3ec71e5b6bfca8e82775d4 # shrinks to word = "//", key = ""

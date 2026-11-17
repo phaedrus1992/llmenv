@@ -135,7 +135,12 @@ pub fn stale_summary_in(
         count: scan.stale.len(),
         bytes: total.bytes,
         bytes_partial: total.skipped > 0 || unsized_entries > 0,
-        unreadable: scan.failed.len() + unsized_entries,
+        // The entries that `dir_size` skipped inside a stale folder are unreadable too, as the
+        // `cache` widget counts them (#3746). A bound with no stale entry has none, so the
+        // shortcut in `stale_summary_with` reads the in-use list no more often than before.
+        unreadable: scan.failed.len()
+            + unsized_entries
+            + usize::try_from(total.skipped).unwrap_or(usize::MAX),
     })
 }
 

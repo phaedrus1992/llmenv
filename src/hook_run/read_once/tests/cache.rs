@@ -17,6 +17,7 @@ fn session_cache_prune_stale_entries() {
         ReadEntry {
             path: "fresh_path".to_string(),
             mtime_unix: 1000,
+            size: 0,
             first_read_at: now,
             hits: 0,
             tokens_saved: 0,
@@ -27,6 +28,7 @@ fn session_cache_prune_stale_entries() {
         ReadEntry {
             path: "stale_path".to_string(),
             mtime_unix: 1000,
+            size: 0,
             first_read_at: now - 3600, // 1 hour ago
             hits: 0,
             tokens_saved: 0,
@@ -50,6 +52,7 @@ fn session_cache_save_and_load_roundtrip() {
         ReadEntry {
             path: "/foo/bar.rs".to_string(),
             mtime_unix: 12345,
+            size: 0,
             first_read_at: unix_now() - 100, // 100 seconds ago — well within 3600s TTL
             hits: 2,
             tokens_saved: 500,
@@ -103,6 +106,7 @@ mod proptests {
                 |(path, mtime_unix, first_read_at, hits, tokens_saved)| ReadEntry {
                     path,
                     mtime_unix,
+                    size: 0,
                     first_read_at,
                     hits,
                     tokens_saved,

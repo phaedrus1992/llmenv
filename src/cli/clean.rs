@@ -86,9 +86,7 @@ fn prune_mode(args: &CleanArgs) -> anyhow::Result<PruneMode> {
         // Default: folders from other versions, and orphaned *.tmp staging folders.
         return Ok(PruneMode::StaleOnly);
     };
-    let duration = humantime::parse_duration(raw).with_context(|| {
-        format!("cannot read --older-than {raw:?}: give a duration such as 14d or 1w")
-    })?;
+    let duration = crate::util::time::parse_age(raw).context("invalid --older-than")?;
     Ok(PruneMode::OlderThan(
         crate::materialize::expiry::AgeRule::new(duration),
     ))

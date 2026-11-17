@@ -67,11 +67,7 @@ fn canonical_parent_join(path: &Path) -> std::io::Result<std::path::PathBuf> {
         return Err(std::io::ErrorKind::NotFound.into());
     }
     let name = path.file_name().ok_or(std::io::ErrorKind::InvalidInput)?;
-    let parent = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        _ => Path::new("."),
-    };
-    Ok(std::fs::canonicalize(parent)?.join(name))
+    Ok(std::fs::canonicalize(llmenv_paths::parent_or_cwd(path))?.join(name))
 }
 
 #[cfg(test)]

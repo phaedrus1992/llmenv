@@ -52,76 +52,114 @@ pub fn edit_task<'a>(
         // One strict read resolves the task, the parent, and every blocker name (#3477). Each
         // name is checked first, so a bad name gets its own error even over a broken store.
         target.check()?;
-        for name in edit
-            .parent
-            .into_iter()
-            .chain(edit.block_on.iter().map(String::as_str))
-            .chain(edit.unblock.iter().map(String::as_str))
-        {
-            resolve::check_identifier(name)?;
-        }
-        let all_tasks = list_tasks_strict(state_dir)?;
-        let resolve = |name: &str| resolve::resolve_in(state_dir, name, &all_tasks);
-        let slug = target.slug_in(state_dir, &all_tasks)?;
+        check_names(edit)?;
+        let snapshot = target.tasks(state_dir)?;
+        let slug = target.slug_in(state_dir, &snapshot)?;
+        let ctx = EditContext {
+            state_dir,
+            all_tasks: &snapshot,
+            slug: &slug,
+        };
         let mut task = load_task(state_dir, &slug)?;
-
         if let Some(title) = edit.title {
             task.title = title.to_string();
         }
-
-        if let Some(parent_input) = edit.parent {
-            let parent_slug = resolve(parent_input)?;
-            if parent_slug == slug {
-                anyhow::bail!("task '{slug}' cannot be its own parent");
-            }
-            let parent_task = all_tasks.as_slice().iter().find(|t| t.slug == parent_slug);
-            ownership::ensure_parent_in_session(
-                parent_task,
-                &parent_slug,
-                task.session.as_deref(),
-            )?;
-            reject_cycle(state_dir, &slug, &parent_slug)?;
-            task.parent = Some(parent_slug);
-        } else if edit.no_parent {
-            task.parent = None;
-        }
-
-        for on in edit.block_on {
-            let on_slug = resolve(on)?;
-            if on_slug == slug {
-                anyhow::bail!("task '{slug}' cannot be blocked on itself");
-            }
-            block_cycle::reject_block_cycle(all_tasks.as_slice(), &slug, &on_slug)?;
-            if !task.blocked_on.contains(&on_slug) {
-                task.blocked_on.push(on_slug);
-            }
-        }
-
-        for on in edit.unblock {
-            let on_slug = resolve(on)?;
-            task.blocked_on.retain(|b| b != &on_slug);
-        }
-
-        if let Some(text) = edit.add_note {
-            task.notes.push(TaskNote {
-                at: now_rfc3339(),
-                text: text.to_string(),
-            });
-        }
-
-        if let Some(id) = edit.delete_note {
-            let idx = resolve_note_index(&task.notes, id)?;
-            task.notes.remove(idx);
-        }
-
+        set_parent(&ctx, &mut task, edit)?;
+        change_blockers(&ctx, &mut task, edit)?;
+        change_notes(&mut task, edit)?;
         if let Some(detail) = edit.detail {
             task.detail = (!detail.is_empty()).then(|| detail.to_string());
         }
-
         task.updated_at = now_rfc3339();
         save_task(state_dir, &task)?;
         Ok(task)
     })?;
     touch_task_session(state_dir, &task);
     Ok(task)
+}
+
+/// The store, the one strict read, and the resolved slug of an edit, so each name resolves against
+/// the same tasks, and the checks name the task that the command resolved.
+struct EditContext<'a> {
+    state_dir: &'a Path,
+    all_tasks: &'a StrictTasks,
+    slug: &'a str,
+}
+
+impl EditContext<'_> {
+    fn resolve(&self, name: &str) -> anyhow::Result<String> {
+        resolve::resolve_in(self.state_dir, name, self.all_tasks)
+    }
+}
+
+/// Refuse a name in the edit that cannot be a task identifier.
+fn check_names(edit: &TaskEdit<'_>) -> anyhow::Result<()> {
+    edit.parent
+        .into_iter()
+        .chain(edit.block_on.iter().map(String::as_str))
+        .chain(edit.unblock.iter().map(String::as_str))
+        .try_for_each(resolve::check_identifier)
+}
+
+/// Apply `--parent` or `--no-parent`. A parent wins over `--no-parent`.
+fn set_parent(ctx: &EditContext<'_>, task: &mut Task, edit: &TaskEdit<'_>) -> anyhow::Result<()> {
+    let Some(parent_input) = edit.parent else {
+        if edit.no_parent {
+            task.parent = None;
+        }
+        return Ok(());
+    };
+    let slug = ctx.slug;
+    let parent_slug = ctx.resolve(parent_input)?;
+    if parent_slug == slug {
+        anyhow::bail!("task '{slug}' cannot be its own parent");
+    }
+    let parent_task = ctx
+        .all_tasks
+        .as_slice()
+        .iter()
+        .find(|t| t.slug == parent_slug);
+    ownership::ensure_parent_in_session(parent_task, &parent_slug, task.session.as_deref())?;
+    reject_cycle(ctx.state_dir, slug, &parent_slug)?;
+    task.parent = Some(parent_slug);
+    Ok(())
+}
+
+/// Add the `--block-on` ids to `blocked_on`, then remove the `--unblock` ids.
+fn change_blockers(
+    ctx: &EditContext<'_>,
+    task: &mut Task,
+    edit: &TaskEdit<'_>,
+) -> anyhow::Result<()> {
+    let slug = ctx.slug;
+    for on in edit.block_on {
+        let on_slug = ctx.resolve(on)?;
+        if on_slug == slug {
+            anyhow::bail!("task '{slug}' cannot be blocked on itself");
+        }
+        block_cycle::reject_block_cycle(ctx.all_tasks.as_slice(), slug, &on_slug)?;
+        if !task.blocked_on.contains(&on_slug) {
+            task.blocked_on.push(on_slug);
+        }
+    }
+    for on in edit.unblock {
+        let on_slug = ctx.resolve(on)?;
+        task.blocked_on.retain(|b| b != &on_slug);
+    }
+    Ok(())
+}
+
+/// Add the new note, then remove the note that `--delete-note` names.
+fn change_notes(task: &mut Task, edit: &TaskEdit<'_>) -> anyhow::Result<()> {
+    if let Some(text) = edit.add_note {
+        task.notes.push(TaskNote {
+            at: now_rfc3339(),
+            text: text.to_string(),
+        });
+    }
+    if let Some(id) = edit.delete_note {
+        let idx = resolve_note_index(&task.notes, id)?;
+        task.notes.remove(idx);
+    }
+    Ok(())
 }

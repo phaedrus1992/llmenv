@@ -3,6 +3,21 @@
 use super::*;
 use proptest::prelude::*;
 
+/// A status file of an older binary names `prunable_partial`. It reads as an exact figure,
+/// as the struct documents, and the next status write replaces it.
+#[test]
+fn an_old_partial_flag_reads_as_an_exact_figure() {
+    let old = r#"{"prunable_bytes": 10, "prunable_partial": true}"#;
+    let cache: CacheData = serde_json::from_str(old).unwrap();
+    assert_eq!(
+        cache,
+        CacheData {
+            prunable_bytes: Some(10),
+            unreadable: 0
+        }
+    );
+}
+
 #[test]
 fn load_parses_full_example() {
     let dir = tempfile::tempdir().unwrap();
@@ -110,6 +125,7 @@ fn arb_status_data() -> impl Strategy<Value = StatusData> {
                 plugins: plugins.map(|(total, errors)| CountData { total, errors }),
                 mcps: None,
                 icm: None,
+                icm_failed: false,
                 throttle: throttle.map(|(backend, cooldown_secs)| ThrottleData {
                     backend,
                     cooldown_secs,

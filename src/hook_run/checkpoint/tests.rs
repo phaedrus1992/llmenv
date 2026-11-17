@@ -315,7 +315,7 @@ fn describe_names_kind_age_attempts_phase_and_log() {
 proptest! {
     #[test]
     fn format_age_is_never_empty_and_ends_in_a_unit(secs in 0u64..10_000_000) {
-        let text = format_age(secs);
+        let text = crate::util::time::format_age(std::time::Duration::from_secs(secs));
         prop_assert!(!text.is_empty());
         prop_assert!(text.ends_with(['s', 'm', 'h', 'd']), "{text}");
     }

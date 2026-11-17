@@ -249,3 +249,52 @@ fn only_a_delete_with_a_description_says_that_the_description_is_not_saved() {
     assert!(!run(Some("in_progress"), Some("why")).contains(said));
     assert!(!run(None, Some("why")).contains(said));
 }
+
+/// The task store is read once for the check and the change (#3485).
+#[test]
+fn a_status_change_reads_the_task_store_once() {
+    for status in ["in_progress", "completed"] {
+        let dir = tempfile::tempdir().unwrap();
+        let (mine, _) = two_conversations(dir.path());
+        let before = task::StrictTasks::reads_on_this_thread();
+        let out = update_as(
+            dir.path(),
+            "conv-me",
+            &json!({ "taskId": mine, "status": status }),
+        );
+        assert!(out.contains(&format!("'{mine}'")), "{out}");
+        assert_eq!(
+            task::StrictTasks::reads_on_this_thread() - before,
+            1,
+            "{status}"
+        );
+    }
+}
+
+#[test]
+fn a_description_and_a_delete_keep_the_one_read() {
+    for input in [
+        |slug: &str| json!({ "taskId": slug, "status": "in_progress", "description": "begun" }),
+        |slug: &str| json!({ "taskId": slug, "status": "deleted" }),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (mine, _) = two_conversations(dir.path());
+        let before = task::StrictTasks::reads_on_this_thread();
+        update_as(dir.path(), "conv-me", &input(&mine));
+        assert_eq!(task::StrictTasks::reads_on_this_thread() - before, 1);
+    }
+}
+
+#[test]
+fn a_bad_id_gets_the_id_deny_even_when_the_store_cannot_be_read() {
+    let dir = tempfile::tempdir().unwrap();
+    two_conversations(dir.path());
+    std::fs::write(dir.path().join("tasks").join("broken.json"), "{not json").unwrap();
+    let out = update_as(
+        dir.path(),
+        "conv-me",
+        &json!({ "taskId": "../escape", "status": "completed" }),
+    );
+    assert!(out.contains("not a valid task identifier"), "{out}");
+    assert!(!out.contains("task store is unavailable"), "{out}");
+}

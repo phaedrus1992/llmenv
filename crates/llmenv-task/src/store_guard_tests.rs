@@ -48,14 +48,15 @@ fn edit_task_refuses_a_block_that_closes_a_loop_through_two_tasks() {
 }
 
 #[test]
-fn a_failed_ancestor_save_names_every_promoted_ancestor() {
+fn a_failed_ancestor_save_names_the_saved_ancestors_and_the_failed_one() {
     let names = ["grand".to_string(), "parent".to_string()];
     let err = std::io::Error::other("disk full");
     let text = format!(
         "{:#}",
-        ancestors::promotion_failed("child", &names, err.into())
+        ancestors::promotion_failed("child", &names, 1, err.into())
     );
-    assert!(text.contains("grand, parent"), "{text}");
+    assert!(text.contains("saving the ancestor 'parent'"), "{text}");
+    assert!(text.contains("already saved as wip: [grand]"), "{text}");
     assert!(text.contains("stays open"), "{text}");
     assert!(
         text.contains("Fix: run `llmenv task start child`"),
