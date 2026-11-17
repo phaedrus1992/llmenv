@@ -188,6 +188,9 @@ Each scope has an `id` (used in diagnostics and `LLMENV_ACTIVE_SCOPES`), a
   are present. All active content scopes are evaluated together in a single
   directory walk, so adding more content scopes doesn't multiply the cost of
   the walk.
+  (added in v3.14.0) When part of the working tree cannot be read, a content scope that did not
+  match has an unknown state, not a "no match" state. The scope stays inactive, and a warning
+  names it. A scope that did match stays active.
 
 > There is no `scope.project` block. Project scopes come from `.llmenv.yaml`
 > markers, not `config.yaml`.

@@ -28,15 +28,17 @@ fn report_walk_error(err: &walkdir::Error, cwd: &std::path::Path) {
 /// per entry against a single walk; a scope drops out of the pending set as
 /// soon as it matches, and the walk ends early once none remain pending.
 ///
-/// Returns the `id`s of scopes whose glob matched.
+/// Returns the `id`s of scopes whose glob matched, and the `id`s whose state is unknown.
 ///
-/// A working directory that cannot be read gives no matches. That case is logged at error, so
-/// the empty result has a visible cause (#3070).
+/// A scope is unknown when it did not match and the walk could not read part of the tree. The
+/// part it could not read may hold a match. A working directory that cannot be read makes every
+/// scope with a valid glob unknown. That case is logged at error, so the result has a visible
+/// cause (#3070, #3330).
 #[must_use]
 pub(crate) fn matches_content_all<'a>(
     scopes: &'a [ContentScope],
     cwd: &std::path::Path,
-) -> std::collections::BTreeSet<&'a str> {
+) -> ContentMatches<'a> {
     let mut pending: Vec<(&str, globset::GlobMatcher, Option<usize>)> = scopes
         .iter()
         .filter_map(|s| match globset::Glob::new(&s.r#match.glob) {
@@ -55,7 +57,7 @@ pub(crate) fn matches_content_all<'a>(
 
     let mut matched = std::collections::BTreeSet::new();
     if pending.is_empty() {
-        return matched;
+        return ContentMatches::default();
     }
 
     // Cap the walk at the loosest per-scope depth limit; any scope with no
@@ -70,11 +72,13 @@ pub(crate) fn matches_content_all<'a>(
         walker = walker.max_depth(depth);
     }
 
+    let mut walk_failed = false;
     for entry in walker {
         if pending.is_empty() {
             break;
         }
         let Ok(entry) = entry.inspect_err(|e| report_walk_error(e, cwd)) else {
+            walk_failed = true;
             continue;
         };
         if entry.file_type().is_dir() {
@@ -103,7 +107,21 @@ pub(crate) fn matches_content_all<'a>(
             }
         });
     }
-    matched
+    let unknown = if walk_failed {
+        pending.iter().map(|(id, _, _)| *id).collect()
+    } else {
+        std::collections::BTreeSet::new()
+    };
+    ContentMatches { matched, unknown }
+}
+
+/// The result of one content walk: each scope is matched, unmatched, or unknown (#3330).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct ContentMatches<'a> {
+    /// Scopes whose glob matched.
+    pub(crate) matched: std::collections::BTreeSet<&'a str>,
+    /// Scopes that did not match, while part of the tree could not be read.
+    pub(crate) unknown: std::collections::BTreeSet<&'a str>,
 }
 
 #[cfg(test)]
@@ -188,7 +206,10 @@ mod tests {
     #[test]
     fn no_scopes_match_nothing() {
         let dir = fixture();
-        assert!(matches_content_all(&[], dir.path()).is_empty());
+        assert_eq!(
+            matches_content_all(&[], dir.path()),
+            ContentMatches::default()
+        );
     }
 
     proptest! {
@@ -206,26 +227,49 @@ mod tests {
                 .map(|(i, (g, d))| scope(&format!("s{i}"), GLOBS[*g], DEPTHS[*d]))
                 .collect();
             prop_assert_eq!(
-                matches_content_all(&scopes, dir.path()),
+                matches_content_all(&scopes, dir.path()).matched,
                 naive_matches(&scopes, dir.path())
             );
         }
     }
 
-    // #3070: a working directory that cannot be read gives no match, and the notice names it.
+    // #3070: a working directory that cannot be read gives an unknown state, and the notice names it.
     #[test]
-    fn an_unreadable_working_directory_matches_nothing_and_says_why() {
+    fn an_unreadable_working_directory_is_unknown_and_says_why() {
         let dir = tempfile::tempdir().expect("temp dir");
         let gone = dir.path().join("content-walk-gone-3070");
         let scopes = [scope("a", "**/*.rs", None)];
         let matched = matches_content_all(&scopes, &gone);
         let notices = crate::agent_notice::current().unwrap_or_default();
         crate::agent_notice::forget_containing("content-walk-gone-3070");
-        assert!(matched.is_empty());
+        assert!(matched.matched.is_empty());
+        assert_eq!(matched.unknown, BTreeSet::from(["a"]));
         assert!(notices.contains("a directory that exists"), "{notices}");
         assert!(
             notices.contains("content-walk-gone-3070") && notices.contains("Fix:"),
             "{notices}"
         );
+    }
+
+    // #3330: an unreadable subdirectory leaves an unmatched scope unknown. A scope that matched
+    // stays matched.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_subdirectory_leaves_only_unmatched_scopes_unknown() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("a.rs"), "").expect("fixture");
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).expect("fixture");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("fixture");
+        let scopes = [scope("rs", "*.rs", None), scope("md", "*.md", None)];
+        let found = matches_content_all(&scopes, dir.path());
+        // Restore the mode so the temp dir can be removed.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).expect("fixture");
+        if std::fs::read_dir(&locked).is_ok() && found.unknown.is_empty() {
+            return; // running as root: the mode does not block the read
+        }
+        assert_eq!(found.matched, BTreeSet::from(["rs"]));
+        assert_eq!(found.unknown, BTreeSet::from(["md"]));
     }
 }
