@@ -32,19 +32,24 @@ macro_rules! damaged {
     };
 }
 
-/// The text of the damaged link that stops `child` from starting, or `None` when no link is
-/// damaged. A wait, such as a queue hold or a done parent, is not damage.
+/// The text of the damaged link above `child`, or `None` when no link is damaged. A wait, such as
+/// a queue hold or a done parent, is not damage and does not hide damage further up, so the walk
+/// runs as a forced start: `force` skips the waits and keeps the damage checks.
 pub(super) fn ancestor_damage(child: &Task, all: &[Task]) -> Option<String> {
-    let error = walk_ancestors(child, false, all, |slug| {
+    let error = walk_ancestors(child, true, all, lookup_in(all)).err()?;
+    error
+        .downcast_ref::<Damaged>()
+        .map(|damaged| damaged.to_string())
+}
+
+/// The parent lookup of a walk over `all`: a slug that is absent fails with a not-found error.
+fn lookup_in(all: &[Task]) -> impl Fn(&str) -> anyhow::Result<Task> {
+    move |slug| {
         all.iter()
             .find(|t| t.slug == slug)
             .map(Task::to_owned)
             .ok_or_else(|| anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::NotFound)))
-    })
-    .err()?;
-    error
-        .downcast_ref::<Damaged>()
-        .map(|damaged| damaged.to_string())
+    }
 }
 
 /// The text of the refusal that starting `child` meets at an ancestor, or `None` when no ancestor
@@ -52,14 +57,9 @@ pub(super) fn ancestor_damage(child: &Task, all: &[Task]) -> Option<String> {
 /// and never names a start that the start refuses (#3770). `all` must come from a strict read,
 /// because a parent that is absent from it is reported as missing.
 pub(super) fn ancestor_refusal(child: &Task, all: &[Task]) -> Option<String> {
-    walk_ancestors(child, false, all, |slug| {
-        all.iter()
-            .find(|t| t.slug == slug)
-            .map(Task::to_owned)
-            .ok_or_else(|| anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::NotFound)))
-    })
-    .err()
-    .map(|e| format!("{e:#}"))
+    walk_ancestors(child, false, all, lookup_in(all))
+        .err()
+        .map(|e| format!("{e:#}"))
 }
 
 /// The walk of [`ancestors_to_start`], with the parent lookup as a parameter. `lookup` fails with a

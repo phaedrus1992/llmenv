@@ -459,9 +459,8 @@ proptest! {
         }
     }
 
-    /// `next_task_loops` names only tasks that are neither done nor waiting and have a walk error or a
-    /// damaged parent link,
-    /// and never a task that `resolve_next_task` returns.
+    /// `next_task_loops` names only tasks that are neither done nor waiting and have a walk error
+    /// or a damaged parent link, and never a task that `resolve_next_task` returns.
     #[test]
     fn next_task_loops_names_only_blocked_open_tasks(tasks in parent_graph()) {
         let by_slug = index(&tasks);
@@ -822,4 +821,35 @@ fn next_task_loops_reports_a_damaged_parent_and_not_a_wait() {
     assert!(reported.contains(&"ring-a".to_owned()), "{reported:?}");
     assert!(!reported.contains(&"under-done".to_owned()), "{reported:?}");
     assert!(!reported.contains(&"behind".to_owned()), "{reported:?}");
+}
+
+// #3777: a wait above a damaged link does not hide the damage. The start reports the wait first,
+// and the damage once the wait is over, so `task show --next` reports the damage now.
+#[test]
+fn next_task_loops_reports_damage_above_a_wait() {
+    let cur = queued("cur", TaskState::Wip, 0);
+    let mut done_mid = task("done-mid", TaskState::Done, Some("gone"), &[]);
+    done_mid.relation = Relation::Child;
+    let mut under_done = task("under-done", TaskState::Open, Some("done-mid"), &[]);
+    under_done.relation = Relation::Child;
+    let held = queued("held", TaskState::Open, 1);
+    let mut held_mid = queued("held-mid", TaskState::Open, 2);
+    held_mid.relation = Relation::Child;
+    held_mid.parent = Some("gone".to_owned());
+    let mut under_held = task("under-held", TaskState::Open, Some("held-mid"), &[]);
+    under_held.relation = Relation::Child;
+    let tasks = vec![
+        cur.to_owned(),
+        done_mid,
+        under_done,
+        held,
+        held_mid,
+        under_held,
+    ];
+    let reported: Vec<String> = next_task_loops(&tasks, &tasks, &cur)
+        .into_iter()
+        .map(|(slug, _)| slug)
+        .collect();
+    assert!(reported.contains(&"under-done".to_owned()), "{reported:?}");
+    assert!(reported.contains(&"under-held".to_owned()), "{reported:?}");
 }
