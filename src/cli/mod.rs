@@ -644,9 +644,14 @@ enum TaskSessionCommand {
         #[arg(long, conflicts_with_all = ["replace", "new"])]
         resume: Option<String>,
         /// Abandon every existing open session for this project (untagging
-        /// their incomplete tasks), then create a fresh one.
+        /// their incomplete tasks), then create a fresh one. A session that another
+        /// conversation started is refused unless `--other-session` names it.
         #[arg(long, conflicts_with_all = ["resume", "new"])]
         replace: bool,
+        /// With `--replace`: the id of another conversation's session to abandon. Repeat for
+        /// more than one session.
+        #[arg(long = "other-session", value_name = "ID", requires = "replace")]
+        other_session: Vec<String>,
         /// Create a new session anyway, leaving existing open session(s) for
         /// this project untouched — true concurrency.
         #[arg(long, conflicts_with_all = ["resume", "replace"])]
@@ -2990,6 +2995,7 @@ fn run_task_session_command(
             description,
             resume,
             replace,
+            other_session,
             new,
             tasks,
             resume_context,
@@ -3001,7 +3007,7 @@ fn run_task_session_command(
             let is_resume = resume.is_some();
             let decision = match (resume, replace, new) {
                 (Some(id), false, false) => StartDecision::Resume(id),
-                (None, true, false) => StartDecision::Replace,
+                (None, true, false) => StartDecision::Replace(other_session),
                 (None, false, true) => StartDecision::New,
                 (None, false, false) => StartDecision::Auto,
                 _ => unreachable!("clap's conflicts_with_all enforces at most one"),
