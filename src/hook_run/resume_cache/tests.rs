@@ -444,3 +444,72 @@ fn the_process_notice_only_exists_for_a_session_start() {
         assert!(notice.is_some_and(|n| !n.is_empty()));
     }
 }
+
+// #3785: the walk of the project's `.claude` folder, checked on its own result.
+#[cfg(unix)]
+mod project_setting_walk {
+    use super::super::project_setting;
+
+    fn project() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        (dir, project)
+    }
+
+    #[test]
+    fn a_missing_folder_or_file_is_none() {
+        let (_dir, project) = project();
+        assert_eq!(project_setting(&project, "settings.json").unwrap(), None);
+        std::fs::create_dir_all(project.join(".claude")).unwrap();
+        assert_eq!(project_setting(&project, "settings.json").unwrap(), None);
+    }
+
+    #[test]
+    fn a_regular_file_gives_its_text() {
+        let (_dir, project) = project();
+        std::fs::create_dir_all(project.join(".claude")).unwrap();
+        std::fs::write(project.join(".claude/settings.json"), r#"{"a":1}"#).unwrap();
+        let text = project_setting(&project, "settings.json").unwrap();
+        assert_eq!(text.as_deref(), Some(r#"{"a":1}"#));
+    }
+
+    #[test]
+    fn a_linked_file_is_an_error_that_says_link() {
+        let (dir, project) = project();
+        std::fs::create_dir_all(project.join(".claude")).unwrap();
+        let target = dir.path().join("target.json");
+        std::fs::write(&target, "{}").unwrap();
+        std::os::unix::fs::symlink(&target, project.join(".claude/settings.json")).unwrap();
+        let err = project_setting(&project, "settings.json").unwrap_err();
+        assert!(err.to_string().contains("it is a link"), "{err}");
+    }
+
+    #[test]
+    fn a_linked_folder_is_an_error_that_says_link() {
+        let (dir, project) = project();
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("settings.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(&real, project.join(".claude")).unwrap();
+        let err = project_setting(&project, "settings.json").unwrap_err();
+        assert!(err.to_string().contains("folder that is a link"), "{err}");
+    }
+
+    #[test]
+    fn a_file_named_claude_is_an_error_that_does_not_say_link() {
+        let (_dir, project) = project();
+        std::fs::write(project.join(".claude"), "x").unwrap();
+        let err = project_setting(&project, "settings.json").unwrap_err();
+        assert!(!err.to_string().contains("link"), "{err}");
+    }
+
+    #[test]
+    fn text_that_is_not_utf8_is_an_error() {
+        let (_dir, project) = project();
+        std::fs::create_dir_all(project.join(".claude")).unwrap();
+        std::fs::write(project.join(".claude/settings.json"), [0xff, 0xfe]).unwrap();
+        let err = project_setting(&project, "settings.json").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+}
