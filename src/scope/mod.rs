@@ -125,9 +125,17 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
     }
     let cwd = std::path::Path::new(&env.cwd);
     if cwd.exists() && !cfg.scope.content.is_empty() {
-        let matched_ids = matcher::matches_content_all(&cfg.scope.content, cwd);
+        let found = matcher::matches_content_all(&cfg.scope.content, cwd);
+        if !found.unknown.is_empty() {
+            // An unknown scope stays inactive, as before. The log names it, so the missing
+            // scope has a cause (#3330).
+            tracing::warn!(
+                scopes = ?found.unknown,
+                "content scopes are unknown because part of the working directory cannot be read"
+            );
+        }
         for s in &cfg.scope.content {
-            if matched_ids.contains(s.id.as_str()) {
+            if found.matched.contains(s.id.as_str()) {
                 scopes.push(ActiveScope {
                     id: s.id.clone(),
                     kind: "content",

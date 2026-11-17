@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Name the content scopes whose state is unknown in a warning, when part of the working directory cannot be read. Such a scope stays inactive, as before, and a scope that matched stays active. See [the scope docs](https://phaedrus1992.github.io/llmenv/docs/configuration). [feat:scope] [#3330] [#3083]
 - Refuse `llmenv task session start --replace` when it would abandon a session that another conversation started, unless `--other-session <id>` names that session. `--resume` is unchanged. See [the task commands](https://phaedrus1992.github.io/llmenv/docs/commands). [fix:task] [#3487] [#3480]
 - Statusline `tasks`, `branch`, `pr`, `icm`, and usage-delta widgets keep their format and show `?` when their data cannot be read, as the zone widgets do. They no longer swap in a text label such as `pr: gh failed`; the cause goes to the log. See [the statusline docs](https://phaedrus1992.github.io/llmenv/docs/configuration). [feat:statusline] [#3745]
 - Read tool versions with the `semver` crate. A version with a leading zero, such as `2.01.0`, or an empty pre-release is no longer a version. [refactor:util] [#3510]
