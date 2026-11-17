@@ -54,6 +54,13 @@ pub(super) fn check_selected_plugins(
             missing_plugins.push(format!("{}@{}", p.plugin, p.marketplace));
             continue;
         };
+        if let Some(command) = crate::plugins::cache::command_of_source(&entry.source) {
+            println!(
+                "ℹ {}@{}: Claude Code runs a command for this plugin, and llmenv runs nothing: \
+                 {command}",
+                p.plugin, p.marketplace
+            );
+        }
         if !crate::plugins::cache::is_external_plugin_source(&entry.source) {
             continue;
         }
