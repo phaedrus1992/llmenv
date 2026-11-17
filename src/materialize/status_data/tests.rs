@@ -598,3 +598,21 @@ fn the_session_log_count_reads_the_configured_path() {
     let config: Config = serde_yaml::from_str(&yaml).unwrap();
     assert_eq!(collect_session_log(&config), Some(3));
 }
+
+// #3062: a session log path that cannot resolve warns with the cause, and the count is empty.
+#[test]
+fn collect_session_log_warns_when_the_path_cannot_resolve() {
+    let config: Config =
+        serde_yaml::from_str("session_log:\n  file:\n    path: relative/session-log.jsonl\n")
+            .expect("config parses");
+    let mut count = Some(1);
+    let logs = crate::test_log_capture::capture_logs(|| {
+        count = collect_session_log(&config);
+    });
+    assert_eq!(count, None);
+    assert!(
+        logs.contains("WARN") && logs.contains("is relative"),
+        "{logs}"
+    );
+    assert!(logs.contains("Fix:"), "{logs}");
+}

@@ -205,4 +205,20 @@ mod tests {
             );
         }
     }
+
+    // #3070: a working directory that cannot be read gives no match, and the notice names it.
+    #[test]
+    fn an_unreadable_working_directory_matches_nothing_and_says_why() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let gone = dir.path().join("content-walk-gone-3070");
+        let scopes = [scope("a", "**/*.rs", None)];
+        let matched = matches_content_all(&scopes, &gone);
+        assert!(matched.is_empty());
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        crate::agent_notice::forget_containing("content-walk-gone-3070");
+        assert!(
+            notices.contains("content-walk-gone-3070") && notices.contains("Fix:"),
+            "{notices}"
+        );
+    }
 }
