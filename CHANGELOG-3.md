@@ -67,6 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Make the Stop, idle-session, and stalled-parent reminders name only a task that `llmenv task start` accepts. They now check the blockers, the queue, and the ancestors, as the start does, and name the refusal when no task can start. [fix:task] [#3770]
+- Report a hook payload with no event name for Crush too, as for the other engines. [fix:hook-run] [#3769]
 - Add a notice when a hook payload parses but names no event, and name the fallback that is used. [fix:hook-run] [#3766]
 - Show the reason when no task can start. The Stop reminder and the idle-session reminder name the first open task and its unmet or looping blocker, and no longer advise a start that fails. [fix:task] [#3763] [#3764]
 - Render the task tree with an explicit stack, so a chain of 100000 sub-tasks cannot overflow the stack. [fix:task] [#3767]

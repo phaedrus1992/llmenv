@@ -676,7 +676,7 @@ proptest! {
             .collect();
         let by_slug = index(&tasks);
         let open: Vec<&Task> = tasks.iter().filter(|t| t.state == TaskState::Open).collect();
-        let got = super::blockers::first_obstacle(&open, &by_slug);
+        let got = super::blockers::first_obstacle(&open, &by_slug, |t| super::blockers::unmet_blocker(t, &by_slug));
         prop_assert_eq!(got.is_none(), open.iter().all(|t| is_actionable(t, &by_slug)));
         let first_loop = open
             .iter()
@@ -696,9 +696,14 @@ fn a_blocker_that_does_not_exist_gets_a_remove_fix_and_a_real_one_a_finish_fix()
         task("slow", TaskState::Wip, None, &[]),
     ];
     let by_slug = index(&tasks);
-    let (_, missing) =
-        super::blockers::first_obstacle(&[&tasks[0]], &by_slug).expect("an obstacle");
+    let (_, missing) = super::blockers::first_obstacle(&[&tasks[0]], &by_slug, |t| {
+        super::blockers::unmet_blocker(t, &by_slug)
+    })
+    .expect("an obstacle");
     assert!(missing.contains("--unblock missing"), "{missing}");
-    let (_, slow) = super::blockers::first_obstacle(&[&tasks[1]], &by_slug).expect("an obstacle");
+    let (_, slow) = super::blockers::first_obstacle(&[&tasks[1]], &by_slug, |t| {
+        super::blockers::unmet_blocker(t, &by_slug)
+    })
+    .expect("an obstacle");
     assert!(slow.contains("finish 'slow' first"), "{slow}");
 }

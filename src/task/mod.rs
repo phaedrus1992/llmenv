@@ -32,6 +32,7 @@ pub(crate) mod ownership;
 pub(crate) mod partial;
 pub(crate) mod progress;
 mod session_choice;
+mod startability;
 pub(crate) use note::note_task;
 pub(crate) use resolve::TaskTarget;
 mod store_lock;
@@ -1164,14 +1165,16 @@ fn idle_sessions(open: Vec<Session>, all_tasks: &[Task]) -> Vec<IdleSession> {
                 .iter()
                 .filter(|t| t.state == TaskState::Open)
                 .collect();
-            let actionable = open.iter().find(|t| is_actionable(t, &by_slug));
-            let next = actionable.or_else(|| open.first())?;
+            let actionable = startability::first_startable(&open, all_tasks, &by_slug);
+            let next = actionable.or_else(|| open.first().copied())?;
             let loop_error = match actionable {
                 Some(_) => None,
-                None => blockers::first_obstacle(&open, &by_slug),
+                None => blockers::first_obstacle(&open, &by_slug, |t| {
+                    startability::refusal(t, all_tasks, &by_slug)
+                }),
             };
             Some(IdleSession {
-                next: (*next).clone(),
+                next: next.to_owned(),
                 open_count: open.len(),
                 loop_error,
                 session,
@@ -2865,7 +2868,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_sessions_prefers_first_unblocked_open_task() {
+    fn idle_sessions_name_the_obstacle_when_a_blocker_and_the_queue_refuse_every_task() {
         let dir = TempDir::new().expect("test");
         let project = current_project();
         let (session_id, first, second) = idle_session_in_project(dir.path(), &project);
@@ -2875,7 +2878,16 @@ mod tests {
         let idle = idle_sessions(open, &list_tasks(dir.path()));
         assert_eq!(idle.len(), 1);
         assert_eq!(idle[0].session.id, session_id);
-        assert_eq!(idle[0].next.slug, second.slug);
+        // The first task waits on the second, and the queue holds the second behind the first, so
+        // the start refuses both. The reminder keeps the first task and names why it cannot
+        // start (#3770), where it used to advise a start of the second that the queue refused.
+        assert_eq!(idle[0].next.slug, first.slug);
+        let (slug, why) = idle[0].loop_error.as_ref().expect("an obstacle is named");
+        assert_eq!(slug, &first.slug);
+        assert!(
+            why.contains(&format!("waits on '{}'", second.slug)),
+            "{why}"
+        );
         assert_eq!(idle[0].open_count, 2);
     }
 

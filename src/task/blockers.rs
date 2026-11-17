@@ -142,7 +142,7 @@ pub(super) fn first_undone_in_subtree<'a>(
 /// Why a blocker keeps `task` from starting: the first blocker that is not done. A blocker that
 /// does not exist has nothing to finish, so its fix is to remove it. `None` when every blocker is
 /// done. The caller has already checked the blocker walks for loops.
-fn unmet_blocker(task: &Task, by_slug: &HashMap<&str, &Task>) -> Option<String> {
+pub(super) fn unmet_blocker(task: &Task, by_slug: &HashMap<&str, &Task>) -> Option<String> {
     let blocker = task
         .blocked_on
         .iter()
@@ -158,18 +158,20 @@ fn unmet_blocker(task: &Task, by_slug: &HashMap<&str, &Task>) -> Option<String> 
     })
 }
 
-/// The first task of `open`, in the order given, that a blocker keeps from starting, and why. A
-/// loop in a blocker walk comes before a plain unmet blocker, because a loop is damaged data that
-/// the user must repair, and a wait ends by itself (#3618, #3763, #3764).
+/// The first task of `open`, in the order given, that keeps the user from starting it, and why. A
+/// loop in a blocker walk comes before any other refusal, because a loop is damaged data that the
+/// user must repair, and a wait ends by itself. `refusal` gives the other refusals of a task, for
+/// the callers that check the queue and the ancestors too (#3618, #3763, #3764, #3770).
 pub(super) fn first_obstacle(
     open: &[&Task],
     by_slug: &HashMap<&str, &Task>,
+    refusal: impl Fn(&Task) -> Option<String>,
 ) -> Option<(String, String)> {
     open.iter()
-        .find_map(|t| blocker_walk_error(t, by_slug).map(|why| (t.slug.clone(), why)))
+        .find_map(|t| blocker_walk_error(t, by_slug).map(|why| (t.slug.to_owned(), why)))
         .or_else(|| {
             open.iter()
-                .find_map(|t| unmet_blocker(t, by_slug).map(|why| (t.slug.clone(), why)))
+                .find_map(|t| refusal(t).map(|why| (t.slug.to_owned(), why)))
         })
 }
 

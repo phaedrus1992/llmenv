@@ -114,7 +114,14 @@ fn next_skips_a_task_with_an_unmet_or_looping_blocker() {
     let mut blocked = task("blocked", "s0", TaskState::Open, 2);
     blocked.blocked_on = vec!["blocker".to_owned()];
     let free = task("free", "s0", TaskState::Open, 3);
-    let tasks = vec![blocker, blocked, free];
+    // Parallel tasks sit outside the queue, so only the blockers decide in this test.
+    let tasks: Vec<Task> = [blocker, blocked, free]
+        .into_iter()
+        .map(|mut t| {
+            t.parallel = true;
+            t
+        })
+        .collect();
     let Tracking::Tracked { next, queued, .. } = tracking_of(&visible, &tasks, None) else {
         unreachable!("tasks are tracked");
     };
@@ -126,6 +133,8 @@ fn next_skips_a_task_with_an_unmet_or_looping_blocker() {
     let mut b = task("b", "s0", TaskState::Open, 2);
     a.blocked_on = vec!["b".to_owned()];
     b.blocked_on = vec!["a".to_owned()];
+    a.parallel = true;
+    b.parallel = true;
     let Tracking::Tracked { next, stuck, .. } = tracking_of(&visible, &[a, b], None) else {
         unreachable!("tasks are tracked");
     };
@@ -155,6 +164,7 @@ proptest::proptest! {
                 if let Some(b) = blocker {
                     t.blocked_on = vec![format!("t{b}")];
                 }
+                t.parallel = true;
                 t
             })
             .collect();
@@ -196,6 +206,7 @@ proptest::proptest! {
                 if let Some(b) = blocker {
                     t.blocked_on = vec![format!("t{b}")];
                 }
+                t.parallel = true;
                 t
             })
             .collect();

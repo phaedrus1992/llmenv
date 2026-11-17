@@ -885,9 +885,11 @@ Nothing turns off the third item.
   whether or not the turn ends with a question.
   It offers `llmenv task start <slug>` to begin the step, and `llmenv task wait <slug> "<reason>"` for a step that needs
   the user or an outside event first. The first reminder carries both commands.
-  (changed in v3.14.0) The next task is the first open task whose blockers are done.
+  (changed in v3.14.0) The next task is the first open task that `task start` accepts.
+  Its blockers are done, the queue does not hold it, and no ancestor refuses it.
   When no open task can start, the reminder names the first open task and says why.
-  The cause is a blocker that is not done, or blocker links that loop.
+  The cause is a blocker that is not done, blocker links that loop, the queue,
+  or a parent that is done, missing, or in another session.
 - An open session with no task at all is named in the Stop and SessionStart reminders.
   It is an error state: add a task, or finish the session.
 - When the agent asks the user a question (the `AskUserQuestion` tool, or a turn that ends with `?`) while a task is
