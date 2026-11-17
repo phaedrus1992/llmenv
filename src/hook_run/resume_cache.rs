@@ -239,11 +239,15 @@ fn project_setting(cwd: &std::path::Path, name: &str) -> std::io::Result<Option<
     }
 }
 
-/// A platform with no `openat` has only the plain bounded read.
+/// A platform with no `openat` has only the plain bounded read. Only a non-unix build compiles
+/// it, so its own name lets `.cargo/mutants.toml` skip it on the Linux mutation run.
 #[cfg(not(unix))]
-fn project_setting(cwd: &std::path::Path, name: &str) -> std::io::Result<Option<String>> {
+fn project_setting_portable(cwd: &std::path::Path, name: &str) -> std::io::Result<Option<String>> {
     llmenv_paths::read_text_bounded(&cwd.join(".claude").join(name), SETTINGS_MAX_BYTES)
 }
+
+#[cfg(not(unix))]
+use project_setting_portable as project_setting;
 
 /// The first Claude Code release with its own warning when a resume would use a noticeable share
 /// of the 5-hour limit on a Pro or Max plan (changelog entry for 2.1.304, #3103).

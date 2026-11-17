@@ -393,6 +393,27 @@ fn a_project_claude_file_is_not_called_a_link() {
     assert!(!ours.contains("is a link"), "{ours}");
 }
 
+// A settings file that cannot be read for another reason is not called a link.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_project_setting_is_not_called_a_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project-3791-dir");
+    // A folder where the file should be gives a read error that is not a link and not missing.
+    std::fs::create_dir_all(project.join(".claude/settings.json")).unwrap();
+    assert!(api_key_helper_set(None, Some(&project)));
+    let notices = crate::agent_notice::current().unwrap_or_default();
+    let ours = notices
+        .lines()
+        .find(|l| l.contains("project-3791-dir"))
+        .unwrap_or_default();
+    assert!(
+        !ours.is_empty(),
+        "the read error must be noticed: {notices}"
+    );
+    assert!(!ours.contains("is a link"), "{ours}");
+}
+
 #[test]
 fn a_prerelease_of_2_1_304_keeps_the_notice() {
     let env = env_of(&[("CLAUDE_CODE_VERSION", "2.1.304-beta")]);
@@ -442,5 +463,74 @@ fn the_process_notice_only_exists_for_a_session_start() {
     if std::env::var_os("CLAUDE_CODE_VERSION").is_none() {
         let notice = super::session_resume_notice("SessionStart", &payload);
         assert!(notice.is_some_and(|n| !n.is_empty()));
+    }
+}
+
+// #3785: the walk of the project's `.claude` folder, checked on its own result.
+#[cfg(unix)]
+mod project_setting_walk {
+    use super::super::project_setting;
+
+    fn project() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        (dir, project)
+    }
+
+    #[test]
+    fn a_missing_folder_or_file_is_none() {
+        let (_dir, project) = project();
+        assert_eq!(project_setting(&project, "settings.json").unwrap(), None);
+        std::fs::create_dir_all(project.join(".claude")).unwrap();
+        assert_eq!(project_setting(&project, "settings.json").unwrap(), None);
+    }
+
+    #[test]
+    fn a_regular_file_gives_its_text() {
+        let (_dir, project) = project();
+        std::fs::create_dir_all(project.join(".claude")).unwrap();
+        std::fs::write(project.join(".claude/settings.json"), r#"{"a":1}"#).unwrap();
+        let text = project_setting(&project, "settings.json").unwrap();
+        assert_eq!(text.as_deref(), Some(r#"{"a":1}"#));
+    }
+
+    #[test]
+    fn a_linked_file_is_an_error_that_says_link() {
+        let (dir, project) = project();
+        std::fs::create_dir_all(project.join(".claude")).unwrap();
+        let target = dir.path().join("target.json");
+        std::fs::write(&target, "{}").unwrap();
+        std::os::unix::fs::symlink(&target, project.join(".claude/settings.json")).unwrap();
+        let err = project_setting(&project, "settings.json").unwrap_err();
+        assert!(err.to_string().contains("it is a link"), "{err}");
+    }
+
+    #[test]
+    fn a_linked_folder_is_an_error_that_says_link() {
+        let (dir, project) = project();
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("settings.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(&real, project.join(".claude")).unwrap();
+        let err = project_setting(&project, "settings.json").unwrap_err();
+        assert!(err.to_string().contains("folder that is a link"), "{err}");
+    }
+
+    #[test]
+    fn a_file_named_claude_is_an_error_that_does_not_say_link() {
+        let (_dir, project) = project();
+        std::fs::write(project.join(".claude"), "x").unwrap();
+        let err = project_setting(&project, "settings.json").unwrap_err();
+        assert!(!err.to_string().contains("link"), "{err}");
+    }
+
+    #[test]
+    fn text_that_is_not_utf8_is_an_error() {
+        let (_dir, project) = project();
+        std::fs::create_dir_all(project.join(".claude")).unwrap();
+        std::fs::write(project.join(".claude/settings.json"), [0xff, 0xfe]).unwrap();
+        let err = project_setting(&project, "settings.json").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 }

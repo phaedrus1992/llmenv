@@ -58,4 +58,7 @@ exclude_re = [
   "replace emit_mcp_call_trace with \\(\\)",
   "in check_stale_with_timing",
   "replace check_stale_with_timing with \\(\\)",
+  # The fallback for a platform with no `openat`. A non-unix build compiles it, so the Linux run
+  # cannot test it. The unix version of project_setting is tested.
+  "replace project_setting_portable",
 ]
