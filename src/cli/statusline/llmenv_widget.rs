@@ -105,19 +105,16 @@ fn render_config_stale(
 fn render_throttle(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
     // An unreadable state file or a config conflict is not "throttling off". Show it, with a label
     // that names the actual problem.
-    let problem = if data.throttle_conflict.is_some() {
-        Some(("throttle conflict", "conflict"))
-    } else if data.throttle_error.is_some() {
-        Some(("throttle unreadable", "unreadable"))
-    } else {
-        None
-    };
-    if let Some((label, reason)) = problem {
+    if data.throttle_conflict.is_some() {
         let format = cfg.and_then(|c| c.format.as_deref()).unwrap_or("{raw}");
         return format
-            .replace("{raw}", label)
+            .replace("{raw}", "throttle conflict")
             .replace("{cooldown_secs}", "")
-            .replace("{reason}", reason);
+            .replace("{reason}", "conflict");
+    }
+    // A state file that cannot be read keeps the format and shows the marker (#3745).
+    if data.throttle_error.is_some() {
+        return super::fill_unknown(cfg, "{raw}", &["{raw}", "{cooldown_secs}", "{reason}"]);
     }
     let Some(throttle) = &data.throttle else {
         return String::new();
@@ -160,8 +157,14 @@ fn render_tasks(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) ->
     let Some(tasks) = &data.tasks else {
         return String::new();
     };
+    // A failed read keeps the configured format and shows the marker where the value goes, so a
+    // read error never looks like no work (#3745).
     if tasks.unreadable {
-        return "tasks: unreadable".to_string();
+        return super::fill_unknown(
+            cfg,
+            "\u{2611} {done}/{total}",
+            &["{done}", "{total}", "{current}"],
+        );
     }
     let Some(session) = tasks.session else {
         return String::new();
@@ -310,7 +313,7 @@ mod tests {
             ..Default::default()
         };
         let out = render_llmenv_widget("throttle", &data, None, &icons(), false).unwrap();
-        assert_eq!(out, "throttle unreadable");
+        assert_eq!(out, "?");
     }
 
     #[test]
@@ -545,7 +548,7 @@ mod tests {
             ..Default::default()
         };
         let out = render_llmenv_widget("tasks", &data, None, &icons(), false).unwrap();
-        assert_eq!(out, "tasks: unreadable");
+        assert_eq!(out, "\u{2611} ?/?");
     }
 
     #[test]
@@ -682,6 +685,7 @@ mod tests {
                 memories: 142,
                 concepts: Some(47),
             }),
+            icm_failed: false,
             cache: Some(CacheData {
                 prunable_bytes: Some(15_728_640),
                 unreadable: 0,

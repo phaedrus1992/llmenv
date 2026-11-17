@@ -461,7 +461,9 @@ Flags:
 
 - `--all` — remove **every** cache folder unconditionally (the next `export` re-materializes).
 - `--older-than DUR` — in the cache-folder step, remove only current-version cache folders older than `DUR`.
-  Examples: `14d`, `1w`.
+  Examples: `14d`, `1w`, `90 days`, `1h30m`.
+  (changed in v3.14.0) A month or a year has no fixed length, so `1mo` and `1y` are refused.
+  Use weeks or days, such as `52w`.
   The age-based sweeps still use `cache_retention_hours`.
   `--all` and `--older-than` cannot be used together.
   A bad value stops the command before anything is removed.
@@ -537,7 +539,7 @@ llmenv task edit <id> [--title <t>] [--parent SLUG | --no-parent]
   [--block-on <id>]... [--unblock <id>]... [--add-note <text>] [--delete-note <index-or-timestamp>]
   [--detail <text> | --detail-file <path>]
 llmenv task clear <id>... | --session <id>
-llmenv task session start [name] [--description <text>] [--resume <id> | --replace | --new]
+llmenv task session start [name] [--description <text>] [--resume <id> | --replace [--other-session <id>]... | --new]
   [--task <title>]...
   [--context <text> | --context-file <path>] [--issue <n>]... [--branch <b>] [--base <b>]
   [--memory-topic <t>]... [--doc <path>]...
@@ -609,6 +611,9 @@ Only when the open session has no match does the search cover the whole project.
   The running command holds a lock on its journal file, so a file that can be locked belongs to a command that is
   gone, and a reused process id cannot hide it.
   A note that cannot be written is kept as a `.failed` file in the journal folder, and it is logged with its text.
+  (added in v3.14.0) A command whose change is saved but whose audit note could not be written exits with status 3.
+  A command whose change failed exits with status 1, as before.
+  A script or an agent that retries on a failure can then tell the two apart, and it does not repeat the saved change.
   `task add --session <id>` refuses a session of another conversation the same way, and a
   `--parent` in another session is refused (#3480, #3486). An owned session takes a new task
   only from its owner. A caller with no conversation id is refused for that session.
@@ -737,6 +742,10 @@ project's hook.
   - `--replace` — abandon every open session for this project (untagging
     their still-incomplete tasks with an orphan note; already-`done` tasks
     keep their tag as a historical record), then start fresh.
+    (changed in v3.14.0) A session that another conversation started is refused, and
+    nothing is changed. Repeat `--other-session <id>` with that session's id to abandon it
+    anyway. A session with no owner, and your own sessions, need no flag. `--resume` stays
+    open to any conversation.
   - `--new` — create a new session anyway, leaving the existing one(s) open
     — true concurrency for two windows genuinely working in parallel.
 

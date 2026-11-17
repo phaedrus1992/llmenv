@@ -92,7 +92,7 @@ proptest! {
                 (add_in(dir.path(), n, session, *s), abandoned)
             })
             .collect();
-        start_session(dir.path(), None, None, PROJECT_A, StartDecision::Replace).unwrap();
+        start_session(dir.path(), None, None, PROJECT_A, StartDecision::Replace(Vec::new())).unwrap();
         for (task, in_abandoned) in &added {
             let now = load_task(dir.path(), &task.slug).unwrap();
             if *in_abandoned && task.state != TaskState::Done {

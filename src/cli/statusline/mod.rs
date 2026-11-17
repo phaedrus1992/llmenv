@@ -23,6 +23,19 @@ pub use widget::render_engine_widget;
 /// configured format, puts this marker in place of the value, and logs a warning (#3071).
 const UNKNOWN_MARKER: &str = "?";
 
+/// The widget format (or `default`) with the marker in place of each named placeholder. A failed
+/// widget keeps its layout this way (#3745).
+fn fill_unknown(
+    cfg: Option<&llmenv_config::WidgetConfig>,
+    default: &str,
+    placeholders: &[&str],
+) -> String {
+    let format = cfg.and_then(|c| c.format.as_deref()).unwrap_or(default);
+    placeholders.iter().fold(format.to_owned(), |text, key| {
+        text.replace(key, UNKNOWN_MARKER)
+    })
+}
+
 const DEFAULT_ROW: &str = "{model} │ {folder} │ {branch} │ {context} │ {budget}";
 
 /// The single row rendered when `config.yaml` can't be loaded or parsed

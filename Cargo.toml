@@ -28,7 +28,6 @@ walkdir = "=2.5.0"
 sha2 = "=0.11.1"
 anstyle = "=1.0.14"
 url = "=2.5.8"
-humantime = "=2.4.0"
 tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "sync"] }
 reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "json", "blocking"] }
 # Hostname via the uname(2) syscall instead of spawning the `hostname` binary on
@@ -89,7 +88,6 @@ sha2 = { workspace = true }
 shell-words = "=1.1.1"
 semver = "=1.0.28"
 hex = "=0.4.3"
-humantime = { workspace = true }
 jiff = { version = "=0.2.44", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 anstyle = { workspace = true }
 globset = { workspace = true }

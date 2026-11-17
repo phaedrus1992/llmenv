@@ -223,7 +223,11 @@ fn reopen_as(
     if failed.is_empty() {
         Ok(())
     } else {
-        anyhow::bail!("{}", failed.join("\n"))
+        // The reopens are saved, so the status says a note failed and not the change (#3765).
+        Err(task::note_not_saved::mark(&anyhow::anyhow!(
+            "{}",
+            failed.join("\n")
+        )))
     }
 }
 

@@ -17,19 +17,27 @@ pub(super) fn only_own_session<'a>(
     owner: &EngineIdentity,
     engine_start: Option<SystemTime>,
 ) -> Option<&'a Session> {
-    let mut own = existing.by_ref().filter(|s| match ownership(s, owner) {
-        Ownership::Conversation => true,
-        Ownership::Process => engine_start.is_some_and(|start| active_since(s, start)),
-        Ownership::None => false,
-    });
+    let mut own = existing
+        .by_ref()
+        .filter(|s| is_callers(s, owner, engine_start));
     match (own.next(), own.next()) {
         (Some(only), None) => Some(only),
         _ => None,
     }
 }
 
+/// Whether the caller started `session`. The process id alone counts only when the session was
+/// active after the caller's engine started, because a process id is reused (#2904).
+fn is_callers(session: &Session, owner: &EngineIdentity, engine_start: Option<SystemTime>) -> bool {
+    match ownership(session, owner) {
+        Ownership::Conversation => true,
+        Ownership::Process => engine_start.is_some_and(|start| active_since(session, start)),
+        Ownership::None => false,
+    }
+}
+
 fn active_since(session: &Session, start: SystemTime) -> bool {
-    humantime::parse_rfc3339(&session.last_activity).is_ok_and(|at| at >= start)
+    crate::util::time::parse_rfc3339(&session.last_activity).is_ok_and(|at| at >= start)
 }
 
 /// When the engine process `pid` started, from its elapsed time in `ps`. `None` when `ps` cannot
@@ -196,13 +204,50 @@ pub(super) fn resume(
 #[must_use]
 pub(crate) fn idle_display(last_activity: &str) -> String {
     let now = std::time::SystemTime::now();
-    humantime::parse_rfc3339(last_activity)
+    crate::util::time::parse_rfc3339(last_activity)
         .ok()
         .and_then(|t| now.duration_since(t).ok())
-        .map(|d| {
-            humantime::format_duration(std::time::Duration::from_secs(d.as_secs())).to_string()
-        })
+        .map(|d| crate::util::time::format_age(std::time::Duration::from_secs(d.as_secs())))
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Refuse `--replace` when it would abandon an owned session of another conversation that the
+/// caller did not name with `--other-session`. A session with no owner has no one to protect, so
+/// it is abandoned as before (#3487).
+///
+/// # Errors
+/// Errors if `named` holds an id that is not an open session of the project, or if a foreign
+/// session is left unnamed. The message lists each such session and the flag that allows it.
+pub(super) fn refuse_unnamed_foreign(
+    existing: &[Session],
+    owner: &EngineIdentity,
+    engine_start: Option<SystemTime>,
+    named: &[String],
+) -> anyhow::Result<()> {
+    if let Some(unknown) = named.iter().find(|n| !existing.iter().any(|s| &s.id == *n)) {
+        anyhow::bail!(
+            "--other-session names '{unknown}', which is not an open session of this project"
+        );
+    }
+    let unnamed: Vec<&Session> = existing
+        .iter()
+        .filter(|s| s.owner_session.is_some() || s.owner_pid.is_some())
+        .filter(|s| !is_callers(s, owner, engine_start))
+        .filter(|s| !named.contains(&s.id))
+        .collect();
+    if unnamed.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<&str> = unnamed.iter().map(|s| s.id.as_str()).collect();
+    let flags: String = ids
+        .iter()
+        .map(|id| format!(" --other-session {id}"))
+        .collect();
+    anyhow::bail!(
+        "--replace would abandon session(s) of another conversation: {}\n\
+         Nothing was changed. To abandon them anyway, run again with{flags}",
+        ids.join(", ")
+    )
 }
 
 #[cfg(test)]

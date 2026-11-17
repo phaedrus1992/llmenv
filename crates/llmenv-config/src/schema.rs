@@ -1241,7 +1241,7 @@ pub enum ConsolidationBackend {
 
 /// Per-type retention policy for memory pruning (R4).
 ///
-/// Each field is a `humantime`-parseable duration string (e.g. `"30d"`,
+/// Each field is a duration string (e.g. `"30d"`,
 /// `"365d"`, `"90 days"`). A value of `None` means "never prune" for that
 /// type.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

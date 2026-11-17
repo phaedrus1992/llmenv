@@ -125,9 +125,19 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
     }
     let cwd = std::path::Path::new(&env.cwd);
     if cwd.exists() && !cfg.scope.content.is_empty() {
-        let matched_ids = matcher::matches_content_all(&cfg.scope.content, cwd);
+        let found = matcher::matches_content_all(&cfg.scope.content, cwd);
+        if !found.unknown.is_empty() {
+            // An unknown scope stays inactive, as before. The notice names it, so the missing
+            // scope has a cause (#3330).
+            crate::agent_notice::record_logged(format!(
+                "llmenv: the content scopes {:?} did not match, and part of the working directory \
+                 cannot be read, so they may match there. Fix: check the permissions of the \
+                 folders that the log names.",
+                found.unknown
+            ));
+        }
         for s in &cfg.scope.content {
-            if matched_ids.contains(s.id.as_str()) {
+            if found.matched.contains(s.id.as_str()) {
                 scopes.push(ActiveScope {
                     id: s.id.clone(),
                     kind: "content",
