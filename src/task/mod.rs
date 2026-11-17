@@ -18,7 +18,7 @@ mod ancestors;
 mod block_cycle;
 mod blockers;
 pub(crate) use blockers::block_task;
-use blockers::{first_undone_in_subtree, is_actionable};
+use blockers::first_undone_in_subtree;
 pub(crate) mod core_text;
 mod finish_hints;
 mod parent_chain;
@@ -708,7 +708,7 @@ fn add_task_for_session_with(
 /// Errors if the task is already `done`, or if any `blocked_on` reference
 /// isn't (recursively) done and `force` is `false`. A dangling `blocked_on`
 /// reference (deleted/corrupt blocker file) fails closed — treated as
-/// unmet, same rationale as [`is_actionable`]'s dangling-blocker handling.
+/// unmet, same rationale as [`blockers::unmet_blocker`]'s dangling-blocker handling.
 /// `force` overrides both cases — the agent may know better than the
 /// ordering hint.
 pub(crate) fn start_task<'a>(
@@ -918,10 +918,22 @@ fn close_task(
         let mut task = load_task(state_dir, &slug)?;
         let prior = task.state;
         if prior == TaskState::Open && !force {
-            anyhow::bail!(
-                "'{slug}' was never started (open). Run `llmenv task start {slug}` and finish \
-                 the work, or pass --force if it is done."
-            );
+            // The advice names a start only when the start would be accepted (#3773).
+            let by_slug: HashMap<&str, &Task> = all_tasks
+                .as_slice()
+                .iter()
+                .map(|t| (t.slug.as_str(), t))
+                .collect();
+            match startability::refusal(&task, all_tasks.as_slice(), &by_slug, false) {
+                Some(why) => anyhow::bail!(
+                    "'{slug}' was never started (open), and the start is refused: {why}. Pass \
+                     --force if it is done."
+                ),
+                None => anyhow::bail!(
+                    "'{slug}' was never started (open). Run `llmenv task start {slug}` and \
+                     finish the work, or pass --force if it is done."
+                ),
+            }
         }
         let undone = relation::undone_descendants(&slug, all_tasks);
         if !force && !undone.is_empty() {
@@ -1362,8 +1374,10 @@ pub(crate) fn resolve_current_task(tasks: &[Task]) -> Option<Task> {
 /// agent's control, not a legitimate "next" step — see [`TaskState::Waiting`])
 /// and any task whose `blocked_on` refs aren't all `done` (resolved against
 /// `all_tasks`, since a blocker can live in a different session than the
-/// task it blocks). `None` if `current` isn't found in `session_tasks`, or
-/// nothing after it qualifies.
+/// task it blocks), and any task that `task start` refuses for the queue or an ancestor, as
+/// [`startability::refusal`] decides (#3773). A task with a damaged parent link is skipped with no
+/// message here. `None` if `current` isn't found in `session_tasks`, or nothing after it
+/// qualifies.
 #[must_use]
 pub(crate) fn resolve_next_task(
     all_tasks: &[Task],
@@ -1373,10 +1387,10 @@ pub(crate) fn resolve_next_task(
     let order = execution_order(session_tasks);
     let pos = order.iter().position(|t| t.slug == current.slug)?;
     let by_slug: HashMap<&str, &Task> = all_tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
-    order
-        .into_iter()
-        .skip(pos + 1)
-        .find(|t| is_actionable(t, &by_slug))
+    order.into_iter().skip(pos + 1).find(|t| {
+        !matches!(t.state, TaskState::Done | TaskState::Waiting)
+            && startability::refusal(t, all_tasks, &by_slug, true).is_none()
+    })
 }
 
 /// Every task after `current` that `task show --next` cannot offer because its blocker walk
@@ -2147,7 +2161,7 @@ mod tests {
         done_task(dir.path(), &a.slug).expect("test");
         let tasks = list_tasks(dir.path());
         let by_slug: HashMap<&str, &Task> = tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
-        assert!(is_actionable(by_slug[b.slug.as_str()], &by_slug));
+        assert!(blockers::unmet_blocker(by_slug[b.slug.as_str()], &by_slug).is_none());
     }
 
     #[test]
@@ -2581,7 +2595,7 @@ mod tests {
     }
 
     // A dangling blocked_on reference (deleted/corrupt blocker file) fails
-    // closed -- same rationale as is_actionable's dangling-blocker handling
+    // closed -- same rationale as unmet_blocker's dangling-blocker handling
     // for `task show --next` -- rather than silently treating it as resolved.
     #[test]
     fn start_task_errors_when_blocked_on_deleted_task() {

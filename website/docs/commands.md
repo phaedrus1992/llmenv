@@ -656,7 +656,9 @@ Only when the open session has no match does the search cover the whole project.
   (falling back to the most recently updated non-`done` task) in each open
   session for the current project; `--next` is the next actionable task after
   it, in the same parent-before-children order `task ls` displays, skipping
-  `done` tasks and any task whose `blocked_on` refs aren't all `done`. A
+  `done` tasks and any task whose `blocked_on` refs aren't all `done`.
+  (changed in v3.14.0) It also skips a task that `task start` refuses for the
+  queue or for an ancestor. A
   single open session prints the same bare JSON as `task show <id>`; two or
   more each get a `# <name> (<id>)` header, separated by a `---` rule. Errors
   if no session is open for the current project. `--current` (changed in

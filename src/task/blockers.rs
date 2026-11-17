@@ -40,18 +40,6 @@ pub(crate) fn block_task<'a>(
     })
 }
 
-/// True when `task` is neither `done` nor `waiting`, and every one of its
-/// `blocked_on` refs is (recursively) done per [`is_done_including_descendants`].
-/// A dangling or not-yet-done blocker keeps the task non-actionable — fail
-/// closed rather than treat an unresolvable reference as satisfied.
-pub(super) fn is_actionable(task: &Task, by_slug: &HashMap<&str, &Task>) -> bool {
-    !matches!(task.state, TaskState::Done | TaskState::Waiting)
-        && task
-            .blocked_on
-            .iter()
-            .all(|b| is_done_including_descendants(b, &task.slug, by_slug))
-}
-
 /// True when the task named `slug` is `done` and every task transitively
 /// parented under it (its children, their children, …) is also `done` —
 /// the resolution `blocked_on` uses (#1164), so blocking on a parent task
@@ -171,7 +159,8 @@ pub(super) fn first_obstacle(
         .find_map(|t| blocker_walk_error(t, by_slug).map(|why| (t.slug.to_owned(), why)))
         .or_else(|| {
             open.iter().find_map(|t| {
-                super::startability::refusal(t, all, by_slug).map(|why| (t.slug.to_owned(), why))
+                super::startability::refusal(t, all, by_slug, true)
+                    .map(|why| (t.slug.to_owned(), why))
             })
         })
 }
