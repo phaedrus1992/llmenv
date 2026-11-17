@@ -99,10 +99,30 @@ fn how_to_track(tracking: &Tracking) -> String {
         Tracking::Tracked {
             next: Some(slug), ..
         } => start_next(slug),
+        Tracking::Tracked {
+            stuck: Some((slug, why)),
+            ..
+        } => cannot_start(slug, why),
         _ => "Add a task for each step: `llmenv task add \"<step>\"`. Then run `llmenv task start \
              <slug>` for the step you do first. Use `--child-of <slug>` for the parts of a step."
             .to_string(),
     }
+}
+
+/// What follows the end of the current task: the start of the next one when the start accepts it,
+/// else the reason that no queued task can start (#3776).
+fn after_current(next: Option<&str>, stuck: Option<&(String, String)>) -> String {
+    match (next, stuck) {
+        (Some(slug), _) => start_next(slug),
+        (None, Some((slug, why))) => format!("Then {}", cannot_start(slug, why)),
+        (None, None) => "No queued task can start yet.".to_owned(),
+    }
+}
+
+/// The sentence that names a task that cannot start, and the reason. A refusal text can end in a
+/// period already, so the sentence takes one period only.
+fn cannot_start(slug: &str, why: &str) -> String {
+    format!("'{slug}' cannot start: {}.", why.trim_end_matches('.'))
 }
 
 /// The command that starts a task that is queued and not yet in progress.

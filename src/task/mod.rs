@@ -1394,8 +1394,9 @@ pub(crate) fn resolve_next_task(
 }
 
 /// Every task after `current` that `task show --next` cannot offer because its blocker walk
-/// loops, each with the text of the loop and its fix, in execution order. `resolve_next_task`
-/// skips such a task with no sign, so the caller asks this to name each one (#3618).
+/// loops or a parent link is damaged (#3777), each with the text of the loop and its fix, in
+/// execution order. `resolve_next_task` skips such a task with no sign, so the caller asks this to
+/// name each one (#3618).
 #[must_use]
 pub(crate) fn next_task_loops(
     all_tasks: &[Task],
@@ -1411,7 +1412,11 @@ pub(crate) fn next_task_loops(
         .iter()
         .skip(pos + 1)
         .filter(|t| !matches!(t.state, TaskState::Done | TaskState::Waiting))
-        .filter_map(|t| blockers::blocker_walk_error(t, &by_slug).map(|e| (t.slug.clone(), e)))
+        .filter_map(|t| {
+            blockers::blocker_walk_error(t, &by_slug)
+                .or_else(|| ancestors::ancestor_damage(t, all_tasks))
+                .map(|e| (t.slug.clone(), e))
+        })
         .collect()
 }
 
