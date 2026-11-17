@@ -94,10 +94,7 @@ fn is_oversized_regular_file(path: &std::path::Path) -> bool {
 /// Rename `path` to `<name>.1` relative to its open folder. The rename resolves no path component
 /// again, so a folder swapped for a link after the check cannot move the rename elsewhere (#3139).
 fn rotate_state_log(path: &std::path::Path) {
-    let dir_path = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        _ => std::path::Path::new("."),
-    };
+    let dir_path = llmenv_paths::parent_or_cwd(path);
     let Some(name) = path.file_name() else {
         return;
     };

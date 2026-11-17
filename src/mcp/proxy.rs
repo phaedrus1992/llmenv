@@ -629,12 +629,7 @@ fn open_log_file(path: &Path, max_bytes: u64, harden_dir: bool) -> anyhow::Resul
     // error is reported as itself, not as a refused link.
     let dir = match crate::paths::dirfd::open_dir_nofollow(parent) {
         Ok(dir) => dir,
-        Err(e)
-            if matches!(
-                rustix::io::Errno::from_io_error(&e),
-                Some(rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR)
-            ) =>
-        {
+        Err(e) if llmenv_paths::is_nofollow_refusal(&e) => {
             anyhow::bail!(
                 "log directory {} is a symlink or not a directory; refusing to write through it",
                 parent.display()

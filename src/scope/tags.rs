@@ -96,50 +96,43 @@ pub(crate) fn cap_aggregate_tags(tags: BTreeSet<String>) -> BTreeSet<String> {
 mod notice_tests {
     use super::*;
 
-    /// A tag outside the charset is named, with its source and a fix (#3217).
+    use crate::agent_notice::assert_noticed;
+
+    /// A tag outside the charset is named, with its source and a fix.
     #[test]
     fn a_dropped_charset_tag_is_recorded_for_the_agent() {
         let kept = sanitize_tags(vec!["bad tag-3217-charset".into()], "src-3217-charset");
         assert!(kept.is_empty());
-        let notices = crate::agent_notice::current().unwrap_or_default();
-        assert!(notices.contains("bad tag-3217-charset"), "{notices}");
-        assert!(notices.contains("src-3217-charset"), "{notices}");
-        assert!(notices.contains("Fix:"), "{notices}");
+        assert_noticed(&["bad tag-3217-charset", "src-3217-charset"]);
     }
 
-    /// A tag over the length limit is named, with a fix (#3217).
+    /// A tag over the length limit is named, with a fix.
     #[test]
     fn an_over_length_tag_is_recorded_for_the_agent() {
         let long = format!("long-3217-{}", "a".repeat(MAX_TAG_LEN));
-        let kept = sanitize_tags(vec![long], "src-3217-long");
-        assert!(kept.is_empty());
-        let notices = crate::agent_notice::current().unwrap_or_default();
-        assert!(notices.contains("long-3217-"), "{notices}");
-        assert!(notices.contains("Fix:"), "{notices}");
+        assert!(sanitize_tags(vec![long], "src-3217-long").is_empty());
+        assert_noticed(&["long-3217-"]);
     }
 
-    /// A source whose tag list is cut is named, with a fix (#3217).
+    /// A source whose tag list is cut is named, with a fix.
     #[test]
     fn a_truncated_tag_list_is_recorded_for_the_agent() {
         let tags: Vec<String> = (0..=MAX_TAGS_PER_SOURCE).map(|i| format!("t{i}")).collect();
-        let kept = sanitize_tags(tags, "src-3217-list");
-        assert_eq!(kept.len(), MAX_TAGS_PER_SOURCE);
-        let notices = crate::agent_notice::current().unwrap_or_default();
-        assert!(notices.contains("src-3217-list"), "{notices}");
-        assert!(notices.contains("Fix:"), "{notices}");
+        assert_eq!(
+            sanitize_tags(tags, "src-3217-list").len(),
+            MAX_TAGS_PER_SOURCE
+        );
+        assert_noticed(&["src-3217-list"]);
     }
 
-    /// The aggregate cap is recorded for the agent, with a fix (#3217).
+    /// The aggregate cap is recorded for the agent, with a fix.
     #[test]
     fn an_aggregate_cap_overflow_is_recorded_for_the_agent() {
         let tags: BTreeSet<String> = (0..=MAX_TAGS_PER_SOURCE)
             .map(|i| format!("agg3217-{i:03}"))
             .collect();
-        let kept = cap_aggregate_tags(tags);
-        assert_eq!(kept.len(), MAX_TAGS_PER_SOURCE);
-        let notices = crate::agent_notice::current().unwrap_or_default();
-        assert!(notices.contains("across all sources"), "{notices}");
-        assert!(notices.contains("Fix:"), "{notices}");
+        assert_eq!(cap_aggregate_tags(tags).len(), MAX_TAGS_PER_SOURCE);
+        assert_noticed(&["across all sources"]);
     }
 }
 

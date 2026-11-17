@@ -106,6 +106,15 @@ pub(crate) fn record_logged(notice: impl Into<String>) {
     }
 }
 
+/// Test helper: every part is in the notices of this process, and the notices name a fix.
+#[cfg(test)]
+pub(crate) fn assert_noticed(parts: &[&str]) {
+    let notices = current().unwrap_or_default();
+    for part in parts.iter().chain(&["Fix:"]) {
+        assert!(notices.contains(part), "{part:?} is missing from {notices}");
+    }
+}
+
 /// Every notice of this process, one per line, or `None` when there is none. The list stays set,
 /// so every call returns the same notices.
 pub(crate) fn current() -> Option<String> {

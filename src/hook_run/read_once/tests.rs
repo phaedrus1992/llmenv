@@ -92,9 +92,7 @@ fn a_deprecated_file_path_key_is_noticed_to_the_agent() {
         &test_config_warn(),
         dir.path(),
     );
-    let notice = crate::agent_notice::current().unwrap_or_default();
-    assert!(notice.contains("deprecated 'filePath' key"), "{notice}");
-    assert!(notice.contains("Fix:"), "{notice}");
+    crate::agent_notice::assert_noticed(&["deprecated 'filePath' key"]);
 }
 
 #[test]
@@ -176,11 +174,7 @@ fn notice_when_file_path_missing() {
         dir.path(),
     );
     assert!(result.is_empty());
-    let notice = crate::agent_notice::current().unwrap_or_default();
-    assert!(
-        notice.contains("file_path text"),
-        "the agent must see the skipped read cache: {notice}"
-    );
+    crate::agent_notice::assert_noticed(&["file_path text"]);
 }
 
 // Found during #1209's pre-pr-review: the identical "required field
@@ -197,11 +191,7 @@ fn notice_when_tool_input_not_an_object() {
         dir.path(),
     );
     assert!(result.is_empty());
-    let notice = crate::agent_notice::current().unwrap_or_default();
-    assert!(
-        notice.contains("tool_input is not an object"),
-        "the agent must see the skipped read cache: {notice}"
-    );
+    crate::agent_notice::assert_noticed(&["tool_input is not an object"]);
 }
 
 // Found during #1209's pre-pr-review: a rejected session_id means the
@@ -217,9 +207,7 @@ fn logs_error_when_session_id_fails_path_safety_check() {
     let result = handle_pre_tool_use(&payload, Some("../escape"), &test_config_warn(), dir.path());
     assert!(result.is_empty());
     // The agent notice is the result; a captured log can miss the line under parallel tests (#3394).
-    let notice = crate::agent_notice::current().unwrap_or_default();
-    assert!(notice.contains("rejected the session id"), "{notice}");
-    assert!(notice.contains("Fix:"), "{notice}");
+    crate::agent_notice::assert_noticed(&["rejected the session id"]);
 }
 
 #[test]
@@ -452,8 +440,7 @@ fn a_busy_read_once_cache_lock_is_an_agent_notice() {
         &test_config_warn(),
         dir.path(),
     );
-    let notice = crate::agent_notice::current().unwrap_or_default();
-    assert!(notice.contains("the read-once cache lock"), "{notice}");
+    crate::agent_notice::assert_noticed(&["the read-once cache lock"]);
 }
 
 fn pin_mtime(path: &std::path::Path, secs: u64) {

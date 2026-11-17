@@ -101,9 +101,7 @@ mod notice_tests {
         let pid_path = dir.path().join("pidfile-3217-stuck.pid");
         std::fs::create_dir(&pid_path).expect("test");
         clear_pidfile(&pid_path, "pid 1 is not running");
-        let notices = crate::agent_notice::current().unwrap_or_default();
-        assert!(notices.contains("pidfile-3217-stuck"), "{notices}");
-        assert!(notices.contains("Fix:"), "{notices}");
+        crate::agent_notice::assert_noticed(&["pidfile-3217-stuck"]);
     }
 
     /// A pidfile that cannot be read is named for the agent. A directory at the path makes the
@@ -114,9 +112,7 @@ mod notice_tests {
         let pid_path = dir.path().join("pidfile-3217-unreadable.pid");
         std::fs::create_dir(&pid_path).expect("test");
         reconcile_pidfile(&pid_path);
-        let notices = crate::agent_notice::current().unwrap_or_default();
-        assert!(notices.contains("pidfile-3217-unreadable"), "{notices}");
-        assert!(notices.contains("Fix:"), "{notices}");
+        crate::agent_notice::assert_noticed(&["pidfile-3217-unreadable"]);
     }
 
     /// A pidfile temp that cannot be removed is named for the agent (#3217).
@@ -126,9 +122,7 @@ mod notice_tests {
         let tmp = dir.path().join("pidfile-3217-temp.tmp");
         std::fs::create_dir(&tmp).expect("test");
         discard_pidfile_temp(&tmp);
-        let notices = crate::agent_notice::current().unwrap_or_default();
-        assert!(notices.contains("pidfile-3217-temp"), "{notices}");
-        assert!(notices.contains("Fix:"), "{notices}");
+        crate::agent_notice::assert_noticed(&["pidfile-3217-temp"]);
     }
 
     /// A pidfile temp that is already gone is not a leftover, so it gives no notice.
@@ -152,8 +146,6 @@ mod notice_tests {
         let log = log_path_for(&pid_path);
         std::fs::create_dir(&log).expect("test");
         drop(proxy_stderr(&pid_path));
-        let notices = crate::agent_notice::current().unwrap_or_default();
-        assert!(notices.contains(&log.display().to_string()), "{notices}");
-        assert!(notices.contains("Fix:"), "{notices}");
+        crate::agent_notice::assert_noticed(&[&log.display().to_string()]);
     }
 }

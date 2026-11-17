@@ -13,6 +13,7 @@ pub use matcher::Env;
 use crate::config::Config;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use tags::sanitize_tags;
 
 #[derive(Debug, Clone, Default)]
 pub struct ActiveScope {
@@ -97,7 +98,7 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
             scopes.push(ActiveScope {
                 id: s.id.clone(),
                 kind: "network",
-                tags: crate::scope::tags::sanitize_tags(s.tags.clone(), "config.yaml scope tags"),
+                tags: sanitize_tags(s.tags.clone(), "config.yaml scope tags"),
                 ..Default::default()
             });
         }
@@ -107,7 +108,7 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
             scopes.push(ActiveScope {
                 id: s.id.clone(),
                 kind: "host",
-                tags: crate::scope::tags::sanitize_tags(s.tags.clone(), "config.yaml scope tags"),
+                tags: sanitize_tags(s.tags.clone(), "config.yaml scope tags"),
                 ..Default::default()
             });
         }
@@ -117,7 +118,7 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
             scopes.push(ActiveScope {
                 id: s.id.clone(),
                 kind: "user",
-                tags: crate::scope::tags::sanitize_tags(s.tags.clone(), "config.yaml scope tags"),
+                tags: sanitize_tags(s.tags.clone(), "config.yaml scope tags"),
                 ..Default::default()
             });
         }
@@ -130,10 +131,7 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
                 scopes.push(ActiveScope {
                     id: s.id.clone(),
                     kind: "content",
-                    tags: crate::scope::tags::sanitize_tags(
-                        s.tags.clone(),
-                        "config.yaml scope tags",
-                    ),
+                    tags: sanitize_tags(s.tags.clone(), "config.yaml scope tags"),
                     ..Default::default()
                 });
             }
