@@ -33,7 +33,7 @@ mod note;
 pub(crate) mod note_not_saved;
 pub(crate) mod ownership;
 pub(crate) mod partial;
-pub use note_not_saved::{EXIT_SAVED_WITHOUT_NOTE, exit_code};
+pub use note_not_saved::exit_code;
 pub(crate) mod pending_note;
 pub(crate) use pending_note::recover as recover_crashed_notes;
 pub(crate) mod progress;

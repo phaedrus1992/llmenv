@@ -473,7 +473,7 @@ fn every_failed_note_says_the_change_is_saved() {
     for (command, err) in &notes {
         assert_eq!(
             crate::task::exit_code(err),
-            crate::task::EXIT_SAVED_WITHOUT_NOTE,
+            crate::task::note_not_saved::EXIT_SAVED_WITHOUT_NOTE,
             "{command}: a saved change with a failed note has its own status"
         );
     }
