@@ -603,8 +603,10 @@ Only when the open session has no match does the search cover the whole project.
   (added in v3.14.0) The command journals the note in `pending-notes/` of the state directory before it changes
   anything.
   A crash between the change and the note leaves the journal, and the next `llmenv task` command writes the note
-  with the prefix "recovered after a crash, the change may not have completed". A note that cannot be written is
-  logged with its text.
+  with the prefix "recovered after a crash, the change may not have completed".
+  The running command holds a lock on its journal file, so a file that can be locked belongs to a command that is
+  gone, and a reused process id cannot hide it.
+  A note that cannot be written is kept as a `.failed` file in the journal folder, and it is logged with its text.
   `task add --session <id>` refuses a session of another conversation the same way, and a
   `--parent` in another session is refused (#3480, #3486). An owned session takes a new task
   only from its owner. A caller with no conversation id is refused for that session.
