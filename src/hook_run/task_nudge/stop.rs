@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use super::{NudgeState, load, queued_reminder, save, state_path};
+use super::{NudgeState, after_current, load, queued_reminder, save, state_path};
 use crate::config::TaskTracker;
 use crate::hook_run::session_state::lock_state_file;
 use crate::task::Tracking;
@@ -112,8 +112,17 @@ pub(crate) fn handle_stop(
         Tracking::Tracked {
             wip: Some(slug),
             queued,
+            next,
+            stuck,
             ..
-        } if *queued > 0 => stop_wip_reminder(tracker, slug, *queued, caller, state_dir),
+        } if *queued > 0 => {
+            let message = format!(
+                "llmenv task tracker: '{slug}' is in progress, and {queued} task(s) are queued \
+                 behind it. If '{slug}' is done, run `llmenv task done {slug}`. {}",
+                after_current(next.as_deref(), stuck.as_ref())
+            );
+            stop_wip_reminder(tracker, &message, caller, state_dir)
+        }
         // The nudges cannot run, so the agent hears why at the end of each turn.
         Tracking::Unknown(cause) => format!(
             "llmenv task tracker: the task reminders did not run, because the task store cannot \
@@ -127,8 +136,7 @@ pub(crate) fn handle_stop(
 /// the first such turn end, then every `stop_nudge_every` turn ends, so a long run is not nagged.
 fn stop_wip_reminder(
     tracker: &TaskTracker,
-    slug: &str,
-    queued: usize,
+    message: &str,
     caller: Option<&str>,
     state_dir: &Path,
 ) -> String {
@@ -148,11 +156,7 @@ fn stop_wip_reminder(
     if !due {
         return String::new();
     }
-    format!(
-        "llmenv task tracker: '{slug}' is in progress, and {queued} task(s) are queued behind it. If \
-         '{slug}' is done, run `llmenv task done {slug}`. Then run `llmenv task start <slug>` for the \
-         next open step."
-    )
+    message.to_owned()
 }
 
 /// Restart the Stop throttle. Only an existing state file is touched, so a session that never
