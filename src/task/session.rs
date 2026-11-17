@@ -469,7 +469,8 @@ pub(crate) fn start_session_as(
         }
         StartDecision::Replace(named) => {
             let existing = open_sessions_strict(state_dir, project)?;
-            checkpoint::refuse_unnamed_foreign(&existing, request.owner, &named)?;
+            let engine_start = request.owner.pid.and_then(engine_start);
+            checkpoint::refuse_unnamed_foreign(&existing, request.owner, engine_start, &named)?;
             let mut abandoned = Vec::with_capacity(existing.len());
             // One strict read of the task store serves every abandoned session (#3479). With no
             // session to abandon, the store is not read.
@@ -1502,6 +1503,28 @@ mod tests {
             panic!("expected Replaced");
         };
         assert_eq!(abandoned.len(), 1);
+    }
+
+    #[test]
+    fn replace_refuses_a_session_that_only_a_reused_process_id_ties_to_the_caller() {
+        let dir = TempDir::new().expect("test");
+        let pid = std::process::id();
+        let mut old = start_as(
+            dir.path(),
+            "old",
+            &owner("conv-a", pid),
+            StartDecision::Auto,
+        );
+        // Last active before this process started: an earlier process had the same id.
+        old.last_activity = "2000-01-01T00:00:00Z".to_string();
+        save_session(dir.path(), &old).unwrap();
+        let err = replace_as(dir.path(), &owner("conv-b", pid), &[])
+            .expect_err("a reused pid alone must not make the session the caller's")
+            .to_string();
+        assert!(
+            err.contains(&format!("--other-session {}", old.id)),
+            "{err}"
+        );
     }
 
     #[test]

@@ -17,14 +17,22 @@ pub(super) fn only_own_session<'a>(
     owner: &EngineIdentity,
     engine_start: Option<SystemTime>,
 ) -> Option<&'a Session> {
-    let mut own = existing.by_ref().filter(|s| match ownership(s, owner) {
-        Ownership::Conversation => true,
-        Ownership::Process => engine_start.is_some_and(|start| active_since(s, start)),
-        Ownership::None => false,
-    });
+    let mut own = existing
+        .by_ref()
+        .filter(|s| is_callers(s, owner, engine_start));
     match (own.next(), own.next()) {
         (Some(only), None) => Some(only),
         _ => None,
+    }
+}
+
+/// Whether the caller started `session`. The process id alone counts only when the session was
+/// active after the caller's engine started, because a process id is reused (#2904).
+fn is_callers(session: &Session, owner: &EngineIdentity, engine_start: Option<SystemTime>) -> bool {
+    match ownership(session, owner) {
+        Ownership::Conversation => true,
+        Ownership::Process => engine_start.is_some_and(|start| active_since(session, start)),
+        Ownership::None => false,
     }
 }
 
@@ -213,6 +221,7 @@ pub(crate) fn idle_display(last_activity: &str) -> String {
 pub(super) fn refuse_unnamed_foreign(
     existing: &[Session],
     owner: &EngineIdentity,
+    engine_start: Option<SystemTime>,
     named: &[String],
 ) -> anyhow::Result<()> {
     if let Some(unknown) = named.iter().find(|n| !existing.iter().any(|s| &s.id == *n)) {
@@ -223,7 +232,7 @@ pub(super) fn refuse_unnamed_foreign(
     let unnamed: Vec<&Session> = existing
         .iter()
         .filter(|s| s.owner_session.is_some() || s.owner_pid.is_some())
-        .filter(|s| matches!(ownership(s, owner), Ownership::None))
+        .filter(|s| !is_callers(s, owner, engine_start))
         .filter(|s| !named.contains(&s.id))
         .collect();
     if unnamed.is_empty() {
