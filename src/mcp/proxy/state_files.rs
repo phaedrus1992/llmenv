@@ -26,7 +26,7 @@ fn clear_pidfile(pid_path: &Path, reason: &str) {
 /// Called once the port has proved a proxy is up. A pidfile naming a dead or
 /// recycled pid is worse than no pidfile — the old fast path read any non-empty
 /// pidfile as proof of life, so a wrong pid could never be recovered from
-/// (#1085). A pid that *is* alive is left alone: `kill -0` cannot prove which
+/// (#1085). A pid that *is* alive is left alone: a signal check cannot prove which
 /// process owns the port, so the running pid is the best available answer to
 /// "who do I signal".
 ///

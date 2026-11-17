@@ -79,9 +79,8 @@ const LOG_TAIL_BYTES: u64 = 8 * 1024;
 /// stale pidfile unrecoverable and let a dead pid be recorded as the listener.
 /// The pidfile answers "who do I signal", and is reconciled (cleared when it
 /// names a process that is not running) on the cold-start paths. The fast path
-/// deliberately skips that: it runs on every shell prompt, and judging a pid
-/// costs a fork+exec of `kill` — far more than the probe it would follow — while
-/// a stale pid is inert once liveness no longer consults it.
+/// deliberately skips that: it runs on every shell prompt, the loopback probe
+/// already answers liveness, and a stale pid is inert once liveness no longer consults it.
 ///
 /// The pid is written only *after* the bind is confirmed and the child is
 /// confirmed still alive, so a child that has *already* exited — losing the port
@@ -101,7 +100,7 @@ const LOG_TAIL_BYTES: u64 = 8 * 1024;
 /// invoking `mcp-proxy`. Production callers pass [`spawn_mcp_proxy`]. It returns
 /// a [`Child`] rather than a bare pid because `Child::try_wait` is the only
 /// reliable way to tell a running child from one that has already exited — a
-/// `kill -0` check reports an unreaped child as alive (#1085).
+/// signal check reports an unreaped child as alive (#1085).
 ///
 /// # Errors
 /// Returns an error if the parent directory cannot be created, the spawn
@@ -134,9 +133,8 @@ where
     // the proxy is up regardless of what the pidfile says (#1085).
     //
     // Deliberately does not reconcile the pidfile. This runs on every shell
-    // prompt on the server host, and `is_alive` costs a fork+exec of `kill`
-    // (~7 ms measured) — far more than the loopback probe it would follow. A
-    // stale pid is harmless now that nothing reads it for liveness, so it is
+    // prompt on the server host, and the loopback probe already answers
+    // liveness. A stale pid is harmless now that nothing reads it for liveness, so it is
     // reconciled on the paths that are already paying for a spawn instead.
     if probe_tcp(bind, LIVENESS_TCP_TIMEOUT_MS) {
         return Ok(EnsureOutcome::AlreadyRunning);
@@ -196,7 +194,7 @@ where
         }
         anyhow::bail!(
             "another llmenv process (pid {holder}) holds {} but nothing is serving {bind} \
-             after {budget_ms}ms",
+             after {budget_ms}ms. Fix: if no llmenv process runs, remove the lock file",
             lock_path.display()
         );
     }
