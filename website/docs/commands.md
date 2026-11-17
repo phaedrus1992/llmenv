@@ -609,6 +609,9 @@ Only when the open session has no match does the search cover the whole project.
   The running command holds a lock on its journal file, so a file that can be locked belongs to a command that is
   gone, and a reused process id cannot hide it.
   A note that cannot be written is kept as a `.failed` file in the journal folder, and it is logged with its text.
+  (added in v3.14.0) A command whose change is saved but whose audit note could not be written exits with status 3.
+  A command whose change failed exits with status 1, as before.
+  A script or an agent that retries on a failure can then tell the two apart, and it does not repeat the saved change.
   `task add --session <id>` refuses a session of another conversation the same way, and a
   `--parent` in another session is refused (#3480, #3486). An owned session takes a new task
   only from its owner. A caller with no conversation id is refused for that session.
