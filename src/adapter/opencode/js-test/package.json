@@ -1,0 +1,10 @@
+{
+  "name": "llmenv-opencode-plugin-tests",
+  "private": true,
+  "type": "module",
+  "description": "Tests and LCOV coverage for ../plugin.js. Run scripts/opencode-js-test.sh from the repo root.",
+  "devDependencies": {
+    "@vitest/coverage-v8": "5.1.0",
+    "vitest": "5.1.0"
+  }
+}
