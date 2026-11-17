@@ -157,31 +157,92 @@ const SETTINGS_MAX_BYTES: u64 = 1 << 20;
 /// `apiKeyHelper`, which gives an API key with no variable: the rendered settings in
 /// `CLAUDE_CONFIG_DIR`, and the project's `.claude/settings.json` and `.claude/settings.local.json`
 /// under `cwd`. A file that exists but cannot be read or parsed counts as set, so it keeps the
-/// notice.
+/// notice. A link at the project's `.claude` folder or at a project file is not followed, because
+/// the repository controls it (#3785).
 fn api_key_helper_set(config_dir: Option<&std::path::Path>, cwd: Option<&std::path::Path>) -> bool {
-    let project = cwd.map(|c| c.join(".claude"));
-    let files = [
-        config_dir.map(|d| d.join("settings.json")),
-        project.as_ref().map(|p| p.join("settings.json")),
-        project.as_ref().map(|p| p.join("settings.local.json")),
-    ];
-    files.into_iter().flatten().any(|file| {
-        match llmenv_paths::read_text_bounded_nofollow(&file, SETTINGS_MAX_BYTES) {
-            Ok(Some(text)) => serde_json::from_str::<Value>(&text).map_or(true, |v| {
-                v.get("apiKeyHelper").is_some_and(|h| !h.is_null())
-            }),
-            Ok(None) => false,
-            // A repo can plant a pipe, a link, or a huge file here. The notice stays on.
-            Err(e) => {
-                crate::agent_notice::record_logged(format!(
-                    "llmenv: cannot read {}: {e}, so the apiKeyHelper counts as set. Fix: remove \
-                     the pipe, link, or large file at that path.",
-                    file.display()
-                ));
-                true
-            }
+    let rendered = config_dir.map(|d| d.join("settings.json"));
+    let rendered_set = rendered.is_some_and(|file| {
+        let read = llmenv_paths::read_text_bounded(&file, SETTINGS_MAX_BYTES);
+        sets_helper(read, &file, "make it a regular UTF-8 file of at most 1 MiB")
+    });
+    rendered_set
+        || cwd.is_some_and(|cwd| {
+            ["settings.json", "settings.local.json"].iter().any(|name| {
+                let file = cwd.join(".claude").join(name);
+                sets_helper(
+                    project_setting(cwd, name),
+                    &file,
+                    "replace a link there with a regular copy of the file",
+                )
+            })
+        })
+}
+
+/// Whether one read settings file sets `apiKeyHelper`. A missing file does not. A file that cannot
+/// be read or parsed does, so the notice stays, and the agent hears why with `fix`.
+fn sets_helper(read: std::io::Result<Option<String>>, file: &std::path::Path, fix: &str) -> bool {
+    match read {
+        Ok(Some(text)) => serde_json::from_str::<Value>(&text).map_or(true, |v| {
+            v.get("apiKeyHelper").is_some_and(|h| !h.is_null())
+        }),
+        Ok(None) => false,
+        Err(e) => {
+            crate::agent_notice::record_logged(format!(
+                "llmenv: cannot read {}: {e}, so llmenv keeps its resume notice. Fix: {fix}, or \
+                 accept the second notice.",
+                file.display()
+            ));
+            true
         }
-    })
+    }
+}
+
+/// The text of `.claude/<name>` under the project folder `cwd`, or `None` when it is missing.
+/// The folder is opened first without following a link, and the file is opened from that handle,
+/// so a link at either one is an error and never a read of another file.
+#[cfg(unix)]
+fn project_setting(cwd: &std::path::Path, name: &str) -> std::io::Result<Option<String>> {
+    use crate::paths::dirfd::{open_dir_at, open_dir_nofollow, read_file_at};
+    use std::os::fd::AsFd as _;
+    let not_found = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
+    // The project folder is the user's own, so a link there is resolved before the walk.
+    let root = open_dir_nofollow(&std::fs::canonicalize(cwd)?)?;
+    let claude_name = std::ffi::OsStr::new(".claude");
+    let claude = match open_dir_at(root.as_fd(), claude_name) {
+        Ok(dir) => dir,
+        Err(e) if not_found(&e) => return Ok(None),
+        // Linux and macOS give different codes for a link here, so the path tells the cause.
+        Err(e) if cwd.join(".claude").is_symlink() => {
+            return Err(std::io::Error::new(
+                e.kind(),
+                "it is in a folder that is a link, which llmenv does not follow",
+            ));
+        }
+        Err(e) => return Err(e),
+    };
+    match read_file_at(
+        claude.as_fd(),
+        std::ffi::OsStr::new(name),
+        SETTINGS_MAX_BYTES,
+    ) {
+        Ok(bytes) => String::from_utf8(bytes).map(Some).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("it is not UTF-8: {e}"),
+            )
+        }),
+        Err(e) if not_found(&e) => Ok(None),
+        Err(e) if e.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()) => Err(
+            std::io::Error::new(e.kind(), "it is a link, which llmenv does not follow"),
+        ),
+        Err(e) => Err(e),
+    }
+}
+
+/// A platform with no `openat` has only the plain bounded read.
+#[cfg(not(unix))]
+fn project_setting(cwd: &std::path::Path, name: &str) -> std::io::Result<Option<String>> {
+    llmenv_paths::read_text_bounded(&cwd.join(".claude").join(name), SETTINGS_MAX_BYTES)
 }
 
 /// The first Claude Code release with its own warning when a resume would use a noticeable share

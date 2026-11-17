@@ -91,8 +91,9 @@ It goes to you, not to the agent.
 Claude Code sends these values on a `resume` or `fork` start, and no notice is shown when a value is missing.
 (changed in v3.14.0) On subscription auth with Claude Code 2.1.304 or later, llmenv shows no notice, because Claude Code warns itself when a resume would use a noticeable share of the 5-hour limit on a Pro or Max plan.
 llmenv counts a session as subscription auth when `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_BASE_URL` are unset or empty, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, and `CLAUDE_CODE_USE_FOUNDRY` are unset, empty, `0`, or `false`, and no `apiKeyHelper` is set in the rendered settings or in the project's `.claude/settings.json` or `.claude/settings.local.json`.
-(changed in v3.14.0) llmenv does not follow a link at either project path, because a cloned repository controls it.
-A link, a pipe, or a file that cannot be read counts as a set `apiKeyHelper`, and llmenv shows a notice with the fix.
+(changed in v3.14.0) llmenv does not follow a link at the project `.claude` folder or at either settings file, because a cloned repository controls them.
+A link, a pipe, or a file that cannot be read keeps the llmenv resume notice, and the agent gets a notice that names the path and the fix.
+To stop the second notice for a settings file that is a link on purpose, replace the link with a regular copy.
 It cannot see the plan, so a Team or Enterprise plan on subscription auth also gets no llmenv notice.
 An API key, gateway, or cloud provider session keeps the notice, as does a session whose Claude Code version llmenv cannot read, and a pre-release of 2.1.304.
 llmenv reads the Claude Code version when it renders the config, so after a Claude Code upgrade or downgrade the notice follows the new version from the next `llmenv regenerate`.
