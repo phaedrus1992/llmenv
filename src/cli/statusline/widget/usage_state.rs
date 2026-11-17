@@ -13,29 +13,55 @@ pub(super) fn usage_delta(state_dir: Option<&Path>, key: &str, pct: f64, now: i6
     };
     let path = dir.join(key);
     let prev = read_usage_state(&path);
-    if prev.is_none_or(|(_, ts)| now - ts >= 60) {
+    let stale = match prev {
+        UsageState::Sample(_, ts) => now - ts >= 60,
+        UsageState::First | UsageState::Unreadable => true,
+    };
+    if stale {
         write_usage_state(&path, pct, now);
     }
     match prev {
-        Some((prev_pct, _)) => format_delta(pct - prev_pct),
-        None => String::new(),
+        UsageState::Sample(prev_pct, _) => format_delta(pct - prev_pct),
+        UsageState::First => String::new(),
+        // The marker takes the value, so an unreadable state does not look like no change
+        // (#3745). The write above replaces the file for the next render.
+        UsageState::Unreadable => format!(" ({})", crate::cli::statusline::UNKNOWN_MARKER),
     }
 }
 
-fn read_usage_state(path: &Path) -> Option<(f64, i64)> {
+/// What the state file holds.
+#[derive(Clone, Copy)]
+enum UsageState {
+    /// No file: the first sample.
+    First,
+    /// The last reading and its time.
+    Sample(f64, i64),
+    /// The file cannot be read or parsed.
+    Unreadable,
+}
+
+fn read_usage_state(path: &Path) -> UsageState {
     let contents = match crate::paths::bounded::state_text_io(path) {
         Ok(contents) => contents,
         // A missing file is the first sample. Any other read error is logged, not hidden.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return UsageState::First,
         Err(e) => {
             tracing::error!("usage state {} cannot be read: {e}", path.display());
-            return None;
+            return UsageState::Unreadable;
         }
     };
     let mut it = contents.split_whitespace();
-    let pct = it.next()?.parse().ok()?;
-    let ts = it.next()?.parse().ok()?;
-    Some((pct, ts))
+    let parsed = it
+        .next()
+        .and_then(|p| p.parse().ok())
+        .zip(it.next().and_then(|t| t.parse().ok()));
+    match parsed {
+        Some((pct, ts)) => UsageState::Sample(pct, ts),
+        None => {
+            tracing::error!("usage state {} has no reading", path.display());
+            UsageState::Unreadable
+        }
+    }
 }
 
 pub(super) fn write_usage_state(path: &Path, pct: f64, now: i64) {

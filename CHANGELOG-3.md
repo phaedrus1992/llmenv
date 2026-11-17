@@ -30,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Statusline `tasks`, `branch`, `pr`, `icm`, and usage-delta widgets keep their format and show `?` when their data cannot be read, as the zone widgets do. They no longer swap in a text label such as `pr: gh failed`; the cause goes to the log. See [the statusline docs](https://phaedrus1992.github.io/llmenv/docs/configuration). [feat:statusline] [#3745]
 - Read tool versions with the `semver` crate. A version with a leading zero, such as `2.01.0`, or an empty pre-release is no longer a version. [refactor:util] [#3510]
 - Return the `--other-session` audit note of a session command as a type that must be used, so a command cannot drop the note without a compiler warning. A pick that cannot name its cause now has a message for every case. [refactor:task] [#3602] [#3603]
 - Read the task store once in `llmenv task clear --session`, and the session store once in `llmenv task session show`, `summary`, `edit`, `note`, and `finish` with no id. `clear --session` takes the deleted tasks from the delete itself, so a failed delete no longer reads the store again. [perf:task] [#3743]

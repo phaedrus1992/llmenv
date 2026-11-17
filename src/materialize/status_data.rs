@@ -79,6 +79,7 @@ pub fn collect_status_data(
     cache_root: &Path,
     hashing: HashingMode,
 ) -> StatusDataJson {
+    let (icm, icm_failed) = collect_icm();
     let (throttle, throttle_fault) = collect_throttle(throttle_configs, &active.tags);
     let (throttle_error, throttle_conflict) = match throttle_fault {
         None => (None, None),
@@ -95,7 +96,8 @@ pub fn collect_status_data(
             }),
             plugins: collect_plugins(config, &active.tags),
             mcps: collect_mcps(config, bundle_mcp, &active.tags),
-            icm: collect_icm(),
+            icm,
+            icm_failed,
             throttle,
             throttle_error,
             throttle_conflict,

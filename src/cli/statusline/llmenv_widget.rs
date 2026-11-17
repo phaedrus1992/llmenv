@@ -160,8 +160,15 @@ fn render_tasks(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) ->
     let Some(tasks) = &data.tasks else {
         return String::new();
     };
+    // A failed read keeps the configured format and shows the marker where the value goes, so a
+    // read error never looks like no work (#3745).
     if tasks.unreadable {
-        return "tasks: unreadable".to_string();
+        return cfg
+            .and_then(|c| c.format.as_deref())
+            .unwrap_or("\u{2611} {done}/{total}")
+            .replace("{done}", super::UNKNOWN_MARKER)
+            .replace("{total}", super::UNKNOWN_MARKER)
+            .replace("{current}", super::UNKNOWN_MARKER);
     }
     let Some(session) = tasks.session else {
         return String::new();
@@ -545,7 +552,7 @@ mod tests {
             ..Default::default()
         };
         let out = render_llmenv_widget("tasks", &data, None, &icons(), false).unwrap();
-        assert_eq!(out, "tasks: unreadable");
+        assert_eq!(out, "\u{2611} ?/?");
     }
 
     #[test]
@@ -682,6 +689,7 @@ mod tests {
                 memories: 142,
                 concepts: Some(47),
             }),
+            icm_failed: false,
             cache: Some(CacheData {
                 prunable_bytes: Some(15_728_640),
                 unreadable: 0,
