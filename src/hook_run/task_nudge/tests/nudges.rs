@@ -287,17 +287,23 @@ fn a_stop_with_the_next_task_below_the_wip_task_puts_the_sub_task_first() {
     let session = open_session(dir.path());
     let parent = add(dir.path(), &session, "Parent");
     crate::task::start_task(dir.path(), parent.as_str(), false).unwrap();
-    let child = crate::task::add_task_for_session(
-        dir.path(),
-        "Child",
-        ParentSpec::Explicit(&parent),
-        &session,
-    )
-    .unwrap();
+    let new = crate::task::NewTask {
+        title: "Child",
+        placement: crate::task::Placement::Child(&parent),
+        ..crate::task::NewTask::default()
+    };
+    let owner = crate::task::session::EngineIdentity::default();
+    let choice = crate::task::SessionChoice::Named {
+        id: &session,
+        owner: &owner,
+        other_session: None,
+    };
+    let child =
+        crate::task::add_task_with(dir.path(), &new, ParentSpec::Detached, choice, "proj").unwrap();
     let stop = serde_json::json!({ "last_assistant_message": "Done." });
     let text = handle_stop_read(&TaskTracker::default(), &stop, Some("s1"), dir.path());
     assert!(
-        text.contains("cannot close before its open sub-tasks"),
+        text.contains("stays open until its open sub-tasks are done"),
         "{text}"
     );
     assert!(

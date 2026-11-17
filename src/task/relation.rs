@@ -96,7 +96,12 @@ fn children<'a>(parent: &str, all: &'a [Task]) -> Vec<&'a Task> {
 /// the walk sees it, and the revisit is skipped. The refusal needs the undone tasks only, so it
 /// does not report the loop. The blocker walk reports it (#3618, #3757).
 pub(super) fn undone_descendants<'a>(slug: &str, all: &'a super::StrictTasks) -> Vec<&'a Task> {
-    let all = all.as_slice();
+    undone_descendants_in(slug, all.as_slice())
+}
+
+/// [`undone_descendants`] over a plain list of tasks, for a caller that does not need the strict
+/// read.
+pub(super) fn undone_descendants_in<'a>(slug: &str, all: &'a [Task]) -> Vec<&'a Task> {
     let mut found: Vec<&Task> = Vec::new();
     let mut seen: Vec<&str> = vec![slug];
     let mut frontier: Vec<&str> = vec![slug];

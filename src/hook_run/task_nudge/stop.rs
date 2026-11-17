@@ -119,21 +119,22 @@ pub(crate) fn handle_stop(
             next_in_wip,
             ..
         } if *queued > 0 => {
-            let message = if let (true, Some(next)) = (*next_in_wip, next) {
+            let after = match next.as_deref().filter(|_| *next_in_wip) {
                 // `done` refuses a task whose sub-tasks are open, so the sub-task comes first.
-                format!(
-                    "llmenv task tracker: '{slug}' is in progress, and {queued} task(s) are queued \
-                     behind it. '{slug}' cannot close before its open sub-tasks do. Finish or \
-                     park them first: {}",
-                    start_next(next)
-                )
-            } else {
-                format!(
-                    "llmenv task tracker: '{slug}' is in progress, and {queued} task(s) are queued \
-                     behind it. If '{slug}' is done, run `llmenv task done {slug}`. {}",
+                Some(sub) => format!(
+                    "'{slug}' stays open until its open sub-tasks are done. Finish or park them \
+                     first: {}",
+                    start_next(sub)
+                ),
+                None => format!(
+                    "If '{slug}' is done, run `llmenv task done {slug}`. {}",
                     after_current(next.as_deref(), stuck.as_ref())
-                )
+                ),
             };
+            let message = format!(
+                "llmenv task tracker: '{slug}' is in progress, and {queued} task(s) are queued \
+                 behind it. {after}"
+            );
             stop_wip_reminder(tracker, &message, caller, state_dir)
         }
         // The nudges cannot run, so the agent hears why at the end of each turn.

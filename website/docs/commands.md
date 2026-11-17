@@ -896,7 +896,7 @@ Nothing turns off the third item.
   Its blockers are done, the queue does not hold it, and no ancestor refuses it.
   When no open task can start, the reminder names the first open task and says why.
   (changed in v3.14.0) When the next task is a sub-task of the task in progress, the Stop reminder says
-  the task in progress cannot close before its open sub-tasks do, and names the sub-task to start.
+  the task in progress stays open until its open sub-tasks are done, and names the sub-task to start.
   The cause is a blocker that is not done, blocker links that loop, the queue,
   or a parent that is done, missing, or in another session.
 - An open session with no task at all is named in the Stop and SessionStart reminders.

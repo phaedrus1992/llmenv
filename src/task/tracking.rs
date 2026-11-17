@@ -115,7 +115,9 @@ fn tracking_of(visible: &[session::Session], tasks: &[Task], caller: Option<&str
     let queued = open.len();
     let next = super::startability::first_startable(&open, tasks, &by_slug).map(|t| t.slug.clone());
     let next_in_wip = match (&wip, &next) {
-        (Some(wip), Some(next)) => is_below(next, wip, &by_slug),
+        (Some(wip), Some(next)) => super::relation::undone_descendants_in(wip, tasks)
+            .iter()
+            .any(|t| &t.slug == next),
         _ => false,
     };
     let stuck = if next.is_none() {
@@ -132,22 +134,6 @@ fn tracking_of(visible: &[session::Session], tasks: &[Task], caller: Option<&str
         stuck,
         next_in_wip,
     }
-}
-
-/// Whether `slug` is a sub-task of `ancestor`, at any depth. A loop in the parent links ends the
-/// walk after one pass over the tasks.
-fn is_below(slug: &str, ancestor: &str, by_slug: &std::collections::HashMap<&str, &Task>) -> bool {
-    let mut current = slug;
-    for _ in 0..by_slug.len() {
-        let Some(parent) = by_slug.get(current).and_then(|t| t.parent.as_deref()) else {
-            return false;
-        };
-        if parent == ancestor {
-            return true;
-        }
-        current = parent;
-    }
-    false
 }
 
 #[cfg(test)]
