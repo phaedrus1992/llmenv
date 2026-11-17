@@ -62,7 +62,10 @@ pub(crate) fn emit_detached_trace(job: &DetachedJob<'_>) {
     if crate::trace::file_sink_path().is_none() {
         match llmenv_paths::state_dir() {
             Ok(dir) => append_to_state_log(&dir.join(STATE_LOG), &line),
-            Err(e) => tracing::warn!("detached trace: no state dir, line dropped: {e:#}"),
+            Err(e) => crate::agent_notice::record_logged(format!(
+                "llmenv: a detached job trace line was dropped, because the state folder cannot \
+                 be found: {e:#}. Fix: run `llmenv doctor` to check the state folder."
+            )),
         }
     }
 }
@@ -104,7 +107,11 @@ fn rotate_state_log(path: &std::path::Path) {
         rustix::fs::renameat(&dir, name, &dir, older.as_os_str()).map_err(std::io::Error::from)
     });
     if let Err(e) = rotated {
-        tracing::warn!("detached trace: cannot rotate {}: {e}", path.display());
+        crate::agent_notice::record_logged(format!(
+            "llmenv: cannot rotate the detached job trace log {}: {e}. Fix: check that the state \
+             folder is writable.",
+            path.display()
+        ));
     }
 }
 

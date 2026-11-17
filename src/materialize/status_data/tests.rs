@@ -601,7 +601,7 @@ fn the_session_log_count_reads_the_configured_path() {
 
 // #3062: a session log path that cannot resolve warns with the cause, and the count is empty.
 #[test]
-fn collect_session_log_warns_when_the_path_cannot_resolve() {
+fn collect_session_log_reports_when_the_path_cannot_resolve() {
     let config: Config =
         serde_yaml::from_str("session_log:\n  file:\n    path: relative/session-log.jsonl\n")
             .expect("config parses");
@@ -611,7 +611,7 @@ fn collect_session_log_warns_when_the_path_cannot_resolve() {
     });
     assert_eq!(count, None);
     assert!(
-        logs.contains("WARN") && logs.contains("is relative"),
+        logs.contains("ERROR") && logs.contains("is relative"),
         "{logs}"
     );
     assert!(logs.contains("Fix:"), "{logs}");
