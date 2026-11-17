@@ -177,12 +177,14 @@ fn child_progress(parent: &str, all: &[Task]) -> Option<ChildProgress> {
     })
 }
 
-/// The first `open` sub-task of `parent`, in creation order.
-fn first_open_child<'a>(parent: &str, all: &'a [Task]) -> Option<&'a Task> {
-    children(parent, all)
+/// The `open` sub-tasks of `parent`, in creation order.
+fn open_children<'a>(parent: &str, all: &'a [Task]) -> Vec<&'a Task> {
+    let mut open: Vec<&Task> = children(parent, all)
         .into_iter()
         .filter(|t| t.state == TaskState::Open)
-        .min_by(|a, b| (&a.created_at, &a.slug).cmp(&(&b.created_at, &b.slug)))
+        .collect();
+    open.sort_by(|a, b| (&a.created_at, &a.slug).cmp(&(&b.created_at, &b.slug)));
+    open
 }
 
 /// The progress of a `wip` parent for a reminder line, with a leading space, or an empty string
@@ -200,21 +202,38 @@ pub(super) fn progress_suffix(slug: &str, all: &[Task]) -> String {
 /// One line for each `wip` parent in `session_ids` whose sub-tasks are all `open` or `done`:
 /// the work is planned and nothing runs.
 pub(super) fn stalled_parent_lines(all: &[Task], session_ids: &[String]) -> Vec<String> {
+    let by_slug: std::collections::HashMap<&str, &Task> =
+        all.iter().map(|t| (t.slug.as_str(), t)).collect();
     all.iter()
         .filter(|t| t.state == TaskState::Wip)
         .filter(|t| t.session.as_ref().is_some_and(|s| session_ids.contains(s)))
         .filter_map(|parent| {
             let progress = child_progress(&parent.slug, all).filter(|p| p.stalled())?;
-            let next = first_open_child(&parent.slug, all)?;
+            let open = open_children(&parent.slug, all);
+            // The start of a sub-task checks its blockers, the queue, and its ancestors, so the
+            // reminder names only a sub-task that the start accepts (#3770).
+            let action = match super::startability::first_startable(&open, all, &by_slug) {
+                Some(next) => format!(
+                    "If you recognize it as your own work, run `llmenv task start {}` ({}) before \
+                     you work on that step.",
+                    next.slug, next.title
+                ),
+                None => match open.first() {
+                    Some(first) => format!(
+                        "Its sub-task '{}' cannot start: {}.",
+                        first.slug,
+                        super::startability::refusal(first, all, &by_slug)
+                            .unwrap_or_else(|| "the start refuses it".to_owned())
+                    ),
+                    None => "None of its sub-tasks can start.".to_owned(),
+                },
+            };
             Some(format!(
-                "Task '{}' ({}) has {}. If you recognize it as your own work, run `llmenv task \
-                 start {}` ({}) before you work on that step. If you don't recognize it, it \
-                 belongs to a different session — leave it alone.",
+                "Task '{}' ({}) has {}. {action} If you don't recognize it, it belongs to a \
+                 different session — leave it alone.",
                 parent.slug,
                 parent.title,
                 progress.line(),
-                next.slug,
-                next.title
             ))
         })
         .collect()

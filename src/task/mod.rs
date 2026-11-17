@@ -32,6 +32,7 @@ pub(crate) mod ownership;
 pub(crate) mod partial;
 pub(crate) mod progress;
 mod session_choice;
+mod startability;
 pub(crate) use note::note_task;
 pub(crate) use resolve::TaskTarget;
 mod store_lock;
@@ -1129,9 +1130,9 @@ pub(crate) fn stop_hook_reminder(stored: &Stored, caller: Option<&str>) -> Strin
 #[derive(Debug, Clone)]
 struct IdleSession {
     session: session::Session,
-    /// The task to start next: the first actionable `open` task in execution
-    /// order, else the first `open` task when every one is blocked.
-    next: Task,
+    /// The task to start next: the first `open` task in execution order that `task start`
+    /// accepts. `None` when the start refuses every open task, and `loop_error` then says why.
+    next: Option<Task>,
     open_count: usize,
     /// Set when no task is actionable: the slug of the first open task that a blocker keeps from
     /// starting, and why (a loop in the blocker walk, or a blocker that is not done). The reminder
@@ -1164,14 +1165,16 @@ fn idle_sessions(open: Vec<Session>, all_tasks: &[Task]) -> Vec<IdleSession> {
                 .iter()
                 .filter(|t| t.state == TaskState::Open)
                 .collect();
-            let actionable = open.iter().find(|t| is_actionable(t, &by_slug));
-            let next = actionable.or_else(|| open.first())?;
-            let loop_error = match actionable {
+            if open.is_empty() {
+                return None;
+            }
+            let next = startability::first_startable(&open, all_tasks, &by_slug);
+            let loop_error = match next {
                 Some(_) => None,
-                None => blockers::first_obstacle(&open, &by_slug),
+                None => blockers::first_obstacle(&open, all_tasks, &by_slug),
             };
             Some(IdleSession {
-                next: (*next).clone(),
+                next: next.map(Task::to_owned),
                 open_count: open.len(),
                 loop_error,
                 session,
@@ -1211,6 +1214,13 @@ fn idle_reminder_lines(project: &str, caller: Option<&str>, stored: &Stored) -> 
                     count = idle.open_count,
                 );
             }
+            let Some(next) = &idle.next else {
+                return format!(
+                    "Session '{label}' ({id}) has {count} open task(s) and none in progress, but \
+                     the start refuses every one of them. Run `llmenv task ls` to see why.",
+                    count = idle.open_count,
+                );
+            };
             format!(
                 "Session '{label}' ({id}) has {count} open task(s) and none in progress. If \
                  you recognize this as your own session, run `llmenv task start {next}` \
@@ -1219,8 +1229,8 @@ fn idle_reminder_lines(project: &str, caller: Option<&str>, stored: &Stored) -> 
                  The session cannot be closed while any task is open. If you don't \
                  recognize it, it belongs to a different session — leave it alone.",
                 count = idle.open_count,
-                next = idle.next.slug,
-                title = idle.next.title,
+                next = next.slug,
+                title = next.title,
             )
         })
         .collect::<Vec<_>>();
@@ -2865,7 +2875,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_sessions_prefers_first_unblocked_open_task() {
+    fn idle_sessions_name_the_obstacle_when_a_blocker_and_the_queue_refuse_every_task() {
         let dir = TempDir::new().expect("test");
         let project = current_project();
         let (session_id, first, second) = idle_session_in_project(dir.path(), &project);
@@ -2875,7 +2885,16 @@ mod tests {
         let idle = idle_sessions(open, &list_tasks(dir.path()));
         assert_eq!(idle.len(), 1);
         assert_eq!(idle[0].session.id, session_id);
-        assert_eq!(idle[0].next.slug, second.slug);
+        // The first task waits on the second, and the queue holds the second behind the first, so
+        // the start refuses both. The reminder keeps the first task and names why it cannot
+        // start (#3770), where it used to advise a start of the second that the queue refused.
+        assert!(idle[0].next.is_none());
+        let (slug, why) = idle[0].loop_error.as_ref().expect("an obstacle is named");
+        assert_eq!(slug, &first.slug);
+        assert!(
+            why.contains(&format!("waits on '{}'", second.slug)),
+            "{why}"
+        );
         assert_eq!(idle[0].open_count, 2);
     }
 
@@ -3137,8 +3156,12 @@ mod tests {
                 .collect();
             proptest::prop_assert_eq!(got, expected);
             for i in &idle {
-                proptest::prop_assert_eq!(i.next.state, TaskState::Open);
-                proptest::prop_assert_eq!(i.next.session.as_deref(), Some(i.session.id.as_str()));
+                // Either a task to start, or the reason that none can start.
+                proptest::prop_assert_eq!(i.next.is_some(), i.loop_error.is_none());
+                if let Some(next) = &i.next {
+                    proptest::prop_assert_eq!(next.state, TaskState::Open);
+                    proptest::prop_assert_eq!(next.session.as_deref(), Some(i.session.id.as_str()));
+                }
             }
         }
     }

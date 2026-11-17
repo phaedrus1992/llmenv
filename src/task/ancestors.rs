@@ -13,6 +13,34 @@ pub(super) fn ancestors_to_start(
     force: bool,
     all_tasks: &StrictTasks,
 ) -> anyhow::Result<Vec<Task>> {
+    walk_ancestors(child, force, all_tasks.as_slice(), |slug| {
+        load_task(state_dir, slug)
+    })
+}
+
+/// The text of the refusal that starting `child` meets at an ancestor, or `None` when no ancestor
+/// refuses. The parents come from `all`, so a reminder asks the same question as the start does
+/// and never names a start that the start refuses (#3770). `all` must come from a strict read,
+/// because a parent that is absent from it is reported as missing.
+pub(super) fn ancestor_refusal(child: &Task, all: &[Task]) -> Option<String> {
+    walk_ancestors(child, false, all, |slug| {
+        all.iter()
+            .find(|t| t.slug == slug)
+            .map(Task::to_owned)
+            .ok_or_else(|| anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::NotFound)))
+    })
+    .err()
+    .map(|e| format!("{e:#}"))
+}
+
+/// The walk of [`ancestors_to_start`], with the parent lookup as a parameter. `lookup` fails with a
+/// not-found error for a parent that is missing, and with any other error for one it cannot read.
+fn walk_ancestors(
+    child: &Task,
+    force: bool,
+    all: &[Task],
+    lookup: impl Fn(&str) -> anyhow::Result<Task>,
+) -> anyhow::Result<Vec<Task>> {
     let mut promoted = Vec::new();
     let mut seen = vec![child.slug.clone()];
     let mut current = child.clone();
@@ -36,7 +64,7 @@ pub(super) fn ancestors_to_start(
         // A missing parent fails the start with the fix, so a dangling link is never passed over
         // silently (#3591). Any other read error fails the start, so the done and queue checks
         // never run blind.
-        let parent = match load_task(state_dir, &parent_slug) {
+        let parent = match lookup(&parent_slug) {
             Ok(parent) => parent,
             Err(e) if is_not_found(&e) => anyhow::bail!(
                 "cannot start '{}': its parent '{parent_slug}' is missing from the task store. \
@@ -83,7 +111,7 @@ pub(super) fn ancestors_to_start(
                 && let Some(block) = relation::queue_block(
                     &parent,
                     &session::filter::tasks_in_sessions(
-                        all_tasks.as_slice(),
+                        all,
                         &std::iter::once(session_id.clone()).collect(),
                     ),
                 )
