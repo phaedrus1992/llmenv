@@ -6,9 +6,15 @@ use crate::config::ContentScope;
 /// below the root skips one entry, so it is a warning (#3070).
 fn report_walk_error(err: &walkdir::Error, cwd: &std::path::Path) {
     if err.depth() == 0 {
+        let fix = match err.io_error().map(std::io::Error::kind) {
+            Some(std::io::ErrorKind::NotFound) => {
+                "Fix: run the command from a directory that exists"
+            }
+            _ => "Fix: check the permissions of the working directory",
+        };
         crate::agent_notice::record_logged(format!(
             "llmenv: content scopes cannot read the working directory {}, so none of them match \
-             ({err}). Fix: check the permissions of the working directory.",
+             ({err}). {fix}.",
             cwd.display()
         ));
     } else {
@@ -204,5 +210,22 @@ mod tests {
                 naive_matches(&scopes, dir.path())
             );
         }
+    }
+
+    // #3070: a working directory that cannot be read gives no match, and the notice names it.
+    #[test]
+    fn an_unreadable_working_directory_matches_nothing_and_says_why() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let gone = dir.path().join("content-walk-gone-3070");
+        let scopes = [scope("a", "**/*.rs", None)];
+        let matched = matches_content_all(&scopes, &gone);
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        crate::agent_notice::forget_containing("content-walk-gone-3070");
+        assert!(matched.is_empty());
+        assert!(notices.contains("a directory that exists"), "{notices}");
+        assert!(
+            notices.contains("content-walk-gone-3070") && notices.contains("Fix:"),
+            "{notices}"
+        );
     }
 }

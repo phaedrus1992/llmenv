@@ -14,7 +14,14 @@ const ICM_STATS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2)
 /// response can't be parsed — every one of those is an expected, non-error
 /// condition (most sessions have no ICM backend configured at all).
 pub(super) fn collect_icm() -> Option<IcmData> {
-    let raw = match crate::memory::stats_json_with_timeout(ICM_STATS_TIMEOUT) {
+    icm_data_from(crate::memory::stats_json_with_timeout(ICM_STATS_TIMEOUT))
+}
+
+/// The status data for the result of the stats call. A scope with no backend is normal and logs at
+/// debug. Any other failure, and a reply with no readable count, log at warn, so an empty field
+/// has a visible cause (#3062).
+fn icm_data_from(reply: anyhow::Result<String>) -> Option<IcmData> {
+    let raw = match reply {
         Ok(raw) => raw,
         // Most scopes have no ICM backend, so that case is not a problem to report.
         Err(e) if crate::memory::is_no_backend(&e) => {
@@ -70,4 +77,48 @@ pub(super) fn extract_stat_line(raw: &str, label: &str) -> Option<u64> {
             .parse()
             .ok()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::icm_data_from;
+    use crate::test_log_capture::capture_logs;
+
+    #[test]
+    fn a_failed_call_warns_with_the_cause_and_a_reply_with_no_count_warns_with_its_head() {
+        let mut failed = None;
+        let logs = capture_logs(|| {
+            failed = icm_data_from(Err(anyhow::anyhow!("connection refused by backend")));
+        });
+        assert!(failed.is_none());
+        assert!(
+            logs.contains("WARN") && logs.contains("connection refused by backend"),
+            "{logs}"
+        );
+        assert!(logs.contains("Fix:"), "{logs}");
+
+        let mut empty = None;
+        let logs = capture_logs(|| {
+            empty = icm_data_from(Ok("Topics: 3\n".to_owned()));
+        });
+        assert!(empty.is_none());
+        assert!(
+            logs.contains("WARN") && logs.contains("Memories line"),
+            "{logs}"
+        );
+        assert!(logs.contains("Topics: 3"), "{logs}");
+    }
+
+    #[test]
+    fn a_good_reply_logs_no_warning() {
+        let mut data = None;
+        let logs = capture_logs(|| {
+            // The control line proves the capture works, so a missing WARN is not a lost log.
+            tracing::info!("capture-control");
+            data = icm_data_from(Ok("Memories: 12\nTopics: 3\n".to_owned()));
+        });
+        assert!(logs.contains("capture-control"), "{logs}");
+        assert_eq!(data.map(|d| d.memories), Some(12));
+        assert!(!logs.contains("WARN"), "{logs}");
+    }
 }
