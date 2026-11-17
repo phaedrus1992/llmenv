@@ -393,6 +393,27 @@ fn a_project_claude_file_is_not_called_a_link() {
     assert!(!ours.contains("is a link"), "{ours}");
 }
 
+// A settings file that cannot be read for another reason is not called a link.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_project_setting_is_not_called_a_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project-3791-dir");
+    // A folder where the file should be gives a read error that is not a link and not missing.
+    std::fs::create_dir_all(project.join(".claude/settings.json")).unwrap();
+    assert!(api_key_helper_set(None, Some(&project)));
+    let notices = crate::agent_notice::current().unwrap_or_default();
+    let ours = notices
+        .lines()
+        .find(|l| l.contains("project-3791-dir"))
+        .unwrap_or_default();
+    assert!(
+        !ours.is_empty(),
+        "the read error must be noticed: {notices}"
+    );
+    assert!(!ours.contains("is a link"), "{ours}");
+}
+
 #[test]
 fn a_prerelease_of_2_1_304_keeps_the_notice() {
     let env = env_of(&[("CLAUDE_CODE_VERSION", "2.1.304-beta")]);
