@@ -139,8 +139,29 @@ fn a_link_in_the_journal_is_not_followed() {
 }
 
 #[test]
-fn this_process_is_not_gone() {
-    assert!(!process_is_gone(std::process::id()));
+fn a_claim_of_a_command_that_is_gone_is_replayed() {
+    let (dir, slug) = state_with_task();
+    std::mem::forget(Pending::for_task(dir.path(), &slug, "acted on").unwrap());
+    let entry = std::fs::read_dir(journal_dir(dir.path()))
+        .unwrap()
+        .flatten()
+        .next()
+        .unwrap()
+        .path();
+    std::fs::rename(&entry, claims::claim_path(&entry, 777)).unwrap();
+    // The claim of a live command stays. The claim of a gone command is replayed.
+    assert!(recover(dir.path(), |pid| pid != 777).is_empty());
+    assert!(notes_of(dir.path(), &slug).is_empty());
+    assert!(recover(dir.path(), |_| true).is_empty());
+    assert_eq!(
+        notes_of(dir.path(), &slug),
+        [format!("{RECOVERED}acted on")]
+    );
+    assert!(
+        files_in(dir.path()).is_empty(),
+        "{:?}",
+        files_in(dir.path())
+    );
 }
 
 proptest! {

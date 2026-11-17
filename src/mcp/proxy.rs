@@ -963,13 +963,12 @@ pub fn probe_tcp(bind: &str, timeout_ms: u64) -> bool {
     TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(timeout_ms)).is_ok()
 }
 
-/// Whether `pid` is a live process, via a `kill -0` signal-0 check.
+/// Whether `pid` is a live process, via a signal-0 check.
 ///
 /// `Some(true)` alive, `Some(false)` definitely not running, `None` when the
 /// check itself couldn't be performed. The three-way answer matters because
-/// callers act destructively on "not running": collapsing an unusable `kill` (not
-/// on `PATH`, or `fork` failing under process exhaustion) into `false` would make
-/// them treat every live process as dead.
+/// callers act destructively on "not running": collapsing an unusable check into `false` would
+/// make them treat every live process as dead. A process of another user is alive.
 ///
 /// # Note on TOCTOU
 /// Subject to PID-reuse races: a recycled pid belonging to an unrelated process
@@ -977,7 +976,7 @@ pub fn probe_tcp(bind: &str, timeout_ms: u64) -> bool {
 /// to the bind address should prefer [`probe_tcp`], which proves the proxy is
 /// actually serving.
 ///
-/// Returns `None` on non-Unix platforms, where there is no `kill` to consult.
+/// Returns `None` on non-Unix platforms, where there is no signal check to make.
 #[must_use]
 pub fn is_alive(pid: u32) -> Option<bool> {
     #[cfg(unix)]
@@ -989,15 +988,14 @@ pub fn is_alive(pid: u32) -> Option<bool> {
         if pid_i32 <= 0 {
             return None;
         }
-        // We avoid pulling libc as a dependency by going through std::process
-        // — std doesn't expose kill(2) with sig=0 directly.
-        Command::new("kill")
-            .arg("-0")
-            .arg(pid_i32.to_string())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .ok()
-            .map(|s| s.success())
+        let pid = rustix::process::Pid::from_raw(pid_i32)?;
+        // Only ESRCH means that no such process exists. EPERM is a live process of another
+        // user, so `kill -0` and its exit status cannot tell the two apart (#3782).
+        match rustix::process::test_kill_process(pid) {
+            Ok(()) | Err(rustix::io::Errno::PERM) => Some(true),
+            Err(rustix::io::Errno::SRCH) => Some(false),
+            Err(_) => None,
+        }
     }
     #[cfg(not(unix))]
     {
@@ -1515,6 +1513,15 @@ mod tests {
             None,
             "a dead pid must be cleared"
         );
+    }
+
+    /// A live process of another user is alive, not gone (#3782). Process 1 belongs to root, so a
+    /// caller without root meets EPERM from it.
+    #[cfg(unix)]
+    #[test]
+    fn a_process_of_another_user_is_alive() {
+        assert_eq!(super::is_alive(1), Some(true));
+        assert_eq!(super::is_alive(std::process::id()), Some(true));
     }
 
     /// An unparseable pidfile is cleared rather than left to fail every later read.

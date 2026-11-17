@@ -12,6 +12,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
+mod claims;
+
 use super::TaskTarget;
 
 /// The prefix of a recovered note. The change may not have saved before the crash, so the note
@@ -135,33 +137,12 @@ fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     options.open(path)?.write_all(bytes)
 }
 
-/// Whether the system reports no process with this id. A process of another user still exists, so
-/// it is not gone. A process that cannot be asked about counts as alive, and its entry stays.
-fn process_is_gone(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        let Some(pid) = i32::try_from(pid)
-            .ok()
-            .and_then(rustix::process::Pid::from_raw)
-        else {
-            return false;
-        };
-        matches!(
-            rustix::process::test_kill_process(pid),
-            Err(rustix::io::Errno::SRCH)
-        )
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        false
-    }
-}
-
 /// [`recover`] for the processes that the system reports as gone. Each result is a note that
 /// could not be written.
 pub(crate) fn recover_crashed(state_dir: &Path) -> Vec<String> {
-    recover(state_dir, process_is_gone)
+    recover(state_dir, |pid| {
+        crate::mcp::proxy::is_alive(pid) == Some(false)
+    })
 }
 
 /// The entries of the journal folder, in name order. A hidden file and a claimed file are not
@@ -230,6 +211,7 @@ fn read_entry(path: &Path) -> Option<Entry> {
 ///
 /// `is_gone` answers whether a process id has no process.
 pub(in crate::task) fn recover(state_dir: &Path, is_gone: impl Fn(u32) -> bool) -> Vec<String> {
+    claims::restore_abandoned(&journal_dir(state_dir), &is_gone);
     let mut lost = Vec::new();
     for path in entry_paths(state_dir) {
         let Some(entry) = read_entry(&path) else {
@@ -239,7 +221,7 @@ pub(in crate::task) fn recover(state_dir: &Path, is_gone: impl Fn(u32) -> bool) 
             continue;
         }
         // The rename is the claim: two commands that start together replay one entry once.
-        let claimed = path.with_extension(format!("claim-{}", std::process::id()));
+        let claimed = claims::claim_path(&path, std::process::id());
         if std::fs::rename(&path, &claimed).is_err() {
             continue;
         }
