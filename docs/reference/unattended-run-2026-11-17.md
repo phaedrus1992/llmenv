@@ -42,19 +42,41 @@ Tests, CI, and chores:
 - `semver` crate, CRAP splits, and review follow-ups (#3510, #3595, #3226).
 - Bug batches (#3754, #3758, #3767, #3768, #3746).
 
-## Work not done
+## Blocked issues, decided and worked
 
-| Issue | State | Why |
-| --- | --- | --- |
-| #3765 | blocked | Owner decision: exit status when an audit note fails after a saved change. |
-| #3745 | blocked | Owner decision: the #3071 marker rule for non-zone widget failures. |
-| #3592 | blocked | The fix lives in the applied-ai plugin. |
-| #3584 | blocked | The issue has no body. Questions posted on the trust model for a `command` source. |
-| #3487 | blocked | Owner decision: how a second conversation may take over an owned session. |
-| #3480 | blocked | Item 5 waits on #3487. Items 1 to 4 and 6 are fixed. |
-| #3330, #3083 | blocked | Owner decision: unknown state for an unreadable working directory. |
-| #3132 | blocked | Needs a GitHub ruleset change. |
-| #3092, #3085 | blocked | Owner decision: a pinned vitest toolchain for `plugin.js`. |
+The owner decided each blocked issue in the table of the first report.
+A second run worked them, on branch `unattended/blocks`, as a second PR.
+
+- #3765: the owner chose a distinct exit status.
+  A command that saved its change and failed the audit note exits with status 3.
+- #3745: the owner chose that every widget keeps its format.
+  The tasks, branch, pr, icm, throttle, and usage-delta widgets show `?` when they fail.
+- #3487 and #3480: the owner chose to refuse `--replace` only.
+  `session start --replace` refuses another conversation's session unless `--other-session` names it.
+- #3330 and #3083: the owner chose a tri-state.
+  A content scope is matched, unmatched, or unknown. An unknown scope stays inactive, and a notice names it.
+- #3592: the owner chose to split the files.
+  The test modules of `src/task/mod.rs` and `src/hook_run/mod.rs` moved to files.
+  The semgrep scan of both files takes a third of the time.
+- #3092 and #3085: the owner chose to add the toolchain.
+  A pinned vitest toolchain lives under `src/adapter/opencode/js-test/`, with a CI job and tests for `plugin.js`.
+- #3790: `humantime` is gone. `jiff` does the time text, and the advisory ignore is removed.
+
+Still blocked:
+
+- #3584: the issue has no body, so the trust model of a `command` source is open.
+- #3132: the ruleset change is the owner's, through `gh api`.
+
+The mutation run of the first PR found three survivors in `project_setting`.
+One was the fallback for a platform with no `openat`, which a Linux run cannot test. The other two now have a test.
+
+Filed from the review of this run: #3792 to #3797, all in v3.14.0.
+
+## Forward-merge
+
+The forward-merge of the first PR into `release/4.x` has 35 conflicts.
+The cause is that `release/4.x` moved the task and scope code into `crates/`.
+The merge was not done. The second PR changes the same files, so one merge of both PRs does the work once.
 
 ## Review of the whole branch
 
@@ -76,10 +98,11 @@ The semgrep tob-rust ruleset timed out on `src/task/mod.rs` in two sprints. The 
 - The commit gate needs a task in progress started in its own Bash call.
 - `sprint-merge.sh` must run on the integration branch, and it refuses a dirty tree.
   Do not mark an issue done before the merge prints its SHA.
+- After a manual mutation, `touch` the file when you restore it. A stale build can run the mutated code.
 - `.tmp/gate2.sh` can leave `gate.rc` at 0 after a failed run. Read `.tmp/verify.log`.
 
 ## What the user must do
 
-1. Decide the blocked issues in the table above.
+1. Decide #3584 and #3132.
 2. Unlock the signer when asked, so `scripts/resign.sh` can sign the branch.
 3. Check the PR and its `closingIssuesReferences` before the merge.
