@@ -4,6 +4,7 @@ pub mod agent_notice;
 pub mod mcp_trace;
 pub mod process;
 pub mod shell;
+pub mod time;
 pub mod trace;
 
 use anstyle::{AnsiColor, Color, Style};

@@ -82,7 +82,7 @@ fn main() {
     if let Err(e) = llmenv::cli::run() {
         llmenv::record_detached_job_failure(&e);
         eprintln!("llmenv: {e:#}");
-        std::process::exit(1);
+        std::process::exit(llmenv::task::exit_code(&e));
     }
 }
 

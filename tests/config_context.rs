@@ -175,6 +175,49 @@ fn config_context_exits_zero_on_empty_stdin() {
     );
 }
 
+// #3752: a payload that does not name its event is an error, not a made-up `SessionStart`.
+#[test]
+fn config_context_rejects_stdin_that_is_not_json() {
+    let (dir, config_path) = setup_config();
+    let output = support::isolated_llmenv_cmd(dir.path())
+        .env("LLMENV_CONFIG", &config_path)
+        .arg("config-context")
+        .write_stdin("not json at all")
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "unparsable stdin must fail");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("not json at all"),
+        "stderr must name the input; got: {stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "no SessionStart payload may be printed"
+    );
+}
+
+#[test]
+fn config_context_rejects_a_payload_with_no_event_name() {
+    let (dir, config_path) = setup_config();
+    let output = support::isolated_llmenv_cmd(dir.path())
+        .env("LLMENV_CONFIG", &config_path)
+        .arg("config-context")
+        .write_stdin(r#"{"session_id":"abc"}"#)
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "a payload without hook_event_name must fail"
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("hook_event_name"),
+        "stderr must name the field; got: {stderr}"
+    );
+    assert!(output.stdout.is_empty());
+}
+
 // #2339: the SessionStart reminder carries each open session's resume context and the command
 // that follows each ref, so a fresh agent after `/clear` does not rebuild it by hand.
 #[test]

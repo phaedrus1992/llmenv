@@ -201,7 +201,9 @@ pub(crate) fn open_regular(path: &Path) -> std::io::Result<Option<std::fs::File>
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::custom_flags(
         &mut opts,
-        rustix::fs::OFlags::NONBLOCK.bits().cast_signed(),
+        (rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::NOFOLLOW)
+            .bits()
+            .cast_signed(),
     );
     let file = match opts.open(path) {
         Ok(file) => file,
@@ -216,6 +218,19 @@ pub(crate) fn open_regular(path: &Path) -> std::io::Result<Option<std::fs::File>
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn open_regular_does_not_follow_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("log");
+        std::fs::write(&file, b"one\n").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert!(open_regular(&file).unwrap().is_some());
+        assert!(open_regular(&link).is_err(), "a link must not be followed");
+        assert!(open_regular(&dir.path().join("none")).unwrap().is_none());
+    }
 
     #[test]
     fn a_cut_character_at_the_end_is_an_error_that_says_the_file_may_be_cut() {

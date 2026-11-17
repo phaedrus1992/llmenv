@@ -424,8 +424,6 @@ pub(crate) fn begin(
 
 mod describe;
 pub(crate) use describe::describe;
-#[cfg(test)]
-use describe::format_age;
 mod inputs;
 mod unrunnable;
 pub(crate) use inputs::{InputsError, inputs_or_checkpoint};

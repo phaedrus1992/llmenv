@@ -49,26 +49,33 @@ pub(super) fn update(
         // A refused or unresolved id is a task error, not a store error, so the deny keeps the id hint.
         // A read error of the store is returned with `?`, so it reaches `store_failed` and not
         // the id hint.
-        let (slug, ownership_note, caller) = match checked_slug(state_dir, project, owner, id)? {
-            Ok(checked) => checked,
-            Err(e) => return Ok((Err(e), String::new())),
-        };
+        let (slug, ownership_note, caller, tasks) =
+            match checked_slug(state_dir, project, owner, id)? {
+                Ok(checked) => checked,
+                Err(e) => return Ok((Err(e), String::new())),
+            };
         // The delete of an owner-less task needs a caller session to hold its record. The check
         // runs before the delete.
         let owner_less_delete = deleted
             && ownership_note
                 .as_ref()
                 .is_some_and(OverrideNote::is_owner_less);
-        let change = if owner_less_delete {
-            check_owner_less_delete(&caller)
-        } else {
-            Ok(())
-        }
-        .and_then(|()| change(state_dir, &slug, status))
-        .and_then(|msg| {
-            record_check_note(state_dir, &caller, &slug, ownership_note.as_ref(), deleted)
-                .map(|()| msg)
-        });
+        // The journal of the delete note exists before the delete, so a crash leaves a trace.
+        let journal = match ownership_note.as_ref().filter(|_| owner_less_delete) {
+            Some(note) => check_owner_less_delete(&caller)
+                .and_then(|()| note.journal_for_delete(state_dir, &caller)),
+            None => Ok(None),
+        };
+        let change = journal
+            .and_then(|journal| {
+                change(state_dir, task::TaskTarget::Checked(&slug, &tasks), status)
+                    .map(|msg| (msg, journal))
+            })
+            .map(|(msg, _journal)| {
+                let noted =
+                    record_check_note(state_dir, &caller, &slug, ownership_note.as_ref(), deleted);
+                with_note_outcome(msg, noted)
+            });
         // The note is kept when the change fails too, and the deny says where it went.
         let note = note.map_or_else(String::new, |note| {
             note_outcome(
@@ -87,6 +94,10 @@ pub(super) fn update(
     }
 }
 
+/// The slug that `id` names, with its ownership note, the caller, and the strict read of the
+/// store that the check made. The change uses that read, so the redirect reads the store once.
+type CheckedUpdate = (String, Option<OverrideNote>, Caller, task::StrictTasks);
+
 /// The slug that `id` names, when the caller may change that task, with the ownership note and
 /// the caller. The check is the check of the `llmenv task` commands. TaskUpdate has no
 /// `--other-session`, so the note is set only for a task with no session.
@@ -98,13 +109,30 @@ fn checked_slug(
     project: &str,
     owner: &session::EngineIdentity,
     id: &str,
-) -> anyhow::Result<anyhow::Result<(String, Option<OverrideNote>, Caller)>> {
+) -> anyhow::Result<anyhow::Result<CheckedUpdate>> {
     let caller = task::ownership::caller_session(state_dir, project, owner)?;
-    task::list_tasks_strict(state_dir)?;
+    // A bad id gets its own deny, even when the store cannot be read.
+    if let Err(e) = task::ownership::check_names(&[id]) {
+        return Ok(Err(e));
+    }
+    let tasks = task::list_tasks_strict(state_dir)?;
     Ok(
-        task::ownership::ensure_task_is_ours(state_dir, id, &caller, None)
-            .map(|(slug, note)| (slug, note, caller)),
+        task::ownership::ensure_task_is_ours(state_dir, &tasks, id, &caller, None)
+            .map(|(slug, note)| (slug, note, caller, tasks)),
     )
+}
+
+/// The text of a saved change, with the failure of its ownership note beside it. The change is
+/// saved, so a failed note is not a failed change, and a retry of a delete would fail on a task
+/// that is gone (#3755). The error of the note already says that the change is saved.
+fn with_note_outcome(msg: String, noted: anyhow::Result<()>) -> String {
+    match noted {
+        Ok(()) => msg,
+        Err(e) => {
+            tracing::error!(error = %format!("{e:#}"), "task redirect: ownership note not saved");
+            format!("{msg}. {e:#}. Do not repeat the update")
+        }
+    }
 }
 
 /// Records the ownership note of a TaskUpdate after its change saved (#3586). A deleted task
@@ -125,9 +153,13 @@ fn record_check_note(
     }
 }
 
-/// Run the status change on the checked `slug`, and return the text that names it.
-fn change(state_dir: &Path, slug: &str, status: Option<&str>) -> anyhow::Result<String> {
-    let target = task::TaskTarget::Resolved(slug);
+/// Run the status change on the checked `target`, and return the text that names it.
+fn change(
+    state_dir: &Path,
+    target: task::TaskTarget<'_>,
+    status: Option<&str>,
+) -> anyhow::Result<String> {
+    let slug = target.slug(state_dir)?;
     match status {
         // force=false: the redirect enforces the hard block on an unmet `blocked_on` (#1164)
         // that `llmenv task start` enforces, so the native tool is no bypass.
@@ -181,3 +213,24 @@ fn note_outcome(saved: anyhow::Result<task::Task>, target: &str) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests;
+
+#[cfg(test)]
+mod note_outcome_tests {
+    use super::with_note_outcome;
+
+    #[test]
+    fn a_failed_note_is_reported_beside_the_saved_change() {
+        let ok = with_note_outcome("deleted 'a'".to_owned(), Ok(()));
+        assert_eq!(ok, "deleted 'a'");
+        let text = with_note_outcome(
+            "deleted 'a'".to_owned(),
+            Err(anyhow::anyhow!(
+                "the change to task 'a' is saved, but its note is not"
+            )),
+        );
+        assert!(text.starts_with("deleted 'a'."), "{text}");
+        assert!(text.contains("is saved, but its note is not"), "{text}");
+        assert!(text.ends_with("Do not repeat the update"), "{text}");
+        assert!(!text.contains("couldn't update"), "{text}");
+    }
+}

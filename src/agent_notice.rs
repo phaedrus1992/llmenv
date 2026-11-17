@@ -11,11 +11,25 @@ pub(crate) use llmenv_util::agent_notice::{
 };
 
 /// Log `notice` at error level, which the default filter shows, and add it for the agent. The
-/// engine drops a hook's stderr, so the log alone reaches no one.
+/// engine drops a hook's stderr, so the log alone reaches no one. A notice that the process raised
+/// before is not logged again, so a check that runs on every pass logs once (#3226).
 pub(crate) fn record_logged(notice: impl Into<String>) {
     let notice = notice.into();
-    tracing::error!("{notice}");
-    record(notice);
+    if record(notice.clone()) {
+        tracing::error!("{notice}");
+    } else {
+        // The repeat is not an error line again, but it stays in the debug log.
+        tracing::debug!("repeat of a notice: {notice}");
+    }
+}
+
+/// Test helper: every part is in the notices of this process, and the notices name a fix.
+#[cfg(test)]
+pub(crate) fn assert_noticed(parts: &[&str]) {
+    let notices = current().unwrap_or_default();
+    for part in parts.iter().chain(&["Fix:"]) {
+        assert!(notices.contains(part), "{part:?} is missing from {notices}");
+    }
 }
 
 /// [`current`] after the notices that detached children spooled under the state folder are read

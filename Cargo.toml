@@ -12,6 +12,8 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
+# Time text for stored timestamps and ages (#3790).
+jiff = { version = "=0.2.44", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 anyhow = "=1.0.104"
 ipnet = "=2.12.2"
 if-addrs = "=0.15.0"
@@ -32,7 +34,6 @@ walkdir = "=2.5.0"
 sha2 = "=0.11.1"
 anstyle = "=1.0.14"
 url = "=2.5.8"
-humantime = "=2.4.0"
 tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "sync", "signal", "net", "time"] }
 # "stream" enables Response::bytes_stream(), used by the launch proxy (#1289)
 # to stream the upstream response back without buffering it.
@@ -106,9 +107,9 @@ walkdir = { workspace = true }
 directories = "=6.0.0"
 sha2 = { workspace = true }
 shell-words = "=1.1.1"
+semver = "=1.0.28"
 hex = "=0.4.3"
-humantime = { workspace = true }
-jiff = { version = "=0.2.43", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
+jiff = { workspace = true }
 anstyle = { workspace = true }
 glob = "=0.3.4"
 globset = { workspace = true }

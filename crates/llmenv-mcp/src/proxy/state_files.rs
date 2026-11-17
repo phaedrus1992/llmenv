@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::process::Stdio;
 
-use super::{PidfileError, is_alive, log_path_for, open_proxy_log, read_pidfile};
+use super::{PidfileError, is_own_process_alive, log_path_for, open_proxy_log, read_pidfile};
 
 /// Delete a stale pidfile. A failed delete is recorded with its path, not dropped.
 fn clear_pidfile(pid_path: &Path, reason: &str) {
@@ -26,7 +26,7 @@ fn clear_pidfile(pid_path: &Path, reason: &str) {
 /// Called once the port has proved a proxy is up. A pidfile naming a dead or
 /// recycled pid is worse than no pidfile — the old fast path read any non-empty
 /// pidfile as proof of life, so a wrong pid could never be recovered from
-/// (#1085). A pid that *is* alive is left alone: `kill -0` cannot prove which
+/// (#1085). A pid that *is* alive is left alone: a signal check cannot prove which
 /// process owns the port, so the running pid is the best available answer to
 /// "who do I signal".
 ///
@@ -40,7 +40,7 @@ pub(super) fn reconcile_pidfile(pid_path: &Path) {
         // means the check itself failed, and deleting on a guess would discard a
         // valid pid.
         Ok(Some(pid)) => {
-            if is_alive(pid) == Some(false) {
+            if is_own_process_alive(pid) == Some(false) {
                 clear_pidfile(pid_path, &format!("pid {pid} is not running"));
             }
         }

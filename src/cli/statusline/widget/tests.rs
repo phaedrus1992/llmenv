@@ -627,7 +627,7 @@ fn pr_widget_shows_unreadable_when_branch_cannot_be_read() {
         "workspace": { "current_dir": dir.path().to_string_lossy() }
     }))
     .unwrap();
-    assert_eq!(render_pr(&data, None, false), "pr: unreadable");
+    assert_eq!(render_pr(&data, None, false), "#?");
 }
 
 #[test]
@@ -1651,4 +1651,35 @@ proptest! {
         let b = pr_cache_path(cache_dir, &PathBuf::from(format!("/{repo2}")), &branch2);
         prop_assert_ne!(a, b);
     }
+}
+
+#[test]
+fn branch_widget_keeps_its_format_and_shows_the_marker_when_head_is_unreadable() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".git").join("HEAD")).unwrap();
+    let data: EngineData = serde_json::from_value(serde_json::json!({
+        "workspace": { "current_dir": dir.path().to_string_lossy() }
+    }))
+    .unwrap();
+    assert_eq!(render_branch(&data, None, false), "\u{1f33f} ?");
+    let cfg = llmenv_config::WidgetConfig {
+        format: Some("on {name}".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(render_branch(&data, Some(&cfg), false), "on ?");
+}
+
+#[test]
+fn usage_delta_shows_the_marker_when_the_state_file_is_unreadable() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("usage_5h"), "garbage").unwrap();
+    assert_eq!(
+        usage_delta(Some(dir.path()), "usage_5h", 20.0, 1_000_000),
+        " (?)"
+    );
+    // The failed read rewrote the file, so the next render has a sample again.
+    assert_eq!(
+        usage_delta(Some(dir.path()), "usage_5h", 20.0, 1_000_060),
+        ""
+    );
 }

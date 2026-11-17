@@ -69,6 +69,8 @@ fn a_task_of_another_conversation_does_not_count_as_tracked_work() {
             waiting: Vec::new(),
             next: None,
             queued: 0,
+            stuck: None,
+            next_in_wip: false,
         }
     );
 }

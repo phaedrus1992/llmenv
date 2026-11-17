@@ -33,7 +33,10 @@ pub(crate) fn emit_detached_trace(job: &DetachedJob<'_>) {
     if crate::trace::file_sink_path().is_none() {
         match llmenv_paths::state_dir() {
             Ok(dir) => append_to_state_log(&dir.join(STATE_LOG), &line),
-            Err(e) => tracing::warn!("detached trace: no state dir, line dropped: {e:#}"),
+            Err(e) => crate::agent_notice::record_logged(format!(
+                "llmenv: a detached job trace line was dropped, because the state folder cannot \
+                 be found: {e:#}. Fix: run `llmenv doctor` to check the state folder."
+            )),
         }
     }
 }
@@ -62,10 +65,7 @@ fn is_oversized_regular_file(path: &std::path::Path) -> bool {
 /// Rename `path` to `<name>.1` relative to its open folder. The rename resolves no path component
 /// again, so a folder swapped for a link after the check cannot move the rename elsewhere (#3139).
 fn rotate_state_log(path: &std::path::Path) {
-    let dir_path = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        _ => std::path::Path::new("."),
-    };
+    let dir_path = llmenv_paths::parent_or_cwd(path);
     let Some(name) = path.file_name() else {
         return;
     };
@@ -75,7 +75,11 @@ fn rotate_state_log(path: &std::path::Path) {
         rustix::fs::renameat(&dir, name, &dir, older.as_os_str()).map_err(std::io::Error::from)
     });
     if let Err(e) = rotated {
-        tracing::warn!("detached trace: cannot rotate {}: {e}", path.display());
+        crate::agent_notice::record_logged(format!(
+            "llmenv: cannot rotate the detached job trace log {}: {e}. Fix: check that the state \
+             folder is writable.",
+            path.display()
+        ));
     }
 }
 
