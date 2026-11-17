@@ -8,7 +8,7 @@ use super::{
     ColorMode, ShowTarget, TaskCommand, caller_session_for_task, run_task_session_command,
     run_task_show_current_or_next, task_add, task_clear, task_done, task_ls,
 };
-use crate::task::ownership::OverrideNote;
+use crate::task::ownership::{Caller, OverrideNote};
 use crate::task::{self, Task, with_store_lock};
 
 /// Run one `llmenv task` subcommand. The commands pass through three dispatchers, so no function
@@ -188,7 +188,17 @@ fn reopen_guarded(
     other_session: Option<&str>,
 ) -> anyhow::Result<()> {
     let caller = caller_session_for_task(state_dir)?;
-    let guarded = guard_tasks(state_dir, &caller, ids, other_session)?;
+    reopen_as(state_dir, &caller, ids, other_session)
+}
+
+/// The reopen of `ids` for a caller that is already known.
+fn reopen_as(
+    state_dir: &Path,
+    caller: &Caller,
+    ids: &[String],
+    other_session: Option<&str>,
+) -> anyhow::Result<()> {
+    let guarded = guard_tasks(state_dir, caller, ids, other_session)?;
     let (slugs, audits): (Vec<String>, Vec<_>) = guarded.items.into_iter().unzip();
     let result = task::reopen::reopen_resolved(state_dir, &guarded.tasks, &slugs);
     let failed = record_reopen_notes(state_dir, &slugs, audits, &result);
@@ -338,4 +348,61 @@ fn edit(state_dir: &Path, command: TaskCommand) -> anyhow::Result<()> {
         println!("Updated '{}'", task.slug);
         Ok(())
     })
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, clippy::expect_used, reason = "test scaffolding")]
+mod tests {
+    use super::*;
+    use crate::task::session::{EngineIdentity, StartDecision, StartOutcome, start_session};
+    use crate::task::{ParentSpec, SessionChoice, TaskState, add_task, complete_task, load_task};
+
+    const PROJECT: &str = "task-run-test";
+
+    /// A session with one task, and the caller that owns the session.
+    fn session_with_task(dir: &Path, title: &str) -> (String, Caller) {
+        let outcome = start_session(dir, Some("a"), None, PROJECT, StartDecision::Auto).unwrap();
+        let StartOutcome::Created(session) = outcome else {
+            panic!("expected a new session");
+        };
+        let owner = EngineIdentity::from_session_id(None);
+        let choice = SessionChoice::Named {
+            id: &session.id,
+            owner: &owner,
+            other_session: None,
+        };
+        let task = add_task(dir, title, ParentSpec::Detached, choice, PROJECT).unwrap();
+        (task.slug, Caller::Session(session.id))
+    }
+
+    #[test]
+    fn reopen_moves_a_done_task_back_to_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let (slug, caller) = session_with_task(dir.path(), "Reopen me");
+        crate::task::start_task(dir.path(), slug.as_str(), false).unwrap();
+        complete_task(dir.path(), slug.as_str(), false).unwrap();
+        assert_eq!(load_task(dir.path(), &slug).unwrap().state, TaskState::Done);
+
+        reopen_as(dir.path(), &caller, std::slice::from_ref(&slug), None).unwrap();
+
+        assert_eq!(load_task(dir.path(), &slug).unwrap().state, TaskState::Open);
+    }
+
+    #[test]
+    fn reopen_refuses_a_task_of_another_session_with_no_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let (slug, _) = session_with_task(dir.path(), "Not yours");
+        let stranger = Caller::Session("someone-else".to_string());
+        let err = reopen_as(dir.path(), &stranger, std::slice::from_ref(&slug), None).unwrap_err();
+        assert!(format!("{err:#}").contains("belongs to session"), "{err:#}");
+    }
+
+    #[test]
+    fn the_notes_of_a_reopen_are_listed_for_the_saved_tasks_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let slugs = vec!["a".to_string(), "b".to_string()];
+        let saved: anyhow::Result<Vec<Task>> = Ok(Vec::new());
+        // No task was saved, so no note is tried and none fails.
+        assert!(record_reopen_notes(dir.path(), &slugs, vec![None, None], &saved).is_empty());
+    }
 }
