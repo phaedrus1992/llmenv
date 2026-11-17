@@ -20,7 +20,8 @@ pub(super) fn ancestors_to_start(
 
 /// The text of the refusal that starting `child` meets at an ancestor, or `None` when no ancestor
 /// refuses. The parents come from `all`, so a reminder asks the same question as the start does
-/// and never names a start that the start refuses (#3770).
+/// and never names a start that the start refuses (#3770). `all` must come from a strict read,
+/// because a parent that is absent from it is reported as missing.
 pub(super) fn ancestor_refusal(child: &Task, all: &[Task]) -> Option<String> {
     walk_ancestors(child, false, all, |slug| {
         all.iter()

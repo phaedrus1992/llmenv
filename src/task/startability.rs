@@ -172,4 +172,57 @@ mod tests {
         assert!(lines[0].contains("'c1' cannot start"), "{}", lines[0]);
         assert!(!lines[0].contains("llmenv task start c1"), "{}", lines[0]);
     }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(48))]
+
+        // For small random stores of open and done tasks, the reminder check accepts a task exactly
+        // when `start_task` accepts it. Each task is tried in a fresh store, because a start
+        // changes the store. A task in progress is left out: the check treats it as done on
+        // purpose, because a reminder names the start that follows it (#3770).
+        #[test]
+        fn the_check_accepts_exactly_what_the_start_accepts(
+            specs in proptest::collection::vec(
+                (proptest::prelude::any::<bool>(), 0u8..3, proptest::option::of(0usize..5)),
+                1..5,
+            ),
+        ) {
+            let tasks: Vec<Task> = specs
+                .iter()
+                .enumerate()
+                .map(|(i, (open, kind, blocker))| {
+                    let state = if *open { TaskState::Open } else { TaskState::Done };
+                    let slug = format!("t{i}");
+                    let mut t = match (*kind, i) {
+                        (2, 1..) => mk(&slug, state, Relation::Child, Some(&format!("t{}", i - 1))),
+                        _ => mk(&slug, state, Relation::Queued, None),
+                    };
+                    t.parallel = *kind == 1;
+                    t.created_at = format!("2026-10-02T00:00:{i:02}Z");
+                    if let Some(b) = blocker.filter(|b| *b < specs.len() && *b != i) {
+                        t.blocked_on = vec![format!("t{b}")];
+                    }
+                    t
+                })
+                .collect();
+            let by_slug: HashMap<&str, &Task> =
+                tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
+            for task in tasks.iter().filter(|t| t.state == TaskState::Open) {
+                let dir = TempDir::new().unwrap();
+                for t in &tasks {
+                    save_task(dir.path(), t).unwrap();
+                }
+                let accepted = refusal(task, &tasks, &by_slug).is_none();
+                let started = start_task(dir.path(), &task.slug, false).is_ok();
+                proptest::prop_assert_eq!(
+                    accepted,
+                    started,
+                    "task {} refusal {:?} in {:?}",
+                    task.slug,
+                    refusal(task, &tasks, &by_slug),
+                    tasks.iter().map(|t| (&t.slug, t.state, &t.parent, t.parallel, &t.blocked_on)).collect::<Vec<_>>()
+                );
+            }
+        }
+    }
 }

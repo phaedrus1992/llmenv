@@ -142,7 +142,7 @@ fn the_only_open_task_with_a_looping_blocker_is_not_offered() {
     let idle = idle_sessions(open, &a_only);
 
     assert_eq!(idle.len(), 1);
-    assert_eq!(idle[0].next.slug, "a");
+    assert!(idle[0].next.is_none());
     let (looped, why) = idle[0].loop_error.as_ref().expect("the loop is named");
     assert_eq!(looped, "a");
     assert!(why.contains("--no-parent"), "{why}");
@@ -676,8 +676,16 @@ proptest! {
             .collect();
         let by_slug = index(&tasks);
         let open: Vec<&Task> = tasks.iter().filter(|t| t.state == TaskState::Open).collect();
-        let got = super::blockers::first_obstacle(&open, &by_slug, |t| super::blockers::unmet_blocker(t, &by_slug));
-        prop_assert_eq!(got.is_none(), open.iter().all(|t| is_actionable(t, &by_slug)));
+        let got = super::blockers::first_obstacle(&open, &tasks, &by_slug);
+        let all_start = open
+            .iter()
+            .all(|t| super::startability::refusal(t, &tasks, &by_slug).is_none());
+        prop_assert_eq!(got.is_none(), all_start);
+        // The reminder never names a task that the check accepts.
+        if let Some((slug, _)) = &got {
+            prop_assert!(open.iter().any(|t| &t.slug == slug
+                && super::startability::refusal(t, &tasks, &by_slug).is_some()));
+        }
         let first_loop = open
             .iter()
             .find(|t| blocker_walk_error(t, &by_slug).is_some())
@@ -696,14 +704,8 @@ fn a_blocker_that_does_not_exist_gets_a_remove_fix_and_a_real_one_a_finish_fix()
         task("slow", TaskState::Wip, None, &[]),
     ];
     let by_slug = index(&tasks);
-    let (_, missing) = super::blockers::first_obstacle(&[&tasks[0]], &by_slug, |t| {
-        super::blockers::unmet_blocker(t, &by_slug)
-    })
-    .expect("an obstacle");
+    let missing = super::blockers::unmet_blocker(&tasks[0], &by_slug).expect("an obstacle");
     assert!(missing.contains("--unblock missing"), "{missing}");
-    let (_, slow) = super::blockers::first_obstacle(&[&tasks[1]], &by_slug, |t| {
-        super::blockers::unmet_blocker(t, &by_slug)
-    })
-    .expect("an obstacle");
+    let slow = super::blockers::unmet_blocker(&tasks[1], &by_slug).expect("an obstacle");
     assert!(slow.contains("finish 'slow' first"), "{slow}");
 }

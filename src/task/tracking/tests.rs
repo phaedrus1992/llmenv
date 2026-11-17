@@ -219,3 +219,36 @@ proptest::proptest! {
         }
     }
 }
+
+proptest::proptest! {
+    /// With queued tasks, blockers, and parents, `next` is the earliest open task that the shared
+    /// startability check accepts, and `stuck` is set exactly when none is accepted (#3770).
+    #[test]
+    fn next_follows_the_startability_check_with_the_queue_on(
+        rows in proptest::collection::vec((0u8..4, proptest::option::of(0usize..12), 0u8..50), 1..10),
+    ) {
+        let visible = [open_session_for_test("s0")];
+        let tasks: Vec<Task> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, (st, blocker, at))| {
+                let mut t = task(&format!("t{i}"), "s0", state_of(*st), *at);
+                if let Some(b) = blocker {
+                    t.blocked_on = vec![format!("t{b}")];
+                }
+                t
+            })
+            .collect();
+        let by_slug: std::collections::HashMap<&str, &Task> =
+            tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
+        let mut open: Vec<&Task> = tasks.iter().filter(|t| t.state == TaskState::Open).collect();
+        open.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.slug.cmp(&b.slug)));
+        let want = crate::task::startability::first_startable(&open, &tasks, &by_slug)
+            .map(|t| t.slug.clone());
+        if let Tracking::Tracked { next, stuck, queued, .. } = tracking_of(&visible, &tasks, None) {
+            proptest::prop_assert_eq!(&next, &want);
+            proptest::prop_assert_eq!(queued, open.len());
+            proptest::prop_assert_eq!(stuck.is_some(), want.is_none() && !open.is_empty());
+        }
+    }
+}

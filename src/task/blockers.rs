@@ -158,20 +158,21 @@ pub(super) fn unmet_blocker(task: &Task, by_slug: &HashMap<&str, &Task>) -> Opti
     })
 }
 
-/// The first task of `open`, in the order given, that keeps the user from starting it, and why. A
+/// The first task of `open`, in the order given, that `llmenv task start` would refuse, and why. A
 /// loop in a blocker walk comes before any other refusal, because a loop is damaged data that the
-/// user must repair, and a wait ends by itself. `refusal` gives the other refusals of a task, for
-/// the callers that check the queue and the ancestors too (#3618, #3763, #3764, #3770).
+/// user must repair, and a wait ends by itself (#3618, #3763, #3764, #3770). `all` is every task
+/// of the store, as [`super::startability::refusal`] needs it.
 pub(super) fn first_obstacle(
     open: &[&Task],
+    all: &[Task],
     by_slug: &HashMap<&str, &Task>,
-    refusal: impl Fn(&Task) -> Option<String>,
 ) -> Option<(String, String)> {
     open.iter()
         .find_map(|t| blocker_walk_error(t, by_slug).map(|why| (t.slug.to_owned(), why)))
         .or_else(|| {
-            open.iter()
-                .find_map(|t| refusal(t).map(|why| (t.slug.to_owned(), why)))
+            open.iter().find_map(|t| {
+                super::startability::refusal(t, all, by_slug).map(|why| (t.slug.to_owned(), why))
+            })
         })
 }
 

@@ -212,27 +212,28 @@ pub(super) fn stalled_parent_lines(all: &[Task], session_ids: &[String]) -> Vec<
             let open = open_children(&parent.slug, all);
             // The start of a sub-task checks its blockers, the queue, and its ancestors, so the
             // reminder names only a sub-task that the start accepts (#3770).
-            let Some(next) = super::startability::first_startable(&open, all, &by_slug) else {
-                let first = open.first()?;
-                let why = super::startability::refusal(first, all, &by_slug)?;
-                return Some(format!(
-                    "Task '{}' ({}) has {}. Its sub-task '{}' cannot start: {why}. If you don't \
-                     recognize it, it belongs to a different session — leave it alone.",
-                    parent.slug,
-                    parent.title,
-                    progress.line(),
-                    first.slug,
-                ));
+            let action = match super::startability::first_startable(&open, all, &by_slug) {
+                Some(next) => format!(
+                    "If you recognize it as your own work, run `llmenv task start {}` ({}) before \
+                     you work on that step.",
+                    next.slug, next.title
+                ),
+                None => match open.first() {
+                    Some(first) => format!(
+                        "Its sub-task '{}' cannot start: {}.",
+                        first.slug,
+                        super::startability::refusal(first, all, &by_slug)
+                            .unwrap_or_else(|| "the start refuses it".to_owned())
+                    ),
+                    None => "None of its sub-tasks can start.".to_owned(),
+                },
             };
             Some(format!(
-                "Task '{}' ({}) has {}. If you recognize it as your own work, run `llmenv task \
-                 start {}` ({}) before you work on that step. If you don't recognize it, it \
-                 belongs to a different session — leave it alone.",
+                "Task '{}' ({}) has {}. {action} If you don't recognize it, it belongs to a \
+                 different session — leave it alone.",
                 parent.slug,
                 parent.title,
                 progress.line(),
-                next.slug,
-                next.title
             ))
         })
         .collect()

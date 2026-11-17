@@ -112,9 +112,7 @@ fn tracking_of(visible: &[session::Session], tasks: &[Task], caller: Option<&str
     let queued = open.len();
     let next = super::startability::first_startable(&open, tasks, &by_slug).map(|t| t.slug.clone());
     let stuck = if next.is_none() {
-        super::blockers::first_obstacle(&open, &by_slug, |t| {
-            super::startability::refusal(t, tasks, &by_slug)
-        })
+        super::blockers::first_obstacle(&open, tasks, &by_slug)
     } else {
         None
     };
