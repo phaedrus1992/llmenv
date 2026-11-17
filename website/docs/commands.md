@@ -537,7 +537,7 @@ llmenv task edit <id> [--title <t>] [--parent SLUG | --no-parent]
   [--block-on <id>]... [--unblock <id>]... [--add-note <text>] [--delete-note <index-or-timestamp>]
   [--detail <text> | --detail-file <path>]
 llmenv task clear <id>... | --session <id>
-llmenv task session start [name] [--description <text>] [--resume <id> | --replace | --new]
+llmenv task session start [name] [--description <text>] [--resume <id> | --replace [--other-session <id>]... | --new]
   [--task <title>]...
   [--context <text> | --context-file <path>] [--issue <n>]... [--branch <b>] [--base <b>]
   [--memory-topic <t>]... [--doc <path>]...
@@ -740,6 +740,10 @@ project's hook.
   - `--replace` — abandon every open session for this project (untagging
     their still-incomplete tasks with an orphan note; already-`done` tasks
     keep their tag as a historical record), then start fresh.
+    (changed in v3.14.0) A session that another conversation started is refused, and
+    nothing is changed. Repeat `--other-session <id>` with that session's id to abandon it
+    anyway. A session with no owner, and your own sessions, need no flag. `--resume` stays
+    open to any conversation.
   - `--new` — create a new session anyway, leaving the existing one(s) open
     — true concurrency for two windows genuinely working in parallel.
 

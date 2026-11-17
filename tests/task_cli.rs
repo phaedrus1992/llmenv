@@ -3170,7 +3170,15 @@ fn clearing_a_task_with_no_session_records_on_the_callers_session_or_is_refused(
     // The replace takes both tasks out of their session, so each has no session.
     llmenv(dir.path())
         .env("CLAUDE_CODE_SESSION_ID", "conv-new")
-        .args(["task", "session", "start", "second", "--replace"])
+        .args([
+            "task",
+            "session",
+            "start",
+            "second",
+            "--replace",
+            "--other-session",
+            "first",
+        ])
         .assert()
         .success();
 
@@ -3193,4 +3201,47 @@ fn clearing_a_task_with_no_session_records_on_the_callers_session_or_is_refused(
         .stdout(predicates::str::contains(
             "Deleted tasks with no session: orphan-one",
         ));
+}
+
+// --- #3487: `session start --replace` of another conversation's session ---
+
+#[test]
+fn replace_of_another_conversations_session_needs_other_session() {
+    let dir = TempDir::new().unwrap();
+    llmenv(dir.path())
+        .env("CLAUDE_CODE_SESSION_ID", "conv-old")
+        .args(["task", "session", "start", "first"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .env("CLAUDE_CODE_SESSION_ID", "conv-new")
+        .args(["task", "session", "start", "second", "--replace"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--other-session first"));
+    llmenv(dir.path())
+        .env("CLAUDE_CODE_SESSION_ID", "conv-new")
+        .args([
+            "task",
+            "session",
+            "start",
+            "second",
+            "--other-session",
+            "first",
+        ])
+        .assert()
+        .failure();
+    llmenv(dir.path())
+        .env("CLAUDE_CODE_SESSION_ID", "conv-new")
+        .args([
+            "task",
+            "session",
+            "start",
+            "second",
+            "--replace",
+            "--other-session",
+            "first",
+        ])
+        .assert()
+        .success();
 }

@@ -228,8 +228,9 @@ pub enum StartDecision {
     /// Adopt the named existing session instead of creating a new one.
     Resume(String),
     /// Abandon every existing open session tagged to this project, then
-    /// create a fresh one.
-    Replace,
+    /// create a fresh one. A session of another conversation is abandoned only when its id is in
+    /// the list (`--other-session`, #3487).
+    Replace(Vec<String>),
     /// Create a new session regardless of what's already open — the
     /// genuine-concurrency path.
     New,
@@ -466,8 +467,9 @@ pub(crate) fn start_session_as(
             }
             Ok(StartOutcome::Resumed(resume(state_dir, session, request)?))
         }
-        StartDecision::Replace => {
+        StartDecision::Replace(named) => {
             let existing = open_sessions_strict(state_dir, project)?;
+            checkpoint::refuse_unnamed_foreign(&existing, request.owner, &named)?;
             let mut abandoned = Vec::with_capacity(existing.len());
             // One strict read of the task store serves every abandoned session (#3479). With no
             // session to abandon, the store is not read.
@@ -1443,6 +1445,84 @@ mod tests {
         assert!(err.contains("--replace to drop them all"), "{err}");
     }
 
+    fn replace_as(
+        dir: &Path,
+        who: &EngineIdentity,
+        named: &[&str],
+    ) -> anyhow::Result<StartOutcome> {
+        let named = named.iter().map(|n| (*n).to_string()).collect();
+        start_session_as(
+            dir,
+            &StartRequest {
+                name: Some("fresh"),
+                description: None,
+                project: PROJECT_A,
+                owner: who,
+                resume: &ResumeContext::default(),
+            },
+            StartDecision::Replace(named),
+        )
+    }
+
+    #[test]
+    fn replace_refuses_another_conversations_session_and_changes_nothing() {
+        let dir = TempDir::new().expect("test");
+        let theirs = start_as(
+            dir.path(),
+            "theirs",
+            &owner("conv-a", 100),
+            StartDecision::Auto,
+        );
+        let err = replace_as(dir.path(), &owner("conv-b", 200), &[])
+            .expect_err("a foreign session must not be abandoned unnamed")
+            .to_string();
+        assert!(
+            err.contains(&format!("--other-session {}", theirs.id)),
+            "{err}"
+        );
+        assert!(
+            load_existing_session(dir.path(), &theirs.id)
+                .unwrap()
+                .is_open()
+        );
+    }
+
+    #[test]
+    fn replace_abandons_a_foreign_session_that_is_named() {
+        let dir = TempDir::new().expect("test");
+        let theirs = start_as(
+            dir.path(),
+            "theirs",
+            &owner("conv-a", 100),
+            StartDecision::Auto,
+        );
+        let outcome = replace_as(dir.path(), &owner("conv-b", 200), &[theirs.id.as_str()])
+            .expect("a named foreign session is abandoned");
+        let StartOutcome::Replaced { abandoned, .. } = outcome else {
+            panic!("expected Replaced");
+        };
+        assert_eq!(abandoned.len(), 1);
+    }
+
+    #[test]
+    fn replace_abandons_the_callers_own_sessions_without_a_name() {
+        let dir = TempDir::new().expect("test");
+        let me = owner("conv-a", 100);
+        start_as(dir.path(), "mine", &me, StartDecision::Auto);
+        assert!(replace_as(dir.path(), &me, &[]).is_ok());
+    }
+
+    #[test]
+    fn replace_refuses_a_name_that_matches_no_open_session() {
+        let dir = TempDir::new().expect("test");
+        let me = owner("conv-a", 100);
+        start_as(dir.path(), "mine", &me, StartDecision::Auto);
+        let err = replace_as(dir.path(), &me, &["no-such-session"])
+            .expect_err("a typo must fail loud")
+            .to_string();
+        assert!(err.contains("no-such-session"), "{err}");
+    }
+
     #[test]
     fn add_task_after_start_new_resolves_to_callers_session() {
         // The #2365 repro: `session start a`, `session start b --new`, `task add`.
@@ -1719,7 +1799,7 @@ mod tests {
             Some("second"),
             None,
             PROJECT_A,
-            StartDecision::Replace,
+            StartDecision::Replace(Vec::new()),
         )
         .expect("test");
         let StartOutcome::Replaced { session, abandoned } = outcome else {
@@ -1762,7 +1842,7 @@ mod tests {
             Some("second"),
             None,
             PROJECT_A,
-            StartDecision::Replace,
+            StartDecision::Replace(Vec::new()),
         )
         .expect("test");
 
@@ -1907,7 +1987,7 @@ mod tests {
             Some("three"),
             None,
             PROJECT_A,
-            StartDecision::Replace,
+            StartDecision::Replace(Vec::new()),
         )
         .expect("test") else {
             panic!("expected Replaced");

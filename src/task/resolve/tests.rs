@@ -30,7 +30,7 @@ fn old_and_new(dir: &Path) -> (String, Vec<String>) {
     for n in 1..=3 {
         add(dir, &format!("Plan task {n}"), &old);
     }
-    let new = open_session(dir, StartDecision::Replace);
+    let new = open_session(dir, StartDecision::Replace(Vec::new()));
     let slugs = (1..=3)
         .map(|n| add(dir, &format!("Plan task {n}"), &new))
         .collect();
@@ -80,7 +80,7 @@ fn a_slug_only_a_finished_session_has_still_resolves() {
     let dir = TempDir::new().unwrap();
     let old = open_session(dir.path(), StartDecision::Auto);
     let slug = add(dir.path(), "Old only", &old);
-    open_session(dir.path(), StartDecision::Replace);
+    open_session(dir.path(), StartDecision::Replace(Vec::new()));
     assert_eq!(
         resolve_identifier_for(dir.path(), &slug, &NOBODY).unwrap(),
         slug
@@ -110,7 +110,7 @@ fn with_several_open_sessions_and_no_owner_an_open_session_task_still_wins() {
     let dir = TempDir::new().unwrap();
     let old = open_session(dir.path(), StartDecision::Auto);
     let finished = add(dir.path(), "Shared", &old);
-    let first = open_session(dir.path(), StartDecision::Replace);
+    let first = open_session(dir.path(), StartDecision::Replace(Vec::new()));
     let second = open_session(dir.path(), StartDecision::New);
     assert_ne!(first, second);
     let live = add(dir.path(), "Shared", &second);
@@ -147,7 +147,7 @@ proptest::proptest! {
         for t in &titles {
             add(dir.path(), t, &old);
         }
-        let new = open_session(dir.path(), StartDecision::Replace);
+        let new = open_session(dir.path(), StartDecision::Replace(Vec::new()));
         let mine: Vec<String> = titles.iter().map(|t| add(dir.path(), t, &new)).collect();
         for t in &titles {
             let bare = crate::task::slugify(t);

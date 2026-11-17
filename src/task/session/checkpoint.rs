@@ -205,6 +205,44 @@ pub(crate) fn idle_display(last_activity: &str) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// Refuse `--replace` when it would abandon an owned session of another conversation that the
+/// caller did not name with `--other-session`. A session with no owner has no one to protect, so
+/// it is abandoned as before (#3487).
+///
+/// # Errors
+/// Errors if `named` holds an id that is not an open session of the project, or if a foreign
+/// session is left unnamed. The message lists each such session and the flag that allows it.
+pub(super) fn refuse_unnamed_foreign(
+    existing: &[Session],
+    owner: &EngineIdentity,
+    named: &[String],
+) -> anyhow::Result<()> {
+    if let Some(unknown) = named.iter().find(|n| !existing.iter().any(|s| &s.id == *n)) {
+        anyhow::bail!(
+            "--other-session names '{unknown}', which is not an open session of this project"
+        );
+    }
+    let unnamed: Vec<&Session> = existing
+        .iter()
+        .filter(|s| s.owner_session.is_some() || s.owner_pid.is_some())
+        .filter(|s| matches!(ownership(s, owner), Ownership::None))
+        .filter(|s| !named.contains(&s.id))
+        .collect();
+    if unnamed.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<&str> = unnamed.iter().map(|s| s.id.as_str()).collect();
+    let flags: String = ids
+        .iter()
+        .map(|id| format!(" --other-session {id}"))
+        .collect();
+    anyhow::bail!(
+        "--replace would abandon session(s) of another conversation: {}\n\
+         Nothing was changed. To abandon them anyway, run again with{flags}",
+        ids.join(", ")
+    )
+}
+
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
