@@ -109,16 +109,14 @@ jobs:
       # Surviving mutants on lines this PR touched are the actionable case: the
       # PR added or changed logic no test distinguishes from a wrong version.
       #
-      # --test-tool nextest: nextest stops at the first failing test, and almost
-      # every mutant is caught, so most test runs end early. --in-place builds in
-      # the checkout instead of a temporary copy, so the cached target directory
-      # from rust-cache is reused. Both are safe on a disposable CI checkout.
+      # The script runs cargo-mutants inside a time budget below the job limit
+      # (#3569). A shard that runs out of budget says so in an annotation and in
+      # the step summary and does not fail, because the job limit would cancel it
+      # with no finding. The weekly sweep covers the mutants it did not reach.
       - env:
           SHARD: ${{ strategy.job-index }}
           SHARDS: ${{ needs.plan.outputs.shards }}
-        run: >-
-          cargo mutants --workspace --in-place --test-tool nextest
-          --in-diff mutants-pr.diff --shard "$SHARD/$SHARDS"
+        run: scripts/mutants-shard.sh "$SHARD" "$SHARDS" mutants-pr.diff
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         if: always()
         with:
