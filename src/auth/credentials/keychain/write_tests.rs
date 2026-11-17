@@ -3,8 +3,7 @@
 
 #![expect(
     clippy::expect_used,
-    clippy::panic,
-    reason = "test code: a failed fixture stops the test, and a lost worker is set up with a panic"
+    reason = "test code: a failed fixture stops the test"
 )]
 
 use super::keychain_write_with;
