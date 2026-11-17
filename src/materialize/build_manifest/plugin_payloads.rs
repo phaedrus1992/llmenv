@@ -114,6 +114,13 @@ pub(super) fn sync_plugin_payloads(
                 );
                 return None;
             };
+            if let Some(command) = crate::plugins::cache::command_of_source(&entry.source) {
+                tracing::info!(
+                    "plugin '{}@{}' has a command source, which only Claude Code runs: {command}",
+                    p.plugin,
+                    p.marketplace
+                );
+            }
             if !crate::plugins::cache::is_external_plugin_source(&entry.source) {
                 return Some(p);
             }
