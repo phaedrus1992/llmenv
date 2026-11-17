@@ -134,6 +134,20 @@ fn parse_plugin_entry(entry: &serde_json::Value) -> Result<Option<MarketplacePlu
                 return Ok(None);
             }
         }
+    } else if raw.get("source").and_then(|v| v.as_str()) == Some("command") {
+        // #3584: Claude Code runs the command itself, shows the user the command to accept, and
+        // loads the directory that it prints. llmenv runs nothing, so a marketplace cannot make
+        // llmenv execute a command. The entry stays in the list as a source that needs no fetch.
+        match raw.get("command").and_then(|v| v.as_str()) {
+            Some(command) if !command.trim().is_empty() => format!("command:{command}"),
+            _ => {
+                eprintln!(
+                    "warning: marketplace entry '{name}': command-source object has no \
+                     non-empty string 'command' field (source = {raw:?}) — skipping entry"
+                );
+                return Ok(None);
+            }
+        }
     } else if let Some(kind) = unsupported_kind(raw) {
         eprintln!(
             "warning: marketplace entry '{name}': source kind '{kind}' is not supported — \

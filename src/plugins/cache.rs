@@ -420,11 +420,12 @@ pub(super) fn pin_source(name: &str, base: &str, raw: &serde_json::Value) -> Res
     Ok(pinned)
 }
 
-/// The kind of an object source that llmenv cannot fetch: `archive` and `command` (#2441).
+/// The kind of an object source that llmenv cannot fetch: `archive` (#2441). A `command` source is
+/// not in this list, because Claude Code runs the command itself (#3584).
 pub(super) fn unsupported_kind(raw: &serde_json::Value) -> Option<&str> {
     raw.get("source")
         .and_then(|v| v.as_str())
-        .filter(|kind| matches!(*kind, "archive" | "command"))
+        .filter(|kind| matches!(*kind, "archive"))
 }
 
 /// The clone source of a `{"source": "github", "repo": "owner/name"}` object (#2440), with the
@@ -494,12 +495,14 @@ fn clean_subdir(name: &str, path: &str) -> Result<String> {
 /// the marketplace clone, and not an npm package). External sources require a
 /// separate clone; relative paths are served directly from the marketplace
 /// directory; npm sources (#1014) resolve through the target engine's own
-/// npm-install mechanism — llmenv has nothing to clone for either.
+/// npm-install mechanism, and a command source (#3584) is run by Claude Code — llmenv has
+/// nothing to fetch for any of them.
 #[must_use]
 pub(crate) fn is_external_plugin_source(source: &str) -> bool {
     !source.starts_with("./")
         && !source.starts_with("../")
         && !source.starts_with("npm:")
+        && !source.starts_with("command:")
         && source != "."
         && source != "./"
         && source != ".."
@@ -1984,20 +1987,39 @@ mod tests {
     }
 
     #[test]
-    fn archive_and_command_sources_are_skipped_naming_the_kind() {
-        for kind in ["archive", "command"] {
-            let raw = serde_json::json!({"source": kind, "url": "https://x/y.zip"});
-            assert_eq!(unsupported_kind(&raw), Some(kind));
-            let plugins = read_manifest(&format!(
-                r#"{{"name": "bad", "source": {{"source": "{kind}", "url": "https://x/y.zip"}}}}, {{"name": "good", "source": "./g"}}"#
-            ))
-            .unwrap();
-            assert_eq!(plugins.len(), 1, "{kind}");
-        }
+    fn an_archive_source_is_skipped_naming_the_kind() {
+        let raw = serde_json::json!({"source": "archive", "url": "https://x/y.zip"});
+        assert_eq!(unsupported_kind(&raw), Some("archive"));
+        let plugins = read_manifest(
+            r#"{"name": "bad", "source": {"source": "archive", "url": "https://x/y.zip"}}, {"name": "good", "source": "./g"}"#,
+        )
+        .unwrap();
+        assert_eq!(plugins.len(), 1);
         assert_eq!(
             unsupported_kind(&serde_json::json!({"source": "url"})),
             None
         );
+    }
+
+    /// Claude Code runs a command source, so the entry stays and needs no fetch (#3584).
+    #[test]
+    fn a_command_source_stays_and_needs_no_fetch() {
+        let plugins = read_manifest(
+            r#"{"name": "xcode", "source": {"source": "command", "command": "xcrun agent plugin path --plugin-format claude", "mode": "link"}}, {"name": "good", "source": "./g"}"#,
+        )
+        .unwrap();
+        assert_eq!(plugins.len(), 2);
+        assert_eq!(
+            plugins[0].source,
+            "command:xcrun agent plugin path --plugin-format claude"
+        );
+        assert!(!is_external_plugin_source(&plugins[0].source));
+        // A command source without a command is a bad entry, and it is skipped.
+        let plugins = read_manifest(
+            r#"{"name": "bad", "source": {"source": "command"}}, {"name": "empty", "source": {"source": "command", "command": "  "}}, {"name": "good", "source": "./g"}"#,
+        )
+        .unwrap();
+        assert_eq!(plugins.len(), 1);
     }
 
     #[cfg(unix)]
