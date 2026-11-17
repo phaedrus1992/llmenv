@@ -166,7 +166,7 @@ fn api_key_helper_set(config_dir: Option<&std::path::Path>, cwd: Option<&std::pa
         project.as_ref().map(|p| p.join("settings.local.json")),
     ];
     files.into_iter().flatten().any(|file| {
-        match llmenv_paths::read_text_bounded(&file, SETTINGS_MAX_BYTES) {
+        match llmenv_paths::read_text_bounded_nofollow(&file, SETTINGS_MAX_BYTES) {
             Ok(Some(text)) => serde_json::from_str::<Value>(&text).map_or(true, |v| {
                 v.get("apiKeyHelper").is_some_and(|h| !h.is_null())
             }),

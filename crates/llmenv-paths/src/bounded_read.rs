@@ -15,7 +15,24 @@ use std::path::Path;
 /// The file cannot be opened or read, is not a regular file, or holds more than `max_bytes`
 /// bytes. The message gives the reason only, so the caller must add the path.
 pub fn read_file_bounded(path: &Path, max_bytes: u64) -> io::Result<Option<Vec<u8>>> {
-    match open_nonblocking(path) {
+    read_with(path, max_bytes, open_nonblocking)
+}
+
+/// [`read_file_bounded`] that does not follow a link, for a path that a cloned repository
+/// controls (#3785). A link is an error, and a missing file is `None`.
+///
+/// # Errors
+/// The errors of [`read_file_bounded`], and `InvalidData` for a link.
+pub fn read_file_bounded_nofollow(path: &Path, max_bytes: u64) -> io::Result<Option<Vec<u8>>> {
+    read_with(path, max_bytes, open_nofollow)
+}
+
+fn read_with(
+    path: &Path,
+    max_bytes: u64,
+    open: fn(&Path) -> io::Result<std::fs::File>,
+) -> io::Result<Option<Vec<u8>>> {
+    match open(path) {
         Ok(file) => read_open_file(file, max_bytes).map(Some),
         Err(e) if e.kind() == io::ErrorKind::NotFound => match std::fs::symlink_metadata(path) {
             Ok(_) => Err(invalid(
@@ -34,10 +51,23 @@ pub fn read_file_bounded(path: &Path, max_bytes: u64) -> io::Result<Option<Vec<u
 /// The errors of [`read_file_bounded`], and `InvalidData` with the offset of the first bad byte
 /// when the file is not UTF-8.
 pub fn read_text_bounded(path: &Path, max_bytes: u64) -> io::Result<Option<String>> {
-    let Some(bytes) = read_file_bounded(path, max_bytes)? else {
-        return Ok(None);
-    };
-    String::from_utf8(bytes).map(Some).map_err(|e| {
+    read_file_bounded(path, max_bytes)?
+        .map(utf8_text)
+        .transpose()
+}
+
+/// [`read_file_bounded_nofollow`] for a UTF-8 text file.
+///
+/// # Errors
+/// The errors of [`read_file_bounded_nofollow`], and `InvalidData` when the file is not UTF-8.
+pub fn read_text_bounded_nofollow(path: &Path, max_bytes: u64) -> io::Result<Option<String>> {
+    read_file_bounded_nofollow(path, max_bytes)?
+        .map(utf8_text)
+        .transpose()
+}
+
+fn utf8_text(bytes: Vec<u8>) -> io::Result<String> {
+    String::from_utf8(bytes).map_err(|e| {
         invalid(&format!(
             "it is not UTF-8 text (the first bad byte is at offset {}); save it as UTF-8",
             e.utf8_error().valid_up_to()
@@ -117,6 +147,29 @@ fn open_nonblocking(path: &Path) -> io::Result<std::fs::File> {
 #[cfg(not(unix))]
 fn open_nonblocking(path: &Path) -> io::Result<std::fs::File> {
     std::fs::File::open(path)
+}
+
+/// Open without blocking and without following a link. A link gives an error that says so.
+#[cfg(unix)]
+fn open_nofollow(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let flags = rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::NOFOLLOW;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags.bits().cast_signed())
+        .open(path)
+        .map_err(|e| {
+            if crate::is_nofollow_refusal(&e) {
+                invalid("it is a link, which is not followed here; replace it with the file")
+            } else {
+                e
+            }
+        })
+}
+
+#[cfg(not(unix))]
+fn open_nofollow(path: &Path) -> io::Result<std::fs::File> {
+    open_nonblocking(path)
 }
 
 fn invalid(reason: &str) -> io::Error {
@@ -247,5 +300,30 @@ mod tests {
                 (got, want) => proptest::prop_assert!(false, "{got:?} vs {want:?}"),
             }
         }
+    }
+
+    #[test]
+    fn the_nofollow_reader_reads_a_file_and_refuses_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("plain.txt");
+        std::fs::write(&file, "text").unwrap();
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert_eq!(
+            read_text_bounded_nofollow(&file, CAP).unwrap().as_deref(),
+            Some("text")
+        );
+        let err = read_text_bounded_nofollow(&link, CAP).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("link"), "{err}");
+        assert_eq!(
+            read_text_bounded_nofollow(&dir.path().join("none"), CAP).unwrap(),
+            None
+        );
+        // The following reader keeps its documented behavior.
+        assert_eq!(
+            read_text_bounded(&link, CAP).unwrap().as_deref(),
+            Some("text")
+        );
     }
 }
