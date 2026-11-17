@@ -20,7 +20,8 @@ pub(super) fn run(state_dir: &Path, command: TaskCommand, color: ColorMode) -> a
     } = command
     else {
         return Err(anyhow::anyhow!(
-            "internal error: `task ls` reached the handler of another command"
+            "this is a bug in llmenv: `task ls` was routed to the wrong handler. Fix: report it \
+             with the command line"
         ));
     };
     // #1124: force a deliberate choice instead of silently listing every session's tasks.

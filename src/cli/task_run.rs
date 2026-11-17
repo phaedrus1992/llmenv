@@ -62,14 +62,25 @@ fn run_edits(state_dir: &Path, command: TaskCommand, color: ColorMode) -> anyhow
             )
         }),
         TaskCommand::Session { command } => run_task_session_command(state_dir, command, color),
-        // The two earlier dispatchers take every other command.
-        _ => anyhow::bail!("internal error: a task command reached the last dispatcher unhandled"),
+        // The two earlier dispatchers take these commands. The list has no wildcard, so a new
+        // command is a compile error here until a dispatcher handles it.
+        TaskCommand::Add { .. }
+        | TaskCommand::Start { .. }
+        | TaskCommand::Done { .. }
+        | TaskCommand::Reopen { .. }
+        | TaskCommand::Ls { .. }
+        | TaskCommand::Show { .. }
+        | TaskCommand::Note { .. }
+        | TaskCommand::Wait { .. } => Err(misrouted("command")),
     }
 }
 
 /// The error for a command that reached a handler of another command.
 fn misrouted(name: &str) -> anyhow::Error {
-    anyhow::anyhow!("internal error: `task {name}` reached the handler of another command")
+    anyhow::anyhow!(
+        "this is a bug in llmenv: `task {name}` was routed to the wrong handler. Fix: report it \
+         with the command line"
+    )
 }
 
 /// The text of an argument, or all of stdin when the argument is absent. The read comes before

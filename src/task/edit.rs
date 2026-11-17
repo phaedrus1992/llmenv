@@ -54,11 +54,12 @@ pub(crate) fn edit_task<'a>(
         target.check()?;
         check_names(edit)?;
         let snapshot = target.tasks(state_dir)?;
+        let slug = target.slug_in(state_dir, &snapshot)?;
         let ctx = EditContext {
             state_dir,
             all_tasks: &snapshot,
+            slug: &slug,
         };
-        let slug = target.slug_in(state_dir, ctx.all_tasks)?;
         let mut task = load_task(state_dir, &slug)?;
         if let Some(title) = edit.title {
             task.title = title.to_string();
@@ -77,10 +78,12 @@ pub(crate) fn edit_task<'a>(
     Ok(task)
 }
 
-/// The store and the one strict read of an edit, so each name resolves against the same tasks.
+/// The store, the one strict read, and the resolved slug of an edit, so each name resolves against
+/// the same tasks, and the checks name the task that the command resolved.
 struct EditContext<'a> {
     state_dir: &'a Path,
     all_tasks: &'a StrictTasks,
+    slug: &'a str,
 }
 
 impl EditContext<'_> {
@@ -106,9 +109,10 @@ fn set_parent(ctx: &EditContext<'_>, task: &mut Task, edit: &TaskEdit<'_>) -> an
         }
         return Ok(());
     };
+    let slug = ctx.slug;
     let parent_slug = ctx.resolve(parent_input)?;
-    if parent_slug == task.slug {
-        anyhow::bail!("task '{}' cannot be its own parent", task.slug);
+    if parent_slug == slug {
+        anyhow::bail!("task '{slug}' cannot be its own parent");
     }
     let parent_task = ctx
         .all_tasks
@@ -116,7 +120,7 @@ fn set_parent(ctx: &EditContext<'_>, task: &mut Task, edit: &TaskEdit<'_>) -> an
         .iter()
         .find(|t| t.slug == parent_slug);
     ownership::ensure_parent_in_session(parent_task, &parent_slug, task.session.as_deref())?;
-    reject_cycle(ctx.state_dir, &task.slug, &parent_slug)?;
+    reject_cycle(ctx.state_dir, slug, &parent_slug)?;
     task.parent = Some(parent_slug);
     Ok(())
 }
@@ -127,12 +131,13 @@ fn change_blockers(
     task: &mut Task,
     edit: &TaskEdit<'_>,
 ) -> anyhow::Result<()> {
+    let slug = ctx.slug;
     for on in edit.block_on {
         let on_slug = ctx.resolve(on)?;
-        if on_slug == task.slug {
-            anyhow::bail!("task '{}' cannot be blocked on itself", task.slug);
+        if on_slug == slug {
+            anyhow::bail!("task '{slug}' cannot be blocked on itself");
         }
-        block_cycle::reject_block_cycle(ctx.all_tasks.as_slice(), &task.slug, &on_slug)?;
+        block_cycle::reject_block_cycle(ctx.all_tasks.as_slice(), slug, &on_slug)?;
         if !task.blocked_on.contains(&on_slug) {
             task.blocked_on.push(on_slug);
         }
