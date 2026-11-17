@@ -187,7 +187,9 @@ where
     // Check the holder before waiting on it. A lock whose holder is gone has
     // nothing to wait for, so reclaiming it immediately keeps a wedged lock from
     // costing the full budget on every prompt.
-    if let Some(holder) = lock_holder(lock_path)?.filter(|pid| is_alive(*pid) != Some(false)) {
+    if let Some(holder) =
+        lock_holder(lock_path)?.filter(|pid| is_own_process_alive(*pid) != Some(false))
+    {
         if wait_for_port(bind, budget_ms) {
             reconcile_pidfile(pid_path);
             return Ok(EnsureOutcome::AlreadyRunning);
@@ -953,49 +955,64 @@ pub fn probe_tcp(bind: &str, timeout_ms: u64) -> bool {
     TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(timeout_ms)).is_ok()
 }
 
-/// Whether `pid` is a live process, via a signal-0 check.
-///
-/// `Some(true)` alive, `Some(false)` definitely not running, `None` when the
-/// check itself couldn't be performed. The three-way answer matters because
-/// callers act destructively on "not running": collapsing an unusable check into `false` would
-/// make them treat every live process as dead. A process of another user is alive.
-///
-/// # Note on TOCTOU
-/// Subject to PID-reuse races: a recycled pid belonging to an unrelated process
-/// answers `Some(true)` even though the proxy is gone (#300). Callers with access
-/// to the bind address should prefer [`probe_tcp`], which proves the proxy is
-/// actually serving.
-///
-/// Returns `None` on non-Unix platforms, where there is no signal check to make.
-#[must_use]
-pub fn is_alive(pid: u32) -> Option<bool> {
+/// What a signal-0 check says about a process id.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Probe {
+    /// A process of this user exists.
+    Own,
+    /// A process of another user exists (`EPERM`).
+    OtherUser,
+    /// No process has the id.
+    Gone,
+}
+
+/// The signal-0 check of `pid`, or `None` when the check cannot be made: the id is out of range,
+/// the platform has no signal check, or the system gave an unexpected error.
+fn probe(pid: u32) -> Option<Probe> {
     #[cfg(unix)]
     {
-        // Out-of-range pids can't be asked about: `kill` takes an i32, and
-        // clamping would silently probe a different process. `kill -0 0` targets
-        // the caller's whole process group, so 0 is not a question either.
-        let pid_i32 = i32::try_from(pid).ok()?;
-        if pid_i32 <= 0 {
-            return None;
-        }
-        let pid = rustix::process::Pid::from_raw(pid_i32)?;
-        // Only ESRCH means that no such process exists. EPERM is a live process of another
-        // user, so `kill -0` and its exit status cannot tell the two apart (#3782).
+        // Out-of-range pids can't be asked about: `kill` takes an i32, and clamping would
+        // silently probe a different process. Pid 0 targets the caller's whole process group, so
+        // it is not a question either.
+        let pid = rustix::process::Pid::from_raw(i32::try_from(pid).ok()?)?;
         match rustix::process::test_kill_process(pid) {
-            Ok(()) | Err(rustix::io::Errno::PERM) => Some(true),
-            Err(rustix::io::Errno::SRCH) => Some(false),
+            Ok(()) => Some(Probe::Own),
+            Err(rustix::io::Errno::PERM) => Some(Probe::OtherUser),
+            Err(rustix::io::Errno::SRCH) => Some(Probe::Gone),
             Err(_) => None,
         }
     }
     #[cfg(not(unix))]
     {
-        #[expect(
-            unused_variables,
-            reason = "pid is only used on Unix for the kill(2) signal-0 liveness check"
-        )]
         let _ = pid;
         None
     }
+}
+
+/// Whether `pid` is a live process of any user, via a signal-0 check (#3782).
+///
+/// `Some(true)` alive, `Some(false)` definitely not running, `None` when the check itself couldn't
+/// be performed. The three-way answer matters because callers act destructively on "not running":
+/// collapsing an unusable check into `false` would make them treat every live process as dead.
+/// A process of another user is alive.
+///
+/// # Note on TOCTOU
+/// Subject to PID-reuse races: a recycled pid belonging to an unrelated process answers
+/// `Some(true)` even though the proxy is gone (#300). Callers with access to the bind address
+/// should prefer [`probe_tcp`], which proves the proxy is actually serving.
+///
+/// Returns `None` on non-Unix platforms, where there is no signal check to make.
+#[must_use]
+pub fn is_alive(pid: u32) -> Option<bool> {
+    probe(pid).map(|p| p != Probe::Gone)
+}
+
+/// [`is_alive`] for a pid that this user's llmenv recorded, such as a proxy or a lock holder. A
+/// live process of another user cannot be one of those, so it counts as gone: a recycled pid must
+/// not keep a stale lock or pidfile alive (#3782).
+#[must_use]
+pub fn is_own_process_alive(pid: u32) -> Option<bool> {
+    probe(pid).map(|p| p == Probe::Own)
 }
 
 #[cfg(all(test, unix))]
@@ -1512,6 +1529,11 @@ mod tests {
     fn a_process_of_another_user_is_alive() {
         assert_eq!(super::is_alive(1), Some(true));
         assert_eq!(super::is_alive(std::process::id()), Some(true));
+        // A recorded pid of another user is a recycled pid, so it is not our process. Root owns
+        // every process, so the same check says alive for root.
+        let root = rustix::process::getuid().is_root();
+        assert_eq!(super::is_own_process_alive(1), Some(root));
+        assert_eq!(super::is_own_process_alive(std::process::id()), Some(true));
     }
 
     /// An unparseable pidfile is cleared rather than left to fail every later read.

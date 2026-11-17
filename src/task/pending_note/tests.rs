@@ -163,6 +163,21 @@ fn an_entry_that_a_replay_holds_is_not_replayed_again() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_pipe_named_like_an_entry_does_not_block_recovery() {
+    let (dir, slug) = state_with_task();
+    let folder = journal_dir(dir.path());
+    std::fs::create_dir_all(&folder).unwrap();
+    let made = std::process::Command::new("mkfifo")
+        .arg(folder.join("1-0.json"))
+        .status()
+        .unwrap();
+    assert!(made.success());
+    assert!(recover(dir.path()).is_empty());
+    assert!(notes_of(dir.path(), &slug).is_empty());
+}
+
 proptest! {
     #[test]
     fn an_entry_survives_a_round_trip(

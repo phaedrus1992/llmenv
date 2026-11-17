@@ -16,6 +16,7 @@
 #                       count against the budget. Unset, the budget starts with the script.
 #   MUTANTS_BUDGET      Seconds from the job start to the stop. Default 2400 (the job limit is
 #                       45 minutes, and 5 minutes stay free for the artifact upload).
+#   MUTANTS_MIN_BUDGET  Seconds below which a shard does not start. Default 120.
 # Diagnostics go to stderr.
 set -euo pipefail
 
@@ -24,7 +25,7 @@ usage() {
 }
 
 # A shard with less time left than this does not start. The build alone takes longer.
-min_budget=120
+min_budget="${MUTANTS_MIN_BUDGET:-120}"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     usage
@@ -40,7 +41,7 @@ shards="$2"
 diff_file="$3"
 total="${MUTANTS_BUDGET:-2400}"
 job_start="${JOB_START:-$(date +%s)}"
-for value in "$shard" "$shards" "$total" "$job_start"; do
+for value in "$shard" "$shards" "$total" "$job_start" "$min_budget"; do
     if ! [[ "$value" =~ ^[0-9]{1,12}$ ]]; then
         echo "mutants-shard: '$value' is not a number of at most 12 digits" >&2
         exit 2
@@ -80,13 +81,17 @@ ${total} s budget were left after the setup steps. The weekly sweep covers it."
 fi
 
 status=0
+run_start=$SECONDS
 # --test-tool nextest stops a mutant at its first failing test. --in-place reuses the cached
 # target directory of the checkout, which is disposable in CI. -k sends KILL 60 s after the TERM,
 # so a child that ignores TERM cannot hold the shard until the job limit.
 timeout -k 60 "$budget" cargo mutants --workspace --in-place --test-tool nextest \
     --in-diff "$diff_file" --shard "$shard/$shards" || status=$?
 
-if [[ "$status" -eq 124 || "$status" -eq 137 ]]; then
+# 124 is a timeout. 137 is the KILL that follows an ignored TERM, but a child that the kernel
+# killed for memory exits 137 too, so 137 counts as a stop only when the run used its budget.
+elapsed=$((SECONDS - run_start))
+if [[ "$status" -eq 124 || ("$status" -eq 137 && "$elapsed" -ge "$budget") ]]; then
     # A mutant that survived before the stop is a finding, so the shard still fails.
     if [[ -s mutants.out/missed.txt ]]; then
         echo "mutants-shard: shard $((shard + 1))/$shards ran out of budget, and it had already" \

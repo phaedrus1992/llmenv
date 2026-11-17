@@ -17,6 +17,7 @@ trap 'trash "$SCRATCH" 2>/dev/null || true' EXIT
 mkdir -p "$SCRATCH/bin" "$SCRATCH/nobin" "$SCRATCH/work" || exit 1
 cat >"$SCRATCH/bin/timeout" <<'STUB'
 #!/usr/bin/env bash
+sleep "${FAKE_SLEEP:-0}"
 exit "${FAKE_STATUS:-0}"
 STUB
 chmod +x "$SCRATCH/bin/timeout"
@@ -57,8 +58,13 @@ check "the annotation names the shard as one-based" "1" \
 check "the step summary says INCOMPLETE" "1" "$(grep -c 'INCOMPLETE' "$summary")"
 check "the marker file is written" "1" "$(grep -c 'INCOMPLETE shard 2/3' mutants.out/INCOMPLETE)"
 
-FAKE_STATUS=137 bash "$SHARD" 1 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
+MUTANTS_MIN_BUDGET=1 MUTANTS_BUDGET=2 FAKE_SLEEP=2 FAKE_STATUS=137 \
+  bash "$SHARD" 1 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
 check "a shard that needed the KILL is incomplete, not failed" "0" "$?"
+
+MUTANTS_MIN_BUDGET=1 MUTANTS_BUDGET=100 FAKE_SLEEP=0 FAKE_STATUS=137 \
+  bash "$SHARD" 1 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
+check "a 137 before the budget ran out is a failure, as an out-of-memory kill is" "137" "$?"
 
 echo "src/lib.rs:1: replace foo with ()" >mutants.out/missed.txt
 FAKE_STATUS=124 bash "$SHARD" 1 3 "$SCRATCH/pr.diff" >/dev/null 2>&1

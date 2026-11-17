@@ -217,7 +217,13 @@ fn read_entry(path: &Path) -> Option<Entry> {
 /// it, or when the entry is gone, which are all reasons to skip it. A lock on a file that was
 /// removed after the open is no lock, so the path must still name the locked file.
 fn lock_entry(path: &Path) -> Option<File> {
-    let file = File::open(path).ok()?;
+    // A pipe or a link named like an entry must not block the open or be followed. The open does
+    // not wait for a writer, and `read_entry` checks the type again.
+    if !std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file()) {
+        tracing::warn!(path = %path.display(), "a note journal entry is not a plain file; skipped");
+        return None;
+    }
+    let file = open_entry(path).ok()?;
     match file.try_lock() {
         Ok(()) => {}
         Err(std::fs::TryLockError::WouldBlock) => return None,
@@ -231,6 +237,21 @@ fn lock_entry(path: &Path) -> Option<File> {
         _ => false,
     };
     still_there.then_some(file)
+}
+
+#[cfg(unix)]
+fn open_entry(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags.bits().cast_signed())
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_entry(path: &Path) -> std::io::Result<File> {
+    File::open(path)
 }
 
 #[cfg(unix)]

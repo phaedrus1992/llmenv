@@ -6,7 +6,9 @@
 use std::path::Path;
 use std::process::Stdio;
 
-use crate::mcp::proxy::{PidfileError, is_alive, log_path_for, open_proxy_log, read_pidfile};
+use crate::mcp::proxy::{
+    PidfileError, is_own_process_alive, log_path_for, open_proxy_log, read_pidfile,
+};
 
 /// Delete a stale pidfile. A failed delete is recorded with its path, not dropped.
 fn clear_pidfile(pid_path: &Path, reason: &str) {
@@ -40,7 +42,7 @@ pub(super) fn reconcile_pidfile(pid_path: &Path) {
         // means the check itself failed, and deleting on a guess would discard a
         // valid pid.
         Ok(Some(pid)) => {
-            if is_alive(pid) == Some(false) {
+            if is_own_process_alive(pid) == Some(false) {
                 clear_pidfile(pid_path, &format!("pid {pid} is not running"));
             }
         }

@@ -561,7 +561,9 @@ Only when the open session has no match does the search cover the whole project.
   order): it cannot start
   until the task ahead of it is `done` or `waiting`, and until no other queued task is in progress.
   `--child-of SLUG` makes it a **sub-task** instead. Sub-tasks run in parallel, starting one puts every `open`
-  ancestor in progress (a queued ancestor must be allowed to start, and a `done` parent refuses). The parent
+  ancestor in progress (a queued ancestor must be allowed to start, and a `done` parent refuses).
+  (added in v3.14.0) A sub-task whose open ancestor, at any level, belongs to another session is refused, and the
+  error names the parent and the fix `llmenv task edit <task> --no-parent`. The parent
   cannot be marked `done` before every sub-task is. A sub-task needs an
   unfinished parent in its own session. `--parallel` takes a top-level task out of the queue, so it runs beside the
   head. `--after SLUG` records that another task must be done first, which `task start` enforces like
@@ -597,9 +599,9 @@ Only when the open session has no match does the search cover the whole project.
   the same way.
   The refusal names the owning session. To act on the task anyway, pass `--other-session <owner-id>`,
   where `<owner-id>` is that owning session's id. A different id is refused. A bare `--other-session`
-  is a usage error. Each override appends a task note that names the calling session,
-  once the command succeeds. `clear` deletes its tasks, so it writes a note on the owning
-  session instead (#3481).
+  is a usage error. Each override leaves a task note that names the calling session. The command journals the
+  note before it changes anything, so the note survives a crash or a failed later save (details below).
+  `clear` deletes its tasks, so it writes a note on the owning session instead (#3481).
   (added in v3.14.0) The command journals the note in `pending-notes/` of the state directory before it changes
   anything.
   A crash between the change and the note leaves the journal, and the next `llmenv task` command writes the note
@@ -665,7 +667,10 @@ Only when the open session has no match does the search cover the whole project.
   it, in the same parent-before-children order `task ls` displays, skipping
   `done` tasks and any task whose `blocked_on` refs aren't all `done`.
   (changed in v3.14.0) It also skips a task that `task start` refuses for the
-  queue or for an ancestor. A
+  queue or for an ancestor.
+  A task that is skipped for a damaged parent link, a parent loop, a parent of another session, or a blocker loop is
+  reported on stderr as `task '<slug>' is not offered as the next task: <why>`. The JSON on stdout does not change.
+  A
   single open session prints the same bare JSON as `task show <id>`; two or
   more each get a `# <name> (<id>)` header, separated by a `---` rule. Errors
   if no session is open for the current project. `--current` (changed in
