@@ -628,43 +628,47 @@ enum TaskCommand {
     },
 }
 
+/// The arguments of `llmenv task session start` (#905).
+#[derive(clap::Args)]
+struct SessionStartArgs {
+    name: Option<String>,
+    /// Free-text description (e.g. "dev-sprint issue 493"), shown in
+    /// `session ls` and the resume/replace checkpoint. Separate from
+    /// `name` — never feeds slug/id generation.
+    #[arg(long)]
+    description: Option<String>,
+    /// Adopt an existing open session (by id) instead of creating a new
+    /// one — e.g. resuming after a context compaction.
+    #[arg(long, conflicts_with_all = ["replace", "new"])]
+    resume: Option<String>,
+    /// Abandon every existing open session for this project (untagging
+    /// their incomplete tasks), then create a fresh one. A session that another
+    /// conversation started is refused unless `--other-session` names it.
+    #[arg(long, conflicts_with_all = ["resume", "new"])]
+    replace: bool,
+    /// With `--replace`: the id of another conversation's session to abandon. Repeat for
+    /// more than one session.
+    #[arg(long = "other-session", value_name = "ID", requires = "replace")]
+    other_session: Vec<String>,
+    /// Create a new session anyway, leaving existing open session(s) for
+    /// this project untouched — true concurrency.
+    #[arg(long, conflicts_with_all = ["resume", "replace"])]
+    new: bool,
+    /// Add a task to the session as it starts. Repeat for more tasks. They join the queue
+    /// in the order given, so the session never exists with no tasks (#2455).
+    #[arg(long = "task", value_name = "TITLE")]
+    tasks: Vec<String>,
+    #[command(flatten)]
+    resume_context: ResumeArgs,
+}
+
 /// `llmenv task session` sub-subcommands (#905).
 #[derive(Subcommand)]
 enum TaskSessionCommand {
     /// Start a new session for the current project. Errors if one or more
     /// sessions are already open for this project, unless `--resume`,
     /// `--replace`, or `--new` resolves the conflict.
-    Start {
-        name: Option<String>,
-        /// Free-text description (e.g. "dev-sprint issue 493"), shown in
-        /// `session ls` and the resume/replace checkpoint. Separate from
-        /// `name` — never feeds slug/id generation.
-        #[arg(long)]
-        description: Option<String>,
-        /// Adopt an existing open session (by id) instead of creating a new
-        /// one — e.g. resuming after a context compaction.
-        #[arg(long, conflicts_with_all = ["replace", "new"])]
-        resume: Option<String>,
-        /// Abandon every existing open session for this project (untagging
-        /// their incomplete tasks), then create a fresh one. A session that another
-        /// conversation started is refused unless `--other-session` names it.
-        #[arg(long, conflicts_with_all = ["resume", "new"])]
-        replace: bool,
-        /// With `--replace`: the id of another conversation's session to abandon. Repeat for
-        /// more than one session.
-        #[arg(long = "other-session", value_name = "ID", requires = "replace")]
-        other_session: Vec<String>,
-        /// Create a new session anyway, leaving existing open session(s) for
-        /// this project untouched — true concurrency.
-        #[arg(long, conflicts_with_all = ["resume", "replace"])]
-        new: bool,
-        /// Add a task to the session as it starts. Repeat for more tasks. They join the queue
-        /// in the order given, so the session never exists with no tasks (#2455).
-        #[arg(long = "task", value_name = "TITLE")]
-        tasks: Vec<String>,
-        #[command(flatten)]
-        resume_context: ResumeArgs,
-    },
+    Start(SessionStartArgs),
     /// Change a session's resume context after it started. Lists gain the entries they lack;
     /// a scalar flag replaces its value. Auto-resolves like `finish`.
     Edit {
@@ -2980,15 +2984,6 @@ fn run_task_show_current_or_next(state_dir: &Path, target: ShowTarget) -> anyhow
         }
     }
     Ok(())
-}
-
-/// Whether the session that `session start` produced has nothing a cold reader could use.
-fn start_outcome_lacks_context(outcome: &crate::task::session::StartOutcome) -> bool {
-    use crate::task::session::StartOutcome;
-    match outcome {
-        StartOutcome::Created(s) | StartOutcome::Resumed(s) => s.resume.needs_nudge(),
-        StartOutcome::Replaced { session, .. } => session.resume.needs_nudge(),
-    }
 }
 
 fn run_context(bundle_filter: Option<&str>, why: bool, use_color: bool) -> anyhow::Result<()> {

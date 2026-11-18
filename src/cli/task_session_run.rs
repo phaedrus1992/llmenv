@@ -2,24 +2,12 @@
 //! stays under the complexity limit.
 
 use super::{
-    ColorMode, ResumeArgs, TaskListFormat, TaskSessionCommand, add_session_tasks,
+    ColorMode, ResumeArgs, SessionStartArgs, TaskListFormat, TaskSessionCommand, add_session_tasks,
     current_project_tag, guard_session_for_write, render_task_session_summary_human,
-    resolve_session_for_read, should_use_color, start_outcome_lacks_context,
+    resolve_session_for_read, should_use_color,
 };
 use crate::task::session::{self, EngineIdentity, StartDecision, StartOutcome};
 use std::path::Path;
-
-/// The fields of `session start`. A struct keeps the start handler within the parameter limit.
-struct StartArgs {
-    name: Option<String>,
-    description: Option<String>,
-    resume: Option<String>,
-    replace: bool,
-    other_session: Vec<String>,
-    new: bool,
-    tasks: Vec<String>,
-    resume_context: ResumeArgs,
-}
 
 /// Handle `llmenv task session <subcommand>` (#905, reworked for mandatory
 /// sessions). Thin formatting layer over `crate::task::session`.
@@ -30,29 +18,7 @@ pub(super) fn run_task_session_command(
 ) -> anyhow::Result<()> {
     let project = current_project_tag()?;
     match command {
-        TaskSessionCommand::Start {
-            name,
-            description,
-            resume,
-            replace,
-            other_session,
-            new,
-            tasks,
-            resume_context,
-        } => start_cmd(
-            state_dir,
-            &project,
-            StartArgs {
-                name,
-                description,
-                resume,
-                replace,
-                other_session,
-                new,
-                tasks,
-                resume_context,
-            },
-        ),
+        TaskSessionCommand::Start(args) => start_cmd(state_dir, &project, args),
         TaskSessionCommand::Edit {
             id,
             resume_context,
@@ -104,8 +70,16 @@ fn start_decision(
     }
 }
 
-fn start_cmd(state_dir: &Path, project: &str, args: StartArgs) -> anyhow::Result<()> {
-    let StartArgs {
+/// Whether the session that `session start` produced has nothing a cold reader could use.
+fn start_outcome_lacks_context(outcome: &StartOutcome) -> bool {
+    match outcome {
+        StartOutcome::Created(s) | StartOutcome::Resumed(s) => s.resume.needs_nudge(),
+        StartOutcome::Replaced { session, .. } => session.resume.needs_nudge(),
+    }
+}
+
+fn start_cmd(state_dir: &Path, project: &str, args: SessionStartArgs) -> anyhow::Result<()> {
+    let SessionStartArgs {
         name,
         description,
         resume,
