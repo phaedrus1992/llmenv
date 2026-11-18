@@ -37,7 +37,9 @@ fn is_callers(session: &Session, owner: &EngineIdentity, engine_start: Option<Sy
 }
 
 fn active_since(session: &Session, start: SystemTime) -> bool {
-    let Some(at) = crate::util::time::instant_or_log(&session.last_activity) else {
+    let Some(at) =
+        crate::util::time::instant_or_log(&session.last_activity, "session last_activity")
+    else {
         // An unknown value reads as "not active". The refusal that follows is non-destructive, so
         // this default is the safe one. The notice names the cause, so the refusal is not
         // silent about it (#3811).
@@ -215,14 +217,14 @@ pub(super) fn resume(
 #[must_use]
 pub(crate) fn idle_display(last_activity: &str) -> String {
     let now = std::time::SystemTime::now();
-    let Some(at) = crate::util::time::instant_or_log(last_activity) else {
+    let Some(at) = crate::util::time::instant_or_log(last_activity, "session last_activity") else {
         return "unknown".to_string();
     };
     match now.duration_since(at) {
         Ok(d) => crate::util::time::format_age(std::time::Duration::from_secs(d.as_secs())),
         Err(_) => {
             // Each listing row calls this, so the warning is logged once per value (#3811).
-            if crate::util::time::first_report(last_activity) {
+            if crate::util::time::first_report("session last_activity", last_activity) {
                 tracing::warn!(
                     value = last_activity,
                     "a last_activity is in the future, so its idle time is unknown. \
@@ -324,7 +326,7 @@ mod tests {
         fn idle_display_shows_a_time_only_for_text_that_parses(text in "\\PC{0,40}") {
             let shown = idle_display(&text);
             if shown != "unknown" {
-                prop_assert!(crate::util::time::instant_or_log(&text).is_some());
+                prop_assert!(crate::util::time::instant_or_log(&text, "test").is_some());
             }
         }
     }

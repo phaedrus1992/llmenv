@@ -228,8 +228,7 @@ pub(super) fn crush_tool_name(neutral: &str) -> Option<&'static str> {
 /// Trading a narrow, unenforceable scope for a broad, enforced one is the
 /// wrong direction for an allowlist: dropping the rule keeps Crush's
 /// deny-by-default posture (the tool still prompts) instead of silently
-/// over-granting. `tracing::error!`, not `warn!` — this codebase's default
-/// `EnvFilter` (`src/main.rs`) drops `warn!` when `RUST_LOG` is unset, so a
+/// over-granting. `tracing::error!`, not `warn!`: a narrower `RUST_LOG` filter drops `warn!`, so a
 /// downgrade on a permission-relevant path needs `error!` to actually surface
 /// (see #1139, the same trap already fixed at six other call sites).
 ///

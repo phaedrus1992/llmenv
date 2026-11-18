@@ -142,7 +142,7 @@ pub struct Task {
     #[serde(default)]
     pub(crate) session: Option<String>,
     /// RFC3339 timestamp.
-    pub(crate) created_at: String,
+    created_at: String,
     /// RFC3339 timestamp.
     updated_at: String,
 }
@@ -464,7 +464,9 @@ fn visit<'a>(
 /// last-element-wins rule — callers that need a stable tiebreak on ties sort
 /// first (see [`append_forest`]'s `created_at`-then-`slug` order).
 fn most_recently_updated<'a>(tasks: impl Iterator<Item = &'a Task>) -> Option<&'a Task> {
-    tasks.max_by(|a, b| crate::util::time::cmp_instants(&a.updated_at, &b.updated_at))
+    tasks.max_by(|a, b| {
+        crate::util::time::cmp_instants(&a.updated_at, &b.updated_at, "task updated_at")
+    })
 }
 
 /// How `add_task`/`add_task_for_session` should set the new task's `parent`, a display link
@@ -1158,8 +1160,9 @@ fn idle_reminder_lines(project: &str, caller: Option<&str>, stored: &Stored) -> 
 
 /// The queue order of two tasks: creation time, then slug for a tie. The tree listing and the
 /// next-task lookup both use it, so they cannot disagree about which task is next.
-pub(super) fn queue_order(a: &Task, b: &Task) -> std::cmp::Ordering {
-    crate::util::time::cmp_instants(&a.created_at, &b.created_at).then_with(|| a.slug.cmp(&b.slug))
+pub(crate) fn queue_order(a: &Task, b: &Task) -> std::cmp::Ordering {
+    crate::util::time::cmp_instants(&a.created_at, &b.created_at, "task created_at")
+        .then_with(|| a.slug.cmp(&b.slug))
 }
 
 /// A line for each open session of `project` that holds no task at all (#2456). An empty session

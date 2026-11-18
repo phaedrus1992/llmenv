@@ -47,10 +47,7 @@ fn queue(session_tasks: &[Task]) -> Vec<&Task> {
         .iter()
         .filter(|t| t.relation == Relation::Queued && !t.parallel)
         .collect();
-    queued.sort_by(|a, b| {
-        crate::util::time::cmp_instants(&a.created_at, &b.created_at)
-            .then_with(|| a.slug.cmp(&b.slug))
-    });
+    queued.sort_by(|a, b| super::queue_order(a, b));
     queued
 }
 
@@ -120,10 +117,7 @@ pub(super) fn undone_descendants_in<'a>(slug: &str, all: &'a [Task]) -> Vec<&'a 
             }
         }
     }
-    found.sort_by(|a, b| {
-        crate::util::time::cmp_instants(&a.created_at, &b.created_at)
-            .then_with(|| a.slug.cmp(&b.slug))
-    });
+    found.sort_by(|a, b| super::queue_order(a, b));
     found
 }
 
@@ -194,10 +188,7 @@ fn open_children<'a>(parent: &str, all: &'a [Task]) -> Vec<&'a Task> {
         .into_iter()
         .filter(|t| t.state == TaskState::Open)
         .collect();
-    open.sort_by(|a, b| {
-        crate::util::time::cmp_instants(&a.created_at, &b.created_at)
-            .then_with(|| a.slug.cmp(&b.slug))
-    });
+    open.sort_by(|a, b| super::queue_order(a, b));
     open
 }
 
