@@ -264,6 +264,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Log a bad stored timestamp once per process, not once per comparison during a sort. [fix:util] [#3812]
 - Print a line on stderr when every auth cache entry is unreadable, so the session says that no account was inherited. The line names the cause and the fix. [fix:auth] [#3813]
 - Name the record kind, such as `task created_at`, in the warning for a bad stored timestamp. [fix:util] [#3834]
+- Print the count of skipped unreadable auth cache files at session start, and name the first one. A failed account or credential inject now prints a line too, not only a log record. [fix:auth] [#3842]
+- Name the task, the bad value, and the count of tasks that share it, when a task with an unparseable `updated_at` wins the most-recent choice. The warning logs once per task and value. [fix:task] [#3843]
 
 ### Security
 

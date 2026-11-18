@@ -11,8 +11,7 @@
 pub mod credentials;
 pub(crate) mod detect;
 mod entries;
-
-use entries::load_all_auth_entries;
+mod load;
 
 use std::path::{Path, PathBuf};
 
@@ -155,32 +154,7 @@ pub(crate) fn save_auth_entry(adapter_root: &Path, entry: &AuthEntry) -> anyhow:
         .map_err(|e| anyhow::anyhow!("writing auth cache {}: {e}", path.display()))
 }
 
-/// Choose the best cached auth entry to inherit into a new folder.
-///
-/// Selects the most-recently-seen entry. When multiple entries exist, logs
-/// the others so users know alternate accounts are cached.
-///
-/// # Errors
-/// Returns an error on I/O failure reading the cache directory.
-pub(crate) fn choose_auth_for_inheritance(
-    adapter_root: &Path,
-) -> anyhow::Result<Option<AuthEntry>> {
-    let entries = load_all_auth_entries(adapter_root)?;
-    match entries.as_slice() {
-        [] => Ok(None),
-        [one] => Ok(Some(one.clone())),
-        [best, rest @ ..] => {
-            for other in rest {
-                tracing::debug!(
-                    "auth cache: also have {} ({}); use `llmenv login` to switch",
-                    other.email,
-                    other.uuid
-                );
-            }
-            Ok(Some(best.clone()))
-        }
-    }
-}
+pub(crate) use entries::choose_auth_for_inheritance;
 
 /// Upsert the `oauthAccount` from `entry` into `<config_dir>/.claude.json`.
 ///
@@ -291,6 +265,7 @@ fn is_leap(year: u64) -> bool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use super::load::load_counted;
     use super::*;
 
     /// Security hardening (#1469): every credential-file read in this module
@@ -482,7 +457,7 @@ mod tests {
             raw: serde_json::json!({"id": "cccc3333-0000-0000-0000-000000000000"}),
         };
         save_auth_entry(tmp.path(), &entry).unwrap();
-        let entries = load_all_auth_entries(tmp.path()).unwrap();
+        let entries = load_counted(tmp.path()).unwrap().entries;
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].uuid, entry.uuid);
         assert_eq!(entries[0].email, entry.email);
@@ -502,7 +477,7 @@ mod tests {
             .unwrap();
         credentials::save_cached(tmp.path(), &creds).unwrap();
 
-        let entries = load_all_auth_entries(tmp.path()).unwrap();
+        let entries = load_counted(tmp.path()).unwrap().entries;
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].uuid, entry.uuid);
     }
@@ -510,14 +485,80 @@ mod tests {
     #[test]
     fn load_all_returns_empty_when_no_cache_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let entries = load_all_auth_entries(tmp.path()).unwrap();
+        let entries = load_counted(tmp.path()).unwrap().entries;
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn load_all_errors_when_every_entry_is_unreadable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = auth_cache_dir(tmp.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("corrupt.json"), b"{ not json").unwrap();
+        let err = load_counted(tmp.path()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("corrupt.json"),
+            "error must name the file: {msg}"
+        );
+    }
+
+    #[test]
+    fn load_all_keeps_the_good_entry_beside_a_corrupt_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let entry = AuthEntry {
+            uuid: "eeee5555-0000-0000-0000-000000000000".to_string(),
+            email: "mixed@test.com".to_string(),
+            last_seen: "2025-01-01T00:00:00Z".to_string(),
+            raw: serde_json::json!({"id": "eeee5555-0000-0000-0000-000000000000"}),
+        };
+        save_auth_entry(tmp.path(), &entry).unwrap();
+        std::fs::write(
+            auth_cache_dir(tmp.path()).join("corrupt.json"),
+            b"{ not json",
+        )
+        .unwrap();
+        let entries = load_counted(tmp.path()).unwrap().entries;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].uuid, entry.uuid);
+    }
+
+    #[test]
+    fn choose_auth_errors_when_the_only_cached_entry_is_corrupt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = auth_cache_dir(tmp.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("corrupt.json"), b"{ not json").unwrap();
+        assert!(choose_auth_for_inheritance(tmp.path()).is_err());
     }
 
     #[test]
     fn choose_auth_returns_none_when_empty() {
         let tmp = tempfile::tempdir().unwrap();
-        assert!(choose_auth_for_inheritance(tmp.path()).unwrap().is_none());
+        let chosen = choose_auth_for_inheritance(tmp.path()).unwrap();
+        assert!(chosen.entry.is_none());
+        assert_eq!(chosen.skipped, 0);
+    }
+
+    #[test]
+    fn choose_auth_counts_a_skipped_corrupt_file_next_to_a_usable_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = auth_cache_dir(tmp.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("corrupt.json"), b"{ not json").unwrap();
+        let entry = AuthEntry {
+            uuid: "cccc0000-0000-0000-0000-000000000000".to_string(),
+            email: "usable@test.com".to_string(),
+            last_seen: "2025-06-01T00:00:00Z".to_string(),
+            raw: serde_json::json!({"id": "cccc"}),
+        };
+        save_auth_entry(tmp.path(), &entry).unwrap();
+        let chosen = choose_auth_for_inheritance(tmp.path()).unwrap();
+        assert_eq!(
+            chosen.entry.as_ref().map(|e| e.uuid.clone()),
+            Some(entry.uuid.clone())
+        );
+        assert_eq!(chosen.skipped, 1);
     }
 
     #[test]
@@ -541,7 +582,10 @@ mod tests {
             };
             save_auth_entry(tmp.path(), &entry).unwrap();
         }
-        let chosen = choose_auth_for_inheritance(tmp.path()).unwrap().unwrap();
+        let chosen = choose_auth_for_inheritance(tmp.path())
+            .unwrap()
+            .entry
+            .unwrap();
         // June 2025 sorts after January 2025 lexicographically.
         assert_eq!(chosen.uuid, "bbbb0000-0000-0000-0000-000000000000");
     }
