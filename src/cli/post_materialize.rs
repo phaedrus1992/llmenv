@@ -53,21 +53,43 @@ fn inject_cached_auth_if_available(adapter_root: &Path, cache_path: &Path) -> Au
             eprintln!("[llmenv] auth: no account inherited. {e:#}");
             AuthStatus::default()
         }
-        Ok(None) => AuthStatus::default(),
-        Ok(Some(entry)) => match crate::auth::inject_auth_into_claude_json(cache_path, &entry) {
-            Ok(()) => {
-                eprintln!("[llmenv] auth: {} (inherited)", entry.email);
-                AuthStatus {
-                    source: AuthSource::Inherited,
-                    id: Some(entry.uuid),
-                    email: Some(entry.email),
-                }
+        Ok(choice) => {
+            // Printed beside the account line, so a skipped file is never silent (#3842).
+            if choice.skipped > 0 {
+                let first = choice.first_problem.as_deref().unwrap_or("unknown file");
+                eprintln!(
+                    "[llmenv] auth: {} cache file(s) skipped as unreadable, first: {first}. \
+                     Fix: repair or remove them, then run `llmenv login`.",
+                    choice.skipped
+                );
             }
-            Err(e) => {
-                tracing::error!("auth inject failed for {} (non-fatal): {e}", entry.email);
-                AuthStatus::default()
+            match choice.entry {
+                None => AuthStatus::default(),
+                Some(entry) => inherit_auth_entry(cache_path, entry),
             }
-        },
+        }
+    }
+}
+
+/// Write `entry` into the cache folder and return the status that names it.
+fn inherit_auth_entry(cache_path: &Path, entry: crate::auth::AuthEntry) -> AuthStatus {
+    match crate::auth::inject_auth_into_claude_json(cache_path, &entry) {
+        Ok(()) => {
+            eprintln!("[llmenv] auth: {} (inherited)", entry.email);
+            AuthStatus {
+                source: AuthSource::Inherited,
+                id: Some(entry.uuid),
+                email: Some(entry.email),
+            }
+        }
+        Err(e) => {
+            // Printed, not only logged: the session starts with no account, and it must say so.
+            eprintln!(
+                "[llmenv] auth: no account inherited for {}. {e:#}",
+                entry.email
+            );
+            AuthStatus::default()
+        }
     }
 }
 
@@ -80,6 +102,10 @@ fn inject_cached_credentials(adapter_root: &Path, cache_path: &Path) {
     match crate::auth::credentials::inject_if_missing(backend, adapter_root, cache_path) {
         Ok(true) => eprintln!("[llmenv] auth: OAuth credential inherited from durable state"),
         Ok(false) => {}
-        Err(e) => tracing::error!("credential inject failed (non-fatal): {e}"),
+        Err(e) => {
+            // Printed, not only logged: a session without its credential must say so.
+            tracing::error!("credential inject failed (non-fatal): {e}");
+            eprintln!("[llmenv] auth: OAuth credential not inherited. {e:#}");
+        }
     }
 }

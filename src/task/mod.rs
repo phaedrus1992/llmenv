@@ -54,7 +54,9 @@ pub(crate) mod resume;
 pub(crate) mod visibility;
 pub(crate) use finish_hints::last_task_hint;
 use finish_hints::session_finish_reminders;
+mod recency;
 mod tracking;
+use recency::most_recently_updated;
 pub(crate) use tracking::{Tracking, tracking, tracking_in};
 pub mod session;
 pub(crate) use progress::{StrictTasks, progress_after_close, progress_in, wip_title_in};
@@ -457,16 +459,6 @@ fn visit<'a>(
             stack.extend(kids.iter().rev().map(|child| (*child, depth + 1)));
         }
     }
-}
-
-/// The most recently updated of `tasks`, by the instant of `updated_at` (see `cmp_instants`, not
-/// text order, #3796). Ties resolve to `max_by`'s documented
-/// last-element-wins rule — callers that need a stable tiebreak on ties sort
-/// first (see [`append_forest`]'s `created_at`-then-`slug` order).
-fn most_recently_updated<'a>(tasks: impl Iterator<Item = &'a Task>) -> Option<&'a Task> {
-    tasks.max_by(|a, b| {
-        crate::util::time::cmp_instants(&a.updated_at, &b.updated_at, "task updated_at")
-    })
 }
 
 /// How `add_task`/`add_task_for_session` should set the new task's `parent`, a display link
