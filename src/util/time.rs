@@ -146,16 +146,19 @@ mod tests {
             }
         }
 
-        // Each distinct bad value is reported once. The nonce keeps this test's values apart
-        // from any value another test reported first.
+        // Each distinct (source, bad value) pair is reported once. The nonce keeps this test's
+        // values apart from any value another test reported first.
         #[test]
-        fn first_report_is_true_once_per_distinct_text(
+        fn first_report_is_true_once_per_distinct_source_and_text(
             nonce in "[0-9a-f]{16}",
-            texts in proptest::collection::vec("[a-z]{1,4}", 1..12),
+            pairs in proptest::collection::vec(("(a|b)", "[a-z]{1,4}"), 1..12),
         ) {
-            let keys: Vec<String> = texts.iter().map(|t| format!("pbt-3812-{nonce}-{t}")).collect();
+            let keys: Vec<(String, String)> = pairs
+                .iter()
+                .map(|(s, t)| (format!("pbt-src-{s}-{nonce}"), format!("pbt-3812-{nonce}-{t}")))
+                .collect();
             let distinct = keys.iter().collect::<std::collections::BTreeSet<_>>().len();
-            let firsts = keys.iter().filter(|k| first_report("pbt-3812", k)).count();
+            let firsts = keys.iter().filter(|(s, t)| first_report(s, t)).count();
             prop_assert_eq!(firsts, distinct);
         }
     }
