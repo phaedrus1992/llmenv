@@ -21,7 +21,7 @@ fn format_nanos(ts: Timestamp) -> String {
 /// Parse RFC 3339 text. An offset other than `Z` is converted to the same instant.
 ///
 /// # Errors
-/// Errors if `text` is not RFC 3339, or is outside the range of `SystemTime`.
+/// Errors if `text` is not RFC 3339.
 fn parse_rfc3339(text: &str) -> anyhow::Result<SystemTime> {
     let ts: Timestamp = text
         .parse()
@@ -31,8 +31,8 @@ fn parse_rfc3339(text: &str) -> anyhow::Result<SystemTime> {
 
 /// Orders two stored timestamps by instant. The text order is wrong for some values: in text,
 /// `Z` sorts after `.`, so a whole second reads later than a fraction of it (#3796). A value that
-/// does not parse sorts first, and it is logged, so it cannot move in silence. `a_record` and
-/// `b_record` name the records that hold the two values in that log.
+/// does not parse sorts first. Its warning is the only signal, and the warning is logged once per
+/// record. `a_record` and `b_record` name the records that hold the two values in that log.
 #[must_use]
 pub(crate) fn cmp_instants(
     a: &str,
@@ -83,9 +83,10 @@ pub(crate) fn instant_or_log(text: &str, source: &str, record: &str) -> Option<S
 }
 
 /// Warn when the record that wins a `max` holds a bad timestamp. A bad value sorts as the
-/// oldest, so the record wins with no visible cue (#3843). `shared` counts the records that
-/// hold the same text. Each record and value pair warns once per process, as `instant_or_log`
-/// does, because a status line re-renders this often.
+/// oldest, so the record wins with no visible cue (#3843). `shared` counts the records that tie
+/// with the winner by instant. When it is above 1, the winner is a tie, not the newest record.
+/// Each record and value pair warns once per process, as `instant_or_log` does, because a status
+/// line re-renders this often.
 pub(crate) fn warn_if_bad_max_winner(source: &str, record: &str, text: &str, shared: usize) {
     let Err(e) = parse_rfc3339(text) else {
         return;
@@ -97,8 +98,8 @@ pub(crate) fn warn_if_bad_max_winner(source: &str, record: &str, text: &str, sha
             record,
             value = text,
             shared,
-            "the most recent record has a bad timestamp, so it won by default. Fix: rewrite \
-             the timestamp of this record as RFC 3339, such as 2026-01-01T00:00:00Z"
+            "this record won the max with an unreadable timestamp, so the pick may be a tie. \
+             Fix: rewrite the timestamp of this record as RFC 3339, such as 2026-01-01T00:00:00Z"
         );
     }
 }
@@ -120,7 +121,11 @@ pub(crate) fn format_age(age: Duration) -> String {
     });
     match balanced {
         Ok(span) => printer.span_to_string(&span),
-        Err(_) => printer.duration_to_string(&signed),
+        Err(e) => {
+            // The plain form is still a correct age, so the rounding failure is only a debug note.
+            tracing::debug!(error = %e, "could not round the age, so it uses the plain form");
+            printer.duration_to_string(&signed)
+        }
     }
 }
 

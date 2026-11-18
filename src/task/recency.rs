@@ -16,9 +16,19 @@ pub(super) fn most_recently_updated<'a>(tasks: impl Iterator<Item = &'a Task>) -
             "task updated_at",
         )
     })?;
+    // Ties by instant, not by text: a bad value sorts equal to every other bad value (#3851).
     let shared = tasks
         .iter()
-        .filter(|t| t.updated_at == winner.updated_at)
+        .filter(|t| {
+            crate::util::time::cmp_instants(
+                &t.updated_at,
+                &t.slug,
+                &winner.updated_at,
+                &winner.slug,
+                "task updated_at",
+            )
+            .is_eq()
+        })
         .count();
     crate::util::time::warn_if_bad_max_winner(
         "task updated_at",

@@ -28,10 +28,20 @@ pub(crate) fn choose_auth_for_inheritance(adapter_root: &Path) -> anyhow::Result
     let loaded = load_counted(adapter_root)?;
     let entry = loaded.entries.first().cloned();
     if let Some(best) = &entry {
+        // Ties by instant, not by text: a bad value sorts equal to every other bad value.
         let shared = loaded
             .entries
             .iter()
-            .filter(|e| e.last_seen == best.last_seen)
+            .filter(|e| {
+                crate::util::time::cmp_instants(
+                    &e.last_seen,
+                    &e.uuid,
+                    &best.last_seen,
+                    &best.uuid,
+                    "auth entry last_seen",
+                )
+                .is_eq()
+            })
             .count();
         crate::util::time::warn_if_bad_max_winner(
             "auth entry last_seen",
