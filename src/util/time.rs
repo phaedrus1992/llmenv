@@ -22,7 +22,7 @@ fn format_nanos(ts: Timestamp) -> String {
 ///
 /// # Errors
 /// Errors if `text` is not RFC 3339, or is outside the range of `SystemTime`.
-pub(crate) fn parse_rfc3339(text: &str) -> anyhow::Result<SystemTime> {
+fn parse_rfc3339(text: &str) -> anyhow::Result<SystemTime> {
     let ts: Timestamp = text
         .parse()
         .map_err(|e| anyhow::anyhow!("{text:?} is not an RFC 3339 timestamp: {e}"))?;
