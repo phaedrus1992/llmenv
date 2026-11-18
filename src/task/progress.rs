@@ -181,7 +181,8 @@ mod tests {
                 .map(|(i, (s, state, at))| {
                     let mut t = task(ids.get(usize::from(*s)).copied(), states[usize::from(*state)]);
                     t.title = format!("t{i}");
-                    t.updated_at = format!("2026-01-0{at}");
+                    // Day 1 to 10, as the store writes them: RFC 3339, not a date alone (#3796).
+                    t.updated_at = format!("2026-01-{:02}T00:00:00Z", at + 1);
                     t
                 })
                 .collect();

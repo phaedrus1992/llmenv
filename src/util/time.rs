@@ -29,6 +29,29 @@ pub(crate) fn parse_rfc3339(text: &str) -> anyhow::Result<SystemTime> {
     Ok(SystemTime::from(ts))
 }
 
+/// Orders two stored timestamps by instant. The text order is wrong for some values: in text,
+/// `Z` sorts after `.`, so a whole second reads later than a fraction of it (#3796). A value that
+/// does not parse sorts first, and it is logged, so it cannot move in silence.
+#[must_use]
+pub(crate) fn cmp_instants(a: &str, b: &str) -> std::cmp::Ordering {
+    instant_or_log(a).cmp(&instant_or_log(b))
+}
+
+/// The instant of a stored timestamp. A value that does not parse is logged, and gives `None`.
+pub(crate) fn instant_or_log(text: &str) -> Option<SystemTime> {
+    match parse_rfc3339(text) {
+        Ok(at) => Some(at),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "a stored timestamp cannot be read. Fix: rewrite it as RFC 3339, \
+                 such as 2026-01-01T00:00:00Z"
+            );
+            None
+        }
+    }
+}
+
 /// `age` as compact text, such as `"1d 2h 3m 4s"`. A zero age is `"0s"`. Days are 24 hours.
 #[must_use]
 pub(crate) fn format_age(age: Duration) -> String {
@@ -82,6 +105,23 @@ pub(crate) fn parse_age(raw: &str) -> anyhow::Result<Duration> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn cmp_instants_orders_by_instant_not_by_text() {
+        // In text, 'Z' sorts after '.', so the whole second reads as later. It is earlier.
+        let whole = "2026-01-01T00:00:01Z";
+        let half = "2026-01-01T00:00:01.500000000Z";
+        assert_eq!(cmp_instants(whole, half), std::cmp::Ordering::Less);
+        assert_eq!(cmp_instants(half, whole), std::cmp::Ordering::Greater);
+    }
+
+    #[test]
+    fn cmp_instants_sorts_an_unparseable_value_first() {
+        let good = "2026-01-01T00:00:00Z";
+        assert_eq!(cmp_instants("garbage", good), std::cmp::Ordering::Less);
+        assert_eq!(cmp_instants(good, "garbage"), std::cmp::Ordering::Greater);
+        assert_eq!(cmp_instants("garbage", "other"), std::cmp::Ordering::Equal);
+    }
 
     #[test]
     fn age_text_uses_compact_units_and_days() {

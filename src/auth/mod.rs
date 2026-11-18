@@ -160,7 +160,7 @@ fn load_all_auth_entries(adapter_root: &Path) -> anyhow::Result<Vec<AuthEntry>> 
                 .ok()
         })
         .collect();
-    entries.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+    entries.sort_by(|a, b| crate::util::time::cmp_instants(&b.last_seen, &a.last_seen));
     Ok(entries)
 }
 
