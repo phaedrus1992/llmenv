@@ -10,6 +10,9 @@
 
 pub mod credentials;
 pub(crate) mod detect;
+mod entries;
+
+use entries::load_all_auth_entries;
 
 use std::path::{Path, PathBuf};
 
@@ -108,60 +111,6 @@ pub(crate) fn save_auth_entry(adapter_root: &Path, entry: &AuthEntry) -> anyhow:
     let json = serde_json::to_string_pretty(entry)?;
     crate::paths::write_owner_only_atomic(&path, json.as_bytes())
         .map_err(|e| anyhow::anyhow!("writing auth cache {}: {e}", path.display()))
-}
-
-/// Load all valid [`AuthEntry`] files from the cache, sorted newest-first.
-///
-/// Unreadable or unparseable cache files are skipped — stale entries from a
-/// prior crashed write must not block normal operation.
-///
-/// # Errors
-/// Returns an error only on I/O failure reading the cache directory itself.
-fn load_all_auth_entries(adapter_root: &Path) -> anyhow::Result<Vec<AuthEntry>> {
-    let dir = auth_cache_dir(adapter_root);
-    let read_dir = match std::fs::read_dir(&dir) {
-        Ok(d) => d,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => {
-            return Err(anyhow::anyhow!(
-                "reading auth cache dir {}: {e}",
-                dir.display()
-            ));
-        }
-    };
-    let mut entries: Vec<AuthEntry> = read_dir
-        .filter_map(|res| {
-            let entry = res
-                .inspect_err(|e| {
-                    tracing::error!(
-                        "an entry in {} cannot be read, so it is left out of the auth list: {e}",
-                        dir.display()
-                    );
-                })
-                .ok()?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                return None;
-            }
-            // The credential cache (#1057) shares this directory but is not an
-            // AuthEntry; without this it would warn on every load.
-            if path.file_name().and_then(|n| n.to_str()) == Some(credentials::CACHE_FILE) {
-                return None;
-            }
-            let bytes = std::fs::read(&path)
-                .inspect_err(|e| {
-                    tracing::error!("failed to read auth entry {}: {e}", path.display())
-                })
-                .ok()?;
-            serde_json::from_slice::<AuthEntry>(&bytes)
-                .inspect_err(|e| {
-                    tracing::error!("failed to parse auth entry {}: {e}", path.display())
-                })
-                .ok()
-        })
-        .collect();
-    entries.sort_by(|a, b| crate::util::time::cmp_instants(&b.last_seen, &a.last_seen));
-    Ok(entries)
 }
 
 /// Choose the best cached auth entry to inherit into a new folder.
@@ -453,6 +402,49 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let entries = load_all_auth_entries(tmp.path()).unwrap();
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn load_all_errors_when_every_entry_is_unreadable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = auth_cache_dir(tmp.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("corrupt.json"), b"{ not json").unwrap();
+        let err = load_all_auth_entries(tmp.path()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("corrupt.json"),
+            "error must name the file: {msg}"
+        );
+    }
+
+    #[test]
+    fn load_all_keeps_the_good_entry_beside_a_corrupt_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let entry = AuthEntry {
+            uuid: "eeee5555-0000-0000-0000-000000000000".to_string(),
+            email: "mixed@test.com".to_string(),
+            last_seen: "2025-01-01T00:00:00Z".to_string(),
+            raw: serde_json::json!({"id": "eeee5555-0000-0000-0000-000000000000"}),
+        };
+        save_auth_entry(tmp.path(), &entry).unwrap();
+        std::fs::write(
+            auth_cache_dir(tmp.path()).join("corrupt.json"),
+            b"{ not json",
+        )
+        .unwrap();
+        let entries = load_all_auth_entries(tmp.path()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].uuid, entry.uuid);
+    }
+
+    #[test]
+    fn choose_auth_errors_when_the_only_cached_entry_is_corrupt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = auth_cache_dir(tmp.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("corrupt.json"), b"{ not json").unwrap();
+        assert!(choose_auth_for_inheritance(tmp.path()).is_err());
     }
 
     #[test]
