@@ -270,10 +270,11 @@ pub(crate) mod filter;
 mod finish;
 mod resume_text;
 pub use checkpoint::idle_display;
+mod abandon;
 mod resume_write;
+use abandon::{abandon_failed, abandon_session};
 use checkpoint::{checkpoint_error, engine_start, only_own_session, resume};
 pub(crate) use context_reminder::missing_context_reminders;
-use finish::untag_unfinished;
 pub use finish::{FinishOutcome, finish_session};
 #[cfg(test)]
 use resume_text::MAX_REMINDER_CONTEXT_CHARS;
@@ -573,56 +574,6 @@ fn try_tasks_in_session(state_dir: &Path, session_id: &str) -> anyhow::Result<Ve
         .into_iter()
         .filter(|t| t.session.as_deref() == Some(session_id))
         .collect())
-}
-
-/// The error of a failed abandon in `session start --replace`. It names the sessions that were
-/// abandoned before it, and the tasks that the failed session had already untagged, because no new
-/// session is started and the user must know what changed (#3759).
-fn abandon_failed(id: &str, abandoned: &[Session], error: anyhow::Error) -> anyhow::Error {
-    let sessions: Vec<&str> = abandoned.iter().map(|s| s.id.as_str()).collect();
-    let untagged: Vec<String> = super::partial::changed_before_failure(&error)
-        .iter()
-        .map(|t| t.slug.clone())
-        .collect();
-    // An error with no list may still follow an untag, so an empty list reads as "none known".
-    let untagged = if untagged.is_empty() {
-        "none known".to_owned()
-    } else {
-        untagged.join(", ")
-    };
-    error.context(format!(
-        "cannot abandon session '{id}', and no new session is started. Already abandoned \
-         sessions: [{}]. Tasks already untagged from '{id}': [{untagged}]. Fix: run `llmenv task \
-         session start --replace` again once the store is writable",
-        sessions.join(", "),
-    ))
-}
-
-use super::partial::PartialWrite;
-
-/// Abandon `session`: stamps `abandoned_at`, and for every one of its tasks
-/// that isn't already `done`, clears the `session` tag and appends an
-/// orphaning note. Already-`done` tasks keep their tag — a legitimate
-/// historical record. `tasks` are the tasks of `session`, from the caller's strict read. Caller
-/// must already hold the store lock. Returns the
-/// stamped session, so the caller doesn't re-read what was just written.
-fn abandon_session(
-    state_dir: &Path,
-    mut session: Session,
-    tasks: Vec<Task>,
-) -> anyhow::Result<Session> {
-    let now = now_rfc3339();
-    let label = session.name.clone().unwrap_or_else(|| session.id.clone());
-    let note = format!(
-        "Orphaned: session '{label}' was abandoned (`session start --replace`) \
-         before this task was finished."
-    );
-    // The stamp comes last, so a failed untag leaves the session open and a retry finds it.
-    let untagged = untag_unfinished(state_dir, &session.id, tasks, &now, &note)?;
-    session.abandoned_at = Some(now);
-    // The tasks are untagged when this save fails, so the error carries them (#3759).
-    save_session(state_dir, &session).map_err(|e| PartialWrite::error(untagged, e))?;
-    Ok(session)
 }
 
 /// One task's fields relevant to a session summary — a stable subset of
@@ -963,7 +914,14 @@ mod tests {
         let updated =
             update_resume(dir.path(), &created.id, |r| r.append_note("hello")).expect("update");
         assert_eq!(updated.resume.context.as_deref(), Some("hello"));
-        assert!(updated.last_activity >= created.last_activity);
+        assert_ne!(
+            llmenv_util::time::cmp_instants(
+                &updated.last_activity,
+                &created.last_activity,
+                "session last_activity"
+            ),
+            std::cmp::Ordering::Less
+        );
         let stored = load_session(dir.path(), &created.id).expect("load");
         assert_eq!(stored.resume.context.as_deref(), Some("hello"));
     }

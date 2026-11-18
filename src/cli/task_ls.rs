@@ -74,10 +74,7 @@ fn ls_print(
         Some(TaskListFormat::Json) => {
             // Stable order even at second-precision timestamp ties, so scripts that parse the
             // JSON get deterministic output.
-            tasks.sort_by(|a, b| {
-                crate::util::time::cmp_instants(&a.created_at, &b.created_at)
-                    .then_with(|| a.slug.cmp(&b.slug))
-            });
+            tasks.sort_by(crate::task::queue_order);
             println!("{}", serde_json::to_string(&tasks)?);
         }
         None => {

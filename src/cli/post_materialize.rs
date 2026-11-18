@@ -49,9 +49,8 @@ fn inject_cached_auth_if_available(adapter_root: &Path, cache_path: &Path) -> Au
     inject_cached_credentials(adapter_root, cache_path);
     match crate::auth::choose_auth_for_inheritance(adapter_root) {
         Err(e) => {
-            tracing::warn!(
-                "auth cache lookup failed, so the session starts with no auth status: {e}. Fix: check the auth cache folder."
-            );
+            // Printed, not only logged: a session that starts with no account must say so.
+            eprintln!("[llmenv] auth: no account inherited. {e:#}");
             AuthStatus::default()
         }
         Ok(None) => AuthStatus::default(),

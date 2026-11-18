@@ -84,7 +84,7 @@ proptest::proptest! {
                 proptest::prop_assert_eq!(queued, open.len());
                 let earliest = open
                     .iter()
-                    .min_by(|a, b| llmenv_util::time::cmp_instants(&a.created_at, &b.created_at).then_with(|| a.slug.cmp(&b.slug)))
+                    .min_by(|a, b| llmenv_util::time::cmp_instants(&a.created_at, &b.created_at, "task created_at").then_with(|| a.slug.cmp(&b.slug)))
                     .map(|t| t.slug.to_string());
                 proptest::prop_assert_eq!(next, earliest);
                 let wip_ok = match &wip {
@@ -177,7 +177,7 @@ proptest::proptest! {
         let want = open
             .iter()
             .filter(|t| blockers_done(t))
-            .min_by(|a, b| llmenv_util::time::cmp_instants(&a.created_at, &b.created_at).then_with(|| a.slug.cmp(&b.slug)))
+            .min_by(|a, b| llmenv_util::time::cmp_instants(&a.created_at, &b.created_at, "task created_at").then_with(|| a.slug.cmp(&b.slug)))
             .map(|t| t.slug.clone());
         match tracking_of(&visible, &tasks, None) {
             Tracking::NoTasks => proptest::prop_assert!(tasks.iter().all(|t| t.state == TaskState::Done)),
@@ -242,7 +242,7 @@ proptest::proptest! {
         let by_slug: std::collections::HashMap<&str, &Task> =
             tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
         let mut open: Vec<&Task> = tasks.iter().filter(|t| t.state == TaskState::Open).collect();
-        open.sort_by(|a, b| llmenv_util::time::cmp_instants(&a.created_at, &b.created_at).then_with(|| a.slug.cmp(&b.slug)));
+        open.sort_by(|a, b| llmenv_util::time::cmp_instants(&a.created_at, &b.created_at, "task created_at").then_with(|| a.slug.cmp(&b.slug)));
         let want = crate::startability::first_startable(&open, &tasks, &by_slug)
             .map(|t| t.slug.clone());
         if let Tracking::Tracked { next, stuck, queued, .. } = tracking_of(&visible, &tasks, None) {
