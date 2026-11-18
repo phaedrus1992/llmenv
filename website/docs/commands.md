@@ -919,8 +919,8 @@ llmenv task session ls
 In-engine task tracker (#231): durable, cross-session "what am I working on"
 state, backed by one JSON file per task. `<id>` accepts an exact slug or any
 unambiguous prefix of one.
-The caller's open session is searched first.
-A bare slug then reaches that session's task, even when a finished session left a task with the same slug.
+An exact slug wins in any session, so a finished session's task is reachable by its exact slug.
+Otherwise the caller's open session is searched first, so its prefix matches win over finished tasks.
 Only when the open session has no match does the search cover the whole project.
 
 - `task add <title> [--child-of SLUG | --parallel] [--after SLUG] [--parent SLUG] [--session <id>]` — create

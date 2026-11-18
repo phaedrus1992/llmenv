@@ -79,19 +79,19 @@ check "a shard with no time left after the setup does not start, and fails" "10"
 check "the late shard says why" "1" "$(grep -c 'did not start' <<<"$out")"
 
 PATH="$SCRATCH/nobin" /bin/bash "$SHARD" 0 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
-check "a runner without timeout is refused" "2" "$?"
+check "a runner without timeout is refused, with the setup code" "11" "$?"
 
 bash "$SHARD" 3 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
-check "a shard index at the shard count is refused" "2" "$?"
+check "a shard index at the shard count is refused, with the setup code" "11" "$?"
 
 bash "$SHARD" 0 3 "$SCRATCH/missing.diff" >/dev/null 2>&1
-check "a missing diff file is refused" "2" "$?"
+check "a missing diff file is refused, with the setup code" "11" "$?"
 
 bash "$SHARD" 0 x "$SCRATCH/pr.diff" >/dev/null 2>&1
-check "a non-number shard count is refused" "2" "$?"
+check "a non-number shard count is refused, with the setup code" "11" "$?"
 
 bash "$SHARD" 0 3 >/dev/null 2>&1
-check "a missing argument is refused" "2" "$?"
+check "a missing argument is refused, with the setup code" "11" "$?"
 
 bash "$SHARD" --help >/dev/null 2>&1
 check "--help exits 0" "0" "$?"

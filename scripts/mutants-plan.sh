@@ -16,6 +16,9 @@
 #
 # <base-ref> is a branch name such as `release/3.x`; the script diffs against
 # `origin/<base-ref>`. Diagnostics go to stderr.
+#
+# Setup errors exit 2. This script has no survivor exit code, so 2 cannot read as a finding here.
+# The shard script uses a different code for setup errors (#3814).
 set -euo pipefail
 
 usage() {

@@ -208,6 +208,7 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 - Read each store once in the TaskCreate redirect. `llmenv task start`, `llmenv task done`, and the TaskUpdate redirect read the task store once, and `task done` reads the session counts for its hint from the same read (#3485, #3482). A failed TaskUpdate now says `couldn't update task '<id>'` with the full cause, for a bad id and a refused change alike, and says which task got its note. [perf:task] [#3474]
 - Read the task store once in `llmenv task note`, `wait`, `clear`, `add`, `ls`, `start`, `block`, `edit`, and `reopen`. `start --reopen` reads it a second time after the reopen writes. `clear` reads the caller once (#3485). The ownership check now hands its resolved task to the command, so the check and the change always act on the same task. [perf:task] [#3477]
 - Read the task store once in `llmenv task session start --replace` and `llmenv task session finish`, and the session files once in `llmenv task ls --current-project`. Before, `--replace` read the whole store once for each session that it abandoned. [perf:task] [#3479]
+- Resolve a bare task slug to an exact match in any session first. A finished session's task is reachable by its exact slug, where an open session's prefix match used to win. See [the task commands](https://phaedrus1992.github.io/llmenv/docs/commands). [fix:task] [#3832]
 
 ### Fixed
 
@@ -397,6 +398,9 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 - Refuse `--parent` for a parent with no session, as `--child-of` already did. Before, `llmenv task add --parent` and `llmenv task edit --parent` accepted an owner-less parent, and starting the child then changed that parent. [fix:task] [#3593]
 - Show `(unknown)`, not `(inactive)`, for a content scope whose folder cannot be read in `llmenv status scopes`. The scope still stays inactive, and the warning names the folder. [fix:status] [#3793]
 - Order tasks and sessions by the time they name, not by the text of the time. The queue, the most recent task, the auth cache, and the session idle time now compare instants, and a stored time that cannot be read is logged with its fix. [fix:task] [#3796]
+- Stop the MCP proxy without failing on a pid of another user, and remove a staging folder whose writer pid belongs to another user. [fix:mcp] [#3810]
+- Show a visible notice when a session's `last_activity` cannot be read, and name the fix. `--replace` no longer blames your own session as another conversation's. [fix:task] [#3811]
+- Log a bad stored timestamp once per process, not once per comparison during a sort. [fix:util] [#3812]
 
 ### Security
 

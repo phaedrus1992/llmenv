@@ -1,7 +1,7 @@
 pub mod proxy {
     pub use llmenv_mcp::proxy::{
         EnsureOutcome, LogDirMode, default_pid_path, detach_process_group, ensure_running,
-        is_alive, open_bounded_log, probe_tcp, spawn_mcp_proxy,
+        is_alive, is_own_process_alive, open_bounded_log, probe_tcp, spawn_mcp_proxy,
     };
 }
 
