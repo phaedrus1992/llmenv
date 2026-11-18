@@ -459,8 +459,8 @@ fn visit<'a>(
     }
 }
 
-/// The most recently updated of `tasks`, by `updated_at` string comparison
-/// (RFC3339 sorts lexicographically). Ties resolve to `max_by`'s documented
+/// The most recently updated of `tasks`, by the instant of `updated_at` (see `cmp_instants`, not
+/// text order, #3796). Ties resolve to `max_by`'s documented
 /// last-element-wins rule — callers that need a stable tiebreak on ties sort
 /// first (see [`append_forest`]'s `created_at`-then-`slug` order).
 fn most_recently_updated<'a>(tasks: impl Iterator<Item = &'a Task>) -> Option<&'a Task> {
