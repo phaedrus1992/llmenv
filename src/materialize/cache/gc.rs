@@ -103,23 +103,49 @@ const STAGING_GRACE: std::time::Duration = std::time::Duration::from_secs(60 * 6
 /// Whether a `.tmp` staging folder is an orphan that gc may remove. It is one when its writer is
 /// gone, or when it is older than [`STAGING_GRACE`]. A name with no readable pid is judged by age.
 fn staging_is_orphan(p: &Path, now: SystemTime) -> bool {
-    // A pid of another user cannot be this llmenv's writer, so it counts as gone (#3810).
-    let alive = staging_pid(p).map(|pid| (pid, crate::mcp::proxy::is_own_process_alive(pid)));
+    let writer = staging_pid(p).map(|pid| {
+        (
+            pid,
+            crate::mcp::proxy::is_alive(pid),
+            crate::mcp::proxy::is_own_process_alive(pid),
+        )
+    });
     // A writer that cannot be asked about leaves only the age rule, which is logged (#3509).
-    if let Some((pid, None)) = alive {
+    if let Some((pid, None, _)) = writer {
         tracing::error!(
             pid,
             path = %p.display(),
             "cannot ask whether the writer of a staging folder is alive, so its age decides"
         );
     }
-    let owner_gone = alive.is_some_and(|(_, state)| state == Some(false));
+    let owner_gone = writer.is_some_and(|(_, any_user, own_user)| {
+        writer_gone(any_user, own_user, owned_by_another_user(p))
+    });
     let old = std::fs::symlink_metadata(p)
         .and_then(|m| m.modified())
         .ok()
         .and_then(|m| now.duration_since(m).ok())
         .is_some_and(|age| age > STAGING_GRACE);
     owner_gone || old
+}
+
+/// Whether the writer of a staging folder is gone, so gc may remove the folder. `any_user` asks
+/// about the pid of any user. `own_user` asks about this user's processes only. A pid that
+/// answers only for another user is gone when the folder is also another user's (#3810). A
+/// sandbox can give EPERM for a live writer of this user, so that case keeps the folder.
+fn writer_gone(any_user: Option<bool>, own_user: Option<bool>, foreign_folder: bool) -> bool {
+    match (any_user, own_user) {
+        (Some(false), _) => true,
+        (Some(true), Some(false)) => foreign_folder,
+        _ => false,
+    }
+}
+
+/// Whether the staging folder belongs to another user. A folder that cannot be read is not
+/// treated as foreign, so the age rule decides for it.
+fn owned_by_another_user(p: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(p).is_ok_and(|m| m.uid() != rustix::process::geteuid().as_raw())
 }
 
 /// The pid in a staging name `{folder}.{pid}.{nanos}.tmp`, or `None` when the name has no pid.
@@ -324,13 +350,27 @@ mod tests {
         assert!(staging_is_orphan(&staging, SystemTime::now()));
     }
 
-    /// Pid 1 belongs to root, so it is a process of another user. A writer of that kind cannot
-    /// be this llmenv, so the folder is an orphan at once (#3810).
+    /// A pid that answers only for another user is gone for a foreign folder, and kept for this
+    /// user's own folder, which a sandbox can produce with EPERM (#3810).
     #[test]
-    fn a_staging_folder_of_another_users_writer_is_an_orphan() {
-        let root = tempfile::TempDir::new().unwrap();
-        let staging = root.path().join("pending.1.1.tmp");
-        std::fs::create_dir(&staging).unwrap();
-        assert!(staging_is_orphan(&staging, SystemTime::now()));
+    fn a_writer_that_answers_only_for_another_user_is_gone_only_in_a_foreign_folder() {
+        assert!(writer_gone(Some(true), Some(false), true));
+        assert!(!writer_gone(Some(true), Some(false), false));
+    }
+
+    #[test]
+    fn a_writer_decides_by_liveness_and_ignores_an_unknown_answer() {
+        assert!(
+            writer_gone(Some(false), Some(false), false),
+            "a dead writer is gone"
+        );
+        assert!(
+            !writer_gone(Some(true), Some(true), true),
+            "this user's live writer stays"
+        );
+        assert!(
+            !writer_gone(None, None, true),
+            "an unknown writer is left to the age rule"
+        );
     }
 }
