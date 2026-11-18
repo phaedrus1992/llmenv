@@ -3199,7 +3199,11 @@ fn run_task_session_command(
                 .into_iter()
                 .filter(session::Session::is_open)
                 .collect();
-            sessions.sort_by_key(|s| (s.project != project, s.started_at.clone()));
+            sessions.sort_by(|a, b| {
+                (a.project != project)
+                    .cmp(&(b.project != project))
+                    .then_with(|| crate::util::time::cmp_instants(&a.started_at, &b.started_at))
+            });
             if sessions.is_empty() {
                 println!("No open sessions.");
             }

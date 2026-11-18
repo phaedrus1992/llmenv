@@ -50,9 +50,9 @@ FAKE_STATUS=2 bash "$SHARD" 0 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
 check "a surviving mutant still fails the shard" "2" "$?"
 
 out="$(FAKE_STATUS=124 GITHUB_STEP_SUMMARY="$summary" bash "$SHARD" 1 3 "$SCRATCH/pr.diff" 2>/dev/null)"
-check "a shard out of budget exits 0" "0" "$?"
-check "a shard out of budget annotates a warning" "1" \
-  "$(grep -c '^::warning title=mutants shard incomplete::' <<<"$out")"
+check "a shard out of budget exits 10, so the check fails" "10" "$?"
+check "a shard out of budget annotates an error" "1" \
+  "$(grep -c '^::error title=mutants shard incomplete::' <<<"$out")"
 check "the annotation names the shard as one-based" "1" \
   "$(grep -c 'shard 2/3' <<<"$out")"
 check "the step summary says INCOMPLETE" "1" "$(grep -c 'INCOMPLETE' "$summary")"
@@ -60,7 +60,7 @@ check "the marker file is written" "1" "$(grep -c 'INCOMPLETE shard 2/3' mutants
 
 MUTANTS_MIN_BUDGET=1 MUTANTS_BUDGET=2 FAKE_SLEEP=2 FAKE_STATUS=137 \
   bash "$SHARD" 1 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
-check "a shard that needed the KILL is incomplete, not failed" "0" "$?"
+check "a KILL after the budget ran out fails the shard, and is never green" "137" "$?"
 
 MUTANTS_MIN_BUDGET=1 MUTANTS_BUDGET=100 FAKE_SLEEP=0 FAKE_STATUS=137 \
   bash "$SHARD" 1 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
@@ -69,11 +69,13 @@ check "a 137 before the budget ran out is a failure, as an out-of-memory kill is
 echo "src/lib.rs:1: replace foo with ()" >mutants.out/missed.txt
 FAKE_STATUS=124 bash "$SHARD" 1 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
 check "a survivor before the stop still fails the shard" "2" "$?"
+check "a survivor before the stop also writes the incomplete marker" "1" \
+  "$(grep -c '^INCOMPLETE shard 2/3' mutants.out/INCOMPLETE)"
 rm -f mutants.out/missed.txt
 
 old_start=$(($(date +%s) - 2350))
 out="$(JOB_START="$old_start" FAKE_STATUS=0 bash "$SHARD" 0 3 "$SCRATCH/pr.diff" 2>/dev/null)"
-check "a shard with no time left after the setup does not start" "0" "$?"
+check "a shard with no time left after the setup does not start, and fails" "10" "$?"
 check "the late shard says why" "1" "$(grep -c 'did not start' <<<"$out")"
 
 PATH="$SCRATCH/nobin" /bin/bash "$SHARD" 0 3 "$SCRATCH/pr.diff" >/dev/null 2>&1

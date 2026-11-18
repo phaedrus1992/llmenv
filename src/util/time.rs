@@ -22,11 +22,34 @@ fn format_nanos(ts: Timestamp) -> String {
 ///
 /// # Errors
 /// Errors if `text` is not RFC 3339, or is outside the range of `SystemTime`.
-pub(crate) fn parse_rfc3339(text: &str) -> anyhow::Result<SystemTime> {
+fn parse_rfc3339(text: &str) -> anyhow::Result<SystemTime> {
     let ts: Timestamp = text
         .parse()
         .map_err(|e| anyhow::anyhow!("{text:?} is not an RFC 3339 timestamp: {e}"))?;
     Ok(SystemTime::from(ts))
+}
+
+/// Orders two stored timestamps by instant. The text order is wrong for some values: in text,
+/// `Z` sorts after `.`, so a whole second reads later than a fraction of it (#3796). A value that
+/// does not parse sorts first, and it is logged, so it cannot move in silence.
+#[must_use]
+pub(crate) fn cmp_instants(a: &str, b: &str) -> std::cmp::Ordering {
+    instant_or_log(a).cmp(&instant_or_log(b))
+}
+
+/// The instant of a stored timestamp. A value that does not parse is logged, and gives `None`.
+pub(crate) fn instant_or_log(text: &str) -> Option<SystemTime> {
+    match parse_rfc3339(text) {
+        Ok(at) => Some(at),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "a stored timestamp cannot be read. Fix: rewrite it as RFC 3339, \
+                 such as 2026-01-01T00:00:00Z"
+            );
+            None
+        }
+    }
 }
 
 /// `age` as compact text, such as `"1d 2h 3m 4s"`. A zero age is `"0s"`. Days are 24 hours.
@@ -82,6 +105,55 @@ pub(crate) fn parse_age(raw: &str) -> anyhow::Result<Duration> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn cmp_instants_orders_by_instant_not_by_text() {
+        // In text, 'Z' sorts after '.', so the whole second reads as later. It is earlier.
+        let whole = "2026-01-01T00:00:01Z";
+        let half = "2026-01-01T00:00:01.500000000Z";
+        assert_eq!(cmp_instants(whole, half), std::cmp::Ordering::Less);
+        assert_eq!(cmp_instants(half, whole), std::cmp::Ordering::Greater);
+    }
+
+    #[test]
+    fn cmp_instants_sorts_an_unparseable_value_first() {
+        let good = "2026-01-01T00:00:00Z";
+        assert_eq!(cmp_instants("garbage", good), std::cmp::Ordering::Less);
+        assert_eq!(cmp_instants(good, "garbage"), std::cmp::Ordering::Greater);
+        assert_eq!(cmp_instants("garbage", "other"), std::cmp::Ordering::Equal);
+    }
+
+    proptest::proptest! {
+        // The helper has an instant exactly when the strict parser accepts the text, and it never
+        // panics on any input.
+        #[test]
+        fn instant_or_log_is_some_exactly_when_the_text_parses(text in "\\PC{0,40}") {
+            proptest::prop_assert_eq!(
+                instant_or_log(&text).is_some(),
+                parse_rfc3339(&text).is_ok()
+            );
+        }
+
+        // Two instants compare by instant, even when one is written in the minimal form and the
+        // other in the fixed 9-digit form (#3796).
+        #[test]
+        fn cmp_instants_compares_mixed_precision_texts_by_instant(
+            secs in 0i64..4_000_000_000,
+            a_nanos in 0i32..1_000_000_000,
+            a_digits in 0u32..=9,
+            b_nanos in 0i32..1_000_000_000,
+        ) {
+            // Drop the digits past `a_digits`, so the minimal text of `a` has fewer digits than
+            // the fixed 9-digit text of `b`. Random nanoseconds alone rarely produce that mix.
+            let unit = 10i32.pow(9 - a_digits);
+            let a = Timestamp::new(secs, a_nanos / unit * unit).expect("in range");
+            let b = Timestamp::new(secs, b_nanos).expect("in range");
+            proptest::prop_assert_eq!(
+                cmp_instants(&a.to_string(), &format_nanos(b)),
+                a.cmp(&b)
+            );
+        }
+    }
 
     #[test]
     fn age_text_uses_compact_units_and_days() {

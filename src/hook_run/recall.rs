@@ -317,6 +317,7 @@ mod tests {
         tags.extend(extra.iter().map(ToString::to_string));
         tags.extend(loose.iter().map(ToString::to_string));
         ActiveScopes {
+            unknown_content: Default::default(),
             scopes,
             tags,
             extra_tags: extra.iter().map(ToString::to_string).collect(),
