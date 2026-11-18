@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use crate::mcp::pid_state::is_running;
 use crate::mcp::proxy::{log_path_for, open_proxy_log, read_pidfile};
+use crate::mcp::proxy_command::{command_of, is_proxy_command};
 
 /// Which llmenv path started the proxy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,53 +114,16 @@ pub(crate) enum StopOutcome {
     StillRunning,
 }
 
-/// A command line that starts the memory proxy: `mcp-proxy … -- <icm> serve`, where `<icm>` is
-/// `icm` or an absolute path to it (#2948). A script runs through its interpreter, and `uvx` runs
-/// the tool by name, so `mcp-proxy` is the first or the second word.
-fn is_proxy_command(command: &str) -> bool {
-    let words: Vec<&str> = command.split_whitespace().collect();
-    let names_proxy = words
-        .iter()
-        .take(2)
-        .any(|w| w.rsplit('/').next() == Some("mcp-proxy"));
-    let serves_icm = matches!(
-        words.as_slice(),
-        [.., "--", icm, "serve"] if icm.rsplit('/').next() == Some("icm")
-    );
-    names_proxy && serves_icm
-}
-
-/// The command line of `pid`, or `None` when the process is gone. `-ww` stops `ps` from cutting
-/// a long line, which would hide the `-- icm serve` tail.
-fn command_of(pid: u32) -> anyhow::Result<Option<String>> {
-    // An absolute path: a `ps` earlier on PATH could answer for any pid.
-    let mut cmd = std::process::Command::new("/bin/ps");
-    cmd.args(["-ww", "-o", "command=", "-p", &pid.to_string()])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let out = crate::process::run_traced("proxy:ps", cmd, PS_TIMEOUT)
-        .map_err(|e| anyhow::anyhow!("cannot run /bin/ps to read the command of pid {pid}: {e}"))?;
-    ps_command(pid, &out)
-}
-
-/// `ps` answers in milliseconds. A stuck `ps` must not hold the proxy check (#2923).
-const PS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// Read the `ps` result for `pid`. `ps -p` exits 1 with no output for a pid that does not exist.
-/// Any other failure is an error, so a broken `ps` does not read as "pid gone" (#2923).
-fn ps_command(pid: u32, out: &std::process::Output) -> anyhow::Result<Option<String>> {
-    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if out.status.success() {
-        return Ok((!text.is_empty()).then_some(text));
+/// The outcome of sending SIGTERM. EPERM means the pid was reused by another user's process after
+/// the liveness check, so the proxy is gone (#3810). `None` means the signal was sent.
+fn sigterm_result(sent: rustix::io::Result<()>, pid: u32) -> anyhow::Result<Option<StopOutcome>> {
+    match sent {
+        Ok(()) => Ok(None),
+        Err(rustix::io::Errno::PERM) => Ok(Some(StopOutcome::Gone)),
+        Err(e) => Err(anyhow::anyhow!(
+            "cannot send SIGTERM to mcp-proxy (pid {pid}): {e}"
+        )),
     }
-    if out.status.code() == Some(1) && text.is_empty() && out.stderr.is_empty() {
-        return Ok(None);
-    }
-    anyhow::bail!(
-        "/bin/ps failed to read the command of pid {pid} ({}): {}",
-        out.status,
-        String::from_utf8_lossy(&out.stderr).trim()
-    )
 }
 
 /// Send SIGTERM to the proxy named by the pidfile, and wait up to `wait` for it to exit.
@@ -187,8 +151,12 @@ pub(crate) fn stop_proxy(pid_path: &Path, wait: Duration) -> anyhow::Result<Stop
     if !is_proxy_command(&command) {
         return Ok(StopOutcome::NotProxy(command));
     }
-    rustix::process::kill_process(target, rustix::process::Signal::TERM)
-        .map_err(|e| anyhow::anyhow!("cannot send SIGTERM to mcp-proxy (pid {pid}): {e}"))?;
+    if let Some(outcome) = sigterm_result(
+        rustix::process::kill_process(target, rustix::process::Signal::TERM),
+        pid,
+    )? {
+        return Ok(outcome);
+    }
     let start = Instant::now();
     while start.elapsed() < wait {
         if !is_running(target)? {
@@ -204,7 +172,18 @@ pub(crate) fn stop_proxy(pid_path: &Path, wait: Duration) -> anyhow::Result<Stop
 mod tests {
     use super::*;
     use crate::mcp::proxy::is_alive;
+    use crate::mcp::proxy_command::ps_command;
     use proptest::prelude::*;
+
+    #[test]
+    fn a_term_refused_with_eperm_means_the_proxy_is_gone() {
+        assert!(matches!(
+            sigterm_result(Err(rustix::io::Errno::PERM), 7),
+            Ok(Some(StopOutcome::Gone))
+        ));
+        assert!(matches!(sigterm_result(Ok(()), 7), Ok(None)));
+        assert!(sigterm_result(Err(rustix::io::Errno::INVAL), 7).is_err());
+    }
 
     /// Pid 1 belongs to root. A process of another user is not running for this user, so the
     /// stop must not fail on it (#3810).
