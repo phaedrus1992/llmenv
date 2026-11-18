@@ -94,8 +94,10 @@ status=0
 # --test-tool nextest stops a mutant at its first failing test. --in-place reuses the cached
 # target directory of the checkout, which is disposable in CI. -k sends KILL 60 s after the TERM,
 # so a child that ignores TERM cannot hold the shard until the job limit.
-timeout -k 60 "$budget" cargo mutants --workspace --in-place --test-tool nextest \
-    --in-diff "$diff_file" --shard "$shard/$shards" || status=$?
+# --test-workspace runs the tests of every crate, as the CI test job does. Without it, a mutant
+# is judged by its own package's tests only, so a survivor can be a false miss (#3809).
+timeout -k 60 "$budget" cargo mutants --workspace --test-workspace=true --in-place \
+    --test-tool nextest --in-diff "$diff_file" --shard "$shard/$shards" || status=$?
 
 # 124 is the only budget stop. A kill (137) is a failure, not a stop: the kernel's memory kill
 # and a KILL after an ignored TERM both exit 137, and neither may pass as a stop. The local
