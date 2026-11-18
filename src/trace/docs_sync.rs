@@ -211,6 +211,16 @@ proptest::proptest! {
         proptest::prop_assert_eq!(one.first().map(String::as_str), Some(first.as_str()));
     }
 
+    // A token of dots and underscores before `us` or `ms` has no digit, so it is a name (#3804).
+    #[test]
+    fn a_token_without_a_digit_before_a_unit_is_a_name(
+        stem in "[._]{1,8}",
+        ms in proptest::bool::ANY,
+    ) {
+        let unit = if ms { "ms" } else { "us" };
+        proptest::prop_assert_eq!(shape_of_token(&format!("{stem}{unit}")), "_");
+    }
+
     // A number followed by `us` or `ms` is always a duration.
     #[test]
     fn a_number_with_a_unit_is_a_duration(n in 0u64..u64::MAX, ms in proptest::bool::ANY) {
