@@ -121,7 +121,9 @@ is report-only."
     report_incomplete "$stop_message"
     exit "$INCOMPLETE_EXIT"
 fi
-if [[ "$status" -ne 0 ]]; then
-    echo "mutants-shard: cargo mutants exited $status. A kill is a failure, not a budget stop." >&2
+if [[ "$status" -eq 137 ]]; then
+    echo "mutants-shard: cargo mutants was killed (exit 137). A kill is a failure, not a budget stop." >&2
+elif [[ "$status" -ne 0 ]]; then
+    echo "mutants-shard: cargo mutants exited $status. See the output above for the cause." >&2
 fi
 exit "$status"
