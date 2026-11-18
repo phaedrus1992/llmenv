@@ -48,7 +48,7 @@ fn queue(session_tasks: &[Task]) -> Vec<&Task> {
         .filter(|t| t.relation == Relation::Queued && !t.parallel)
         .collect();
     queued.sort_by(|a, b| {
-        crate::util::time::cmp_instants(&a.created_at, &b.created_at)
+        crate::util::time::cmp_instants(&a.created_at, &b.created_at, "task created_at")
             .then_with(|| a.slug.cmp(&b.slug))
     });
     queued
@@ -121,7 +121,7 @@ pub(super) fn undone_descendants_in<'a>(slug: &str, all: &'a [Task]) -> Vec<&'a 
         }
     }
     found.sort_by(|a, b| {
-        crate::util::time::cmp_instants(&a.created_at, &b.created_at)
+        crate::util::time::cmp_instants(&a.created_at, &b.created_at, "task created_at")
             .then_with(|| a.slug.cmp(&b.slug))
     });
     found
@@ -195,7 +195,7 @@ fn open_children<'a>(parent: &str, all: &'a [Task]) -> Vec<&'a Task> {
         .filter(|t| t.state == TaskState::Open)
         .collect();
     open.sort_by(|a, b| {
-        crate::util::time::cmp_instants(&a.created_at, &b.created_at)
+        crate::util::time::cmp_instants(&a.created_at, &b.created_at, "task created_at")
             .then_with(|| a.slug.cmp(&b.slug))
     });
     open
