@@ -24,8 +24,10 @@ use blockers::first_undone_in_subtree;
 pub(crate) mod core_text;
 mod finish_hints;
 mod parent_chain;
+mod queue_order;
 use ancestors::ancestors_to_start;
 use parent_chain::reject_cycle;
+pub(crate) use queue_order::queue_order;
 mod edit;
 pub(crate) use edit::TaskEdit;
 pub(crate) use edit::edit_task;
@@ -1148,13 +1150,6 @@ fn idle_reminder_lines(project: &str, caller: Option<&str>, stored: &Stored) -> 
         .chain(idle)
         .collect::<Vec<_>>()
         .join("\n\n")
-}
-
-/// The queue order of two tasks: creation time, then slug for a tie. The tree listing and the
-/// next-task lookup both use it, so they cannot disagree about which task is next.
-pub(crate) fn queue_order(a: &Task, b: &Task) -> std::cmp::Ordering {
-    crate::util::time::cmp_instants(&a.created_at, &b.created_at, "task created_at")
-        .then_with(|| a.slug.cmp(&b.slug))
 }
 
 /// A line for each open session of `project` that holds no task at all (#2456). An empty session

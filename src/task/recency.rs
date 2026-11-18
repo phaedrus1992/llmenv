@@ -8,11 +8,27 @@ use crate::task::Task;
 pub(super) fn most_recently_updated<'a>(tasks: impl Iterator<Item = &'a Task>) -> Option<&'a Task> {
     let tasks: Vec<&Task> = tasks.collect();
     let winner = tasks.iter().copied().max_by(|a, b| {
-        crate::util::time::cmp_instants(&a.updated_at, &b.updated_at, "task updated_at")
+        crate::util::time::cmp_instants(
+            &a.updated_at,
+            &a.slug,
+            &b.updated_at,
+            &b.slug,
+            "task updated_at",
+        )
     })?;
+    // Ties by instant, not by text: a bad value sorts equal to every other bad value (#3851).
     let shared = tasks
         .iter()
-        .filter(|t| t.updated_at == winner.updated_at)
+        .filter(|t| {
+            crate::util::time::cmp_instants(
+                &t.updated_at,
+                &t.slug,
+                &winner.updated_at,
+                &winner.slug,
+                "task updated_at",
+            )
+            .is_eq()
+        })
         .count();
     crate::util::time::warn_if_bad_max_winner(
         "task updated_at",
