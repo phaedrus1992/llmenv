@@ -60,7 +60,7 @@ pub mod session {
         StartOutcome, StartRequest, append_override_note, delete_tasks_in_session, finish_session,
         idle_display, list_sessions_strict, load_existing_session, open_sessions_strict,
         pick_open_session, session_reads_on_this_thread, session_summary,
-        session_summary_with_agent, start_session, start_session_as, touch_last_activity,
-        try_session_progress, update_resume,
+        session_summary_with_agent, sort_listing, start_session, start_session_as,
+        touch_last_activity, try_session_progress, update_resume,
     };
 }
