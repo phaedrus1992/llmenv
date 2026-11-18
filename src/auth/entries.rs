@@ -16,11 +16,15 @@ use crate::auth::{AuthEntry, auth_cache_dir};
 /// Returns an error when the cache directory cannot be read. Also returns an error when
 /// files exist but none of them is usable. The caller then reports the cause, instead of
 /// treating the cache as empty.
-pub(super) fn load_all_auth_entries(adapter_root: &Path) -> anyhow::Result<Vec<AuthEntry>> {
+/// Load the usable entries, and count the files that were skipped as unreadable.
+///
+/// The count lets the caller tell the user that an account was left out. A session
+/// can otherwise inherit a different account with no sign that a file was skipped.
+pub(super) fn load_counted(adapter_root: &Path) -> anyhow::Result<(Vec<AuthEntry>, usize)> {
     let dir = auth_cache_dir(adapter_root);
     let read_dir = match std::fs::read_dir(&dir) {
         Ok(d) => d,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), 0)),
         Err(e) => {
             return Err(anyhow::anyhow!(
                 "reading auth cache dir {}: {e}. Fix: make the directory readable, or remove \
@@ -31,6 +35,7 @@ pub(super) fn load_all_auth_entries(adapter_root: &Path) -> anyhow::Result<Vec<A
     };
     let mut entries: Vec<AuthEntry> = Vec::new();
     let mut first_problem: Option<String> = None;
+    let mut skipped = 0_usize;
     for res in read_dir {
         let outcome = res
             .map_err(|e| anyhow::anyhow!("an entry in {} cannot be read: {e}", dir.display()))
@@ -40,6 +45,7 @@ pub(super) fn load_all_auth_entries(adapter_root: &Path) -> anyhow::Result<Vec<A
             Ok(None) => {}
             Err(e) => {
                 tracing::error!("{e:#}");
+                skipped += 1;
                 first_problem.get_or_insert(format!("{e:#}"));
             }
         }
@@ -55,7 +61,43 @@ pub(super) fn load_all_auth_entries(adapter_root: &Path) -> anyhow::Result<Vec<A
     entries.sort_by(|a, b| {
         crate::util::time::cmp_instants(&b.last_seen, &a.last_seen, "auth entry last_seen")
     });
-    Ok(entries)
+    Ok((entries, skipped))
+}
+
+/// The cache entry chosen for a new folder, and the number of cache files skipped.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Inheritance {
+    /// The chosen entry, or `None` when the cache holds no entry.
+    pub(crate) entry: Option<AuthEntry>,
+    /// Cache files left out because they could not be read or parsed.
+    pub(crate) skipped: usize,
+}
+
+/// Choose the best cached auth entry to inherit into a new folder.
+///
+/// Selects the most-recently-seen entry. When multiple entries exist, logs
+/// the others so users know alternate accounts are cached.
+///
+/// # Errors
+/// Returns an error on I/O failure reading the cache directory, or when every
+/// cache file is unusable.
+pub(crate) fn choose_auth_for_inheritance(adapter_root: &Path) -> anyhow::Result<Inheritance> {
+    let (entries, skipped) = load_counted(adapter_root)?;
+    let entry = match entries.as_slice() {
+        [] => None,
+        [one] => Some(one.clone()),
+        [best, rest @ ..] => {
+            for other in rest {
+                tracing::debug!(
+                    "auth cache: also have {} ({}); use `llmenv login` to switch",
+                    other.email,
+                    other.uuid
+                );
+            }
+            Some(best.clone())
+        }
+    };
+    Ok(Inheritance { entry, skipped })
 }
 
 /// Read one file of the cache. `Ok(None)` marks a file that is not an auth entry.
@@ -86,7 +128,7 @@ mod tests {
     use jiff::Timestamp;
     use proptest::prelude::*;
 
-    use super::{CACHE_FILE, load_all_auth_entries};
+    use super::{CACHE_FILE, load_counted};
     use crate::auth::{AuthEntry, auth_cache_dir, save_auth_entry};
 
     fn entry_with(index: u32, email: &str, last_seen: &str) -> AuthEntry {
@@ -117,7 +159,7 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let saved = entry_with(index, &format!("{email}@test.com"), &format!("2025-01-01T00:00:{seconds:02}Z"));
             save_auth_entry(tmp.path(), &saved).unwrap();
-            let loaded = load_all_auth_entries(tmp.path()).unwrap();
+            let loaded = load_counted(tmp.path()).unwrap().0;
             prop_assert_eq!(loaded.len(), 1);
             prop_assert_eq!(&loaded[0].uuid, &saved.uuid);
             prop_assert_eq!(&loaded[0].email, &saved.email);
@@ -149,7 +191,7 @@ mod tests {
                     _ => write_file(tmp.path(), CACHE_FILE, b"ignored"),
                 }
             }
-            match load_all_auth_entries(tmp.path()) {
+            match load_counted(tmp.path()).map(|(entries, _)| entries) {
                 Ok(entries) => {
                     prop_assert_eq!(entries.len(), valid);
                     prop_assert!(valid > 0 || bad == 0);
@@ -173,7 +215,7 @@ mod tests {
                 let saved = entry_with(index, "ord@test.com", &at.to_string());
                 save_auth_entry(tmp.path(), &saved).unwrap();
             }
-            let loaded = load_all_auth_entries(tmp.path()).unwrap();
+            let loaded = load_counted(tmp.path()).unwrap().0;
             prop_assert_eq!(loaded.len(), stamps.len());
             for pair in loaded.windows(2) {
                 let earlier: Timestamp = pair[0].last_seen.parse().unwrap();
