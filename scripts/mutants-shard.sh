@@ -6,7 +6,7 @@
 # incomplete, with an error annotation, a step summary, and an INCOMPLETE marker in mutants.out,
 # and exits 10. Exit 10 fails the check, so an incomplete shard is never green (#3794). Without the
 # budget, the job limit cancels the shard. A mutant that survived before the stop exits 2. A
-# setup error exits 3.
+# setup error exits 11.
 #
 # <shard-index> is zero-based, as `cargo mutants --shard k/n` needs. A shard that finishes exits
 # with the status of cargo-mutants, so a surviving mutant still fails the check. The weekly sweep
@@ -31,9 +31,10 @@ min_budget="${MUTANTS_MIN_BUDGET:-120}"
 # Exit status of an incomplete shard. It is not 0, so the check cannot pass with untested lines.
 # It is outside the small range that cargo-mutants uses, so it never reads as a survivor or a timeout.
 readonly INCOMPLETE_EXIT=10
-# Exit status of a setup error, such as a bad argument or a missing diff file. It differs from 2,
-# which means a surviving mutant, so a reader cannot mistake a setup failure for a finding (#3814).
-readonly SETUP_EXIT=3
+# Exit status of a setup error, such as a bad argument or a missing diff file. It is outside the
+# small codes that cargo-mutants and this script use, so a setup failure never reads as a finding
+# or a timeout (#3814). The exact cargo-mutants codes are not confirmed here.
+readonly SETUP_EXIT=11
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     usage
