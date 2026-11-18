@@ -3,6 +3,9 @@
 
 use anstyle::{AnsiColor, Color, Style};
 
+mod doctor;
+pub use doctor::{doctor_fail, doctor_info, doctor_pass, doctor_warning};
+
 /// Wrap text in an ANSI style when `use_color` is set, else return it plain.
 fn paint(text: &str, color: AnsiColor, use_color: bool) -> String {
     if use_color {
@@ -82,33 +85,14 @@ pub fn inactive_annotation(use_color: bool) -> String {
     paint("(inactive)", AnsiColor::Yellow, use_color)
 }
 
+/// Format an unknown annotation (e.g., "(unknown)") with optional yellow color.
+pub fn unknown_annotation(use_color: bool) -> String {
+    paint("(unknown)", AnsiColor::Yellow, use_color)
+}
+
 /// Format an orphan annotation (e.g., "(orphan)") with optional red color.
 pub fn orphan_annotation(use_color: bool) -> String {
     paint("(orphan)", AnsiColor::Red, use_color)
-}
-
-/// Format a doctor "pass" symbol (✓) with optional green color.
-pub fn doctor_pass(use_color: bool) -> String {
-    paint("✓", AnsiColor::Green, use_color)
-}
-
-/// Format a doctor "warning" symbol (⚠) with optional yellow color.
-pub fn doctor_warning(use_color: bool) -> String {
-    paint("⚠", AnsiColor::Yellow, use_color)
-}
-
-/// Format a doctor "fail" symbol (✗) with optional red color.
-pub fn doctor_fail(use_color: bool) -> String {
-    paint("✗", AnsiColor::Red, use_color)
-}
-
-/// Format a doctor "info" symbol (ℹ), falling back to "i" when color is disabled.
-pub fn doctor_info(use_color: bool) -> String {
-    if use_color {
-        "ℹ".to_string()
-    } else {
-        "i".to_string()
-    }
 }
 
 /// Glyph + ANSI color for a task lifecycle state, for human `task ls` output
@@ -368,6 +352,13 @@ mod tests {
         assert!(doctor_pass(true).contains('✓'));
         assert!(doctor_warning(true).contains('⚠'));
         assert!(doctor_fail(true).contains('✗'));
+    }
+
+    #[test]
+    fn unknown_annotation_is_plain_without_color_and_marked_with_color() {
+        assert_eq!(unknown_annotation(false), "(unknown)");
+        assert!(unknown_annotation(true).contains("(unknown)"));
+        assert_ne!(unknown_annotation(true), inactive_annotation(true));
     }
 
     #[test]

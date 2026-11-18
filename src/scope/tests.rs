@@ -2,6 +2,43 @@
 
 use super::*;
 
+/// A content scope whose folder cannot be read is unknown, not inactive, so `status scopes`
+/// can say why it did not match (#3793).
+#[cfg(unix)]
+#[test]
+#[expect(
+    clippy::expect_used,
+    reason = "fixture setup failure should panic the test"
+)]
+fn an_unreadable_subdirectory_marks_an_unmatched_content_scope_unknown() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("temp dir");
+    let locked = dir.path().join("locked");
+    std::fs::create_dir(&locked).expect("fixture");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("fixture");
+    let mut cfg = Config::default();
+    cfg.scope.content.push(crate::config::ContentScope {
+        id: "md".to_string(),
+        r#match: crate::config::ContentMatch {
+            glob: "*.md".to_string(),
+            depth: None,
+        },
+        tags: Vec::new(),
+    });
+    let env = Env {
+        cwd: dir.path().display().to_string(),
+        ..Default::default()
+    };
+    let active = evaluate(&cfg, &env);
+    // Restore the mode so the temp dir can be removed.
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).expect("fixture");
+    if std::fs::read_dir(&locked).is_ok() {
+        return; // running as root: the mode does not block the read
+    }
+    assert!(active.unknown_content.contains("md"));
+    assert!(active.scopes.iter().all(|s| s.id != "md"));
+}
+
 #[test]
 fn non_project_tags_excludes_project_scope_tags() {
     let active = ActiveScopes {
@@ -233,6 +270,7 @@ fn non_project_tags_excludes_extra_tags() {
     // tags are (#696, #1020) — not treated as an environment tag like
     // the OS tag.
     let active = ActiveScopes {
+        unknown_content: Default::default(),
         scopes: vec![ActiveScope {
             id: "h1".into(),
             kind: "host",
