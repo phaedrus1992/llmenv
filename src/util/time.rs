@@ -37,16 +37,31 @@ pub(crate) fn cmp_instants(a: &str, b: &str) -> std::cmp::Ordering {
     instant_or_log(a).cmp(&instant_or_log(b))
 }
 
-/// The instant of a stored timestamp. A value that does not parse is logged, and gives `None`.
+/// Bad timestamp texts that were already logged in this process. A sort compares one value many
+/// times, so each bad value is logged once, not once per comparison (#3812).
+static REPORTED_BAD: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Whether `text` is new to the bad-timestamp log. A poisoned lock counts as new, so the
+/// warning still appears.
+fn first_report(text: &str) -> bool {
+    REPORTED_BAD
+        .lock()
+        .map_or(true, |mut seen| seen.insert(text.to_string()))
+}
+
+/// The instant of a stored timestamp. A value that does not parse is logged once, and gives `None`.
 pub(crate) fn instant_or_log(text: &str) -> Option<SystemTime> {
     match parse_rfc3339(text) {
         Ok(at) => Some(at),
         Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "a stored timestamp cannot be read. Fix: rewrite it as RFC 3339, \
-                 such as 2026-01-01T00:00:00Z"
-            );
+            if first_report(text) {
+                tracing::warn!(
+                    error = %e,
+                    "a stored timestamp cannot be read. Fix: rewrite it as RFC 3339, \
+                     such as 2026-01-01T00:00:00Z"
+                );
+            }
             None
         }
     }
@@ -105,6 +120,19 @@ pub(crate) fn parse_age(raw: &str) -> anyhow::Result<Duration> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn a_bad_value_is_reported_once_per_process() {
+        let bad = "not-a-time-3812-unique";
+        assert!(
+            first_report(bad),
+            "the first report of a bad value is logged"
+        );
+        assert!(
+            !first_report(bad),
+            "a repeat of the same bad value is not logged again"
+        );
+    }
 
     #[test]
     fn cmp_instants_orders_by_instant_not_by_text() {
