@@ -3,13 +3,14 @@
 #
 # Run one shard of the in-diff mutation run for a pull request (#3569). The shard runs inside a
 # time budget that is shorter than the job limit. A shard that runs out of budget is reported as
-# incomplete, with a warning annotation, a step summary, and an INCOMPLETE marker in mutants.out,
-# and exits 0. Without the budget, the job limit cancels the shard, and the check fails with no
-# finding. A mutant that survived before the stop still fails the shard.
+# incomplete, with an error annotation, a step summary, and an INCOMPLETE marker in mutants.out,
+# and exits 10. Exit 10 fails the check, so an incomplete shard is never green (#3794). Without the
+# budget, the job limit cancels the shard. A mutant that survived before the stop exits 2.
 #
 # <shard-index> is zero-based, as `cargo mutants --shard k/n` needs. A shard that finishes exits
 # with the status of cargo-mutants, so a surviving mutant still fails the check. The weekly sweep
-# covers the mutants of an incomplete shard.
+# runs the scoped set from .cargo/mutants.toml, not this diff, and it is report-only. It does not
+# cover the mutants that an incomplete shard skipped.
 #
 # Environment:
 #   JOB_START           Unix time at the start of the job. The setup steps before this script
@@ -26,6 +27,9 @@ usage() {
 
 # A shard with less time left than this does not start. The build alone takes longer.
 min_budget="${MUTANTS_MIN_BUDGET:-120}"
+# Exit status of an incomplete shard. It is not 0, so the check cannot pass with untested lines.
+# It is outside the small range that cargo-mutants uses, so it never reads as a survivor or a timeout.
+readonly INCOMPLETE_EXIT=10
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     usage
@@ -66,7 +70,7 @@ report_incomplete() {
     local message="$1"
     mkdir -p mutants.out
     printf 'INCOMPLETE shard %s/%s\n%s\n' "$((shard + 1))" "$shards" "$message" >mutants.out/INCOMPLETE
-    echo "::warning title=mutants shard incomplete::$message"
+    echo "::error title=mutants shard incomplete::$message"
     if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
         printf '### mutants shard %s/%s: INCOMPLETE\n\n%s\n' "$((shard + 1))" "$shards" "$message" \
             >>"$GITHUB_STEP_SUMMARY"
@@ -76,32 +80,37 @@ report_incomplete() {
 
 if ((budget < min_budget)); then
     report_incomplete "mutants shard $((shard + 1))/$shards did not start: only ${budget} s of the \
-${total} s budget were left after the setup steps. The weekly sweep covers it."
-    exit 0
+${total} s budget were left after the setup steps. Its mutants were not tested. The weekly sweep \
+runs the scoped set, not this diff, and it is report-only."
+    exit "$INCOMPLETE_EXIT"
 fi
 
 status=0
-run_start=$SECONDS
 # --test-tool nextest stops a mutant at its first failing test. --in-place reuses the cached
 # target directory of the checkout, which is disposable in CI. -k sends KILL 60 s after the TERM,
 # so a child that ignores TERM cannot hold the shard until the job limit.
 timeout -k 60 "$budget" cargo mutants --workspace --in-place --test-tool nextest \
     --in-diff "$diff_file" --shard "$shard/$shards" || status=$?
 
-# 124 is a timeout. 137 is the KILL that follows an ignored TERM, but a child that the kernel
-# killed for memory exits 137 too, so 137 counts as a stop only when the run used its budget.
-elapsed=$((SECONDS - run_start))
-if [[ "$status" -eq 124 || ("$status" -eq 137 && "$elapsed" -ge "$budget") ]]; then
-    # A mutant that survived before the stop is a finding, so the shard still fails.
+# 124 is the only budget stop. A kill (137) is a failure, not a stop: the kernel's memory kill
+# and a KILL after an ignored TERM both exit 137, and neither may pass as a stop.
+if [[ "$status" -eq 124 ]]; then
+    stop_message="mutants shard $((shard + 1))/$shards ran out of time, and the shard had ${budget} s. \
+The rest of the shard was not tested. The weekly sweep runs the scoped set, not this diff, and it \
+is report-only."
+    # The incomplete report is written in both cases, so the gap is visible even with survivors.
     if [[ -s mutants.out/missed.txt ]]; then
-        echo "mutants-shard: shard $((shard + 1))/$shards ran out of budget, and it had already" \
+        echo "mutants-shard: shard $((shard + 1))/$shards ran out of time, and it had already" \
             "missed $(grep -c . mutants.out/missed.txt) mutant(s):" >&2
         cat mutants.out/missed.txt >&2
+        report_incomplete "$stop_message"
+        # A mutant that survived before the stop is a finding, so the shard still fails.
         exit 2
     fi
-    report_incomplete "mutants shard $((shard + 1))/$shards ran out of its ${budget} s budget and \
-is incomplete. No survivor was recorded before the stop, but the rest of the shard was not tested. \
-The weekly sweep covers it."
-    exit 0
+    report_incomplete "$stop_message"
+    exit "$INCOMPLETE_EXIT"
+fi
+if [[ "$status" -ne 0 ]]; then
+    echo "mutants-shard: cargo mutants exited $status. A kill is a failure, not a budget stop." >&2
 fi
 exit "$status"
