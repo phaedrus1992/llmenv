@@ -10,15 +10,15 @@ use crate::task::session::{self, EngineIdentity, StartDecision, StartOutcome};
 use std::path::Path;
 
 /// The fields of `session start`. A struct keeps the start handler within the parameter limit.
-pub(super) struct StartArgs {
-    pub(super) name: Option<String>,
-    pub(super) description: Option<String>,
-    pub(super) resume: Option<String>,
-    pub(super) replace: bool,
-    pub(super) other_session: Vec<String>,
-    pub(super) new: bool,
-    pub(super) tasks: Vec<String>,
-    pub(super) resume_context: ResumeArgs,
+struct StartArgs {
+    name: Option<String>,
+    description: Option<String>,
+    resume: Option<String>,
+    replace: bool,
+    other_session: Vec<String>,
+    new: bool,
+    tasks: Vec<String>,
+    resume_context: ResumeArgs,
 }
 
 /// Handle `llmenv task session <subcommand>` (#905, reworked for mandatory

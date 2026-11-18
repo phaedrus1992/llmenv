@@ -32,7 +32,7 @@ pub struct Session {
     #[serde(default)]
     pub(crate) description: Option<String>,
     /// RFC3339 timestamp.
-    pub(crate) started_at: String,
+    started_at: String,
     /// RFC3339 timestamp, updated whenever a task tagged to this session
     /// changes (add/start/done/note) or the session is resumed. Surfaced as
     /// an idle duration in `session ls` and the `session start` checkpoint.
