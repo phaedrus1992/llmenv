@@ -11,6 +11,7 @@
 pub mod credentials;
 pub(crate) mod detect;
 mod entries;
+mod load;
 
 use std::path::{Path, PathBuf};
 
@@ -220,7 +221,7 @@ fn is_leap(year: u64) -> bool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::entries::load_counted;
+    use super::load::load_counted;
     use super::*;
 
     fn sample_claude_json(uuid: &str, email: &str) -> serde_json::Value {
@@ -346,7 +347,7 @@ mod tests {
             raw: serde_json::json!({"id": "cccc3333-0000-0000-0000-000000000000"}),
         };
         save_auth_entry(tmp.path(), &entry).unwrap();
-        let entries = load_counted(tmp.path()).unwrap().0;
+        let entries = load_counted(tmp.path()).unwrap().entries;
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].uuid, entry.uuid);
         assert_eq!(entries[0].email, entry.email);
@@ -366,7 +367,7 @@ mod tests {
             .unwrap();
         credentials::save_cached(tmp.path(), &creds).unwrap();
 
-        let entries = load_counted(tmp.path()).unwrap().0;
+        let entries = load_counted(tmp.path()).unwrap().entries;
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].uuid, entry.uuid);
     }
@@ -374,7 +375,7 @@ mod tests {
     #[test]
     fn load_all_returns_empty_when_no_cache_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let entries = load_counted(tmp.path()).unwrap().0;
+        let entries = load_counted(tmp.path()).unwrap().entries;
         assert!(entries.is_empty());
     }
 
@@ -407,7 +408,7 @@ mod tests {
             b"{ not json",
         )
         .unwrap();
-        let entries = load_counted(tmp.path()).unwrap().0;
+        let entries = load_counted(tmp.path()).unwrap().entries;
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].uuid, entry.uuid);
     }
