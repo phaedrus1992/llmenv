@@ -100,6 +100,7 @@ pub(super) fn select_firing<'a>(
         scopes: filtered_scopes,
         tags: filtered_tags,
         extra_tags: active.extra_tags.clone(),
+        ..Default::default()
     };
     let firing = firing_bundles(&config.bundle, &filtered, tag);
     (firing, filtered)

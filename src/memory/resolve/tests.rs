@@ -65,6 +65,7 @@ fn memory_url_skips_other_remote_mcps() {
         ..Default::default()
     };
     let active = crate::scope::ActiveScopes {
+        unknown_content: Default::default(),
         scopes: vec![],
         tags: std::collections::BTreeSet::from(["mytag".to_string()]),
         extra_tags: std::collections::BTreeSet::new(),

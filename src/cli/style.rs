@@ -15,6 +15,11 @@ pub fn inactive_annotation(use_color: bool) -> String {
     llmenv_util::paint("(inactive)", AnsiColor::Yellow, use_color)
 }
 
+/// Format an unknown annotation (e.g., "(unknown)") with optional yellow color.
+pub fn unknown_annotation(use_color: bool) -> String {
+    llmenv_util::paint("(unknown)", AnsiColor::Yellow, use_color)
+}
+
 /// Format an orphan annotation (e.g., "(orphan)") with optional red color.
 pub fn orphan_annotation(use_color: bool) -> String {
     llmenv_util::paint("(orphan)", AnsiColor::Red, use_color)
