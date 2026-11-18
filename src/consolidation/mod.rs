@@ -1305,7 +1305,7 @@ mod tests {
         // a generous bound rather than asserting immediately after drop.
         let mut still_alive = true;
         for _ in 0..100 {
-            if crate::mcp::proxy::is_alive(pid) != Some(true) {
+            if crate::mcp::proxy::is_own_process_alive(pid) != Some(true) {
                 still_alive = false;
                 break;
             }
