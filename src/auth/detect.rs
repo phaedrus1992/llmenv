@@ -122,7 +122,11 @@ mod tests {
 
         assert_eq!(manifest.auth_status.id.as_deref(), Some(new_uuid));
         // Cache file was written.
-        let entries = crate::auth::load_all_auth_entries(cache_tmp.path()).unwrap();
+        let entries: Vec<_> = crate::auth::choose_auth_for_inheritance(cache_tmp.path())
+            .unwrap()
+            .entry
+            .into_iter()
+            .collect();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].uuid, new_uuid);
     }

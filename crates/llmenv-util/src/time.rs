@@ -72,6 +72,27 @@ pub fn instant_or_log(text: &str, source: &str) -> Option<SystemTime> {
     }
 }
 
+/// Warn when the record that wins a `max` holds a bad timestamp. A bad value sorts as the
+/// oldest, so the record wins with no visible cue (#3843). `shared` counts the records that
+/// hold the same text. Each record and value pair warns once per process, as `instant_or_log`
+/// does, because a status line re-renders this often.
+pub fn warn_if_bad_max_winner(source: &str, record: &str, text: &str, shared: usize) {
+    let Err(e) = parse_rfc3339(text) else {
+        return;
+    };
+    if first_report(&format!("{source} winner {record}"), text) {
+        tracing::warn!(
+            error = %e,
+            source,
+            record,
+            value = text,
+            shared,
+            "the most recent record has a bad timestamp, so it won by default. Fix: rewrite \
+             the timestamp of this record as RFC 3339, such as 2026-01-01T00:00:00Z"
+        );
+    }
+}
+
 /// `age` as compact text, such as `"1d 2h 3m 4s"`. A zero age is `"0s"`. Days are 24 hours.
 #[must_use]
 pub fn format_age(age: Duration) -> String {

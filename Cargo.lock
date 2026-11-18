@@ -1457,6 +1457,7 @@ name = "llmenv-task"
 version = "5.0.0-alpha.1"
 dependencies = [
  "anyhow",
+ "jiff",
  "llmenv-git",
  "llmenv-paths",
  "llmenv-scope",
