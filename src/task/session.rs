@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 
 use super::resume::ResumeContext;
 use super::{Task, TaskNote, TaskState, now_rfc3339, slugify, task_path, tasks_dir, unique_slug};
-use anyhow::Context;
 
 /// A task session: a named (or anonymous) span of work, tagged with the
 /// project it was started in, whose tasks are tracked as a group.
@@ -252,6 +251,8 @@ mod checkpoint;
 mod context_reminder;
 pub(in crate::task) mod filter;
 mod finish;
+mod listing;
+pub(crate) use listing::{list_sessions_strict, open_sessions_strict, sort_listing};
 mod resume_text;
 mod resume_write;
 use abandon::{abandon_failed, abandon_session};
@@ -327,63 +328,6 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn session_reads_on_this_thread() -> usize {
     SESSION_READS.with(std::cell::Cell::get)
-}
-
-/// Every session in the store, failing on any file that cannot be read or parsed. A corrupt
-/// file is an error that names the file, not a skipped entry.
-/// The Stop reminder needs the full set, so a missing task in it must come from a real absence
-/// and not from a corrupt file (#2628).
-///
-/// # Errors
-/// Returns an error if the store cannot be read or any session file is corrupt.
-pub(crate) fn list_sessions_strict(state_dir: &Path) -> anyhow::Result<Vec<Session>> {
-    #[cfg(test)]
-    SESSION_READS.with(|reads| reads.set(reads.get() + 1));
-    let dir = sessions_dir(state_dir);
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => {
-            return Err(
-                anyhow::Error::new(e).context(format!("reading sessions dir {}", dir.display()))
-            );
-        }
-    };
-    let mut sessions = Vec::new();
-    for entry in entries {
-        let path = entry
-            .with_context(|| format!("reading an entry of {}", dir.display()))?
-            .path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        let content = crate::paths::bounded::state_text_io(&path)
-            .with_context(|| format!("reading session file {}", path.display()))?;
-        let session: Session = serde_json::from_str(&content).with_context(|| {
-            format!(
-                "session file {} is not valid session JSON. Repair or delete the file, then retry",
-                path.display()
-            )
-        })?;
-        sessions.push(session);
-    }
-    Ok(sessions)
-}
-
-/// Every open session tagged with `project`, read strictly. A corrupt session file is an error that names the file,
-/// so its tasks are not dropped without a word (#2665).
-///
-/// # Errors
-/// Returns an error if the sessions directory cannot be read or a session file is corrupt.
-pub(crate) fn open_sessions_strict(
-    state_dir: &Path,
-    project: &str,
-) -> anyhow::Result<Vec<Session>> {
-    Ok(filter::open_visible(
-        &list_sessions_strict(state_dir)?,
-        project,
-        None,
-    ))
 }
 
 /// Update a session's `last_activity` to now. No-op (returns `Ok`) if the
@@ -889,7 +833,9 @@ mod tests {
         assert_ne!(
             crate::util::time::cmp_instants(
                 &updated.last_activity,
+                &updated.id,
                 &created.last_activity,
+                &created.id,
                 "session last_activity"
             ),
             std::cmp::Ordering::Less

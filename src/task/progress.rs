@@ -203,8 +203,11 @@ mod tests {
                     // The oracle orders by instant, the same rule the title uses (#3796).
                     let latest = active
                         .iter()
-                        .map(|t| t.updated_at.as_str())
-                        .max_by(|a, b| crate::util::time::cmp_instants(a, b, "task updated_at"));
+                        .map(|t| (t.updated_at.as_str(), t.slug.as_str()))
+                        .max_by(|a, b| {
+                            crate::util::time::cmp_instants(a.0, a.1, b.0, b.1, "task updated_at")
+                        })
+                        .map(|(updated_at, _)| updated_at);
                     proptest::prop_assert_eq!(
                         chosen.map(|t| t.updated_at.as_str()),
                         latest

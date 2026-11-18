@@ -3199,17 +3199,7 @@ fn run_task_session_command(
                 .into_iter()
                 .filter(session::Session::is_open)
                 .collect();
-            sessions.sort_by(|a, b| {
-                (a.project != project)
-                    .cmp(&(b.project != project))
-                    .then_with(|| {
-                        crate::util::time::cmp_instants(
-                            &a.started_at,
-                            &b.started_at,
-                            "session started_at",
-                        )
-                    })
-            });
+            session::sort_listing(&mut sessions, &project);
             if sessions.is_empty() {
                 println!("No open sessions.");
             }
@@ -3220,7 +3210,7 @@ fn run_task_session_command(
                     s.name.as_deref().unwrap_or("-"),
                     s.project,
                     s.description.as_deref().unwrap_or("-"),
-                    session::idle_display(&s.last_activity),
+                    session::idle_display(&s.last_activity, &s.id),
                 );
             }
         }

@@ -31,38 +31,48 @@ fn parse_rfc3339(text: &str) -> anyhow::Result<SystemTime> {
 
 /// Orders two stored timestamps by instant. The text order is wrong for some values: in text,
 /// `Z` sorts after `.`, so a whole second reads later than a fraction of it (#3796). A value that
-/// does not parse sorts first, and it is logged, so it cannot move in silence.
+/// does not parse sorts first, and it is logged, so it cannot move in silence. `a_record` and
+/// `b_record` name the records that hold the two values in that log.
 #[must_use]
-pub(crate) fn cmp_instants(a: &str, b: &str, source: &str) -> std::cmp::Ordering {
-    instant_or_log(a, source).cmp(&instant_or_log(b, source))
+pub(crate) fn cmp_instants(
+    a: &str,
+    a_record: &str,
+    b: &str,
+    b_record: &str,
+    source: &str,
+) -> std::cmp::Ordering {
+    instant_or_log(a, source, a_record).cmp(&instant_or_log(b, source, b_record))
 }
 
-/// Bad timestamps that were already logged in this process, as (source, text) pairs. A sort
-/// compares one value many times, so each bad value is logged once, not once per comparison
-/// (#3812). The source is part of the key, so the same bad text from another record kind is
-/// still named.
-static REPORTED_BAD: std::sync::Mutex<std::collections::BTreeSet<(String, String)>> =
+/// Bad timestamps that were already logged in this process, as (source, record, text) triples.
+/// A sort compares one value many times, so each bad value is logged once, not once per
+/// comparison (#3812). The source is part of the key, so the same bad text from another record
+/// kind is still named. The record is part of the key, so each record names itself once (#3851).
+static REPORTED_BAD: std::sync::Mutex<std::collections::BTreeSet<(String, String, String)>> =
     std::sync::Mutex::new(std::collections::BTreeSet::new());
 
-/// Whether `text` from `source` is new to the bad-timestamp log. A poisoned lock still holds a
-/// valid set, so the dedupe keeps working after a panic elsewhere.
-pub(crate) fn first_report(source: &str, text: &str) -> bool {
+/// Whether `text` held by `record` from `source` is new to the bad-timestamp log. A poisoned lock
+/// still holds a valid set, so the dedupe keeps working after a panic elsewhere.
+pub(crate) fn first_report(source: &str, record: &str, text: &str) -> bool {
     REPORTED_BAD
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert((source.to_string(), text.to_string()))
+        .insert((source.to_string(), record.to_string(), text.to_string()))
 }
 
 /// The instant of a stored timestamp. `source` names the record kind in the warning, such as
-/// `task created_at`. A value that does not parse is logged once, and gives `None`.
-pub(crate) fn instant_or_log(text: &str, source: &str) -> Option<SystemTime> {
+/// `task created_at`, and `record` names the record, such as its slug. A value that does not
+/// parse is logged once per record, and gives `None`.
+pub(crate) fn instant_or_log(text: &str, source: &str, record: &str) -> Option<SystemTime> {
     match parse_rfc3339(text) {
         Ok(at) => Some(at),
         Err(e) => {
-            if first_report(source, text) {
+            if first_report(source, record, text) {
                 tracing::warn!(
                     error = %e,
                     source,
+                    record,
+                    value = text,
                     "a stored timestamp cannot be read. Fix: rewrite it as RFC 3339, \
                      such as 2026-01-01T00:00:00Z"
                 );
@@ -80,7 +90,7 @@ pub(crate) fn warn_if_bad_max_winner(source: &str, record: &str, text: &str, sha
     let Err(e) = parse_rfc3339(text) else {
         return;
     };
-    if first_report(&format!("{source} winner {record}"), text) {
+    if first_report(&format!("{source} winner"), record, text) {
         tracing::warn!(
             error = %e,
             source,
@@ -161,25 +171,34 @@ mod tests {
         // is transitive over mixed valid and bad text.
         #[test]
         fn cmp_instants_is_a_total_preorder(a in stored_text(), b in stored_text(), c in stored_text()) {
-            prop_assert_eq!(cmp_instants(&a, &b, "test"), cmp_instants(&b, &a, "test").reverse());
-            if cmp_instants(&a, &b, "test").is_le() && cmp_instants(&b, &c, "test").is_le() {
-                prop_assert!(cmp_instants(&a, &c, "test").is_le());
+            prop_assert_eq!(
+                cmp_instants(&a, "ra", &b, "rb", "test"),
+                cmp_instants(&b, "rb", &a, "ra", "test").reverse()
+            );
+            if cmp_instants(&a, "ra", &b, "rb", "test").is_le()
+                && cmp_instants(&b, "rb", &c, "rc", "test").is_le()
+            {
+                prop_assert!(cmp_instants(&a, "ra", &c, "rc", "test").is_le());
             }
         }
 
-        // Each distinct (source, bad value) pair is reported once. The nonce keeps this test's
-        // values apart from any value another test reported first.
+        // Each distinct (source, record, bad value) triple is reported once. The nonce keeps this
+        // test's values apart from any value another test reported first.
         #[test]
-        fn first_report_is_true_once_per_distinct_source_and_text(
+        fn first_report_is_true_once_per_distinct_source_record_and_text(
             nonce in "[0-9a-f]{16}",
-            pairs in proptest::collection::vec(("(a|b)", "[a-z]{1,4}"), 1..12),
+            triples in proptest::collection::vec(("(a|b)", "(r|s)", "[a-z]{1,4}"), 1..12),
         ) {
-            let keys: Vec<(String, String)> = pairs
+            let keys: Vec<(String, String, String)> = triples
                 .iter()
-                .map(|(s, t)| (format!("pbt-src-{s}-{nonce}"), format!("pbt-3812-{nonce}-{t}")))
+                .map(|(s, r, t)| (
+                    format!("pbt-src-{s}-{nonce}"),
+                    format!("pbt-rec-{r}-{nonce}"),
+                    format!("pbt-3812-{nonce}-{t}"),
+                ))
                 .collect();
             let distinct = keys.iter().collect::<std::collections::BTreeSet<_>>().len();
-            let firsts = keys.iter().filter(|(s, t)| first_report(s, t)).count();
+            let firsts = keys.iter().filter(|(s, r, t)| first_report(s, r, t)).count();
             prop_assert_eq!(firsts, distinct);
         }
     }
@@ -188,11 +207,11 @@ mod tests {
     fn a_bad_value_is_reported_once_per_process() {
         let bad = "not-a-time-3812-unique";
         assert!(
-            first_report("test-3812", bad),
+            first_report("test-3812", "rec", bad),
             "the first report of a bad value is logged"
         );
         assert!(
-            !first_report("test-3812", bad),
+            !first_report("test-3812", "rec", bad),
             "a repeat of the same bad value is not logged again"
         );
     }
@@ -201,9 +220,18 @@ mod tests {
     fn a_bad_value_is_reported_once_per_source() {
         // The same bad text in another record kind is a new report, so its source is named too.
         let bad = "not-a-time-3834-unique";
-        assert!(first_report("task created_at", bad));
-        assert!(first_report("session started_at", bad));
-        assert!(!first_report("task created_at", bad));
+        assert!(first_report("task created_at", "rec", bad));
+        assert!(first_report("session started_at", "rec", bad));
+        assert!(!first_report("task created_at", "rec", bad));
+    }
+
+    #[test]
+    fn a_bad_value_is_reported_once_per_record() {
+        // The same bad text in two records of one kind names each record once (#3851).
+        let bad = "not-a-time-3851-unique";
+        assert!(first_report("task created_at", "slug-one", bad));
+        assert!(first_report("task created_at", "slug-two", bad));
+        assert!(!first_report("task created_at", "slug-one", bad));
     }
 
     #[test]
@@ -211,9 +239,12 @@ mod tests {
         // In text, 'Z' sorts after '.', so the whole second reads as later. It is earlier.
         let whole = "2026-01-01T00:00:01Z";
         let half = "2026-01-01T00:00:01.500000000Z";
-        assert_eq!(cmp_instants(whole, half, "test"), std::cmp::Ordering::Less);
         assert_eq!(
-            cmp_instants(half, whole, "test"),
+            cmp_instants(whole, "a", half, "b", "test"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            cmp_instants(half, "b", whole, "a", "test"),
             std::cmp::Ordering::Greater
         );
     }
@@ -222,15 +253,15 @@ mod tests {
     fn cmp_instants_sorts_an_unparseable_value_first() {
         let good = "2026-01-01T00:00:00Z";
         assert_eq!(
-            cmp_instants("garbage", good, "test"),
+            cmp_instants("garbage", "a", good, "b", "test"),
             std::cmp::Ordering::Less
         );
         assert_eq!(
-            cmp_instants(good, "garbage", "test"),
+            cmp_instants(good, "b", "garbage", "a", "test"),
             std::cmp::Ordering::Greater
         );
         assert_eq!(
-            cmp_instants("garbage", "other", "test"),
+            cmp_instants("garbage", "a", "other", "b", "test"),
             std::cmp::Ordering::Equal
         );
     }
@@ -241,7 +272,7 @@ mod tests {
         #[test]
         fn instant_or_log_is_some_exactly_when_the_text_parses(text in "\\PC{0,40}") {
             proptest::prop_assert_eq!(
-                instant_or_log(&text, "test").is_some(),
+                instant_or_log(&text, "test", "rec").is_some(),
                 parse_rfc3339(&text).is_ok()
             );
         }
@@ -261,7 +292,7 @@ mod tests {
             let a = Timestamp::new(secs, a_nanos / unit * unit).expect("in range");
             let b = Timestamp::new(secs, b_nanos).expect("in range");
             proptest::prop_assert_eq!(
-                cmp_instants(&a.to_string(), &format_nanos(b), "test"),
+                cmp_instants(&a.to_string(), "a", &format_nanos(b), "b", "test"),
                 a.cmp(&b)
             );
         }
