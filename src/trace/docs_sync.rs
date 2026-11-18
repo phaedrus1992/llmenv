@@ -32,7 +32,9 @@ fn shape_of_token(token: &str) -> String {
         let Some(value) = token.strip_suffix(unit) else {
             continue;
         };
-        let is_number = !value.is_empty() && value.chars().all(|c| c.is_ascii_digit() || c == '.');
+        // A number has a digit. A bare dot is a name, so `.ms` is not a duration (#3804).
+        let is_number = value.chars().any(|c| c.is_ascii_digit())
+            && value.chars().all(|c| c.is_ascii_digit() || c == '.');
         if is_number || (value.starts_with('<') && value.ends_with('>')) {
             return format!("#{unit}");
         }
@@ -181,6 +183,15 @@ fn a_changed_line_shape_is_not_shown_by_the_docs() {
         !docs_show(&format!("{line} extra=1")),
         "an added key must not match"
     );
+}
+
+#[test]
+fn a_bare_dot_before_a_unit_is_a_name_not_a_duration() {
+    // A property test found the name `.ms`. A value with no digit is not a number (#3804).
+    assert_eq!(shape_of_token(".ms"), "_");
+    assert_eq!(shape_of_token("..us"), "_");
+    assert_eq!(shape_of_token("1.5ms"), "#ms");
+    assert_eq!(shape_of_token("0.000ms"), "#ms");
 }
 
 proptest::proptest! {
