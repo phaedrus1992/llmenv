@@ -5,7 +5,8 @@
 # time budget that is shorter than the job limit. A shard that runs out of budget is reported as
 # incomplete, with an error annotation, a step summary, and an INCOMPLETE marker in mutants.out,
 # and exits 10. Exit 10 fails the check, so an incomplete shard is never green (#3794). Without the
-# budget, the job limit cancels the shard. A mutant that survived before the stop exits 2.
+# budget, the job limit cancels the shard. A mutant that survived before the stop exits 2. A
+# setup error exits 11.
 #
 # <shard-index> is zero-based, as `cargo mutants --shard k/n` needs. A shard that finishes exits
 # with the status of cargo-mutants, so a surviving mutant still fails the check. The weekly sweep
@@ -30,6 +31,10 @@ min_budget="${MUTANTS_MIN_BUDGET:-120}"
 # Exit status of an incomplete shard. It is not 0, so the check cannot pass with untested lines.
 # It is outside the small range that cargo-mutants uses, so it never reads as a survivor or a timeout.
 readonly INCOMPLETE_EXIT=10
+# Exit status of a setup error, such as a bad argument or a missing diff file. It is outside the
+# small codes that cargo-mutants and this script use, so a setup failure never reads as a finding
+# or a timeout (#3814). The exact cargo-mutants codes are not confirmed here.
+readonly SETUP_EXIT=11
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     usage
@@ -38,7 +43,7 @@ fi
 if [[ $# -ne 3 ]]; then
     echo "mutants-shard: expected <shard-index> <shards> <diff-file>" >&2
     usage
-    exit 2
+    exit "$SETUP_EXIT"
 fi
 shard="$1"
 shards="$2"
@@ -48,20 +53,20 @@ job_start="${JOB_START:-$(date +%s)}"
 for value in "$shard" "$shards" "$total" "$job_start" "$min_budget"; do
     if ! [[ "$value" =~ ^[0-9]{1,12}$ ]]; then
         echo "mutants-shard: '$value' is not a number of at most 12 digits" >&2
-        exit 2
+        exit "$SETUP_EXIT"
     fi
 done
 if ((shard >= shards)); then
     echo "mutants-shard: shard index $shard must be below the shard count $shards" >&2
-    exit 2
+    exit "$SETUP_EXIT"
 fi
 if [[ ! -f "$diff_file" ]]; then
     echo "mutants-shard: diff file '$diff_file' does not exist" >&2
-    exit 2
+    exit "$SETUP_EXIT"
 fi
 if ! command -v timeout >/dev/null; then
     echo "mutants-shard: GNU timeout is missing. Run on Linux, or install coreutils." >&2
-    exit 2
+    exit "$SETUP_EXIT"
 fi
 
 budget=$((total - ($(date +%s) - job_start)))
@@ -93,12 +98,16 @@ timeout -k 60 "$budget" cargo mutants --workspace --in-place --test-tool nextest
     --in-diff "$diff_file" --shard "$shard/$shards" || status=$?
 
 # 124 is the only budget stop. A kill (137) is a failure, not a stop: the kernel's memory kill
-# and a KILL after an ignored TERM both exit 137, and neither may pass as a stop.
+# and a KILL after an ignored TERM both exit 137, and neither may pass as a stop. The local
+# uutils timeout is the one checked. GNU timeout is not checked here (#3814). If its budget stop
+# exits 137, the shard fails as a kill, so it stays red.
 if [[ "$status" -eq 124 ]]; then
     stop_message="mutants shard $((shard + 1))/$shards ran out of time, and the shard had ${budget} s. \
 The rest of the shard was not tested. The weekly sweep runs the scoped set, not this diff, and it \
 is report-only."
     # The incomplete report is written in both cases, so the gap is visible even with survivors.
+    # cargo-mutants is assumed to write missed.txt before the TERM stops it. That is not verified
+    # (#3814). When the file is absent, the shard still fails as incomplete, so no survivor passes.
     if [[ -s mutants.out/missed.txt ]]; then
         echo "mutants-shard: shard $((shard + 1))/$shards ran out of time, and it had already" \
             "missed $(grep -c . mutants.out/missed.txt) mutant(s):" >&2

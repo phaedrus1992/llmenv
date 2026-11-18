@@ -975,7 +975,7 @@ pub fn is_alive(pid: u32) -> Option<bool> {
 /// live process of another user cannot be one of those, so it counts as gone: a recycled pid must
 /// not keep a stale lock or pidfile alive (#3782).
 #[must_use]
-pub(crate) fn is_own_process_alive(pid: u32) -> Option<bool> {
+pub fn is_own_process_alive(pid: u32) -> Option<bool> {
     probe(pid).map(|p| p == Probe::Own)
 }
 

@@ -37,13 +37,25 @@ fn old_and_new(dir: &Path) -> (String, Vec<String>) {
     (new, slugs)
 }
 
+/// #3832: an exact slug in a finished session beats a longer slug in the open session.
 #[test]
-fn bare_slug_reaches_the_open_session_task_not_the_finished_one() {
+fn an_exact_slug_of_a_finished_session_beats_a_prefix_in_the_open_one() {
     let dir = TempDir::new().unwrap();
     let (_, new) = old_and_new(dir.path());
     assert_eq!(new, ["plan-task-1-2", "plan-task-2-2", "plan-task-3-2"]);
     assert_eq!(
         resolve_identifier_for(dir.path(), "plan-task-3", &NOBODY).unwrap(),
+        "plan-task-3"
+    );
+}
+
+#[test]
+fn a_prefix_still_reaches_the_open_session_task() {
+    let dir = TempDir::new().unwrap();
+    let (_, new) = old_and_new(dir.path());
+    assert_eq!(new, ["plan-task-1-2", "plan-task-2-2", "plan-task-3-2"]);
+    assert_eq!(
+        resolve_identifier_for(dir.path(), "plan-task-3-", &NOBODY).unwrap(),
         "plan-task-3-2"
     );
 }
@@ -106,7 +118,7 @@ fn unknown_identifier_is_an_error() {
 }
 
 #[test]
-fn with_several_open_sessions_and_no_owner_an_open_session_task_still_wins() {
+fn with_several_open_sessions_an_exact_slug_still_wins_over_an_open_prefix() {
     let dir = TempDir::new().unwrap();
     let old = open_session(dir.path(), StartDecision::Auto);
     let finished = add(dir.path(), "Shared", &old);
@@ -115,9 +127,10 @@ fn with_several_open_sessions_and_no_owner_an_open_session_task_still_wins() {
     assert_ne!(first, second);
     let live = add(dir.path(), "Shared", &second);
     assert_eq!((finished.as_str(), live.as_str()), ("shared", "shared-2"));
+    // #3832: the exact slug of the finished session wins over the open session's `shared-2`.
     assert_eq!(
         resolve_identifier_for(dir.path(), "shared", &NOBODY).unwrap(),
-        "shared-2"
+        "shared"
     );
 }
 
@@ -133,13 +146,36 @@ fn pick_prefers_an_exact_match_and_rejects_an_ambiguous_prefix() {
 }
 
 proptest::proptest! {
+    // The match contract of `pick`: a hit starts with the input, `None` only when nothing
+    // starts with it, and an error only for several prefix hits with no exact slug.
+    #[test]
+    fn pick_follows_its_match_contract(
+        slugs in proptest::collection::btree_set("[a-c]{1,4}", 0..8),
+        input in "[a-c]{1,3}",
+    ) {
+        let all: Vec<&str> = slugs.iter().map(String::as_str).collect();
+        let hits: Vec<&str> = all.iter().copied().filter(|s| s.starts_with(input.as_str())).collect();
+        match pick(&all, &input) {
+            Ok(Some(slug)) => {
+                proptest::prop_assert!(all.contains(&slug.as_str()));
+                proptest::prop_assert!(slug == input || hits.len() == 1);
+                proptest::prop_assert!(slug.starts_with(input.as_str()));
+            }
+            Ok(None) => proptest::prop_assert!(hits.is_empty()),
+            Err(_) => proptest::prop_assert!(hits.len() > 1 && !slugs.contains(&input)),
+        }
+    }
+}
+
+proptest::proptest! {
     // Each case writes session and task files, so the case count stays low.
     #![proptest_config(proptest::prelude::ProptestConfig::with_cases(24))]
 
-    // Whatever the titles, a bare slug never resolves to a task of the finished session
-    // while the open session has tasks, and each open-session slug resolves to itself.
+    // Whatever the titles, a bare slug resolves to its exact task in the finished session, even
+    // when the open session holds a longer slug for it (#3832). Each open-session slug resolves
+    // to itself.
     #[test]
-    fn open_session_tasks_win_over_finished_session_tasks(
+    fn an_exact_slug_wins_whatever_the_titles(
         titles in proptest::collection::btree_set("[a-z]{1,6}", 1..6),
     ) {
         let dir = TempDir::new().unwrap();
@@ -151,9 +187,8 @@ proptest::proptest! {
         let mine: Vec<String> = titles.iter().map(|t| add(dir.path(), t, &new)).collect();
         for t in &titles {
             let bare = crate::slugify(t);
-            if let Ok(slug) = resolve_identifier_for(dir.path(), &bare, &NOBODY) {
-                proptest::prop_assert!(mine.contains(&slug), "{bare} -> {slug}");
-            }
+            let slug = resolve_identifier_for(dir.path(), &bare, &NOBODY).unwrap();
+            proptest::prop_assert_eq!(&slug, &bare);
         }
         for slug in &mine {
             proptest::prop_assert_eq!(
@@ -182,6 +217,19 @@ proptest::proptest! {
 
 fn break_one_task_file(dir: &Path) {
     std::fs::write(crate::tasks_dir(dir).join("broken.json"), "not json").unwrap();
+}
+
+/// An unreadable session store is an error even for an exact slug, so the exact-slug rule
+/// cannot hide a store that the strict read would refuse (#1112, #3471, #3832).
+#[test]
+fn an_exact_slug_still_reports_an_unreadable_session_store() {
+    let dir = TempDir::new().unwrap();
+    let old = open_session(dir.path(), StartDecision::Auto);
+    add(dir.path(), "Plan", &old);
+    let sessions = crate::tasks_dir(dir.path()).join("sessions");
+    std::fs::write(sessions.join("bad-session.json"), "not a session").unwrap();
+    let err = resolve_identifier_for(dir.path(), "plan", &NOBODY).unwrap_err();
+    assert!(format!("{err:#}").contains("listing sessions"), "{err:#}");
 }
 
 /// A corrupt task file is a read error, not "no task found" (#1112, #3471).
