@@ -39,6 +39,49 @@ fn an_unreadable_subdirectory_marks_an_unmatched_content_scope_unknown() {
     assert!(active.scopes.iter().all(|s| s.id != "md"));
 }
 
+/// A working directory that cannot be checked is not an absent one. Its content scopes are unknown,
+/// so they are not reported as inactive (#3793).
+#[cfg(unix)]
+#[test]
+#[expect(
+    clippy::expect_used,
+    reason = "fixture setup failure should panic the test"
+)]
+fn a_working_directory_behind_a_locked_parent_makes_content_scopes_unknown() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("temp dir");
+    let locked = dir.path().join("locked");
+    let cwd = locked.join("work");
+    std::fs::create_dir_all(&cwd).expect("fixture");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("fixture");
+    if std::fs::metadata(&cwd).is_ok() {
+        // Running as root: the mode does not block the check.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).expect("fixture");
+        return;
+    }
+    let mut cfg = Config::default();
+    cfg.scope.content.push(crate::config::ContentScope {
+        id: "md".to_string(),
+        r#match: crate::config::ContentMatch {
+            glob: "*.md".to_string(),
+            depth: None,
+        },
+        tags: Vec::new(),
+    });
+    let env = Env {
+        cwd: cwd.display().to_string(),
+        ..Default::default()
+    };
+    let active = evaluate(&cfg, &env);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).expect("fixture");
+    assert!(
+        active.unknown_content.contains("md"),
+        "{:?}",
+        active.unknown_content
+    );
+    assert!(active.scopes.iter().all(|s| s.id != "md"));
+}
+
 #[test]
 fn non_project_tags_excludes_project_scope_tags() {
     let active = ActiveScopes {

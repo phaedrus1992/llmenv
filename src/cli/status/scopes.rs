@@ -61,18 +61,17 @@ pub(super) fn run_scope_ls(use_color: bool) -> anyhow::Result<()> {
         return Ok(());
     }
     // A content scope is unknown when the walk could not read part of the tree (#3793).
-    let unknown_rows: HashSet<String> = active
-        .unknown_content
-        .iter()
-        .map(|id| format!("content:{id}"))
-        .collect();
+    let is_unknown = |name: &str| {
+        name.strip_prefix("content:")
+            .is_some_and(|id| active.unknown_content.contains(id))
+    };
     for (name, is_active, is_orphan) in rows {
         let mark = if is_active {
             crate::cli::active_marker(use_color)
         } else {
             " ".to_string()
         };
-        let annotation = if !is_active && unknown_rows.contains(&name) {
+        let annotation = if !is_active && is_unknown(&name) {
             format!(" {}", crate::cli::style::unknown_annotation(use_color))
         } else {
             crate::cli::annotate(is_active, is_orphan, use_color)

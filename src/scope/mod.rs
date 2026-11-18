@@ -129,7 +129,23 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
     }
     let cwd = std::path::Path::new(&env.cwd);
     let mut unknown_content = BTreeSet::new();
-    if cwd.exists() && !cfg.scope.content.is_empty() {
+    let cwd_exists = match cwd.try_exists() {
+        Ok(exists) => exists,
+        Err(e) => {
+            // A stat error is not an absent folder. Each content scope is unknown, and the notice
+            // says why (#3793).
+            if !cfg.scope.content.is_empty() {
+                crate::agent_notice::record_logged(format!(
+                    "llmenv: cannot check the working directory {} for content scopes ({e}), so \
+                     they are unknown. Fix: check the permissions of the parent folders.",
+                    cwd.display()
+                ));
+                unknown_content = cfg.scope.content.iter().map(|s| s.id.clone()).collect();
+            }
+            false
+        }
+    };
+    if cwd_exists && !cfg.scope.content.is_empty() {
         let found = matcher::matches_content_all(&cfg.scope.content, cwd);
         unknown_content = found.unknown.iter().map(|id| (*id).to_string()).collect();
         if !found.unknown.is_empty() {
