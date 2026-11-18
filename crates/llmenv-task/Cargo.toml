@@ -25,5 +25,6 @@ thiserror = { workspace = true }
 rustix = { workspace = true }
 
 [dev-dependencies]
+jiff = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
