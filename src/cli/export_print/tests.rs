@@ -83,6 +83,7 @@ mod scope_selection {
         tags.insert(env.os.clone());
         tags.extend(extra_tags.iter().cloned());
         ActiveScopes {
+            unknown_content: Default::default(),
             scopes,
             tags,
             extra_tags,

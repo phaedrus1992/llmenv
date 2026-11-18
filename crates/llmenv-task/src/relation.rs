@@ -47,7 +47,10 @@ fn queue(session_tasks: &[Task]) -> Vec<&Task> {
         .iter()
         .filter(|t| t.relation == Relation::Queued && !t.parallel)
         .collect();
-    queued.sort_by(|a, b| (&a.created_at, &a.slug).cmp(&(&b.created_at, &b.slug)));
+    queued.sort_by(|a, b| {
+        llmenv_util::time::cmp_instants(&a.created_at, &b.created_at)
+            .then_with(|| a.slug.cmp(&b.slug))
+    });
     queued
 }
 
@@ -117,7 +120,10 @@ pub(super) fn undone_descendants_in<'a>(slug: &str, all: &'a [Task]) -> Vec<&'a 
             }
         }
     }
-    found.sort_by(|a, b| (&a.created_at, &a.slug).cmp(&(&b.created_at, &b.slug)));
+    found.sort_by(|a, b| {
+        llmenv_util::time::cmp_instants(&a.created_at, &b.created_at)
+            .then_with(|| a.slug.cmp(&b.slug))
+    });
     found
 }
 
@@ -188,7 +194,10 @@ fn open_children<'a>(parent: &str, all: &'a [Task]) -> Vec<&'a Task> {
         .into_iter()
         .filter(|t| t.state == TaskState::Open)
         .collect();
-    open.sort_by(|a, b| (&a.created_at, &a.slug).cmp(&(&b.created_at, &b.slug)));
+    open.sort_by(|a, b| {
+        llmenv_util::time::cmp_instants(&a.created_at, &b.created_at)
+            .then_with(|| a.slug.cmp(&b.slug))
+    });
     open
 }
 

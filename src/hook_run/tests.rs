@@ -701,6 +701,7 @@ fn memory_url_uses_persisted_cache_when_key_matches() {
     };
 
     let active = crate::scope::ActiveScopes {
+        unknown_content: Default::default(),
         scopes: vec![],
         tags: std::collections::BTreeSet::from(["mytag".to_string(), "network-home".to_string()]),
         extra_tags: std::collections::BTreeSet::new(),
@@ -799,6 +800,7 @@ fn memory_url_skips_other_remote_mcps() {
         ..Default::default()
     };
     let active = crate::scope::ActiveScopes {
+        unknown_content: Default::default(),
         scopes: vec![],
         tags: std::collections::BTreeSet::from(["mytag".to_string()]),
         extra_tags: std::collections::BTreeSet::new(),
@@ -851,6 +853,7 @@ fn memory_url_ignores_persisted_cache_on_key_mismatch() {
         ..Default::default()
     };
     let active = crate::scope::ActiveScopes {
+        unknown_content: Default::default(),
         scopes: vec![],
         tags: std::collections::BTreeSet::from(["mytag".to_string(), "network-home".to_string()]),
         extra_tags: std::collections::BTreeSet::new(),
@@ -916,6 +919,7 @@ fn unreadable_bundle_fixture() -> (
         ..Default::default()
     };
     let active = crate::scope::ActiveScopes {
+        unknown_content: Default::default(),
         scopes: vec![],
         tags: std::collections::BTreeSet::from(["mytag".to_string()]),
         extra_tags: std::collections::BTreeSet::new(),
