@@ -103,7 +103,8 @@ const STAGING_GRACE: std::time::Duration = std::time::Duration::from_secs(60 * 6
 /// Whether a `.tmp` staging folder is an orphan that gc may remove. It is one when its writer is
 /// gone, or when it is older than [`STAGING_GRACE`]. A name with no readable pid is judged by age.
 fn staging_is_orphan(p: &Path, now: SystemTime) -> bool {
-    let alive = staging_pid(p).map(|pid| (pid, crate::mcp::proxy::is_alive(pid)));
+    // A pid of another user cannot be this llmenv's writer, so it counts as gone (#3810).
+    let alive = staging_pid(p).map(|pid| (pid, crate::mcp::proxy::is_own_process_alive(pid)));
     // A writer that cannot be asked about leaves only the age rule, which is logged (#3509).
     if let Some((pid, None)) = alive {
         tracing::error!(
@@ -319,6 +320,16 @@ mod tests {
     fn a_staging_folder_of_a_dead_writer_is_an_orphan() {
         let root = tempfile::TempDir::new().unwrap();
         let staging = root.path().join("pending.2147483647.1.tmp");
+        std::fs::create_dir(&staging).unwrap();
+        assert!(staging_is_orphan(&staging, SystemTime::now()));
+    }
+
+    /// Pid 1 belongs to root, so it is a process of another user. A writer of that kind cannot
+    /// be this llmenv, so the folder is an orphan at once (#3810).
+    #[test]
+    fn a_staging_folder_of_another_users_writer_is_an_orphan() {
+        let root = tempfile::TempDir::new().unwrap();
+        let staging = root.path().join("pending.1.1.tmp");
         std::fs::create_dir(&staging).unwrap();
         assert!(staging_is_orphan(&staging, SystemTime::now()));
     }

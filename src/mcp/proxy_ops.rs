@@ -9,6 +9,7 @@ use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::mcp::pid_state::is_running;
 use crate::mcp::proxy::{log_path_for, open_proxy_log, read_pidfile};
 
 /// Which llmenv path started the proxy.
@@ -161,18 +162,6 @@ fn ps_command(pid: u32, out: &std::process::Output) -> anyhow::Result<Option<Str
     )
 }
 
-/// Whether `pid` is a running process that this user can signal.
-fn is_running(pid: rustix::process::Pid) -> anyhow::Result<bool> {
-    match rustix::process::test_kill_process(pid) {
-        Ok(()) => Ok(true),
-        Err(rustix::io::Errno::SRCH) => Ok(false),
-        Err(e) => Err(anyhow::anyhow!(
-            "cannot check pid {}: {e}",
-            pid.as_raw_nonzero()
-        )),
-    }
-}
-
 /// Send SIGTERM to the proxy named by the pidfile, and wait up to `wait` for it to exit.
 ///
 /// The command line check guards against pid reuse: the pid may belong to another process now.
@@ -216,6 +205,14 @@ mod tests {
     use super::*;
     use crate::mcp::proxy::is_alive;
     use proptest::prelude::*;
+
+    /// Pid 1 belongs to root. A process of another user is not running for this user, so the
+    /// stop must not fail on it (#3810).
+    #[test]
+    fn a_process_of_another_user_is_not_running_for_this_user() {
+        let pid = rustix::process::Pid::from_raw(1).unwrap();
+        assert!(!is_running(pid).unwrap());
+    }
 
     fn ps_output(code: i32, stdout: &str, stderr: &str) -> std::process::Output {
         use std::os::unix::process::ExitStatusExt;
