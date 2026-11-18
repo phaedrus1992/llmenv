@@ -146,6 +146,28 @@ fn pick_prefers_an_exact_match_and_rejects_an_ambiguous_prefix() {
 }
 
 proptest::proptest! {
+    // The match contract of `pick`: a hit starts with the input, `None` only when nothing
+    // starts with it, and an error only for several prefix hits with no exact slug.
+    #[test]
+    fn pick_follows_its_match_contract(
+        slugs in proptest::collection::btree_set("[a-c]{1,4}", 0..8),
+        input in "[a-c]{1,3}",
+    ) {
+        let all: Vec<&str> = slugs.iter().map(String::as_str).collect();
+        let hits: Vec<&str> = all.iter().copied().filter(|s| s.starts_with(input.as_str())).collect();
+        match pick(&all, &input) {
+            Ok(Some(slug)) => {
+                proptest::prop_assert!(all.contains(&slug.as_str()));
+                proptest::prop_assert!(slug == input || hits.len() == 1);
+                proptest::prop_assert!(slug.starts_with(input.as_str()));
+            }
+            Ok(None) => proptest::prop_assert!(hits.is_empty()),
+            Err(_) => proptest::prop_assert!(hits.len() > 1 && !slugs.contains(&input)),
+        }
+    }
+}
+
+proptest::proptest! {
     // Each case writes session and task files, so the case count stays low.
     #![proptest_config(proptest::prelude::ProptestConfig::with_cases(24))]
 
@@ -195,6 +217,19 @@ proptest::proptest! {
 
 fn break_one_task_file(dir: &Path) {
     std::fs::write(crate::task::tasks_dir(dir).join("broken.json"), "not json").unwrap();
+}
+
+/// An unreadable session store is an error even for an exact slug, so the exact-slug rule
+/// cannot hide a store that the strict read would refuse (#1112, #3471, #3832).
+#[test]
+fn an_exact_slug_still_reports_an_unreadable_session_store() {
+    let dir = TempDir::new().unwrap();
+    let old = open_session(dir.path(), StartDecision::Auto);
+    add(dir.path(), "Plan", &old);
+    let sessions = crate::task::tasks_dir(dir.path()).join("sessions");
+    std::fs::write(sessions.join("bad-session.json"), "not a session").unwrap();
+    let err = resolve_identifier_for(dir.path(), "plan", &NOBODY).unwrap_err();
+    assert!(format!("{err:#}").contains("listing sessions"), "{err:#}");
 }
 
 /// A corrupt task file is a read error, not "no task found" (#1112, #3471).
