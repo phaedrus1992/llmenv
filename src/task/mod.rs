@@ -142,7 +142,7 @@ pub struct Task {
     #[serde(default)]
     pub(crate) session: Option<String>,
     /// RFC3339 timestamp.
-    pub(crate) created_at: String,
+    created_at: String,
     /// RFC3339 timestamp.
     updated_at: String,
 }
