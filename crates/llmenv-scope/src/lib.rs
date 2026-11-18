@@ -199,6 +199,10 @@ pub struct ActiveScopes {
     /// host-level plugin/MCP resolution, matching the trust level of the
     /// `.llmenv.yaml` project tags they're the escape hatch for (#696, #1020).
     pub extra_tags: BTreeSet<String>,
+    /// Content scopes whose state is unknown: they did not match, and part of the working
+    /// directory could not be read. `llmenv status scopes` shows them as unknown, not inactive
+    /// (#3793).
+    pub unknown_content: BTreeSet<String>,
 }
 
 impl ActiveScopes {
@@ -271,8 +275,26 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
         }
     }
     let cwd = std::path::Path::new(&env.cwd);
-    if cwd.exists() && !cfg.scope.content.is_empty() {
+    let mut unknown_content = BTreeSet::new();
+    let cwd_exists = match cwd.try_exists() {
+        Ok(exists) => exists,
+        Err(e) => {
+            // A stat error is not an absent folder. Each content scope is unknown, and the notice
+            // says why (#3793).
+            if !cfg.scope.content.is_empty() {
+                llmenv_util::agent_notice::record_logged(format!(
+                    "llmenv: cannot check the working directory {} for content scopes ({e}), so \
+                     they are unknown. Fix: check the permissions of the parent folders.",
+                    cwd.display()
+                ));
+                unknown_content = cfg.scope.content.iter().map(|s| s.id.clone()).collect();
+            }
+            false
+        }
+    };
+    if cwd_exists && !cfg.scope.content.is_empty() {
         let found = matcher::matches_content_all(&cfg.scope.content, cwd);
+        unknown_content = found.unknown.iter().map(|id| (*id).to_string()).collect();
         if !found.unknown.is_empty() {
             // An unknown scope stays inactive, as before. The notice names it, so the missing
             // scope has a cause (#3330).
@@ -318,6 +340,7 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
         scopes,
         tags,
         extra_tags,
+        unknown_content,
     }
 }
 

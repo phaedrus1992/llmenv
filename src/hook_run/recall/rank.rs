@@ -102,6 +102,7 @@ mod tests {
             tags.extend(extra.iter().cloned());
             tags.extend(loose.iter().cloned());
             let active = ActiveScopes {
+                unknown_content: Default::default(),
                 scopes,
                 tags: tags.clone(),
                 extra_tags: extra.clone(),
