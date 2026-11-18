@@ -170,3 +170,31 @@ fn reclaimed_unreadable_lock_is_recorded_for_the_agent() {
     assert!(notices.contains("proxy-3217-garbage.lock"), "{notices}");
     assert!(notices.contains("Fix:"), "{notices}");
 }
+
+/// A lock that names a process of another user is reclaimed, not waited on. Pid 1 belongs to
+/// root, so from any other user's shell it is a pid of another user (#3795). The spawn fails on
+/// purpose, so the test stops after the reclaim.
+#[cfg(unix)]
+#[test]
+fn a_lock_held_by_another_users_pid_is_reclaimed() {
+    // Under root, pid 1 is a process of this user, and the lock is held, so the case does not apply.
+    if crate::mcp::proxy::is_own_process_alive(1) != Some(false) {
+        return;
+    }
+    let dir = TempDir::new().expect("tempdir");
+    let pid_path = dir.path().join("mcp-proxy.pid");
+    let lock = crate::mcp::proxy::lockfile_path(&pid_path);
+    std::fs::write(&lock, "1").expect("write lock");
+    let result = crate::mcp::proxy::ensure_running_within(
+        "127.0.0.1:1",
+        &pid_path,
+        |_| anyhow::bail!("spawn reached"),
+        50,
+    );
+    let text = result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+    assert!(
+        text.contains("spawn reached"),
+        "the lock was not reclaimed: {text}"
+    );
+    assert!(!text.contains("holds"), "the lock was waited on: {text}");
+}
