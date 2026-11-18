@@ -13,9 +13,8 @@ use super::session::{self, EngineIdentity};
 use super::{list_tasks_strict, task_path};
 
 /// Resolve a user-supplied identifier (exact slug or unambiguous prefix) to the exact slug of
-/// an existing task. The caller's open session is searched first, so a bare slug does not
-/// land on a task that a finished session left behind. That search also matches by prefix, so a
-/// bare `foo` reaches the open session's `foo-2` even when a finished session holds `foo`.
+/// an existing task. An exact slug wins in any session. Otherwise the caller's open session is
+/// searched first, so a bare prefix reaches an open task before a finished one.
 ///
 /// # Errors
 /// Returns an error if `input` isn't a safe single path component (rejects
@@ -175,6 +174,11 @@ fn resolve_with(
     owner: &EngineIdentity,
     tasks: &[super::Task],
 ) -> anyhow::Result<String> {
+    // An exact slug wins in any session. A prefix match in the open session must not hide a
+    // finished session's task that has this slug (#3832).
+    if tasks.iter().any(|t| t.slug == input) {
+        return Ok(input.to_string());
+    }
     let preferred = preferred_sessions(state_dir, owner)
         .with_context(|| format!("listing sessions to resolve task '{input}'"))?;
     if !preferred.is_empty() {
