@@ -1,8 +1,12 @@
 //! Resolve a typed task identifier to the slug of an existing task.
 //!
 //! Slugs are unique per project, so a done task from a finished session keeps its slug.
-//! A later session that adds the same title gets a `-2` suffix. A bare slug typed in that
-//! later session must reach the later session's task first (#2501).
+//! A later session that adds the same title gets a `-2` suffix.
+//!
+//! An exact slug resolves to its task in any session (#3832). A prefix prefers the caller's
+//! open session, so a later session's `-2` task is reached first (#2501). A mutating command
+//! still refuses a task of another session unless `--other-session` names that session, so an
+//! exact slug from a finished session cannot change that task silently.
 
 use std::borrow::Cow;
 use std::path::Path;
@@ -13,9 +17,8 @@ use super::session::{self, EngineIdentity};
 use super::{list_tasks_strict, task_path};
 
 /// Resolve a user-supplied identifier (exact slug or unambiguous prefix) to the exact slug of
-/// an existing task. The caller's open session is searched first, so a bare slug does not
-/// land on a task that a finished session left behind. That search also matches by prefix, so a
-/// bare `foo` reaches the open session's `foo-2` even when a finished session holds `foo`.
+/// an existing task. An exact slug wins in any session. Otherwise the caller's open session is
+/// searched first, so a bare prefix reaches an open task before a finished one.
 ///
 /// # Errors
 /// Returns an error if `input` isn't a safe single path component (rejects
@@ -175,8 +178,15 @@ fn resolve_with(
     owner: &EngineIdentity,
     tasks: &[super::Task],
 ) -> anyhow::Result<String> {
+    // The session read runs first, so an unreadable session store is an error even for an exact
+    // slug.
     let preferred = preferred_sessions(state_dir, owner)
         .with_context(|| format!("listing sessions to resolve task '{input}'"))?;
+    // An exact slug wins in any session. A prefix match in the open session must not hide a
+    // finished session's task that has this slug (#3832).
+    if tasks.iter().any(|t| t.slug == input) {
+        return Ok(input.to_string());
+    }
     if !preferred.is_empty() {
         let mine: Vec<&str> = tasks
             .iter()

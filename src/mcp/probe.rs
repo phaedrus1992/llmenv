@@ -394,13 +394,9 @@ mod tests {
             .trim()
             .parse()
             .unwrap();
-        // Signal 0 checks that the process exists. The probe killed it, so it must not.
-        let alive = std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .output()
-            .unwrap()
-            .status
-            .success();
+        // The probe killed the process, so it must not be running for this user.
+        let target = rustix::process::Pid::from_raw(pid).unwrap();
+        let alive = crate::mcp::pid_state::is_running(target).unwrap();
         assert!(!alive, "the probe left process {pid} running");
     }
 
@@ -424,12 +420,8 @@ mod tests {
     }
 
     fn alive(pid: &str) -> bool {
-        std::process::Command::new("kill")
-            .args(["-0", pid])
-            .output()
-            .unwrap()
-            .status
-            .success()
+        let target = rustix::process::Pid::from_raw(pid.parse().unwrap()).unwrap();
+        crate::mcp::pid_state::is_running(target).unwrap()
     }
 
     #[tokio::test]

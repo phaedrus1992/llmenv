@@ -37,7 +37,18 @@ fn is_callers(session: &Session, owner: &EngineIdentity, engine_start: Option<Sy
 }
 
 fn active_since(session: &Session, start: SystemTime) -> bool {
-    crate::util::time::instant_or_log(&session.last_activity).is_some_and(|at| at >= start)
+    let Some(at) = crate::util::time::instant_or_log(&session.last_activity) else {
+        // An unknown value reads as "not active". The refusal that follows is non-destructive, so
+        // this default is the safe one. The notice names the cause, so the refusal is not
+        // silent about it (#3811).
+        crate::agent_notice::record_logged(format!(
+            "session {} has an unreadable last_activity, so it is not known to be active. \
+             Fix: rewrite it as RFC 3339, such as 2026-01-01T00:00:00Z",
+            session.id
+        ));
+        return false;
+    };
+    at >= start
 }
 
 /// When the engine process `pid` started, from its elapsed time in `ps`. `None` when `ps` cannot
@@ -204,10 +215,23 @@ pub(super) fn resume(
 #[must_use]
 pub(crate) fn idle_display(last_activity: &str) -> String {
     let now = std::time::SystemTime::now();
-    crate::util::time::instant_or_log(last_activity)
-        .and_then(|t| now.duration_since(t).ok())
-        .map(|d| crate::util::time::format_age(std::time::Duration::from_secs(d.as_secs())))
-        .unwrap_or_else(|| "unknown".to_string())
+    let Some(at) = crate::util::time::instant_or_log(last_activity) else {
+        return "unknown".to_string();
+    };
+    match now.duration_since(at) {
+        Ok(d) => crate::util::time::format_age(std::time::Duration::from_secs(d.as_secs())),
+        Err(_) => {
+            // Each listing row calls this, so the warning is logged once per value (#3811).
+            if crate::util::time::first_report(last_activity) {
+                tracing::warn!(
+                    value = last_activity,
+                    "a last_activity is in the future, so its idle time is unknown. \
+                     Fix: check the clock of the machine that wrote it"
+                );
+            }
+            "unknown".to_string()
+        }
+    }
 }
 
 /// Refuse `--replace` when it would abandon an owned session of another conversation that the
@@ -278,6 +302,31 @@ mod tests {
     fn this_process_started_before_now() {
         let start = engine_start(std::process::id()).unwrap();
         assert!(start <= SystemTime::now());
+    }
+
+    /// #3811: an unreadable `last_activity` is not active, and the cause is noticed to the user.
+    #[test]
+    fn an_unreadable_last_activity_is_noticed_and_not_active() {
+        let mut s = session(9, None, None);
+        s.last_activity = "garbage-3811".into();
+        assert!(!active_since(&s, SystemTime::UNIX_EPOCH));
+        crate::agent_notice::assert_noticed(&["unreadable last_activity", "s9"]);
+    }
+
+    #[test]
+    fn a_future_last_activity_has_no_idle_time() {
+        assert_eq!(idle_display("9999-01-01T00:00:00Z"), "unknown");
+    }
+
+    proptest! {
+        // Arbitrary stored text never panics. A value other than "unknown" needs text that parses.
+        #[test]
+        fn idle_display_shows_a_time_only_for_text_that_parses(text in "\\PC{0,40}") {
+            let shown = idle_display(&text);
+            if shown != "unknown" {
+                prop_assert!(crate::util::time::instant_or_log(&text).is_some());
+            }
+        }
     }
 
     fn session(id: usize, conversation: Option<u8>, pid: Option<u32>) -> Session {
