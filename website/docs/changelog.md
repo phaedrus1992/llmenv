@@ -401,6 +401,8 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 - Stop the MCP proxy without failing on a pid of another user, and remove a staging folder whose writer pid belongs to another user. [fix:mcp] [#3810]
 - Show a visible notice when a session's `last_activity` cannot be read, and name the fix. `--replace` no longer blames your own session as another conversation's. [fix:task] [#3811]
 - Log a bad stored timestamp once per process, not once per comparison during a sort. [fix:util] [#3812]
+- Print a line on stderr when every auth cache entry is unreadable, so the session says that no account was inherited. The line names the cause and the fix. [fix:auth] [#3813]
+- Name the record kind, such as `task created_at`, in the warning for a bad stored timestamp. [fix:util] [#3834]
 
 ### Security
 

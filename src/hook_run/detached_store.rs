@@ -24,8 +24,7 @@ const STORE_TIMEOUT: Duration = Duration::from_secs(5);
 /// store the memory. There's no terminal to write to, so on error this logs via
 /// `tracing::error!` and the parent (`handle_web_fetch_post_tool_use`) points
 /// the child's stderr at a bounded log — `error!` rather than `warn!` because
-/// the default `EnvFilter` (`RUST_LOG` unset) is ERROR-only and dropped the
-/// warning before it could reach that log (#1133).
+/// a narrower `RUST_LOG` filter drops a `warn!`, but never an `error!` (#1133).
 ///
 /// Emits a `[LLMENV_DETACHED] icm-store` trace line with wall time, CPU time,
 /// and exit status when `LLMENV_TRACE_TIMING` is set (#3014).
@@ -295,8 +294,7 @@ mod tests {
     }
 
     // #1133: this child's only report channel is its (now log-redirected)
-    // stderr, and the default `EnvFilter` with `RUST_LOG` unset is ERROR-only —
-    // a `warn!` here was dropped before it could reach that log.
+    // stderr. An `error!` survives a narrower `RUST_LOG` filter that would drop a `warn!`.
     //
     // The malformed-payload rejection is asserted in the same test on purpose:
     // `tracing` caches a callsite's interest globally on first hit, so a
