@@ -13,7 +13,7 @@ resolver = "2"
 
 [workspace.dependencies]
 # Time text for stored timestamps and ages (#3790).
-jiff = { version = "=0.2.44", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
+jiff = { version = "=0.2.45", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 anyhow = "=1.0.104"
 ipnet = "=2.12.2"
 if-addrs = "=0.15.0"
