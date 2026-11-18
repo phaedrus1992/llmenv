@@ -201,7 +201,7 @@ mod tests {
                     let latest = active
                         .iter()
                         .map(|t| t.updated_at.as_str())
-                        .max_by(|a, b| llmenv_util::time::cmp_instants(a, b));
+                        .max_by(|a, b| llmenv_util::time::cmp_instants(a, b, "task updated_at"));
                     proptest::prop_assert_eq!(
                         chosen.map(|t| t.updated_at.as_str()),
                         latest

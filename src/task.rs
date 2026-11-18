@@ -3,7 +3,7 @@ pub use llmenv_task::{
     Task, TaskEdit, TaskState, TaskTarget, Tracking, add_task, add_task_for_session, add_task_with,
     block_task, complete_task, complete_task_by, delete_task, display_rows, edit_task, exit_code,
     filter_by_state, filter_tasks_for_project, last_task_hint, list_tasks, list_tasks_strict,
-    load_task, next_task_loops, note_task, progress_after_close, progress_in,
+    load_task, next_task_loops, note_task, progress_after_close, progress_in, queue_order,
     recover_crashed_notes, render_task_list, reopen_task, resolve_current_task, resolve_identifier,
     resolve_next_task, session_start_reminder, start_task, stop_hook_reminder, tasks_dir, tracking,
     tracking_in, try_list_tasks, wait_task, wip_title_in, with_store_lock,
