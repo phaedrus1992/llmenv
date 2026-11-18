@@ -38,16 +38,18 @@ pub(crate) fn cmp_instants(a: &str, b: &str) -> std::cmp::Ordering {
 }
 
 /// Bad timestamp texts that were already logged in this process. A sort compares one value many
-/// times, so each bad value is logged once, not once per comparison (#3812).
+/// times, so each bad value is logged once, not once per comparison (#3812). The set holds one
+/// entry per distinct bad value, and a stored file has few of them.
 static REPORTED_BAD: std::sync::Mutex<std::collections::BTreeSet<String>> =
     std::sync::Mutex::new(std::collections::BTreeSet::new());
 
-/// Whether `text` is new to the bad-timestamp log. A poisoned lock counts as new, so the
-/// warning still appears.
-fn first_report(text: &str) -> bool {
+/// Whether `text` is new to the bad-timestamp log. A poisoned lock still holds a valid set, so
+/// the dedupe keeps working after a panic elsewhere.
+pub(crate) fn first_report(text: &str) -> bool {
     REPORTED_BAD
         .lock()
-        .map_or(true, |mut seen| seen.insert(text.to_string()))
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(text.to_string())
 }
 
 /// The instant of a stored timestamp. A value that does not parse is logged once, and gives `None`.
@@ -120,6 +122,40 @@ pub(crate) fn parse_age(raw: &str) -> anyhow::Result<Duration> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    /// Stored text as a sort sees it: a valid instant, or any other text.
+    fn stored_text() -> impl Strategy<Value = String> {
+        prop_oneof![
+            "\\PC{0,30}",
+            (0i64..4_000_000_000)
+                .prop_map(|s| format_nanos(Timestamp::from_second(s).expect("in range"))),
+        ]
+    }
+
+    proptest! {
+        // A sort needs a total preorder: swapping the arguments reverses the order, and the order
+        // is transitive over mixed valid and bad text.
+        #[test]
+        fn cmp_instants_is_a_total_preorder(a in stored_text(), b in stored_text(), c in stored_text()) {
+            prop_assert_eq!(cmp_instants(&a, &b), cmp_instants(&b, &a).reverse());
+            if cmp_instants(&a, &b).is_le() && cmp_instants(&b, &c).is_le() {
+                prop_assert!(cmp_instants(&a, &c).is_le());
+            }
+        }
+
+        // Each distinct bad value is reported once. The nonce keeps this test's values apart
+        // from any value another test reported first.
+        #[test]
+        fn first_report_is_true_once_per_distinct_text(
+            nonce in "[0-9a-f]{16}",
+            texts in proptest::collection::vec("[a-z]{1,4}", 1..12),
+        ) {
+            let keys: Vec<String> = texts.iter().map(|t| format!("pbt-3812-{nonce}-{t}")).collect();
+            let distinct = keys.iter().collect::<std::collections::BTreeSet<_>>().len();
+            let firsts = keys.iter().filter(|k| first_report(k)).count();
+            prop_assert_eq!(firsts, distinct);
+        }
+    }
 
     #[test]
     fn a_bad_value_is_reported_once_per_process() {
