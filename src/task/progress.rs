@@ -200,7 +200,11 @@ mod tests {
                 Some(title) => {
                     let chosen = active.iter().find(|t| t.title == title);
                     proptest::prop_assert!(chosen.is_some(), "{title} is not an active task");
-                    let latest = active.iter().map(|t| t.updated_at.as_str()).max();
+                    // The oracle orders by instant, the same rule the title uses (#3796).
+                    let latest = active
+                        .iter()
+                        .map(|t| t.updated_at.as_str())
+                        .max_by(|a, b| crate::util::time::cmp_instants(a, b));
                     proptest::prop_assert_eq!(
                         chosen.map(|t| t.updated_at.as_str()),
                         latest

@@ -123,6 +123,38 @@ mod tests {
         assert_eq!(cmp_instants("garbage", "other"), std::cmp::Ordering::Equal);
     }
 
+    proptest::proptest! {
+        // The helper has an instant exactly when the strict parser accepts the text, and it never
+        // panics on any input.
+        #[test]
+        fn instant_or_log_is_some_exactly_when_the_text_parses(text in "\\PC{0,40}") {
+            proptest::prop_assert_eq!(
+                instant_or_log(&text).is_some(),
+                parse_rfc3339(&text).is_ok()
+            );
+        }
+
+        // Two instants compare by instant, even when one is written in the minimal form and the
+        // other in the fixed 9-digit form (#3796).
+        #[test]
+        fn cmp_instants_compares_mixed_precision_texts_by_instant(
+            secs in 0i64..4_000_000_000,
+            a_nanos in 0i32..1_000_000_000,
+            a_digits in 0u32..=9,
+            b_nanos in 0i32..1_000_000_000,
+        ) {
+            // Drop the digits past `a_digits`, so the minimal text of `a` has fewer digits than
+            // the fixed 9-digit text of `b`. Random nanoseconds alone rarely produce that mix.
+            let unit = 10i32.pow(9 - a_digits);
+            let a = Timestamp::new(secs, a_nanos / unit * unit).expect("in range");
+            let b = Timestamp::new(secs, b_nanos).expect("in range");
+            proptest::prop_assert_eq!(
+                cmp_instants(&a.to_string(), &format_nanos(b)),
+                a.cmp(&b)
+            );
+        }
+    }
+
     #[test]
     fn age_text_uses_compact_units_and_days() {
         assert_eq!(format_age(Duration::from_secs(0)), "0s");
