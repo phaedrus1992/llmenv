@@ -40,7 +40,7 @@ fn insert_once(
 }
 
 /// Whether `text` held by `record` from `source` is new to the bad-timestamp log.
-pub(crate) fn first_report(source: &str, record: &str, text: &str) -> bool {
+pub(super) fn first_report(source: &str, record: &str, text: &str) -> bool {
     insert_once(&REPORTED_BAD, source, record, text)
 }
 

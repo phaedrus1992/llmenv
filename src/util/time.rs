@@ -5,7 +5,7 @@ use jiff::{SignedDuration, Span, SpanRelativeTo, SpanRound, Timestamp, Unit, fmt
 use std::time::{Duration, SystemTime};
 
 mod bad_log;
-pub(crate) use bad_log::{first_report, instant_or_log, warn_if_bad_max_winner};
+pub(crate) use bad_log::{instant_or_log, warn_if_bad_max_winner};
 
 /// The format of a stored timestamp. It always has 9 fractional digits, so the text of two
 /// timestamps sorts in time order.
@@ -111,7 +111,7 @@ pub(crate) fn parse_age(raw: &str) -> anyhow::Result<Duration> {
     reason = "a test fails loudly when its fixture is wrong"
 )]
 mod tests {
-    use super::bad_log::{MAX_REPORTED, winner_report};
+    use super::bad_log::{MAX_REPORTED, first_report, winner_report};
     use super::*;
     use proptest::prelude::*;
 

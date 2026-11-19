@@ -45,14 +45,19 @@ fn active_since(session: &Session, start: SystemTime) -> bool {
         // An unknown value reads as "not active". The refusal that follows is non-destructive, so
         // this default is the safe one. The notice names the cause, so the refusal is not
         // silent about it (#3811).
-        crate::agent_notice::record_logged(format!(
-            "session {} has an unreadable last_activity, so it is not known to be active. \
-             Fix: rewrite it as RFC 3339, such as 2026-01-01T00:00:00Z",
-            session.id
-        ));
+        crate::agent_notice::record_logged(unreadable_last_activity(&session.id));
         return false;
     };
     at >= start
+}
+
+/// The notice for a `last_activity` that does not parse. The checkpoint and the listing both
+/// record it, so they report the same cause (#3859).
+fn unreadable_last_activity(session_id: &str) -> String {
+    format!(
+        "session {session_id} has an unreadable last_activity, so it is not known to be active. \
+         Fix: rewrite it as RFC 3339, such as 2026-01-01T00:00:00Z"
+    )
 }
 
 /// When the engine process `pid` started, from its elapsed time in `ps`. `None` when `ps` cannot
@@ -222,19 +227,18 @@ pub(crate) fn idle_display(last_activity: &str, session_id: &str) -> String {
     let Some(at) =
         crate::util::time::instant_or_log(last_activity, "session last_activity", session_id)
     else {
+        // The listing has no other place for the cause, so the notice carries it (#3859).
+        crate::agent_notice::record_logged(unreadable_last_activity(session_id));
         return "unknown".to_string();
     };
     match now.duration_since(at) {
         Ok(d) => crate::util::time::format_age(std::time::Duration::from_secs(d.as_secs())),
         Err(_) => {
-            // Each listing row calls this, so the warning is logged once per value (#3811).
-            if crate::util::time::first_report("session last_activity", session_id, last_activity) {
-                tracing::warn!(
-                    value = last_activity,
-                    "a last_activity is in the future, so its idle time is unknown. \
-                     Fix: check the clock of the machine that wrote it"
-                );
-            }
+            // Each listing row calls this. A repeat of the notice is not logged again (#3811).
+            crate::agent_notice::record_logged(format!(
+                "session {session_id} has a last_activity in the future, so its idle time is \
+                 unknown. Fix: check the clock of the machine that wrote it"
+            ));
             "unknown".to_string()
         }
     }
@@ -317,6 +321,18 @@ mod tests {
         s.last_activity = "garbage-3811".into();
         assert!(!active_since(&s, SystemTime::UNIX_EPOCH));
         crate::agent_notice::assert_noticed(&["unreadable last_activity", "s9"]);
+    }
+
+    #[test]
+    fn idle_display_names_an_unreadable_last_activity_in_the_notice() {
+        assert_eq!(idle_display("yesterday", "s10"), "unknown");
+        crate::agent_notice::assert_noticed(&["unreadable last_activity", "s10"]);
+    }
+
+    #[test]
+    fn idle_display_names_a_future_last_activity_in_the_notice() {
+        assert_eq!(idle_display("2999-01-01T00:00:00Z", "s11"), "unknown");
+        crate::agent_notice::assert_noticed(&["last_activity in the future", "s11"]);
     }
 
     #[test]
