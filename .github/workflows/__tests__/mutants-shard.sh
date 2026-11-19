@@ -73,10 +73,19 @@ check "a survivor before the stop also writes the incomplete marker" "1" \
   "$(grep -c '^INCOMPLETE shard 2/3' mutants.out/INCOMPLETE)"
 rm -f mutants.out/missed.txt
 
-old_start=$(($(date +%s) - 2350))
+clock="$(date +%s)"
+old_start=$((clock - 2350))
 out="$(JOB_START="$old_start" FAKE_STATUS=0 bash "$SHARD" 0 3 "$SCRATCH/pr.diff" 2>/dev/null)"
 check "a shard with no time left after the setup does not start, and fails" "10" "$?"
 check "the late shard says why" "1" "$(grep -c 'did not start' <<<"$out")"
+
+future_start=$((clock + 3600))
+JOB_START="$future_start" FAKE_STATUS=0 bash "$SHARD" 0 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
+check "a job start in the future is refused, with the setup code" "11" "$?"
+
+JOB_START="$clock" MUTANTS_BUDGET=0 MUTANTS_MIN_BUDGET=0 FAKE_STATUS=0 \
+  bash "$SHARD" 0 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
+check "a budget of zero does not start the shard, because timeout 0 has no limit" "10" "$?"
 
 PATH="$SCRATCH/nobin" /bin/bash "$SHARD" 0 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
 check "a runner without timeout is refused, with the setup code" "11" "$?"
@@ -90,11 +99,17 @@ check "a missing diff file is refused, with the setup code" "11" "$?"
 bash "$SHARD" 0 x "$SCRATCH/pr.diff" >/dev/null 2>&1
 check "a non-number shard count is refused, with the setup code" "11" "$?"
 
+bash "$SHARD" 08 9 "$SCRATCH/pr.diff" >/dev/null 2>&1
+check "a shard index with a leading zero is refused, not read as octal" "11" "$?"
+
 bash "$SHARD" 0 3 >/dev/null 2>&1
 check "a missing argument is refused, with the setup code" "11" "$?"
 
 bash "$SHARD" --help >/dev/null 2>&1
 check "--help exits 0" "0" "$?"
+
+check "--help lists every environment variable" "3" \
+  "$(bash "$SHARD" --help 2>&1 | grep -c -E '^  (JOB_START|MUTANTS_BUDGET|MUTANTS_MIN_BUDGET) ')"
 
 echo "passed: $PASS, failed: $FAIL"
 [[ "$FAIL" -eq 0 ]]
