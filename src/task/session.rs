@@ -162,18 +162,26 @@ pub(crate) fn pick_open_session(
         _ => {}
     }
     let count = open.len();
-    let start = std::cell::OnceCell::new();
-    let mut owned: Vec<Session> = open
+    // A session of this conversation beats one that only the engine process ties to the caller. A
+    // new conversation after a `/clear` then gets the session that it started (#3905).
+    let (by_conversation, rest): (Vec<Session>, Vec<Session>) = open
         .into_iter()
-        .filter(|s| is_callers_session(s, owner, &start))
-        .collect();
+        .partition(|s| is_callers_conversation(s, owner));
+    let start = std::cell::OnceCell::new();
+    let mut owned: Vec<Session> = if by_conversation.is_empty() {
+        rest.into_iter()
+            .filter(|s| is_callers_session(s, owner, &start))
+            .collect()
+    } else {
+        by_conversation
+    };
     if owned.len() == 1 {
         return Ok(owned.remove(0));
     }
     Err(PickError::Ambiguous {
         open: count,
         owned: owned.len(),
-        identified: owner.session_id.is_some() || owner.pid.is_some(),
+        identified: owner.session_id.is_some(),
     })
 }
 
@@ -215,6 +223,12 @@ impl Session {
     #[must_use]
     pub(crate) fn owner_session(&self) -> Option<&str> {
         self.owner_session.as_deref()
+    }
+
+    /// The engine process that owns this session, if one is recorded.
+    #[must_use]
+    pub(crate) fn owner_pid(&self) -> Option<u32> {
+        self.owner_pid
     }
 }
 
@@ -258,7 +272,7 @@ mod resume_write;
 use crate::util::proc_start::process_start;
 use abandon::{abandon_failed, abandon_session};
 use checkpoint::{checkpoint_error, only_own_session, resume};
-pub(crate) use checkpoint::{idle_display, is_callers_session};
+pub(crate) use checkpoint::{idle_display, is_callers_conversation, is_callers_session};
 pub(in crate::task) use context_reminder::missing_context_reminders;
 pub(crate) use finish::finish_session;
 #[cfg(test)]

@@ -89,11 +89,19 @@ fn unreadable_last_activity(session_id: &str) -> String {
 /// the session was active after that process started, so a session that the caller started before a
 /// `/clear` or a compaction still counts. A result of "cannot tell" is not ownership, because a
 /// guard must not widen on a guess. `engine_start` is read once, and only when it decides.
+///
+/// A caller with no conversation id is never the owner here, so the refusal of #3480 holds: a
+/// stale or inherited process id alone does not open a session to a write. The same engine process
+/// id can be reused after its process exits. The check that the session was active after the engine
+/// started narrows that, and #3922 tracks the stronger check.
 pub(crate) fn is_callers_session(
     session: &Session,
     owner: &EngineIdentity,
     engine_start: &std::cell::OnceCell<Option<SystemTime>>,
 ) -> bool {
+    if owner.session_id.is_none() {
+        return false;
+    }
     match ownership(session, owner, None) {
         Ownership::Conversation => true,
         Ownership::UnknownEngineStart => {
@@ -102,6 +110,13 @@ pub(crate) fn is_callers_session(
         }
         _ => false,
     }
+}
+
+/// Whether the conversation id of the caller started `session`. The pick prefers such a session to
+/// one that only the engine process ties to the caller, so a new conversation after a `/clear`
+/// gets the session that it started, not an ambiguity (#3905).
+pub(crate) fn is_callers_conversation(session: &Session, owner: &EngineIdentity) -> bool {
+    ownership(session, owner, None) == Ownership::Conversation
 }
 
 pub(super) fn ownership(

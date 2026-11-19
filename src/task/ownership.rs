@@ -451,7 +451,23 @@ pub(crate) fn check_takes_tasks(session: &Session, owner: &EngineIdentity) -> an
     if session.may_take_tasks(owner) {
         return Ok(());
     }
-    anyhow::bail!(foreign_session_message(&session.id))
+    let mut message = foreign_session_message(&session.id);
+    // The engine process id matches, but the session does not count as this caller's: `ps` could
+    // not give the start of the engine, or the session was last active before it started.
+    if owner.session_id.is_some()
+        && session.owner_pid().is_some()
+        && session.owner_pid() == owner.pid
+    {
+        use std::fmt::Write as _;
+        let _ = write!(
+            message,
+            " The engine process id of this caller matches the session, but llmenv cannot show \
+             that the session was active after this engine started. Run `llmenv task session \
+             start --resume {}` to claim it.",
+            session.id
+        );
+    }
+    anyhow::bail!(message)
 }
 
 /// Refuses a parent link from a task of `child_session` to a parent in another session (#3480).
