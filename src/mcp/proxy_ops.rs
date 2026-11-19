@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use crate::mcp::pid_state::{PidState, pid_state};
 use crate::mcp::proxy::{log_path_for, open_proxy_log, read_pidfile};
 use crate::mcp::proxy_command::{command_of, is_proxy_command};
+use anyhow::Context as _;
 
 /// Which llmenv path started the proxy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,7 +129,13 @@ fn sigterm_result(
     let pid = target.as_raw_nonzero();
     match sent {
         Ok(()) => Ok(None),
-        Err(rustix::io::Errno::PERM) => match pid_state(target)? {
+        Err(rustix::io::Errno::PERM) => match pid_state(target).with_context(|| {
+            format!(
+                "the system refused SIGTERM (EPERM) for mcp-proxy (pid {pid}), and llmenv cannot \
+                 tell whose process it is. Fix: check that /bin/ps works, then run the restart \
+                 again"
+            )
+        })? {
             PidState::Gone => Ok(Some(StopOutcome::Gone)),
             PidState::OtherUser => Ok(Some(StopOutcome::OtherUser)),
             PidState::Own => Err(anyhow::anyhow!(
@@ -179,7 +186,13 @@ pub(crate) fn stop_proxy(pid_path: &Path, wait: Duration) -> anyhow::Result<Stop
     let start = Instant::now();
     while start.elapsed() < wait {
         // A pid that another user holds now is a pid reused after the proxy exited.
-        if pid_state(target)? != PidState::Own {
+        let state = pid_state(target).with_context(|| {
+            format!(
+                "SIGTERM was sent to mcp-proxy (pid {pid}), and llmenv cannot tell whether it \
+                 stopped. Fix: check that /bin/ps works, then run the restart again"
+            )
+        })?;
+        if state != PidState::Own {
             return Ok(StopOutcome::Stopped);
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -200,12 +213,9 @@ mod tests {
         rustix::process::Pid::from_raw(raw).unwrap()
     }
 
-    /// A pid that no process holds: a child that has exited and been waited for.
+    /// A pid that no process holds: it is above the pid limit of every system that we run on.
     fn gone_pid() -> rustix::process::Pid {
-        let mut child = std::process::Command::new("true").spawn().unwrap();
-        let raw = child.id().cast_signed();
-        child.wait().unwrap();
-        pid(raw)
+        pid(i32::MAX)
     }
 
     #[test]
@@ -258,6 +268,25 @@ mod tests {
         #[test]
         fn a_failed_ps_never_panics(code in 1i32..128, out in "\\PC{0,20}", err in "\\PC{0,20}") {
             let _ = ps_command(7, &ps_output(code, &out, &err));
+        }
+    }
+
+    proptest! {
+        /// A failed `ps` reads as a gone pid only for exit 1 with no output. Any exit code of 2
+        /// or more is an error, whatever `ps` printed (#2923).
+        #[test]
+        fn only_a_quiet_exit_1_reads_as_a_gone_pid(
+            code in 0i32..128,
+            out in "[ a-z]{0,4}",
+            err in "[a-z]{0,4}",
+        ) {
+            let read = ps_command(7, &ps_output(code, &out, &err));
+            if code >= 2 {
+                prop_assert!(read.is_err());
+            }
+            if code == 1 && (!out.trim().is_empty() || !err.is_empty()) {
+                prop_assert!(read.is_err());
+            }
         }
     }
 

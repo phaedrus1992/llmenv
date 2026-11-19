@@ -74,13 +74,8 @@ fn write_staging(staging: &Path) -> anyhow::Result<()> {
     let mut file = opts
         .open(staging)
         .with_context(|| format!("creating proxy lock staging file {}", staging.display()))?;
-    file.write_all(holder_text(std::process::id(), own_start_secs()).as_bytes())
+    file.write_all(holder_text(std::process::id(), start_secs(std::process::id())).as_bytes())
         .with_context(|| format!("writing proxy lock staging file {}", staging.display()))
-}
-
-/// When this process started, in seconds since the epoch. `None` when `ps` cannot tell.
-fn own_start_secs() -> Option<u64> {
-    start_secs(std::process::id())
 }
 
 /// When the process `pid` started, in seconds since the epoch. `None` when `ps` cannot tell.
@@ -94,27 +89,31 @@ fn holder_text(pid: u32, start: Option<u64>) -> String {
     start.map_or_else(|| pid.to_string(), |secs| format!("{pid} {secs}"))
 }
 
-/// `ps` gives the age of a process in whole seconds, so two reads of one process can differ by
-/// a second or two.
-const START_TOLERANCE_SECS: u64 = 3;
+/// Two reads of one start time can differ by this much. `ps` counts whole seconds. On Linux the
+/// age comes from the time since boot, so a step of the wall clock moves the start as well. A
+/// reused pid starts much later than this, because the holder lives for seconds and a reboot
+/// takes longer.
+const START_TOLERANCE_SECS: u64 = 30;
 
 /// The process that took the spawn lock (#3795).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct LockHolder {
     pub(super) pid: u32,
-    /// When the holder started. `None` for a lock of an older llmenv, or when `ps` could not tell.
+    /// When the holder started. `None` for a lock of an older llmenv, or a start that is not a
+    /// full epoch time.
     start: Option<u64>,
 }
 
 impl LockHolder {
     /// Whether `pid` now names a process that started after the lock was taken. A pid is reused
     /// after its process exits, for example after a reboot, so the lock is stale then. A
-    /// signal check cannot see that when the new process belongs to this user.
-    pub(super) fn pid_was_reused(&self) -> bool {
+    /// signal check cannot see that when the new process belongs to this user. `None` when `ps`
+    /// cannot say. A lock with no recorded start has no sign of reuse.
+    pub(super) fn pid_was_reused(&self) -> Option<bool> {
         let Some(recorded) = self.start else {
-            return false;
+            return Some(false);
         };
-        start_secs(self.pid).is_some_and(|current| start_is_later(recorded, current))
+        start_secs(self.pid).map(|current| start_is_later(recorded, current))
     }
 }
 
@@ -123,14 +122,20 @@ fn start_is_later(recorded: u64, current: u64) -> bool {
     current > recorded.saturating_add(START_TOLERANCE_SECS)
 }
 
-/// Reads `<pid>` or `<pid> <start>`. Anything else is not a lock of llmenv.
+/// A decimal number of ASCII digits, and nothing else. `str::parse` also takes a leading `+`.
+fn digits(word: &str) -> Option<u64> {
+    let ascii = !word.is_empty() && word.bytes().all(|b| b.is_ascii_digit());
+    ascii.then(|| word.parse().ok()).flatten()
+}
+
+/// Reads `<pid>` or `<pid> <start>`. Anything else is not a lock of llmenv. A start that is not
+/// 10 digits, such as one cut short, is dropped: the lock then has only its pid.
 fn parse_holder(text: &str) -> Option<LockHolder> {
     let mut words = text.split_whitespace();
-    let pid = words.next()?.parse::<u32>().ok()?;
-    let start = match words.next() {
-        None => None,
-        Some(word) => Some(word.parse::<u64>().ok()?),
-    };
+    let pid = u32::try_from(digits(words.next()?)?).ok()?;
+    let start = words
+        .next()
+        .and_then(|w| digits(w).filter(|_| w.len() == 10));
     words.next().is_none().then_some(LockHolder { pid, start })
 }
 
@@ -234,7 +239,7 @@ mod lock_notice_tests {
         let holder = lock_holder(&lock).expect("test").expect("a holder");
         assert_eq!(holder.pid, std::process::id());
         // This process has not been replaced by another one with its pid.
-        assert!(!holder.pid_was_reused());
+        assert_ne!(holder.pid_was_reused(), Some(true));
     }
 
     proptest! {
@@ -250,36 +255,57 @@ mod lock_notice_tests {
 
         /// A pid and a start time read back as written.
         #[test]
-        fn a_pid_and_start_read_back_unchanged(pid in any::<u32>(), start in any::<u64>()) {
+        fn a_pid_and_start_read_back_unchanged(
+            pid in any::<u32>(),
+            start in 1_000_000_000u64..10_000_000_000,
+        ) {
             let text = super::holder_text(pid, Some(start));
             prop_assert_eq!(parse_holder(&text), Some(LockHolder { pid, start: Some(start) }));
+            let bare = super::holder_text(pid, None);
+            prop_assert_eq!(parse_holder(&bare), Some(LockHolder { pid, start: None }));
         }
 
-        /// A start later than the recorded one by more than the tolerance is a new process.
+        /// Any text parses without a panic, and what parses is written back as the same words.
         #[test]
-        fn only_a_clearly_later_start_is_a_reused_pid(
-            recorded in 0u64..1_000_000,
-            delta in 0u64..100,
-        ) {
-            prop_assert_eq!(start_is_later(recorded, recorded + delta), delta > 3);
-            prop_assert!(!start_is_later(recorded + delta, recorded));
+        fn what_parses_is_what_the_writer_writes(text in "\\PC{0,30}") {
+            if let Some(holder) = parse_holder(&text) {
+                let written = super::holder_text(holder.pid, holder.start);
+                prop_assert_eq!(parse_holder(&written), Some(holder));
+            }
         }
+    }
 
-        /// Text that is not a pid reads as no holder, never as a panic or an error.
-        #[test]
-        fn non_numeric_lock_reads_as_no_holder(text in "[a-z]{1,24}") {
-            let dir = tempfile::tempdir().expect("test");
-            let lock = dir.path().join("proxy.lock");
-            std::fs::write(&lock, &text).expect("test");
-            prop_assert_eq!(lock_holder(&lock).expect("test"), None);
-        }
+    /// A start later than the recorded one by the tolerance is the same process. A start later
+    /// by more than that is a new process. An earlier start is never a new process.
+    #[test]
+    fn only_a_start_past_the_tolerance_is_a_reused_pid() {
+        let tolerance = super::START_TOLERANCE_SECS;
+        assert!(!start_is_later(1_000, 1_000 + 2));
+        assert!(!start_is_later(1_000, 1_000 + tolerance));
+        assert!(start_is_later(1_000, 1_000 + tolerance + 1));
+        assert!(!start_is_later(1_000 + tolerance + 1, 1_000));
     }
 
     /// A lock with a third word, or a start that is not a number, is not a lock of llmenv.
     #[test]
     fn a_malformed_lock_reads_as_no_holder() {
-        for text in ["", "12 x", "12 3 4", "x 3", "-1", "12 -3"] {
+        for text in ["", "12 3 4", "x 3", "-1", "+12", "1_2"] {
             assert_eq!(parse_holder(text), None, "{text:?}");
+        }
+    }
+
+    /// A start that is cut short or is not a number leaves the pid, and no sign of reuse.
+    #[test]
+    fn a_start_that_is_not_a_full_epoch_time_is_dropped() {
+        for text in ["12 17", "12 x", "12 -3", "12 +1700000000"] {
+            assert_eq!(
+                parse_holder(text),
+                Some(LockHolder {
+                    pid: 12,
+                    start: None
+                }),
+                "{text:?}"
+            );
         }
     }
 

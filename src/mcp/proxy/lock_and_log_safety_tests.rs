@@ -216,8 +216,8 @@ fn a_lock_whose_pid_was_reused_by_an_own_process_is_reclaimed() {
     let dir = TempDir::new().expect("tempdir");
     let pid_path = dir.path().join("mcp-proxy.pid");
     let lock = crate::mcp::proxy::lockfile_path(&pid_path);
-    // This test process is alive and is this user's. A start time of 1 is long before it began.
-    std::fs::write(&lock, format!("{} 1", std::process::id())).expect("write lock");
+    // This test process is alive and is this user's. A start time in 2001 is long before it began.
+    std::fs::write(&lock, format!("{} 1000000001", std::process::id())).expect("write lock");
     let result = crate::mcp::proxy::ensure_running_within(
         "127.0.0.1:1",
         &pid_path,

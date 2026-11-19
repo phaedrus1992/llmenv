@@ -184,6 +184,7 @@ lockfile records the pid that holds it and when that process started. If that
 process is gone — killed with `^C` mid-start, say — the next export reclaims the
 lock instead of failing against it. It also reclaims the lock when the pid now
 names a process that started later, such as after a reboot (added in v3.14.0).
+An llmenv from before v3.14.0 reads this lock as one with no holder and reclaims it, so do not run two versions of llmenv against one state folder at the same time.
 
 **`listen_host` may be IPv6.** llmenv brackets it when building the bind address
 (`::1` and port 9092 become `[::1]:9092`), which is what both `mcp-proxy` and the

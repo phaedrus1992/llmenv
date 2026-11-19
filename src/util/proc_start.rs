@@ -3,42 +3,67 @@
 
 use std::time::{Duration, SystemTime};
 
+/// `ps` answers in milliseconds. A stuck `ps` must not hold the proxy check or the task store lock.
+const PS_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// One field of `ps` for `pid`: `flags` pick the field, and `what` names it in an error. `None`
+/// means the process is gone. `label` names the spawn in the trace.
+pub(crate) fn ps_value(
+    label: &str,
+    pid: u32,
+    flags: &[&str],
+    what: &str,
+) -> anyhow::Result<Option<String>> {
+    // An absolute path: a `ps` earlier on PATH could answer for any pid.
+    let mut cmd = std::process::Command::new("/bin/ps");
+    cmd.args(flags)
+        .args(["-p", &pid.to_string()])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let out = crate::process::run_traced(label, cmd, PS_TIMEOUT)
+        .map_err(|e| anyhow::anyhow!("cannot run /bin/ps to read the {what} of pid {pid}: {e}"))?;
+    ps_field(pid, &out, what)
+}
+
+/// Read the `ps` result for `pid`. `ps -p` exits 1 with no output for a pid that does not exist.
+/// Any other failure is an error, so a broken `ps` does not read as "pid gone" (#2923).
+pub(crate) fn ps_field(
+    pid: u32,
+    out: &std::process::Output,
+    what: &str,
+) -> anyhow::Result<Option<String>> {
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if out.status.success() {
+        return Ok((!text.is_empty()).then_some(text));
+    }
+    if out.status.code() == Some(1) && text.is_empty() && out.stderr.is_empty() {
+        return Ok(None);
+    }
+    anyhow::bail!(
+        "/bin/ps failed to read the {what} of pid {pid} ({}): {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr).trim()
+    )
+}
+
 /// When the process `pid` started, from its elapsed time in `ps`. `None` when `ps` cannot
 /// tell. The cause is noticed, except for a process that is gone, which is only logged (#3858).
 pub(crate) fn process_start(pid: u32) -> Option<SystemTime> {
-    let mut cmd = std::process::Command::new("/bin/ps");
-    cmd.args(["-o", "etime=", "-p", &pid.to_string()])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let out = match crate::process::run_traced("proc:ps", cmd, PS_TIMEOUT) {
-        Ok(out) if out.status.success() => out,
-        // `ps -p` exits 1 with no output for a pid that does not exist (#2923). That is an
-        // expected state, so it is a debug line and not a notice.
-        Ok(out)
-            if out.status.code() == Some(1) && out.stdout.is_empty() && out.stderr.is_empty() =>
-        {
+    let text = match ps_value("proc:ps", pid, &["-o", "etime="], "age") {
+        Ok(Some(text)) => text,
+        // An expected state, so it is a debug line and not a notice (#2923).
+        Ok(None) => {
             tracing::debug!("ps found no process {pid}");
-            return None;
-        }
-        Ok(out) => {
-            crate::agent_notice::record_logged(format!(
-                "/bin/ps failed to read the age of process {pid} ({}): {}. Fix: check that \
-                 /bin/ps works.",
-                out.status,
-                String::from_utf8_lossy(&out.stderr).trim()
-            ));
             return None;
         }
         Err(e) => {
             crate::agent_notice::record_logged(format!(
-                "cannot run /bin/ps to read the age of process {pid}: {e}. Fix: check that \
-                 /bin/ps exists and works."
+                "{e:#}. Fix: check that /bin/ps exists and works."
             ));
             return None;
         }
     };
-    let text = String::from_utf8_lossy(&out.stdout);
-    let Some(age) = parse_etime(text.trim()) else {
+    let Some(age) = parse_etime(&text) else {
         crate::agent_notice::record_logged(format!(
             "cannot read the age of process {pid} from ps: {text:?}. Fix: report the \
              output of `ps -o etime= -p {pid}`."
@@ -56,9 +81,6 @@ pub(crate) fn process_start(pid: u32) -> Option<SystemTime> {
     start
 }
 
-/// `ps` answers in milliseconds. The bound keeps a stuck `ps` from holding the task store lock.
-const PS_TIMEOUT: Duration = Duration::from_secs(5);
-
 /// Parse the `etime` of `ps`: `[[dd-]hh:]mm:ss`.
 fn parse_etime(text: &str) -> Option<Duration> {
     let (days, clock) = match text.split_once('-') {
@@ -71,10 +93,10 @@ fn parse_etime(text: &str) -> Option<Duration> {
         [h, m, s] => (number(h, 23)?, number(m, 59)?, number(s, 59)?),
         _ => return None,
     };
-    let secs = days
-        .checked_mul(86_400)?
-        .checked_add(hours * 3_600 + minutes * 60 + seconds)?;
-    Some(Duration::from_secs(secs))
+    // Each field has at most 7 digits, so the sum cannot overflow.
+    Some(Duration::from_secs(
+        days * 86_400 + hours * 3_600 + minutes * 60 + seconds,
+    ))
 }
 
 /// An ASCII decimal number of at most 7 digits, no more than `max`.
