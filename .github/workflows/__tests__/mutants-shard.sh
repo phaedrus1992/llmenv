@@ -132,6 +132,12 @@ check "a shard index with a leading zero is refused, not read as octal" "11" "$?
 bash "$SHARD" 0 3 >/dev/null 2>&1
 check "a missing argument is refused, with the setup code" "11" "$?"
 
+MUTANTS_KILL_AFTER=0 bash "$SHARD" 0 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
+check "a grace time of zero is refused, because timeout would never send KILL" "11" "$?"
+
+JOB_START='' bash "$SHARD" 0 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
+check "an empty JOB_START is refused, and does not give a full budget" "11" "$?"
+
 bash "$SHARD" --help >/dev/null 2>&1
 check "--help exits 0" "0" "$?"
 
