@@ -7,8 +7,7 @@ use std::time::SystemTime;
 use super::{EngineIdentity, Session, StartRequest, now_rfc3339, save_session};
 
 mod ownership;
-use crate::util::time::RecordId;
-use ownership::{Ownership, ownership, ownership_note, unreadable_last_activity};
+use ownership::{Ownership, last_activity_at, ownership, ownership_note};
 
 /// The one listed session that `owner` started, or `None` when it started none or more than one.
 /// After a `/clear` or a compaction the choice is then clear, so `Auto` resumes it (#2904).
@@ -124,25 +123,12 @@ pub(super) fn resume(
 #[must_use]
 pub(crate) fn idle_display(last_activity: &str, session_id: &str) -> String {
     let now = std::time::SystemTime::now();
-    let Some(at) = crate::util::time::instant_or_log(
-        last_activity,
-        "session last_activity",
-        RecordId(session_id),
-    ) else {
-        // The listing has no other place for the cause, so the notice carries it (#3859).
-        crate::agent_notice::record_logged(unreadable_last_activity(session_id));
-        return "unknown: last_activity is unreadable".to_string();
-    };
-    match now.duration_since(at) {
-        Ok(d) => crate::util::time::format_age(std::time::Duration::from_secs(d.as_secs())),
-        Err(_) => {
-            // Each listing row calls this. A repeat of the notice is not logged again (#3811).
-            crate::agent_notice::record_logged(format!(
-                "session {session_id} has a last_activity in the future, so its idle time is \
-                 unknown. Fix: check the clock of the machine that wrote it"
-            ));
-            "unknown: last_activity is in the future".to_string()
+    match last_activity_at(last_activity, session_id, now) {
+        Ok(at) => {
+            let idle = now.duration_since(at).unwrap_or_default();
+            crate::util::time::format_age(std::time::Duration::from_secs(idle.as_secs()))
         }
+        Err(reason) => format!("unknown: last_activity is {reason}"),
     }
 }
 
@@ -246,7 +232,7 @@ mod tests {
         fn idle_display_shows_a_time_only_for_text_that_parses(text in "\\PC{0,40}") {
             let shown = idle_display(&text, "s1");
             if !shown.starts_with("unknown") {
-                prop_assert!(crate::util::time::instant_or_log(&text, "test", RecordId("s1")).is_some());
+                prop_assert!(crate::util::time::instant_or_log(&text, "test", crate::util::time::RecordId("s1")).is_some());
             }
         }
     }
@@ -300,6 +286,19 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("Every listed session is yours"), "{text}");
+    }
+
+    /// A `last_activity` in the future would count as active after any engine start, so it is also
+    /// "cannot tell".
+    #[test]
+    fn a_future_last_activity_on_a_pid_match_is_cannot_tell() {
+        let mut s = session(1, None, Some(1));
+        s.last_activity = "2999-01-01T00:00:00Z".into();
+        let text = checkpoint_error(&[s], &caller(), Some(SystemTime::UNIX_EPOCH));
+        assert!(
+            text.contains("may be yours: its last_activity is unreadable or in the future"),
+            "{text}"
+        );
     }
 
     /// A session from before the engine started is not yours, so the hint does not say it is.

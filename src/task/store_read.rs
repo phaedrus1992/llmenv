@@ -166,17 +166,13 @@ fn skip_task_file(path: &Path, e: &anyhow::Error) -> String {
     format!("{}: {cause}", path.display())
 }
 
-/// Read one task file, then check its `created_at` and `updated_at`. The queue sorts on the first,
-/// and the current-task pick uses the second, so a value that does not parse would win or lose
-/// with no cue (#3856, #3882).
-fn read_task_file(path: &Path) -> anyhow::Result<Task> {
-    let content = crate::paths::bounded::state_text_io(path).map_err(anyhow::Error::from)?;
-    let task: Task = serde_json::from_str(&content).with_context(|| {
-        format!(
-            "task file {} is not valid task JSON. Fix: repair or delete the file.",
-            path.display()
-        )
-    })?;
+/// Check the `created_at` and `updated_at` of a task that was read from `path`, and name every
+/// field that does not parse. Each reader of a task file calls this, so the lenient listing and
+/// the commands that change one task agree on which files are bad (#3882).
+///
+/// # Errors
+/// Errors if a field is not RFC 3339. The message names the task, the file, and the fix.
+pub(crate) fn check_task_times(task: &Task, path: &Path) -> anyhow::Result<()> {
     let record = format!("task '{}' at {}", task.slug, path.display());
     let problems: Vec<String> = [
         ("created_at", &task.created_at),
@@ -189,9 +185,25 @@ fn read_task_file(path: &Path) -> anyhow::Result<Task> {
             .map(|e| format!("{e:#}"))
     })
     .collect();
-    if !problems.is_empty() {
-        anyhow::bail!("{}", problems.join("; also "));
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("{}", problems.join("; also "))
     }
+}
+
+/// Read one task file, then check its `created_at` and `updated_at`. The queue sorts on the first,
+/// and the current-task pick uses the second, so a value that does not parse would win or lose
+/// with no cue (#3856, #3882).
+fn read_task_file(path: &Path) -> anyhow::Result<Task> {
+    let content = crate::paths::bounded::state_text_io(path).map_err(anyhow::Error::from)?;
+    let task: Task = serde_json::from_str(&content).with_context(|| {
+        format!(
+            "task file {} is not valid task JSON. Fix: repair or delete the file.",
+            path.display()
+        )
+    })?;
+    check_task_times(&task, path)?;
     Ok(task)
 }
 

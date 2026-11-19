@@ -202,8 +202,11 @@ pub(crate) fn load_task(state_dir: &Path, slug: &str) -> anyhow::Result<Task> {
     let path = task_path(state_dir, slug);
     let content = crate::paths::bounded::state_text_io(&path)
         .with_context(|| format!("cannot read task '{slug}' at {}", path.display()))?;
-    serde_json::from_str(&content)
-        .with_context(|| format!("task '{slug}' at {} is not valid task JSON", path.display()))
+    let task: Task = serde_json::from_str(&content)
+        .with_context(|| format!("task '{slug}' at {} is not valid task JSON", path.display()))?;
+    // A command that changes a task must not save over a file that the listing skips (#3882).
+    store_read::check_task_times(&task, &path)?;
+    Ok(task)
 }
 
 /// List all tasks in the store, tolerating a missing or unreadable store by

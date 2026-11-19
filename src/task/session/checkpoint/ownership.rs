@@ -30,7 +30,7 @@ impl Ownership {
     pub(super) fn cannot_tell_reason(self) -> Option<&'static str> {
         match self {
             Self::UnknownEngineStart => Some("the start time of this engine process is unknown"),
-            Self::UnknownLastActivity => Some("its last_activity is unreadable"),
+            Self::UnknownLastActivity => Some("its last_activity is unreadable or in the future"),
             _ => None,
         }
     }
@@ -42,22 +42,41 @@ impl Ownership {
 }
 
 /// Whether `session` was active at or after `start`. `None` when its `last_activity` is not
-/// readable, and the cause is noticed.
+/// readable or is in the future, and the cause is noticed.
 fn active_since(session: &Session, start: SystemTime) -> Option<bool> {
-    let at = crate::util::time::instant_or_log(
-        &session.last_activity,
-        "session last_activity",
-        RecordId(&session.id),
-    );
-    if at.is_none() {
-        crate::agent_notice::record_logged(unreadable_last_activity(&session.id));
+    last_activity_at(&session.last_activity, &session.id, SystemTime::now())
+        .ok()
+        .map(|at| at >= start)
+}
+
+/// The instant of a `last_activity`. `Err` holds the reason it has no usable instant, in words
+/// that finish "last_activity is ...", and the cause is noticed. A value in the future is not
+/// usable: it would count as active after any engine start.
+pub(super) fn last_activity_at(
+    text: &str,
+    session_id: &str,
+    now: SystemTime,
+) -> Result<SystemTime, &'static str> {
+    let Some(at) =
+        crate::util::time::instant_or_log(text, "session last_activity", RecordId(session_id))
+    else {
+        crate::agent_notice::record_logged(unreadable_last_activity(session_id));
+        return Err("unreadable");
+    };
+    if at > now {
+        // Each listing row and each ownership check calls this. A repeat is not logged again.
+        crate::agent_notice::record_logged(format!(
+            "session {session_id} has a last_activity in the future, so its idle time is \
+             unknown. Fix: check the clock of the machine that wrote it"
+        ));
+        return Err("in the future");
     }
-    at.map(|at| at >= start)
+    Ok(at)
 }
 
 /// The notice for a `last_activity` that does not parse. The checkpoint and the listing both
 /// record it, so they report the same cause (#3859).
-pub(super) fn unreadable_last_activity(session_id: &str) -> String {
+fn unreadable_last_activity(session_id: &str) -> String {
     format!(
         "session {session_id} has an unreadable last_activity, so it is not known to be active. \
          Fix: rewrite it as RFC 3339, such as 2026-01-01T00:00:00Z"
@@ -99,8 +118,8 @@ pub(super) fn ownership_note(owned: Ownership) -> &'static str {
              cannot tell. The process may be gone, or /bin/ps may not list it"
         }
         Ownership::UnknownLastActivity => {
-            " — may be yours: its last_activity is unreadable, so llmenv cannot tell if it is \
-             from before this engine process started"
+            " — may be yours: its last_activity is unreadable or in the future, so llmenv cannot \
+             tell if it is from before this engine process started"
         }
         Ownership::None => "",
     }

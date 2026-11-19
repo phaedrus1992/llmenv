@@ -117,7 +117,7 @@ fn a_failed_second_untag_returns_the_task_already_untagged() {
     let second = add_in(dir.path(), 2, &session, TaskState::Open);
     let tasks = vec![first.clone(), second.clone()];
     let mut saves = 0;
-    let err = super::untag_with(&session, tasks, "now", "dropped", |task| {
+    let err = super::untag_with(&session, tasks, "2026-01-01T00:00:00Z", "dropped", |task| {
         saves += 1;
         if saves == 2 {
             anyhow::bail!("disk full")
