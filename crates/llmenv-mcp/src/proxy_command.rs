@@ -1,5 +1,7 @@
 //! Inspect the command line of a process, to confirm that it is the memory proxy (#2923, #2948).
 
+use llmenv_util::proc_start::ps_value;
+
 /// A command line that starts the memory proxy: `mcp-proxy … -- <icm> serve`, where `<icm>` is
 /// `icm` or an absolute path to it (#2948). A script runs through its interpreter, and `uvx` runs
 /// the tool by name, so `mcp-proxy` is the first or the second word.
@@ -19,32 +21,41 @@ pub(crate) fn is_proxy_command(command: &str) -> bool {
 /// The command line of `pid`, or `None` when the process is gone. `-ww` stops `ps` from cutting
 /// a long line, which would hide the `-- icm serve` tail.
 pub(crate) fn command_of(pid: u32) -> anyhow::Result<Option<String>> {
-    // An absolute path: a `ps` earlier on PATH could answer for any pid.
-    let mut cmd = std::process::Command::new("/bin/ps");
-    cmd.args(["-ww", "-o", "command=", "-p", &pid.to_string()])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let out = crate::process::run_traced("proxy:ps", cmd, PS_TIMEOUT)
-        .map_err(|e| anyhow::anyhow!("cannot run /bin/ps to read the command of pid {pid}: {e}"))?;
-    ps_command(pid, &out)
+    ps_value("proxy:ps", pid, &["-ww", "-o", "command="], "command")
 }
 
-/// `ps` answers in milliseconds. A stuck `ps` must not hold the proxy check (#2923).
-const PS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// The uid of the user that owns `pid`, or `None` when the process is gone (#3835). The real uid
+/// is the one that `kill(2)` compares with the uid of the caller.
+pub(crate) fn uid_of(pid: u32) -> anyhow::Result<Option<u32>> {
+    ps_value("proxy:ps-uid", pid, &["-o", "ruid="], "owner")?
+        .map(|text| parse_uid(pid, &text))
+        .transpose()
+}
 
-/// Read the `ps` result for `pid`. `ps -p` exits 1 with no output for a pid that does not exist.
-/// Any other failure is an error, so a broken `ps` does not read as "pid gone" (#2923).
-pub(crate) fn ps_command(pid: u32, out: &std::process::Output) -> anyhow::Result<Option<String>> {
-    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if out.status.success() {
-        return Ok((!text.is_empty()).then_some(text));
+/// The uid that `ps` printed for `pid`.
+fn parse_uid(pid: u32, text: &str) -> anyhow::Result<u32> {
+    text.parse().map_err(|e| {
+        anyhow::anyhow!("/bin/ps printed {text:?} for the owner of pid {pid}, not a uid: {e}")
+    })
+}
+
+#[cfg(test)]
+mod uid_tests {
+    use super::parse_uid;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// A uid that `ps` printed reads back as the same number.
+        #[test]
+        fn a_printed_uid_reads_back(uid in any::<u32>()) {
+            prop_assert_eq!(parse_uid(7, &uid.to_string()).ok(), Some(uid));
+        }
+
+        /// Text that is not an unsigned number is an error that names the pid.
+        #[test]
+        fn text_that_is_not_a_uid_is_an_error(text in "[a-z+ -]{1,8}") {
+            let err = parse_uid(7, &text).err().map(|e| e.to_string());
+            prop_assert!(err.is_some_and(|e| e.contains("pid 7")));
+        }
     }
-    if out.status.code() == Some(1) && text.is_empty() && out.stderr.is_empty() {
-        return Ok(None);
-    }
-    anyhow::bail!(
-        "/bin/ps failed to read the command of pid {pid} ({}): {}",
-        out.status,
-        String::from_utf8_lossy(&out.stderr).trim()
-    )
 }

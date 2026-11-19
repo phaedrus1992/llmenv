@@ -1,7 +1,12 @@
 //! The bad-timestamp log: one warning per record and bad value, with each dedupe set bounded.
 
-use super::parse_rfc3339;
+use super::{parse_rfc3339, validate_stored};
 use std::time::SystemTime;
+
+/// The id of the record that holds a stored timestamp, such as a task slug or a session id. It is
+/// its own type, so a record id cannot take the place of the timestamp text (#3862).
+#[derive(Clone, Copy, Debug)]
+pub struct RecordId<'a>(pub &'a str);
 
 /// One dedupe key: (source, record, text).
 type ReportKey = (String, String, String);
@@ -15,11 +20,6 @@ pub(super) const MAX_REPORTED: usize = 1024;
 /// key, so the same bad text from another record kind is still named. The record is part of the
 /// key, so each record names itself once (#3851).
 static REPORTED_BAD: std::sync::Mutex<std::collections::BTreeSet<ReportKey>> =
-    std::sync::Mutex::new(std::collections::BTreeSet::new());
-
-/// Records that already got the winner note. The note is a different message from the parse
-/// warning, so it has its own set, and each message logs once per record.
-static REPORTED_WINNER: std::sync::Mutex<std::collections::BTreeSet<ReportKey>> =
     std::sync::Mutex::new(std::collections::BTreeSet::new());
 
 /// Insert a key into `set`, and return whether it was new. A poisoned lock still holds a valid
@@ -46,19 +46,29 @@ pub(super) fn insert_once(
 }
 
 /// Whether `text` held by `record` from `source` is new to the bad-timestamp log.
-pub(super) fn first_report(source: &str, record: &str, text: &str) -> bool {
-    insert_once(&REPORTED_BAD, source, record, text)
+pub(super) fn first_report(source: &'static str, record: RecordId<'_>, text: &str) -> bool {
+    insert_once(&REPORTED_BAD, source, record.0, text)
 }
 
-/// Whether the winner note for `text` held by `record` from `source` is new.
-pub(super) fn winner_report(source: &str, record: &str, text: &str) -> bool {
-    insert_once(&REPORTED_WINNER, source, record, text)
+/// Whether the winner note for `text` held by `record` from `source` is new. The note is a
+/// different message from the parse warning, so its source key has a prefix.
+pub(super) fn winner_report(source: &'static str, record: RecordId<'_>, text: &str) -> bool {
+    insert_once(
+        &REPORTED_BAD,
+        &format!("winner of {source}"),
+        record.0,
+        text,
+    )
 }
 
 /// The instant of a stored timestamp. `source` names the record kind in the warning, such as
 /// `task created_at`, and `record` names the record, such as its slug. A value that does not
 /// parse is logged once per record, and gives `None`.
-pub fn instant_or_log(text: &str, source: &str, record: &str) -> Option<SystemTime> {
+pub fn instant_or_log(
+    text: &str,
+    source: &'static str,
+    record: RecordId<'_>,
+) -> Option<SystemTime> {
     match parse_rfc3339(text) {
         Ok(at) => Some(at),
         Err(e) => {
@@ -66,8 +76,8 @@ pub fn instant_or_log(text: &str, source: &str, record: &str) -> Option<SystemTi
                 tracing::warn!(
                     error = %e,
                     source,
-                    record,
-                    value = text,
+                    record = record.0,
+                    value = %crate::strip_unsafe_chars(text),
                     "a stored timestamp cannot be read. Fix: rewrite it as RFC 3339, \
                      such as 2026-01-01T00:00:00Z"
                 );
@@ -77,12 +87,31 @@ pub fn instant_or_log(text: &str, source: &str, record: &str) -> Option<SystemTi
     }
 }
 
+/// Check that the `field` of `record`, stored as `text`, is RFC 3339. A reader calls this at read
+/// time, so a bad value fails there with the record and the fix, and not later in a sort (#3882).
+///
+/// # Errors
+/// Errors if `text` is not RFC 3339. `record` names the record, such as `task 'x' at <path>`.
+pub fn validate_stored_field(field: &str, text: &str, record: &str) -> anyhow::Result<()> {
+    validate_stored(text).map_err(|e| {
+        anyhow::anyhow!(
+            "{record} has an unreadable {field}: {e:#}. Fix: rewrite it as RFC 3339, such as \
+             2026-01-01T00:00:00Z"
+        )
+    })
+}
+
 /// Warn when the record that wins a `max` holds a bad timestamp. A bad value sorts as the
 /// oldest, so the record wins with no visible cue (#3843). `shared` counts the records that tie
 /// with the winner by instant. When it is above 1, the winner is a tie, not the newest record.
 /// Each record and value pair warns once per process, as `instant_or_log` does, because a status
 /// line re-renders this often.
-pub fn warn_if_bad_max_winner(source: &str, record: &str, text: &str, shared: usize) {
+pub fn warn_if_bad_max_winner(
+    source: &'static str,
+    record: RecordId<'_>,
+    text: &str,
+    shared: usize,
+) {
     let Err(e) = parse_rfc3339(text) else {
         return;
     };
@@ -90,8 +119,8 @@ pub fn warn_if_bad_max_winner(source: &str, record: &str, text: &str, shared: us
         tracing::warn!(
             error = %e,
             source,
-            record,
-            value = text,
+            record = record.0,
+            value = %crate::strip_unsafe_chars(text),
             shared,
             "this record won the max with an unreadable timestamp, so the pick may be a tie. \
              Fix: rewrite the timestamp of this record as RFC 3339, such as 2026-01-01T00:00:00Z"

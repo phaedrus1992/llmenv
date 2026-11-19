@@ -63,15 +63,18 @@ pub(crate) fn prune_rotations_at(
     };
     let mut failures = Vec::new();
     let mut expired = Vec::new();
+    let mut named = Vec::new();
     for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
+        match entry {
+            Ok(entry) => named.push(entry),
             // The folder listing failed at this entry, so the entry has no name to report.
-            Err(e) => {
-                failures.push(format!("an unnamed entry of {}: {e}", dir.display()));
-                continue;
-            }
-        };
+            Err(e) => failures.push(format!("an unnamed entry of {}: {e}", dir.display())),
+        }
+    }
+    // Folder order differs between runs, and the failure message lists the failures in order.
+    failures.sort();
+    named.sort_by_key(std::fs::DirEntry::path);
+    for entry in named {
         if !is_rotation_of(&entry.file_name(), base) {
             continue;
         }
