@@ -18,14 +18,12 @@ pub(super) fn render_pr_widget(
     let (pr, stale) = match view {
         Ok(view) => view,
         Err(e) => {
-            if let PrError::Branch(cause) = &e {
-                tracing::error!("statusline pr cannot read the branch: {cause}");
-            }
             // The format stays and the marker takes the value (#3745), with the cause after it
             // (#3889). The fix goes to the log.
             tracing::error!(
-                "statusline pr has no answer: {}. Fix: run `gh auth status`.",
-                e.label()
+                "statusline pr has no answer: {}. Fix: {}.",
+                e.label(),
+                e.fix()
             );
             let raw = render_pr_unknown(cfg, e.cause());
             return crate::cli::statusline::finish("pr", raw, cfg, None, use_color);
@@ -157,6 +155,18 @@ impl PrError {
         match self {
             Self::Branch(_) => "pr: unreadable",
             Self::Gh(failure) => failure.label(),
+        }
+    }
+
+    /// What to do about this error, for the log.
+    fn fix(&self) -> String {
+        match self {
+            Self::Branch(cause) => {
+                format!("the branch cannot be read ({cause}). Check the repository")
+            }
+            Self::Gh(GhFailure::Missing) => "install gh and put it on the PATH".to_string(),
+            Self::Gh(GhFailure::Unauthenticated) => "run `gh auth login`".to_string(),
+            Self::Gh(_) => "run `gh pr view` in the folder to see the cause".to_string(),
         }
     }
 

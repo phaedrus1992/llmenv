@@ -7,9 +7,22 @@ use super::*;
 use std::time::Duration;
 
 #[test]
-fn parse_gh_pr_view_none_for_missing_number_or_malformed_json() {
-    assert_eq!(parse_gh_pr_view(br#"{"url":"https://x"}"#), None);
-    assert_eq!(parse_gh_pr_view(b"not json"), None);
+fn parse_gh_pr_view_reads_a_missing_number_as_no_pr_and_malformed_json_as_an_error() {
+    assert_eq!(parse_gh_pr_view(br#"{"url":"https://x"}"#).unwrap(), None);
+    assert!(parse_gh_pr_view(b"not json").is_err());
+}
+
+/// A shim that prints a banner on success is a failure, not "no PR", so it cannot clear a kept PR.
+#[cfg(unix)]
+#[test]
+fn output_that_is_not_json_is_a_failure() {
+    let bin_dir = tempfile::tempdir().unwrap();
+    let repo_dir = tempfile::tempdir().unwrap();
+    let gh = write_fake_gh(bin_dir.path(), "#!/bin/sh\necho 'welcome to gh'\n");
+    assert_eq!(
+        gh_pr_view(fake_gh(&gh.to_string_lossy()), repo_dir.path(), "feat/x"),
+        Err(GhFailure::Failed)
+    );
 }
 
 #[cfg(unix)]

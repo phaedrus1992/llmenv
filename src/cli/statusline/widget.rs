@@ -26,7 +26,7 @@ use {
     gh_view::{gh_pr_view, map_review_decision, parse_gh_pr_view},
     pr_cache::{
         PR_CACHE_TTL_SECS, PR_FAILURE_TTL_SECS, PrCacheEntry, derive_pr, pr_cache_path,
-        read_pr_cache, write_pr_cache,
+        read_pr_entry, write_pr_entry,
     },
 };
 

@@ -32,14 +32,22 @@ The detached child is the pattern that `session_log::detached` and `hook_run::de
 - An answer is fresh for `PR_CACHE_TTL_SECS`, and a failure is fresh for `PR_FAILURE_TTL_SECS`.
   A timeout is transient, so a failure is retried sooner than an answer.
 - A cache entry that is not fresh starts one refresh, and the render uses what it has.
-  A lock file next to the cache entry keeps two renders from starting two refreshes.
-  A lock older than `REFRESH_LOCK_STALE_SECS` belongs to a child that died, so it is replaced.
+  The refresh holds a system file lock on a file next to the cache entry for as long as it lives.
+  The system frees the lock when the process ends, so a child that dies leaves no lock, and no age rule is needed.
+  Two renders that both see no lock start two children, and the second child finds the lock held and ends.
+  A lost refresh has no checkpoint, because the next render starts a new one.
 - The cache entry keeps the last PR that a lookup returned.
   While that PR is younger than `STALE_PR_MAX_AGE_SECS`, a failed or due lookup shows it in the stale grey.
   The review-decision color is dropped, because the decision may have changed.
 - A lookup that returns no PR clears the kept PR, so a merged or closed PR does not stay on the bar.
+- An answer that is due and older than a day is not shown as the current PR.
+- A time in the future reads as old, so a clock that stepped back keeps nothing alive.
+- Output of `gh` that is not JSON is a failure, and it does not clear the kept PR.
+- A refresh that cannot start shows a failure when there is nothing cached, so it does not look like "no PR".
+- The refresh child takes the cache folder from its own environment, and not from its input.
 - With no cache at all, the render shows nothing for that branch until the refresh lands.
-- With no state folder to hold a cache, the render runs `gh` itself with the short limit, as before.
+- With no state folder to hold a cache (`CLAUDE_CONFIG_DIR` is not set), the render runs `gh` itself with the short limit, and it waits.
+  This is the behavior from before this change. The engine sets `CLAUDE_CONFIG_DIR`, so it only shows for a manual run.
 - A failure with no kept PR shows `#?` and the cause, such as `#? auth` or `#? timeout`.
 
 ## Not in this change

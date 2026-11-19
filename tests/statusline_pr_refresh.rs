@@ -101,7 +101,7 @@ impl Env {
     fn wait_for_refresh(&self) {
         let lock = PathBuf::from(format!("{}.lock", self.cache_file().display()));
         let deadline = Instant::now() + Duration::from_secs(30);
-        while !(self.cache_file().exists() && !lock.exists()) {
+        while !(self.cache_file().exists() && lock_is_free(&lock)) {
             assert!(Instant::now() < deadline, "the refresh did not finish");
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -110,6 +110,14 @@ impl Env {
     fn gh_calls(&self) -> usize {
         std::fs::read_to_string(self.repo.path().join("gh-calls.log"))
             .map_or(0, |text| text.lines().count())
+    }
+}
+
+/// Whether no refresh holds the lock. The lock file stays, and the system lock on it is the signal.
+fn lock_is_free(lock: &Path) -> bool {
+    match std::fs::OpenOptions::new().write(true).open(lock) {
+        Ok(file) => file.try_lock().is_ok(),
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
     }
 }
 

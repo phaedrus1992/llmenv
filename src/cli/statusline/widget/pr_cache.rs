@@ -57,11 +57,20 @@ pub(super) fn derive_pr(
     if let Some(entry) = &prior
         && entry.is_fresh(now)
     {
-        return entry.answer(now);
+        return entry.show(now, true);
     }
     if gh.background {
-        start_refresh(dir, repo_dir, branch, now);
-        return prior.map_or((Ok(None), false), |entry| entry.shown_while_refreshing(now));
+        if let Err(e) = start_refresh(dir, repo_dir, branch) {
+            tracing::error!(
+                "the PR refresh cannot start: {e:#}. Fix: run `llmenv doctor`, and check that \
+                 the state folder is writable."
+            );
+            // With nothing cached, the failure shows, so it does not look like "no PR".
+            if prior.is_none() {
+                return (Err(GhFailure::Failed), false);
+            }
+        }
+        return prior.map_or((Ok(None), false), |entry| entry.show(now, false));
     }
     refresh_in_place(gh, &path, (repo_dir, branch), prior, now)
 }
@@ -89,10 +98,7 @@ pub(super) fn refresh_in_place(
         good,
     };
     write_pr_entry(path, &entry);
-    match (&fresh, entry.kept(now)) {
-        (Err(_), Some(pr)) => (Ok(Some(pr.clone())), true),
-        _ => (fresh, false),
-    }
+    entry.show(now, true)
 }
 
 /// Cache file path for a (repo, branch) key: `<cache_dir>/pr-cache-<hash>`.
@@ -124,7 +130,7 @@ pub(super) struct PrCacheEntry {
 
 impl PrCacheEntry {
     /// What the entry says: the PR, no PR, or why `gh` gave no answer.
-    fn lookup(&self) -> PrLookup {
+    pub(super) fn lookup(&self) -> PrLookup {
         match self.failure {
             Some(failure) => Err(failure),
             None => Ok(self.pr.clone()),
@@ -132,40 +138,43 @@ impl PrCacheEntry {
     }
 
     /// Whether the entry is young enough to use without a refresh. A failure expires sooner.
-    fn is_fresh(&self, now: i64) -> bool {
+    pub(super) fn is_fresh(&self, now: i64) -> bool {
         let ttl = if self.failure.is_some() {
             PR_FAILURE_TTL_SECS
         } else {
             PR_CACHE_TTL_SECS
         };
-        now.saturating_sub(self.ts) < ttl
+        is_younger(self.ts, now, ttl)
     }
 
     /// The last PR that a lookup returned, when it is young enough to show.
     fn kept(&self, now: i64) -> Option<&PrInfo> {
         self.good
             .as_ref()
-            .filter(|(ts, _)| now.saturating_sub(*ts) < STALE_PR_MAX_AGE_SECS)
+            .filter(|(ts, _)| is_younger(*ts, now, STALE_PR_MAX_AGE_SECS))
             .map(|(_, pr)| pr)
     }
 
-    /// What the widget shows for a fresh entry: what it says, except that a failure shows the kept
-    /// PR, marked stale, when there is one.
-    fn answer(&self, now: i64) -> (PrLookup, bool) {
-        match (self.failure, self.kept(now)) {
-            (Some(_), Some(pr)) => (Ok(Some(pr.clone())), true),
-            _ => (self.lookup(), false),
+    /// What the widget shows for this entry. `fresh` is whether the entry is young enough to use.
+    /// A fresh answer shows as it is. Anything else shows the kept PR, marked stale, or else what
+    /// the entry says, so an answer that is due is never shown as current past the day limit.
+    pub(super) fn show(&self, now: i64, fresh: bool) -> (PrLookup, bool) {
+        if fresh && self.failure.is_none() {
+            return (self.lookup(), false);
+        }
+        match (self.kept(now), self.failure) {
+            (Some(pr), _) => (Ok(Some(pr.clone())), true),
+            (None, Some(failure)) => (Err(failure), false),
+            (None, None) => (Ok(None), false),
         }
     }
+}
 
-    /// What the widget shows while a refresh of this due entry runs: the kept PR, marked stale,
-    /// or else what the entry says.
-    fn shown_while_refreshing(&self, now: i64) -> (PrLookup, bool) {
-        match self.kept(now) {
-            Some(pr) => (Ok(Some(pr.clone())), true),
-            None => (self.lookup(), false),
-        }
-    }
+/// Whether `ts` is no later than `now` and less than `limit` seconds before it. A time in the
+/// future reads as old, so a clock that stepped back cannot keep an entry alive (#3889).
+fn is_younger(ts: i64, now: i64, limit: i64) -> bool {
+    now.checked_sub(ts)
+        .is_some_and(|age| (0..limit).contains(&age))
 }
 
 /// Read the cache entry, whatever its age. `None` for a missing, corrupt, or unreadable entry; a
@@ -191,31 +200,9 @@ pub(super) fn read_pr_entry(path: &Path) -> Option<PrCacheEntry> {
     }
 }
 
-/// Read a still-fresh cache entry. `None` for a missing, corrupt, unreadable, or expired entry.
-#[cfg(test)]
-pub(super) fn read_pr_cache(path: &Path, now: i64) -> Option<PrLookup> {
-    read_pr_entry(path)
-        .filter(|entry| entry.is_fresh(now))
-        .map(|entry| entry.lookup())
-}
-
-/// Write `lookup` as a cache entry with no kept PR.
-#[cfg(test)]
-pub(super) fn write_pr_cache(path: &Path, lookup: &PrLookup, now: i64) {
-    write_pr_entry(
-        path,
-        &PrCacheEntry {
-            ts: now,
-            pr: lookup.clone().unwrap_or_default(),
-            failure: lookup.as_ref().err().copied(),
-            good: None,
-        },
-    );
-}
-
 /// Best-effort cache write: a failed write only means the next render
 /// re-queries `gh`, not a broken widget.
-fn write_pr_entry(path: &Path, entry: &PrCacheEntry) {
+pub(super) fn write_pr_entry(path: &Path, entry: &PrCacheEntry) {
     if let Some(parent) = path.parent()
         && let Err(e) = crate::paths::create_dir_owner_only(parent)
     {
@@ -232,7 +219,7 @@ fn write_pr_entry(path: &Path, entry: &PrCacheEntry) {
             return;
         }
     };
-    if let Err(e) = crate::paths::write_owner_only(path, json.as_bytes()) {
+    if let Err(e) = crate::paths::write_owner_only_atomic(path, json.as_bytes()) {
         tracing::error!("pr cache write to {} failed: {e}", path.display());
     }
 }

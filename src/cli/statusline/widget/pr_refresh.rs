@@ -2,59 +2,49 @@
 //! slow `gh` never holds up the prompt (#3889). Design: docs/design/statusline-pr-lookup.md
 
 use serde::{Deserialize, Serialize};
+use std::fs::{File, TryLockError};
 use std::path::{Path, PathBuf};
 
 use super::gh_cmd::GhPrCmd;
 use super::now_unix;
 use super::pr_cache::{pr_cache_path, read_pr_entry, refresh_in_place};
-
-/// How old a refresh lock may be before it is taken as left by a child that died. It is longer
-/// than the time the child may take: the limit of `gh`, and the retry after a failed start.
-const REFRESH_LOCK_STALE_SECS: i64 = 30;
+use super::usage_state_dir;
 
 /// The input of the detached refresh, sent on its stdin. The branch name comes from git state, so
-/// it travels in the payload and not in the process table.
-#[derive(Serialize, Deserialize)]
-pub(crate) struct RefreshJob {
-    cache_dir: PathBuf,
+/// it travels in the payload and not in the process table. The cache folder is not part of it: the
+/// child works it out from its own environment, so a job cannot point it at another folder.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub(super) struct RefreshJob {
     repo_dir: PathBuf,
     branch: String,
 }
 
-/// Start the detached refresh of the cache entry for (`repo_dir`, `branch`), unless one runs. One
-/// lock file next to the entry keeps two renders from starting two refreshes. A refresh that
-/// cannot start is logged, and the next render tries again.
-pub(super) fn start_refresh(cache_dir: &Path, repo_dir: &Path, branch: &str, now: i64) {
-    if let Err(e) = crate::paths::create_dir_owner_only(cache_dir) {
-        tracing::error!(
-            "pr cache dir {} unavailable, so the PR is not refreshed: {e}",
-            cache_dir.display()
-        );
-        return;
-    }
-    let lock = lock_path(&pr_cache_path(cache_dir, repo_dir, branch));
-    if !take_lock(&lock, now) {
-        return;
+/// Start the detached refresh of the cache entry for (`repo_dir`, `branch`), unless one runs.
+///
+/// The refresh holds a file lock next to the cache entry for as long as it lives, and the system
+/// frees the lock when the process ends, so a child that dies leaves no lock behind. Two renders
+/// that both see no lock start two children, and the second child finds the lock held and ends.
+///
+/// # Errors
+/// Errors if the lock cannot be checked or the child cannot start. The caller shows the failure,
+/// because a refresh that never starts would otherwise look like "no PR".
+pub(super) fn start_refresh(cache_dir: &Path, repo_dir: &Path, branch: &str) -> anyhow::Result<()> {
+    let path = pr_cache_path(cache_dir, repo_dir, branch);
+    if refresh_is_running(&path)? {
+        return Ok(());
     }
     let job = RefreshJob {
-        cache_dir: cache_dir.to_path_buf(),
         repo_dir: repo_dir.to_path_buf(),
         branch: branch.to_string(),
     };
-    if let Err(e) = spawn(&job) {
-        tracing::error!(
-            "the detached PR refresh cannot start, so the PR is not refreshed: {e:#}. Fix: run \
-             `llmenv doctor`."
-        );
-        drop_lock(&lock);
-    }
+    spawn(&job)
 }
 
-/// The entry point of the hidden `statusline-pr-refresh` command: read the job from stdin, run
-/// `gh`, write the cache entry, and release the lock.
+/// The entry point of the hidden `statusline-pr-refresh` command: read the job from stdin, take the
+/// lock, run `gh`, and write the cache entry. It ends at once when another refresh holds the lock.
 ///
 /// # Errors
-/// Errors if stdin is not a refresh job.
+/// Errors if stdin is not a refresh job, or the cache folder or the lock is not available.
 pub(crate) fn run() -> anyhow::Result<()> {
     // Starts the notice spool, so the notices of this child reach the next hook run (#3398).
     crate::cli::checkpoint_arg::checked_checkpoint(None)?;
@@ -64,7 +54,17 @@ pub(crate) fn run() -> anyhow::Result<()> {
             "the PR refresh input is not a refresh job: {e}. Fix: do not run this command by hand"
         )
     })?;
-    let path = pr_cache_path(&job.cache_dir, &job.repo_dir, &job.branch);
+    let cache_dir = usage_state_dir().ok_or_else(|| {
+        anyhow::anyhow!(
+            "the PR refresh has no state folder. Fix: set CLAUDE_CONFIG_DIR, as the engine does"
+        )
+    })?;
+    let path = pr_cache_path(&cache_dir, &job.repo_dir, &job.branch);
+    // The lock is held until this function ends.
+    let Some(_lock) = take_lock(&path)? else {
+        tracing::debug!("a PR refresh runs for {}, so this one ends", path.display());
+        return Ok(());
+    };
     let prior = read_pr_entry(&path);
     let (_lookup, _stale) = refresh_in_place(
         GhPrCmd::refresh("gh"),
@@ -73,70 +73,46 @@ pub(crate) fn run() -> anyhow::Result<()> {
         prior,
         now_unix(),
     );
-    drop_lock(&lock_path(&path));
     Ok(())
 }
 
-pub(super) fn lock_path(cache_path: &Path) -> PathBuf {
+fn lock_path(cache_path: &Path) -> PathBuf {
     let mut name = cache_path.as_os_str().to_owned();
     name.push(".lock");
     PathBuf::from(name)
 }
 
-/// Create the lock. `false` when a refresh holds it, or when it cannot be made.
-pub(super) fn take_lock(lock: &Path, now: i64) -> bool {
-    match create_lock(lock) {
-        Ok(()) => true,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            if !lock_is_stale(lock, now) {
-                return false;
-            }
-            tracing::warn!(
-                "the PR refresh lock {} is old, so a child died. It is replaced.",
-                lock.display()
-            );
-            drop_lock(lock);
-            create_lock(lock).is_ok()
-        }
-        Err(e) => {
-            tracing::error!(
-                "the PR refresh lock {} cannot be made, so the PR is not refreshed: {e}",
-                lock.display()
-            );
-            false
-        }
-    }
+/// Whether a refresh holds the lock of the cache entry at `cache_path`.
+fn refresh_is_running(cache_path: &Path) -> anyhow::Result<bool> {
+    crate::paths::create_dir_owner_only(cache_path.parent().unwrap_or(Path::new(".")))?;
+    Ok(take_lock(cache_path)?.is_none())
 }
 
-fn create_lock(lock: &Path) -> std::io::Result<()> {
+/// The lock of the cache entry at `cache_path`, or `None` when another process holds it. The file
+/// stays after the refresh, and it holds nothing: the lock is the system lock on the open file.
+fn take_lock(cache_path: &Path) -> anyhow::Result<Option<File>> {
+    let lock = lock_path(cache_path);
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
+    options.write(true).create(true).truncate(false);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
-    options.open(lock).map(drop)
-}
-
-fn lock_is_stale(lock: &Path, now: i64) -> bool {
-    let modified = std::fs::metadata(lock)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .and_then(|d| i64::try_from(d.as_secs()).ok());
-    // A lock whose age cannot be read is taken as old, so a broken lock cannot stop refreshes.
-    modified.is_none_or(|at| now.saturating_sub(at) >= REFRESH_LOCK_STALE_SECS)
-}
-
-fn drop_lock(lock: &Path) {
-    if let Err(e) = std::fs::remove_file(lock)
-        && e.kind() != std::io::ErrorKind::NotFound
-    {
-        tracing::error!(
-            "the PR refresh lock {} cannot be removed: {e}",
+    crate::paths::refuse_symlink(&mut options);
+    let file = options.open(&lock).map_err(|e| {
+        anyhow::anyhow!(
+            "the PR refresh lock {} cannot be opened: {e}",
             lock.display()
-        );
+        )
+    })?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(e)) => Err(anyhow::anyhow!(
+            "the PR refresh lock {} cannot be taken: {e}",
+            lock.display()
+        )),
     }
 }
 
@@ -144,13 +120,12 @@ fn drop_lock(lock: &Path) {
 /// integration tests start the real child.
 #[cfg(test)]
 fn spawn(_job: &RefreshJob) -> anyhow::Result<()> {
-    anyhow::bail!("the detached refresh is off in unit tests")
+    Ok(())
 }
 
 /// Spawn this binary as a detached child that runs the refresh. It is not waited on.
 #[cfg(not(test))]
 fn spawn(job: &RefreshJob) -> anyhow::Result<()> {
-    use std::io::Write as _;
     use std::process::{Command, Stdio};
     // Spawns this same binary. The path is this process's own image, not input.
     // nosemgrep: rust.lang.security.current-exe.current-exe
@@ -160,14 +135,44 @@ fn spawn(job: &RefreshJob) -> anyhow::Result<()> {
     cmd.arg("statusline-pr-refresh")
         .stdin(Stdio::piped())
         .stdout(Stdio::null());
-    crate::hook_run::redirect_stderr_to_detached_log(
-        &mut cmd,
-        crate::hook_run::detached_child_log_path(),
-    );
-    crate::mcp::proxy::detach_process_group(&mut cmd);
-    let mut child = crate::trace::spawn_counted("statusline:pr-refresh", &mut cmd)?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(payload.as_bytes())?;
+    crate::hook_run::respawn::spawn_detached(cmd, Some(&payload), &job.repo_dir)
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test code")]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[test]
+    fn a_second_taker_finds_the_lock_held_until_the_first_drops_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("pr-cache-x");
+        let first = take_lock(&cache).unwrap();
+        assert!(first.is_some());
+        assert!(take_lock(&cache).unwrap().is_none(), "the lock is held");
+        drop(first);
+        assert!(
+            take_lock(&cache).unwrap().is_some(),
+            "a dropped lock is free"
+        );
     }
-    Ok(())
+
+    #[test]
+    fn a_lock_that_cannot_be_opened_is_an_error_with_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("missing-folder").join("pr-cache-x");
+        let err = take_lock(&cache).unwrap_err().to_string();
+        assert!(err.contains("pr-cache-x.lock"), "{err}");
+    }
+
+    proptest! {
+        // A refresh job survives the stdin hop, whatever the folder and the branch hold.
+        #[test]
+        fn a_refresh_job_round_trips(repo in "[a-zA-Z0-9/_. -]{0,40}", branch in "\\PC{0,40}") {
+            let job = RefreshJob { repo_dir: PathBuf::from(repo), branch };
+            let json = serde_json::to_string(&job).unwrap();
+            prop_assert_eq!(serde_json::from_str::<RefreshJob>(&json).unwrap(), job);
+        }
+    }
 }

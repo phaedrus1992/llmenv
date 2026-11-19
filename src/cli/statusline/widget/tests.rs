@@ -10,6 +10,26 @@ fn engine_data_reads_the_session_id() {
 
 use super::usage::{UsageArgs, humanize_until, render_usage};
 use super::*;
+
+/// Write `lookup` as a cache entry with no kept PR.
+fn write_pr_cache(path: &Path, lookup: &PrLookup, now: i64) {
+    write_pr_entry(
+        path,
+        &PrCacheEntry {
+            ts: now,
+            pr: lookup.clone().unwrap_or_default(),
+            failure: lookup.as_ref().err().copied(),
+            good: None,
+        },
+    );
+}
+
+/// Read a still-fresh cache entry.
+fn read_pr_cache(path: &Path, now: i64) -> Option<PrLookup> {
+    read_pr_entry(path)
+        .filter(|entry| entry.is_fresh(now))
+        .map(|entry| entry.lookup())
+}
 use proptest::prelude::*;
 
 #[test]
@@ -650,7 +670,7 @@ fn parse_gh_pr_view_maps_fields_and_review_decision() {
     let json =
         br#"{"number":834,"url":"https://github.com/o/r/pull/834","reviewDecision":"APPROVED"}"#;
     assert_eq!(
-        parse_gh_pr_view(json),
+        parse_gh_pr_view(json).unwrap(),
         Some(PrInfo {
             number: Some(834),
             url: Some("https://github.com/o/r/pull/834".to_string()),
