@@ -45,14 +45,19 @@ fn active_since(session: &Session, start: SystemTime) -> bool {
         // An unknown value reads as "not active". The refusal that follows is non-destructive, so
         // this default is the safe one. The notice names the cause, so the refusal is not
         // silent about it (#3811).
-        llmenv_util::agent_notice::record_logged(format!(
-            "session {} has an unreadable last_activity, so it is not known to be active. \
-             Fix: rewrite it as RFC 3339, such as 2026-01-01T00:00:00Z",
-            session.id
-        ));
+        llmenv_util::agent_notice::record_logged(unreadable_last_activity(&session.id));
         return false;
     };
     at >= start
+}
+
+/// The notice for a `last_activity` that does not parse. The checkpoint and the listing both
+/// record it, so they report the same cause (#3859).
+fn unreadable_last_activity(session_id: &str) -> String {
+    format!(
+        "session {session_id} has an unreadable last_activity, so it is not known to be active. \
+         Fix: rewrite it as RFC 3339, such as 2026-01-01T00:00:00Z"
+    )
 }
 
 /// When the engine process `pid` started, from its elapsed time in `ps`. `None` when `ps` cannot
@@ -215,27 +220,27 @@ pub(super) fn resume(
 
 /// Human-readable idle duration since an RFC3339 `last_activity` timestamp
 /// (e.g. `"2h 5m 3s"`), for `session ls` and the `session start` checkpoint.
-/// `"unknown"` when the timestamp can't be parsed or is in the future.
+/// `"unknown"` with the reason when the timestamp can't be parsed or is in the future. The
+/// reason shows in the listing, because a notice reaches only hook output (#3859).
 #[must_use]
 pub fn idle_display(last_activity: &str, session_id: &str) -> String {
     let now = std::time::SystemTime::now();
     let Some(at) =
         llmenv_util::time::instant_or_log(last_activity, "session last_activity", session_id)
     else {
-        return "unknown".to_string();
+        // The listing has no other place for the cause, so the notice carries it (#3859).
+        llmenv_util::agent_notice::record_logged(unreadable_last_activity(session_id));
+        return "unknown: last_activity is unreadable".to_string();
     };
     match now.duration_since(at) {
         Ok(d) => llmenv_util::time::format_age(std::time::Duration::from_secs(d.as_secs())),
         Err(_) => {
-            // Each listing row calls this, so the warning is logged once per value (#3811).
-            if llmenv_util::time::first_report("session last_activity", session_id, last_activity) {
-                tracing::warn!(
-                    value = last_activity,
-                    "a last_activity is in the future, so its idle time is unknown. \
-                     Fix: check the clock of the machine that wrote it"
-                );
-            }
-            "unknown".to_string()
+            // Each listing row calls this. A repeat of the notice is not logged again (#3811).
+            llmenv_util::agent_notice::record_logged(format!(
+                "session {session_id} has a last_activity in the future, so its idle time is \
+                 unknown. Fix: check the clock of the machine that wrote it"
+            ));
+            "unknown: last_activity is in the future".to_string()
         }
     }
 }
@@ -324,16 +329,45 @@ mod tests {
     }
 
     #[test]
+    fn idle_display_names_an_unreadable_last_activity_in_the_notice() {
+        assert_eq!(
+            idle_display("yesterday", "s10"),
+            "unknown: last_activity is unreadable"
+        );
+        let notices = llmenv_util::agent_notice::current().unwrap_or_default();
+        assert!(
+            notices.contains("unreadable last_activity") && notices.contains("s10"),
+            "{notices}"
+        );
+    }
+
+    #[test]
+    fn idle_display_names_a_future_last_activity_in_the_notice() {
+        assert_eq!(
+            idle_display("2999-01-01T00:00:00Z", "s11"),
+            "unknown: last_activity is in the future"
+        );
+        let notices = llmenv_util::agent_notice::current().unwrap_or_default();
+        assert!(
+            notices.contains("last_activity in the future") && notices.contains("s11"),
+            "{notices}"
+        );
+    }
+
+    #[test]
     fn a_future_last_activity_has_no_idle_time() {
-        assert_eq!(idle_display("9999-01-01T00:00:00Z", "s1"), "unknown");
+        assert_eq!(
+            idle_display("9999-01-01T00:00:00Z", "s1"),
+            "unknown: last_activity is in the future"
+        );
     }
 
     proptest! {
-        // Arbitrary stored text never panics. A value other than "unknown" needs text that parses.
+        // Arbitrary stored text never panics. A time shows only for text that parses.
         #[test]
         fn idle_display_shows_a_time_only_for_text_that_parses(text in "\\PC{0,40}") {
             let shown = idle_display(&text, "s1");
-            if shown != "unknown" {
+            if !shown.starts_with("unknown") {
                 prop_assert!(llmenv_util::time::instant_or_log(&text, "test", "s1").is_some());
             }
         }
