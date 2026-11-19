@@ -1,7 +1,6 @@
 //! The bad-timestamp log: one warning per record and bad value, with each dedupe set bounded.
 
 use super::{parse_rfc3339, validate_stored};
-use anyhow::Context as _;
 use std::time::SystemTime;
 
 /// The id of the record that holds a stored timestamp, such as a task slug or a session id. It is
@@ -93,9 +92,9 @@ pub(crate) fn instant_or_log(
 /// # Errors
 /// Errors if `text` is not RFC 3339. `record` names the record, such as `task 'x' at <path>`.
 pub(crate) fn validate_stored_field(field: &str, text: &str, record: &str) -> anyhow::Result<()> {
-    validate_stored(text).with_context(|| {
-        format!(
-            "{record} has an unreadable {field}. Fix: rewrite it as RFC 3339, such as \
+    validate_stored(text).map_err(|e| {
+        anyhow::anyhow!(
+            "{record} has an unreadable {field}: {e:#}. Fix: rewrite it as RFC 3339, such as \
              2026-01-01T00:00:00Z"
         )
     })

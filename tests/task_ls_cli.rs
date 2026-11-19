@@ -67,7 +67,7 @@ fn ls_says_on_stderr_when_it_skips_a_task_file() {
         .success()
         .stdout(predicates::str::contains("Ship the release"))
         .stderr(predicates::str::contains(
-            "1 item(s) of the task store could not be read",
+            "1 item(s) of the task store could not be loaded",
         ))
         .stderr(predicates::str::contains("broken.json"));
 }
@@ -89,7 +89,7 @@ fn ls_strips_control_characters_from_the_skipped_file_cause() {
         .assert()
         .success()
         .stderr(predicates::str::contains(
-            "1 item(s) of the task store could not be read",
+            "1 item(s) of the task store could not be loaded",
         ))
         .get_output()
         .stderr

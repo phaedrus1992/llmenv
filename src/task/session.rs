@@ -1487,7 +1487,7 @@ mod tests {
         assert!(!other_line.contains("yours"), "{err}");
         assert!(err.contains("--resume <id> to continue it"), "{err}");
         assert!(
-            err.contains("--replace abandons all 3 listed sessions"),
+            err.contains("which abandons all 3 listed sessions"),
             "mixed ownership must warn that --replace drops the other window's session: {err}"
         );
         assert!(!err.contains("--replace to drop"), "{err}");

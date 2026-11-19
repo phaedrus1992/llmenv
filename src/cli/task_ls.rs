@@ -69,14 +69,12 @@ fn ls_scoped(
 /// output only, so without this line a person sees a short list with no reason (#3883). The first
 /// problem holds text from the task file, so it is stripped of control characters.
 fn report_skipped(read: &task::store_read::ReadTasks) {
-    if read.skipped == 0 {
+    let Some((count, first)) = read.skipped() else {
         return;
-    }
-    let first = read.first_problem.as_deref().unwrap_or("unknown file");
+    };
     eprintln!(
-        "[llmenv] task ls: {} item(s) of the task store could not be read, so they are not \
+        "[llmenv] task ls: {count} item(s) of the task store could not be loaded, so they are not \
          listed, whatever the filters. First: {}. Fix: repair or remove the file.",
-        read.skipped,
         super::style::sanitize_for_terminal(first)
     );
 }

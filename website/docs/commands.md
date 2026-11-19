@@ -750,7 +750,8 @@ project's hook.
     (changed in v3.14.0) A session that another conversation started is refused, and
     nothing is changed. Repeat `--other-session <id>` with that session's id to abandon it
     anyway. A session with no owner, and your own sessions, need no flag. `--resume` stays
-    open to any conversation.
+    open to any conversation. The `--replace` text of the checkpoint error carries the
+    `--other-session` flags that the refusal needs.
   - `--new` — create a new session anyway, leaving the existing one(s) open
     — true concurrency for two windows genuinely working in parallel.
 

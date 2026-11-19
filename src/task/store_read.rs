@@ -18,12 +18,20 @@ pub(super) enum UnreadablePolicy {
 pub(crate) struct ReadTasks {
     pub(crate) tasks: Vec<Task>,
     /// Files and directory entries that a lenient read skipped.
-    pub(crate) skipped: usize,
-    /// The first skipped item, with its cause, so a person can start the repair (#3883).
-    pub(crate) first_problem: Option<String>,
+    skipped: usize,
+    /// The first skipped item, with its cause, so a person can start the repair (#3883). It is
+    /// `Some` exactly when `skipped` is above 0, and only `skip` sets either.
+    first_problem: Option<String>,
 }
 
 impl ReadTasks {
+    /// The count of the skipped items and the first problem, or `None` when nothing was skipped.
+    pub(crate) fn skipped(&self) -> Option<(usize, &str)> {
+        self.first_problem
+            .as_deref()
+            .map(|first| (self.skipped, first))
+    }
+
     fn skip(&mut self, problem: String) {
         self.skipped += 1;
         self.first_problem.get_or_insert(problem);

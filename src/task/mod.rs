@@ -589,8 +589,8 @@ fn touch_task_session(state_dir: &Path, task: &Task) {
     if let Some(session_id) = &task.session
         && let Err(e) = session::touch_last_activity(state_dir, session_id)
     {
-        // error level, because the default log filter drops warnings. A session that cannot load
-        // is a real fault, even though the task change is already saved.
+        // A notice, because the engine drops hook stderr. A session that cannot load is a real
+        // fault, even though the task change is already saved.
         crate::agent_notice::record_logged(format!(
             "llmenv: the task change is saved, but the activity time of session {session_id} is \
              not, so the session can look idle: {e:#}. Fix: run `llmenv task session show`."

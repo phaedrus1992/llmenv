@@ -73,19 +73,24 @@ pub(super) fn checkpoint_error(
         .iter()
         .filter(|o| o.cannot_tell_reason().is_some())
         .count();
-    // `--replace` abandons every listed session, so it is only offered as the
-    // way to drop "yours" when every listed session is yours.
+    // `--replace` abandons every listed session. The guard refuses it for a session that is not
+    // yours unless `--other-session` names it, so the text gives those flags.
+    let replace = format!(
+        "--replace{}",
+        other_session_flags(&foreign(existing, owner, engine_start, &[]))
+    );
     let mut hint = if yours == 0 {
         String::new()
     } else if yours == existing.len() {
-        "\nEvery listed session is yours: pass --resume <id> to continue one, or --replace \
-         to drop them all. Use --new only for a second, parallel window."
-            .to_string()
+        format!(
+            "\nEvery listed session is yours: pass --resume <id> to continue one, or {replace} \
+             to drop them all. Use --new only for a second, parallel window."
+        )
     } else {
         format!(
             "\nA session marked as yours holds your own earlier work: pass --resume <id> to \
-             continue it, or close it with `llmenv task session finish <id>`. --replace \
-             abandons all {} listed sessions, including the ones that are not yours.",
+             continue it, or close it with `llmenv task session finish <id>`. Or run \
+             {replace}, which abandons all {} listed sessions, including the ones that are not yours.",
             existing.len()
         )
     };
@@ -97,7 +102,7 @@ pub(super) fn checkpoint_error(
     }
     format!(
         "session(s) already open for this project:\n{}\n\
-         pass one of --resume <id>, --replace, or --new{hint}",
+         pass one of --resume <id>, {replace}, or --new{hint}",
         lines.join("\n")
     )
 }
@@ -161,33 +166,48 @@ pub(super) fn refuse_unnamed_foreign(
             "--other-session names '{unknown}', which is not an open session of this project"
         );
     }
-    let unnamed: Vec<&Session> = existing
-        .iter()
-        .filter(|s| s.owner_session.is_some() || s.owner_pid.is_some())
-        .filter(|s| !ownership(s, owner, engine_start).is_callers())
-        .filter(|s| !named.contains(&s.id))
-        .collect();
+    let unnamed = foreign(existing, owner, engine_start, named);
     if unnamed.is_empty() {
         return Ok(());
     }
     let listed: Vec<String> = unnamed
         .iter()
-        .map(
-            |s| match ownership(s, owner, engine_start).cannot_tell_reason() {
-                Some(why) => format!("{} (cannot tell if it is yours: {why})", s.id),
-                None => s.id.clone(),
-            },
-        )
-        .collect();
-    let flags: String = unnamed
-        .iter()
-        .map(|s| format!(" --other-session {}", s.id))
+        .map(|(s, owned)| match owned.cannot_tell_reason() {
+            Some(why) => format!("{} (cannot tell if it is yours: {why})", s.id),
+            None => s.id.clone(),
+        })
         .collect();
     anyhow::bail!(
-        "--replace would abandon session(s) of another conversation: {}\n\
-         Nothing was changed. To abandon them anyway, run again with{flags}",
-        listed.join(", ")
+        "--replace would abandon session(s) that are not known to be yours: {}\n\
+         Nothing was changed. To abandon them anyway, run again with{}",
+        listed.join(", "),
+        other_session_flags(&unnamed)
     )
+}
+
+/// The open sessions that `--replace` refuses without `--other-session`: sessions that have an
+/// owner, are not the caller's, and are not in `named`. Each comes with its ownership.
+fn foreign<'a>(
+    existing: &'a [Session],
+    owner: &EngineIdentity,
+    engine_start: Option<SystemTime>,
+    named: &[String],
+) -> Vec<(&'a Session, Ownership)> {
+    existing
+        .iter()
+        .filter(|s| s.owner_session.is_some() || s.owner_pid.is_some())
+        .map(|s| (s, ownership(s, owner, engine_start)))
+        .filter(|(_, owned)| !owned.is_callers())
+        .filter(|(s, _)| !named.contains(&s.id))
+        .collect()
+}
+
+/// The ` --other-session <id>` flags, one for each session in `foreign`.
+fn other_session_flags(foreign: &[(&Session, Ownership)]) -> String {
+    foreign
+        .iter()
+        .map(|(s, _)| format!(" --other-session {}", s.id))
+        .collect()
 }
 
 #[cfg(test)]
@@ -293,7 +313,7 @@ mod tests {
         assert!(!text.contains("yours"), "{text}");
         let err = refuse_unnamed_foreign(&sessions, &caller(), later, &[]).unwrap_err();
         assert!(
-            err.to_string().contains("another conversation: s1"),
+            err.to_string().contains("not known to be yours: s1"),
             "{err}"
         );
     }
@@ -338,6 +358,7 @@ mod tests {
         );
         assert!(text.contains("s2"), "{text}");
         assert!(!text.contains("s2 (cannot tell"), "{text}");
+        assert!(text.contains("not known to be yours"), "{text}");
     }
 
     #[test]
@@ -371,6 +392,13 @@ mod tests {
             let text = checkpoint_error(&sessions, &caller(), start);
             let all_yours = owned.iter().all(|o| o.is_callers());
             prop_assert_eq!(text.contains("Every listed session is yours"), all_yours);
+            // The text offers `--replace` with the flags that the guard needs, so the guard accepts
+            // exactly what the text says to run.
+            let refused = foreign(&sessions, &caller(), start, &[]);
+            let flags = other_session_flags(&refused);
+            prop_assert!(text.contains(&format!("--replace{flags}")), "{text}");
+            let named: Vec<String> = refused.iter().map(|(s, _)| s.id.clone()).collect();
+            prop_assert!(refuse_unnamed_foreign(&sessions, &caller(), start, &named).is_ok());
             let any_unplaced = owned.iter().any(|o| o.cannot_tell_reason().is_some());
             prop_assert_eq!(text.contains("cannot tell which sessions"), any_unplaced);
 
