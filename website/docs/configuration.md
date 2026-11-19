@@ -1660,6 +1660,12 @@ placeholder renders the count with no staleness indication at all.
 | `session_log` | `{icon} {entries}` | `📝 8` | `icon`, `entries` |
 | `tasks` | `☑ {done}/{total}` (summed across the current project's open sessions, #905); renders empty when no session is open for this project. In a project with several conversations, the widget counts only the sessions that the current conversation owns, plus sessions with no owner (changed in v3.14.0) | `☑ 2/5` | `done`, `total` (summed across every session open for the current project), `current` (title of the task currently `wip`/`waiting` among those sessions; empty when none). The default doesn't show `current` — combine it yourself, e.g. `format: "{done}/{total} — {current}"` |
 
+(added in v3.13.0; decided in v3.14.0) When `llmenv-status.json` exists but cannot be read or parsed, the status line prints a yellow `status unreadable` line above the rows.
+It is the one signal for this fault, because all llmenv widgets share the file.
+It also shows when the row template has no llmenv widget.
+The widgets that read the file keep their blank values or their own `?`.
+A missing file shows no line, because that is the state before llmenv writes the first status.
+
 When a session or task file cannot be read, the `tasks` widget keeps its format and shows `?` in place of each count, so a read error never looks like no work (changed in v3.13.0; changed in v3.14.0 to keep the format).
 
 When the repository's `HEAD` exists but cannot be read, the `branch` widget keeps its format and shows `?` in place of the name, instead of hiding the branch (changed in v3.13.0; changed in v3.14.0 to keep the format).

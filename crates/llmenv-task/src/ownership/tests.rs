@@ -558,3 +558,144 @@ fn a_crash_after_a_delete_leaves_the_note_on_the_callers_session() {
         "{context}"
     );
 }
+
+fn start_session_value(
+    dir: &std::path::Path,
+    owner: &EngineIdentity,
+    decision: StartDecision,
+) -> super::super::session::Session {
+    let request = StartRequest {
+        name: None,
+        description: None,
+        project: PROJECT,
+        owner,
+        resume: &ResumeContext::default(),
+    };
+    match start_session_as(dir, &request, decision).expect("start") {
+        StartOutcome::Created(session) => session,
+        other => panic!("expected a new session, got {other:?}"),
+    }
+}
+
+fn start_as(dir: &std::path::Path, owner: &EngineIdentity, decision: StartDecision) -> String {
+    start_session_value(dir, owner, decision).id
+}
+
+fn engine(conversation: &str) -> EngineIdentity {
+    EngineIdentity {
+        session_id: Some(conversation.to_string()),
+        pid: Some(std::process::id()),
+    }
+}
+
+/// #3905: after a `/clear` the conversation id changes and the engine process stays. A session
+/// that this engine process started is still the caller's, as it is for the checkpoint.
+#[test]
+fn a_session_of_this_engine_process_is_the_callers_after_a_clear() {
+    let dir = TempDir::new().expect("tempdir");
+    let mine = start_as(
+        dir.path(),
+        &engine("conv-before-clear"),
+        StartDecision::Auto,
+    );
+    let other = EngineIdentity {
+        session_id: Some("conv-elsewhere".to_string()),
+        pid: None,
+    };
+    start_as(dir.path(), &other, StartDecision::New);
+
+    let caller = caller_session(dir.path(), PROJECT, &engine("conv-after-clear")).expect("caller");
+
+    assert_eq!(caller, Caller::Session(mine));
+}
+
+/// A session of another process is not the caller's, whatever the conversation says.
+#[test]
+fn a_session_of_another_engine_process_is_not_the_callers() {
+    let dir = TempDir::new().expect("tempdir");
+    let theirs = EngineIdentity {
+        session_id: Some("conv-theirs".to_string()),
+        pid: Some(std::process::id().wrapping_add(1)),
+    };
+    start_as(dir.path(), &theirs, StartDecision::Auto);
+    start_as(dir.path(), &conversation("conv-third"), StartDecision::New);
+
+    let caller = caller_session(dir.path(), PROJECT, &engine("conv-after-clear")).expect("caller");
+
+    assert!(matches!(caller, Caller::Unidentified(_)), "{caller:?}");
+}
+
+/// A session that was last active before this engine process started is not the caller's, because
+/// the process id may have been reused.
+#[test]
+fn a_session_from_before_this_engine_started_does_not_take_tasks() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut session = start_session_value(
+        dir.path(),
+        &engine("conv-before-clear"),
+        StartDecision::Auto,
+    );
+    session.last_activity = "2000-01-01T00:00:00Z".to_string();
+
+    assert!(!session.may_take_tasks(&engine("conv-after-clear")));
+    assert!(session.may_take_tasks(&engine("conv-before-clear")));
+}
+
+/// A caller with no conversation id and no process id is refused (#3480).
+#[test]
+fn a_caller_with_no_identity_does_not_take_an_owned_session() {
+    let dir = TempDir::new().expect("tempdir");
+    let session = start_session_value(dir.path(), &engine("conv-a"), StartDecision::Auto);
+
+    assert!(!session.may_take_tasks(&EngineIdentity::default()));
+}
+
+/// A caller with a process id and no conversation id is refused (#3480). A stale or inherited
+/// process id alone must not open an owned session to a write.
+#[test]
+fn a_caller_with_only_a_process_id_does_not_take_an_owned_session() {
+    let dir = TempDir::new().expect("tempdir");
+    let session = start_session_value(dir.path(), &engine("conv-a"), StartDecision::Auto);
+    let pid_only = EngineIdentity {
+        session_id: None,
+        pid: Some(std::process::id()),
+    };
+
+    assert!(!session.may_take_tasks(&pid_only));
+}
+
+/// After a `/clear`, a new conversation that started its own session gets that session, and the
+/// older session of the same engine process does not make the pick ambiguous.
+#[test]
+fn the_conversation_s_own_session_beats_one_that_only_the_process_ties() {
+    let dir = TempDir::new().expect("tempdir");
+    start_as(
+        dir.path(),
+        &engine("conv-before-clear"),
+        StartDecision::Auto,
+    );
+    let own = start_as(dir.path(), &engine("conv-after-clear"), StartDecision::New);
+
+    let caller = caller_session(dir.path(), PROJECT, &engine("conv-after-clear")).expect("caller");
+
+    assert_eq!(caller, Caller::Session(own));
+}
+
+/// A process match that cannot be confirmed says what to run, not only that another conversation
+/// owns the session.
+#[test]
+fn a_refusal_for_a_process_match_names_the_resume_command() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut session = start_session_value(
+        dir.path(),
+        &engine("conv-before-clear"),
+        StartDecision::Auto,
+    );
+    session.last_activity = "2000-01-01T00:00:00Z".to_string();
+
+    let err = super::check_takes_tasks(&session, &engine("conv-after-clear"))
+        .expect_err("refused")
+        .to_string();
+
+    assert!(err.contains("session start --resume"), "{err}");
+}

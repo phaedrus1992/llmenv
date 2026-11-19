@@ -982,6 +982,10 @@ Only when the open session has no match does the search cover the whole project.
   `task add --session <id>` refuses a session of another conversation the same way, and a
   `--parent` in another session is refused (#3480, #3486). An owned session takes a new task
   only from its owner. A caller with no conversation id is refused for that session.
+  (changed in v3.14.0) After a `/clear` the conversation id changes and the engine process stays, so a session that
+  this engine process started also counts as the caller's, when it was active after that process started.
+  The pick of a session with no id and this check use the same rule as the `session start` checkpoint.
+  A caller with no conversation id is still refused, whatever its engine process id says.
   A bare `--force` does not override this check.
 - `task done <id> [--force]` — mark a task complete. (changed in v3.12.0) Refuses a parent whose sub-tasks are
   not all `done`, and lists them; `--force` closes it anyway and prints a note.
