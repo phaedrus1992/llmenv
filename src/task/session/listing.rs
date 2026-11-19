@@ -111,7 +111,7 @@ pub(crate) fn sort_listing(sessions: &mut [Session], project: &str) {
     reason = "a test fails loudly when its fixture is wrong"
 )]
 mod tests {
-    use super::{Session, list_sessions_strict, sessions_dir, sort_listing};
+    use super::{Session, list_sessions_strict, parse_session, sessions_dir, sort_listing};
     use proptest::prelude::*;
     use tempfile::TempDir;
 
@@ -161,6 +161,29 @@ mod tests {
     }
 
     proptest! {
+        // A session that was written reads back as the same session.
+        #[test]
+        fn a_written_session_reads_back(
+            id in "[a-z0-9]{1,8}",
+            project in "[a-z]{1,6}",
+            secs in 0i64..4_000_000_000,
+        ) {
+            let at = jiff::Timestamp::from_second(secs).expect("in range").to_string();
+            let written = session(&id, &project, &at);
+            let text = serde_json::to_string(&written).expect("serialize");
+            let read = parse_session(&text, std::path::Path::new("s.json")).expect("valid");
+            prop_assert_eq!(read, written);
+        }
+
+        // Any text gives a result and never a panic. It is a session only when it parses and
+        // its `started_at` is RFC 3339.
+        #[test]
+        fn any_text_gives_a_result_and_a_session_has_a_valid_start(text in "\\PC{0,200}") {
+            if let Ok(read) = parse_session(&text, std::path::Path::new("s.json")) {
+                prop_assert!(crate::util::time::validate_stored(&read.started_at).is_ok());
+            }
+        }
+
         // The strict read fails exactly when `started_at` is not RFC 3339 (#3882).
         #[test]
         fn the_strict_read_agrees_with_the_timestamp_validator(

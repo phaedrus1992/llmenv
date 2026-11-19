@@ -119,10 +119,10 @@ fn skip_entry(dir: &Path, e: &std::io::Error) -> String {
         dir = %dir.display(),
         "skipping unreadable directory entry"
     );
-    crate::agent_notice::record(format!(
+    crate::agent_notice::record(crate::util::strip_unsafe_chars(&format!(
         "llmenv skipped an unreadable entry in {}: {e}. Fix: check the directory's permissions.",
         dir.display()
-    ));
+    )));
     format!("an unreadable entry in {}: {e}", dir.display())
 }
 
@@ -144,11 +144,11 @@ fn skip_unreadable_file(path: &Path, e: &anyhow::Error) -> String {
     } else {
         "check the file's permissions"
     };
-    crate::agent_notice::record(format!(
+    crate::agent_notice::record(crate::util::strip_unsafe_chars(&format!(
         "llmenv skipped the unreadable task file {}: {e}. The task is missing from \
          task lists and resume. Fix: {fix}.",
         path.display()
-    ));
+    )));
     format!("{}: {e}", path.display())
 }
 

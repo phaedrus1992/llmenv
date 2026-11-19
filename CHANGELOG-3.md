@@ -82,6 +82,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Reclaim a proxy spawn lock when its pid now names a newer process of yours, such as after a reboot. The lock records the start time of its holder. See [the memory proxy](https://phaedrus1992.github.io/llmenv/docs/mcp). [fix:mcp] [#3795]
 - Refuse to change a task whose `created_at` or `updated_at` is not RFC 3339, as the listing already skips it, and name the file and the fix. See [the task commands](https://phaedrus1992.github.io/llmenv/docs/commands#task). [fix:task] [#3882]
 - Treat a session `last_activity` in the future as "cannot tell" when `llmenv task session start` checks who owns a session, so a wrong clock cannot make another engine's session look like yours. [fix:task] [#3858]
+- Rewrite a status line usage sample that is stamped in the future, so the pace delta does not keep an old reading after a clock step. [fix:statusline]
 - Log each bad-timestamp warning once per record and value, not twice. The dedupe sets for these warnings are now bounded. [fix:util] [#3863]
 - Fail a task read when a task `created_at` is not RFC 3339, and name the file and the fix. A lenient listing skips that task with a notice, so the task no longer sorts to the head of the queue without a notice. [fix:task] [#3856]
 - Give the real refusal reason for a session read, such as `llmenv task session show`. An unidentified caller gets its own reason, not a claim that another conversation owns the session. [fix:cli] [#3861]
