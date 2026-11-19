@@ -310,12 +310,7 @@ pub(crate) fn load_existing_session(state_dir: &Path, id: &str) -> anyhow::Resul
         }
         Err(e) => anyhow::bail!("cannot read session '{id}' at {}: {e}", path.display()),
     };
-    serde_json::from_str(&content).map_err(|e| {
-        anyhow::anyhow!(
-            "session '{id}' at {} is not valid session JSON: {e}",
-            path.display()
-        )
-    })
+    listing::parse_session(&content, &path)
 }
 
 #[cfg(test)]

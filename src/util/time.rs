@@ -5,7 +5,7 @@ use jiff::{SignedDuration, Span, SpanRelativeTo, SpanRound, Timestamp, Unit, fmt
 use std::time::{Duration, SystemTime};
 
 mod bad_log;
-pub(crate) use bad_log::{RecordId, instant_or_log, warn_if_bad_max_winner};
+pub(crate) use bad_log::{RecordId, instant_or_log, validate_stored_field, warn_if_bad_max_winner};
 
 /// The format of a stored timestamp. It always has 9 fractional digits, so the text of two
 /// timestamps sorts in time order.

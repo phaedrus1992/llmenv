@@ -7,9 +7,30 @@ use anyhow::Context;
 #[cfg(test)]
 use super::SESSION_READS;
 use super::{Session, filter, sessions_dir};
+use crate::util::time::RecordId;
 
-/// Every session in the store, failing on any file that cannot be read or parsed. A corrupt
-/// file is an error that names the file, not a skipped entry.
+/// Parse the JSON of one session file, then check its `started_at`. `sort_listing` orders on that
+/// field, so a value that does not parse would sort first with no cue (#3882). Every strict read
+/// of a session file uses this, so one file gets one verdict.
+///
+/// # Errors
+/// Errors if `content` is not session JSON, or the `started_at` is not RFC 3339. The message names
+/// the file and the fix.
+pub(super) fn parse_session(content: &str, path: &Path) -> anyhow::Result<Session> {
+    let session: Session = serde_json::from_str(content).with_context(|| {
+        format!(
+            "session file {} is not valid session JSON. Repair or delete the file, then retry",
+            path.display()
+        )
+    })?;
+    let record = format!("session '{}' at {}", session.id, path.display());
+    crate::util::time::validate_stored_field("started_at", &session.started_at, &record)?;
+    Ok(session)
+}
+
+/// Every session in the store, failing on any file that cannot be read or parsed, or that has a
+/// `started_at` that is not RFC 3339. A corrupt file is an error that names the file, not a
+/// skipped entry.
 /// The Stop reminder needs the full set, so a missing task in it must come from a real absence
 /// and not from a corrupt file (#2628).
 ///
@@ -39,21 +60,7 @@ pub(crate) fn list_sessions_strict(state_dir: &Path) -> anyhow::Result<Vec<Sessi
         }
         let content = crate::paths::bounded::state_text_io(&path)
             .with_context(|| format!("reading session file {}", path.display()))?;
-        let session: Session = serde_json::from_str(&content).with_context(|| {
-            format!(
-                "session file {} is not valid session JSON. Repair or delete the file, then retry",
-                path.display()
-            )
-        })?;
-        // `sort_listing` orders on this value, so a bad one would sort first with no cue (#3882).
-        crate::util::time::validate_stored(&session.started_at).with_context(|| {
-            format!(
-                "session '{}' at {} has an unreadable started_at. Fix: rewrite it as RFC 3339, \
-                 such as 2026-01-01T00:00:00Z",
-                session.id,
-                path.display()
-            )
-        })?;
+        let session = parse_session(&content, &path)?;
         sessions.push(session);
     }
     Ok(sessions)
@@ -76,8 +83,8 @@ pub(crate) fn open_sessions_strict(
 }
 
 /// Orders the `session ls` rows: sessions of `project` first, then by start time, then by id.
-/// The id breaks the tie that an unreadable start time leaves, so the order does not depend on
-/// the order that `read_dir` returns the files in.
+/// Two sessions with the same start time are ordered by id, so the order does not depend on the
+/// order that `read_dir` returns the files in. The strict read refuses an unreadable start time.
 pub(crate) fn sort_listing(sessions: &mut [Session], project: &str) {
     sessions.sort_by(|a, b| {
         (a.project != project)
@@ -85,9 +92,9 @@ pub(crate) fn sort_listing(sessions: &mut [Session], project: &str) {
             .then_with(|| {
                 crate::util::time::cmp_instants(
                     &a.started_at,
-                    crate::util::time::RecordId(&a.id),
+                    RecordId(&a.id),
                     &b.started_at,
-                    crate::util::time::RecordId(&b.id),
+                    RecordId(&b.id),
                     "session started_at",
                 )
                 .then_with(|| a.id.cmp(&b.id))
@@ -140,6 +147,24 @@ mod tests {
     }
 
     proptest! {
+        // The strict read fails exactly when `started_at` is not RFC 3339 (#3882).
+        #[test]
+        fn the_strict_read_agrees_with_the_timestamp_validator(
+            started_at in prop_oneof![
+                (0i64..4_000_000_000).prop_map(|s| jiff::Timestamp::from_second(s)
+                    .expect("in range")
+                    .to_string()),
+                "\\PC{0,30}",
+            ],
+        ) {
+            let dir = TempDir::new().expect("test");
+            std::fs::create_dir_all(sessions_dir(dir.path())).expect("test");
+            let body = serde_json::to_string(&session("p1", "p", &started_at)).expect("serialize");
+            std::fs::write(sessions_dir(dir.path()).join("p1.json"), body).expect("test");
+            let valid = crate::util::time::validate_stored(&started_at).is_ok();
+            prop_assert_eq!(list_sessions_strict(dir.path()).is_ok(), valid);
+        }
+
         // The listing must not depend on the order of the input. Unreadable start times compare
         // equal, so only the id keeps the order fixed.
         #[test]

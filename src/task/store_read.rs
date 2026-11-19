@@ -63,6 +63,9 @@ fn read_tasks_counted(state_dir: &Path, policy: UnreadablePolicy) -> anyhow::Res
             );
         }
     };
+    // A fixed order, so the first problem is the same on every run.
+    let mut entries: Vec<_> = entries.collect();
+    entries.sort_by_key(|e| e.as_ref().ok().map(std::fs::DirEntry::path));
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
@@ -92,9 +95,8 @@ fn read_tasks_counted(state_dir: &Path, policy: UnreadablePolicy) -> anyhow::Res
                 }
                 read.skip(skip_unreadable_file(&path, &e));
             }
-            Err(e) if policy == UnreadablePolicy::Fail => {
-                return Err(e.context(format!("parsing task file {}", path.display())));
-            }
+            // The message names the file, so no more context is added.
+            Err(e) if policy == UnreadablePolicy::Fail => return Err(e),
             Err(e) => read.skip(skip_task_file(&path, &e)),
         }
     }
@@ -145,7 +147,7 @@ fn skip_unreadable_file(path: &Path, e: &anyhow::Error) -> String {
 /// the count.
 fn skip_task_file(path: &Path, e: &anyhow::Error) -> String {
     // The full chain names the cause, such as an unreadable created_at and its fix.
-    let cause = format!("{e:#}");
+    let cause = crate::util::strip_unsafe_chars(&format!("{e:#}"));
     tracing::error!(error = %cause, path = %path.display(), "skipping task file");
     crate::agent_notice::record(format!(
         "llmenv skipped the task file {}: {cause}. The task is missing from task \
@@ -166,18 +168,20 @@ fn read_task_file(path: &Path) -> anyhow::Result<Task> {
             path.display()
         )
     })?;
-    for (field, value) in [
+    let record = format!("task '{}' at {}", task.slug, path.display());
+    let problems: Vec<String> = [
         ("created_at", &task.created_at),
         ("updated_at", &task.updated_at),
-    ] {
-        crate::util::time::validate_stored(value).with_context(|| {
-            format!(
-                "task '{}' at {} has an unreadable {field}. Fix: rewrite it as RFC 3339, \
-                 such as 2026-01-01T00:00:00Z",
-                task.slug,
-                path.display()
-            )
-        })?;
+    ]
+    .into_iter()
+    .filter_map(|(field, value)| {
+        crate::util::time::validate_stored_field(field, value, &record)
+            .err()
+            .map(|e| format!("{e:#}"))
+    })
+    .collect();
+    if !problems.is_empty() {
+        anyhow::bail!("{}", problems.join("; also "));
     }
     Ok(task)
 }
@@ -283,10 +287,7 @@ mod tests {
         assert_eq!(read.tasks.len(), 1);
         assert_eq!(read.skipped, 2);
         let problem = read.first_problem.expect("a first problem");
-        assert!(
-            problem.contains(&first.display().to_string()) || problem.contains("junk.json"),
-            "{problem}"
-        );
+        assert!(problem.contains(&first.display().to_string()), "{problem}");
     }
 
     #[test]
@@ -325,18 +326,50 @@ mod tests {
     }
 
     proptest! {
-        // The strict read fails exactly when the validator rejects created_at, and the lenient
-        // read keeps the task exactly when the validator accepts it. A disagreement would let a
-        // bad value reach the queue sort (#3856).
+        // The strict read fails exactly when the validator rejects `created_at` or `updated_at`,
+        // and the lenient read keeps the task exactly when the validator accepts both. A
+        // disagreement would let a bad value reach the queue sort or the current-task pick
+        // (#3856, #3882).
         #[test]
-        fn the_reads_agree_with_the_created_at_validator(created_at in created_at_text()) {
+        fn the_reads_agree_with_the_timestamp_validator(
+            created_at in created_at_text(),
+            updated_at in created_at_text(),
+        ) {
             let dir = TempDir::new().expect("test");
-            write_task(dir.path(), "p", &created_at);
-            let valid = crate::util::time::validate_stored(&created_at).is_ok();
+            write_task_at(dir.path(), "p", &created_at, &updated_at);
+            let valid = crate::util::time::validate_stored(&created_at).is_ok()
+                && crate::util::time::validate_stored(&updated_at).is_ok();
             let strict = read_tasks(dir.path(), UnreadablePolicy::Fail);
             let lenient = read_tasks(dir.path(), UnreadablePolicy::Skip).expect("lenient read");
             prop_assert_eq!(strict.is_ok(), valid);
             prop_assert_eq!(lenient.len(), usize::from(valid));
+        }
+
+        // Every `.json` file is kept or skipped, so the two counts add up, and the first problem
+        // exists exactly when a file was skipped (#3883).
+        #[test]
+        fn the_counted_read_keeps_or_skips_every_file(kinds in proptest::collection::vec(0u8..4, 0..8)) {
+            let dir = TempDir::new().expect("test");
+            for (i, kind) in kinds.iter().enumerate() {
+                let slug = format!("t{i}");
+                match kind {
+                    0 => { write_task(dir.path(), &slug, VALID_AT); }
+                    1 => { write_task(dir.path(), &slug, "bad"); }
+                    2 => { write_task_at(dir.path(), &slug, VALID_AT, "bad"); }
+                    _ => {
+                        std::fs::create_dir_all(tasks_dir(dir.path())).expect("test");
+                        std::fs::write(tasks_dir(dir.path()).join(format!("{slug}.json")), "{ x")
+                            .expect("test");
+                    }
+                }
+            }
+            let read = try_list_tasks_counted(dir.path()).expect("lenient read");
+            let kept = kinds.iter().filter(|k| **k == 0).count();
+            prop_assert_eq!(read.tasks.len(), kept);
+            prop_assert_eq!(read.tasks.len() + read.skipped, kinds.len());
+            prop_assert_eq!(read.first_problem.is_none(), read.skipped == 0);
+            let strict = read_tasks(dir.path(), UnreadablePolicy::Fail);
+            prop_assert_eq!(strict.is_ok(), read.skipped == 0);
         }
     }
 }

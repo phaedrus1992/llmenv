@@ -6,6 +6,7 @@ use anyhow::Context;
 
 use crate::auth::credentials::CACHE_FILE;
 use crate::auth::{AuthEntry, auth_cache_dir};
+use crate::util::time::RecordId;
 
 /// The usable entries of the cache, newest-first, with the skipped files.
 #[derive(Debug)]
@@ -71,9 +72,9 @@ pub(super) fn load_counted(adapter_root: &Path) -> anyhow::Result<Loaded> {
     entries.sort_by(|a, b| {
         crate::util::time::cmp_instants(
             &b.last_seen,
-            crate::util::time::RecordId(&b.uuid),
+            RecordId(&b.uuid),
             &a.last_seen,
-            crate::util::time::RecordId(&a.uuid),
+            RecordId(&a.uuid),
             "auth entry last_seen",
         )
     });
