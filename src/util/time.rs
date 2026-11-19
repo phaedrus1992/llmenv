@@ -4,6 +4,9 @@
 use jiff::{SignedDuration, Span, SpanRelativeTo, SpanRound, Timestamp, Unit, fmt::friendly};
 use std::time::{Duration, SystemTime};
 
+mod bad_log;
+pub(crate) use bad_log::{instant_or_log, warn_if_bad_max_winner};
+
 /// The format of a stored timestamp. It always has 9 fractional digits, so the text of two
 /// timestamps sorts in time order.
 const RFC3339_NANOS: &str = "%Y-%m-%dT%H:%M:%S%.9fZ";
@@ -29,6 +32,15 @@ fn parse_rfc3339(text: &str) -> anyhow::Result<SystemTime> {
     Ok(SystemTime::from(ts))
 }
 
+/// Check that a stored timestamp parses. A reader calls this before the value reaches a sort, so a
+/// bad value fails at the read and not in the order (#3856).
+///
+/// # Errors
+/// Errors if `text` is not RFC 3339.
+pub(crate) fn validate_stored(text: &str) -> anyhow::Result<()> {
+    parse_rfc3339(text).map(|_| ())
+}
+
 /// Orders two stored timestamps by instant. The text order is wrong for some values: in text,
 /// `Z` sorts after `.`, so a whole second reads later than a fraction of it (#3796). A value that
 /// does not parse sorts first. Its warning is the only signal, and the warning is logged once per
@@ -42,66 +54,6 @@ pub(crate) fn cmp_instants(
     source: &str,
 ) -> std::cmp::Ordering {
     instant_or_log(a, source, a_record).cmp(&instant_or_log(b, source, b_record))
-}
-
-/// Bad timestamps that were already logged in this process, as (source, record, text) triples.
-/// A sort compares one value many times, so each bad value is logged once, not once per
-/// comparison (#3812). The source is part of the key, so the same bad text from another record
-/// kind is still named. The record is part of the key, so each record names itself once (#3851).
-static REPORTED_BAD: std::sync::Mutex<std::collections::BTreeSet<(String, String, String)>> =
-    std::sync::Mutex::new(std::collections::BTreeSet::new());
-
-/// Whether `text` held by `record` from `source` is new to the bad-timestamp log. A poisoned lock
-/// still holds a valid set, so the dedupe keeps working after a panic elsewhere.
-pub(crate) fn first_report(source: &str, record: &str, text: &str) -> bool {
-    REPORTED_BAD
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert((source.to_string(), record.to_string(), text.to_string()))
-}
-
-/// The instant of a stored timestamp. `source` names the record kind in the warning, such as
-/// `task created_at`, and `record` names the record, such as its slug. A value that does not
-/// parse is logged once per record, and gives `None`.
-pub(crate) fn instant_or_log(text: &str, source: &str, record: &str) -> Option<SystemTime> {
-    match parse_rfc3339(text) {
-        Ok(at) => Some(at),
-        Err(e) => {
-            if first_report(source, record, text) {
-                tracing::warn!(
-                    error = %e,
-                    source,
-                    record,
-                    value = text,
-                    "a stored timestamp cannot be read. Fix: rewrite it as RFC 3339, \
-                     such as 2026-01-01T00:00:00Z"
-                );
-            }
-            None
-        }
-    }
-}
-
-/// Warn when the record that wins a `max` holds a bad timestamp. A bad value sorts as the
-/// oldest, so the record wins with no visible cue (#3843). `shared` counts the records that tie
-/// with the winner by instant. When it is above 1, the winner is a tie, not the newest record.
-/// Each record and value pair warns once per process, as `instant_or_log` does, because a status
-/// line re-renders this often.
-pub(crate) fn warn_if_bad_max_winner(source: &str, record: &str, text: &str, shared: usize) {
-    let Err(e) = parse_rfc3339(text) else {
-        return;
-    };
-    if first_report(&format!("{source} winner"), record, text) {
-        tracing::warn!(
-            error = %e,
-            source,
-            record,
-            value = text,
-            shared,
-            "this record won the max with an unreadable timestamp, so the pick may be a tie. \
-             Fix: rewrite the timestamp of this record as RFC 3339, such as 2026-01-01T00:00:00Z"
-        );
-    }
 }
 
 /// `age` as compact text, such as `"1d 2h 3m 4s"`. A zero age is `"0s"`. Days are 24 hours.
@@ -159,6 +111,7 @@ pub(crate) fn parse_age(raw: &str) -> anyhow::Result<Duration> {
     reason = "a test fails loudly when its fixture is wrong"
 )]
 mod tests {
+    use super::bad_log::{MAX_REPORTED, first_report, insert_once, winner_report};
     use super::*;
     use proptest::prelude::*;
 
@@ -187,23 +140,24 @@ mod tests {
             }
         }
 
-        // Each distinct (source, record, bad value) triple is reported once. The nonce keeps this
-        // test's values apart from any value another test reported first.
+        // Each distinct (source, record, bad value) triple is reported once. The set is local to
+        // the case, so another test cannot reset it between two inserts (#3812).
         #[test]
         fn first_report_is_true_once_per_distinct_source_record_and_text(
-            nonce in "[0-9a-f]{16}",
             triples in proptest::collection::vec(("(a|b)", "(r|s)", "[a-z]{1,4}"), 1..12),
         ) {
+            let set = std::sync::Mutex::new(std::collections::BTreeSet::new());
             let keys: Vec<(String, String, String)> = triples
                 .iter()
-                .map(|(s, r, t)| (
-                    format!("pbt-src-{s}-{nonce}"),
-                    format!("pbt-rec-{r}-{nonce}"),
-                    format!("pbt-3812-{nonce}-{t}"),
-                ))
+                .map(|(s, r, t)| {
+                    (format!("pbt-src-{s}"), format!("pbt-rec-{r}"), format!("pbt-3812-{t}"))
+                })
                 .collect();
             let distinct = keys.iter().collect::<std::collections::BTreeSet<_>>().len();
-            let firsts = keys.iter().filter(|(s, r, t)| first_report(s, r, t)).count();
+            let firsts = keys
+                .iter()
+                .filter(|(s, r, t)| insert_once(&set, s, r, t))
+                .count();
             prop_assert_eq!(firsts, distinct);
         }
     }
@@ -218,6 +172,43 @@ mod tests {
         assert!(
             !first_report("test-3812", "rec", bad),
             "a repeat of the same bad value is not logged again"
+        );
+    }
+
+    #[test]
+    fn the_winner_note_and_the_parse_warning_each_log_once_per_record() {
+        let bad = "not-a-time-3863-unique";
+        assert!(
+            first_report("test-3863", "rec", bad),
+            "parse warning is new"
+        );
+        assert!(winner_report("test-3863", "rec", bad), "winner note is new");
+        assert!(
+            !first_report("test-3863", "rec", bad),
+            "parse warning repeats"
+        );
+        assert!(
+            !winner_report("test-3863", "rec", bad),
+            "winner note repeats"
+        );
+    }
+
+    #[test]
+    fn the_dedupe_set_resets_past_its_cap_so_an_evicted_value_logs_again() {
+        // The first key is cleared by a reset, because every insert after it pushes the set past
+        // the cap. So the reset has to run before the last insert, whatever other tests add.
+        let first = (
+            "test-3863-cap".to_string(),
+            "r".to_string(),
+            "first".to_string(),
+        );
+        assert!(first_report(&first.0, &first.1, &first.2));
+        for i in 0..=MAX_REPORTED {
+            first_report("test-3863-cap", "r", &format!("filler-{i}"));
+        }
+        assert!(
+            first_report(&first.0, &first.1, &first.2),
+            "the key was evicted, so it logs again"
         );
     }
 
@@ -279,6 +270,11 @@ mod tests {
             proptest::prop_assert_eq!(
                 instant_or_log(&text, "test", "rec").is_some(),
                 parse_rfc3339(&text).is_ok()
+            );
+            // The read-time check and the sort-time parse must agree on every value.
+            proptest::prop_assert_eq!(
+                validate_stored(&text).is_ok(),
+                instant_or_log(&text, "test", "rec").is_some()
             );
         }
 
