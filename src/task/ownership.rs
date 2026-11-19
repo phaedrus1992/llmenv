@@ -59,9 +59,7 @@ pub(crate) fn caller_for_pick(
     match pick {
         // A caller with no conversation id is not the owner of an owned session. The write
         // guards must refuse it, as `task add` does (#3480).
-        Ok(picked) if picked.may_take_tasks(owner.session_id.as_deref()) => {
-            Caller::Session(picked.id.clone())
-        }
+        Ok(picked) if picked.may_take_tasks(owner) => Caller::Session(picked.id.clone()),
         Ok(picked) if owner.session_id.is_none() => Caller::Unidentified(format!(
             "the only open session '{}' belongs to another conversation, and this caller has no \
              conversation id. Set CLAUDE_CODE_SESSION_ID",
@@ -450,10 +448,26 @@ pub(crate) fn ensure_named_session_takes_tasks(
 /// # Errors
 /// Errors when [`Session::may_take_tasks`] refuses the caller.
 pub(crate) fn check_takes_tasks(session: &Session, owner: &EngineIdentity) -> anyhow::Result<()> {
-    if session.may_take_tasks(owner.session_id.as_deref()) {
+    if session.may_take_tasks(owner) {
         return Ok(());
     }
-    anyhow::bail!(foreign_session_message(&session.id))
+    let mut message = foreign_session_message(&session.id);
+    // The engine process id matches, but the session does not count as this caller's: `ps` could
+    // not give the start of the engine, or the session was last active before it started.
+    if owner.session_id.is_some()
+        && session.owner_pid().is_some()
+        && session.owner_pid() == owner.pid
+    {
+        use std::fmt::Write as _;
+        let _ = write!(
+            message,
+            " The engine process id of this caller matches the session, but llmenv cannot show \
+             that the session was active after this engine started. Run `llmenv task session \
+             start --resume {}` to claim it.",
+            session.id
+        );
+    }
+    anyhow::bail!(message)
 }
 
 /// Refuses a parent link from a task of `child_session` to a parent in another session (#3480).

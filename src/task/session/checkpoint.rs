@@ -8,6 +8,7 @@ use super::{EngineIdentity, Session, StartRequest, now_rfc3339, save_session};
 
 mod ownership;
 use ownership::{Ownership, last_activity_at, ownership, ownership_note};
+pub(crate) use ownership::{is_callers_conversation, is_callers_session};
 
 /// The one listed session that `owner` started, or `None` when it started none or more than one.
 /// After a `/clear` or a compaction the choice is then clear, so `Auto` resumes it (#2904).
