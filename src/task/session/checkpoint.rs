@@ -8,27 +8,33 @@ use super::{EngineIdentity, Session, StartRequest, now_rfc3339, save_session};
 
 mod engine_start;
 mod ownership;
+use crate::util::time::RecordId;
 pub(super) use engine_start::engine_start;
-use ownership::{Ownership, is_callers, ownership, ownership_note, unreadable_last_activity};
+use ownership::{Ownership, ownership, ownership_note, unreadable_last_activity};
 
 /// The one listed session that `owner` started, or `None` when it started none or more than one.
 /// After a `/clear` or a compaction the choice is then clear, so `Auto` resumes it (#2904).
 ///
 /// A process id is reused after its process exits, so a session that only the process id ties to
 /// the caller counts only when it was active after the caller's engine started (`engine_start`).
-/// Without that time, only a session of the same conversation counts.
+/// Without that time, only a session of the same conversation counts. A session that llmenv
+/// cannot place leaves the choice open, so `None` is returned and the checkpoint lists it (#3858).
 pub(super) fn only_own_session<'a>(
-    mut existing: impl Iterator<Item = &'a Session>,
+    existing: impl Iterator<Item = &'a Session>,
     owner: &EngineIdentity,
     engine_start: Option<SystemTime>,
 ) -> Option<&'a Session> {
-    let mut own = existing
-        .by_ref()
-        .filter(|s| is_callers(s, owner, engine_start));
-    match (own.next(), own.next()) {
-        (Some(only), None) => Some(only),
-        _ => None,
+    let mut own = None;
+    for session in existing {
+        let owned = ownership(session, owner, engine_start);
+        if owned.cannot_tell_reason().is_some() {
+            return None;
+        }
+        if owned.is_callers() && own.replace(session).is_some() {
+            return None;
+        }
     }
+    own
 }
 
 /// Build the `session start` checkpoint error message: lists every existing
@@ -41,9 +47,14 @@ pub(super) fn checkpoint_error(
     owner: &EngineIdentity,
     engine_start: Option<SystemTime>,
 ) -> String {
+    let owned: Vec<Ownership> = existing
+        .iter()
+        .map(|s| ownership(s, owner, engine_start))
+        .collect();
     let lines: Vec<String> = existing
         .iter()
-        .map(|s| {
+        .zip(&owned)
+        .map(|(s, owned)| {
             let idle = idle_display(&s.last_activity, &s.id);
             format!(
                 "  - {} ({}){} — idle {idle}{}",
@@ -53,22 +64,14 @@ pub(super) fn checkpoint_error(
                     .as_deref()
                     .map(|d| format!(": {d}"))
                     .unwrap_or_default(),
-                ownership_note(s, owner, engine_start),
+                ownership_note(*owned),
             )
         })
         .collect();
-    let yours = existing
+    let yours = owned.iter().filter(|o| o.is_callers()).count();
+    let unknown = owned
         .iter()
-        .filter(|s| {
-            matches!(
-                ownership(s, owner, engine_start),
-                Ownership::Conversation | Ownership::Process(_)
-            )
-        })
-        .count();
-    let unknown = existing
-        .iter()
-        .filter(|s| matches!(ownership(s, owner, engine_start), Ownership::Unknown))
+        .filter(|o| o.cannot_tell_reason().is_some())
         .count();
     // `--replace` abandons every listed session, so it is only offered as the
     // way to drop "yours" when every listed session is yours.
@@ -88,9 +91,8 @@ pub(super) fn checkpoint_error(
     };
     if unknown > 0 {
         hint.push_str(
-            "\nllmenv could not read when this engine process started, so it cannot tell which \
-             sessions marked \"may be yours\" are yours. Fix: check that /bin/ps works, then run \
-             the command again, or pass --resume <id>.",
+            "\nllmenv cannot tell which sessions marked \"may be yours\" are yours, and the note \
+             on each line says why. Pass --resume <id> to continue the one you want.",
         );
     }
     format!(
@@ -122,7 +124,7 @@ pub(crate) fn idle_display(last_activity: &str, session_id: &str) -> String {
     let Some(at) = crate::util::time::instant_or_log(
         last_activity,
         "session last_activity",
-        crate::util::time::RecordId(session_id),
+        RecordId(session_id),
     ) else {
         // The listing has no other place for the cause, so the notice carries it (#3859).
         crate::agent_notice::record_logged(unreadable_last_activity(session_id));
@@ -162,7 +164,7 @@ pub(super) fn refuse_unnamed_foreign(
     let unnamed: Vec<&Session> = existing
         .iter()
         .filter(|s| s.owner_session.is_some() || s.owner_pid.is_some())
-        .filter(|s| !is_callers(s, owner, engine_start))
+        .filter(|s| !ownership(s, owner, engine_start).is_callers())
         .filter(|s| !named.contains(&s.id))
         .collect();
     if unnamed.is_empty() {
@@ -170,26 +172,19 @@ pub(super) fn refuse_unnamed_foreign(
     }
     let listed: Vec<String> = unnamed
         .iter()
-        .map(|s| match ownership(s, owner, engine_start) {
-            Ownership::Unknown => format!("{} (cannot tell if it is yours)", s.id),
-            _ => s.id.clone(),
-        })
+        .map(
+            |s| match ownership(s, owner, engine_start).cannot_tell_reason() {
+                Some(why) => format!("{} (cannot tell if it is yours: {why})", s.id),
+                None => s.id.clone(),
+            },
+        )
         .collect();
     let flags: String = unnamed
         .iter()
         .map(|s| format!(" --other-session {}", s.id))
         .collect();
-    let cannot_tell = if unnamed
-        .iter()
-        .any(|s| matches!(ownership(s, owner, engine_start), Ownership::Unknown))
-    {
-        "\nllmenv could not read when this engine process started, so it cannot tell whether a \
-         session marked \"cannot tell\" is yours. Fix: check that /bin/ps works, then run again."
-    } else {
-        ""
-    };
     anyhow::bail!(
-        "--replace would abandon session(s) of another conversation: {}{cannot_tell}\n\
+        "--replace would abandon session(s) of another conversation: {}\n\
          Nothing was changed. To abandon them anyway, run again with{flags}",
         listed.join(", ")
     )
@@ -233,7 +228,7 @@ mod tests {
         fn idle_display_shows_a_time_only_for_text_that_parses(text in "\\PC{0,40}") {
             let shown = idle_display(&text, "s1");
             if !shown.starts_with("unknown") {
-                prop_assert!(crate::util::time::instant_or_log(&text, "test", crate::util::time::RecordId("s1")).is_some());
+                prop_assert!(crate::util::time::instant_or_log(&text, "test", RecordId("s1")).is_some());
             }
         }
     }
@@ -268,12 +263,53 @@ mod tests {
         let text = checkpoint_error(&sessions, &caller(), None);
         assert!(text.contains("may be yours"), "{text}");
         assert!(text.contains("cannot tell"), "{text}");
-        assert!(text.contains("Fix: check that /bin/ps works"), "{text}");
+        assert!(text.contains("/bin/ps may not list it"), "{text}");
         assert!(
             !text.contains("yours: started by this engine process"),
             "{text}"
         );
         assert!(only_own_session(sessions.iter(), &caller(), None).is_none());
+    }
+
+    /// An unreadable `last_activity` on a pid match is also "cannot tell", with its own cause.
+    #[test]
+    fn an_unreadable_last_activity_on_a_pid_match_says_why_in_the_note() {
+        let mut s = session(1, None, Some(1));
+        s.last_activity = "garbage-3858".into();
+        let text = checkpoint_error(&[s], &caller(), Some(SystemTime::UNIX_EPOCH));
+        assert!(
+            text.contains("may be yours: its last_activity is unreadable"),
+            "{text}"
+        );
+        assert!(!text.contains("Every listed session is yours"), "{text}");
+    }
+
+    /// A session from before the engine started is not yours, so the hint does not say it is.
+    #[test]
+    fn a_session_from_before_the_engine_is_not_called_yours() {
+        let sessions = [session(1, None, Some(1))];
+        let later = Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(4_000_000_000));
+        let text = checkpoint_error(&sessions, &caller(), later);
+        assert!(!text.contains("yours"), "{text}");
+        let err = refuse_unnamed_foreign(&sessions, &caller(), later, &[]).unwrap_err();
+        assert!(
+            err.to_string().contains("another conversation: s1"),
+            "{err}"
+        );
+    }
+
+    /// With one session of this conversation and one that llmenv cannot place, the one own
+    /// session is not picked, because the other may be the caller's too.
+    #[test]
+    fn a_session_that_cannot_be_placed_stops_the_auto_pick() {
+        let sessions = [session(1, Some(0), None), session(2, None, Some(1))];
+        assert!(only_own_session(sessions.iter(), &caller(), None).is_none());
+        let start = Some(SystemTime::UNIX_EPOCH);
+        let sessions = [session(1, Some(0), None), session(2, None, Some(9))];
+        assert_eq!(
+            only_own_session(sessions.iter(), &caller(), start).map(|s| s.id.as_str()),
+            Some("s1")
+        );
     }
 
     #[test]
@@ -294,10 +330,14 @@ mod tests {
         let sessions = [session(1, None, Some(1)), session(2, Some(7), None)];
         let err = refuse_unnamed_foreign(&sessions, &caller(), None, &[]).unwrap_err();
         let text = err.to_string();
-        assert!(text.contains("s1 (cannot tell if it is yours)"), "{text}");
+        assert!(
+            text.contains(
+                "s1 (cannot tell if it is yours: the start time of this engine process is unknown)"
+            ),
+            "{text}"
+        );
         assert!(text.contains("s2"), "{text}");
         assert!(!text.contains("s2 (cannot tell"), "{text}");
-        assert!(text.contains("Fix: check that /bin/ps works"), "{text}");
     }
 
     #[test]
@@ -308,6 +348,53 @@ mod tests {
     }
 
     proptest! {
+        // The hints follow the ownership of the listed sessions: the "every session is yours" hint
+        // only when each one is the caller's, and the "cannot tell" hint only when one is not
+        // placed. The refusal of `--replace` names exactly the sessions that are not the
+        // caller's, and gives each its flag (#3858).
+        #[test]
+        fn the_hints_and_the_refusal_follow_the_ownership(
+            owners in proptest::collection::vec(
+                (proptest::option::of(0u8..3), proptest::option::of(1u32..4)),
+                1..6,
+            ),
+            start_known in any::<bool>(),
+        ) {
+            let sessions: Vec<Session> = owners
+                .iter()
+                .enumerate()
+                .map(|(i, (c, p))| session(i, *c, *p))
+                .collect();
+            let start = start_known.then_some(SystemTime::UNIX_EPOCH);
+            let owned: Vec<Ownership> =
+                sessions.iter().map(|s| ownership(s, &caller(), start)).collect();
+            let text = checkpoint_error(&sessions, &caller(), start);
+            let all_yours = owned.iter().all(|o| o.is_callers());
+            prop_assert_eq!(text.contains("Every listed session is yours"), all_yours);
+            let any_unplaced = owned.iter().any(|o| o.cannot_tell_reason().is_some());
+            prop_assert_eq!(text.contains("cannot tell which sessions"), any_unplaced);
+
+            let refused: Vec<&str> = sessions
+                .iter()
+                .zip(&owned)
+                .filter(|(s, o)| (s.owner_session.is_some() || s.owner_pid.is_some()) && !o.is_callers())
+                .map(|(s, _)| s.id.as_str())
+                .collect();
+            match refuse_unnamed_foreign(&sessions, &caller(), start, &[]) {
+                Ok(()) => prop_assert!(refused.is_empty()),
+                Err(e) => {
+                    let msg = e.to_string();
+                    let flags: Vec<&str> = msg
+                        .split(" --other-session ")
+                        .skip(1)
+                        .map(|f| f.split_whitespace().next().unwrap_or(""))
+                        .collect();
+                    prop_assert_eq!(flags, refused);
+                    prop_assert_eq!(msg.contains("cannot tell if it is yours"), any_unplaced);
+                }
+            }
+        }
+
         #[test]
         fn only_one_own_session_is_picked_in_any_order(
             owners in proptest::collection::vec(

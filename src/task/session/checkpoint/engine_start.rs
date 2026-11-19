@@ -116,7 +116,28 @@ mod tests {
         assert!(start <= SystemTime::now());
     }
 
+    /// The shape `[[dd-]hh:]mm:ss`, as a second statement of the rule: digits only, at most 7
+    /// digits a field, hours below 24, minutes and seconds below 60.
+    fn is_ps_shape(text: &str) -> bool {
+        let re =
+            regex::Regex::new(r"^(?:([0-9]{1,7})-)?(?:([0-9]{1,7}):)?([0-9]{1,7}):([0-9]{1,7})$")
+                .unwrap();
+        let Some(c) = re.captures(text) else {
+            return false;
+        };
+        let at = |i: usize| c.get(i).map(|m| m.as_str().parse::<u64>().unwrap());
+        at(2).is_none_or(|h| h <= 23) && at(3).unwrap() <= 59 && at(4).unwrap() <= 59
+    }
+
     proptest! {
+        // Arbitrary text never panics, and a value is read exactly when it has the ps shape.
+        #[test]
+        fn parse_etime_reads_exactly_the_ps_shape(
+            text in prop_oneof!["\\PC{0,20}", "[0-9:\\-]{0,16}"],
+        ) {
+            prop_assert_eq!(parse_etime(&text).is_some(), is_ps_shape(&text));
+        }
+
         #[test]
         fn etime_round_trips(days in 0u64..400, h in 0u64..24, m in 0u64..60, s in 0u64..60) {
             let text = if days > 0 {
