@@ -69,7 +69,13 @@ pub(super) fn load_counted(adapter_root: &Path) -> anyhow::Result<Loaded> {
         );
     }
     entries.sort_by(|a, b| {
-        llmenv_util::time::cmp_instants(&b.last_seen, &a.last_seen, "auth entry last_seen")
+        llmenv_util::time::cmp_instants(
+            &b.last_seen,
+            &b.uuid,
+            &a.last_seen,
+            &a.uuid,
+            "auth entry last_seen",
+        )
     });
     Ok(Loaded {
         entries,

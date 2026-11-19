@@ -37,9 +37,11 @@ fn is_callers(session: &Session, owner: &EngineIdentity, engine_start: Option<Sy
 }
 
 fn active_since(session: &Session, start: SystemTime) -> bool {
-    let Some(at) =
-        llmenv_util::time::instant_or_log(&session.last_activity, "session last_activity")
-    else {
+    let Some(at) = llmenv_util::time::instant_or_log(
+        &session.last_activity,
+        "session last_activity",
+        &session.id,
+    ) else {
         // An unknown value reads as "not active". The refusal that follows is non-destructive, so
         // this default is the safe one. The notice names the cause, so the refusal is not
         // silent about it (#3811).
@@ -128,7 +130,7 @@ pub(super) fn checkpoint_error(existing: &[Session], owner: &EngineIdentity) -> 
     let lines: Vec<String> = existing
         .iter()
         .map(|s| {
-            let idle = idle_display(&s.last_activity);
+            let idle = idle_display(&s.last_activity, &s.id);
             format!(
                 "  - {} ({}){} — idle {idle}{}",
                 s.id,
@@ -215,16 +217,18 @@ pub(super) fn resume(
 /// (e.g. `"2h 5m 3s"`), for `session ls` and the `session start` checkpoint.
 /// `"unknown"` when the timestamp can't be parsed or is in the future.
 #[must_use]
-pub fn idle_display(last_activity: &str) -> String {
+pub fn idle_display(last_activity: &str, session_id: &str) -> String {
     let now = std::time::SystemTime::now();
-    let Some(at) = llmenv_util::time::instant_or_log(last_activity, "session last_activity") else {
+    let Some(at) =
+        llmenv_util::time::instant_or_log(last_activity, "session last_activity", session_id)
+    else {
         return "unknown".to_string();
     };
     match now.duration_since(at) {
         Ok(d) => llmenv_util::time::format_age(std::time::Duration::from_secs(d.as_secs())),
         Err(_) => {
             // Each listing row calls this, so the warning is logged once per value (#3811).
-            if llmenv_util::time::first_report("session last_activity", last_activity) {
+            if llmenv_util::time::first_report("session last_activity", session_id, last_activity) {
                 tracing::warn!(
                     value = last_activity,
                     "a last_activity is in the future, so its idle time is unknown. \
@@ -321,16 +325,16 @@ mod tests {
 
     #[test]
     fn a_future_last_activity_has_no_idle_time() {
-        assert_eq!(idle_display("9999-01-01T00:00:00Z"), "unknown");
+        assert_eq!(idle_display("9999-01-01T00:00:00Z", "s1"), "unknown");
     }
 
     proptest! {
         // Arbitrary stored text never panics. A value other than "unknown" needs text that parses.
         #[test]
         fn idle_display_shows_a_time_only_for_text_that_parses(text in "\\PC{0,40}") {
-            let shown = idle_display(&text);
+            let shown = idle_display(&text, "s1");
             if shown != "unknown" {
-                prop_assert!(llmenv_util::time::instant_or_log(&text, "test").is_some());
+                prop_assert!(llmenv_util::time::instant_or_log(&text, "test", "s1").is_some());
             }
         }
     }

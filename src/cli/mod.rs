@@ -44,7 +44,9 @@ mod task_guard;
 mod task_ls;
 mod task_run;
 mod task_session_pick;
+mod task_session_run;
 mod task_session_start;
+use task_session_run::run_task_session_command;
 
 use hook_event::hook_event_name_from;
 use task_guard::record_override;
@@ -623,43 +625,47 @@ enum TaskCommand {
     },
 }
 
+/// The arguments of `llmenv task session start` (#905).
+#[derive(clap::Args)]
+struct SessionStartArgs {
+    name: Option<String>,
+    /// Free-text description (e.g. "dev-sprint issue 493"), shown in
+    /// `session ls` and the resume/replace checkpoint. Separate from
+    /// `name` — never feeds slug/id generation.
+    #[arg(long)]
+    description: Option<String>,
+    /// Adopt an existing open session (by id) instead of creating a new
+    /// one — e.g. resuming after a context compaction.
+    #[arg(long, conflicts_with_all = ["replace", "new"])]
+    resume: Option<String>,
+    /// Abandon every existing open session for this project (untagging
+    /// their incomplete tasks), then create a fresh one. A session that another
+    /// conversation started is refused unless `--other-session` names it.
+    #[arg(long, conflicts_with_all = ["resume", "new"])]
+    replace: bool,
+    /// With `--replace`: the id of another conversation's session to abandon. Repeat for
+    /// more than one session.
+    #[arg(long = "other-session", value_name = "ID", requires = "replace")]
+    other_session: Vec<String>,
+    /// Create a new session anyway, leaving existing open session(s) for
+    /// this project untouched — true concurrency.
+    #[arg(long, conflicts_with_all = ["resume", "replace"])]
+    new: bool,
+    /// Add a task to the session as it starts. Repeat for more tasks. They join the queue
+    /// in the order given, so the session never exists with no tasks (#2455).
+    #[arg(long = "task", value_name = "TITLE")]
+    tasks: Vec<String>,
+    #[command(flatten)]
+    resume_context: ResumeArgs,
+}
+
 /// `llmenv task session` sub-subcommands (#905).
 #[derive(Subcommand)]
 enum TaskSessionCommand {
     /// Start a new session for the current project. Errors if one or more
     /// sessions are already open for this project, unless `--resume`,
     /// `--replace`, or `--new` resolves the conflict.
-    Start {
-        name: Option<String>,
-        /// Free-text description (e.g. "dev-sprint issue 493"), shown in
-        /// `session ls` and the resume/replace checkpoint. Separate from
-        /// `name` — never feeds slug/id generation.
-        #[arg(long)]
-        description: Option<String>,
-        /// Adopt an existing open session (by id) instead of creating a new
-        /// one — e.g. resuming after a context compaction.
-        #[arg(long, conflicts_with_all = ["replace", "new"])]
-        resume: Option<String>,
-        /// Abandon every existing open session for this project (untagging
-        /// their incomplete tasks), then create a fresh one. A session that another
-        /// conversation started is refused unless `--other-session` names it.
-        #[arg(long, conflicts_with_all = ["resume", "new"])]
-        replace: bool,
-        /// With `--replace`: the id of another conversation's session to abandon. Repeat for
-        /// more than one session.
-        #[arg(long = "other-session", value_name = "ID", requires = "replace")]
-        other_session: Vec<String>,
-        /// Create a new session anyway, leaving existing open session(s) for
-        /// this project untouched — true concurrency.
-        #[arg(long, conflicts_with_all = ["resume", "replace"])]
-        new: bool,
-        /// Add a task to the session as it starts. Repeat for more tasks. They join the queue
-        /// in the order given, so the session never exists with no tasks (#2455).
-        #[arg(long = "task", value_name = "TITLE")]
-        tasks: Vec<String>,
-        #[command(flatten)]
-        resume_context: ResumeArgs,
-    },
+    Start(SessionStartArgs),
     /// Change a session's resume context after it started. Lists gain the entries they lack;
     /// a scalar flag replaces its value. Auto-resolves like `finish`.
     Edit {
@@ -3128,266 +3134,6 @@ fn run_task_show_current_or_next(state_dir: &Path, target: ShowTarget) -> anyhow
         }
     }
     Ok(())
-}
-
-/// Handle `llmenv task session <subcommand>` (#905, reworked for mandatory
-/// sessions). Thin formatting layer over `crate::task::session`.
-fn run_task_session_command(
-    state_dir: &std::path::Path,
-    command: TaskSessionCommand,
-    color: ColorMode,
-) -> anyhow::Result<()> {
-    use crate::task::session::{self, StartDecision, StartOutcome};
-    let project = current_project_tag()?;
-    match command {
-        TaskSessionCommand::Start {
-            name,
-            description,
-            resume,
-            replace,
-            other_session,
-            new,
-            tasks,
-            resume_context,
-        } => {
-            let explicit = resume_context.into_context()?;
-            let mut detected = explicit.clone();
-            let branch = crate::task::resume::git_branch(&std::env::current_dir()?)?;
-            detected.fill_detected(branch.as_deref());
-            let is_resume = resume.is_some();
-            let decision = match (resume, replace, new) {
-                (Some(id), false, false) => StartDecision::Resume(id),
-                (None, true, false) => StartDecision::Replace(other_session),
-                (None, false, true) => StartDecision::New,
-                (None, false, false) => StartDecision::Auto,
-                _ => unreachable!("clap's conflicts_with_all enforces at most one"),
-            };
-            let auto = matches!(decision, StartDecision::Auto);
-            let owner = session::EngineIdentity::from_env()?;
-            let request = session::StartRequest {
-                name: name.as_deref(),
-                description: description.as_deref(),
-                project: &project,
-                owner: &owner,
-                // A resumed session keeps what it has: only explicit flags change it.
-                resume: if is_resume { &explicit } else { &detected },
-            };
-            let outcome = session::start_session_as(state_dir, &request, decision)?;
-            let nudge = start_outcome_lacks_context(&outcome);
-            let session_id = match &outcome {
-                StartOutcome::Created(s) | StartOutcome::Resumed(s) => s.id.clone(),
-                StartOutcome::Replaced { session, .. } => session.id.clone(),
-            };
-            match outcome {
-                StartOutcome::Created(s) => println!(
-                    "Started session '{}'{}",
-                    s.id,
-                    s.name
-                        .as_deref()
-                        .map(|n| format!(" ({n})"))
-                        .unwrap_or_default()
-                ),
-                StartOutcome::Resumed(s) if auto => println!(
-                    "Resumed session '{}': it is the one open session of this project that this \
-                     conversation or engine process started. Pass --new for a second session.",
-                    s.id
-                ),
-                StartOutcome::Resumed(s) => println!("Resumed session '{}'", s.id),
-                StartOutcome::Replaced { session, abandoned } => {
-                    for a in &abandoned {
-                        println!(
-                            "Abandoned session '{}' — its incomplete tasks were untagged and noted as orphaned.",
-                            a.id
-                        );
-                    }
-                    println!("Started session '{}'", session.id);
-                }
-            }
-            if nudge {
-                println!("{}", crate::task::resume::MISSING_CONTEXT_NUDGE);
-            }
-            add_session_tasks(&session_id, &tasks, |title| {
-                let new = crate::task::NewTask {
-                    title,
-                    ..crate::task::NewTask::default()
-                };
-                let task = crate::task::add_task_with(
-                    state_dir,
-                    &new,
-                    crate::task::ParentSpec::Detached,
-                    crate::task::SessionChoice::Named {
-                        id: &session_id,
-                        owner: &owner,
-                        other_session: None,
-                    },
-                    &project,
-                )?;
-                println!("Added task '{}' ({})", task.slug, task.title);
-                Ok(task)
-            })?;
-            if tasks.is_empty() {
-                // Known steps added now let the idle reminders catch a step that never starts (#2987).
-                println!(
-                    "Add every known step now with `llmenv task add <title>`, and add `--session <id>` when more than one session is open."
-                );
-            }
-        }
-        TaskSessionCommand::Edit {
-            id,
-            resume_context,
-            other_session,
-        } => {
-            let update = resume_context.into_context()?;
-            let session = crate::task::with_store_lock(state_dir, || {
-                let (id, audit) =
-                    guard_session_for_write(state_dir, &project, id, other_session.as_deref())?;
-                let session = session::update_resume(state_dir, &id, |r| r.apply(&update))?;
-                audit.record(state_dir)?;
-                Ok(session)
-            })?;
-            println!("Updated resume context for session '{}'", session.id);
-        }
-        TaskSessionCommand::Note {
-            text,
-            id,
-            other_session,
-        } => {
-            let text = match text {
-                Some(text) => text,
-                None => std::io::read_to_string(std::io::stdin())?,
-            };
-            let text = text.trim_end();
-            anyhow::ensure!(
-                !text.is_empty(),
-                "the note is empty: pass text or pipe it on stdin"
-            );
-            let session = crate::task::with_store_lock(state_dir, || {
-                let (id, audit) =
-                    guard_session_for_write(state_dir, &project, id, other_session.as_deref())?;
-                let session = session::update_resume(state_dir, &id, |r| r.append_note(text))?;
-                audit.record(state_dir)?;
-                Ok(session)
-            })?;
-            println!("Noted session '{}'", session.id);
-        }
-        TaskSessionCommand::Finish {
-            id,
-            abandon_open,
-            other_session,
-        } => {
-            let outcome = crate::task::with_store_lock(state_dir, || {
-                let (id, audit) =
-                    guard_session_for_write(state_dir, &project, id, other_session.as_deref())?;
-                let outcome = match session::finish_session(state_dir, &id, abandon_open) {
-                    Ok(outcome) => outcome,
-                    Err(e) => return Err(audit.record_after_failure(state_dir, e)),
-                };
-                audit.record(state_dir)?;
-                Ok(outcome)
-            })?;
-            let (done, total) = (outcome.done, outcome.total);
-            let id = &outcome.session.id;
-            if outcome.abandoned.is_empty() {
-                println!("Finished session '{id}' ({done}/{total} done)");
-            } else {
-                let n = outcome.abandoned.len();
-                println!("Finished session '{id}' ({done}/{total} done, {n} abandoned)");
-                for task in &outcome.abandoned {
-                    println!(
-                        "  abandoned {} {} {}",
-                        task.state.as_str(),
-                        task.slug,
-                        task.title
-                    );
-                }
-            }
-        }
-        TaskSessionCommand::Show { id } => {
-            let id = resolve_session_for_read(state_dir, &project, id)?;
-            // Validate the session exists rather than printing "0/0 done" for
-            // a typo'd id (session_progress returns (0, 0) for any unknown id).
-            // A corrupt session file is reported with its path, not as a missing id (#2628).
-            let session = session::load_existing_session(state_dir, &id)?;
-            let (done, total) = session::try_session_progress(state_dir, &session.id)?;
-            let state = if session.is_open() {
-                "open"
-            } else if session.finished_at.is_some() {
-                "finished"
-            } else {
-                "abandoned"
-            };
-            println!(
-                "Session '{}'{}: {done}/{total} done ({state})",
-                session.id,
-                session
-                    .name
-                    .as_deref()
-                    .map(|n| format!(" ({n})"))
-                    .unwrap_or_default(),
-            );
-            let resume = session.resume.render();
-            if !resume.is_empty() {
-                println!("{resume}");
-            }
-        }
-        TaskSessionCommand::Summary { id, format } => {
-            let id = resolve_session_for_read(state_dir, &project, id)?;
-            let summary = session::session_summary_with_agent(state_dir, &id, |dir, owner| {
-                crate::hook_run::agent_config::load(dir, owner)
-                    .and_then(|agent| serde_json::to_value(agent).ok())
-            })?;
-            match format {
-                Some(TaskListFormat::Json) => {
-                    println!("{}", serde_json::to_string_pretty(&summary)?);
-                }
-                None => {
-                    use std::io::IsTerminal;
-                    let use_color = should_use_color(Some(color), std::io::stdout().is_terminal());
-                    print!("{}", render_task_session_summary_human(&summary, use_color));
-                }
-            }
-        }
-        TaskSessionCommand::Ls => {
-            let mut sessions: Vec<_> = session::list_sessions_strict(state_dir)?
-                .into_iter()
-                .filter(session::Session::is_open)
-                .collect();
-            sessions.sort_by(|a, b| {
-                (a.project != project)
-                    .cmp(&(b.project != project))
-                    .then_with(|| {
-                        llmenv_util::time::cmp_instants(
-                            &a.started_at,
-                            &b.started_at,
-                            "session started_at",
-                        )
-                    })
-            });
-            if sessions.is_empty() {
-                println!("No open sessions.");
-            }
-            for s in &sessions {
-                println!(
-                    "{}\t{}\t{}\t{}\tidle {}",
-                    s.id,
-                    s.name.as_deref().unwrap_or("-"),
-                    s.project,
-                    s.description.as_deref().unwrap_or("-"),
-                    session::idle_display(&s.last_activity),
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Whether the session that `session start` produced has nothing a cold reader could use.
-fn start_outcome_lacks_context(outcome: &crate::task::session::StartOutcome) -> bool {
-    use crate::task::session::StartOutcome;
-    match outcome {
-        StartOutcome::Created(s) | StartOutcome::Resumed(s) => s.resume.needs_nudge(),
-        StartOutcome::Replaced { session, .. } => session.resume.needs_nudge(),
-    }
 }
 
 fn run_context(bundle_filter: Option<&str>, why: bool, use_color: bool) -> anyhow::Result<()> {
