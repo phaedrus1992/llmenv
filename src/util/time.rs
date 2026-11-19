@@ -93,12 +93,19 @@ pub(crate) fn parse_age(raw: &str) -> anyhow::Result<Duration> {
             "cannot read the duration {raw:?}: {e}. Give a number and a unit, such as 14d or 1w"
         )
     })?;
+    // Only months and years have no fixed length. A value that is too large fails in the parse
+    // above, with the range of the unit (#3860).
+    if span.get_years() != 0 || span.get_months() != 0 {
+        anyhow::bail!(
+            "the duration {raw:?} uses months or years, which have no fixed length. \
+             Give it in weeks or days, such as 52w or 365d"
+        );
+    }
     let signed = span
         .to_duration(SpanRelativeTo::days_are_24_hours())
-        .map_err(|_| {
+        .map_err(|e| {
             anyhow::anyhow!(
-                "the duration {raw:?} uses months or years, which have no fixed length. \
-                 Give it in weeks or days, such as 52w or 365d"
+                "cannot convert the duration {raw:?} to seconds: {e}. Give a smaller value"
             )
         })?;
     Duration::try_from(signed)
@@ -330,8 +337,23 @@ mod tests {
             let err = parse_age(bad).expect_err(bad).to_string();
             assert!(err.contains(&format!("{bad:?}")), "{err}");
         }
-        let err = parse_age("1y").expect_err("1y").to_string();
-        assert!(err.contains("52w or 365d"), "{err}");
+        for calendar in ["1y", "1mo", "1y2d", "10000y"] {
+            let err = parse_age(calendar).expect_err(calendar).to_string();
+            assert!(err.contains("52w or 365d"), "{err}");
+        }
+    }
+
+    /// #3860: a day count past the range of the unit is not a calendar unit, and the message
+    /// says why.
+    #[test]
+    fn a_duration_too_large_for_its_unit_is_not_called_a_calendar_unit() {
+        for big in ["999999999999999d", "99999999999w", "7304485d"] {
+            let err = parse_age(big).expect_err(big).to_string();
+            assert!(err.contains(&format!("{big:?}")), "{err}");
+            assert!(err.contains("not in the required range"), "{err}");
+            assert!(!err.contains("months or years"), "{err}");
+        }
+        assert!(parse_age("7304484d").is_ok());
     }
 
     #[test]
@@ -365,6 +387,28 @@ mod tests {
             let (xa, xb) = (format_nanos(ta), format_nanos(tb));
             prop_assert_eq!(parse_rfc3339(&xa).expect("parse"), SystemTime::from(ta));
             prop_assert_eq!(ta.cmp(&tb), xa.cmp(&xb));
+        }
+
+        /// Years and months are refused with the calendar text. Days and weeks read back as that
+        /// many seconds, up to the range of the unit (#3860).
+        #[test]
+        fn parse_age_refuses_calendar_units_and_reads_fixed_units_back(
+            years in 1u32..10_000,
+            days in 0u64..7_304_485,
+            weeks in 0u64..1_043_498,
+        ) {
+            for text in [format!("{years}y"), format!("{years}mo")] {
+                let err = parse_age(&text).expect_err("a calendar unit is refused").to_string();
+                prop_assert!(err.contains("months or years"), "{err}");
+            }
+            prop_assert_eq!(
+                parse_age(&format!("{days}d")).expect("days read back"),
+                Duration::from_secs(days * 86_400)
+            );
+            prop_assert_eq!(
+                parse_age(&format!("{weeks}w")).expect("weeks read back"),
+                Duration::from_secs(weeks * 7 * 86_400)
+            );
         }
 
         /// Any input gives a value or an error that names the input. An `Ok` value is a duration.

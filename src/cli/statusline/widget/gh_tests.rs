@@ -4,11 +4,26 @@
 
 use super::gh_lookup::{GH_LOGIN_SIGNS, GH_NO_PR_SIGNS};
 use super::*;
+use std::time::Duration;
 
 #[test]
-fn parse_gh_pr_view_none_for_missing_number_or_malformed_json() {
-    assert_eq!(parse_gh_pr_view(br#"{"url":"https://x"}"#), None);
-    assert_eq!(parse_gh_pr_view(b"not json"), None);
+fn parse_gh_pr_view_refuses_a_missing_number_and_malformed_json() {
+    assert!(parse_gh_pr_view(br#"{"url":"https://x"}"#).is_err());
+    assert!(parse_gh_pr_view(b"{}").is_err());
+    assert!(parse_gh_pr_view(b"not json").is_err());
+}
+
+/// A shim that prints a banner on success is a failure, not "no PR", so it cannot clear a kept PR.
+#[cfg(unix)]
+#[test]
+fn output_that_is_not_json_is_a_failure() {
+    let bin_dir = tempfile::tempdir().unwrap();
+    let repo_dir = tempfile::tempdir().unwrap();
+    let gh = write_fake_gh(bin_dir.path(), "#!/bin/sh\necho 'welcome to gh'\n");
+    assert_eq!(
+        gh_pr_view(fake_gh(&gh.to_string_lossy()), repo_dir.path(), "feat/x"),
+        Err(GhFailure::Failed)
+    );
 }
 
 #[cfg(unix)]
@@ -34,6 +49,7 @@ pub(super) fn fake_gh(bin: &str) -> GhPrCmd<'_> {
     GhPrCmd {
         bin,
         timeout: Duration::from_secs(120),
+        background: false,
     }
 }
 
@@ -151,11 +167,12 @@ fn gh_pr_view_fails_when_gh_outlives_its_timeout() {
     let cmd = GhPrCmd {
         bin: &gh_bin,
         timeout: Duration::from_millis(50),
+        background: false,
     };
     let started = std::time::Instant::now();
     assert_eq!(
         gh_pr_view(cmd, repo_dir.path(), "feat/x"),
-        Err(GhFailure::Failed)
+        Err(GhFailure::TimedOut)
     );
     assert!(
         started.elapsed() < Duration::from_secs(30),
@@ -180,7 +197,7 @@ fn derive_pr_cache_miss_calls_gh_and_writes_cache() {
         Some(cache_dir.path()),
         1_000,
     );
-    assert_eq!(pr.clone().ok().flatten().and_then(|p| p.number), Some(1));
+    assert_eq!(pr.0.clone().ok().flatten().and_then(|p| p.number), Some(1));
     let calls = std::fs::read_to_string(repo_dir.path().join("gh-calls.log")).unwrap();
     assert_eq!(calls.lines().count(), 1, "gh should be called on a miss");
     let cache_path = pr_cache_path(cache_dir.path(), repo_dir.path(), "feat/x");

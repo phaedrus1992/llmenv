@@ -73,6 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Stop the `pr` widget from showing `#?` for a branch that has a PR when `gh` is slow. A cache entry that is not fresh starts a refresh in a detached process with an 8-second limit, and the render does not wait. A failed or due lookup keeps showing the last PR for up to a day, in grey. A failure is cached for 10 seconds, not 60, and a failure with no kept PR shows its cause, such as `#? timeout`. See [the statusline widgets](https://phaedrus1992.github.io/llmenv/docs/configuration#statusline). [fix:statusline] [#3889]
 - Fail a task read when a task `updated_at` is not RFC 3339, and fail a session read when a session `started_at` is not. The error names the file and the fix. A lenient task listing skips the task with a notice. See [the task commands](https://phaedrus1992.github.io/llmenv/docs/commands#task). [fix:task] [#3882]
 - Print the count and the first cause of the task files that `llmenv task ls` skips on stderr, so a shorter list has a stated reason. See [the task commands](https://phaedrus1992.github.io/llmenv/docs/commands#task). [fix:task] [#3883]
 - Show the `--other-session` flags in the `--replace` text of the `llmenv task session start` checkpoint, so the text names what the refusal needs. See [the task commands](https://phaedrus1992.github.io/llmenv/docs/commands#task). [fix:task] [#3895]
