@@ -98,5 +98,14 @@ fn read_auth_entry(path: &Path) -> anyhow::Result<Option<AuthEntry>> {
         .with_context(|| format!("failed to read auth entry {}", path.display()))?;
     let entry = serde_json::from_slice::<AuthEntry>(&bytes)
         .with_context(|| format!("failed to parse auth entry {}", path.display()))?;
+    // An entry whose last_seen does not parse cannot be ordered. Every such entry ties, so the
+    // first file listed would be inherited (#3857). Treat it as unusable instead.
+    crate::util::time::validate_stored(&entry.last_seen).with_context(|| {
+        format!(
+            "auth entry {} has an unreadable last_seen. Fix: rewrite it as RFC 3339, such as \
+             2026-01-01T00:00:00Z, or remove the file",
+            path.display()
+        )
+    })?;
     Ok(Some(entry))
 }
