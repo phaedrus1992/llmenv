@@ -293,8 +293,8 @@ fn save_session(state_dir: &Path, session: &Session) -> anyhow::Result<()> {
 
 fn load_session(state_dir: &Path, id: &str) -> anyhow::Result<Session> {
     ensure_plain_name(id)?;
-    let content = crate::paths::bounded::state_text_io(&session_path(state_dir, id))?;
-    Ok(serde_json::from_str(&content)?)
+    let path = session_path(state_dir, id);
+    listing::parse_session(&crate::paths::bounded::state_text_io(&path)?, &path)
 }
 
 /// [`load_session`] for a session the caller expects to exist. A missing file reads "no session

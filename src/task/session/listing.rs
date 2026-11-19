@@ -49,6 +49,9 @@ pub(crate) fn list_sessions_strict(state_dir: &Path) -> anyhow::Result<Vec<Sessi
             );
         }
     };
+    // A fixed order, so the file named in an error is the same on every run.
+    let mut entries: Vec<_> = entries.collect();
+    entries.sort_by_key(|e| e.as_ref().ok().map(std::fs::DirEntry::path));
     let mut sessions = Vec::new();
     for entry in entries {
         let path = entry
@@ -121,6 +124,17 @@ mod tests {
             "last_activity": started_at,
         }))
         .expect("a minimal session parses")
+    }
+
+    #[test]
+    fn the_strict_read_names_the_file_that_sorts_first() {
+        let dir = TempDir::new().expect("test");
+        std::fs::create_dir_all(sessions_dir(dir.path())).expect("test");
+        for name in ["b.json", "c.json", "a.json"] {
+            std::fs::write(sessions_dir(dir.path()).join(name), "{ not json").expect("test");
+        }
+        let err = list_sessions_strict(dir.path()).expect_err("corrupt files must fail");
+        assert!(format!("{err:#}").contains("a.json"), "{err:#}");
     }
 
     #[test]
