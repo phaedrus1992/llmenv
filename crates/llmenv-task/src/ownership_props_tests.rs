@@ -125,7 +125,7 @@ proptest! {
         if let Ok(resolved) = &picked {
             let id = &resolved.id;
             let session = made.iter().find(|s| &s.id == id).expect("the id names an open session");
-            prop_assert!(session.may_take_tasks(identity.session_id.as_deref()), "{}", id);
+            prop_assert!(session.may_take_tasks(&identity), "{}", id);
         }
         // One open session with no owner is always the answer.
         if let [None] = owners.as_slice() {
@@ -154,7 +154,7 @@ proptest! {
             Ok(session.clone())
         };
         let got = super::ownership::caller_for_pick(&pick, &identity);
-        let takes = session.may_take_tasks(identity.session_id.as_deref());
+        let takes = session.may_take_tasks(&identity);
         match (pick_failed, takes) {
             (false, true) => prop_assert_eq!(got, super::ownership::Caller::Session(session.id)),
             (false, false) => {
