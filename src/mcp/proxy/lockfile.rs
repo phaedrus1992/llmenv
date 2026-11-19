@@ -140,7 +140,7 @@ fn parse_holder(text: &str) -> Option<LockHolder> {
     let start = second.and_then(|w| digits(w).filter(|_| w.len() == 10));
     if second.is_some() && start.is_none() {
         tracing::warn!(
-            lock = text,
+            lock = %crate::util::strip_unsafe_chars(text),
             "the spawn lock has a start time that is not an epoch time"
         );
     }
@@ -174,7 +174,16 @@ pub(super) fn release_lock(lock_path: &Path) {
 /// a lock whose holder may still be alive (#2587).
 pub(super) fn lock_holder(lock_path: &Path) -> anyhow::Result<Option<LockHolder>> {
     match crate::paths::bounded::state_text_io(lock_path) {
-        Ok(text) => Ok(parse_holder(&text)),
+        Ok(text) => {
+            let holder = parse_holder(&text);
+            if holder.is_none() && !text.trim().is_empty() {
+                tracing::warn!(
+                    lock = %crate::util::strip_unsafe_chars(&text),
+                    "the spawn lock is not a pid and a start time, so it reads as stale"
+                );
+            }
+            Ok(holder)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(anyhow::Error::new(e)
             .context(format!("reading proxy lockfile {}", lock_path.display()))),

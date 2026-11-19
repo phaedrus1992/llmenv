@@ -48,7 +48,15 @@ fn classify(value: Option<&str>, now: i64) -> Link {
         Ok(since) if crate::util::ttl::is_within(since, now, DEFAULT_PENDING_TTL_SECS) => {
             Link::Pending { since }
         }
-        _ => Link::Missing,
+        Ok(_) => Link::Missing,
+        Err(e) => {
+            crate::agent_notice::record_logged(format!(
+                "a pending session link marker does not hold a time, so the link reads as \
+                 missing: {e}. Fix: none is needed, because the next session start writes the \
+                 link again."
+            ));
+            Link::Missing
+        }
     }
 }
 

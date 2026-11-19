@@ -55,7 +55,7 @@ shard="$1"
 shards="$2"
 diff_file="$3"
 total="${MUTANTS_BUDGET:-2400}"
-if [[ -n "${JOB_START:-}" ]]; then
+if [[ -n "${JOB_START+set}" ]]; then
     job_start="$JOB_START"
 else
     job_start="$(date +%s)" || {
@@ -70,6 +70,12 @@ for value in "$shard" "$shards" "$total" "$job_start" "$min_budget" "$kill_after
         exit "$SETUP_EXIT"
     fi
 done
+# timeout reads a grace time of 0 as never sending KILL, so a child that ignores TERM would hold the
+# shard until the job limit.
+if ((kill_after < 1)); then
+    echo "mutants-shard: MUTANTS_KILL_AFTER must be at least 1 second" >&2
+    exit "$SETUP_EXIT"
+fi
 if ((shard >= shards)); then
     echo "mutants-shard: shard index $shard must be below the shard count $shards" >&2
     exit "$SETUP_EXIT"

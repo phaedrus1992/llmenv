@@ -71,7 +71,8 @@ pub(crate) fn prune_rotations_at(
             Err(e) => failures.push(format!("an unnamed entry of {}: {e}", dir.display())),
         }
     }
-    // Folder order differs between runs, and the failure message lists the files in this order.
+    // Folder order differs between runs, and the failure message lists the failures in order.
+    failures.sort();
     named.sort_by_key(std::fs::DirEntry::path);
     for entry in named {
         if !is_rotation_of(&entry.file_name(), base) {

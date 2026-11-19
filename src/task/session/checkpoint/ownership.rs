@@ -151,6 +151,25 @@ mod tests {
         .expect("a minimal session parses")
     }
 
+    proptest! {
+        /// A `last_activity` is usable exactly when it parses and is not after `now`.
+        #[test]
+        fn last_activity_is_usable_exactly_when_it_parses_and_is_not_in_the_future(
+            at in 0i64..4_000_000_000,
+            now in 0i64..4_000_000_000,
+        ) {
+            let text = jiff::Timestamp::from_second(at).expect("in range").to_string();
+            let now_at = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(now.cast_unsigned());
+            let read = last_activity_at(&text, "s9", now_at);
+            if at <= now {
+                let want = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(at.cast_unsigned());
+                prop_assert_eq!(read, Ok(want));
+            } else {
+                prop_assert_eq!(read, Err("in the future"));
+            }
+        }
+    }
+
     /// #3811: an unreadable `last_activity` is noticed, and the session is not known to be active.
     #[test]
     fn an_unreadable_last_activity_is_noticed_and_cannot_be_told() {
