@@ -2,10 +2,12 @@
 
 pub mod agent_notice;
 pub mod mcp_trace;
+pub mod proc_start;
 pub mod process;
 pub mod shell;
 pub mod time;
 pub mod trace;
+pub mod ttl;
 
 use anstyle::{AnsiColor, Color, Style};
 use sha2::{Digest, Sha256};

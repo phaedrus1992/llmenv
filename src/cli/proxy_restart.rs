@@ -63,6 +63,9 @@ fn report_stop(outcome: StopOutcome, pid_path: &Path) -> anyhow::Result<Note> {
         StopOutcome::Gone => Ok(Note::Info(
             "The memory proxy in the pidfile was not running",
         )),
+        StopOutcome::OtherUser => Ok(Note::Info(
+            "The pid in the pidfile belongs to another user, so llmenv did not stop it",
+        )),
         StopOutcome::NoPidfile => Ok(Note::Info("No memory proxy pidfile")),
     }
 }

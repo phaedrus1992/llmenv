@@ -1,4 +1,4 @@
-//! The proxy spawn lock: take it, record the holder's pid, and release it.
+//! The proxy spawn lock: take it, record the holder's pid and start time, and release it.
 
 use std::path::{Path, PathBuf};
 
@@ -74,8 +74,77 @@ fn write_staging(staging: &Path) -> anyhow::Result<()> {
     let mut file = opts
         .open(staging)
         .with_context(|| format!("creating proxy lock staging file {}", staging.display()))?;
-    file.write_all(std::process::id().to_string().as_bytes())
+    file.write_all(holder_text(std::process::id(), start_secs(std::process::id())).as_bytes())
         .with_context(|| format!("writing proxy lock staging file {}", staging.display()))
+}
+
+/// When the process `pid` started, in seconds since the epoch. `None` when `ps` cannot tell.
+fn start_secs(pid: u32) -> Option<u64> {
+    let start = llmenv_util::proc_start::process_start(pid)?;
+    Some(start.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs())
+}
+
+/// The text of a lock: the pid, and the start time of that process when it is known.
+fn holder_text(pid: u32, start: Option<u64>) -> String {
+    start.map_or_else(|| pid.to_string(), |secs| format!("{pid} {secs}"))
+}
+
+/// Two reads of one start time can differ by this much. `ps` counts whole seconds. On Linux the
+/// age comes from the time since boot, so a step of the wall clock moves the start as well. A
+/// reused pid starts much later than this, because the holder lives for seconds and a reboot
+/// takes longer.
+const START_TOLERANCE_SECS: u64 = 30;
+
+/// The process that took the spawn lock (#3795).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct LockHolder {
+    pub(super) pid: u32,
+    /// When the holder started. `None` for a lock of an older llmenv, or a start that is not a
+    /// full epoch time.
+    start: Option<u64>,
+}
+
+impl LockHolder {
+    /// Whether `pid` now names a process that started after the lock was taken. A pid is reused
+    /// after its process exits, for example after a reboot, so the lock is stale then. A
+    /// signal check cannot see that when the new process belongs to this user. `None` when `ps`
+    /// cannot say. A lock with no recorded start has no sign of reuse.
+    pub(super) fn pid_was_reused(&self) -> Option<bool> {
+        let Some(recorded) = self.start else {
+            return Some(false);
+        };
+        start_secs(self.pid).map(|current| start_is_later(recorded, current))
+    }
+}
+
+/// Whether `current` is later than `recorded` by more than the clock tolerance.
+fn start_is_later(recorded: u64, current: u64) -> bool {
+    current > recorded.saturating_add(START_TOLERANCE_SECS)
+}
+
+/// A decimal number of ASCII digits, and nothing else. `str::parse` also takes a leading `+`.
+fn digits(word: &str) -> Option<u64> {
+    let ascii = !word.is_empty() && word.bytes().all(|b| b.is_ascii_digit());
+    ascii.then(|| word.parse().ok()).flatten()
+}
+
+/// Reads `<pid>` or `<pid> <start>`. Anything else is not a lock of llmenv. A start that is not
+/// 10 digits, such as one cut short, is dropped: the lock then has only its pid.
+fn parse_holder(text: &str) -> Option<LockHolder> {
+    let mut words = text.split_whitespace();
+    // A pid is a positive i32 for `kill(2)`. Any other number is not a pid of this lock.
+    let pid = u32::try_from(digits(words.next()?)?)
+        .ok()
+        .filter(|p| (1..=i32::MAX.cast_unsigned()).contains(p))?;
+    let second = words.next();
+    let start = second.and_then(|w| digits(w).filter(|_| w.len() == 10));
+    if second.is_some() && start.is_none() {
+        tracing::warn!(
+            lock = %llmenv_util::strip_unsafe_chars(text),
+            "the spawn lock has a start time that is not an epoch time"
+        );
+    }
+    words.next().is_none().then_some(LockHolder { pid, start })
 }
 
 /// Releases the spawn lock, complaining loudly if it can't.
@@ -120,9 +189,18 @@ pub(super) fn read_state_text(path: &Path) -> std::io::Result<String> {
 /// llmenv or a manual edit and reads as stale. Any other
 /// read failure is an error. Reading it as "no holder" would let a peer reclaim
 /// a lock whose holder may still be alive (#2587).
-pub(super) fn lock_holder(lock_path: &Path) -> anyhow::Result<Option<u32>> {
+pub(super) fn lock_holder(lock_path: &Path) -> anyhow::Result<Option<LockHolder>> {
     match read_state_text(lock_path) {
-        Ok(text) => Ok(text.trim().parse::<u32>().ok()),
+        Ok(text) => {
+            let holder = parse_holder(&text);
+            if holder.is_none() && !text.trim().is_empty() {
+                tracing::warn!(
+                    lock = %llmenv_util::strip_unsafe_chars(&text),
+                    "the spawn lock is not a pid and a start time, so it reads as stale"
+                );
+            }
+            Ok(holder)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(anyhow::Error::new(e)
             .context(format!("reading proxy lockfile {}", lock_path.display()))),
@@ -132,7 +210,9 @@ pub(super) fn lock_holder(lock_path: &Path) -> anyhow::Result<Option<u32>> {
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "test code")]
 mod lock_notice_tests {
-    use super::{lock_holder, release_lock, write_staging};
+    use super::{
+        LockHolder, lock_holder, parse_holder, release_lock, start_is_later, write_staging,
+    };
     use proptest::prelude::*;
 
     /// A dangling link at the lock path is an error, not "no holder": a peer must not reclaim a
@@ -190,26 +270,76 @@ mod lock_notice_tests {
         let dir = tempfile::tempdir().expect("test");
         let lock = dir.path().join("proxy.lock");
         write_staging(&lock).expect("test");
-        assert_eq!(lock_holder(&lock).expect("test"), Some(std::process::id()));
+        let holder = lock_holder(&lock).expect("test").expect("a holder");
+        assert_eq!(holder.pid, std::process::id());
+        // This process has not been replaced by another one with its pid.
+        assert_ne!(holder.pid_was_reused(), Some(true));
     }
 
     proptest! {
         /// Any u32 written as decimal text reads back as the same pid.
         #[test]
-        fn any_pid_reads_back_unchanged(pid in any::<u32>()) {
+        fn any_pid_reads_back_unchanged(pid in 1..=i32::MAX.cast_unsigned()) {
             let dir = tempfile::tempdir().expect("test");
             let lock = dir.path().join("proxy.lock");
             std::fs::write(&lock, pid.to_string()).expect("test");
-            prop_assert_eq!(lock_holder(&lock).expect("test"), Some(pid));
+            let holder = lock_holder(&lock).expect("test");
+            prop_assert_eq!(holder, Some(LockHolder { pid, start: None }));
         }
 
-        /// Text that is not a pid reads as no holder, never as a panic or an error.
+        /// A pid and a start time read back as written.
         #[test]
-        fn non_numeric_lock_reads_as_no_holder(text in "[a-z]{1,24}") {
-            let dir = tempfile::tempdir().expect("test");
-            let lock = dir.path().join("proxy.lock");
-            std::fs::write(&lock, &text).expect("test");
-            prop_assert_eq!(lock_holder(&lock).expect("test"), None);
+        fn a_pid_and_start_read_back_unchanged(
+            pid in 1..=i32::MAX.cast_unsigned(),
+            start in 1_000_000_000u64..10_000_000_000,
+        ) {
+            let text = super::holder_text(pid, Some(start));
+            prop_assert_eq!(parse_holder(&text), Some(LockHolder { pid, start: Some(start) }));
+            let bare = super::holder_text(pid, None);
+            prop_assert_eq!(parse_holder(&bare), Some(LockHolder { pid, start: None }));
+        }
+
+        /// Any text parses without a panic, and what parses is written back as the same words.
+        #[test]
+        fn what_parses_is_what_the_writer_writes(text in "\\PC{0,30}") {
+            if let Some(holder) = parse_holder(&text) {
+                let written = super::holder_text(holder.pid, holder.start);
+                prop_assert_eq!(parse_holder(&written), Some(holder));
+            }
+        }
+    }
+
+    /// A start later than the recorded one by the tolerance is the same process. A start later
+    /// by more than that is a new process. An earlier start is never a new process.
+    #[test]
+    fn only_a_start_past_the_tolerance_is_a_reused_pid() {
+        let tolerance = super::START_TOLERANCE_SECS;
+        assert!(!start_is_later(1_000, 1_000 + 2));
+        assert!(!start_is_later(1_000, 1_000 + tolerance));
+        assert!(start_is_later(1_000, 1_000 + tolerance + 1));
+        assert!(!start_is_later(1_000 + tolerance + 1, 1_000));
+    }
+
+    /// A lock with a third word, or a start that is not a number, is not a lock of llmenv.
+    #[test]
+    fn a_malformed_lock_reads_as_no_holder() {
+        for text in ["", "12 3 4", "x 3", "-1", "+12", "1_2", "0", "2147483648"] {
+            assert_eq!(parse_holder(text), None, "{text:?}");
+        }
+    }
+
+    /// A start that is cut short or is not a number leaves the pid, and no sign of reuse.
+    #[test]
+    fn a_start_that_is_not_a_full_epoch_time_is_dropped() {
+        for text in ["12 17", "12 x", "12 -3", "12 +1700000000"] {
+            assert_eq!(
+                parse_holder(text),
+                Some(LockHolder {
+                    pid: 12,
+                    start: None
+                }),
+                "{text:?}"
+            );
         }
     }
 

@@ -12,7 +12,9 @@ pub(in crate::cli::statusline) enum GhFailure {
     Missing,
     /// `gh` is not logged in, or its login expired.
     Unauthenticated,
-    /// A timeout, a failed read or wait, or a spawn error other than a missing binary.
+    /// `gh` did not answer within its time limit (#3889).
+    TimedOut,
+    /// A failed read or wait, or a spawn error other than a missing binary.
     Failed,
 }
 
@@ -21,7 +23,18 @@ impl GhFailure {
         match self {
             Self::Missing => "pr: gh missing",
             Self::Unauthenticated => "pr: gh not logged in",
+            Self::TimedOut => "pr: gh timed out",
             Self::Failed => "pr: gh failed",
+        }
+    }
+
+    /// The short cause that follows the marker in the widget, such as `#? auth` (#3889).
+    pub(super) fn cause(self) -> &'static str {
+        match self {
+            Self::Missing => "no gh",
+            Self::Unauthenticated => "auth",
+            Self::TimedOut => "timeout",
+            Self::Failed => "failed",
         }
     }
 }

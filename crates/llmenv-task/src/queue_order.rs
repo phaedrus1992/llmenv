@@ -2,13 +2,14 @@
 //! and `tracking::open` all sort with it, so they agree on which task is next.
 
 use super::Task;
+use llmenv_util::time::RecordId;
 
 pub fn queue_order(a: &Task, b: &Task) -> std::cmp::Ordering {
     llmenv_util::time::cmp_instants(
         &a.created_at,
-        &a.slug,
+        RecordId(&a.slug),
         &b.created_at,
-        &b.slug,
+        RecordId(&b.slug),
         "task created_at",
     )
     .then_with(|| a.slug.cmp(&b.slug))

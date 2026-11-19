@@ -2,6 +2,7 @@
 //! `llmenv task ls` and its `list` alias: the deliberate choice of `--session` or `--all`
 //! (#1124, #2905).
 
+use predicates::prelude::PredicateBooleanExt as _;
 use tempfile::TempDir;
 
 mod support;
@@ -46,6 +47,72 @@ fn ls_with_all_flag_succeeds() {
         .assert()
         .success()
         .stdout(predicates::str::contains("Ship the release"));
+}
+
+// #3883: a skipped task file shows on stderr, because the agent notice reaches hook output only.
+#[test]
+fn ls_says_on_stderr_when_it_skips_a_task_file() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Ship the release"])
+        .assert()
+        .success();
+    let bad = dir.path().join("tasks").join("broken.json");
+    std::fs::write(&bad, "{ not json").unwrap();
+
+    llmenv(dir.path())
+        .args(["task", "ls", "--all", "--format", "json"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Ship the release"))
+        .stderr(predicates::str::contains(
+            "1 item(s) of the task store could not be loaded",
+        ))
+        .stderr(predicates::str::contains("broken.json"));
+}
+
+#[test]
+fn ls_strips_control_characters_from_the_skipped_file_cause() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    let evil = dir.path().join("tasks").join("evil.json");
+    std::fs::write(
+        &evil,
+        r#"{"slug":"\u001b[31mevil","title":"t","state":"open",
+            "created_at":"bad","updated_at":"bad"}"#,
+    )
+    .unwrap();
+
+    let out = llmenv(dir.path())
+        .args(["task", "ls", "--all", "--format", "json"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains(
+            "1 item(s) of the task store could not be loaded",
+        ))
+        .get_output()
+        .stderr
+        .clone();
+    // The log layer colors its own level text, so only the injected sequence is checked.
+    let text = String::from_utf8_lossy(&out);
+    assert!(text.contains("evil"), "{text}");
+    assert!(!text.contains("\u{1b}[31mevil"), "{text}");
+}
+
+#[test]
+fn ls_prints_no_skip_line_when_every_task_file_reads() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Ship the release"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "ls", "--all", "--format", "json"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("skipped").not());
 }
 
 #[test]

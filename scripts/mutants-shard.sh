@@ -19,21 +19,27 @@
 #   MUTANTS_BUDGET      Seconds from the job start to the stop. Default 2400 (the job limit is
 #                       45 minutes, and 5 minutes stay free for the artifact upload).
 #   MUTANTS_MIN_BUDGET  Seconds below which a shard does not start. Default 120.
+#   MUTANTS_KILL_AFTER  Seconds between the TERM at the budget and the KILL of a process that
+#                       ignores TERM. Default 60.
 # Diagnostics go to stderr.
 set -euo pipefail
 
 usage() {
-    sed -n "2,17p" "$0" | sed 's/^# \{0,1\}//' >&2
+    sed -n '2,${/^#/!q;p;}' "$0" | sed 's/^# \{0,1\}//' >&2
 }
 
 # A shard with less time left than this does not start. The build alone takes longer.
 min_budget="${MUTANTS_MIN_BUDGET:-120}"
+kill_after="${MUTANTS_KILL_AFTER:-60}"
+# Exit codes of cargo-mutants, from https://mutants.rs/exit-codes.html (#3837): 0 all caught,
+# 1 usage error, 2 a mutant was not caught, 3 a test timed out, 4 the baseline failed, 5 the
+# --in-diff diff does not match the tree, 6 the --in-diff input is not a diff, 70 internal error.
 # Exit status of an incomplete shard. It is not 0, so the check cannot pass with untested lines.
-# It is outside the small range that cargo-mutants uses, so it never reads as a survivor or a timeout.
+# It is outside the codes above, so it never reads as a survivor or a timeout.
 readonly INCOMPLETE_EXIT=10
 # Exit status of a setup error, such as a bad argument or a missing diff file. It is outside the
-# small codes that cargo-mutants and this script use, so a setup failure never reads as a finding
-# or a timeout (#3814). The exact cargo-mutants codes are not confirmed here.
+# codes above and outside INCOMPLETE_EXIT, so a setup failure never reads as a finding, a timeout,
+# or an incomplete shard (#3814).
 readonly SETUP_EXIT=11
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
@@ -49,13 +55,27 @@ shard="$1"
 shards="$2"
 diff_file="$3"
 total="${MUTANTS_BUDGET:-2400}"
-job_start="${JOB_START:-$(date +%s)}"
-for value in "$shard" "$shards" "$total" "$job_start" "$min_budget"; do
-    if ! [[ "$value" =~ ^[0-9]{1,12}$ ]]; then
-        echo "mutants-shard: '$value' is not a number of at most 12 digits" >&2
+if [[ -n "${JOB_START+set}" ]]; then
+    job_start="$JOB_START"
+else
+    job_start="$(date +%s)" || {
+        echo "mutants-shard: cannot read the clock with date. Set JOB_START to a Unix time." >&2
+        exit "$SETUP_EXIT"
+    }
+fi
+for value in "$shard" "$shards" "$total" "$job_start" "$min_budget" "$kill_after"; do
+    # A leading zero is refused because bash reads it as octal in the arithmetic below.
+    if ! [[ "$value" =~ ^(0|[1-9][0-9]{0,11})$ ]]; then
+        echo "mutants-shard: '$value' is not a number of at most 12 digits without a leading zero" >&2
         exit "$SETUP_EXIT"
     fi
 done
+# timeout reads a grace time of 0 as never sending KILL, so a child that ignores TERM would hold the
+# shard until the job limit.
+if ((kill_after < 1)); then
+    echo "mutants-shard: MUTANTS_KILL_AFTER must be at least 1 second" >&2
+    exit "$SETUP_EXIT"
+fi
 if ((shard >= shards)); then
     echo "mutants-shard: shard index $shard must be below the shard count $shards" >&2
     exit "$SETUP_EXIT"
@@ -69,7 +89,17 @@ if ! command -v timeout >/dev/null; then
     exit "$SETUP_EXIT"
 fi
 
-budget=$((total - ($(date +%s) - job_start)))
+# The semgrep bash grammar cannot parse a command substitution inside arithmetic (#3845).
+now="$(date +%s)" || {
+    echo "mutants-shard: cannot read the clock with date." >&2
+    exit "$SETUP_EXIT"
+}
+if ((job_start > now)); then
+    echo "mutants-shard: JOB_START $job_start is later than the clock $now. Fix the value." >&2
+    exit "$SETUP_EXIT"
+fi
+elapsed=$((now - job_start))
+budget=$((total - elapsed))
 
 report_incomplete() {
     local message="$1"
@@ -83,7 +113,8 @@ report_incomplete() {
     echo "mutants-shard: $message" >&2
 }
 
-if ((budget < min_budget)); then
+# timeout reads a limit of 0 as no limit, so a budget below 1 never starts the shard.
+if ((budget < min_budget || budget < 1)); then
     report_incomplete "mutants shard $((shard + 1))/$shards did not start: only ${budget} s of the \
 ${total} s budget were left after the setup steps. Its mutants were not tested. The weekly sweep \
 runs the scoped set, not this diff, and it is report-only."
@@ -92,18 +123,30 @@ fi
 
 status=0
 # --test-tool nextest stops a mutant at its first failing test. --in-place reuses the cached
-# target directory of the checkout, which is disposable in CI. -k sends KILL 60 s after the TERM,
-# so a child that ignores TERM cannot hold the shard until the job limit.
+# target directory of the checkout, which is disposable in CI. -k sends KILL $kill_after seconds
+# after the TERM, so a child that ignores TERM cannot hold the shard until the job limit.
 # --test-workspace runs the tests of every crate, as the CI test job does. Without it, a mutant
 # is judged by its own package's tests only, so a survivor can be a false miss (#3809).
-timeout -k 60 "$budget" cargo mutants --workspace --test-workspace=true --in-place \
+timeout -k "$kill_after" "$budget" cargo mutants --workspace --test-workspace=true --in-place \
     --test-tool nextest --in-diff "$diff_file" --shard "$shard/$shards" || status=$?
 
-# 124 is the only budget stop. A kill (137) is a failure, not a stop: the kernel's memory kill
-# and a KILL after an ignored TERM both exit 137, and neither may pass as a stop. The local
-# uutils timeout is the one checked. GNU timeout is not checked here (#3814). If its budget stop
-# exits 137, the shard fails as a kill, so it stays red.
+# Exit 124 is a budget stop. GNU timeout 9.4 exits 137 instead when cargo mutants ignores the TERM
+# and the KILL of -k ends it (checked on Ubuntu 24.04, #3894). The local uutils timeout is not
+# checked for this. The kernel's memory kill also exits 137. The run time tells them apart: the
+# KILL comes $kill_after seconds after the budget, so a 137 at or after that time is a stop. An
+# earlier 137 is a failure, such as a memory kill during the grace time. The check reads the wall
+# clock. A step of the clock can read a kill as a stop or a stop as a kill, and both stay red.
+finished="$(date +%s)" || {
+    echo "mutants-shard: cannot read the clock after the run, so a 137 reads as a kill." >&2
+    finished=0
+}
+stopped=no
 if [[ "$status" -eq 124 ]]; then
+    stopped=yes
+elif [[ "$status" -eq 137 ]] && ((finished - now >= budget + kill_after)); then
+    stopped=yes
+fi
+if [[ "$stopped" == yes ]]; then
     stop_message="mutants shard $((shard + 1))/$shards ran out of time, and the shard had ${budget} s. \
 The rest of the shard was not tested. The weekly sweep runs the scoped set, not this diff, and it \
 is report-only."

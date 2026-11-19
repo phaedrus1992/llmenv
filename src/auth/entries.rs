@@ -2,19 +2,7 @@
 
 use std::path::Path;
 
-use crate::auth::AuthEntry;
-use crate::auth::load::load_counted;
-
-/// The cache entry chosen for a new folder, and what was left out to choose it.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Inheritance {
-    /// The chosen entry, or `None` when the cache holds no entry.
-    pub(crate) entry: Option<AuthEntry>,
-    /// Cache files left out because they could not be read or parsed.
-    pub(crate) skipped: usize,
-    /// The first problem among the skipped files. It names one file in the session notice.
-    pub(crate) first_problem: Option<String>,
-}
+use crate::auth::load::{Loaded, load_counted};
 
 /// Choose the best cached auth entry to inherit into a new folder.
 ///
@@ -24,11 +12,10 @@ pub(crate) struct Inheritance {
 /// # Errors
 /// Returns an error on I/O failure reading the cache directory, or when every
 /// cache file is unusable.
-pub(crate) fn choose_auth_for_inheritance(adapter_root: &Path) -> anyhow::Result<Inheritance> {
+pub(crate) fn choose_auth_for_inheritance(adapter_root: &Path) -> anyhow::Result<Loaded> {
     let loaded = load_counted(adapter_root)?;
     // `load_counted` drops every entry whose last_seen does not parse, so the winner always has
     // a readable instant and no tie among bad values can reach this point (#3857).
-    let entry = loaded.entries.first().cloned();
     for other in loaded.entries.iter().skip(1) {
         tracing::debug!(
             "auth cache: also have {} ({}); use `llmenv login` to switch",
@@ -36,11 +23,7 @@ pub(crate) fn choose_auth_for_inheritance(adapter_root: &Path) -> anyhow::Result
             other.uuid
         );
     }
-    Ok(Inheritance {
-        entry,
-        skipped: loaded.skipped,
-        first_problem: loaded.first_problem,
-    })
+    Ok(loaded)
 }
 
 #[cfg(test)]
@@ -172,7 +155,7 @@ mod tests {
             let newest = stamps.iter().filter_map(|s| s.parse::<Timestamp>().ok()).max();
             match newest {
                 Some(newest) => {
-                    let entry = chosen.unwrap().entry.unwrap();
+                    let entry = chosen.unwrap().newest().cloned().unwrap();
                     let chosen_at = entry.last_seen.parse::<Timestamp>().ok();
                     prop_assert_eq!(chosen_at, Some(newest));
                 }
@@ -195,9 +178,25 @@ mod tests {
         .unwrap();
         save_auth_entry(tmp.path(), &entry_with(2, "bad@test.com", "yesterday")).unwrap();
         let chosen = choose_auth_for_inheritance(tmp.path()).unwrap();
-        assert_eq!(chosen.entry.unwrap().email, "good@test.com");
+        assert_eq!(chosen.newest().unwrap().email, "good@test.com");
         assert_eq!(chosen.skipped, 1);
         assert!(chosen.first_problem.unwrap().contains("last_seen"));
+    }
+
+    #[test]
+    fn the_first_problem_of_an_unusable_cache_is_the_file_that_sorts_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        for index in [3, 1, 2] {
+            save_auth_entry(tmp.path(), &entry_with(index, "x@test.com", "yesterday")).unwrap();
+        }
+        let mut files: Vec<_> = std::fs::read_dir(crate::auth::auth_cache_dir(tmp.path()))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        files.sort();
+        let err = choose_auth_for_inheritance(tmp.path()).err().unwrap();
+        let text = format!("{err:#}");
+        assert!(text.contains(&files[0].display().to_string()), "{text}");
     }
 
     #[test]

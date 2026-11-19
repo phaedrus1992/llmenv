@@ -1598,7 +1598,9 @@ Notes:
   onto the same `review_state` values above. The result is cached for 60
   seconds (keyed by repo + branch, alongside the `usage_5h`/`usage_7d` state
   under `$CLAUDE_CONFIG_DIR/statusline-state/`) so the statusline — re-rendered
-  on every prompt — doesn't shell out on every render. `pr` renders empty,
+  on every prompt — doesn't shell out on every render. A cache entry that is
+  not fresh starts a refresh in a detached process, and the render does not wait for it
+  (changed in v3.14.0; the render ran `gh` itself before). `pr` renders empty,
   with no error output, whenever `gh` isn't installed, isn't authenticated,
   there's no remote, HEAD is detached, or there's no open PR for the branch.
   An engine-supplied `pr` always takes precedence over the derived one. The
@@ -1663,7 +1665,17 @@ When a session or task file cannot be read, the `tasks` widget keeps its format 
 When the repository's `HEAD` exists but cannot be read, the `branch` widget keeps its format and shows `?` in place of the name, instead of hiding the branch (changed in v3.13.0; changed in v3.14.0 to keep the format).
 
 When the branch cannot be read, or `gh` gives no answer, the `pr` widget keeps its format and shows `?` in place of `{number}`, `{url}`, and `{review_state}` (changed in v3.14.0; it showed `pr: unreadable`, `pr: gh missing`, `pr: gh not logged in`, or `pr: gh failed` before).
-The cause is written to the log, and it stays cached for the same 60 seconds as a PR answer.
+The short cause follows the marker, such as `#? auth`, `#? timeout`, `#? no gh`, or `#? failed` (added in v3.14.0). A branch read error has no cause text, because the `branch` widget shows it.
+The fix is written to the log. A failure is cached for 10 seconds, and a PR answer for 60 seconds (changed in v3.14.0; a failure was cached for 60 seconds).
+
+The detached refresh waits up to 8 seconds for `gh` (added in v3.14.0).
+A failed or due lookup shows the last PR that a lookup returned, in the grey `color-248`, while that PR is less than a day old (added in v3.14.0).
+The grey replaces the review-state color, because the decision may have changed.
+An answer that is older than a day and has not been refreshed shows `#? failed`, and not the old PR.
+A lookup that finds no PR clears the kept PR.
+A branch with no cache entry shows nothing until the first refresh ends.
+With no state folder for the cache, the render runs `gh` itself, and waits up to 3 seconds.
+An explicit `style` on the widget wins over the grey.
 A branch with no open PR shows nothing in the `pr` widget, and it does not show `?` (fixed in v3.14.0).
 The "no PR" answer needs `gh` exit code 1 with its no-PR message, as gh 2.103.3 writes it.
 The same message with another exit, or a `gh` killed by a signal, shows `?` (changed in v3.14.0).
