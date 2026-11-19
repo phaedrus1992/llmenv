@@ -180,9 +180,11 @@ out.
 
 **A spawn is guarded by a lockfile** next to the pidfile, so several shells
 redrawing their prompts at once start one proxy rather than one each. The
-lockfile records the pid that holds it; if that process is gone — killed with
-`^C` mid-start, say — the next export reclaims the lock instead of failing
-against it.
+lockfile records the pid that holds it and when that process started. If that
+process is gone — killed with `^C` mid-start, say — the next export reclaims the
+lock instead of failing against it. It also reclaims the lock when the pid now
+names a process that started later, such as after a reboot (added in v3.14.0).
+An llmenv from before v3.14.0 reads this lock as one with no holder and reclaims it, so do not run two versions of llmenv against one state folder at the same time.
 
 **`listen_host` may be IPv6.** llmenv brackets it when building the bind address
 (`::1` and port 9092 become `[::1]:9092`), which is what both `mcp-proxy` and the
@@ -217,6 +219,7 @@ Use the line to find what started a proxy that later stopped without a reason.
 `llmenv doctor --restart-memory-proxy` sends SIGTERM to the one process that the pidfile names, waits up to 5 seconds for it to exit, and starts a new proxy.
 It first checks that the command line of that process is an `mcp-proxy` for `icm serve`, so a reused pid is never signaled.
 `pkill -f mcp-proxy` stops the proxy of every session on the machine, so do not use it.
+When the pid in the pidfile belongs to another user, llmenv does not signal it and reports that (added in v3.14.0).
 The command fails with the fix when the old proxy does not exit, when the pid is another program, or when a process that llmenv does not track holds the port.
 
 ### Placing a host on a network manually

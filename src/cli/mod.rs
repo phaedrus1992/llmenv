@@ -18,7 +18,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 mod checkpoint_arg;
-use checkpoint_arg::checked_checkpoint;
+use checkpoint_arg::{checked_checkpoint, read_job_payload};
 mod clean;
 mod config_guard;
 mod env_vars;
@@ -361,6 +361,13 @@ enum Command {
         #[arg(long)]
         checkpoint: Option<PathBuf>,
     },
+    /// Refresh the cached PR of the status line.
+    ///
+    /// Internal plumbing: the detached child that `statusline::widget::pr_refresh` starts, so the
+    /// `pr` widget never waits on `gh`. Not meant to be invoked directly. Reads the refresh job
+    /// from stdin.
+    #[command(name = "statusline-pr-refresh", hide = true)]
+    StatuslinePrRefresh,
     /// Run post-session memory consolidation as a detached child process.
     ///
     /// Internal plumbing: entrypoint for `hook_run::detached_consolidation::
@@ -996,21 +1003,17 @@ pub fn run() -> anyhow::Result<()> {
             }
         }
         Some(Command::SessionLogRecord { checkpoint }) => {
-            use std::io::Read;
-            let mut payload_json = String::new();
             // The checkpoint check starts the notice spool, so a stdin error reaches the agent.
             let checkpoint = checked_checkpoint(checkpoint)?;
-            std::io::stdin().read_to_string(&mut payload_json)?;
+            let payload_json = read_job_payload()?;
             crate::session_log::detached::run_record(&payload_json, checkpoint.as_deref())?;
         }
         Some(Command::IcmStore { checkpoint }) => {
-            use std::io::Read;
-            let mut payload_json = String::new();
-            // The checkpoint check starts the notice spool, so a stdin error reaches the agent.
             let checkpoint = checked_checkpoint(checkpoint)?;
-            std::io::stdin().read_to_string(&mut payload_json)?;
+            let payload_json = read_job_payload()?;
             crate::hook_run::detached_store::run_icm_store(&payload_json, checkpoint.as_deref())?;
         }
+        Some(Command::StatuslinePrRefresh) => statusline::widget::pr_refresh::run()?,
         Some(Command::ConsolidationRun { checkpoint }) => {
             let checkpoint = checked_checkpoint(checkpoint)?;
             crate::hook_run::detached_consolidation::run_consolidation(

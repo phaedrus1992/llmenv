@@ -358,6 +358,22 @@ mod tests {
         assert!(!writer_gone(Some(true), Some(false), false));
     }
 
+    /// The uid comparison itself (#3836). A second uid is not needed: `/` belongs to root on macOS
+    /// and Linux, so it is another user's folder for any caller that is not root.
+    #[test]
+    fn a_folder_of_another_uid_is_foreign_and_one_of_this_uid_is_not() {
+        let own = tempfile::tempdir().unwrap();
+        assert!(!owned_by_another_user(own.path()));
+        assert!(
+            !owned_by_another_user(&own.path().join("missing")),
+            "a folder that cannot be read is not foreign"
+        );
+        // A root caller owns `/`, so the foreign case cannot be built.
+        if !rustix::process::geteuid().is_root() {
+            assert!(owned_by_another_user(Path::new("/")));
+        }
+    }
+
     #[test]
     fn a_writer_decides_by_liveness_and_ignores_an_unknown_answer() {
         assert!(

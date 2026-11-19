@@ -75,7 +75,7 @@ use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use store_read::{UnreadablePolicy, read_tasks};
 
-mod store_read;
+pub mod store_read;
 
 /// Lifecycle state of a tracked task.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
@@ -225,8 +225,11 @@ pub fn load_task(state_dir: &Path, slug: &str) -> anyhow::Result<Task> {
     let path = task_path(state_dir, slug);
     let content = session::read_state_text(&path)
         .with_context(|| format!("cannot read task '{slug}' at {}", path.display()))?;
-    serde_json::from_str(&content)
-        .with_context(|| format!("task '{slug}' at {} is not valid task JSON", path.display()))
+    let task: Task = serde_json::from_str(&content)
+        .with_context(|| format!("task '{slug}' at {} is not valid task JSON", path.display()))?;
+    // A command that changes a task must not save over a file that the listing skips (#3882).
+    store_read::check_task_times(&task, &path)?;
+    Ok(task)
 }
 
 /// List all tasks in the store, tolerating a missing or unreadable store by
@@ -624,8 +627,8 @@ fn touch_task_session(state_dir: &Path, task: &Task) {
     if let Some(session_id) = &task.session
         && let Err(e) = session::touch_last_activity(state_dir, session_id)
     {
-        // error level, because the default log filter drops warnings. A session that cannot load
-        // is a real fault, even though the task change is already saved.
+        // A notice, because the engine drops hook stderr. A session that cannot load is a real
+        // fault, even though the task change is already saved.
         llmenv_util::agent_notice::record_logged(format!(
             "llmenv: the task change is saved, but the activity time of session {session_id} is \
              not, so the session can look idle: {e:#}. Fix: run `llmenv task session show`."

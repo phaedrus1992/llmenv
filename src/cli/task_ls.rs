@@ -49,7 +49,9 @@ fn ls_scoped(
     session: Option<&str>,
     current_project: bool,
 ) -> anyhow::Result<(Vec<Task>, Option<Vec<task::session::Session>>)> {
-    let mut tasks = task::try_list_tasks(state_dir)?;
+    let read = task::store_read::try_list_tasks_counted(state_dir)?;
+    report_skipped(&read);
+    let mut tasks = read.tasks;
     let mut sessions = None;
     if current_project {
         let project = current_project_tag()?;
@@ -61,6 +63,20 @@ fn ls_scoped(
         tasks.retain(|t| t.session.as_deref() == Some(session_id));
     }
     Ok((tasks, sessions))
+}
+
+/// Say on stderr that the list is shorter than the store. The notice of a skipped file reaches hook
+/// output only, so without this line a person sees a short list with no reason (#3883). The first
+/// problem holds text from the task file, so it is stripped of control characters.
+fn report_skipped(read: &task::store_read::ReadTasks) {
+    let Some((count, first)) = read.skipped() else {
+        return;
+    };
+    eprintln!(
+        "[llmenv] task ls: {count} item(s) of the task store could not be loaded, so they are not \
+         listed, whatever the filters. First: {}. Fix: repair or remove the file.",
+        super::style::sanitize_for_terminal(first)
+    );
 }
 
 fn ls_print(

@@ -10,6 +10,26 @@ fn engine_data_reads_the_session_id() {
 
 use super::usage::{UsageArgs, humanize_until, render_usage};
 use super::*;
+
+/// Write `lookup` as a cache entry with no kept PR.
+fn write_pr_cache(path: &Path, lookup: &PrLookup, now: i64) {
+    write_pr_entry(
+        path,
+        &PrCacheEntry {
+            ts: now,
+            pr: lookup.clone().unwrap_or_default(),
+            failure: lookup.as_ref().err().copied(),
+            good: None,
+        },
+    );
+}
+
+/// Read a still-fresh cache entry.
+fn read_pr_cache(path: &Path, now: i64) -> Option<PrLookup> {
+    read_pr_entry(path)
+        .filter(|entry| entry.is_fresh(now))
+        .map(|entry| entry.lookup())
+}
 use proptest::prelude::*;
 
 #[test]
@@ -530,7 +550,7 @@ fn branch_hyperlink_derives_pr_when_engine_sends_none() {
 
 #[test]
 fn resolve_pr_none_when_no_workspace_dir() {
-    assert_eq!(resolve_pr(&EngineData::default()), Ok(None));
+    assert_eq!(resolve_pr(&EngineData::default()), Ok((None, false)));
 }
 
 #[cfg(unix)]
@@ -650,8 +670,8 @@ fn parse_gh_pr_view_maps_fields_and_review_decision() {
     let json =
         br#"{"number":834,"url":"https://github.com/o/r/pull/834","reviewDecision":"APPROVED"}"#;
     assert_eq!(
-        parse_gh_pr_view(json),
-        Some(PrInfo {
+        parse_gh_pr_view(json).unwrap(),
+        (PrInfo {
             number: Some(834),
             url: Some("https://github.com/o/r/pull/834".to_string()),
             review_state: Some("approved".to_string()),
@@ -665,10 +685,10 @@ fn a_cached_failure_reads_back_as_a_failure_not_as_no_pr() {
     let path = cache_dir.path().join("pr-cache-x");
     write_pr_cache(&path, &Err(GhFailure::Unauthenticated), 1_000);
     assert_eq!(
-        read_pr_cache(&path, 1_010),
+        read_pr_cache(&path, 1_000 + PR_FAILURE_TTL_SECS - 1),
         Some(Err(GhFailure::Unauthenticated))
     );
-    assert_eq!(read_pr_cache(&path, 1_000 + PR_CACHE_TTL_SECS), None);
+    assert_eq!(read_pr_cache(&path, 1_000 + PR_FAILURE_TTL_SECS), None);
     // An entry from an older version has no failure field.
     std::fs::write(&path, r#"{"ts":1000,"pr":null}"#).unwrap();
     assert_eq!(read_pr_cache(&path, 1_010), Some(Ok(None)));
@@ -716,7 +736,7 @@ fn derive_pr_cache_hit_skips_gh() {
         1_030,
     );
     assert_eq!(
-        pr.clone().ok().flatten().and_then(|p| p.number),
+        pr.0.clone().ok().flatten().and_then(|p| p.number),
         Some(999),
         "must return the cached value, not gh's"
     );
@@ -756,7 +776,7 @@ fn derive_pr_cache_expiry_calls_gh_again() {
         now,
     );
     assert_eq!(
-        pr.clone().ok().flatten().and_then(|p| p.number),
+        pr.0.clone().ok().flatten().and_then(|p| p.number),
         Some(2),
         "expiry must re-query gh, not reuse the stale cache"
     );
@@ -1612,10 +1632,12 @@ proptest! {
         failure in prop::option::of(prop_oneof![
             Just(GhFailure::Missing),
             Just(GhFailure::Unauthenticated),
+            Just(GhFailure::TimedOut),
             Just(GhFailure::Failed),
         ]),
+        good in prop::option::of((any::<i64>(), arb_pr_info())),
     ) {
-        let entry = PrCacheEntry { ts, pr, failure };
+        let entry = PrCacheEntry { ts, pr, failure, good };
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: PrCacheEntry = serde_json::from_str(&json).unwrap();
         prop_assert_eq!(entry, parsed);

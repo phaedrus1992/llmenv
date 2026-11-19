@@ -53,7 +53,7 @@ pub(crate) mod recall_health;
 mod record_hash;
 mod relevance;
 pub(crate) mod repeat_detect;
-mod respawn;
+pub(crate) mod respawn;
 mod resume_cache;
 mod session_emit;
 mod session_ledger;
