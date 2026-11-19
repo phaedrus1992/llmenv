@@ -73,7 +73,10 @@ if ! command -v timeout >/dev/null; then
     exit "$SETUP_EXIT"
 fi
 
-budget=$((total - ($(date +%s) - job_start)))
+# The semgrep bash grammar cannot parse a command substitution inside arithmetic (#3845).
+now="$(date +%s)"
+elapsed=$((now - job_start))
+budget=$((total - elapsed))
 
 report_incomplete() {
     local message="$1"
