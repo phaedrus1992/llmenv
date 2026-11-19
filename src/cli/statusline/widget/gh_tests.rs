@@ -13,6 +13,35 @@ fn parse_gh_pr_view_refuses_a_missing_number_and_malformed_json() {
     assert!(parse_gh_pr_view(b"not json").is_err());
 }
 
+proptest::proptest! {
+    /// Whatever `gh` prints, the parse does not panic, and a PR it accepts has a number.
+    #[test]
+    fn gh_output_of_any_bytes_gives_a_pr_with_a_number_or_an_error(
+        bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..64),
+    ) {
+        if let Ok(info) = parse_gh_pr_view(&bytes) {
+            proptest::prop_assert!(info.number.is_some());
+        }
+    }
+
+    /// A number, a URL, and a review decision read back as the same PR.
+    #[test]
+    fn a_pr_that_gh_prints_reads_back(
+        number in proptest::prelude::any::<u64>(),
+        url in proptest::option::of("[a-z/:.]{0,20}"),
+        decision in proptest::option::of(proptest::prop_oneof![
+            "APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED", "[A-Z_]{0,12}",
+        ]),
+    ) {
+        let json = serde_json::json!({"number": number, "url": url, "reviewDecision": decision});
+        let info = parse_gh_pr_view(json.to_string().as_bytes()).unwrap();
+        proptest::prop_assert_eq!(info.number, Some(number));
+        proptest::prop_assert_eq!(info.url, url);
+        let state = decision.as_deref().and_then(map_review_decision).map(str::to_string);
+        proptest::prop_assert_eq!(info.review_state, state);
+    }
+}
+
 /// A shim that prints a banner on success is a failure, not "no PR", so it cannot clear a kept PR.
 #[cfg(unix)]
 #[test]
