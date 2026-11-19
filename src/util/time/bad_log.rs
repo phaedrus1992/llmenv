@@ -24,7 +24,7 @@ static REPORTED_WINNER: std::sync::Mutex<std::collections::BTreeSet<ReportKey>> 
 
 /// Insert a key into `set`, and return whether it was new. A poisoned lock still holds a valid
 /// set, so the dedupe keeps working after a panic elsewhere.
-fn insert_once(
+pub(super) fn insert_once(
     set: &std::sync::Mutex<std::collections::BTreeSet<ReportKey>>,
     source: &str,
     record: &str,
@@ -34,6 +34,12 @@ fn insert_once(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if guard.len() >= MAX_REPORTED {
+        // A reset lets a value log again. The line lets a reader see why a value repeats (#3863).
+        tracing::warn!(
+            max = MAX_REPORTED,
+            "the bad-timestamp dedupe set reached its cap and reset, so a repeated value may log \
+             again"
+        );
         guard.clear();
     }
     guard.insert((source.to_string(), record.to_string(), text.to_string()))
@@ -89,6 +95,50 @@ pub(crate) fn warn_if_bad_max_winner(source: &str, record: &str, text: &str, sha
             shared,
             "this record won the max with an unreadable timestamp, so the pick may be a tie. \
              Fix: rewrite the timestamp of this record as RFC 3339, such as 2026-01-01T00:00:00Z"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_REPORTED, insert_once};
+    use proptest::prelude::*;
+    use std::collections::BTreeSet;
+    use std::sync::Mutex;
+
+    proptest! {
+        // Below the cap, a key answers "new" exactly once, whatever the order of the keys.
+        #[test]
+        fn insert_once_answers_new_once_per_key_below_the_cap(
+            keys in proptest::collection::vec(("[ab]", "[xy]", "[0-9]{1,2}"), 1..40),
+        ) {
+            let set = Mutex::new(BTreeSet::new());
+            let mut seen = BTreeSet::new();
+            for (s, r, t) in &keys {
+                let expected = seen.insert((s.clone(), r.clone(), t.clone()));
+                prop_assert_eq!(insert_once(&set, s, r, t), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn the_reset_at_the_cap_makes_an_old_key_new_again_and_bounds_the_set() {
+        let set = Mutex::new(BTreeSet::new());
+        assert!(insert_once(&set, "s", "r", "first"));
+        for i in 0..MAX_REPORTED {
+            insert_once(&set, "s", "r", &format!("filler-{i}"));
+        }
+        let len = set
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len();
+        assert!(
+            len <= MAX_REPORTED,
+            "the set holds {len} keys, above the cap"
+        );
+        assert!(
+            insert_once(&set, "s", "r", "first"),
+            "the first key was cleared by the reset, so it is new again"
         );
     }
 }

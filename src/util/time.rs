@@ -111,7 +111,7 @@ pub(crate) fn parse_age(raw: &str) -> anyhow::Result<Duration> {
     reason = "a test fails loudly when its fixture is wrong"
 )]
 mod tests {
-    use super::bad_log::{MAX_REPORTED, first_report, winner_report};
+    use super::bad_log::{MAX_REPORTED, first_report, insert_once, winner_report};
     use super::*;
     use proptest::prelude::*;
 
@@ -140,23 +140,24 @@ mod tests {
             }
         }
 
-        // Each distinct (source, record, bad value) triple is reported once. The nonce keeps this
-        // test's values apart from any value another test reported first.
+        // Each distinct (source, record, bad value) triple is reported once. The set is local to
+        // the case, so another test cannot reset it between two inserts (#3812).
         #[test]
         fn first_report_is_true_once_per_distinct_source_record_and_text(
-            nonce in "[0-9a-f]{16}",
             triples in proptest::collection::vec(("(a|b)", "(r|s)", "[a-z]{1,4}"), 1..12),
         ) {
+            let set = std::sync::Mutex::new(std::collections::BTreeSet::new());
             let keys: Vec<(String, String, String)> = triples
                 .iter()
-                .map(|(s, r, t)| (
-                    format!("pbt-src-{s}-{nonce}"),
-                    format!("pbt-rec-{r}-{nonce}"),
-                    format!("pbt-3812-{nonce}-{t}"),
-                ))
+                .map(|(s, r, t)| {
+                    (format!("pbt-src-{s}"), format!("pbt-rec-{r}"), format!("pbt-3812-{t}"))
+                })
                 .collect();
             let distinct = keys.iter().collect::<std::collections::BTreeSet<_>>().len();
-            let firsts = keys.iter().filter(|(s, r, t)| first_report(s, r, t)).count();
+            let firsts = keys
+                .iter()
+                .filter(|(s, r, t)| insert_once(&set, s, r, t))
+                .count();
             prop_assert_eq!(firsts, distinct);
         }
     }
@@ -269,6 +270,11 @@ mod tests {
             proptest::prop_assert_eq!(
                 instant_or_log(&text, "test", "rec").is_some(),
                 parse_rfc3339(&text).is_ok()
+            );
+            // The read-time check and the sort-time parse must agree on every value.
+            proptest::prop_assert_eq!(
+                validate_stored(&text).is_ok(),
+                instant_or_log(&text, "test", "rec").is_some()
             );
         }
 
