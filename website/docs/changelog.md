@@ -212,6 +212,8 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 
 ### Fixed
 
+- Name the record in the bad-timestamp warning, so each record with an unreadable timestamp is named once. A warning for the winner of a `max` now says the pick may be a tie. [#3851]
+- List open sessions with an unreadable start time in a stable order with `llmenv task session ls`. [#3855]
 - Report a task that `llmenv task show --next` skips because of a missing parent, a parent loop, or a parent of another session, on stderr with its fix. [fix:task] [#3777]
 - Keep the `--other-session` audit note when a command crashes after its change: the note is journaled first, and the next `llmenv task` command writes it. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#task). [fix:task] [#3762]
 - Do not follow a link at the project `.claude` folder or at its settings files in the subscription-auth check, and do not follow a linked session log in the record count. A linked settings file now keeps the llmenv resume notice. See [configuration](https://phaedrus1992.github.io/llmenv/docs/configuration). [fix:hook] [#3785]
