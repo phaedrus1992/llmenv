@@ -9,9 +9,10 @@ use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::mcp::pid_state::is_running;
+use crate::mcp::pid_state::{PidState, pid_state};
 use crate::mcp::proxy::{log_path_for, open_proxy_log, read_pidfile};
 use crate::mcp::proxy_command::{command_of, is_proxy_command};
+use anyhow::Context as _;
 
 /// Which llmenv path started the proxy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +107,9 @@ pub(crate) enum StopOutcome {
     NoPidfile,
     /// The pid in the pidfile is not running.
     Gone,
+    /// The pid in the pidfile is a running process of another user. It is not this user's to
+    /// stop, so llmenv does not signal it (#3835).
+    OtherUser,
     /// The pid runs, but its command line is not the proxy. Carries that command line.
     NotProxy(String),
     /// The proxy took SIGTERM and exited.
@@ -114,12 +118,32 @@ pub(crate) enum StopOutcome {
     StillRunning,
 }
 
-/// The outcome of sending SIGTERM. EPERM means the pid was reused by another user's process after
-/// the liveness check, so the proxy is gone (#3810). `None` means the signal was sent.
-fn sigterm_result(sent: rustix::io::Result<()>, pid: u32) -> anyhow::Result<Option<StopOutcome>> {
+/// The outcome of sending SIGTERM. EPERM means the pid is not one that this user may signal. It
+/// is a process of another user, so the pid was reused after the liveness check (#3810), or it is
+/// gone. A process of this user that gives EPERM is a sandbox that blocks signals, and that fails
+/// loud, because the proxy still runs (#3835). `None` means the signal was sent.
+fn sigterm_result(
+    sent: rustix::io::Result<()>,
+    target: rustix::process::Pid,
+) -> anyhow::Result<Option<StopOutcome>> {
+    let pid = target.as_raw_nonzero();
     match sent {
         Ok(()) => Ok(None),
-        Err(rustix::io::Errno::PERM) => Ok(Some(StopOutcome::Gone)),
+        Err(rustix::io::Errno::PERM) => match pid_state(target).with_context(|| {
+            format!(
+                "the system refused SIGTERM (EPERM) for mcp-proxy (pid {pid}), and llmenv cannot \
+                 tell whose process it is. Fix: check that /bin/ps works, then run the restart \
+                 again"
+            )
+        })? {
+            PidState::Gone => Ok(Some(StopOutcome::Gone)),
+            PidState::OtherUser => Ok(Some(StopOutcome::OtherUser)),
+            PidState::Own => Err(anyhow::anyhow!(
+                "the system refused SIGTERM (EPERM) for mcp-proxy (pid {pid}), which is a process \
+                 of this user. A sandbox that blocks signals does this. Stop the proxy from \
+                 outside the sandbox."
+            )),
+        },
         Err(e) => Err(anyhow::anyhow!(
             "cannot send SIGTERM to mcp-proxy (pid {pid}): {e}"
         )),
@@ -142,8 +166,10 @@ pub(crate) fn stop_proxy(pid_path: &Path, wait: Duration) -> anyhow::Result<Stop
         .ok()
         .and_then(rustix::process::Pid::from_raw)
         .ok_or_else(|| anyhow::anyhow!("pid {pid} in {} is not a process", pid_path.display()))?;
-    if !is_running(target)? {
-        return Ok(StopOutcome::Gone);
+    match pid_state(target)? {
+        PidState::Gone => return Ok(StopOutcome::Gone),
+        PidState::OtherUser => return Ok(StopOutcome::OtherUser),
+        PidState::Own => {}
     }
     let Some(command) = command_of(pid)? else {
         return Ok(StopOutcome::Gone);
@@ -153,13 +179,20 @@ pub(crate) fn stop_proxy(pid_path: &Path, wait: Duration) -> anyhow::Result<Stop
     }
     if let Some(outcome) = sigterm_result(
         rustix::process::kill_process(target, rustix::process::Signal::TERM),
-        pid,
+        target,
     )? {
         return Ok(outcome);
     }
     let start = Instant::now();
     while start.elapsed() < wait {
-        if !is_running(target)? {
+        // A pid that another user holds now is a pid reused after the proxy exited.
+        let state = pid_state(target).with_context(|| {
+            format!(
+                "SIGTERM was sent to mcp-proxy (pid {pid}), and llmenv cannot tell whether it \
+                 stopped. Fix: check that /bin/ps works, then run the restart again"
+            )
+        })?;
+        if state != PidState::Own {
             return Ok(StopOutcome::Stopped);
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -171,18 +204,40 @@ pub(crate) fn stop_proxy(pid_path: &Path, wait: Duration) -> anyhow::Result<Stop
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
     use super::*;
+    use crate::mcp::pid_state::is_running;
     use crate::mcp::proxy::is_alive;
     use crate::mcp::proxy_command::ps_command;
     use proptest::prelude::*;
 
+    fn pid(raw: i32) -> rustix::process::Pid {
+        rustix::process::Pid::from_raw(raw).unwrap()
+    }
+
+    /// A pid that no process holds: it is above the pid limit of every system that we run on.
+    fn gone_pid() -> rustix::process::Pid {
+        pid(i32::MAX)
+    }
+
     #[test]
-    fn a_term_refused_with_eperm_means_the_proxy_is_gone() {
+    fn a_term_refused_with_eperm_is_settled_by_whose_process_it_is() {
+        let eperm = || Err(rustix::io::Errno::PERM);
         assert!(matches!(
-            sigterm_result(Err(rustix::io::Errno::PERM), 7),
+            sigterm_result(eperm(), gone_pid()),
             Ok(Some(StopOutcome::Gone))
         ));
-        assert!(matches!(sigterm_result(Ok(()), 7), Ok(None)));
-        assert!(sigterm_result(Err(rustix::io::Errno::INVAL), 7).is_err());
+        if !rustix::process::geteuid().is_root() {
+            // Pid 1 belongs to root, so the pid was reused by another user's process.
+            assert!(matches!(
+                sigterm_result(eperm(), pid(1)),
+                Ok(Some(StopOutcome::OtherUser))
+            ));
+        }
+        // This user's own process that refuses a signal is a sandbox, and it fails loud (#3835).
+        let own = pid(std::process::id().cast_signed());
+        let err = sigterm_result(eperm(), own).unwrap_err().to_string();
+        assert!(err.contains("sandbox"), "{err}");
+        assert!(matches!(sigterm_result(Ok(()), own), Ok(None)));
+        assert!(sigterm_result(Err(rustix::io::Errno::INVAL), own).is_err());
     }
 
     /// Pid 1 belongs to root. A process of another user is not running for this user, so the
@@ -213,6 +268,25 @@ mod tests {
         #[test]
         fn a_failed_ps_never_panics(code in 1i32..128, out in "\\PC{0,20}", err in "\\PC{0,20}") {
             let _ = ps_command(7, &ps_output(code, &out, &err));
+        }
+    }
+
+    proptest! {
+        /// A failed `ps` reads as a gone pid only for exit 1 with no output. Any exit code of 2
+        /// or more is an error, whatever `ps` printed (#2923).
+        #[test]
+        fn only_a_quiet_exit_1_reads_as_a_gone_pid(
+            code in 0i32..128,
+            out in "[ a-z]{0,4}",
+            err in "[a-z]{0,4}",
+        ) {
+            let read = ps_command(7, &ps_output(code, &out, &err));
+            if code >= 2 {
+                prop_assert!(read.is_err());
+            }
+            if code == 1 && (!out.trim().is_empty() || !err.is_empty()) {
+                prop_assert!(read.is_err());
+            }
         }
     }
 

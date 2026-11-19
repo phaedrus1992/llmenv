@@ -187,16 +187,16 @@ where
     // Check the holder before waiting on it. A lock whose holder is gone has
     // nothing to wait for, so reclaiming it immediately keeps a wedged lock from
     // costing the full budget on every prompt.
-    if let Some(holder) =
-        lock_holder(lock_path)?.filter(|pid| is_own_process_alive(*pid) != Some(false))
-    {
+    let judged = lock_holder(lock_path)?;
+    if let Some((holder, note)) = judged.and_then(|h| busy_holder_note(&h).map(|n| (h, n))) {
         if wait_for_port(bind, budget_ms) {
             reconcile_pidfile(pid_path);
             return Ok(EnsureOutcome::AlreadyRunning);
         }
         anyhow::bail!(
-            "another llmenv process (pid {holder}) holds {} but nothing is serving {bind} \
-             after {budget_ms}ms. Fix: if no llmenv process runs, remove the lock file",
+            "another llmenv process (pid {}) holds {} but nothing is serving {bind} \
+             after {budget_ms}ms.{note} Fix: if no llmenv process runs, remove the lock file",
+            holder.pid,
             lock_path.display()
         );
     }
@@ -206,6 +206,15 @@ where
     if probe_tcp(bind, LIVENESS_TCP_TIMEOUT_MS) {
         reconcile_pidfile(pid_path);
         return Ok(EnsureOutcome::AlreadyRunning);
+    }
+
+    // The judgement above can be seconds old, because `ps` and the port probe both take time.
+    // Only the lock that was judged is removed. A peer may have replaced it since.
+    if lock_holder(lock_path)? != judged {
+        anyhow::bail!(
+            "lost the race to reclaim stale proxy lockfile {}; the next export will retry",
+            lock_path.display()
+        );
     }
 
     // Recorded, not only logged: a lock whose pid cannot be read is a sign that something else
@@ -238,6 +247,23 @@ where
         "lost the race to reclaim stale proxy lockfile {}; the next export will retry",
         lock_path.display()
     )
+}
+
+/// `Some(note)` when the holder of the spawn lock still runs. The note is empty, unless the
+/// check for a reused pid could not run (#3795). A holder is gone when its pid is gone, when
+/// another user owns it, or when a newer process of this user has it.
+fn busy_holder_note(holder: &lockfile::LockHolder) -> Option<&'static str> {
+    if is_own_process_alive(holder.pid) == Some(false) {
+        return None;
+    }
+    match holder.pid_was_reused() {
+        Some(true) => None,
+        Some(false) => Some(""),
+        None => Some(
+            " llmenv could not read the start time of that process from ps, so it cannot tell \
+             the holder from a process that reused its pid.",
+        ),
+    }
 }
 
 /// Polls `bind` until something is serving it or `budget_ms` elapses.
@@ -1012,7 +1038,27 @@ pub fn is_alive(pid: u32) -> Option<bool> {
 /// not keep a stale lock or pidfile alive (#3782).
 #[must_use]
 pub(crate) fn is_own_process_alive(pid: u32) -> Option<bool> {
-    probe(pid).map(|p| p == Probe::Own)
+    #[cfg(unix)]
+    {
+        use crate::mcp::pid_state::{PidState, pid_state};
+        let pid = rustix::process::Pid::from_raw(i32::try_from(pid).ok()?)?;
+        // A process of this user that refuses a signal, such as under a sandbox, is still this
+        // user's, so the owner decides and not the signal check (#3835).
+        match pid_state(pid) {
+            Ok(state) => Some(state == PidState::Own),
+            Err(e) => {
+                crate::agent_notice::record_logged(format!(
+                    "llmenv: {e:#}. Fix: check that /bin/ps works."
+                ));
+                None
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        None
+    }
 }
 
 #[cfg(all(test, unix))]
