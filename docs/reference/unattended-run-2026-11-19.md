@@ -104,6 +104,36 @@ Dismissed, with the reason:
 
 Filed: #3909 and a comment on #3907.
 
+Second pass (after the first fixes, on the same six analyzers): P0 0, P1 1, P2 22, plus 7 from the silent-failure hunt.
+
+Fixed:
+
+- P1: property tests for `parse_session`, and for `last_activity_at`.
+- The lock reclaim notice now follows the removal. A lock that is gone is not a lost race.
+- `MUTANTS_KILL_AFTER=0` and an empty `JOB_START` are refused.
+- Notices of skipped task files strip control characters. The lock log does too.
+- The prune failure list is sorted. A pending link marker that is not a time is noticed.
+- A usage sample stamped in the future is rewritten.
+
+Filed:
+
+- #3910: a bad timestamp blocks the commands that could repair it.
+- #3911: the usage delta uses a sample of any age.
+- #3912: the recall health warning counts old failures as recent.
+- #3913: the consolidation spawn has no lock.
+- #3914: the index spawn has no lock.
+
+Dismissed, with the reason:
+
+- `read_job_payload`, the three `resolve_pr` layers, `lock_path` by hand:
+  one shared place, a test seam, and an append that `with_extension` would replace.
+- The legacy `kept()` fallback: it keeps a cache entry of v3.13 readable for one refresh, and it is three lines.
+- `ReadTasks` counts: the list of problems would grow with the number of bad files, and the count is bounded on purpose.
+- `digits` next to `number`: the length caps differ.
+- Two matches over the unknown ownership variants, and the ownership oracle test:
+  one gives the reason, one gives the note, and the oracle covers branch pairs that the examples do not.
+- `date` three times in the shard script: each site handles a failure in its own way.
+
 Semgrep did not finish two files: `src/cli/mod.rs` for the `rust` ruleset and `src/task/session.rs` for `apiiro-obfuscation-rust`.
 Both are time-outs. #3864 tracks the first. The scans of the sprint diffs had no finding.
 
