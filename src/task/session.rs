@@ -833,9 +833,9 @@ mod tests {
         assert_ne!(
             crate::util::time::cmp_instants(
                 &updated.last_activity,
-                &updated.id,
+                crate::util::time::RecordId(&updated.id),
                 &created.last_activity,
-                &created.id,
+                crate::util::time::RecordId(&created.id),
                 "session last_activity"
             ),
             std::cmp::Ordering::Less

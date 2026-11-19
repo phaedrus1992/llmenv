@@ -76,9 +76,9 @@ pub(crate) fn sort_listing(sessions: &mut [Session], project: &str) {
             .then_with(|| {
                 crate::util::time::cmp_instants(
                     &a.started_at,
-                    &a.id,
+                    crate::util::time::RecordId(&a.id),
                     &b.started_at,
-                    &b.id,
+                    crate::util::time::RecordId(&b.id),
                     "session started_at",
                 )
                 .then_with(|| a.id.cmp(&b.id))

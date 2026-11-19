@@ -205,7 +205,7 @@ mod tests {
                         .iter()
                         .map(|t| (t.updated_at.as_str(), t.slug.as_str()))
                         .max_by(|a, b| {
-                            crate::util::time::cmp_instants(a.0, a.1, b.0, b.1, "task updated_at")
+                            crate::util::time::cmp_instants(a.0, crate::util::time::RecordId(a.1), b.0, crate::util::time::RecordId(b.1), "task updated_at")
                         })
                         .map(|(updated_at, _)| updated_at);
                     proptest::prop_assert_eq!(

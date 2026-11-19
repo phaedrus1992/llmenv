@@ -3,6 +3,11 @@
 use super::parse_rfc3339;
 use std::time::SystemTime;
 
+/// The id of the record that holds a stored timestamp, such as a task slug or a session id. It is
+/// its own type, so a record id cannot take the place of the timestamp text (#3862).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RecordId<'a>(pub(crate) &'a str);
+
 /// One dedupe key: (source, record, text).
 type ReportKey = (String, String, String);
 
@@ -46,19 +51,23 @@ pub(super) fn insert_once(
 }
 
 /// Whether `text` held by `record` from `source` is new to the bad-timestamp log.
-pub(super) fn first_report(source: &str, record: &str, text: &str) -> bool {
-    insert_once(&REPORTED_BAD, source, record, text)
+pub(super) fn first_report(source: &'static str, record: RecordId<'_>, text: &str) -> bool {
+    insert_once(&REPORTED_BAD, source, record.0, text)
 }
 
 /// Whether the winner note for `text` held by `record` from `source` is new.
-pub(super) fn winner_report(source: &str, record: &str, text: &str) -> bool {
-    insert_once(&REPORTED_WINNER, source, record, text)
+pub(super) fn winner_report(source: &'static str, record: RecordId<'_>, text: &str) -> bool {
+    insert_once(&REPORTED_WINNER, source, record.0, text)
 }
 
 /// The instant of a stored timestamp. `source` names the record kind in the warning, such as
 /// `task created_at`, and `record` names the record, such as its slug. A value that does not
 /// parse is logged once per record, and gives `None`.
-pub(crate) fn instant_or_log(text: &str, source: &str, record: &str) -> Option<SystemTime> {
+pub(crate) fn instant_or_log(
+    text: &str,
+    source: &'static str,
+    record: RecordId<'_>,
+) -> Option<SystemTime> {
     match parse_rfc3339(text) {
         Ok(at) => Some(at),
         Err(e) => {
@@ -66,7 +75,7 @@ pub(crate) fn instant_or_log(text: &str, source: &str, record: &str) -> Option<S
                 tracing::warn!(
                     error = %e,
                     source,
-                    record,
+                    record = record.0,
                     value = text,
                     "a stored timestamp cannot be read. Fix: rewrite it as RFC 3339, \
                      such as 2026-01-01T00:00:00Z"
@@ -82,7 +91,12 @@ pub(crate) fn instant_or_log(text: &str, source: &str, record: &str) -> Option<S
 /// with the winner by instant. When it is above 1, the winner is a tie, not the newest record.
 /// Each record and value pair warns once per process, as `instant_or_log` does, because a status
 /// line re-renders this often.
-pub(crate) fn warn_if_bad_max_winner(source: &str, record: &str, text: &str, shared: usize) {
+pub(crate) fn warn_if_bad_max_winner(
+    source: &'static str,
+    record: RecordId<'_>,
+    text: &str,
+    shared: usize,
+) {
     let Err(e) = parse_rfc3339(text) else {
         return;
     };
@@ -90,7 +104,7 @@ pub(crate) fn warn_if_bad_max_winner(source: &str, record: &str, text: &str, sha
         tracing::warn!(
             error = %e,
             source,
-            record,
+            record = record.0,
             value = text,
             shared,
             "this record won the max with an unreadable timestamp, so the pick may be a tie. \

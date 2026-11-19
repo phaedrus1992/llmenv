@@ -10,9 +10,9 @@ pub(super) fn most_recently_updated<'a>(tasks: impl Iterator<Item = &'a Task>) -
     let winner = tasks.iter().copied().max_by(|a, b| {
         crate::util::time::cmp_instants(
             &a.updated_at,
-            &a.slug,
+            crate::util::time::RecordId(&a.slug),
             &b.updated_at,
-            &b.slug,
+            crate::util::time::RecordId(&b.slug),
             "task updated_at",
         )
     })?;
@@ -22,9 +22,9 @@ pub(super) fn most_recently_updated<'a>(tasks: impl Iterator<Item = &'a Task>) -
         .filter(|t| {
             crate::util::time::cmp_instants(
                 &t.updated_at,
-                &t.slug,
+                crate::util::time::RecordId(&t.slug),
                 &winner.updated_at,
-                &winner.slug,
+                crate::util::time::RecordId(&winner.slug),
                 "task updated_at",
             )
             .is_eq()
@@ -32,7 +32,7 @@ pub(super) fn most_recently_updated<'a>(tasks: impl Iterator<Item = &'a Task>) -
         .count();
     crate::util::time::warn_if_bad_max_winner(
         "task updated_at",
-        &winner.slug,
+        crate::util::time::RecordId(&winner.slug),
         &winner.updated_at,
         shared,
     );

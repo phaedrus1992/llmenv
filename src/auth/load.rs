@@ -71,9 +71,9 @@ pub(super) fn load_counted(adapter_root: &Path) -> anyhow::Result<Loaded> {
     entries.sort_by(|a, b| {
         crate::util::time::cmp_instants(
             &b.last_seen,
-            &b.uuid,
+            crate::util::time::RecordId(&b.uuid),
             &a.last_seen,
-            &a.uuid,
+            crate::util::time::RecordId(&a.uuid),
             "auth entry last_seen",
         )
     });

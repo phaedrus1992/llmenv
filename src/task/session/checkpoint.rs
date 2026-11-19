@@ -40,7 +40,7 @@ fn active_since(session: &Session, start: SystemTime) -> bool {
     let Some(at) = crate::util::time::instant_or_log(
         &session.last_activity,
         "session last_activity",
-        &session.id,
+        crate::util::time::RecordId(&session.id),
     ) else {
         // An unknown value reads as "not active". The refusal that follows is non-destructive, so
         // this default is the safe one. The notice names the cause, so the refusal is not
@@ -225,9 +225,11 @@ pub(super) fn resume(
 #[must_use]
 pub(crate) fn idle_display(last_activity: &str, session_id: &str) -> String {
     let now = std::time::SystemTime::now();
-    let Some(at) =
-        crate::util::time::instant_or_log(last_activity, "session last_activity", session_id)
-    else {
+    let Some(at) = crate::util::time::instant_or_log(
+        last_activity,
+        "session last_activity",
+        crate::util::time::RecordId(session_id),
+    ) else {
         // The listing has no other place for the cause, so the notice carries it (#3859).
         crate::agent_notice::record_logged(unreadable_last_activity(session_id));
         return "unknown: last_activity is unreadable".to_string();
@@ -356,7 +358,7 @@ mod tests {
         fn idle_display_shows_a_time_only_for_text_that_parses(text in "\\PC{0,40}") {
             let shown = idle_display(&text, "s1");
             if !shown.starts_with("unknown") {
-                prop_assert!(crate::util::time::instant_or_log(&text, "test", "s1").is_some());
+                prop_assert!(crate::util::time::instant_or_log(&text, "test", crate::util::time::RecordId("s1")).is_some());
             }
         }
     }

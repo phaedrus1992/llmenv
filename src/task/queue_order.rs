@@ -6,9 +6,9 @@ use super::Task;
 pub(crate) fn queue_order(a: &Task, b: &Task) -> std::cmp::Ordering {
     crate::util::time::cmp_instants(
         &a.created_at,
-        &a.slug,
+        crate::util::time::RecordId(&a.slug),
         &b.created_at,
-        &b.slug,
+        crate::util::time::RecordId(&b.slug),
         "task created_at",
     )
     .then_with(|| a.slug.cmp(&b.slug))
