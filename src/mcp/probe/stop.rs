@@ -6,6 +6,9 @@ pub(super) fn signal_group(pid: u32) -> std::io::Result<()> {
     let pid = i32::try_from(pid)
         .ok()
         .and_then(rustix::process::Pid::from_raw)
+        // A group of pid 1 would reach every process that this user may signal. A child that was
+        // just spawned cannot have pid 1, so this is a guard against a wrong id.
+        .filter(|p| p.as_raw_nonzero().get() > 1)
         .ok_or_else(|| std::io::Error::other(format!("pid {pid} is not a process")))?;
     rustix::process::kill_process_group(pid, rustix::process::Signal::TERM)
         .map_err(std::io::Error::from)

@@ -132,10 +132,18 @@ fn digits(word: &str) -> Option<u64> {
 /// 10 digits, such as one cut short, is dropped: the lock then has only its pid.
 fn parse_holder(text: &str) -> Option<LockHolder> {
     let mut words = text.split_whitespace();
-    let pid = u32::try_from(digits(words.next()?)?).ok()?;
-    let start = words
-        .next()
-        .and_then(|w| digits(w).filter(|_| w.len() == 10));
+    // A pid is a positive i32 for `kill(2)`. Any other number is not a pid of this lock.
+    let pid = u32::try_from(digits(words.next()?)?)
+        .ok()
+        .filter(|p| (1..=i32::MAX.cast_unsigned()).contains(p))?;
+    let second = words.next();
+    let start = second.and_then(|w| digits(w).filter(|_| w.len() == 10));
+    if second.is_some() && start.is_none() {
+        tracing::warn!(
+            lock = text,
+            "the spawn lock has a start time that is not an epoch time"
+        );
+    }
     words.next().is_none().then_some(LockHolder { pid, start })
 }
 
@@ -245,7 +253,7 @@ mod lock_notice_tests {
     proptest! {
         /// Any u32 written as decimal text reads back as the same pid.
         #[test]
-        fn any_pid_reads_back_unchanged(pid in any::<u32>()) {
+        fn any_pid_reads_back_unchanged(pid in 1..=i32::MAX.cast_unsigned()) {
             let dir = tempfile::tempdir().expect("test");
             let lock = dir.path().join("proxy.lock");
             std::fs::write(&lock, pid.to_string()).expect("test");
@@ -256,7 +264,7 @@ mod lock_notice_tests {
         /// A pid and a start time read back as written.
         #[test]
         fn a_pid_and_start_read_back_unchanged(
-            pid in any::<u32>(),
+            pid in 1..=i32::MAX.cast_unsigned(),
             start in 1_000_000_000u64..10_000_000_000,
         ) {
             let text = super::holder_text(pid, Some(start));
@@ -289,7 +297,7 @@ mod lock_notice_tests {
     /// A lock with a third word, or a start that is not a number, is not a lock of llmenv.
     #[test]
     fn a_malformed_lock_reads_as_no_holder() {
-        for text in ["", "12 3 4", "x 3", "-1", "+12", "1_2"] {
+        for text in ["", "12 3 4", "x 3", "-1", "+12", "1_2", "0", "2147483648"] {
             assert_eq!(parse_holder(text), None, "{text:?}");
         }
     }

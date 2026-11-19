@@ -144,8 +144,11 @@ fn sigterm_result(
                  outside the sandbox."
             )),
         },
+        // The proxy exited between the check and the signal.
+        Err(rustix::io::Errno::SRCH) => Ok(Some(StopOutcome::Gone)),
         Err(e) => Err(anyhow::anyhow!(
-            "cannot send SIGTERM to mcp-proxy (pid {pid}): {e}"
+            "cannot send SIGTERM to mcp-proxy (pid {pid}): {e}. Fix: stop the proxy by hand, \
+             then run the restart again"
         )),
     }
 }
@@ -166,7 +169,9 @@ pub(crate) fn stop_proxy(pid_path: &Path, wait: Duration) -> anyhow::Result<Stop
         .ok()
         .and_then(rustix::process::Pid::from_raw)
         .ok_or_else(|| anyhow::anyhow!("pid {pid} in {} is not a process", pid_path.display()))?;
-    match pid_state(target)? {
+    let state = pid_state(target)
+        .with_context(|| format!("cannot tell whether pid {pid} in the pidfile is the proxy"))?;
+    match state {
         PidState::Gone => return Ok(StopOutcome::Gone),
         PidState::OtherUser => return Ok(StopOutcome::OtherUser),
         PidState::Own => {}
@@ -204,9 +209,8 @@ pub(crate) fn stop_proxy(pid_path: &Path, wait: Duration) -> anyhow::Result<Stop
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
     use super::*;
-    use crate::mcp::pid_state::is_running;
     use crate::mcp::proxy::is_alive;
-    use crate::mcp::proxy_command::ps_command;
+    use crate::util::proc_start::ps_field;
     use proptest::prelude::*;
 
     fn pid(raw: i32) -> rustix::process::Pid {
@@ -238,6 +242,11 @@ mod tests {
         assert!(err.contains("sandbox"), "{err}");
         assert!(matches!(sigterm_result(Ok(()), own), Ok(None)));
         assert!(sigterm_result(Err(rustix::io::Errno::INVAL), own).is_err());
+        // A proxy that exits between the check and the signal is gone, not an error.
+        assert!(matches!(
+            sigterm_result(Err(rustix::io::Errno::SRCH), own),
+            Ok(Some(StopOutcome::Gone))
+        ));
     }
 
     /// Pid 1 belongs to root. A process of another user is not running for this user, so the
@@ -245,7 +254,7 @@ mod tests {
     #[test]
     fn a_process_of_another_user_is_not_running_for_this_user() {
         let pid = rustix::process::Pid::from_raw(1).unwrap();
-        assert!(!is_running(pid).unwrap());
+        assert_ne!(pid_state(pid).unwrap(), PidState::Own);
     }
 
     fn ps_output(code: i32, stdout: &str, stderr: &str) -> std::process::Output {
@@ -260,14 +269,14 @@ mod tests {
     proptest! {
         #[test]
         fn a_successful_ps_gives_its_trimmed_output(out in "\\PC{0,40}", err in "\\PC{0,20}") {
-            let read = ps_command(7, &ps_output(0, &out, &err)).unwrap();
+            let read = ps_field(7, &ps_output(0, &out, &err), "command").unwrap();
             let trimmed = out.trim();
             prop_assert_eq!(read, (!trimmed.is_empty()).then(|| trimmed.to_string()));
         }
 
         #[test]
         fn a_failed_ps_never_panics(code in 1i32..128, out in "\\PC{0,20}", err in "\\PC{0,20}") {
-            let _ = ps_command(7, &ps_output(code, &out, &err));
+            let _ = ps_field(7, &ps_output(code, &out, &err), "command");
         }
     }
 
@@ -280,7 +289,7 @@ mod tests {
             out in "[ a-z]{0,4}",
             err in "[a-z]{0,4}",
         ) {
-            let read = ps_command(7, &ps_output(code, &out, &err));
+            let read = ps_field(7, &ps_output(code, &out, &err), "command");
             if code >= 2 {
                 prop_assert!(read.is_err());
             }
@@ -293,13 +302,13 @@ mod tests {
     #[test]
     fn a_ps_failure_is_an_error_and_not_a_gone_pid() {
         assert_eq!(
-            ps_command(7, &ps_output(0, "icm serve\n", "")).unwrap(),
+            ps_field(7, &ps_output(0, "icm serve\n", ""), "command").unwrap(),
             Some("icm serve".to_string())
         );
-        assert_eq!(ps_command(7, &ps_output(1, "", "")).unwrap(), None);
-        let err = ps_command(7, &ps_output(1, "", "ps: bad option")).unwrap_err();
+        assert_eq!(ps_field(7, &ps_output(1, "", ""), "command").unwrap(), None);
+        let err = ps_field(7, &ps_output(1, "", "ps: bad option"), "command").unwrap_err();
         assert!(format!("{err:#}").contains("bad option"), "{err:#}");
-        assert!(ps_command(7, &ps_output(2, "", "")).is_err());
+        assert!(ps_field(7, &ps_output(2, "", ""), "command").is_err());
     }
 
     fn spawner() -> Spawner {

@@ -39,12 +39,6 @@ fn parse_uid(pid: u32, text: &str) -> anyhow::Result<u32> {
     })
 }
 
-/// [`ps_field`] for the command of a process, as the tests of the proxy stop read it.
-#[cfg(test)]
-pub(crate) fn ps_command(pid: u32, out: &std::process::Output) -> anyhow::Result<Option<String>> {
-    crate::util::proc_start::ps_field(pid, out, "command")
-}
-
 #[cfg(test)]
 mod uid_tests {
     use super::parse_uid;

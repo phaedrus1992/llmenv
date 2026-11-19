@@ -29,7 +29,8 @@ pub(crate) fn pid_state(pid: rustix::process::Pid) -> anyhow::Result<PidState> {
         Err(rustix::io::Errno::SRCH) => Ok(PidState::Gone),
         Err(rustix::io::Errno::PERM) => owner_state(pid.as_raw_nonzero().get().cast_unsigned()),
         Err(e) => Err(anyhow::anyhow!(
-            "cannot check pid {}: {e}",
+            "cannot check pid {}: {e}. Fix: check that this process may signal its own user's \
+             processes",
             pid.as_raw_nonzero()
         )),
     }
@@ -37,8 +38,9 @@ pub(crate) fn pid_state(pid: rustix::process::Pid) -> anyhow::Result<PidState> {
 
 /// Settle a pid that gave EPERM by the uid of its owner.
 fn owner_state(pid: u32) -> anyhow::Result<PidState> {
-    let uid = crate::mcp::proxy_command::uid_of(pid)
-        .with_context(|| format!("pid {pid} gave EPERM, and its owner cannot be read"))?;
+    let uid = crate::mcp::proxy_command::uid_of(pid).with_context(|| {
+        format!("pid {pid} gave EPERM, and its owner cannot be read. Fix: check that /bin/ps works")
+    })?;
     Ok(state_for_owner(uid, rustix::process::geteuid().as_raw()))
 }
 
@@ -50,13 +52,6 @@ fn state_for_owner(owner: Option<u32>, own: u32) -> PidState {
         Some(uid) if uid == own => PidState::Own,
         Some(_) => PidState::OtherUser,
     }
-}
-
-/// Whether `pid` is a running process of this user. A process of another user is not running for
-/// this user (#3810).
-#[cfg(test)]
-pub(crate) fn is_running(pid: rustix::process::Pid) -> anyhow::Result<bool> {
-    Ok(pid_state(pid)? == PidState::Own)
 }
 
 #[cfg(test)]

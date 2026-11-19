@@ -396,7 +396,8 @@ mod tests {
             .unwrap();
         // The probe killed the process, so it must not be running for this user.
         let target = rustix::process::Pid::from_raw(pid).unwrap();
-        let alive = crate::mcp::pid_state::is_running(target).unwrap();
+        let alive = crate::mcp::pid_state::pid_state(target).unwrap()
+            == crate::mcp::pid_state::PidState::Own;
         assert!(!alive, "the probe left process {pid} running");
     }
 
@@ -421,7 +422,7 @@ mod tests {
 
     fn alive(pid: &str) -> bool {
         let target = rustix::process::Pid::from_raw(pid.parse().unwrap()).unwrap();
-        crate::mcp::pid_state::is_running(target).unwrap()
+        crate::mcp::pid_state::pid_state(target).unwrap() == crate::mcp::pid_state::PidState::Own
     }
 
     #[tokio::test]
