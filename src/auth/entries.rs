@@ -26,30 +26,9 @@ pub(crate) struct Inheritance {
 /// cache file is unusable.
 pub(crate) fn choose_auth_for_inheritance(adapter_root: &Path) -> anyhow::Result<Inheritance> {
     let loaded = load_counted(adapter_root)?;
+    // `load_counted` drops every entry whose last_seen does not parse, so the winner always has
+    // a readable instant and no tie among bad values can reach this point (#3857).
     let entry = loaded.entries.first().cloned();
-    if let Some(best) = &entry {
-        // Ties by instant, not by text: a bad value sorts equal to every other bad value.
-        let shared = loaded
-            .entries
-            .iter()
-            .filter(|e| {
-                crate::util::time::cmp_instants(
-                    &e.last_seen,
-                    &e.uuid,
-                    &best.last_seen,
-                    &best.uuid,
-                    "auth entry last_seen",
-                )
-                .is_eq()
-            })
-            .count();
-        llmenv_util::time::warn_if_bad_max_winner(
-            "auth entry last_seen",
-            &best.uuid,
-            &best.last_seen,
-            shared,
-        );
-    }
     for other in loaded.entries.iter().skip(1) {
         tracing::debug!(
             "auth cache: also have {} ({}); use `llmenv login` to switch",
@@ -189,12 +168,44 @@ mod tests {
             for (index, stamp) in (0u32..).zip(stamps.iter()) {
                 save_auth_entry(tmp.path(), &entry_with(index, "p@test.com", stamp)).unwrap();
             }
-            let chosen = choose_auth_for_inheritance(tmp.path()).unwrap();
+            let chosen = choose_auth_for_inheritance(tmp.path());
             let newest = stamps.iter().filter_map(|s| s.parse::<Timestamp>().ok()).max();
-            if let Some(newest) = newest {
-                let chosen_at = chosen.entry.unwrap().last_seen.parse::<Timestamp>().ok();
-                prop_assert_eq!(chosen_at, Some(newest));
+            match newest {
+                Some(newest) => {
+                    let entry = chosen.unwrap().entry.unwrap();
+                    let chosen_at = entry.last_seen.parse::<Timestamp>().ok();
+                    prop_assert_eq!(chosen_at, Some(newest));
+                }
+                // No stamp parses, so no entry can be ordered, and none may be inherited (#3857).
+                None => prop_assert!(
+                    chosen.is_err(),
+                    "an entry with no readable last_seen was chosen"
+                ),
             }
         }
+    }
+
+    #[test]
+    fn an_unreadable_last_seen_is_skipped_and_the_readable_entry_is_inherited() {
+        let tmp = tempfile::tempdir().unwrap();
+        save_auth_entry(
+            tmp.path(),
+            &entry_with(1, "good@test.com", "2025-01-01T00:00:00Z"),
+        )
+        .unwrap();
+        save_auth_entry(tmp.path(), &entry_with(2, "bad@test.com", "yesterday")).unwrap();
+        let chosen = choose_auth_for_inheritance(tmp.path()).unwrap();
+        assert_eq!(chosen.entry.unwrap().email, "good@test.com");
+        assert_eq!(chosen.skipped, 1);
+        assert!(chosen.first_problem.unwrap().contains("last_seen"));
+    }
+
+    #[test]
+    fn a_cache_whose_last_seen_values_all_fail_to_parse_inherits_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        save_auth_entry(tmp.path(), &entry_with(1, "a@test.com", "yesterday")).unwrap();
+        save_auth_entry(tmp.path(), &entry_with(2, "b@test.com", "last week")).unwrap();
+        let err = choose_auth_for_inheritance(tmp.path()).err().unwrap();
+        assert!(format!("{err:#}").contains("unreadable"), "{err:#}");
     }
 }

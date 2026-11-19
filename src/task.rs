@@ -19,8 +19,8 @@ pub mod core_text {
 
 pub mod ownership {
     pub use llmenv_task::ownership::{
-        Caller, OverrideNote, SessionOverride, caller_for_pick, caller_session, check_names,
-        check_owner_less_delete, check_takes_tasks, ensure_named_session_takes_tasks,
+        Caller, OverrideNote, SessionOverride, caller_for_pick, caller_reason, caller_session,
+        check_names, check_owner_less_delete, check_takes_tasks, ensure_named_session_takes_tasks,
         ensure_session_is_callers, ensure_session_is_ours, ensure_task_is_ours,
         ensure_tasks_are_ours, read_for_check, record_cleared_override, record_owner_less_delete,
     };
