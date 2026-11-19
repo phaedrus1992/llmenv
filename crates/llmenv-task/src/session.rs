@@ -163,7 +163,8 @@ impl PickError {
 }
 
 /// Pick the session an id-less command means: the only open one, else the
-/// only open one that `owner`'s conversation started or resumed (#2365).
+/// only open one that `owner` started or resumed (#2365). A session that the engine process of
+/// `owner` started before a `/clear` counts, as it does for the checkpoint (#3905).
 ///
 /// # Errors
 /// [`PickError::NoneOpen`] when `open` is empty. [`PickError::Ambiguous`]
@@ -178,12 +179,19 @@ pub fn pick_open_session(
         _ => {}
     }
     let count = open.len();
-    let mut owned: Vec<Session> = open
+    // A session of this conversation beats one that only the engine process ties to the caller. A
+    // new conversation after a `/clear` then gets the session that it started (#3905).
+    let (by_conversation, rest): (Vec<Session>, Vec<Session>) = open
         .into_iter()
-        .filter(|s| {
-            owner.session_id.is_some() && s.owner_session.as_deref() == owner.session_id.as_deref()
-        })
-        .collect();
+        .partition(|s| is_callers_conversation(s, owner));
+    let start = std::cell::OnceCell::new();
+    let mut owned: Vec<Session> = if by_conversation.is_empty() {
+        rest.into_iter()
+            .filter(|s| is_callers_session(s, owner, &start))
+            .collect()
+    } else {
+        by_conversation
+    };
     if owned.len() == 1 {
         return Ok(owned.remove(0));
     }
@@ -233,6 +241,12 @@ impl Session {
     pub fn owner_session(&self) -> Option<&str> {
         self.owner_session.as_deref()
     }
+
+    /// The engine process that owns this session, if one is recorded.
+    #[must_use]
+    pub fn owner_pid(&self) -> Option<u32> {
+        self.owner_pid
+    }
 }
 
 /// How `session start` should resolve an existing same-project session.
@@ -275,6 +289,7 @@ mod abandon;
 mod resume_write;
 use abandon::{abandon_failed, abandon_session};
 use checkpoint::{checkpoint_error, only_own_session, resume};
+pub(crate) use checkpoint::{is_callers_conversation, is_callers_session};
 pub(crate) use context_reminder::missing_context_reminders;
 pub use finish::{FinishOutcome, finish_session};
 use llmenv_util::proc_start::process_start;

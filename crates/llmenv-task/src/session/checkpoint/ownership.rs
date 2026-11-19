@@ -5,6 +5,7 @@
 use std::time::SystemTime;
 
 use crate::session::{EngineIdentity, Session};
+use llmenv_util::proc_start::process_start;
 use llmenv_util::time::RecordId;
 
 /// How the caller owns a listed session.
@@ -81,6 +82,41 @@ fn unreadable_last_activity(session_id: &str) -> String {
         "session {session_id} has an unreadable last_activity, so it is not known to be active. \
          Fix: rewrite it as RFC 3339, such as 2026-01-01T00:00:00Z"
     )
+}
+
+/// Whether the caller started or resumed `session`, for the pick and the write guards (#3905). It
+/// is the rule of the checkpoint: the conversation id matches, or the engine process id matches and
+/// the session was active after that process started, so a session that the caller started before a
+/// `/clear` or a compaction still counts. A result of "cannot tell" is not ownership, because a
+/// guard must not widen on a guess. `engine_start` is read once, and only when it decides.
+///
+/// A caller with no conversation id is never the owner here, so the refusal of #3480 holds: a
+/// stale or inherited process id alone does not open a session to a write. The same engine process
+/// id can be reused after its process exits. The check that the session was active after the engine
+/// started narrows that, and #3922 tracks the stronger check.
+pub fn is_callers_session(
+    session: &Session,
+    owner: &EngineIdentity,
+    engine_start: &std::cell::OnceCell<Option<SystemTime>>,
+) -> bool {
+    if owner.session_id.is_none() {
+        return false;
+    }
+    match ownership(session, owner, None) {
+        Ownership::Conversation => true,
+        Ownership::UnknownEngineStart => {
+            let start = *engine_start.get_or_init(|| owner.pid.and_then(process_start));
+            ownership(session, owner, start).is_callers()
+        }
+        _ => false,
+    }
+}
+
+/// Whether the conversation id of the caller started `session`. The pick prefers such a session to
+/// one that only the engine process ties to the caller, so a new conversation after a `/clear`
+/// gets the session that it started, not an ambiguity (#3905).
+pub fn is_callers_conversation(session: &Session, owner: &EngineIdentity) -> bool {
+    ownership(session, owner, None) == Ownership::Conversation
 }
 
 pub(super) fn ownership(
