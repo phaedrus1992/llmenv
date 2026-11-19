@@ -5,7 +5,7 @@ use jiff::{SignedDuration, Span, SpanRelativeTo, SpanRound, Timestamp, Unit, fmt
 use std::time::{Duration, SystemTime};
 
 mod bad_log;
-pub(crate) use bad_log::{instant_or_log, warn_if_bad_max_winner};
+pub(crate) use bad_log::{RecordId, instant_or_log, validate_stored_field, warn_if_bad_max_winner};
 
 /// The format of a stored timestamp. It always has 9 fractional digits, so the text of two
 /// timestamps sorts in time order.
@@ -48,10 +48,10 @@ pub(crate) fn validate_stored(text: &str) -> anyhow::Result<()> {
 #[must_use]
 pub(crate) fn cmp_instants(
     a: &str,
-    a_record: &str,
+    a_record: RecordId<'_>,
     b: &str,
-    b_record: &str,
-    source: &str,
+    b_record: RecordId<'_>,
+    source: &'static str,
 ) -> std::cmp::Ordering {
     instant_or_log(a, source, a_record).cmp(&instant_or_log(b, source, b_record))
 }
@@ -130,13 +130,13 @@ mod tests {
         #[test]
         fn cmp_instants_is_a_total_preorder(a in stored_text(), b in stored_text(), c in stored_text()) {
             prop_assert_eq!(
-                cmp_instants(&a, "ra", &b, "rb", "test"),
-                cmp_instants(&b, "rb", &a, "ra", "test").reverse()
+                cmp_instants(&a, RecordId("ra"), &b, RecordId("rb"), "test"),
+                cmp_instants(&b, RecordId("rb"), &a, RecordId("ra"), "test").reverse()
             );
-            if cmp_instants(&a, "ra", &b, "rb", "test").is_le()
-                && cmp_instants(&b, "rb", &c, "rc", "test").is_le()
+            if cmp_instants(&a, RecordId("ra"), &b, RecordId("rb"), "test").is_le()
+                && cmp_instants(&b, RecordId("rb"), &c, RecordId("rc"), "test").is_le()
             {
-                prop_assert!(cmp_instants(&a, "ra", &c, "rc", "test").is_le());
+                prop_assert!(cmp_instants(&a, RecordId("ra"), &c, RecordId("rc"), "test").is_le());
             }
         }
 
@@ -166,11 +166,11 @@ mod tests {
     fn a_bad_value_is_reported_once_per_process() {
         let bad = "not-a-time-3812-unique";
         assert!(
-            first_report("test-3812", "rec", bad),
+            first_report("test-3812", RecordId("rec"), bad),
             "the first report of a bad value is logged"
         );
         assert!(
-            !first_report("test-3812", "rec", bad),
+            !first_report("test-3812", RecordId("rec"), bad),
             "a repeat of the same bad value is not logged again"
         );
     }
@@ -179,16 +179,19 @@ mod tests {
     fn the_winner_note_and_the_parse_warning_each_log_once_per_record() {
         let bad = "not-a-time-3863-unique";
         assert!(
-            first_report("test-3863", "rec", bad),
+            first_report("test-3863", RecordId("rec"), bad),
             "parse warning is new"
         );
-        assert!(winner_report("test-3863", "rec", bad), "winner note is new");
         assert!(
-            !first_report("test-3863", "rec", bad),
+            winner_report("test-3863", RecordId("rec"), bad),
+            "winner note is new"
+        );
+        assert!(
+            !first_report("test-3863", RecordId("rec"), bad),
             "parse warning repeats"
         );
         assert!(
-            !winner_report("test-3863", "rec", bad),
+            !winner_report("test-3863", RecordId("rec"), bad),
             "winner note repeats"
         );
     }
@@ -197,17 +200,13 @@ mod tests {
     fn the_dedupe_set_resets_past_its_cap_so_an_evicted_value_logs_again() {
         // The first key is cleared by a reset, because every insert after it pushes the set past
         // the cap. So the reset has to run before the last insert, whatever other tests add.
-        let first = (
-            "test-3863-cap".to_string(),
-            "r".to_string(),
-            "first".to_string(),
-        );
-        assert!(first_report(&first.0, &first.1, &first.2));
+        let first = ("test-3863-cap", "r", "first");
+        assert!(first_report(first.0, RecordId(first.1), first.2));
         for i in 0..=MAX_REPORTED {
-            first_report("test-3863-cap", "r", &format!("filler-{i}"));
+            first_report("test-3863-cap", RecordId("r"), &format!("filler-{i}"));
         }
         assert!(
-            first_report(&first.0, &first.1, &first.2),
+            first_report(first.0, RecordId(first.1), first.2),
             "the key was evicted, so it logs again"
         );
     }
@@ -216,18 +215,18 @@ mod tests {
     fn a_bad_value_is_reported_once_per_source() {
         // The same bad text in another record kind is a new report, so its source is named too.
         let bad = "not-a-time-3834-unique";
-        assert!(first_report("task created_at", "rec", bad));
-        assert!(first_report("session started_at", "rec", bad));
-        assert!(!first_report("task created_at", "rec", bad));
+        assert!(first_report("task created_at", RecordId("rec"), bad));
+        assert!(first_report("session started_at", RecordId("rec"), bad));
+        assert!(!first_report("task created_at", RecordId("rec"), bad));
     }
 
     #[test]
     fn a_bad_value_is_reported_once_per_record() {
         // The same bad text in two records of one kind names each record once (#3851).
         let bad = "not-a-time-3851-unique";
-        assert!(first_report("task created_at", "slug-one", bad));
-        assert!(first_report("task created_at", "slug-two", bad));
-        assert!(!first_report("task created_at", "slug-one", bad));
+        assert!(first_report("task created_at", RecordId("slug-one"), bad));
+        assert!(first_report("task created_at", RecordId("slug-two"), bad));
+        assert!(!first_report("task created_at", RecordId("slug-one"), bad));
     }
 
     #[test]
@@ -236,11 +235,11 @@ mod tests {
         let whole = "2026-01-01T00:00:01Z";
         let half = "2026-01-01T00:00:01.500000000Z";
         assert_eq!(
-            cmp_instants(whole, "a", half, "b", "test"),
+            cmp_instants(whole, RecordId("a"), half, RecordId("b"), "test"),
             std::cmp::Ordering::Less
         );
         assert_eq!(
-            cmp_instants(half, "b", whole, "a", "test"),
+            cmp_instants(half, RecordId("b"), whole, RecordId("a"), "test"),
             std::cmp::Ordering::Greater
         );
     }
@@ -249,15 +248,15 @@ mod tests {
     fn cmp_instants_sorts_an_unparseable_value_first() {
         let good = "2026-01-01T00:00:00Z";
         assert_eq!(
-            cmp_instants("garbage", "a", good, "b", "test"),
+            cmp_instants("garbage", RecordId("a"), good, RecordId("b"), "test"),
             std::cmp::Ordering::Less
         );
         assert_eq!(
-            cmp_instants(good, "b", "garbage", "a", "test"),
+            cmp_instants(good, RecordId("b"), "garbage", RecordId("a"), "test"),
             std::cmp::Ordering::Greater
         );
         assert_eq!(
-            cmp_instants("garbage", "a", "other", "b", "test"),
+            cmp_instants("garbage", RecordId("a"), "other", RecordId("b"), "test"),
             std::cmp::Ordering::Equal
         );
     }
@@ -268,13 +267,13 @@ mod tests {
         #[test]
         fn instant_or_log_is_some_exactly_when_the_text_parses(text in "\\PC{0,40}") {
             proptest::prop_assert_eq!(
-                instant_or_log(&text, "test", "rec").is_some(),
+                instant_or_log(&text, "test", RecordId("rec")).is_some(),
                 parse_rfc3339(&text).is_ok()
             );
             // The read-time check and the sort-time parse must agree on every value.
             proptest::prop_assert_eq!(
                 validate_stored(&text).is_ok(),
-                instant_or_log(&text, "test", "rec").is_some()
+                instant_or_log(&text, "test", RecordId("rec")).is_some()
             );
         }
 
@@ -293,7 +292,7 @@ mod tests {
             let a = Timestamp::new(secs, a_nanos / unit * unit).expect("in range");
             let b = Timestamp::new(secs, b_nanos).expect("in range");
             proptest::prop_assert_eq!(
-                cmp_instants(&a.to_string(), "a", &format_nanos(b), "b", "test"),
+                cmp_instants(&a.to_string(), RecordId("a"), &format_nanos(b), RecordId("b"), "test"),
                 a.cmp(&b)
             );
         }

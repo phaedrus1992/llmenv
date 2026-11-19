@@ -1,6 +1,7 @@
 //! Picks the most recently updated task from a set.
 
 use crate::task::Task;
+use crate::util::time::RecordId;
 
 /// The most recently updated of `tasks`, by the instant of `updated_at` (see `cmp_instants`, not
 /// text order, #3796). Ties resolve to `max_by`'s last-element-wins rule. Callers that need a
@@ -10,9 +11,9 @@ pub(super) fn most_recently_updated<'a>(tasks: impl Iterator<Item = &'a Task>) -
     let winner = tasks.iter().copied().max_by(|a, b| {
         crate::util::time::cmp_instants(
             &a.updated_at,
-            &a.slug,
+            RecordId(&a.slug),
             &b.updated_at,
-            &b.slug,
+            RecordId(&b.slug),
             "task updated_at",
         )
     })?;
@@ -22,9 +23,9 @@ pub(super) fn most_recently_updated<'a>(tasks: impl Iterator<Item = &'a Task>) -
         .filter(|t| {
             crate::util::time::cmp_instants(
                 &t.updated_at,
-                &t.slug,
+                RecordId(&t.slug),
                 &winner.updated_at,
-                &winner.slug,
+                RecordId(&winner.slug),
                 "task updated_at",
             )
             .is_eq()
@@ -32,7 +33,7 @@ pub(super) fn most_recently_updated<'a>(tasks: impl Iterator<Item = &'a Task>) -
         .count();
     crate::util::time::warn_if_bad_max_winner(
         "task updated_at",
-        &winner.slug,
+        RecordId(&winner.slug),
         &winner.updated_at,
         shared,
     );

@@ -656,6 +656,9 @@ Only when the open session has no match does the search cover the whole project.
   (`open`/`wip`/`waiting`/`done`), and annotates blocked tasks with their
   `blocked_on` refs; color follows TTY / `NO_COLOR` / `CLICOLOR_FORCE`.
   `--format json` is the stable machine format.
+  (added in v3.14.0) When `task ls` skips a task file that it cannot read, it prints the count
+  and the first cause on stderr, so a short list has a stated reason. Stdout does not change.
+  A task file whose `created_at` or `updated_at` is not RFC 3339 is skipped the same way.
   `--state <open|wip|waiting|done>` (repeatable) keeps only those states; `--hide-done`
   (alias `--active`) drops completed tasks; `--current-project` (added in
   v3.8.0) further narrows to tasks whose session is tagged to the current
@@ -747,7 +750,8 @@ project's hook.
     (changed in v3.14.0) A session that another conversation started is refused, and
     nothing is changed. Repeat `--other-session <id>` with that session's id to abandon it
     anyway. A session with no owner, and your own sessions, need no flag. `--resume` stays
-    open to any conversation.
+    open to any conversation. The `--replace` text of the checkpoint error carries the
+    `--other-session` flags that the refusal needs.
   - `--new` — create a new session anyway, leaving the existing one(s) open
     — true concurrency for two windows genuinely working in parallel.
 
@@ -768,6 +772,10 @@ project's hook.
   The error stays when two or more listed sessions are yours, or when none is.
   A process id can be reused, so a session that only the engine process ties to you counts for this resume only when
   it was active after that process started.
+  (added in v3.14.0) When llmenv cannot read the start time of the engine process from `ps`, it cannot
+  tell if such a session is yours. The checkpoint marks it "may be yours", and the `--replace` refusal marks it
+  "cannot tell if it is yours". The cause of the `ps` failure shows as a notice.
+  A session file whose `started_at` is not RFC 3339 fails the session read, and the error names the file and the fix.
   Outside an engine (no such variables) nothing is recorded, and resolution
   works as before.
   (changed in v3.12.0) A session id must be a plain name.

@@ -227,7 +227,10 @@ mod writer_ownership {
     }
 
     fn task_count(dir: &Path) -> usize {
-        try_list_tasks(dir).expect("list tasks").len()
+        crate::task::store_read::try_list_tasks_counted(dir)
+            .expect("list tasks")
+            .tasks
+            .len()
     }
 
     #[test]

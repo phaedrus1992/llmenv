@@ -201,6 +201,22 @@ mod tests {
     }
 
     #[test]
+    fn the_first_problem_of_an_unusable_cache_is_the_file_that_sorts_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        for index in [3, 1, 2] {
+            save_auth_entry(tmp.path(), &entry_with(index, "x@test.com", "yesterday")).unwrap();
+        }
+        let mut files: Vec<_> = std::fs::read_dir(crate::auth::auth_cache_dir(tmp.path()))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        files.sort();
+        let err = choose_auth_for_inheritance(tmp.path()).err().unwrap();
+        let text = format!("{err:#}");
+        assert!(text.contains(&files[0].display().to_string()), "{text}");
+    }
+
+    #[test]
     fn a_cache_whose_last_seen_values_all_fail_to_parse_inherits_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         save_auth_entry(tmp.path(), &entry_with(1, "a@test.com", "yesterday")).unwrap();

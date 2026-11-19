@@ -293,8 +293,8 @@ fn save_session(state_dir: &Path, session: &Session) -> anyhow::Result<()> {
 
 fn load_session(state_dir: &Path, id: &str) -> anyhow::Result<Session> {
     ensure_plain_name(id)?;
-    let content = crate::paths::bounded::state_text_io(&session_path(state_dir, id))?;
-    Ok(serde_json::from_str(&content)?)
+    let path = session_path(state_dir, id);
+    listing::parse_session(&crate::paths::bounded::state_text_io(&path)?, &path)
 }
 
 /// [`load_session`] for a session the caller expects to exist. A missing file reads "no session
@@ -310,12 +310,7 @@ pub(crate) fn load_existing_session(state_dir: &Path, id: &str) -> anyhow::Resul
         }
         Err(e) => anyhow::bail!("cannot read session '{id}' at {}: {e}", path.display()),
     };
-    serde_json::from_str(&content).map_err(|e| {
-        anyhow::anyhow!(
-            "session '{id}' at {} is not valid session JSON: {e}",
-            path.display()
-        )
-    })
+    listing::parse_session(&content, &path)
 }
 
 #[cfg(test)]
@@ -402,7 +397,7 @@ pub(crate) fn start_session_as(
                     own.clone(),
                     request,
                 )?)),
-                None => anyhow::bail!(checkpoint_error(&existing, request.owner)),
+                None => anyhow::bail!(checkpoint_error(&existing, request.owner, engine_start)),
             }
         }
         StartDecision::Resume(id) => {
@@ -833,9 +828,9 @@ mod tests {
         assert_ne!(
             crate::util::time::cmp_instants(
                 &updated.last_activity,
-                &updated.id,
+                crate::util::time::RecordId(&updated.id),
                 &created.last_activity,
-                &created.id,
+                crate::util::time::RecordId(&created.id),
                 "session last_activity"
             ),
             std::cmp::Ordering::Less
@@ -1492,7 +1487,7 @@ mod tests {
         assert!(!other_line.contains("yours"), "{err}");
         assert!(err.contains("--resume <id> to continue it"), "{err}");
         assert!(
-            err.contains("--replace abandons all 3 listed sessions"),
+            err.contains("which abandons all 3 listed sessions"),
             "mixed ownership must warn that --replace drops the other window's session: {err}"
         );
         assert!(!err.contains("--replace to drop"), "{err}");

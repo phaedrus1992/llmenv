@@ -82,6 +82,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Fail a task read when a task `updated_at` is not RFC 3339, and fail a session read when a session `started_at` is not. The error names the file and the fix. A lenient task listing skips the task with a notice. See [the task commands](https://phaedrus1992.github.io/llmenv/docs/commands#task). [fix:task] [#3882]
+- Print the count and the first cause of the task files that `llmenv task ls` skips on stderr, so a shorter list has a stated reason. See [the task commands](https://phaedrus1992.github.io/llmenv/docs/commands#task). [fix:task] [#3883]
+- Show the `--other-session` flags in the `--replace` text of the `llmenv task session start` checkpoint, so the text names what the refusal needs. See [the task commands](https://phaedrus1992.github.io/llmenv/docs/commands#task). [fix:task] [#3895]
+- Tell a failed `ps` check from a session that is not yours. `llmenv task session start` marks a session tied to your process as "may be yours", and the `--replace` refusal says llmenv cannot tell. See [the task commands](https://phaedrus1992.github.io/llmenv/docs/commands#task). [fix:task] [#3858]
 - Log each bad-timestamp warning once per record and value, not twice. The dedupe sets for these warnings are now bounded. [fix:util] [#3863]
 - Fail a task read when a task `created_at` is not RFC 3339, and name the file and the fix. A lenient listing skips that task with a notice, so the task no longer sorts to the head of the queue without a notice. [fix:task] [#3856]
 - Give the real refusal reason for a session read, such as `llmenv task session show`. An unidentified caller gets its own reason, not a claim that another conversation owns the session. [fix:cli] [#3861]
