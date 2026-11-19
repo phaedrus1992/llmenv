@@ -10,10 +10,20 @@ use crate::util::time::RecordId;
 
 /// The usable entries of the cache, newest-first, with the skipped files.
 #[derive(Debug)]
-pub(super) struct Loaded {
-    pub(super) entries: Vec<AuthEntry>,
-    pub(super) skipped: usize,
-    pub(super) first_problem: Option<String>,
+pub(crate) struct Loaded {
+    pub(crate) entries: Vec<AuthEntry>,
+    /// Cache files left out because they could not be read or parsed.
+    pub(crate) skipped: usize,
+    /// The first problem among the skipped files. It names one file in the session notice.
+    pub(crate) first_problem: Option<String>,
+}
+
+impl Loaded {
+    /// The most recently seen entry, which a new folder inherits. `None` when the cache holds no
+    /// usable entry.
+    pub(crate) fn newest(&self) -> Option<&AuthEntry> {
+        self.entries.first()
+    }
 }
 
 /// Load the usable entries from the cache, sorted newest-first.

@@ -124,7 +124,8 @@ mod tests {
         // Cache file was written.
         let entries: Vec<_> = crate::auth::choose_auth_for_inheritance(cache_tmp.path())
             .unwrap()
-            .entry
+            .newest()
+            .cloned()
             .into_iter()
             .collect();
         assert_eq!(entries.len(), 1);

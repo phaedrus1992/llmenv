@@ -63,7 +63,7 @@ fn inject_cached_auth_if_available(adapter_root: &Path, cache_path: &Path) -> Au
                     choice.skipped
                 );
             }
-            match choice.entry {
+            match choice.newest().cloned() {
                 None => AuthStatus::default(),
                 Some(entry) => inherit_auth_entry(cache_path, entry),
             }
