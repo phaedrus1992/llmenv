@@ -147,17 +147,22 @@ impl PrCacheEntry {
         is_younger(self.ts, now, ttl)
     }
 
-    /// The last PR that a lookup returned, when it is young enough to show.
+    /// The last PR that a lookup returned, when it is young enough to show. An answer with a PR is
+    /// its own last PR, which also covers an entry from a version that kept none.
     fn kept(&self, now: i64) -> Option<&PrInfo> {
+        let own = self.pr.as_ref().filter(|_| self.failure.is_none());
         self.good
             .as_ref()
+            .map(|(ts, pr)| (*ts, pr))
+            .or_else(|| own.map(|pr| (self.ts, pr)))
             .filter(|(ts, _)| is_younger(*ts, now, STALE_PR_MAX_AGE_SECS))
             .map(|(_, pr)| pr)
     }
 
     /// What the widget shows for this entry. `fresh` is whether the entry is young enough to use.
     /// A fresh answer shows as it is. Anything else shows the kept PR, marked stale, or else what
-    /// the entry says, so an answer that is due is never shown as current past the day limit.
+    /// the entry says. An answer with a PR that is due and past the day limit shows a failure and
+    /// not a blank, because a refresh that has not landed for a day is a fault.
     pub(super) fn show(&self, now: i64, fresh: bool) -> (PrLookup, bool) {
         if fresh && self.failure.is_none() {
             return (self.lookup(), false);
@@ -165,6 +170,7 @@ impl PrCacheEntry {
         match (self.kept(now), self.failure) {
             (Some(pr), _) => (Ok(Some(pr.clone())), true),
             (None, Some(failure)) => (Err(failure), false),
+            (None, None) if self.pr.is_some() => (Err(GhFailure::Failed), false),
             (None, None) => (Ok(None), false),
         }
     }
@@ -220,6 +226,11 @@ pub(super) fn write_pr_entry(path: &Path, entry: &PrCacheEntry) {
         }
     };
     if let Err(e) = crate::paths::write_owner_only_atomic(path, json.as_bytes()) {
-        tracing::error!("pr cache write to {} failed: {e}", path.display());
+        // A notice, because the refresh child writes it, and a failed write shows as no PR.
+        crate::agent_notice::record_logged(format!(
+            "the PR cache entry {} cannot be written, so the status line shows no PR: {e}. Fix: \
+             check that the state folder is writable and not full.",
+            path.display()
+        ));
     }
 }

@@ -671,7 +671,7 @@ fn parse_gh_pr_view_maps_fields_and_review_decision() {
         br#"{"number":834,"url":"https://github.com/o/r/pull/834","reviewDecision":"APPROVED"}"#;
     assert_eq!(
         parse_gh_pr_view(json).unwrap(),
-        Some(PrInfo {
+        (PrInfo {
             number: Some(834),
             url: Some("https://github.com/o/r/pull/834".to_string()),
             review_state: Some("approved".to_string()),

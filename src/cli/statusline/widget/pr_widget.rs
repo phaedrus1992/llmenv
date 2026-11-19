@@ -164,7 +164,9 @@ impl PrError {
             Self::Branch(cause) => {
                 format!("the branch cannot be read ({cause}). Check the repository")
             }
-            Self::Gh(GhFailure::Missing) => "install gh and put it on the PATH".to_string(),
+            Self::Gh(GhFailure::Missing) => {
+                "check that gh is installed, executable, and on the PATH".to_string()
+            }
             Self::Gh(GhFailure::Unauthenticated) => "run `gh auth login`".to_string(),
             Self::Gh(_) => "run `gh pr view` in the folder to see the cause".to_string(),
         }

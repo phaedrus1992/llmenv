@@ -1604,6 +1604,7 @@ The fix is written to the log. A failure is cached for 10 seconds, and a PR answ
 The detached refresh waits up to 8 seconds for `gh` (added in v3.14.0).
 A failed or due lookup shows the last PR that a lookup returned, in the grey `color-248`, while that PR is less than a day old (added in v3.14.0).
 The grey replaces the review-state color, because the decision may have changed.
+An answer that is older than a day and has not been refreshed shows `#? failed`, and not the old PR.
 A lookup that finds no PR clears the kept PR.
 A branch with no cache entry shows nothing until the first refresh ends.
 With no state folder for the cache, the render runs `gh` itself, and waits up to 3 seconds.

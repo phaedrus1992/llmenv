@@ -153,8 +153,8 @@ fn a_lookup_with_no_pr_clears_the_kept_pr() {
     assert_eq!(fx.derive(1_200), (Err(GhFailure::Failed), false));
 }
 
-/// An answer that is due and older than a day is not shown as the current PR, while the refresh
-/// runs (#3889).
+/// An answer that is due and older than a day shows a failure, not the PR and not a blank, because
+/// a refresh that has not landed for a day is a fault (#3889).
 #[cfg(unix)]
 #[test]
 fn a_due_answer_older_than_a_day_is_not_shown() {
@@ -171,7 +171,21 @@ fn a_due_answer_older_than_a_day_is_not_shown() {
         Some(fx.cache.path()),
         long_after,
     );
-    assert_eq!(answer, (Ok(None), false));
+    assert_eq!(answer, (Err(GhFailure::Failed), false));
+}
+
+/// An entry from a version that kept no last PR still shows its own PR while it is due.
+#[cfg(unix)]
+#[test]
+fn an_entry_with_no_kept_pr_shows_its_own_pr_as_stale_while_due() {
+    let entry = PrCacheEntry {
+        ts: 1_000,
+        pr: Some(pr_42()),
+        failure: None,
+        good: None,
+    };
+    let due = 1_000 + PR_CACHE_TTL_SECS + 1;
+    assert_eq!(entry.show(due, false), (Ok(Some(pr_42())), true));
 }
 
 /// An entry with a time in the future is old, so a clock that stepped back keeps nothing alive.
@@ -315,7 +329,12 @@ proptest! {
     ) {
         let (lookup, stale) = entry.show(now, fresh);
         if stale {
-            let (ts, pr) = entry.good.clone().unwrap();
+            // The kept PR is the last good one, or the PR of an answer entry.
+            let (ts, pr) = entry
+                .good
+                .clone()
+                .or_else(|| entry.pr.clone().map(|pr| (entry.ts, pr)))
+                .unwrap();
             prop_assert!((0..STALE_PR_MAX_AGE_SECS).contains(&(now - ts)));
             prop_assert_eq!(lookup.clone(), Ok(Some(pr)));
         }

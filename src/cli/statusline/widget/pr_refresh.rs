@@ -66,12 +66,17 @@ pub(crate) fn run() -> anyhow::Result<()> {
         return Ok(());
     };
     let prior = read_pr_entry(&path);
+    let now = now_unix();
+    // The refresh that held the lock before this one may have written a fresh entry.
+    if prior.as_ref().is_some_and(|entry| entry.is_fresh(now)) {
+        return Ok(());
+    }
     let (_lookup, _stale) = refresh_in_place(
         GhPrCmd::refresh("gh"),
         &path,
         (&job.repo_dir, &job.branch),
         prior,
-        now_unix(),
+        now,
     );
     Ok(())
 }

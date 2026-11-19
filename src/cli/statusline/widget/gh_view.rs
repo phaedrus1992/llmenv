@@ -63,10 +63,12 @@ pub(super) fn gh_pr_view(gh: GhPrCmd<'_>, repo_dir: &Path, branch: &str) -> PrLo
         other => other,
     };
     match out {
-        Ok(out) if out.status.success() => parse_gh_pr_view(&out.stdout).map_err(|e| {
+        // A PR view that exits 0 holds a PR. "No PR" is a non-zero exit, read below.
+        Ok(out) if out.status.success() => parse_gh_pr_view(&out.stdout).map(Some).map_err(|e| {
             tracing::error!(
-                "gh pr view printed output that is not JSON, so the PR is unknown: {e}. Fix: run \
-                 `gh pr view` by hand in this folder, and check that nothing else prints to stdout."
+                "gh pr view printed output that is not a PR, so the PR is unknown: {e}. Fix: \
+                     run `gh pr view` by hand in this folder, and check that nothing else prints \
+                     to stdout."
             );
             GhFailure::Failed
         }),
@@ -94,7 +96,7 @@ pub(super) fn gh_pr_view(gh: GhPrCmd<'_>, repo_dir: &Path, branch: &str) -> PrLo
 /// [`PrInfo`], mapping `gh`'s `reviewDecision` (`"APPROVED"` /
 /// `"CHANGES_REQUESTED"` / `"REVIEW_REQUIRED"` / absent) onto the same
 /// lowercase `review_state` values an engine-supplied PR uses.
-pub(super) fn parse_gh_pr_view(stdout: &[u8]) -> Result<Option<PrInfo>, serde_json::Error> {
+pub(super) fn parse_gh_pr_view(stdout: &[u8]) -> Result<PrInfo, String> {
     #[derive(Deserialize)]
     struct GhPrView {
         number: Option<u64>,
@@ -102,8 +104,11 @@ pub(super) fn parse_gh_pr_view(stdout: &[u8]) -> Result<Option<PrInfo>, serde_js
         #[serde(rename = "reviewDecision")]
         review_decision: Option<String>,
     }
-    let parsed: GhPrView = serde_json::from_slice(stdout)?;
-    Ok(parsed.number.map(|number| PrInfo {
+    let parsed: GhPrView = serde_json::from_slice(stdout).map_err(|e| e.to_string())?;
+    let number = parsed
+        .number
+        .ok_or_else(|| "the JSON has no PR number".to_string())?;
+    Ok(PrInfo {
         number: Some(number),
         url: parsed.url,
         review_state: parsed
@@ -111,7 +116,7 @@ pub(super) fn parse_gh_pr_view(stdout: &[u8]) -> Result<Option<PrInfo>, serde_js
             .as_deref()
             .and_then(map_review_decision)
             .map(str::to_string),
-    }))
+    })
 }
 
 /// Map `gh`'s `reviewDecision` enum values to the lowercase snake_case

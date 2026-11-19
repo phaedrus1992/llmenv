@@ -7,8 +7,9 @@ use super::*;
 use std::time::Duration;
 
 #[test]
-fn parse_gh_pr_view_reads_a_missing_number_as_no_pr_and_malformed_json_as_an_error() {
-    assert_eq!(parse_gh_pr_view(br#"{"url":"https://x"}"#).unwrap(), None);
+fn parse_gh_pr_view_refuses_a_missing_number_and_malformed_json() {
+    assert!(parse_gh_pr_view(br#"{"url":"https://x"}"#).is_err());
+    assert!(parse_gh_pr_view(b"{}").is_err());
     assert!(parse_gh_pr_view(b"not json").is_err());
 }
 

@@ -36,13 +36,15 @@ The detached child is the pattern that `session_log::detached` and `hook_run::de
   The system frees the lock when the process ends, so a child that dies leaves no lock, and no age rule is needed.
   Two renders that both see no lock start two children, and the second child finds the lock held and ends.
   A lost refresh has no checkpoint, because the next render starts a new one.
+  A child that finds the lock held ends with a debug line only, because that is the designed dedupe.
+  The lock file stays after the refresh, and a clean-up of the state folder must keep it while a refresh runs.
 - The cache entry keeps the last PR that a lookup returned.
   While that PR is younger than `STALE_PR_MAX_AGE_SECS`, a failed or due lookup shows it in the stale grey.
   The review-decision color is dropped, because the decision may have changed.
 - A lookup that returns no PR clears the kept PR, so a merged or closed PR does not stay on the bar.
-- An answer that is due and older than a day is not shown as the current PR.
+- An answer with a PR that is due and older than a day shows a failure, not the PR and not a blank, because a refresh that has not landed for a day is a fault.
 - A time in the future reads as old, so a clock that stepped back keeps nothing alive.
-- Output of `gh` that is not JSON is a failure, and it does not clear the kept PR.
+- Output of `gh` that is not a PR is a failure, and it does not clear the kept PR. A PR view that exits 0 holds a PR, and "no PR" is a non-zero exit.
 - A refresh that cannot start shows a failure when there is nothing cached, so it does not look like "no PR".
 - The refresh child takes the cache folder from its own environment, and not from its input.
 - With no cache at all, the render shows nothing for that branch until the refresh lands.
