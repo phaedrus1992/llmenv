@@ -45,6 +45,15 @@ pub(crate) fn list_sessions_strict(state_dir: &Path) -> anyhow::Result<Vec<Sessi
                 path.display()
             )
         })?;
+        // `sort_listing` orders on this value, so a bad one would sort first with no cue (#3882).
+        crate::util::time::validate_stored(&session.started_at).with_context(|| {
+            format!(
+                "session '{}' at {} has an unreadable started_at. Fix: rewrite it as RFC 3339, \
+                 such as 2026-01-01T00:00:00Z",
+                session.id,
+                path.display()
+            )
+        })?;
         sessions.push(session);
     }
     Ok(sessions)
@@ -92,8 +101,9 @@ pub(crate) fn sort_listing(sessions: &mut [Session], project: &str) {
     reason = "a test fails loudly when its fixture is wrong"
 )]
 mod tests {
-    use super::{Session, sort_listing};
+    use super::{Session, list_sessions_strict, sessions_dir, sort_listing};
     use proptest::prelude::*;
+    use tempfile::TempDir;
 
     fn session(id: &str, project: &str, started_at: &str) -> Session {
         serde_json::from_value(serde_json::json!({
@@ -104,6 +114,21 @@ mod tests {
             "last_activity": started_at,
         }))
         .expect("a minimal session parses")
+    }
+
+    #[test]
+    fn the_strict_read_fails_on_an_unreadable_started_at_and_names_the_fix() {
+        let dir = TempDir::new().expect("test");
+        std::fs::create_dir_all(sessions_dir(dir.path())).expect("test");
+        let path = sessions_dir(dir.path()).join("bad.json");
+        let bad = serde_json::to_string(&session("bad", "p", "yesterday")).expect("serialize");
+        std::fs::write(&path, bad).expect("test");
+
+        let err = list_sessions_strict(dir.path()).expect_err("a bad started_at must fail");
+        let text = format!("{err:#}");
+        assert!(text.contains(&path.display().to_string()), "{text}");
+        assert!(text.contains("unreadable started_at"), "{text}");
+        assert!(text.contains("Fix: rewrite it as RFC 3339"), "{text}");
     }
 
     /// Code 0 is an unreadable start time. Codes 1 to 3 are readable instants.

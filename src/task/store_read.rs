@@ -104,8 +104,9 @@ pub(super) fn read_tasks(state_dir: &Path, policy: UnreadablePolicy) -> anyhow::
     Ok(tasks)
 }
 
-/// Read one task file, then check its `created_at`. The queue sorts on that field, so a value
-/// that does not parse would move the task to the head of the queue with no cue (#3856).
+/// Read one task file, then check its `created_at` and `updated_at`. The queue sorts on the first,
+/// and the current-task pick uses the second, so a value that does not parse would win or lose
+/// with no cue (#3856, #3882).
 fn read_task_file(path: &Path) -> anyhow::Result<Task> {
     let content = crate::paths::bounded::state_text_io(path).map_err(anyhow::Error::from)?;
     let task: Task = serde_json::from_str(&content).with_context(|| {
@@ -114,14 +115,19 @@ fn read_task_file(path: &Path) -> anyhow::Result<Task> {
             path.display()
         )
     })?;
-    crate::util::time::validate_stored(&task.created_at).with_context(|| {
-        format!(
-            "task '{}' at {} has an unreadable created_at. Fix: rewrite it as RFC 3339, \
-             such as 2026-01-01T00:00:00Z",
-            task.slug,
-            path.display()
-        )
-    })?;
+    for (field, value) in [
+        ("created_at", &task.created_at),
+        ("updated_at", &task.updated_at),
+    ] {
+        crate::util::time::validate_stored(value).with_context(|| {
+            format!(
+                "task '{}' at {} has an unreadable {field}. Fix: rewrite it as RFC 3339, \
+                 such as 2026-01-01T00:00:00Z",
+                task.slug,
+                path.display()
+            )
+        })?;
+    }
     Ok(task)
 }
 
@@ -137,14 +143,25 @@ mod tests {
     use std::path::Path;
     use tempfile::TempDir;
 
+    const VALID_AT: &str = "2026-01-01T00:00:00Z";
+
     fn write_task(state_dir: &Path, slug: &str, created_at: &str) -> std::path::PathBuf {
+        write_task_at(state_dir, slug, created_at, VALID_AT)
+    }
+
+    fn write_task_at(
+        state_dir: &Path,
+        slug: &str,
+        created_at: &str,
+        updated_at: &str,
+    ) -> std::path::PathBuf {
         let dir = tasks_dir(state_dir);
         std::fs::create_dir_all(&dir).expect("test");
         let body = serde_json::json!({
             "slug": slug,
             "title": slug,
             "created_at": created_at,
-            "updated_at": "",
+            "updated_at": updated_at,
         });
         let path = dir.join(format!("{slug}.json"));
         std::fs::write(&path, body.to_string()).expect("test");
@@ -188,6 +205,33 @@ mod tests {
         crate::agent_notice::assert_noticed(&[
             "store-read-3856",
             "unreadable created_at",
+            "Fix: rewrite it as RFC 3339",
+        ]);
+    }
+
+    #[test]
+    fn a_strict_read_fails_on_an_unreadable_updated_at_and_names_the_field_and_the_fix() {
+        let dir = TempDir::new().expect("test");
+        let bad = write_task_at(dir.path(), "bad", VALID_AT, "");
+        let err = read_tasks(dir.path(), UnreadablePolicy::Fail)
+            .expect_err("an unreadable updated_at must fail the strict read");
+        let text = format!("{err:#}");
+        assert!(text.contains(&bad.display().to_string()), "{text}");
+        assert!(text.contains("unreadable updated_at"), "{text}");
+        assert!(text.contains("Fix: rewrite it as RFC 3339"), "{text}");
+    }
+
+    #[test]
+    fn a_lenient_read_skips_an_unreadable_updated_at_and_notices_it() {
+        let dir = TempDir::new().expect("test");
+        write_task_at(dir.path(), "store-read-3882", VALID_AT, "later");
+        write_task(dir.path(), "good", VALID_AT);
+        let tasks = read_tasks(dir.path(), UnreadablePolicy::Skip).expect("lenient read");
+        let slugs: Vec<&str> = tasks.iter().map(|t| t.slug.as_str()).collect();
+        assert_eq!(slugs, ["good"]);
+        crate::agent_notice::assert_noticed(&[
+            "store-read-3882",
+            "unreadable updated_at",
             "Fix: rewrite it as RFC 3339",
         ]);
     }
