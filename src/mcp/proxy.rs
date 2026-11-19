@@ -187,16 +187,19 @@ where
     // Check the holder before waiting on it. A lock whose holder is gone has
     // nothing to wait for, so reclaiming it immediately keeps a wedged lock from
     // costing the full budget on every prompt.
-    if let Some(holder) =
-        lock_holder(lock_path)?.filter(|pid| is_own_process_alive(*pid) != Some(false))
+    // A holder pid that now names a process that started later is a reused pid: the holder is
+    // gone, even though this user's process answers the signal check (#3795).
+    if let Some(holder) = lock_holder(lock_path)?
+        .filter(|h| is_own_process_alive(h.pid) != Some(false) && !h.pid_was_reused())
     {
         if wait_for_port(bind, budget_ms) {
             reconcile_pidfile(pid_path);
             return Ok(EnsureOutcome::AlreadyRunning);
         }
         anyhow::bail!(
-            "another llmenv process (pid {holder}) holds {} but nothing is serving {bind} \
+            "another llmenv process (pid {}) holds {} but nothing is serving {bind} \
              after {budget_ms}ms. Fix: if no llmenv process runs, remove the lock file",
+            holder.pid,
             lock_path.display()
         );
     }

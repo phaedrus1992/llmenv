@@ -255,9 +255,10 @@ mod listing;
 pub(crate) use listing::{list_sessions_strict, open_sessions_strict, sort_listing};
 mod resume_text;
 mod resume_write;
+use crate::util::proc_start::process_start;
 use abandon::{abandon_failed, abandon_session};
 pub(crate) use checkpoint::idle_display;
-use checkpoint::{checkpoint_error, engine_start, only_own_session, resume};
+use checkpoint::{checkpoint_error, only_own_session, resume};
 pub(in crate::task) use context_reminder::missing_context_reminders;
 pub(crate) use finish::finish_session;
 #[cfg(test)]
@@ -390,7 +391,7 @@ pub(crate) fn start_session_as(
             if existing.is_empty() {
                 return Ok(StartOutcome::Created(create_session(state_dir, request)?));
             }
-            let engine_start = request.owner.pid.and_then(engine_start);
+            let engine_start = request.owner.pid.and_then(process_start);
             match only_own_session(existing.iter(), request.owner, engine_start) {
                 Some(own) => Ok(StartOutcome::Resumed(resume(
                     state_dir,
@@ -409,7 +410,7 @@ pub(crate) fn start_session_as(
         }
         StartDecision::Replace(named) => {
             let existing = open_sessions_strict(state_dir, project)?;
-            let engine_start = request.owner.pid.and_then(engine_start);
+            let engine_start = request.owner.pid.and_then(process_start);
             checkpoint::refuse_unnamed_foreign(&existing, request.owner, engine_start, &named)?;
             let mut abandoned = Vec::with_capacity(existing.len());
             // One strict read of the task store serves every abandoned session (#3479). With no

@@ -6,10 +6,8 @@ use std::time::SystemTime;
 
 use super::{EngineIdentity, Session, StartRequest, now_rfc3339, save_session};
 
-mod engine_start;
 mod ownership;
 use crate::util::time::RecordId;
-pub(super) use engine_start::engine_start;
 use ownership::{Ownership, ownership, ownership_note, unreadable_last_activity};
 
 /// The one listed session that `owner` started, or `None` when it started none or more than one.
