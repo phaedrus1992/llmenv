@@ -7,6 +7,7 @@ use std::time::SystemTime;
 use super::{EngineIdentity, Session, StartRequest, now_rfc3339, save_session};
 
 mod ownership;
+pub(crate) use ownership::is_callers_session;
 use ownership::{Ownership, last_activity_at, ownership, ownership_note};
 
 /// The one listed session that `owner` started, or `None` when it started none or more than one.

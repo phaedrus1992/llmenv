@@ -59,9 +59,7 @@ pub(crate) fn caller_for_pick(
     match pick {
         // A caller with no conversation id is not the owner of an owned session. The write
         // guards must refuse it, as `task add` does (#3480).
-        Ok(picked) if picked.may_take_tasks(owner.session_id.as_deref()) => {
-            Caller::Session(picked.id.clone())
-        }
+        Ok(picked) if picked.may_take_tasks(owner) => Caller::Session(picked.id.clone()),
         Ok(picked) if owner.session_id.is_none() => Caller::Unidentified(format!(
             "the only open session '{}' belongs to another conversation, and this caller has no \
              conversation id. Set CLAUDE_CODE_SESSION_ID",
@@ -450,7 +448,7 @@ pub(crate) fn ensure_named_session_takes_tasks(
 /// # Errors
 /// Errors when [`Session::may_take_tasks`] refuses the caller.
 pub(crate) fn check_takes_tasks(session: &Session, owner: &EngineIdentity) -> anyhow::Result<()> {
-    if session.may_take_tasks(owner.session_id.as_deref()) {
+    if session.may_take_tasks(owner) {
         return Ok(());
     }
     anyhow::bail!(foreign_session_message(&session.id))

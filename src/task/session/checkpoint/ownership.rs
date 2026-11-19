@@ -5,6 +5,7 @@
 use std::time::SystemTime;
 
 use crate::task::session::{EngineIdentity, Session};
+use crate::util::proc_start::process_start;
 use crate::util::time::RecordId;
 
 /// How the caller owns a listed session.
@@ -81,6 +82,26 @@ fn unreadable_last_activity(session_id: &str) -> String {
         "session {session_id} has an unreadable last_activity, so it is not known to be active. \
          Fix: rewrite it as RFC 3339, such as 2026-01-01T00:00:00Z"
     )
+}
+
+/// Whether the caller started or resumed `session`, for the pick and the write guards (#3905). It
+/// is the rule of the checkpoint: the conversation id matches, or the engine process id matches and
+/// the session was active after that process started, so a session that the caller started before a
+/// `/clear` or a compaction still counts. A result of "cannot tell" is not ownership, because a
+/// guard must not widen on a guess. `engine_start` is read once, and only when it decides.
+pub(crate) fn is_callers_session(
+    session: &Session,
+    owner: &EngineIdentity,
+    engine_start: &std::cell::OnceCell<Option<SystemTime>>,
+) -> bool {
+    match ownership(session, owner, None) {
+        Ownership::Conversation => true,
+        Ownership::UnknownEngineStart => {
+            let start = *engine_start.get_or_init(|| owner.pid.and_then(process_start));
+            ownership(session, owner, start).is_callers()
+        }
+        _ => false,
+    }
 }
 
 pub(super) fn ownership(

@@ -146,7 +146,8 @@ impl PickError {
 }
 
 /// Pick the session an id-less command means: the only open one, else the
-/// only open one that `owner`'s conversation started or resumed (#2365).
+/// only open one that `owner` started or resumed (#2365). A session that the engine process of
+/// `owner` started before a `/clear` counts, as it does for the checkpoint (#3905).
 ///
 /// # Errors
 /// [`PickError::NoneOpen`] when `open` is empty. [`PickError::Ambiguous`]
@@ -161,11 +162,10 @@ pub(crate) fn pick_open_session(
         _ => {}
     }
     let count = open.len();
+    let start = std::cell::OnceCell::new();
     let mut owned: Vec<Session> = open
         .into_iter()
-        .filter(|s| {
-            owner.session_id.is_some() && s.owner_session.as_deref() == owner.session_id.as_deref()
-        })
+        .filter(|s| is_callers_session(s, owner, &start))
         .collect();
     if owned.len() == 1 {
         return Ok(owned.remove(0));
@@ -173,7 +173,7 @@ pub(crate) fn pick_open_session(
     Err(PickError::Ambiguous {
         open: count,
         owned: owned.len(),
-        identified: owner.session_id.is_some(),
+        identified: owner.session_id.is_some() || owner.pid.is_some(),
     })
 }
 
@@ -257,8 +257,8 @@ mod resume_text;
 mod resume_write;
 use crate::util::proc_start::process_start;
 use abandon::{abandon_failed, abandon_session};
-pub(crate) use checkpoint::idle_display;
 use checkpoint::{checkpoint_error, only_own_session, resume};
+pub(crate) use checkpoint::{idle_display, is_callers_session};
 pub(in crate::task) use context_reminder::missing_context_reminders;
 pub(crate) use finish::finish_session;
 #[cfg(test)]
