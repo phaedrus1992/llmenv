@@ -82,6 +82,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Log each bad-timestamp warning once per record and value, not twice. The dedupe sets for these warnings are now bounded. [fix:util] [#3863]
+- Fail a task read when a task `created_at` is not RFC 3339, and name the file and the fix. A lenient listing skips that task with a notice, so the task no longer sorts to the head of the queue without a notice. [fix:task] [#3856]
+- Give the real refusal reason for a session read, such as `llmenv task session show`. An unidentified caller gets its own reason, not a claim that another conversation owns the session. [fix:cli] [#3861]
+- Skip an auth cache entry whose `last_seen` is not RFC 3339, and count it as skipped. When no entry has a readable `last_seen`, inheritance fails with the file and the fix, instead of picking an arbitrary account. [fix:auth] [#3857]
+- Record a notice for an unreadable or future `last_activity` in `llmenv task session ls` and at the session checkpoint, instead of showing `unknown` with no reason. [fix:session] [#3859]
 - Name the record in the bad-timestamp warning, so each record with an unreadable timestamp is named once. A warning for the winner of a `max` now says the pick may be a tie. [#3851]
 - List open sessions with an unreadable start time in a stable order with `llmenv task session ls`. [#3855]
 - Report a task that `llmenv task show --next` skips because of a missing parent, a parent loop, or a parent of another session, on stderr with its fix. [fix:task] [#3777]
