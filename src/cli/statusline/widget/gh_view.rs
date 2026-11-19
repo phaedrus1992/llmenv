@@ -70,7 +70,7 @@ pub(super) fn gh_pr_view(gh: GhPrCmd<'_>, repo_dir: &Path, branch: &str) -> PrLo
                 "gh pr view timed out after {secs}s. Fix: run `gh pr view` by hand in this \
                  folder, and check that GitHub is reachable."
             );
-            Err(GhFailure::Failed)
+            Err(GhFailure::TimedOut)
         }
         Err(e) => {
             tracing::error!("gh pr view: {e}");

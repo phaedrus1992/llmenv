@@ -13,15 +13,21 @@ use git::*;
 mod gh_cmd;
 use gh_cmd::GhPrCmd;
 mod gh_lookup;
-use gh_lookup::GhFailure;
 mod gh_view;
 mod pr_cache;
-use pr_cache::derive_pr;
+pub(crate) mod pr_refresh;
+mod pr_widget;
+#[cfg(test)]
+use pr_widget::{PrError, render_pr_info};
+use pr_widget::{PrLookup, render_pr_widget, resolve_pr, resolve_pr_with};
 #[cfg(test)]
 use {
-    gh_lookup::classify_gh_exit,
+    gh_lookup::{GhFailure, classify_gh_exit},
     gh_view::{gh_pr_view, map_review_decision, parse_gh_pr_view},
-    pr_cache::{PR_CACHE_TTL_SECS, PrCacheEntry, pr_cache_path, read_pr_cache, write_pr_cache},
+    pr_cache::{
+        PR_CACHE_TTL_SECS, PR_FAILURE_TTL_SECS, PrCacheEntry, derive_pr, pr_cache_path,
+        read_pr_cache, write_pr_cache,
+    },
 };
 
 mod reset_clock;
@@ -141,26 +147,7 @@ pub fn render_engine_widget(
     // read + JSON deserialize (and a duplicate `gh` derivation on a cold
     // cache) on every single render.
     if name == "pr" {
-        let pr = match resolve_pr(data) {
-            Ok(pr) => pr,
-            Err(e) => {
-                if let PrError::Branch(cause) = &e {
-                    tracing::error!("statusline pr cannot read the branch: {cause}");
-                }
-                // The format stays and the marker takes the value (#3745). The cause goes to the log.
-                tracing::error!(
-                    "statusline pr has no answer: {}. Fix: run `gh auth status`.",
-                    e.label()
-                );
-                let raw = render_pr_unknown(cfg);
-                return Some(super::finish(name, raw, cfg, None, use_color));
-            }
-        };
-        let raw = pr
-            .as_ref()
-            .map_or_else(String::new, |pr| render_pr_info(pr, cfg, use_color));
-        let dyn_style = pr.as_ref().and_then(pr_style_for);
-        return Some(super::finish(name, raw, cfg, dyn_style, use_color));
+        return Some(render_pr_widget(resolve_pr(data), cfg, use_color));
     }
     let raw = match name {
         "model" => render_model(data, cfg),
@@ -465,144 +452,6 @@ fn render_cache_usage(
     render_pct_and_bar(used, cfg, "\u{21bb}{pct}%", BarStyle::Plain, use_color) // ↻
 }
 
-/// Format an already-resolved [`PrInfo`] (engine-supplied or derived via
-/// [`resolve_pr`]) into the `pr` widget's text.
-fn render_pr_info(
-    pr: &PrInfo,
-    cfg: Option<&llmenv_config::WidgetConfig>,
-    use_color: bool,
-) -> String {
-    let Some(number) = pr.number else {
-        return String::new();
-    };
-    let url = pr.url.as_deref().map(super::sanitize).unwrap_or_default();
-    let review_state = pr
-        .review_state
-        .as_deref()
-        .map(super::sanitize)
-        .unwrap_or_default();
-    // `display: url` shows the full URL (falling back to `#<number>` when the
-    // engine didn't send one); default/`number` shows `#<number>`. An explicit
-    // `format` overrides both.
-    let default_format = match cfg.and_then(|c| c.display.as_deref()) {
-        Some("url") if !url.is_empty() => "{url}",
-        _ => "#{number}",
-    };
-    let format = cfg
-        .and_then(|c| c.format.as_deref())
-        .unwrap_or(default_format);
-    let label = format
-        .replace("{number}", &number.to_string())
-        .replace("{url}", &url)
-        .replace("{review_state}", &review_state);
-    // Link the label to the PR when we have a safe URL (OSC 8), gated on color
-    // so piped / non-TTY output stays plain.
-    if use_color && super::valid_url(&url) {
-        super::hyperlink(&label, &url)
-    } else {
-        label
-    }
-}
-
-/// The `pr` widget when the lookup failed: the configured format with the marker in place of each
-/// value (#3745).
-fn render_pr_unknown(cfg: Option<&llmenv_config::WidgetConfig>) -> String {
-    let default_format = match cfg.and_then(|c| c.display.as_deref()) {
-        Some("url") => "{url}",
-        _ => "#{number}",
-    };
-    super::fill_unknown(
-        cfg,
-        default_format,
-        &["{number}", "{url}", "{review_state}"],
-    )
-}
-
-/// Color the `pr` widget by review state: approved green, changes-requested
-/// red, pending yellow; `None` (default `bold magenta`) otherwise. Takes the
-/// already-resolved [`PrInfo`] — [`render_engine_widget`] resolves it once
-/// via [`resolve_pr`] and shares it with [`render_pr_info`], so a derived
-/// PR's review state colors the widget exactly like an engine-supplied one
-/// would, without a second lookup.
-fn pr_style_for(pr: &PrInfo) -> Option<&'static str> {
-    match pr.review_state.as_deref()? {
-        "approved" => Some("green"),
-        "changes_requested" => Some("red"),
-        "pending" | "review_required" => Some("yellow"),
-        _ => None,
-    }
-}
-
-/// Resolve the PR for the current session, in precedence order:
-///
-/// 1. `data.pr` from stdin — forward-compat if an engine ever sends one
-///    directly (Claude Code currently doesn't).
-/// 2. Derived via `gh pr view` for the branch [`resolve_branch_name`]
-///    resolves, cached with a short TTL (see [`PR_CACHE_TTL_SECS`]) keyed by
-///    (repo directory, branch) in the same state directory the `usage_5h`/
-///    `usage_7d` delta tracking uses.
-///
-/// `None` whenever the derivation can't proceed or `gh` can't produce a PR —
-/// no workspace directory, no resolvable branch (including detached HEAD),
-/// `gh` not installed, not authenticated, no remote, or no open PR for the
-/// branch. All of these degrade silently, matching [`render_branch`]'s
-/// fallback.
-fn resolve_pr(data: &EngineData) -> Result<Option<PrInfo>, PrError> {
-    resolve_pr_with(data, GhPrCmd::new("gh"))
-}
-
-/// Why the PR widget has no answer. Each case has its own label, so a failure does not look
-/// like "no open PR" (#2749, #2821).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum PrError {
-    /// The branch cannot be read.
-    Branch(String),
-    /// `gh` gave no answer.
-    Gh(GhFailure),
-}
-
-impl PrError {
-    /// The text the widget shows for this error.
-    fn label(&self) -> &'static str {
-        match self {
-            Self::Branch(_) => "pr: unreadable",
-            Self::Gh(failure) => failure.label(),
-        }
-    }
-}
-
-/// The result of one PR lookup: the PR, `None` for no open PR, or why `gh` gave no answer.
-type PrLookup = Result<Option<PrInfo>, GhFailure>;
-
-/// [`resolve_pr`]'s backend, with the `gh` invocation injectable so tests can
-/// exercise the full engine-precedence + branch-resolution + derivation chain
-/// against a fake `gh` instead of the real one.
-///
-/// A branch read error is returned, not hidden, so the widget can show it (#2749).
-fn resolve_pr_with(data: &EngineData, gh: GhPrCmd<'_>) -> Result<Option<PrInfo>, PrError> {
-    if let Some(pr) = &data.pr {
-        return Ok(Some(pr.clone()));
-    }
-    let Some(dir) = data
-        .workspace
-        .as_ref()
-        .and_then(|w| w.current_dir.as_deref())
-    else {
-        return Ok(None);
-    };
-    let Some(branch) = resolve_branch_name(data).map_err(PrError::Branch)? else {
-        return Ok(None);
-    };
-    derive_pr(
-        gh,
-        Path::new(dir),
-        &branch,
-        usage_state_dir().as_deref(),
-        now_unix(),
-    )
-    .map_err(PrError::Gh)
-}
-
 /// Resolve a widget's bar cell width: the configured `width`, or
 /// `default_width` when unset. Shared by every percentage-based widget
 /// (`context`, `cache_usage`, `usage_5h`, `usage_7d`) so `width:` behaves
@@ -733,6 +582,9 @@ fn now_unix() -> i64 {
 
 #[cfg(test)]
 mod gh_tests;
+
+#[cfg(test)]
+mod pr_stale_tests;
 
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]

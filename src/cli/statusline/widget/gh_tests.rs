@@ -35,6 +35,7 @@ pub(super) fn fake_gh(bin: &str) -> GhPrCmd<'_> {
     GhPrCmd {
         bin,
         timeout: Duration::from_secs(120),
+        background: false,
     }
 }
 
@@ -152,11 +153,12 @@ fn gh_pr_view_fails_when_gh_outlives_its_timeout() {
     let cmd = GhPrCmd {
         bin: &gh_bin,
         timeout: Duration::from_millis(50),
+        background: false,
     };
     let started = std::time::Instant::now();
     assert_eq!(
         gh_pr_view(cmd, repo_dir.path(), "feat/x"),
-        Err(GhFailure::Failed)
+        Err(GhFailure::TimedOut)
     );
     assert!(
         started.elapsed() < Duration::from_secs(30),
@@ -181,7 +183,7 @@ fn derive_pr_cache_miss_calls_gh_and_writes_cache() {
         Some(cache_dir.path()),
         1_000,
     );
-    assert_eq!(pr.clone().ok().flatten().and_then(|p| p.number), Some(1));
+    assert_eq!(pr.0.clone().ok().flatten().and_then(|p| p.number), Some(1));
     let calls = std::fs::read_to_string(repo_dir.path().join("gh-calls.log")).unwrap();
     assert_eq!(calls.lines().count(), 1, "gh should be called on a miss");
     let cache_path = pr_cache_path(cache_dir.path(), repo_dir.path(), "feat/x");
