@@ -14,15 +14,15 @@ impl Session {
         owner_visible(self.owner_session(), caller)
     }
 
-    /// Whether a new task from `caller` may join this session (#3480). A session with no owner
-    /// takes any task. An owned session takes a task only from its owner, so a caller with no
-    /// conversation id is refused. [`Session::visible_to`] allows that caller, which suits a
-    /// reminder but not a write.
+    /// Whether a new task from `owner` may join this session (#3480). A session with no owner
+    /// takes any task. An owned session takes a task only from the caller that started it, by
+    /// conversation, or by engine process after a `/clear` (#3905). A caller with no identity is
+    /// refused. [`Session::visible_to`] allows that caller, which suits a reminder but not a write.
     #[must_use]
-    pub(crate) fn may_take_tasks(&self, caller: Option<&str>) -> bool {
+    pub(crate) fn may_take_tasks(&self, owner: &super::session::EngineIdentity) -> bool {
         match self.owner_session() {
             None => true,
-            Some(owner) => caller == Some(owner),
+            Some(_) => super::session::is_callers_session(self, owner, &std::cell::OnceCell::new()),
         }
     }
 }
