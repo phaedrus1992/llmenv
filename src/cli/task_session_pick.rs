@@ -2,7 +2,7 @@
 
 use super::task_guard::guard_session;
 use crate::task::ownership::{
-    Caller, SessionOverride, ensure_session_is_callers, ensure_session_is_ours,
+    Caller, SessionOverride, caller_reason, ensure_session_is_callers, ensure_session_is_ours,
 };
 
 /// The session a write command (`session edit`, `note`, `finish`) acts on, and the override note
@@ -68,13 +68,12 @@ pub(super) fn resolve_session_for_read(
 /// caller gets its own reason (#3861). The fix is the read's own: the write guard's
 /// `--other-session` flag is not taken here.
 fn read_refusal(picked: &str, caller: &Caller) -> String {
+    let why = caller_reason(caller);
     let reason = match caller {
-        Caller::Session(id) => {
-            format!(
-                "session '{picked}' belongs to another conversation, and your session is '{id}'"
-            )
+        Caller::Session(_) => {
+            format!("session '{picked}' belongs to another conversation, and {why}")
         }
-        Caller::Unidentified(reason) => reason.clone(),
+        Caller::Unidentified(_) => why,
     };
     format!(
         "{reason}. Fix: pass its id as an argument to read it, for example \

@@ -531,19 +531,19 @@ fn refuse_unless_caller(owner: &str, caller: &Caller, what: &str) -> anyhow::Res
     if matches!(caller, Caller::Session(id) if id == owner) {
         return Ok(());
     }
-    let why = match caller {
-        Caller::Session(id) => format!("your session is '{id}'"),
-        Caller::Unidentified(reason) => reason.clone(),
-    };
     anyhow::bail!(
-        "{what}, and {why}. To act on it anyway, pass the owning session's id as \
-         --other-session <SESSION_ID>."
+        "{what}, and {}. To act on it anyway, pass the owning session's id as \
+         --other-session <SESSION_ID>.",
+        caller_reason(caller)
     )
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests;
+
+mod caller;
+pub(crate) use caller::caller_reason;
 
 /// Refuses the deletion of a task with no session when the caller has no session to record the
 /// deletion on. Such a deletion would leave no record of the caller (#3586).
