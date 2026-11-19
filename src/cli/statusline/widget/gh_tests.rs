@@ -4,6 +4,7 @@
 
 use super::gh_lookup::{GH_LOGIN_SIGNS, GH_NO_PR_SIGNS};
 use super::*;
+use std::time::Duration;
 
 #[test]
 fn parse_gh_pr_view_none_for_missing_number_or_malformed_json() {
