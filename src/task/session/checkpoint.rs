@@ -220,7 +220,8 @@ pub(super) fn resume(
 
 /// Human-readable idle duration since an RFC3339 `last_activity` timestamp
 /// (e.g. `"2h 5m 3s"`), for `session ls` and the `session start` checkpoint.
-/// `"unknown"` when the timestamp can't be parsed or is in the future.
+/// `"unknown"` with the reason when the timestamp can't be parsed or is in the future. The
+/// reason shows in the listing, because a notice reaches only hook output (#3859).
 #[must_use]
 pub(crate) fn idle_display(last_activity: &str, session_id: &str) -> String {
     let now = std::time::SystemTime::now();
@@ -229,7 +230,7 @@ pub(crate) fn idle_display(last_activity: &str, session_id: &str) -> String {
     else {
         // The listing has no other place for the cause, so the notice carries it (#3859).
         crate::agent_notice::record_logged(unreadable_last_activity(session_id));
-        return "unknown".to_string();
+        return "unknown: last_activity is unreadable".to_string();
     };
     match now.duration_since(at) {
         Ok(d) => crate::util::time::format_age(std::time::Duration::from_secs(d.as_secs())),
@@ -239,7 +240,7 @@ pub(crate) fn idle_display(last_activity: &str, session_id: &str) -> String {
                 "session {session_id} has a last_activity in the future, so its idle time is \
                  unknown. Fix: check the clock of the machine that wrote it"
             ));
-            "unknown".to_string()
+            "unknown: last_activity is in the future".to_string()
         }
     }
 }
@@ -325,27 +326,36 @@ mod tests {
 
     #[test]
     fn idle_display_names_an_unreadable_last_activity_in_the_notice() {
-        assert_eq!(idle_display("yesterday", "s10"), "unknown");
+        assert_eq!(
+            idle_display("yesterday", "s10"),
+            "unknown: last_activity is unreadable"
+        );
         crate::agent_notice::assert_noticed(&["unreadable last_activity", "s10"]);
     }
 
     #[test]
     fn idle_display_names_a_future_last_activity_in_the_notice() {
-        assert_eq!(idle_display("2999-01-01T00:00:00Z", "s11"), "unknown");
+        assert_eq!(
+            idle_display("2999-01-01T00:00:00Z", "s11"),
+            "unknown: last_activity is in the future"
+        );
         crate::agent_notice::assert_noticed(&["last_activity in the future", "s11"]);
     }
 
     #[test]
     fn a_future_last_activity_has_no_idle_time() {
-        assert_eq!(idle_display("9999-01-01T00:00:00Z", "s1"), "unknown");
+        assert_eq!(
+            idle_display("9999-01-01T00:00:00Z", "s1"),
+            "unknown: last_activity is in the future"
+        );
     }
 
     proptest! {
-        // Arbitrary stored text never panics. A value other than "unknown" needs text that parses.
+        // Arbitrary stored text never panics. A time shows only for text that parses.
         #[test]
         fn idle_display_shows_a_time_only_for_text_that_parses(text in "\\PC{0,40}") {
             let shown = idle_display(&text, "s1");
-            if shown != "unknown" {
+            if !shown.starts_with("unknown") {
                 prop_assert!(crate::util::time::instant_or_log(&text, "test", "s1").is_some());
             }
         }
