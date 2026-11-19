@@ -1,7 +1,9 @@
 //! Picks the session a `llmenv task session` command acts on when no id is named.
 
 use super::task_guard::guard_session;
-use crate::task::ownership::{SessionOverride, ensure_session_is_callers, ensure_session_is_ours};
+use crate::task::ownership::{
+    Caller, SessionOverride, ensure_session_is_callers, ensure_session_is_ours,
+};
 
 /// The session a write command (`session edit`, `note`, `finish`) acts on, and the override note
 /// when `--other-session` was needed. An omitted id resolves through
@@ -56,15 +58,28 @@ pub(super) fn resolve_session_for_read(
         return Ok(id);
     }
     let (picked, caller) = pick_session(state_dir, project)?;
-    // The read names its own fix. The write guard's text names `--other-session`, which these
-    // commands do not take.
-    ensure_session_is_callers(&picked, &caller).map_err(|_| {
-        anyhow::anyhow!(
-            "session '{picked}' belongs to another conversation. Fix: pass its id as an argument \
-             to read it, for example `llmenv task session show {picked}`"
-        )
-    })?;
-    Ok(picked)
+    if ensure_session_is_callers(&picked, &caller).is_ok() {
+        return Ok(picked);
+    }
+    anyhow::bail!("{}", read_refusal(&picked, &caller))
+}
+
+/// The text of a refused read of `picked`. The reason comes from the caller, so an unidentified
+/// caller gets its own reason (#3861). The fix is the read's own: the write guard's
+/// `--other-session` flag is not taken here.
+fn read_refusal(picked: &str, caller: &Caller) -> String {
+    let reason = match caller {
+        Caller::Session(id) => {
+            format!(
+                "session '{picked}' belongs to another conversation, and your session is '{id}'"
+            )
+        }
+        Caller::Unidentified(reason) => reason.clone(),
+    };
+    format!(
+        "{reason}. Fix: pass its id as an argument to read it, for example \
+         `llmenv task session show {picked}`"
+    )
 }
 
 #[cfg(test)]
@@ -85,6 +100,24 @@ mod tests {
                 "an undocumented failure: {text}"
             );
         }
+    }
+
+    #[test]
+    fn a_refused_read_names_the_other_session_and_its_own_session() {
+        let text = read_refusal("sess-a", &Caller::Session("sess-b".to_string()));
+        assert!(text.contains("belongs to another conversation"), "{text}");
+        assert!(text.contains("your session is 'sess-b'"), "{text}");
+        assert!(text.contains("llmenv task session show sess-a"), "{text}");
+        assert!(!text.contains("--other-session"), "{text}");
+    }
+
+    #[test]
+    fn a_refused_read_from_an_unidentified_caller_gives_its_own_reason() {
+        let reason = "no identity was given for this conversation";
+        let text = read_refusal("sess-a", &Caller::Unidentified(reason.to_string()));
+        assert!(text.starts_with(reason), "{text}");
+        assert!(!text.contains("your session is"), "{text}");
+        assert!(text.contains("llmenv task session show sess-a"), "{text}");
     }
 
     fn started_project(dir: &std::path::Path) -> String {
