@@ -29,12 +29,37 @@ pub(crate) fn command_of(pid: u32) -> anyhow::Result<Option<String>> {
     ps_command(pid, &out)
 }
 
+/// The uid of the user that owns `pid`, or `None` when the process is gone (#3835).
+pub(crate) fn uid_of(pid: u32) -> anyhow::Result<Option<u32>> {
+    // An absolute path: a `ps` earlier on PATH could answer for any pid.
+    let mut cmd = std::process::Command::new("/bin/ps");
+    cmd.args(["-o", "uid=", "-p", &pid.to_string()])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let out = crate::process::run_traced("proxy:ps-uid", cmd, PS_TIMEOUT)
+        .map_err(|e| anyhow::anyhow!("cannot run /bin/ps to read the owner of pid {pid}: {e}"))?;
+    ps_field(pid, &out, "owner")?
+        .map(|text| {
+            text.parse().map_err(|e| {
+                anyhow::anyhow!(
+                    "/bin/ps printed {text:?} for the owner of pid {pid}, not a uid: {e}"
+                )
+            })
+        })
+        .transpose()
+}
+
 /// `ps` answers in milliseconds. A stuck `ps` must not hold the proxy check (#2923).
 const PS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Read the `ps` result for `pid`. `ps -p` exits 1 with no output for a pid that does not exist.
 /// Any other failure is an error, so a broken `ps` does not read as "pid gone" (#2923).
 pub(crate) fn ps_command(pid: u32, out: &std::process::Output) -> anyhow::Result<Option<String>> {
+    ps_field(pid, out, "command")
+}
+
+/// [`ps_command`] for any field of `ps`. `what` names the field in the error.
+fn ps_field(pid: u32, out: &std::process::Output, what: &str) -> anyhow::Result<Option<String>> {
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if out.status.success() {
         return Ok((!text.is_empty()).then_some(text));
@@ -43,7 +68,7 @@ pub(crate) fn ps_command(pid: u32, out: &std::process::Output) -> anyhow::Result
         return Ok(None);
     }
     anyhow::bail!(
-        "/bin/ps failed to read the command of pid {pid} ({}): {}",
+        "/bin/ps failed to read the {what} of pid {pid} ({}): {}",
         out.status,
         String::from_utf8_lossy(&out.stderr).trim()
     )

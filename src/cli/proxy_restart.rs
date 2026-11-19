@@ -38,6 +38,9 @@ pub(super) fn run(use_color: bool) -> anyhow::Result<()> {
         }
         StopOutcome::Stopped => eprintln!("{pass} Stopped the memory proxy"),
         StopOutcome::Gone => eprintln!("{info} The memory proxy in the pidfile was not running"),
+        StopOutcome::OtherUser => eprintln!(
+            "{info} The pid in the pidfile belongs to another user, so llmenv did not stop it"
+        ),
         StopOutcome::NoPidfile => eprintln!("{info} No memory proxy pidfile"),
     }
     match ensure_local_memory_proxy(&config, &config_dir, &active, SpawnSource::Restart) {
