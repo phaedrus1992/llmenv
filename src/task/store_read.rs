@@ -34,7 +34,8 @@ pub(super) fn read_tasks(state_dir: &Path, policy: UnreadablePolicy) -> anyhow::
     read_tasks_counted(state_dir, policy).map(|read| read.tasks)
 }
 
-/// The lenient read of [`super::try_list_tasks`], with the count of the skipped files. A person at
+/// The lenient read: a read error on the tasks directory is an error, a missing directory is no
+/// tasks, and a corrupt task file is logged, noticed, and skipped (#1112). It counts the skipped files. A person at
 /// a terminal sees the count, because an agent notice reaches hook output only (#3883).
 ///
 /// # Errors

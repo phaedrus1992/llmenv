@@ -5,6 +5,11 @@ use tempfile::TempDir;
 
 const PROJECT: &str = "test-project-0000000000";
 
+/// The lenient read of the store, as the CLI makes it.
+fn try_list_tasks(state_dir: &Path) -> anyhow::Result<Vec<Task>> {
+    store_read::try_list_tasks_counted(state_dir).map(|read| read.tasks)
+}
+
 /// A caller with no engine identity, as from a plain terminal.
 static NO_OWNER: session::EngineIdentity = session::EngineIdentity {
     session_id: None,
