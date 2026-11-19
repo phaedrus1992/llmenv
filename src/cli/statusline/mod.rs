@@ -7,7 +7,7 @@ mod llmenv_widget;
 mod peak;
 mod task_scope;
 mod template;
-mod widget;
+pub(crate) mod widget;
 
 use crate::cli::style::{apply_style, truncate_ellipsis};
 use std::io::Read;

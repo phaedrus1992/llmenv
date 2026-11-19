@@ -14,7 +14,7 @@ pub(super) fn usage_delta(state_dir: Option<&Path>, key: &str, pct: f64, now: i6
     let path = dir.join(key);
     let prev = read_usage_state(&path);
     let stale = match prev {
-        UsageState::Sample(_, ts) => now - ts >= 60,
+        UsageState::Sample(_, ts) => !crate::util::ttl::is_within(ts, now, 60),
         UsageState::First | UsageState::Unreadable => true,
     };
     if stale {

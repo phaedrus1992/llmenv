@@ -68,7 +68,7 @@ fn respawn_job_with_exe(
 
 /// Spawn `cmd` as a detached child in `cwd` with the shared bounded stderr log, and write `stdin`
 /// to it. Not waited on.
-fn spawn_detached(
+pub(crate) fn spawn_detached(
     mut cmd: std::process::Command,
     stdin: Option<&str>,
     cwd: &std::path::Path,

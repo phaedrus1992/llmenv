@@ -50,6 +50,10 @@ pub mod resume {
     pub use llmenv_task::resume::{MISSING_CONTEXT_NUDGE, ResumeContext, git_branch};
 }
 
+pub mod store_read {
+    pub use llmenv_task::store_read::{ReadTasks, try_list_tasks_counted};
+}
+
 pub mod visibility {
     pub use llmenv_task::visibility::owner_visible;
 }
