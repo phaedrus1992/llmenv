@@ -243,7 +243,7 @@ proptest::proptest! {
             tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
         let mut open: Vec<&Task> = tasks.iter().filter(|t| t.state == TaskState::Open).collect();
         open.sort_by(|a, b| llmenv_util::time::cmp_instants(&a.created_at, &a.slug, &b.created_at, &b.slug, "task created_at").then_with(|| a.slug.cmp(&b.slug)));
-        let want = crate::task::startability::first_startable(&open, &tasks, &by_slug)
+        let want = crate::startability::first_startable(&open, &tasks, &by_slug)
             .map(|t| t.slug.clone());
         if let Tracking::Tracked { next, stuck, queued, .. } = tracking_of(&visible, &tasks, None) {
             proptest::prop_assert_eq!(&next, &want);
