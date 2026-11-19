@@ -402,7 +402,7 @@ pub(crate) fn start_session_as(
                     own.clone(),
                     request,
                 )?)),
-                None => anyhow::bail!(checkpoint_error(&existing, request.owner)),
+                None => anyhow::bail!(checkpoint_error(&existing, request.owner, engine_start)),
             }
         }
         StartDecision::Resume(id) => {

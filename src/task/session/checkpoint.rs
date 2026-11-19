@@ -2,9 +2,14 @@
 //! refusal that lists them.
 
 use std::path::Path;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use super::{EngineIdentity, Session, StartRequest, now_rfc3339, save_session};
+
+mod engine_start;
+mod ownership;
+pub(super) use engine_start::engine_start;
+use ownership::{Ownership, is_callers, ownership, ownership_note, unreadable_last_activity};
 
 /// The one listed session that `owner` started, or `None` when it started none or more than one.
 /// After a `/clear` or a compaction the choice is then clear, so `Auto` resumes it (#2904).
@@ -26,112 +31,16 @@ pub(super) fn only_own_session<'a>(
     }
 }
 
-/// Whether the caller started `session`. The process id alone counts only when the session was
-/// active after the caller's engine started, because a process id is reused (#2904).
-fn is_callers(session: &Session, owner: &EngineIdentity, engine_start: Option<SystemTime>) -> bool {
-    match ownership(session, owner) {
-        Ownership::Conversation => true,
-        Ownership::Process => engine_start.is_some_and(|start| active_since(session, start)),
-        Ownership::None => false,
-    }
-}
-
-fn active_since(session: &Session, start: SystemTime) -> bool {
-    let Some(at) = crate::util::time::instant_or_log(
-        &session.last_activity,
-        "session last_activity",
-        crate::util::time::RecordId(&session.id),
-    ) else {
-        // An unknown value reads as "not active". The refusal that follows is non-destructive, so
-        // this default is the safe one. The notice names the cause, so the refusal is not
-        // silent about it (#3811).
-        crate::agent_notice::record_logged(unreadable_last_activity(&session.id));
-        return false;
-    };
-    at >= start
-}
-
-/// The notice for a `last_activity` that does not parse. The checkpoint and the listing both
-/// record it, so they report the same cause (#3859).
-fn unreadable_last_activity(session_id: &str) -> String {
-    format!(
-        "session {session_id} has an unreadable last_activity, so it is not known to be active. \
-         Fix: rewrite it as RFC 3339, such as 2026-01-01T00:00:00Z"
-    )
-}
-
-/// When the engine process `pid` started, from its elapsed time in `ps`. `None` when `ps` cannot
-/// tell, and the reason is logged.
-pub(super) fn engine_start(pid: u32) -> Option<SystemTime> {
-    let mut cmd = std::process::Command::new("/bin/ps");
-    cmd.args(["-o", "etime=", "-p", &pid.to_string()])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let out = match crate::process::run_traced("task:ps", cmd, PS_TIMEOUT) {
-        Ok(out) if out.status.success() => out,
-        // `ps -p` exits 1 with no output for a pid that does not exist (#2923).
-        Ok(out)
-            if out.status.code() == Some(1) && out.stdout.is_empty() && out.stderr.is_empty() =>
-        {
-            tracing::error!("ps found no engine process {pid}");
-            return None;
-        }
-        Ok(out) => {
-            tracing::error!(
-                "/bin/ps failed to read the age of engine process {pid} ({}): {}",
-                out.status,
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-            return None;
-        }
-        Err(e) => {
-            tracing::error!("cannot run /bin/ps to read the age of engine process {pid}: {e}");
-            return None;
-        }
-    };
-    let text = String::from_utf8_lossy(&out.stdout);
-    let Some(age) = parse_etime(text.trim()) else {
-        tracing::error!("cannot read the age of engine process {pid} from ps: {text:?}");
-        return None;
-    };
-    // `etime` has a resolution of one second.
-    SystemTime::now().checked_sub(age + Duration::from_secs(1))
-}
-
-/// `ps` answers in milliseconds. The bound keeps a stuck `ps` from holding the task store lock.
-const PS_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Parse the `etime` of `ps`: `[[dd-]hh:]mm:ss`.
-fn parse_etime(text: &str) -> Option<Duration> {
-    let (days, clock) = match text.split_once('-') {
-        Some((days, clock)) => (number(days, u64::MAX)?, clock),
-        None => (0, text),
-    };
-    let parts: Vec<&str> = clock.split(':').collect();
-    let (hours, minutes, seconds) = match parts.as_slice() {
-        [m, s] => (0, number(m, 59)?, number(s, 59)?),
-        [h, m, s] => (number(h, 23)?, number(m, 59)?, number(s, 59)?),
-        _ => return None,
-    };
-    let secs = days
-        .checked_mul(86_400)?
-        .checked_add(hours * 3_600 + minutes * 60 + seconds)?;
-    Some(Duration::from_secs(secs))
-}
-
-/// An ASCII decimal number of at most 7 digits, no more than `max`.
-fn number(text: &str, max: u64) -> Option<u64> {
-    let shape_ok = (1..=7).contains(&text.len()) && text.bytes().all(|b| b.is_ascii_digit());
-    let value: u64 = shape_ok.then(|| text.parse().ok()).flatten()?;
-    (value <= max).then_some(value)
-}
-
 /// Build the `session start` checkpoint error message: lists every existing
 /// open same-project session with enough detail (id, name, description,
 /// idle duration, and whether `owner` started it) that the agent or a human
 /// can decide `--resume`, `--replace`, or `--new` without needing to inspect
 /// anything further.
-pub(super) fn checkpoint_error(existing: &[Session], owner: &EngineIdentity) -> String {
+pub(super) fn checkpoint_error(
+    existing: &[Session],
+    owner: &EngineIdentity,
+    engine_start: Option<SystemTime>,
+) -> String {
     let lines: Vec<String> = existing
         .iter()
         .map(|s| {
@@ -144,17 +53,26 @@ pub(super) fn checkpoint_error(existing: &[Session], owner: &EngineIdentity) -> 
                     .as_deref()
                     .map(|d| format!(": {d}"))
                     .unwrap_or_default(),
-                ownership_note(s, owner),
+                ownership_note(s, owner, engine_start),
             )
         })
         .collect();
     let yours = existing
         .iter()
-        .filter(|s| !ownership_note(s, owner).is_empty())
+        .filter(|s| {
+            matches!(
+                ownership(s, owner, engine_start),
+                Ownership::Conversation | Ownership::Process(_)
+            )
+        })
+        .count();
+    let unknown = existing
+        .iter()
+        .filter(|s| matches!(ownership(s, owner, engine_start), Ownership::Unknown))
         .count();
     // `--replace` abandons every listed session, so it is only offered as the
     // way to drop "yours" when every listed session is yours.
-    let hint = if yours == 0 {
+    let mut hint = if yours == 0 {
         String::new()
     } else if yours == existing.len() {
         "\nEvery listed session is yours: pass --resume <id> to continue one, or --replace \
@@ -168,42 +86,18 @@ pub(super) fn checkpoint_error(existing: &[Session], owner: &EngineIdentity) -> 
             existing.len()
         )
     };
+    if unknown > 0 {
+        hint.push_str(
+            "\nllmenv could not read when this engine process started, so it cannot tell which \
+             sessions marked \"may be yours\" are yours. Fix: check that /bin/ps works, then run \
+             the command again, or pass --resume <id>.",
+        );
+    }
     format!(
         "session(s) already open for this project:\n{}\n\
          pass one of --resume <id>, --replace, or --new{hint}",
         lines.join("\n")
     )
-}
-
-/// The checkpoint's note on whether `owner` started `session`. The same
-/// engine process with a different conversation id is the state after a
-/// `/clear` or a compaction (#2365).
-/// How the caller owns a listed session.
-enum Ownership {
-    Conversation,
-    Process,
-    None,
-}
-
-fn ownership(session: &Session, owner: &EngineIdentity) -> Ownership {
-    if owner.session_id.is_some() && session.owner_session.as_deref() == owner.session_id.as_deref()
-    {
-        Ownership::Conversation
-    } else if owner.pid.is_some() && session.owner_pid == owner.pid {
-        Ownership::Process
-    } else {
-        Ownership::None
-    }
-}
-
-fn ownership_note(session: &Session, owner: &EngineIdentity) -> &'static str {
-    match ownership(session, owner) {
-        Ownership::Conversation => " — yours: started by this conversation",
-        Ownership::Process => {
-            " — yours: started by this engine process, most likely before a /clear or a compaction"
-        }
-        Ownership::None => "",
-    }
 }
 
 pub(super) fn resume(
@@ -274,15 +168,30 @@ pub(super) fn refuse_unnamed_foreign(
     if unnamed.is_empty() {
         return Ok(());
     }
-    let ids: Vec<&str> = unnamed.iter().map(|s| s.id.as_str()).collect();
-    let flags: String = ids
+    let listed: Vec<String> = unnamed
         .iter()
-        .map(|id| format!(" --other-session {id}"))
+        .map(|s| match ownership(s, owner, engine_start) {
+            Ownership::Unknown => format!("{} (cannot tell if it is yours)", s.id),
+            _ => s.id.clone(),
+        })
         .collect();
+    let flags: String = unnamed
+        .iter()
+        .map(|s| format!(" --other-session {}", s.id))
+        .collect();
+    let cannot_tell = if unnamed
+        .iter()
+        .any(|s| matches!(ownership(s, owner, engine_start), Ownership::Unknown))
+    {
+        "\nllmenv could not read when this engine process started, so it cannot tell whether a \
+         session marked \"cannot tell\" is yours. Fix: check that /bin/ps works, then run again."
+    } else {
+        ""
+    };
     anyhow::bail!(
-        "--replace would abandon session(s) of another conversation: {}\n\
+        "--replace would abandon session(s) of another conversation: {}{cannot_tell}\n\
          Nothing was changed. To abandon them anyway, run again with{flags}",
-        ids.join(", ")
+        listed.join(", ")
     )
 }
 
@@ -291,40 +200,6 @@ pub(super) fn refuse_unnamed_foreign(
 mod tests {
     use super::*;
     use proptest::prelude::*;
-
-    #[test]
-    fn etime_reads_every_ps_shape() {
-        assert_eq!(parse_etime("00:05"), Some(Duration::from_secs(5)));
-        assert_eq!(parse_etime("01:02:03"), Some(Duration::from_secs(3723)));
-        assert_eq!(
-            parse_etime("2-00:00:01"),
-            Some(Duration::from_secs(172_801))
-        );
-    }
-
-    #[test]
-    fn etime_refuses_a_malformed_value() {
-        for text in [
-            "", "5", "1:2:3:4", "00:60", "24:00:00", "a:00", "-1:00", "1-", "00:٣",
-        ] {
-            assert_eq!(parse_etime(text), None, "{text:?}");
-        }
-    }
-
-    #[test]
-    fn this_process_started_before_now() {
-        let start = engine_start(std::process::id()).unwrap();
-        assert!(start <= SystemTime::now());
-    }
-
-    /// #3811: an unreadable `last_activity` is not active, and the cause is noticed to the user.
-    #[test]
-    fn an_unreadable_last_activity_is_noticed_and_not_active() {
-        let mut s = session(9, None, None);
-        s.last_activity = "garbage-3811".into();
-        assert!(!active_since(&s, SystemTime::UNIX_EPOCH));
-        crate::agent_notice::assert_noticed(&["unreadable last_activity", "s9"]);
-    }
 
     #[test]
     fn idle_display_names_an_unreadable_last_activity_in_the_notice() {
@@ -379,6 +254,59 @@ mod tests {
         }
     }
 
+    fn caller() -> EngineIdentity {
+        EngineIdentity {
+            session_id: Some("c0".into()),
+            pid: Some(1),
+        }
+    }
+
+    /// #3858: a failed process check is "cannot tell", not "not yours".
+    #[test]
+    fn an_unknown_engine_start_marks_a_process_tied_session_as_may_be_yours() {
+        let sessions = [session(1, None, Some(1))];
+        let text = checkpoint_error(&sessions, &caller(), None);
+        assert!(text.contains("may be yours"), "{text}");
+        assert!(text.contains("cannot tell"), "{text}");
+        assert!(text.contains("Fix: check that /bin/ps works"), "{text}");
+        assert!(
+            !text.contains("yours: started by this engine process"),
+            "{text}"
+        );
+        assert!(only_own_session(sessions.iter(), &caller(), None).is_none());
+    }
+
+    #[test]
+    fn a_known_engine_start_still_marks_the_session_as_yours() {
+        let sessions = [session(1, None, Some(1))];
+        let start = Some(SystemTime::UNIX_EPOCH);
+        let text = checkpoint_error(&sessions, &caller(), start);
+        assert!(
+            text.contains("yours: started by this engine process"),
+            "{text}"
+        );
+        assert!(!text.contains("cannot tell"), "{text}");
+        assert!(only_own_session(sessions.iter(), &caller(), start).is_some());
+    }
+
+    #[test]
+    fn replace_says_cannot_tell_for_a_session_it_cannot_place() {
+        let sessions = [session(1, None, Some(1)), session(2, Some(7), None)];
+        let err = refuse_unnamed_foreign(&sessions, &caller(), None, &[]).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("s1 (cannot tell if it is yours)"), "{text}");
+        assert!(text.contains("s2"), "{text}");
+        assert!(!text.contains("s2 (cannot tell"), "{text}");
+        assert!(text.contains("Fix: check that /bin/ps works"), "{text}");
+    }
+
+    #[test]
+    fn replace_has_no_cannot_tell_text_when_every_owner_is_known() {
+        let sessions = [session(2, Some(7), None)];
+        let err = refuse_unnamed_foreign(&sessions, &caller(), None, &[]).unwrap_err();
+        assert!(!err.to_string().contains("cannot tell"), "{err}");
+    }
+
     proptest! {
         #[test]
         fn only_one_own_session_is_picked_in_any_order(
@@ -409,17 +337,6 @@ mod tests {
                 let picked = only_own_session(list.iter(), &me, since).map(|s| s.id.as_str());
                 prop_assert_eq!(picked, expected);
             }
-        }
-
-        #[test]
-        fn etime_round_trips(days in 0u64..400, h in 0u64..24, m in 0u64..60, s in 0u64..60) {
-            let text = if days > 0 {
-                format!("{days}-{h:02}:{m:02}:{s:02}")
-            } else {
-                format!("{h:02}:{m:02}:{s:02}")
-            };
-            let expected = Duration::from_secs(days * 86_400 + h * 3_600 + m * 60 + s);
-            prop_assert_eq!(parse_etime(&text), Some(expected));
         }
     }
 }
