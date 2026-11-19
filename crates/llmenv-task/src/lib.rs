@@ -73,6 +73,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
+use store_read::{UnreadablePolicy, read_tasks};
+
+mod store_read;
 
 /// Lifecycle state of a tracked task.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
@@ -246,7 +249,7 @@ pub fn list_tasks(state_dir: &Path) -> Vec<Task> {
 /// to an empty `Vec` indistinguishable from "no tasks tracked yet" (#1112).
 /// A missing directory still resolves to `Ok(vec![])` — that case really is
 /// "no tasks yet". Per-entry `DirEntry` errors and corrupt task files are
-/// logged via `tracing::warn!` and skipped, never silently dropped.
+/// logged and skipped, never silently dropped. A skipped task file also records an agent notice.
 ///
 /// # Errors
 /// Returns an error if the tasks directory exists but can't be read (e.g.
@@ -260,99 +263,6 @@ pub fn try_list_tasks(state_dir: &Path) -> anyhow::Result<Vec<Task>> {
 /// (#2608).
 pub fn list_tasks_strict(state_dir: &Path) -> anyhow::Result<StrictTasks> {
     StrictTasks::read(state_dir)
-}
-
-/// What [`read_tasks`] does with a task file or directory entry that cannot be read.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum UnreadablePolicy {
-    /// Log the file and leave it out of the listing.
-    Skip,
-    /// Fail the whole listing.
-    Fail,
-}
-
-fn read_tasks(state_dir: &Path, policy: UnreadablePolicy) -> anyhow::Result<Vec<Task>> {
-    StrictTasks::count_read();
-    let dir = tasks_dir(state_dir);
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => {
-            return Err(
-                anyhow::Error::new(e).context(format!("reading tasks dir {}", dir.display()))
-            );
-        }
-    };
-    let mut tasks = Vec::new();
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(e) if policy == UnreadablePolicy::Fail => {
-                return Err(anyhow::Error::new(e)
-                    .context(format!("reading an entry of tasks dir {}", dir.display())));
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, dir = %dir.display(), "skipping unreadable directory entry");
-                llmenv_util::agent_notice::record(format!(
-                    "llmenv skipped an unreadable entry in {}: {e}. Fix: check the directory's permissions.",
-                    dir.display()
-                ));
-                continue;
-            }
-        };
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        match session::read_state_text(&path)
-            .map_err(anyhow::Error::from)
-            .and_then(|content| Ok(serde_json::from_str::<Task>(&content)?))
-        {
-            Ok(task) => tasks.push(task),
-            // Distinguish a genuine read failure (e.g. permission denied on this
-            // one file) from corrupt JSON content: the former is an `io::Error`
-            // (from `read_to_string`), the latter a `serde_json::Error` — the
-            // wrong diagnosis sends someone chasing data corruption for what's
-            // actually a permissions problem (#1112).
-            Err(e) if e.downcast_ref::<std::io::Error>().is_some() => {
-                if policy == UnreadablePolicy::Fail {
-                    return Err(e.context(format!("reading task file {}", path.display())));
-                }
-                tracing::error!(
-                    error = %e,
-                    path = %path.display(),
-                    "skipping unreadable task file"
-                );
-                // A refused read (a FIFO, a file past the cap, or not UTF-8) is not a permission
-                // problem, so its fix differs.
-                let refused = e
-                    .downcast_ref::<std::io::Error>()
-                    .is_some_and(|io| io.kind() == std::io::ErrorKind::InvalidData);
-                let fix = if refused {
-                    "remove the file, or replace it with a task file that llmenv wrote"
-                } else {
-                    "check the file's permissions"
-                };
-                llmenv_util::agent_notice::record(format!(
-                    "llmenv skipped the unreadable task file {}: {e}. The task is missing from \
-                     task lists and resume. Fix: {fix}.",
-                    path.display()
-                ));
-            }
-            Err(e) if policy == UnreadablePolicy::Fail => {
-                return Err(e.context(format!("parsing task file {}", path.display())));
-            }
-            Err(e) => {
-                tracing::error!(error = %e, path = %path.display(), "skipping corrupt task file");
-                llmenv_util::agent_notice::record(format!(
-                    "llmenv skipped the corrupt task file {}: {e}. The task is missing from task \
-                     lists and resume. Fix: repair or delete the file.",
-                    path.display()
-                ));
-            }
-        }
-    }
-    Ok(tasks)
 }
 
 /// A task paired with its indentation depth for human `task ls` rendering: a
