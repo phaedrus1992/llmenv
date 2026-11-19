@@ -23,15 +23,14 @@
 set -euo pipefail
 
 usage() {
-    sed -n "2,17p" "$0" | sed 's/^# \{0,1\}//' >&2
+    sed -n '2,${/^#/!q;p;}' "$0" | sed 's/^# \{0,1\}//' >&2
 }
 
 # A shard with less time left than this does not start. The build alone takes longer.
 min_budget="${MUTANTS_MIN_BUDGET:-120}"
-# Exit codes of cargo-mutants (https://mutants.rs/exit-codes.html; code 1 was checked against
-# the pinned 27.1.0): 0 all caught, 1 usage error, 2 a mutant was not caught, 3 a test timed out,
-# 4 the baseline failed, 5 the --in-diff diff does not match the tree, 6 the --in-diff input is
-# not a diff, 70 internal error (#3837).
+# Exit codes of cargo-mutants, from https://mutants.rs/exit-codes.html (#3837): 0 all caught,
+# 1 usage error, 2 a mutant was not caught, 3 a test timed out, 4 the baseline failed, 5 the
+# --in-diff diff does not match the tree, 6 the --in-diff input is not a diff, 70 internal error.
 # Exit status of an incomplete shard. It is not 0, so the check cannot pass with untested lines.
 # It is outside the codes above, so it never reads as a survivor or a timeout.
 readonly INCOMPLETE_EXIT=10
@@ -53,10 +52,18 @@ shard="$1"
 shards="$2"
 diff_file="$3"
 total="${MUTANTS_BUDGET:-2400}"
-job_start="${JOB_START:-$(date +%s)}"
+if [[ -n "${JOB_START:-}" ]]; then
+    job_start="$JOB_START"
+else
+    job_start="$(date +%s)" || {
+        echo "mutants-shard: cannot read the clock with date. Set JOB_START to a Unix time." >&2
+        exit "$SETUP_EXIT"
+    }
+fi
 for value in "$shard" "$shards" "$total" "$job_start" "$min_budget"; do
-    if ! [[ "$value" =~ ^[0-9]{1,12}$ ]]; then
-        echo "mutants-shard: '$value' is not a number of at most 12 digits" >&2
+    # A leading zero is refused because bash reads it as octal in the arithmetic below.
+    if ! [[ "$value" =~ ^(0|[1-9][0-9]{0,11})$ ]]; then
+        echo "mutants-shard: '$value' is not a number of at most 12 digits without a leading zero" >&2
         exit "$SETUP_EXIT"
     fi
 done
@@ -74,7 +81,14 @@ if ! command -v timeout >/dev/null; then
 fi
 
 # The semgrep bash grammar cannot parse a command substitution inside arithmetic (#3845).
-now="$(date +%s)"
+now="$(date +%s)" || {
+    echo "mutants-shard: cannot read the clock with date." >&2
+    exit "$SETUP_EXIT"
+}
+if ((job_start > now)); then
+    echo "mutants-shard: JOB_START $job_start is later than the clock $now. Fix the value." >&2
+    exit "$SETUP_EXIT"
+fi
 elapsed=$((now - job_start))
 budget=$((total - elapsed))
 
@@ -90,7 +104,8 @@ report_incomplete() {
     echo "mutants-shard: $message" >&2
 }
 
-if ((budget < min_budget)); then
+# timeout reads a limit of 0 as no limit, so a budget below 1 never starts the shard.
+if ((budget < min_budget || budget < 1)); then
     report_incomplete "mutants shard $((shard + 1))/$shards did not start: only ${budget} s of the \
 ${total} s budget were left after the setup steps. Its mutants were not tested. The weekly sweep \
 runs the scoped set, not this diff, and it is report-only."
