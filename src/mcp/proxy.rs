@@ -188,11 +188,17 @@ where
     // nothing to wait for, so reclaiming it immediately keeps a wedged lock from
     // costing the full budget on every prompt.
     let judged = lock_holder(lock_path)?;
-    if let Some((holder, note)) = judged.and_then(|h| busy_holder_note(&h).map(|n| (h, n))) {
+    if let Some(holder) = judged.filter(holder_is_busy) {
         if wait_for_port(bind, budget_ms) {
             reconcile_pidfile(pid_path);
             return Ok(EnsureOutcome::AlreadyRunning);
         }
+        let note = if holder.pid_was_reused().is_none() {
+            " llmenv could not read the start time of that process from ps, so it cannot tell \
+             the holder from a process that reused its pid."
+        } else {
+            ""
+        };
         anyhow::bail!(
             "another llmenv process (pid {}) holds {} but nothing is serving {bind} \
              after {budget_ms}ms.{note} Fix: if no llmenv process runs, remove the lock file",
@@ -208,24 +214,26 @@ where
         return Ok(EnsureOutcome::AlreadyRunning);
     }
 
-    // The judgement above can be seconds old, because `ps` and the port probe both take time.
-    // Only the lock that was judged is removed. A peer may have replaced it since.
-    if lock_holder(lock_path)? != judged {
+    // The judgement above can be seconds old, because `ps` and the port probe both take time. A
+    // peer may have replaced the lock since, so only a lock that still names the judged holder is
+    // removed. This narrows the window and does not close it (#3909). A lock that is gone is fine:
+    // its holder finished, and the `try_lock` below takes it.
+    let current = lock_holder(lock_path)?;
+    if current.is_some() && current != judged {
         anyhow::bail!(
             "lost the race to reclaim stale proxy lockfile {}; the next export will retry",
             lock_path.display()
         );
     }
-
-    // Recorded, not only logged: a lock whose pid cannot be read is a sign that something else
-    // writes the lock, and the agent should see it (#3217).
-    crate::agent_notice::record_logged(format!(
-        "llmenv: reclaimed stale proxy lockfile {} (its holder is gone or its pid is unreadable). \
-         Fix: none is needed unless this repeats. If it repeats, check what writes the lockfile.",
-        lock_path.display()
-    ));
     match std::fs::remove_file(lock_path) {
-        Ok(()) => {}
+        // Recorded, not only logged: a lock whose pid cannot be read is a sign that something
+        // else writes the lock, and the agent should see it (#3217).
+        Ok(()) => crate::agent_notice::record_logged(format!(
+            "llmenv: reclaimed stale proxy lockfile {} (its holder is gone or its pid is \
+             unreadable). Fix: none is needed unless this repeats. If it repeats, check what \
+             writes the lockfile.",
+            lock_path.display()
+        )),
         // A peer reclaimed it first. The `try_lock` below decides who spawns.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
@@ -249,21 +257,11 @@ where
     )
 }
 
-/// `Some(note)` when the holder of the spawn lock still runs. The note is empty, unless the
-/// check for a reused pid could not run (#3795). A holder is gone when its pid is gone, when
-/// another user owns it, or when a newer process of this user has it.
-fn busy_holder_note(holder: &lockfile::LockHolder) -> Option<&'static str> {
-    if is_own_process_alive(holder.pid) == Some(false) {
-        return None;
-    }
-    match holder.pid_was_reused() {
-        Some(true) => None,
-        Some(false) => Some(""),
-        None => Some(
-            " llmenv could not read the start time of that process from ps, so it cannot tell \
-             the holder from a process that reused its pid.",
-        ),
-    }
+/// Whether the holder of the spawn lock still runs (#3795). A holder is gone when its pid is gone,
+/// when another user owns it, or when a newer process of this user has it. When `ps` cannot say,
+/// the holder counts as running.
+fn holder_is_busy(holder: &lockfile::LockHolder) -> bool {
+    is_own_process_alive(holder.pid) != Some(false) && holder.pid_was_reused() != Some(true)
 }
 
 /// Polls `bind` until something is serving it or `budget_ms` elapses.
