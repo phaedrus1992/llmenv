@@ -44,20 +44,50 @@ pub(crate) fn cmp_instants(
     instant_or_log(a, source, a_record).cmp(&instant_or_log(b, source, b_record))
 }
 
-/// Bad timestamps that were already logged in this process, as (source, record, text) triples.
-/// A sort compares one value many times, so each bad value is logged once, not once per
-/// comparison (#3812). The source is part of the key, so the same bad text from another record
-/// kind is still named. The record is part of the key, so each record names itself once (#3851).
-static REPORTED_BAD: std::sync::Mutex<std::collections::BTreeSet<(String, String, String)>> =
+/// One dedupe key: (source, record, text).
+type ReportKey = (String, String, String);
+
+/// Most keys one dedupe set holds. A process meets few bad values. Past this cap the set resets,
+/// so a value may log again. A repeated line costs less than a set that grows without limit.
+const MAX_REPORTED: usize = 1024;
+
+/// Bad timestamps that were already logged in this process. A sort compares one value many times,
+/// so each bad value is logged once, not once per comparison (#3812). The source is part of the
+/// key, so the same bad text from another record kind is still named. The record is part of the
+/// key, so each record names itself once (#3851).
+static REPORTED_BAD: std::sync::Mutex<std::collections::BTreeSet<ReportKey>> =
     std::sync::Mutex::new(std::collections::BTreeSet::new());
 
-/// Whether `text` held by `record` from `source` is new to the bad-timestamp log. A poisoned lock
-/// still holds a valid set, so the dedupe keeps working after a panic elsewhere.
-pub(crate) fn first_report(source: &str, record: &str, text: &str) -> bool {
-    REPORTED_BAD
+/// Records that already got the winner note. The note is a different message from the parse
+/// warning, so it has its own set, and each message logs once per record.
+static REPORTED_WINNER: std::sync::Mutex<std::collections::BTreeSet<ReportKey>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Insert a key into `set`, and return whether it was new. A poisoned lock still holds a valid
+/// set, so the dedupe keeps working after a panic elsewhere.
+fn insert_once(
+    set: &std::sync::Mutex<std::collections::BTreeSet<ReportKey>>,
+    source: &str,
+    record: &str,
+    text: &str,
+) -> bool {
+    let mut guard = set
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert((source.to_string(), record.to_string(), text.to_string()))
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if guard.len() >= MAX_REPORTED {
+        guard.clear();
+    }
+    guard.insert((source.to_string(), record.to_string(), text.to_string()))
+}
+
+/// Whether `text` held by `record` from `source` is new to the bad-timestamp log.
+pub(crate) fn first_report(source: &str, record: &str, text: &str) -> bool {
+    insert_once(&REPORTED_BAD, source, record, text)
+}
+
+/// Whether the winner note for `text` held by `record` from `source` is new.
+fn winner_report(source: &str, record: &str, text: &str) -> bool {
+    insert_once(&REPORTED_WINNER, source, record, text)
 }
 
 /// The instant of a stored timestamp. `source` names the record kind in the warning, such as
@@ -91,7 +121,7 @@ pub(crate) fn warn_if_bad_max_winner(source: &str, record: &str, text: &str, sha
     let Err(e) = parse_rfc3339(text) else {
         return;
     };
-    if first_report(&format!("{source} winner"), record, text) {
+    if winner_report(source, record, text) {
         tracing::warn!(
             error = %e,
             source,
@@ -218,6 +248,43 @@ mod tests {
         assert!(
             !first_report("test-3812", "rec", bad),
             "a repeat of the same bad value is not logged again"
+        );
+    }
+
+    #[test]
+    fn the_winner_note_and_the_parse_warning_each_log_once_per_record() {
+        let bad = "not-a-time-3863-unique";
+        assert!(
+            first_report("test-3863", "rec", bad),
+            "parse warning is new"
+        );
+        assert!(winner_report("test-3863", "rec", bad), "winner note is new");
+        assert!(
+            !first_report("test-3863", "rec", bad),
+            "parse warning repeats"
+        );
+        assert!(
+            !winner_report("test-3863", "rec", bad),
+            "winner note repeats"
+        );
+    }
+
+    #[test]
+    fn the_dedupe_set_resets_past_its_cap_so_an_evicted_value_logs_again() {
+        // The first key is cleared by a reset, because every insert after it pushes the set past
+        // the cap. So the reset has to run before the last insert, whatever other tests add.
+        let first = (
+            "test-3863-cap".to_string(),
+            "r".to_string(),
+            "first".to_string(),
+        );
+        assert!(first_report(&first.0, &first.1, &first.2));
+        for i in 0..=MAX_REPORTED {
+            first_report("test-3863-cap", "r", &format!("filler-{i}"));
+        }
+        assert!(
+            first_report(&first.0, &first.1, &first.2),
+            "the key was evicted, so it logs again"
         );
     }
 
