@@ -121,11 +121,18 @@ status=0
 timeout -k 60 "$budget" cargo mutants --workspace --test-workspace=true --in-place \
     --test-tool nextest --in-diff "$diff_file" --shard "$shard/$shards" || status=$?
 
-# 124 is the only budget stop. A kill (137) is a failure, not a stop: the kernel's memory kill
-# and a KILL after an ignored TERM both exit 137, and neither may pass as a stop. The local
-# uutils timeout is the one checked. GNU timeout is not checked here (#3814). If its budget stop
-# exits 137, the shard fails as a kill, so it stays red.
+# Exit 124 is a budget stop. GNU timeout 9.4 exits 137 instead when cargo mutants ignores the TERM
+# and the KILL of -k ends it (checked on Ubuntu 24.04, #3894). The kernel's memory kill also exits
+# 137. The run time tells them apart: a 137 at or after the budget is a stop, because TERM was
+# sent at the budget. A 137 before the budget is a failure.
+finished="$(date +%s)" || finished=0
+stopped=no
 if [[ "$status" -eq 124 ]]; then
+    stopped=yes
+elif [[ "$status" -eq 137 && "$finished" -gt 0 ]] && ((finished - now >= budget)); then
+    stopped=yes
+fi
+if [[ "$stopped" == yes ]]; then
     stop_message="mutants shard $((shard + 1))/$shards ran out of time, and the shard had ${budget} s. \
 The rest of the shard was not tested. The weekly sweep runs the scoped set, not this diff, and it \
 is report-only."

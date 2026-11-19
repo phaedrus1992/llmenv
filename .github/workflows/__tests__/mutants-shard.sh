@@ -60,7 +60,7 @@ check "the marker file is written" "1" "$(grep -c 'INCOMPLETE shard 2/3' mutants
 
 MUTANTS_MIN_BUDGET=1 MUTANTS_BUDGET=2 FAKE_SLEEP=2 FAKE_STATUS=137 \
   bash "$SHARD" 1 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
-check "a KILL after the budget ran out fails the shard, and is never green" "137" "$?"
+check "a KILL after the budget ran out is a budget stop, as GNU timeout -k ends it" "10" "$?"
 
 MUTANTS_MIN_BUDGET=1 MUTANTS_BUDGET=100 FAKE_SLEEP=0 FAKE_STATUS=137 \
   bash "$SHARD" 1 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
@@ -71,6 +71,10 @@ FAKE_STATUS=124 bash "$SHARD" 1 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
 check "a survivor before the stop still fails the shard" "2" "$?"
 check "a survivor before the stop also writes the incomplete marker" "1" \
   "$(grep -c '^INCOMPLETE shard 2/3' mutants.out/INCOMPLETE)"
+
+MUTANTS_MIN_BUDGET=1 MUTANTS_BUDGET=2 FAKE_SLEEP=2 FAKE_STATUS=137 \
+  bash "$SHARD" 1 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
+check "a survivor before a KILL stop still fails the shard" "2" "$?"
 rm -f mutants.out/missed.txt
 
 clock="$(date +%s)"
