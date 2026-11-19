@@ -45,7 +45,7 @@ fn classify(value: Option<&str>, now: i64) -> Link {
         return Link::Linked(value.to_owned());
     };
     match since.parse::<i64>() {
-        Ok(since) if (0..DEFAULT_PENDING_TTL_SECS).contains(&now.saturating_sub(since)) => {
+        Ok(since) if crate::util::ttl::is_within(since, now, DEFAULT_PENDING_TTL_SECS) => {
             Link::Pending { since }
         }
         _ => Link::Missing,

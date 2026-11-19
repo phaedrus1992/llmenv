@@ -61,10 +61,12 @@ pub(super) fn derive_pr(
     }
     if gh.background {
         if let Err(e) = start_refresh(dir, repo_dir, branch) {
-            tracing::error!(
+            // A notice, because the status line keeps the last PR with no sign that the refresh
+            // is broken.
+            crate::agent_notice::record_logged(format!(
                 "the PR refresh cannot start: {e:#}. Fix: run `llmenv doctor`, and check that \
                  the state folder is writable."
-            );
+            ));
             // With nothing cached, the failure shows, so it does not look like "no PR".
             if prior.is_none() {
                 return (Err(GhFailure::Failed), false);
@@ -144,7 +146,7 @@ impl PrCacheEntry {
         } else {
             PR_CACHE_TTL_SECS
         };
-        is_younger(self.ts, now, ttl)
+        crate::util::ttl::is_within(self.ts, now, ttl)
     }
 
     /// The last PR that a lookup returned, when it is young enough to show. An answer with a PR is
@@ -155,7 +157,7 @@ impl PrCacheEntry {
             .as_ref()
             .map(|(ts, pr)| (*ts, pr))
             .or_else(|| own.map(|pr| (self.ts, pr)))
-            .filter(|(ts, _)| is_younger(*ts, now, STALE_PR_MAX_AGE_SECS))
+            .filter(|(ts, _)| crate::util::ttl::is_within(*ts, now, STALE_PR_MAX_AGE_SECS))
             .map(|(_, pr)| pr)
     }
 
@@ -176,31 +178,30 @@ impl PrCacheEntry {
     }
 }
 
-/// Whether `ts` is no later than `now` and less than `limit` seconds before it. A time in the
-/// future reads as old, so a clock that stepped back cannot keep an entry alive (#3889).
-fn is_younger(ts: i64, now: i64, limit: i64) -> bool {
-    now.checked_sub(ts)
-        .is_some_and(|age| (0..limit).contains(&age))
-}
-
-/// Read the cache entry, whatever its age. `None` for a missing, corrupt, or unreadable entry; a
-/// read error other than a missing file is logged (#2821).
+/// Read the cache entry, whatever its age. `None` for a missing, corrupt, or unreadable entry. A
+/// read error other than a missing file is noticed, because the entry then reads as "no PR"
+/// (#2821).
 pub(super) fn read_pr_entry(path: &Path) -> Option<PrCacheEntry> {
     let contents = match crate::paths::bounded::state_text_io(path) {
         Ok(contents) => contents,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(e) => {
-            tracing::error!(
-                "pr cache {} cannot be read, so gh runs: {e}",
+            crate::agent_notice::record_logged(format!(
+                "the PR cache {} cannot be read, so the status line reads it as empty: {e}. Fix: \
+                 check the permissions of the file.",
                 path.display()
-            );
+            ));
             return None;
         }
     };
     match serde_json::from_str(&contents) {
         Ok(entry) => Some(entry),
         Err(e) => {
-            tracing::error!("pr cache {} is corrupt, so gh runs: {e}", path.display());
+            crate::agent_notice::record_logged(format!(
+                "the PR cache {} is corrupt, so the status line reads it as empty: {e}. Fix: \
+                 none is needed, because the next refresh replaces it.",
+                path.display()
+            ));
             None
         }
     }
@@ -212,7 +213,11 @@ pub(super) fn write_pr_entry(path: &Path, entry: &PrCacheEntry) {
     if let Some(parent) = path.parent()
         && let Err(e) = crate::paths::create_dir_owner_only(parent)
     {
-        tracing::error!("pr cache dir {} unavailable: {e}", parent.display());
+        crate::agent_notice::record_logged(format!(
+            "the PR cache folder {} is not available, so the status line shows no PR: {e}. Fix: \
+             check that the state folder is writable.",
+            parent.display()
+        ));
         return;
     }
     let json = match serde_json::to_string(entry) {

@@ -22,11 +22,6 @@ pub(super) const MAX_REPORTED: usize = 1024;
 static REPORTED_BAD: std::sync::Mutex<std::collections::BTreeSet<ReportKey>> =
     std::sync::Mutex::new(std::collections::BTreeSet::new());
 
-/// Records that already got the winner note. The note is a different message from the parse
-/// warning, so it has its own set, and each message logs once per record.
-static REPORTED_WINNER: std::sync::Mutex<std::collections::BTreeSet<ReportKey>> =
-    std::sync::Mutex::new(std::collections::BTreeSet::new());
-
 /// Insert a key into `set`, and return whether it was new. A poisoned lock still holds a valid
 /// set, so the dedupe keeps working after a panic elsewhere.
 pub(super) fn insert_once(
@@ -55,9 +50,15 @@ pub(super) fn first_report(source: &'static str, record: RecordId<'_>, text: &st
     insert_once(&REPORTED_BAD, source, record.0, text)
 }
 
-/// Whether the winner note for `text` held by `record` from `source` is new.
+/// Whether the winner note for `text` held by `record` from `source` is new. The note is a
+/// different message from the parse warning, so its source key has a prefix.
 pub(super) fn winner_report(source: &'static str, record: RecordId<'_>, text: &str) -> bool {
-    insert_once(&REPORTED_WINNER, source, record.0, text)
+    insert_once(
+        &REPORTED_BAD,
+        &format!("winner of {source}"),
+        record.0,
+        text,
+    )
 }
 
 /// The instant of a stored timestamp. `source` names the record kind in the warning, such as
@@ -76,7 +77,7 @@ pub(crate) fn instant_or_log(
                     error = %e,
                     source,
                     record = record.0,
-                    value = text,
+                    value = %crate::util::strip_unsafe_chars(text),
                     "a stored timestamp cannot be read. Fix: rewrite it as RFC 3339, \
                      such as 2026-01-01T00:00:00Z"
                 );
@@ -119,7 +120,7 @@ pub(crate) fn warn_if_bad_max_winner(
             error = %e,
             source,
             record = record.0,
-            value = text,
+            value = %crate::util::strip_unsafe_chars(text),
             shared,
             "this record won the max with an unreadable timestamp, so the pick may be a tie. \
              Fix: rewrite the timestamp of this record as RFC 3339, such as 2026-01-01T00:00:00Z"

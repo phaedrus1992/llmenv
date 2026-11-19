@@ -659,6 +659,8 @@ Only when the open session has no match does the search cover the whole project.
   (added in v3.14.0) When `task ls` skips a task file that it cannot read, it prints the count
   and the first cause on stderr, so a short list has a stated reason. Stdout does not change.
   A task file whose `created_at` or `updated_at` is not RFC 3339 is skipped the same way.
+  (added in v3.14.0) A command that changes one task, such as `task note`, refuses that file too, and the error names
+  the file and the fix.
   `--state <open|wip|waiting|done>` (repeatable) keeps only those states; `--hide-done`
   (alias `--active`) drops completed tasks; `--current-project` (added in
   v3.8.0) further narrows to tasks whose session is tagged to the current
@@ -775,6 +777,7 @@ project's hook.
   (added in v3.14.0) When llmenv cannot read the start time of the engine process from `ps`, it cannot
   tell if such a session is yours. The checkpoint marks it "may be yours", and the `--replace` refusal marks it
   "cannot tell if it is yours". The cause of the `ps` failure shows as a notice.
+  A session whose `last_activity` is in the future, or does not parse, is treated the same way.
   A session file whose `started_at` is not RFC 3339 fails the session read, and the error names the file and the fix.
   Outside an engine (no such variables) nothing is recorded, and resolution
   works as before.

@@ -46,7 +46,7 @@ pub(super) fn is_recent(adapter_root: &Path, now_ms: i64) -> anyhow::Result<bool
         }
     };
     match text.trim().parse::<i64>() {
-        Ok(at) => Ok((0..DEAD_FOLDER_TTL_MS).contains(&now_ms.saturating_sub(at))),
+        Ok(at) => Ok(crate::util::ttl::is_within(at, now_ms, DEAD_FOLDER_TTL_MS)),
         Err(_) => {
             // The keychain is read on every export until the next dead read rewrites the file.
             tracing::warn!(

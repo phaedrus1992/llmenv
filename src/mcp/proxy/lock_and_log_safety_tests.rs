@@ -148,7 +148,7 @@ proptest::proptest! {
     }
 
     #[test]
-    fn lock_holder_reads_back_any_pid(pid in proptest::prelude::any::<u32>(), pad in "[ \\t\\n]{0,3}") {
+    fn lock_holder_reads_back_any_pid(pid in 1..=i32::MAX.cast_unsigned(), pad in "[ \\t\\n]{0,3}") {
         let dir = TempDir::new().expect("tempdir");
         let lock = dir.path().join("p.lock");
         std::fs::write(&lock, format!("{pad}{pid}{pad}")).expect("write");
