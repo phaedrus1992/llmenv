@@ -227,7 +227,7 @@ pub(crate) fn list_tasks(state_dir: &Path) -> Vec<Task> {
 /// to an empty `Vec` indistinguishable from "no tasks tracked yet" (#1112).
 /// A missing directory still resolves to `Ok(vec![])` — that case really is
 /// "no tasks yet". Per-entry `DirEntry` errors and corrupt task files are
-/// logged via `tracing::warn!` and skipped, never silently dropped.
+/// logged and skipped, never silently dropped. A skipped task file also records an agent notice.
 ///
 /// # Errors
 /// Returns an error if the tasks directory exists but can't be read (e.g.

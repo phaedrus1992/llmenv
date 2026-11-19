@@ -36,9 +36,14 @@ pub(super) fn read_tasks(state_dir: &Path, policy: UnreadablePolicy) -> anyhow::
                     .context(format!("reading an entry of tasks dir {}", dir.display())));
             }
             Err(e) => {
-                tracing::warn!(error = %e, dir = %dir.display(), "skipping unreadable directory entry");
+                tracing::warn!(
+                    error = %e,
+                    dir = %dir.display(),
+                    "skipping unreadable directory entry"
+                );
                 crate::agent_notice::record(format!(
-                    "llmenv skipped an unreadable entry in {}: {e}. Fix: check the directory's permissions.",
+                    "llmenv skipped an unreadable entry in {}: {e}. Fix: check the directory's \
+                     permissions.",
                     dir.display()
                 ));
                 continue;
@@ -66,9 +71,10 @@ pub(super) fn read_tasks(state_dir: &Path, policy: UnreadablePolicy) -> anyhow::
                 );
                 // A refused read (a FIFO, a file past the cap, or not UTF-8) is not a permission
                 // problem, so its fix differs.
-                let refused = e
-                    .downcast_ref::<std::io::Error>()
-                    .is_some_and(|io| io.kind() == std::io::ErrorKind::InvalidData);
+                let refused = matches!(
+                    e.downcast_ref::<std::io::Error>(),
+                    Some(io) if io.kind() == std::io::ErrorKind::InvalidData
+                );
                 let fix = if refused {
                     "remove the file, or replace it with a task file that llmenv wrote"
                 } else {
@@ -84,10 +90,12 @@ pub(super) fn read_tasks(state_dir: &Path, policy: UnreadablePolicy) -> anyhow::
                 return Err(e.context(format!("parsing task file {}", path.display())));
             }
             Err(e) => {
-                tracing::error!(error = %e, path = %path.display(), "skipping corrupt task file");
+                // The full chain names the cause, such as an unreadable created_at and its fix.
+                let cause = format!("{e:#}");
+                tracing::error!(error = %cause, path = %path.display(), "skipping task file");
                 crate::agent_notice::record(format!(
-                    "llmenv skipped the corrupt task file {}: {e}. The task is missing from task \
-                     lists and resume. Fix: repair or delete the file.",
+                    "llmenv skipped the task file {}: {cause}. The task is missing from task \
+                     lists and resume.",
                     path.display()
                 ));
             }
@@ -100,7 +108,12 @@ pub(super) fn read_tasks(state_dir: &Path, policy: UnreadablePolicy) -> anyhow::
 /// that does not parse would move the task to the head of the queue with no cue (#3856).
 fn read_task_file(path: &Path) -> anyhow::Result<Task> {
     let content = crate::paths::bounded::state_text_io(path).map_err(anyhow::Error::from)?;
-    let task: Task = serde_json::from_str(&content)?;
+    let task: Task = serde_json::from_str(&content).with_context(|| {
+        format!(
+            "task file {} is not valid task JSON. Fix: repair or delete the file.",
+            path.display()
+        )
+    })?;
     crate::util::time::validate_stored(&task.created_at).with_context(|| {
         format!(
             "task '{}' at {} has an unreadable created_at. Fix: rewrite it as RFC 3339, \
@@ -120,6 +133,7 @@ fn read_task_file(path: &Path) -> anyhow::Result<Task> {
 mod tests {
     use super::{UnreadablePolicy, read_tasks};
     use crate::task::tasks_dir;
+    use proptest::prelude::*;
     use std::path::Path;
     use tempfile::TempDir;
 
@@ -164,5 +178,44 @@ mod tests {
         write_task(dir.path(), "good", "2026-01-01T00:00:00Z");
         let tasks = read_tasks(dir.path(), UnreadablePolicy::Fail).expect("valid read");
         assert_eq!(tasks.len(), 1);
+    }
+
+    #[test]
+    fn a_lenient_read_notices_the_skipped_created_at_with_its_cause_and_fix() {
+        let dir = TempDir::new().expect("test");
+        write_task(dir.path(), "store-read-3856", "yesterday");
+        read_tasks(dir.path(), UnreadablePolicy::Skip).expect("lenient read");
+        crate::agent_notice::assert_noticed(&[
+            "store-read-3856",
+            "unreadable created_at",
+            "Fix: rewrite it as RFC 3339",
+        ]);
+    }
+
+    fn created_at_text() -> impl Strategy<Value = String> {
+        prop_oneof![
+            (0i64..4_000_000_000).prop_map(|s| {
+                jiff::Timestamp::from_second(s)
+                    .expect("in range")
+                    .to_string()
+            }),
+            "\\PC{0,30}",
+        ]
+    }
+
+    proptest! {
+        // The strict read fails exactly when the validator rejects created_at, and the lenient
+        // read keeps the task exactly when the validator accepts it. A disagreement would let a
+        // bad value reach the queue sort (#3856).
+        #[test]
+        fn the_reads_agree_with_the_created_at_validator(created_at in created_at_text()) {
+            let dir = TempDir::new().expect("test");
+            write_task(dir.path(), "p", &created_at);
+            let valid = crate::util::time::validate_stored(&created_at).is_ok();
+            let strict = read_tasks(dir.path(), UnreadablePolicy::Fail);
+            let lenient = read_tasks(dir.path(), UnreadablePolicy::Skip).expect("lenient read");
+            prop_assert_eq!(strict.is_ok(), valid);
+            prop_assert_eq!(lenient.len(), usize::from(valid));
+        }
     }
 }
