@@ -28,12 +28,16 @@ usage() {
 
 # A shard with less time left than this does not start. The build alone takes longer.
 min_budget="${MUTANTS_MIN_BUDGET:-120}"
+# Exit codes of cargo-mutants (https://mutants.rs/exit-codes.html; code 1 was checked against
+# the pinned 27.1.0): 0 all caught, 1 usage error, 2 a mutant was not caught, 3 a test timed out,
+# 4 the baseline failed, 5 the --in-diff diff does not match the tree, 6 the --in-diff input is
+# not a diff, 70 internal error (#3837).
 # Exit status of an incomplete shard. It is not 0, so the check cannot pass with untested lines.
-# It is outside the small range that cargo-mutants uses, so it never reads as a survivor or a timeout.
+# It is outside the codes above, so it never reads as a survivor or a timeout.
 readonly INCOMPLETE_EXIT=10
 # Exit status of a setup error, such as a bad argument or a missing diff file. It is outside the
-# small codes that cargo-mutants and this script use, so a setup failure never reads as a finding
-# or a timeout (#3814). The exact cargo-mutants codes are not confirmed here.
+# codes above and outside INCOMPLETE_EXIT, so a setup failure never reads as a finding, a timeout,
+# or an incomplete shard (#3814).
 readonly SETUP_EXIT=11
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
