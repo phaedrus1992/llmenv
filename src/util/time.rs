@@ -389,6 +389,28 @@ mod tests {
             prop_assert_eq!(ta.cmp(&tb), xa.cmp(&xb));
         }
 
+        /// Years and months are refused with the calendar text. Days and weeks read back as that
+        /// many seconds, up to the range of the unit (#3860).
+        #[test]
+        fn parse_age_refuses_calendar_units_and_reads_fixed_units_back(
+            years in 1u32..10_000,
+            days in 0u64..7_304_485,
+            weeks in 0u64..1_043_498,
+        ) {
+            for text in [format!("{years}y"), format!("{years}mo")] {
+                let err = parse_age(&text).expect_err("a calendar unit is refused").to_string();
+                prop_assert!(err.contains("months or years"), "{err}");
+            }
+            prop_assert_eq!(
+                parse_age(&format!("{days}d")).expect("days read back"),
+                Duration::from_secs(days * 86_400)
+            );
+            prop_assert_eq!(
+                parse_age(&format!("{weeks}w")).expect("weeks read back"),
+                Duration::from_secs(weeks * 7 * 86_400)
+            );
+        }
+
         /// Any input gives a value or an error that names the input. An `Ok` value is a duration.
         #[test]
         fn parse_age_never_panics_and_names_a_bad_input(raw in "\\PC{0,24}") {
