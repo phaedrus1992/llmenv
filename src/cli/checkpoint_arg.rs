@@ -20,3 +20,12 @@ pub(super) fn checked_checkpoint(path: Option<PathBuf>) -> anyhow::Result<Option
     let state_dir = paths::state_dir()?;
     crate::hook_run::checkpoint::validated_path(&state_dir, &path).map(Some)
 }
+
+/// Read the JSON payload of a detached job from stdin. The parent writes it, so it is not input
+/// from a person.
+pub(super) fn read_job_payload() -> anyhow::Result<String> {
+    use std::io::Read;
+    let mut payload = String::new();
+    std::io::stdin().read_to_string(&mut payload)?;
+    Ok(payload)
+}

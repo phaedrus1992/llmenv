@@ -75,7 +75,7 @@ use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use store_read::{UnreadablePolicy, read_tasks};
 
-mod store_read;
+pub(crate) mod store_read;
 
 /// Lifecycle state of a tracked task.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
@@ -202,18 +202,21 @@ pub(crate) fn load_task(state_dir: &Path, slug: &str) -> anyhow::Result<Task> {
     let path = task_path(state_dir, slug);
     let content = crate::paths::bounded::state_text_io(&path)
         .with_context(|| format!("cannot read task '{slug}' at {}", path.display()))?;
-    serde_json::from_str(&content)
-        .with_context(|| format!("task '{slug}' at {} is not valid task JSON", path.display()))
+    let task: Task = serde_json::from_str(&content)
+        .with_context(|| format!("task '{slug}' at {} is not valid task JSON", path.display()))?;
+    // A command that changes a task must not save over a file that the listing skips (#3882).
+    store_read::check_task_times(&task, &path)?;
+    Ok(task)
 }
 
 /// List all tasks in the store, tolerating a missing or unreadable store by
 /// treating it as empty (logging the cause via `tracing::warn!`). Callers
 /// that must distinguish "genuinely empty" from "couldn't read the store"
 /// (e.g. denying a `TaskList` redirect with the real error, #1112) should use
-/// [`try_list_tasks`] instead.
+/// `store_read::try_list_tasks_counted` instead.
 #[cfg(test)]
 pub(crate) fn list_tasks(state_dir: &Path) -> Vec<Task> {
-    match try_list_tasks(state_dir) {
+    match read_tasks(state_dir, UnreadablePolicy::Skip) {
         Ok(tasks) => tasks,
         Err(e) => {
             tracing::error!(error = %e, "failed to read tasks dir; treating as empty");
@@ -222,21 +225,7 @@ pub(crate) fn list_tasks(state_dir: &Path) -> Vec<Task> {
     }
 }
 
-/// Fallible sibling of [`list_tasks`]: propagates a genuine read error on the
-/// tasks directory itself (e.g. permission denied) instead of collapsing it
-/// to an empty `Vec` indistinguishable from "no tasks tracked yet" (#1112).
-/// A missing directory still resolves to `Ok(vec![])` — that case really is
-/// "no tasks yet". Per-entry `DirEntry` errors and corrupt task files are
-/// logged and skipped, never silently dropped. A skipped task file also records an agent notice.
-///
-/// # Errors
-/// Returns an error if the tasks directory exists but can't be read (e.g.
-/// permission denied).
-pub(crate) fn try_list_tasks(state_dir: &Path) -> anyhow::Result<Vec<Task>> {
-    read_tasks(state_dir, UnreadablePolicy::Skip)
-}
-
-/// [`try_list_tasks`], but a task file that cannot be read is an error and not a skipped entry.
+/// A lenient read, but a task file that cannot be read is an error and not a skipped entry.
 /// A decision or a reminder that reads the store uses this, so it never sees a partial view
 /// (#2608).
 pub(crate) fn list_tasks_strict(state_dir: &Path) -> anyhow::Result<StrictTasks> {
@@ -603,8 +592,8 @@ fn touch_task_session(state_dir: &Path, task: &Task) {
     if let Some(session_id) = &task.session
         && let Err(e) = session::touch_last_activity(state_dir, session_id)
     {
-        // error level, because the default log filter drops warnings. A session that cannot load
-        // is a real fault, even though the task change is already saved.
+        // A notice, because the engine drops hook stderr. A session that cannot load is a real
+        // fault, even though the task change is already saved.
         crate::agent_notice::record_logged(format!(
             "llmenv: the task change is saved, but the activity time of session {session_id} is \
              not, so the session can look idle: {e:#}. Fix: run `llmenv task session show`."

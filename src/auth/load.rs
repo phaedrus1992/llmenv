@@ -6,13 +6,24 @@ use anyhow::Context;
 
 use crate::auth::credentials::CACHE_FILE;
 use crate::auth::{AuthEntry, auth_cache_dir};
+use crate::util::time::RecordId;
 
 /// The usable entries of the cache, newest-first, with the skipped files.
 #[derive(Debug)]
-pub(super) struct Loaded {
-    pub(super) entries: Vec<AuthEntry>,
-    pub(super) skipped: usize,
-    pub(super) first_problem: Option<String>,
+pub(crate) struct Loaded {
+    pub(crate) entries: Vec<AuthEntry>,
+    /// Cache files left out because they could not be read or parsed.
+    pub(crate) skipped: usize,
+    /// The first problem among the skipped files. It names one file in the session notice.
+    pub(crate) first_problem: Option<String>,
+}
+
+impl Loaded {
+    /// The most recently seen entry, which a new folder inherits. `None` when the cache holds no
+    /// usable entry.
+    pub(crate) fn newest(&self) -> Option<&AuthEntry> {
+        self.entries.first()
+    }
 }
 
 /// Load the usable entries from the cache, sorted newest-first.
@@ -43,10 +54,13 @@ pub(super) fn load_counted(adapter_root: &Path) -> anyhow::Result<Loaded> {
             ));
         }
     };
+    // A fixed order, so the first problem is the same on every run.
+    let mut listed: Vec<_> = read_dir.collect();
+    listed.sort_by_key(|e| e.as_ref().ok().map(std::fs::DirEntry::path));
     let mut entries: Vec<AuthEntry> = Vec::new();
     let mut first_problem: Option<String> = None;
     let mut skipped = 0_usize;
-    for res in read_dir {
+    for res in listed {
         let outcome = res
             .map_err(|e| anyhow::anyhow!("an entry in {} cannot be read: {e}", dir.display()))
             .and_then(|entry| read_auth_entry(&entry.path()));
@@ -71,9 +85,9 @@ pub(super) fn load_counted(adapter_root: &Path) -> anyhow::Result<Loaded> {
     entries.sort_by(|a, b| {
         crate::util::time::cmp_instants(
             &b.last_seen,
-            &b.uuid,
+            RecordId(&b.uuid),
             &a.last_seen,
-            &a.uuid,
+            RecordId(&a.uuid),
             "auth entry last_seen",
         )
     });

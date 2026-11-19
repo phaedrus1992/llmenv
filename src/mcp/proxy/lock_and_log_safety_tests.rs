@@ -7,14 +7,22 @@ fn try_lock_records_the_pid_before_the_lock_is_visible() {
     let lock = dir.path().join("proxy.lock");
 
     assert!(try_lock(&lock).expect("first take").is_some());
-    let pid = std::process::id().to_string();
-    assert_eq!(std::fs::read_to_string(&lock).expect("read lock"), pid);
+    let pid = std::process::id();
+    let text = std::fs::read_to_string(&lock).expect("read lock");
+    // The lock names the pid, and the start time when `ps` gave one (#3795).
+    assert!(
+        text == pid.to_string() || text.starts_with(&format!("{pid} ")),
+        "{text}"
+    );
 
     assert!(
         try_lock(&lock).expect("second take").is_none(),
         "a held lock must not be taken again"
     );
-    assert_eq!(lock_holder(&lock).expect("holder"), pid.parse::<u32>().ok());
+    assert_eq!(
+        lock_holder(&lock).expect("holder").map(|h| h.pid),
+        Some(pid)
+    );
 }
 
 #[test]
@@ -140,12 +148,12 @@ proptest::proptest! {
     }
 
     #[test]
-    fn lock_holder_reads_back_any_pid(pid in proptest::prelude::any::<u32>(), pad in "[ \\t\\n]{0,3}") {
+    fn lock_holder_reads_back_any_pid(pid in 1..=i32::MAX.cast_unsigned(), pad in "[ \\t\\n]{0,3}") {
         let dir = TempDir::new().expect("tempdir");
         let lock = dir.path().join("p.lock");
         std::fs::write(&lock, format!("{pad}{pid}{pad}")).expect("write");
 
-        proptest::prop_assert_eq!(lock_holder(&lock).expect("holder"), Some(pid));
+        proptest::prop_assert_eq!(lock_holder(&lock).expect("holder").map(|h| h.pid), Some(pid));
     }
 }
 
@@ -197,4 +205,49 @@ fn a_lock_held_by_another_users_pid_is_reclaimed() {
         "the lock was not reclaimed: {text}"
     );
     assert!(!text.contains("holds"), "the lock was waited on: {text}");
+}
+
+/// The lock names a process of this user that started after the lock was taken, so the pid was
+/// reused and the lock is stale. The signal check says the pid is alive, and only the start time
+/// says it is another process (#3795).
+#[cfg(unix)]
+#[test]
+fn a_lock_whose_pid_was_reused_by_an_own_process_is_reclaimed() {
+    let dir = TempDir::new().expect("tempdir");
+    let pid_path = dir.path().join("mcp-proxy.pid");
+    let lock = crate::mcp::proxy::lockfile_path(&pid_path);
+    // This test process is alive and is this user's. A start time in 2001 is long before it began.
+    std::fs::write(&lock, format!("{} 1000000001", std::process::id())).expect("write lock");
+    let result = crate::mcp::proxy::ensure_running_within(
+        "127.0.0.1:1",
+        &pid_path,
+        |_| anyhow::bail!("spawn reached"),
+        50,
+    );
+    let text = result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+    assert!(
+        text.contains("spawn reached"),
+        "the lock was waited on: {text}"
+    );
+}
+
+/// A lock whose holder is alive and has the recorded start is busy, not stale.
+#[cfg(unix)]
+#[test]
+fn a_lock_of_a_live_holder_with_its_own_start_is_waited_on() {
+    let dir = TempDir::new().expect("tempdir");
+    let pid_path = dir.path().join("mcp-proxy.pid");
+    let lock = crate::mcp::proxy::lockfile_path(&pid_path);
+    assert!(try_lock(&lock).expect("take").is_some());
+    let result = crate::mcp::proxy::ensure_running_within(
+        "127.0.0.1:1",
+        &pid_path,
+        |_| anyhow::bail!("spawn reached"),
+        50,
+    );
+    let text = result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+    assert!(
+        text.contains("holds"),
+        "the live lock was reclaimed: {text}"
+    );
 }

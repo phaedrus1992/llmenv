@@ -255,9 +255,10 @@ mod listing;
 pub(crate) use listing::{list_sessions_strict, open_sessions_strict, sort_listing};
 mod resume_text;
 mod resume_write;
+use crate::util::proc_start::process_start;
 use abandon::{abandon_failed, abandon_session};
 pub(crate) use checkpoint::idle_display;
-use checkpoint::{checkpoint_error, engine_start, only_own_session, resume};
+use checkpoint::{checkpoint_error, only_own_session, resume};
 pub(in crate::task) use context_reminder::missing_context_reminders;
 pub(crate) use finish::finish_session;
 #[cfg(test)]
@@ -293,8 +294,8 @@ fn save_session(state_dir: &Path, session: &Session) -> anyhow::Result<()> {
 
 fn load_session(state_dir: &Path, id: &str) -> anyhow::Result<Session> {
     ensure_plain_name(id)?;
-    let content = crate::paths::bounded::state_text_io(&session_path(state_dir, id))?;
-    Ok(serde_json::from_str(&content)?)
+    let path = session_path(state_dir, id);
+    listing::parse_session(&crate::paths::bounded::state_text_io(&path)?, &path)
 }
 
 /// [`load_session`] for a session the caller expects to exist. A missing file reads "no session
@@ -310,12 +311,7 @@ pub(crate) fn load_existing_session(state_dir: &Path, id: &str) -> anyhow::Resul
         }
         Err(e) => anyhow::bail!("cannot read session '{id}' at {}: {e}", path.display()),
     };
-    serde_json::from_str(&content).map_err(|e| {
-        anyhow::anyhow!(
-            "session '{id}' at {} is not valid session JSON: {e}",
-            path.display()
-        )
-    })
+    listing::parse_session(&content, &path)
 }
 
 #[cfg(test)]
@@ -395,14 +391,14 @@ pub(crate) fn start_session_as(
             if existing.is_empty() {
                 return Ok(StartOutcome::Created(create_session(state_dir, request)?));
             }
-            let engine_start = request.owner.pid.and_then(engine_start);
+            let engine_start = request.owner.pid.and_then(process_start);
             match only_own_session(existing.iter(), request.owner, engine_start) {
                 Some(own) => Ok(StartOutcome::Resumed(resume(
                     state_dir,
                     own.clone(),
                     request,
                 )?)),
-                None => anyhow::bail!(checkpoint_error(&existing, request.owner)),
+                None => anyhow::bail!(checkpoint_error(&existing, request.owner, engine_start)),
             }
         }
         StartDecision::Resume(id) => {
@@ -414,7 +410,7 @@ pub(crate) fn start_session_as(
         }
         StartDecision::Replace(named) => {
             let existing = open_sessions_strict(state_dir, project)?;
-            let engine_start = request.owner.pid.and_then(engine_start);
+            let engine_start = request.owner.pid.and_then(process_start);
             checkpoint::refuse_unnamed_foreign(&existing, request.owner, engine_start, &named)?;
             let mut abandoned = Vec::with_capacity(existing.len());
             // One strict read of the task store serves every abandoned session (#3479). With no
@@ -833,9 +829,9 @@ mod tests {
         assert_ne!(
             crate::util::time::cmp_instants(
                 &updated.last_activity,
-                &updated.id,
+                crate::util::time::RecordId(&updated.id),
                 &created.last_activity,
-                &created.id,
+                crate::util::time::RecordId(&created.id),
                 "session last_activity"
             ),
             std::cmp::Ordering::Less
@@ -1492,7 +1488,7 @@ mod tests {
         assert!(!other_line.contains("yours"), "{err}");
         assert!(err.contains("--resume <id> to continue it"), "{err}");
         assert!(
-            err.contains("--replace abandons all 3 listed sessions"),
+            err.contains("which abandons all 3 listed sessions"),
             "mixed ownership must warn that --replace drops the other window's session: {err}"
         );
         assert!(!err.contains("--replace to drop"), "{err}");

@@ -187,16 +187,22 @@ where
     // Check the holder before waiting on it. A lock whose holder is gone has
     // nothing to wait for, so reclaiming it immediately keeps a wedged lock from
     // costing the full budget on every prompt.
-    if let Some(holder) =
-        lock_holder(lock_path)?.filter(|pid| is_own_process_alive(*pid) != Some(false))
-    {
+    let judged = lock_holder(lock_path)?;
+    if let Some(holder) = judged.filter(holder_is_busy) {
         if wait_for_port(bind, budget_ms) {
             reconcile_pidfile(pid_path);
             return Ok(EnsureOutcome::AlreadyRunning);
         }
+        let note = if holder.pid_was_reused().is_none() {
+            " llmenv could not read the start time of that process from ps, so it cannot tell \
+             the holder from a process that reused its pid."
+        } else {
+            ""
+        };
         anyhow::bail!(
-            "another llmenv process (pid {holder}) holds {} but nothing is serving {bind} \
-             after {budget_ms}ms. Fix: if no llmenv process runs, remove the lock file",
+            "another llmenv process (pid {}) holds {} but nothing is serving {bind} \
+             after {budget_ms}ms.{note} Fix: if no llmenv process runs, remove the lock file",
+            holder.pid,
             lock_path.display()
         );
     }
@@ -208,15 +214,26 @@ where
         return Ok(EnsureOutcome::AlreadyRunning);
     }
 
-    // Recorded, not only logged: a lock whose pid cannot be read is a sign that something else
-    // writes the lock, and the agent should see it (#3217).
-    crate::agent_notice::record_logged(format!(
-        "llmenv: reclaimed stale proxy lockfile {} (its holder is gone or its pid is unreadable). \
-         Fix: none is needed unless this repeats. If it repeats, check what writes the lockfile.",
-        lock_path.display()
-    ));
+    // The judgement above can be seconds old, because `ps` and the port probe both take time. A
+    // peer may have replaced the lock since, so only a lock that still names the judged holder is
+    // removed. This narrows the window and does not close it (#3909). A lock that is gone is fine:
+    // its holder finished, and the `try_lock` below takes it.
+    let current = lock_holder(lock_path)?;
+    if current.is_some() && current != judged {
+        anyhow::bail!(
+            "lost the race to reclaim stale proxy lockfile {}; the next export will retry",
+            lock_path.display()
+        );
+    }
     match std::fs::remove_file(lock_path) {
-        Ok(()) => {}
+        // Recorded, not only logged: a lock whose pid cannot be read is a sign that something
+        // else writes the lock, and the agent should see it (#3217).
+        Ok(()) => crate::agent_notice::record_logged(format!(
+            "llmenv: reclaimed stale proxy lockfile {} (its holder is gone or its pid is \
+             unreadable). Fix: none is needed unless this repeats. If it repeats, check what \
+             writes the lockfile.",
+            lock_path.display()
+        )),
         // A peer reclaimed it first. The `try_lock` below decides who spawns.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
@@ -238,6 +255,13 @@ where
         "lost the race to reclaim stale proxy lockfile {}; the next export will retry",
         lock_path.display()
     )
+}
+
+/// Whether the holder of the spawn lock still runs (#3795). A holder is gone when its pid is gone,
+/// when another user owns it, or when a newer process of this user has it. When `ps` cannot say,
+/// the holder counts as running.
+fn holder_is_busy(holder: &lockfile::LockHolder) -> bool {
+    is_own_process_alive(holder.pid) != Some(false) && holder.pid_was_reused() != Some(true)
 }
 
 /// Polls `bind` until something is serving it or `budget_ms` elapses.
@@ -955,31 +979,26 @@ pub fn probe_tcp(bind: &str, timeout_ms: u64) -> bool {
     TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(timeout_ms)).is_ok()
 }
 
-/// What a signal-0 check says about a process id.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Probe {
-    /// A process of this user exists.
-    Own,
-    /// A process of another user exists (`EPERM`).
-    OtherUser,
-    /// No process has the id.
-    Gone,
-}
-
-/// The signal-0 check of `pid`, or `None` when the check cannot be made: the id is out of range,
-/// the platform has no signal check, or the system gave an unexpected error.
-fn probe(pid: u32) -> Option<Probe> {
+/// What `pid` names, or `None` when the check cannot be made: the id is out of range, the platform
+/// has no signal check, or `ps` failed to name the owner of a pid that refused the signal check.
+/// A failure of `ps` is noticed.
+fn state_of(pid: u32) -> Option<crate::mcp::pid_state::PidState> {
     #[cfg(unix)]
     {
         // Out-of-range pids can't be asked about: `kill` takes an i32, and clamping would
         // silently probe a different process. Pid 0 targets the caller's whole process group, so
         // it is not a question either.
         let pid = rustix::process::Pid::from_raw(i32::try_from(pid).ok()?)?;
-        match rustix::process::test_kill_process(pid) {
-            Ok(()) => Some(Probe::Own),
-            Err(rustix::io::Errno::PERM) => Some(Probe::OtherUser),
-            Err(rustix::io::Errno::SRCH) => Some(Probe::Gone),
-            Err(_) => None,
+        // A process of this user that refuses a signal, such as under a sandbox, is still this
+        // user's, so the owner decides and not the signal check (#3835).
+        match crate::mcp::pid_state::pid_state(pid) {
+            Ok(state) => Some(state),
+            Err(e) => {
+                crate::agent_notice::record_logged(format!(
+                    "llmenv: {e:#}. Fix: check that /bin/ps works."
+                ));
+                None
+            }
         }
     }
     #[cfg(not(unix))]
@@ -989,7 +1008,7 @@ fn probe(pid: u32) -> Option<Probe> {
     }
 }
 
-/// Whether `pid` is a live process of any user, via a signal-0 check (#3782).
+/// Whether `pid` is a live process of any user (#3782).
 ///
 /// `Some(true)` alive, `Some(false)` definitely not running, `None` when the check itself couldn't
 /// be performed. The three-way answer matters because callers act destructively on "not running":
@@ -1004,7 +1023,7 @@ fn probe(pid: u32) -> Option<Probe> {
 /// Returns `None` on non-Unix platforms, where there is no signal check to make.
 #[must_use]
 pub fn is_alive(pid: u32) -> Option<bool> {
-    probe(pid).map(|p| p != Probe::Gone)
+    state_of(pid).map(|state| state != crate::mcp::pid_state::PidState::Gone)
 }
 
 /// [`is_alive`] for a pid that this user's llmenv recorded, such as a proxy or a lock holder. A
@@ -1012,7 +1031,7 @@ pub fn is_alive(pid: u32) -> Option<bool> {
 /// not keep a stale lock or pidfile alive (#3782).
 #[must_use]
 pub(crate) fn is_own_process_alive(pid: u32) -> Option<bool> {
-    probe(pid).map(|p| p == Probe::Own)
+    state_of(pid).map(|state| state == crate::mcp::pid_state::PidState::Own)
 }
 
 #[cfg(all(test, unix))]

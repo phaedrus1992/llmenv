@@ -58,9 +58,32 @@ check "the annotation names the shard as one-based" "1" \
 check "the step summary says INCOMPLETE" "1" "$(grep -c 'INCOMPLETE' "$summary")"
 check "the marker file is written" "1" "$(grep -c 'INCOMPLETE shard 2/3' mutants.out/INCOMPLETE)"
 
-MUTANTS_MIN_BUDGET=1 MUTANTS_BUDGET=2 FAKE_SLEEP=2 FAKE_STATUS=137 \
+# The run lasts 3 s, and the KILL is due at 2 + 1 s. The whole-second clock reads 3 or 4.
+MUTANTS_MIN_BUDGET=1 MUTANTS_BUDGET=2 MUTANTS_KILL_AFTER=1 FAKE_SLEEP=3 FAKE_STATUS=137 \
   bash "$SHARD" 1 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
-check "a KILL after the budget ran out fails the shard, and is never green" "137" "$?"
+check "a KILL after the budget and the grace time is a budget stop, as GNU timeout -k ends it" \
+  "10" "$?"
+
+# The run lasts 2 s, and the KILL is due at 2 + 5 s. A 137 inside the grace time is a failure.
+MUTANTS_MIN_BUDGET=1 MUTANTS_BUDGET=2 MUTANTS_KILL_AFTER=5 FAKE_SLEEP=2 FAKE_STATUS=137 \
+  bash "$SHARD" 1 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
+check "a 137 inside the grace time is a failure, as an out-of-memory kill is" "137" "$?"
+
+mkdir -p "$SCRATCH/datebin"
+cat >"$SCRATCH/datebin/date" <<'STUB'
+#!/usr/bin/env bash
+n=$(($(cat "$DATE_COUNT" 2>/dev/null || echo 0) + 1))
+echo "$n" >"$DATE_COUNT"
+if ((n > ${DATE_OK:-99})); then exit 1; fi
+exec /bin/date "$@"
+STUB
+chmod +x "$SCRATCH/datebin/date"
+job_start="$(date +%s)"
+err="$(PATH="$SCRATCH/datebin:$PATH" DATE_COUNT="$SCRATCH/date.count" DATE_OK=1 \
+  JOB_START="$job_start" MUTANTS_MIN_BUDGET=1 MUTANTS_BUDGET=2 MUTANTS_KILL_AFTER=1 \
+  FAKE_SLEEP=3 FAKE_STATUS=137 bash "$SHARD" 1 3 "$SCRATCH/pr.diff" 2>&1 >/dev/null)"
+check "a failed clock after the run keeps a 137 red" "137" "$?"
+check "a failed clock after the run is named" "1" "$(grep -c 'cannot read the clock after' <<<"$err")"
 
 MUTANTS_MIN_BUDGET=1 MUTANTS_BUDGET=100 FAKE_SLEEP=0 FAKE_STATUS=137 \
   bash "$SHARD" 1 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
@@ -71,12 +94,25 @@ FAKE_STATUS=124 bash "$SHARD" 1 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
 check "a survivor before the stop still fails the shard" "2" "$?"
 check "a survivor before the stop also writes the incomplete marker" "1" \
   "$(grep -c '^INCOMPLETE shard 2/3' mutants.out/INCOMPLETE)"
+
+MUTANTS_MIN_BUDGET=1 MUTANTS_BUDGET=2 MUTANTS_KILL_AFTER=1 FAKE_SLEEP=3 FAKE_STATUS=137 \
+  bash "$SHARD" 1 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
+check "a survivor before a KILL stop still fails the shard" "2" "$?"
 rm -f mutants.out/missed.txt
 
-old_start=$(($(date +%s) - 2350))
+clock="$(date +%s)"
+old_start=$((clock - 2350))
 out="$(JOB_START="$old_start" FAKE_STATUS=0 bash "$SHARD" 0 3 "$SCRATCH/pr.diff" 2>/dev/null)"
 check "a shard with no time left after the setup does not start, and fails" "10" "$?"
 check "the late shard says why" "1" "$(grep -c 'did not start' <<<"$out")"
+
+future_start=$((clock + 3600))
+JOB_START="$future_start" FAKE_STATUS=0 bash "$SHARD" 0 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
+check "a job start in the future is refused, with the setup code" "11" "$?"
+
+JOB_START="$clock" MUTANTS_BUDGET=0 MUTANTS_MIN_BUDGET=0 FAKE_STATUS=0 \
+  bash "$SHARD" 0 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
+check "a budget of zero does not start the shard, because timeout 0 has no limit" "10" "$?"
 
 PATH="$SCRATCH/nobin" /bin/bash "$SHARD" 0 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
 check "a runner without timeout is refused, with the setup code" "11" "$?"
@@ -90,11 +126,23 @@ check "a missing diff file is refused, with the setup code" "11" "$?"
 bash "$SHARD" 0 x "$SCRATCH/pr.diff" >/dev/null 2>&1
 check "a non-number shard count is refused, with the setup code" "11" "$?"
 
+bash "$SHARD" 08 9 "$SCRATCH/pr.diff" >/dev/null 2>&1
+check "a shard index with a leading zero is refused, not read as octal" "11" "$?"
+
 bash "$SHARD" 0 3 >/dev/null 2>&1
 check "a missing argument is refused, with the setup code" "11" "$?"
 
+MUTANTS_KILL_AFTER=0 bash "$SHARD" 0 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
+check "a grace time of zero is refused, because timeout would never send KILL" "11" "$?"
+
+JOB_START='' bash "$SHARD" 0 3 "$SCRATCH/pr.diff" >/dev/null 2>&1
+check "an empty JOB_START is refused, and does not give a full budget" "11" "$?"
+
 bash "$SHARD" --help >/dev/null 2>&1
 check "--help exits 0" "0" "$?"
+
+check "--help lists every environment variable" "4" \
+  "$(bash "$SHARD" --help 2>&1 | grep -c -E '^  (JOB_START|MUTANTS_BUDGET|MUTANTS_MIN_BUDGET|MUTANTS_KILL_AFTER) ')"
 
 echo "passed: $PASS, failed: $FAIL"
 [[ "$FAIL" -eq 0 ]]

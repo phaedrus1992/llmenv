@@ -426,7 +426,7 @@ mod tests {
     fn choose_auth_returns_none_when_empty() {
         let tmp = tempfile::tempdir().unwrap();
         let chosen = choose_auth_for_inheritance(tmp.path()).unwrap();
-        assert!(chosen.entry.is_none());
+        assert!(chosen.newest().is_none());
         assert_eq!(chosen.skipped, 0);
     }
 
@@ -444,7 +444,7 @@ mod tests {
         };
         save_auth_entry(tmp.path(), &entry).unwrap();
         let chosen = choose_auth_for_inheritance(tmp.path()).unwrap();
-        assert_eq!(chosen.entry.map(|e| e.uuid), Some(entry.uuid));
+        assert_eq!(chosen.newest().map(|e| e.uuid.clone()), Some(entry.uuid));
         assert_eq!(chosen.skipped, 1);
     }
 
@@ -471,7 +471,8 @@ mod tests {
         }
         let chosen = choose_auth_for_inheritance(tmp.path())
             .unwrap()
-            .entry
+            .newest()
+            .cloned()
             .unwrap();
         // June 2025 sorts after January 2025 lexicographically.
         assert_eq!(chosen.uuid, "bbbb0000-0000-0000-0000-000000000000");

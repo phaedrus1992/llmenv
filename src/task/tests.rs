@@ -5,6 +5,11 @@ use tempfile::TempDir;
 
 const PROJECT: &str = "test-project-0000000000";
 
+/// The lenient read of the store, as the CLI makes it.
+fn try_list_tasks(state_dir: &Path) -> anyhow::Result<Vec<Task>> {
+    store_read::try_list_tasks_counted(state_dir).map(|read| read.tasks)
+}
+
 /// A caller with no engine identity, as from a plain terminal.
 static NO_OWNER: session::EngineIdentity = session::EngineIdentity {
     session_id: None,
@@ -2391,6 +2396,25 @@ fn start_task_touches_its_sessions_last_activity() {
 // field, wrong rename attr) would silently corrupt a user's task store.
 // Also covers slugify/resolve_identifier/nesting invariants (#231
 // pre-pr-review property-test-gap-finder pass).
+mod load_task_timestamp_tests {
+    use super::*;
+
+    /// A command that changes a task reads it through `load_task`. The listing skips a task with a
+    /// created_at that does not parse, so `load_task` must refuse it too, and not save over it.
+    #[test]
+    fn load_task_refuses_a_task_that_the_listing_skips() {
+        let dir = TempDir::new().expect("test");
+        std::fs::create_dir_all(tasks_dir(dir.path())).expect("test");
+        let json = r#"{"slug":"bad","title":"t","created_at":"yesterday","updated_at":"2026-01-01T00:00:00Z"}"#;
+        std::fs::write(task_path(dir.path(), "bad"), json).expect("test");
+        let err = load_task(dir.path(), "bad").expect_err("a bad created_at is refused");
+        let text = format!("{err:#}");
+        assert!(text.contains("created_at"), "{text}");
+        assert!(text.contains("Fix: rewrite it as RFC 3339"), "{text}");
+    }
+}
+
+#[cfg(test)]
 mod proptests {
     use super::*;
     use proptest::prelude::*;
@@ -2588,8 +2612,15 @@ mod proptests {
         fn save_task_load_task_file_roundtrips(task in arb_task_with_fs_safe_slug()) {
             let dir = tempfile::TempDir::new().unwrap();
             save_task(dir.path(), &task).unwrap();
-            let loaded = load_task(dir.path(), &task.slug).unwrap();
-            prop_assert_eq!(loaded, task);
+            let loaded = load_task(dir.path(), &task.slug);
+            // A task that the listing skips for a bad timestamp is refused here too (#3882).
+            let times_read = crate::util::time::validate_stored(&task.created_at).is_ok()
+                && crate::util::time::validate_stored(&task.updated_at).is_ok();
+            if times_read {
+                prop_assert_eq!(loaded.unwrap(), task);
+            } else {
+                prop_assert!(loaded.is_err());
+            }
         }
 
         #[test]
