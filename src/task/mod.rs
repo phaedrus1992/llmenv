@@ -75,7 +75,7 @@ use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use store_read::{UnreadablePolicy, read_tasks};
 
-mod store_read;
+pub(crate) mod store_read;
 
 /// Lifecycle state of a tracked task.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]

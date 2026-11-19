@@ -2,6 +2,7 @@
 //! `llmenv task ls` and its `list` alias: the deliberate choice of `--session` or `--all`
 //! (#1124, #2905).
 
+use predicates::prelude::PredicateBooleanExt as _;
 use tempfile::TempDir;
 
 mod support;
@@ -46,6 +47,42 @@ fn ls_with_all_flag_succeeds() {
         .assert()
         .success()
         .stdout(predicates::str::contains("Ship the release"));
+}
+
+// #3883: a skipped task file shows on stderr, because the agent notice reaches hook output only.
+#[test]
+fn ls_says_on_stderr_when_it_skips_a_task_file() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Ship the release"])
+        .assert()
+        .success();
+    let bad = dir.path().join("tasks").join("broken.json");
+    std::fs::write(&bad, "{ not json").unwrap();
+
+    llmenv(dir.path())
+        .args(["task", "ls", "--all", "--format", "json"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Ship the release"))
+        .stderr(predicates::str::contains("1 task file(s) skipped"))
+        .stderr(predicates::str::contains("broken.json"));
+}
+
+#[test]
+fn ls_prints_no_skip_line_when_every_task_file_reads() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "add", "Ship the release"])
+        .assert()
+        .success();
+    llmenv(dir.path())
+        .args(["task", "ls", "--all", "--format", "json"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("skipped").not());
 }
 
 #[test]

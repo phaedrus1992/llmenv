@@ -14,20 +14,55 @@ pub(super) enum UnreadablePolicy {
     Fail,
 }
 
+/// The tasks of a read, with the count of the files that a lenient read left out.
+pub(crate) struct ReadTasks {
+    pub(crate) tasks: Vec<Task>,
+    /// Files and directory entries that a lenient read skipped.
+    pub(crate) skipped: usize,
+    /// The first skipped item, with its cause, so a person can start the repair (#3883).
+    pub(crate) first_problem: Option<String>,
+}
+
+impl ReadTasks {
+    fn skip(&mut self, problem: String) {
+        self.skipped += 1;
+        self.first_problem.get_or_insert(problem);
+    }
+}
+
 pub(super) fn read_tasks(state_dir: &Path, policy: UnreadablePolicy) -> anyhow::Result<Vec<Task>> {
+    read_tasks_counted(state_dir, policy).map(|read| read.tasks)
+}
+
+/// The lenient read of [`super::try_list_tasks`], with the count of the skipped files. A person at
+/// a terminal sees the count, because an agent notice reaches hook output only (#3883).
+///
+/// # Errors
+/// Returns an error if the tasks directory exists but cannot be read.
+pub(crate) fn try_list_tasks_counted(state_dir: &Path) -> anyhow::Result<ReadTasks> {
+    read_tasks_counted(state_dir, UnreadablePolicy::Skip)
+}
+
+/// [`read_tasks`] with the count of the skipped files. A strict read never skips, so its count is
+/// 0.
+fn read_tasks_counted(state_dir: &Path, policy: UnreadablePolicy) -> anyhow::Result<ReadTasks> {
     #[cfg(test)]
     super::StrictTasks::count_read();
     let dir = tasks_dir(state_dir);
+    let mut read = ReadTasks {
+        tasks: Vec::new(),
+        skipped: 0,
+        first_problem: None,
+    };
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(read),
         Err(e) => {
             return Err(
                 anyhow::Error::new(e).context(format!("reading tasks dir {}", dir.display()))
             );
         }
     };
-    let mut tasks = Vec::new();
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
@@ -36,16 +71,7 @@ pub(super) fn read_tasks(state_dir: &Path, policy: UnreadablePolicy) -> anyhow::
                     .context(format!("reading an entry of tasks dir {}", dir.display())));
             }
             Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    dir = %dir.display(),
-                    "skipping unreadable directory entry"
-                );
-                crate::agent_notice::record(format!(
-                    "llmenv skipped an unreadable entry in {}: {e}. Fix: check the directory's \
-                     permissions.",
-                    dir.display()
-                ));
+                read.skip(skip_entry(&dir, &e));
                 continue;
             }
         };
@@ -54,7 +80,7 @@ pub(super) fn read_tasks(state_dir: &Path, policy: UnreadablePolicy) -> anyhow::
             continue;
         }
         match read_task_file(&path) {
-            Ok(task) => tasks.push(task),
+            Ok(task) => read.tasks.push(task),
             // Distinguish a genuine read failure (e.g. permission denied on this
             // one file) from corrupt JSON content: the former is an `io::Error`
             // (from `read_to_string`), the latter a `serde_json::Error` — the
@@ -64,44 +90,69 @@ pub(super) fn read_tasks(state_dir: &Path, policy: UnreadablePolicy) -> anyhow::
                 if policy == UnreadablePolicy::Fail {
                     return Err(e.context(format!("reading task file {}", path.display())));
                 }
-                tracing::error!(
-                    error = %e,
-                    path = %path.display(),
-                    "skipping unreadable task file"
-                );
-                // A refused read (a FIFO, a file past the cap, or not UTF-8) is not a permission
-                // problem, so its fix differs.
-                let refused = matches!(
-                    e.downcast_ref::<std::io::Error>(),
-                    Some(io) if io.kind() == std::io::ErrorKind::InvalidData
-                );
-                let fix = if refused {
-                    "remove the file, or replace it with a task file that llmenv wrote"
-                } else {
-                    "check the file's permissions"
-                };
-                crate::agent_notice::record(format!(
-                    "llmenv skipped the unreadable task file {}: {e}. The task is missing from \
-                     task lists and resume. Fix: {fix}.",
-                    path.display()
-                ));
+                read.skip(skip_unreadable_file(&path, &e));
             }
             Err(e) if policy == UnreadablePolicy::Fail => {
                 return Err(e.context(format!("parsing task file {}", path.display())));
             }
-            Err(e) => {
-                // The full chain names the cause, such as an unreadable created_at and its fix.
-                let cause = format!("{e:#}");
-                tracing::error!(error = %cause, path = %path.display(), "skipping task file");
-                crate::agent_notice::record(format!(
-                    "llmenv skipped the task file {}: {cause}. The task is missing from task \
-                     lists and resume.",
-                    path.display()
-                ));
-            }
+            Err(e) => read.skip(skip_task_file(&path, &e)),
         }
     }
-    Ok(tasks)
+    Ok(read)
+}
+
+/// Log and notice a directory entry that cannot be read. Returns the problem for the count.
+fn skip_entry(dir: &Path, e: &std::io::Error) -> String {
+    tracing::warn!(
+        error = %e,
+        dir = %dir.display(),
+        "skipping unreadable directory entry"
+    );
+    crate::agent_notice::record(format!(
+        "llmenv skipped an unreadable entry in {}: {e}. Fix: check the directory's permissions.",
+        dir.display()
+    ));
+    format!("an unreadable entry in {}: {e}", dir.display())
+}
+
+/// Log and notice a task file that cannot be read from disk. Returns the problem for the count.
+fn skip_unreadable_file(path: &Path, e: &anyhow::Error) -> String {
+    tracing::error!(
+        error = %e,
+        path = %path.display(),
+        "skipping unreadable task file"
+    );
+    // A refused read (a FIFO, a file past the cap, or not UTF-8) is not a permission
+    // problem, so its fix differs.
+    let refused = matches!(
+        e.downcast_ref::<std::io::Error>(),
+        Some(io) if io.kind() == std::io::ErrorKind::InvalidData
+    );
+    let fix = if refused {
+        "remove the file, or replace it with a task file that llmenv wrote"
+    } else {
+        "check the file's permissions"
+    };
+    crate::agent_notice::record(format!(
+        "llmenv skipped the unreadable task file {}: {e}. The task is missing from \
+         task lists and resume. Fix: {fix}.",
+        path.display()
+    ));
+    format!("{}: {e}", path.display())
+}
+
+/// Log and notice a task file that read but did not parse or validate. Returns the problem for
+/// the count.
+fn skip_task_file(path: &Path, e: &anyhow::Error) -> String {
+    // The full chain names the cause, such as an unreadable created_at and its fix.
+    let cause = format!("{e:#}");
+    tracing::error!(error = %cause, path = %path.display(), "skipping task file");
+    crate::agent_notice::record(format!(
+        "llmenv skipped the task file {}: {cause}. The task is missing from task \
+         lists and resume.",
+        path.display()
+    ));
+    format!("{}: {cause}", path.display())
 }
 
 /// Read one task file, then check its `created_at` and `updated_at`. The queue sorts on the first,
@@ -137,7 +188,7 @@ fn read_task_file(path: &Path) -> anyhow::Result<Task> {
     reason = "a test fails loudly when its fixture is wrong"
 )]
 mod tests {
-    use super::{UnreadablePolicy, read_tasks};
+    use super::{UnreadablePolicy, read_tasks, try_list_tasks_counted};
     use crate::task::tasks_dir;
     use proptest::prelude::*;
     use std::path::Path;
@@ -219,6 +270,32 @@ mod tests {
         assert!(text.contains(&bad.display().to_string()), "{text}");
         assert!(text.contains("unreadable updated_at"), "{text}");
         assert!(text.contains("Fix: rewrite it as RFC 3339"), "{text}");
+    }
+
+    #[test]
+    fn the_counted_read_counts_each_skipped_file_and_keeps_the_first_cause() {
+        let dir = TempDir::new().expect("test");
+        write_task(dir.path(), "good", VALID_AT);
+        let first = write_task(dir.path(), "first-bad", "yesterday");
+        std::fs::write(tasks_dir(dir.path()).join("junk.json"), "{ not json").expect("test");
+
+        let read = try_list_tasks_counted(dir.path()).expect("lenient read");
+        assert_eq!(read.tasks.len(), 1);
+        assert_eq!(read.skipped, 2);
+        let problem = read.first_problem.expect("a first problem");
+        assert!(
+            problem.contains(&first.display().to_string()) || problem.contains("junk.json"),
+            "{problem}"
+        );
+    }
+
+    #[test]
+    fn the_counted_read_of_a_clean_store_skips_nothing() {
+        let dir = TempDir::new().expect("test");
+        write_task(dir.path(), "good", VALID_AT);
+        let read = try_list_tasks_counted(dir.path()).expect("read");
+        assert_eq!((read.tasks.len(), read.skipped), (1, 0));
+        assert!(read.first_problem.is_none());
     }
 
     #[test]
