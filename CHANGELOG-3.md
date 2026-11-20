@@ -35,10 +35,11 @@ Crush gets `CRUSH.md`, `disabled_tools`, the `agent` and `question` tool names, 
 `llmenv doctor` warns about hook commands that name a temporary binary or the bare `llmenv` name (#3119, #3049, #3392).
 
 **Task tracker.**
-Task commands, the TaskUpdate tool, and the id-less session pick refuse another conversation's session unless `--other-session` names its owner (#3478, #3480, #3487, #3905).
+Task commands, the TaskUpdate tool, and the id-less session pick refuse another conversation's session unless `--other-session` names its owner (#3478, #3480, #3487).
+A session that your engine process started still counts as yours after `/clear` (#3905).
 A task with a bad timestamp or an unreadable file is named in an error or a notice, not skipped without a word (#3882, #3883, #3859).
 A chain of 100000 tasks no longer overflows the stack (#3757, #3767).
-Task commands read the task store once, so hooks and the status line run faster (#3466, #3468, #3474, #3477, #3479, #3743).
+Task commands, hooks, and the status line read the task store once, not many times (#3466, #3468, #3474, #3477, #3479, #3743).
 
 **Hooks and notices.**
 Fail-open hook paths now tell the agent the cause and the fix (#3320, #3457, #3462).
