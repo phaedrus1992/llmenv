@@ -1,6 +1,6 @@
 [package]
 name = "llmenv-git"
-version = "3.14.0"
+version = "3.14.1"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
@@ -11,7 +11,7 @@ repository = "https://github.com/phaedrus1992/llmenv"
 workspace = true
 
 [dependencies]
-llmenv-paths = { path = "../llmenv-paths", version = "3.14.0" }
+llmenv-paths = { path = "../llmenv-paths", version = "3.14.1" }
 tracing = { workspace = true }
 
 [dev-dependencies]

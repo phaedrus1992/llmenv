@@ -3234,7 +3234,7 @@ THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [llmenv 3.14.0](https://github.com/phaedrus1992/llmenv)
+- [llmenv 3.14.1](https://github.com/phaedrus1992/llmenv)
 
 ```
 Copyright (c) 2026 The llmenv Authors
@@ -3687,10 +3687,10 @@ SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [llmenv-config 3.14.0](https://github.com/phaedrus1992/llmenv)
-- [llmenv-git 3.14.0](https://github.com/phaedrus1992/llmenv)
-- [llmenv-paths 3.14.0](https://github.com/phaedrus1992/llmenv)
-- [llmenv-util 3.14.0](https://github.com/phaedrus1992/llmenv)
+- [llmenv-config 3.14.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv-git 3.14.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv-paths 3.14.1](https://github.com/phaedrus1992/llmenv)
+- [llmenv-util 3.14.1](https://github.com/phaedrus1992/llmenv)
 - [anes 0.1.6](https://github.com/zrzka/anes-rs)
 - [difflib 0.4.0](https://github.com/DimaKudosh/difflib)
 - [jni-macros 0.22.4](https://github.com/jni-rs/jni-rs)
