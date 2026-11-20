@@ -150,19 +150,72 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 
 ## [Unreleased] - ReleaseDate
 
+3.14.0 adds opencode 2.x and Crush adapter features, trace telemetry for timing, and `llmenv prefill`.
+It also stops one conversation from changing the tasks of another, and it replaces many silent failures with notices that name the cause and the fix.
+
+**Breaking changes.**
+`llmenv clean --older-than` refuses months and years, which have no fixed length, so use weeks or days (#3790).
+`llmenv memory prune` and post-session consolidation read the ICM recall as JSON, so they need icm 0.11.5 or later (#3368, #3371).
+The status data field `prunable_partial` is now `unreadable` (#3110).
+`llmenv export` and `llmenv regenerate` fail when the llmenv binary path is not UTF-8 or is unknown (#3060).
+A failed opencode tool call goes to `PostToolUseFailure`, so a bundle hook on `PostToolUse` no longer sees it.
+`llmenv task session start --replace` refuses to abandon a session that another conversation started, unless `--other-session` names it (#3487, #3480).
+A TaskUpdate that changes a task of another conversation's session is refused (#3478).
+A statusline widget shows `?` where it showed a text label such as `pr: gh failed` (#3745).
+
+**Adapters.**
+opencode 2.x runs six more Claude Code hook events, and it gets MCP tool tiers as permission rules and the effort level as a model variant (#2848, #2977, #2847).
+Crush gets `CRUSH.md`, `disabled_tools`, the `agent` and `question` tool names, bundle env vars, and the llmenv PreToolUse guards (#2872, #2873, #2874, #2875, #2876).
+`on_failure: block` makes a guard hook that cannot run block the action in Claude Code 2.1.295 or later (#3101).
+
+**Diagnostics.**
+`LLMENV_TRACE_TIMING` adds lines for child processes, recall ledger locks, file counts, widgets, and session-start phases, and `LLMENV_TRACE_FILE` writes them as JSON Lines (#3009, #3010, #3011, #3012, #3013, #3014, #3015, #3016, #3017, #3018, #3019, #3020, #3025, #3027).
+`llmenv prefill` shows the size of the prompt prefill and the changes that miss the cache (#3102).
+`llmenv doctor` warns about hook commands that name a temporary binary or the bare `llmenv` name (#3119, #3049, #3392).
+
+**Task tracker.**
+Task commands, the TaskUpdate tool, and the id-less session pick refuse another conversation's session unless `--other-session` names its owner (#3478, #3480, #3487).
+A session that your engine process started still counts as yours after `/clear` (#3905).
+A task with a bad timestamp or an unreadable file is named in an error or a notice, not skipped without a word (#3882, #3883, #3859).
+A chain of 100000 tasks no longer overflows the stack (#3757, #3767).
+Task commands, hooks, and the status line read the task store once, not many times (#3466, #3468, #3474, #3477, #3479, #3743).
+
+**Hooks and notices.**
+Fail-open hook paths now tell the agent the cause and the fix (#3320, #3457, #3462).
+Hook commands name the running llmenv binary, so a project folder on `PATH` cannot put its own `llmenv` into an engine config (#3081).
+Each memory is sent once by its ICM record id, and `llmenv memory prune` reads up to 200 records (#3369, #3419).
+A `PreToolUse` hook runs about 5 ms faster, and `TurnStart` with memory off runs about 25 ms faster (#3127).
+
+**Statusline.**
+The `pr` widget refreshes in a detached process and shows the last PR in grey, so a slow `gh` does not show `#?` (#3889).
+`usage_5h` and `usage_7d` can show the reset time as a clock time (#3022).
+A widget with unreadable data keeps its format and shows `?` (#3745, #3110, #3071, #3054).
+
+**Cleanup and state.**
+`llmenv clean` and the cache sweeps keep a file restored with an old mtime, because they judge age by the later of mtime and change time (#3195, #3275, #3292, #3314, #3321).
+They name the cause of each failed removal, and a partial delete no longer leaves old builds in `state/tmp` (#3077, #3184).
+`llmenv doctor` and `llmenv clean` skip the `lsof` call when no entry is old enough to remove (#3039).
+
+**Security and auth.**
+A session log path that is a symbolic link is refused (#3117).
+An unreadable keychain credential is an error, not a fall back to the file credential (#3067).
+A login token is judged with a 5-second clock-skew tolerance, so a fast clock does not discard a live login (#3098).
+An unreadable auth cache entry is counted and named, and inheritance fails with the file and the fix when none is readable (#3813, #3842, #3857).
+`rustls-webpki` and `webpki-root-certs` are updated for RUSTSEC-2026-0382 and RUSTSEC-2026-0383.
+
 ### Added
 
 - Warn in `llmenv doctor` when hook commands name a binary in a cargo `target` folder or a temp folder, or a binary that was removed after it started. [feat:doctor] [#3119]
 - Show the reset time of the `usage_5h` and `usage_7d` widgets as a local clock time, with `display: clock_24h` or `display: clock_12h`. A 7-day window also shows the weekday. The default is still the countdown. [feat:statusline] [#3022]
 - Warn in `llmenv doctor` when hook commands use the bare `llmenv` name, and name the fix. [feat:doctor] [#3049]
-- Run six more Claude Code hook events on opencode 2.x: `SubagentStart`, `SubagentStop` (foreground subagents only), `Notification`, `PreCompact`, `PostModelSwitch`, and `PostToolBatch`. The events and their opencode sources are in [Hook events on opencode](https://phaedrus1992.github.io/llmenv/docs/engines#hook-events-on-opencode). [feat:opencode]
-- Write the merged agent instructions to `CRUSH.md` in the Crush config dir, so Crush loads them as global context. [feat:crush]
-- Render opencode MCP tool tiers as permission rules. Read-only and mutation tools allow, and destructive tools ask. [feat:opencode]
-- Send the effort level to the opencode large model as a variant, `provider/model#<effort>`. [feat:opencode]
-- Render an unscoped Crush `deny` rule to `options.disabled_tools`, which removes the tool from the agent. A rule scoped to a pattern or path is still not rendered, and it is logged. [feat:crush]
-- Map `Task` to Crush's `agent` tool, and add `AskUserQuestion` as a neutral tool that maps to Crush's `question` tool (Crush v0.85.0 or later). [feat:crush]
-- Render bundle env vars (`capabilities.env`) to the top-level `env` key in `crush.json`. [feat:crush]
-- Extend `LLMENV_TRACE_TIMING` with `[LLMENV_SPAWN]` lines for child processes, `[LLMENV_LEDGER]` lines for recall ledger locking, `[LLMENV_MATERIALIZE]` file counts per adapter, per-widget statusline timing, session-start sub-phases, and one `llmenv-trace` marker each for `export` and `regenerate`. Markers carry `"v": 1`. Set `LLMENV_TRACE_FILE` to append every trace line as JSON Lines. See [Trace telemetry](https://phaedrus1992.github.io/llmenv/docs/trace). [#3009, #3010, #3011, #3012, #3013, #3015, #3016, #3017, #3019, #3020]
+- Run six more Claude Code hook events on opencode 2.x: `SubagentStart`, `SubagentStop` (foreground subagents only), `Notification`, `PreCompact`, `PostModelSwitch`, and `PostToolBatch`. The events and their opencode sources are in [Hook events on opencode](https://phaedrus1992.github.io/llmenv/docs/engines#hook-events-on-opencode). [feat:opencode] [#2848] [#2977]
+- Write the merged agent instructions to `CRUSH.md` in the Crush config dir, so Crush loads them as global context. [feat:crush] [#2872]
+- Render opencode MCP tool tiers as permission rules. Read-only and mutation tools allow, and destructive tools ask. [feat:opencode] [#2847]
+- Send the effort level to the opencode large model as a variant, `provider/model#<effort>`. [feat:opencode] [#2847]
+- Render an unscoped Crush `deny` rule to `options.disabled_tools`, which removes the tool from the agent. A rule scoped to a pattern or path is still not rendered, and it is logged. [feat:crush] [#2873]
+- Map `Task` to Crush's `agent` tool, and add `AskUserQuestion` as a neutral tool that maps to Crush's `question` tool (Crush v0.85.0 or later). [feat:crush] [#2874]
+- Render bundle env vars (`capabilities.env`) to the top-level `env` key in `crush.json`. [feat:crush] [#2875]
+- Extend `LLMENV_TRACE_TIMING` with `[LLMENV_SPAWN]` lines for child processes, `[LLMENV_LEDGER]` lines for recall ledger locking, `[LLMENV_MATERIALIZE]` file counts per adapter, per-widget statusline timing, session-start sub-phases, and one `llmenv-trace` marker each for `export` and `regenerate`. Markers carry `"v": 1`. Set `LLMENV_TRACE_FILE` to append every trace line as JSON Lines. See [Trace telemetry](https://phaedrus1992.github.io/llmenv/docs/trace). [#3009, #3010, #3011, #3012, #3013, #3015, #3016, #3017, #3018, #3019, #3020, #3025, #3027]
 - Emit a `[LLMENV_DETACHED]` trace line when each detached job (consolidation, ICM store, session-log record, CBM index) exits. The line carries job kind, wall time, CPU time (macOS), MCP call count, and exit status. See [Trace telemetry](https://phaedrus1992.github.io/llmenv/docs/trace#llmenvdetached). [#3014]
 - Add `on_failure: block` to a bundle hook handler, so a guard hook that cannot run blocks the action in Claude Code 2.1.295 or later. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration). [feat:adapter] [#3101]
 - Add `llmenv prefill`, which reads a Claude Code transcript and shows the prompt prefill size, the largest tool schemas, the shape changes that miss the cache, and the cache breakpoints. See [`prefill`](https://phaedrus1992.github.io/llmenv/docs/commands#prefill). [feat:cli] [#3102]
@@ -175,7 +228,7 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 - Refuse `llmenv task session start --replace` when it would abandon a session that another conversation started, unless `--other-session <id>` names that session. `--resume` is unchanged. See [the task commands](https://phaedrus1992.github.io/llmenv/docs/commands). [fix:task] [#3487] [#3480]
 - Statusline `tasks`, `branch`, `pr`, `icm`, `throttle`, and usage-delta widgets keep their format and show `?` when their data cannot be read, as the zone widgets do. They no longer swap in a text label such as `pr: gh failed`; the cause goes to the log. See [the statusline docs](https://phaedrus1992.github.io/llmenv/docs/configuration). [feat:statusline] [#3745]
 - Read tool versions with the `semver` crate. A version with a leading zero, such as `2.01.0`, or an empty pre-release is no longer a version. [refactor:util] [#3510]
-- Return the `--other-session` audit note of a session command as a type that must be used, so a command cannot drop the note without a compiler warning. A pick that cannot name its cause now has a message for every case. [refactor:task] [#3602] [#3603]
+- Give a session pick that cannot name its cause a message for every case. [refactor:task] [#3602] [#3603]
 - Read the task store once in `llmenv task clear --session`, and the session store once in `llmenv task session show`, `summary`, `edit`, `note`, and `finish` with no id. `clear --session` takes the deleted tasks from the delete itself, so a failed delete no longer reads the store again. [perf:task] [#3743]
 - Show how many entries a partial cache size left out. The `cache` widget reads `at least 1.2 GiB (3 unreadable)`, the status data holds the count in `unreadable` (it replaces `prunable_partial`), and the first cause of a run is logged at `info`. [feat:statusline] [#3110]
 - Make the `peak` widget and the `{reset}` clock of `usage_5h` and `usage_7d` keep the configured format when the time zone cannot be read. Each shows `?` where the value goes, and logs a warning. The peak widget showed `unknown` and the usage widget showed the countdown. [feat:statusline] [#3071]
@@ -185,7 +238,7 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 - Skip the project lookup (a git subprocess) at `SessionStart` and `TurnStart` when no memory backend resolved, so `TurnStart` with memory off runs about 25 ms faster. A run with no memory backend no longer shows the notice that memory was skipped because git could not run. [perf:hook-run] [#3127]
 - Show `?` for the prunable cache size in the statusline when the size cannot be read. The field no longer disappears. [feat:statusline] [#3054]
 - Skip a write when an owner-only file already holds the same bytes at the same mode, so a repeat `llmenv regenerate` leaves current files untouched. An existing file with a looser mode, such as 0644, is now tightened to 0600 on its next write. [#3020, #3024]
-- Run llmenv's PreToolUse guards on every Crush tool call, including the commit gate, cd guard, read-once, repeat detection, and slippage. Crush tool names map to Claude Code's names first, so these guards now apply to Crush sessions. [feat:crush]
+- Run llmenv's PreToolUse guards on every Crush tool call, including the commit gate, cd guard, read-once, repeat detection, and slippage. Crush tool names map to Claude Code's names first, so these guards now apply to Crush sessions. [feat:crush] [#2876]
 - Stop writing the model `reasoning` flag to the opencode config, because opencode 2.x drops it. [feat:opencode]
 - Send a failed opencode tool call to `PostToolUseFailure`, not `PostToolUse`, as Claude Code does. Bundle hooks on `PostToolUse` no longer see failed calls. [fix:opencode]
 - Skip the `lsof` call in `llmenv doctor` and `llmenv clean` when no entry under `state/tmp` or `state/codebase-memory` is old enough to remove. `lsof` can take up to a minute on a hung mount. [perf:doctor] [#3039]
@@ -212,6 +265,7 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 
 ### Fixed
 
+- Say that a duration is not in the required range when `--older-than` or another age value is too large for its unit, such as `999999999999999d`. Before, llmenv called every such value a calendar unit and told you to use weeks or days. [fix:util] [#3860]
 - Stop the `pr` widget from showing `#?` for a branch that has a PR when `gh` is slow. A cache entry that is not fresh starts a refresh in a detached process with an 8-second limit, and the render does not wait. A failed or due lookup keeps showing the last PR for up to a day, in grey. A failure is cached for 10 seconds, not 60, and a failure with no kept PR shows its cause, such as `#? timeout`. See [the statusline widgets](https://phaedrus1992.github.io/llmenv/docs/configuration#statusline). [fix:statusline] [#3889]
 - Fail a task read when a task `updated_at` is not RFC 3339, and fail a session read when a session `started_at` is not. The error names the file and the fix. A lenient task listing skips the task with a notice. See [the task commands](https://phaedrus1992.github.io/llmenv/docs/commands#task). [fix:task] [#3882]
 - Print the count and the first cause of the task files that `llmenv task ls` skips on stderr, so a shorter list has a stated reason. See [the task commands](https://phaedrus1992.github.io/llmenv/docs/commands#task). [fix:task] [#3883]
@@ -230,7 +284,7 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 - Name the record in the bad-timestamp warning, so each record with an unreadable timestamp is named once. A warning for the winner of a `max` now says the pick may be a tie. [#3851]
 - List open sessions with an unreadable start time in a stable order with `llmenv task session ls`. [#3855]
 - Report a task that `llmenv task show --next` skips because of a missing parent, a parent loop, or a parent of another session, on stderr with its fix. [fix:task] [#3777]
-- Keep the `--other-session` audit note when a command crashes after its change: the note is journaled first, and the next `llmenv task` command writes it. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#task). [fix:task] [#3762]
+- Keep the `--other-session` audit note when a command crashes after its change: the note is journaled first, and the next `llmenv task` command writes it. A note that a crashed command had claimed is written too, because the journal is locked and no longer guarded by a process id check. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#task). [fix:task] [#3762] [#3783]
 - Do not follow a link at the project `.claude` folder or at its settings files in the subscription-auth check, and do not follow a linked session log in the record count. A linked settings file now keeps the llmenv resume notice. See [configuration](https://phaedrus1992.github.io/llmenv/docs/configuration). [fix:hook] [#3785]
 - Exit with status 3 when a task command saved its change but could not write the `--other-session` audit note. A failed change still exits with status 1. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#task). [fix:task] [#3765]
 - Pass a re-read through when the file size changed, even when the modification time did not. Read-once compared only the modification time before. See [configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#featuresread_once). [fix:hook] [#3226]
