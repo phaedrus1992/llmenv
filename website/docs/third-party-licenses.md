@@ -1317,8 +1317,8 @@ Used by:
 - [glob 0.3.4](https://github.com/rust-lang/glob)
 - [log 0.4.35](https://github.com/rust-lang/log)
 - [num-traits 0.2.19](https://github.com/rust-num/num-traits)
-- [regex-automata 0.4.18](https://github.com/rust-lang/regex)
-- [regex-syntax 0.8.11](https://github.com/rust-lang/regex)
+- [regex-automata 0.4.19](https://github.com/rust-lang/regex)
+- [regex-syntax 0.8.12](https://github.com/rust-lang/regex)
 - [regex 1.13.1](https://github.com/rust-lang/regex)
 
 ```
@@ -2425,7 +2425,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [bytes 1.12.1](https://github.com/tokio-rs/bytes)
+- [bytes 1.12.2](https://github.com/tokio-rs/bytes)
 
 ```
 Copyright (c) 2018 Carl Lerche
@@ -2493,7 +2493,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [smallvec 1.16.5](https://github.com/servo/rust-smallvec)
+- [smallvec 1.16.6](https://github.com/smallvec/smallvec)
 
 ```
 Copyright (c) 2018 The Servo Project Developers
@@ -4228,7 +4228,7 @@ Used by:
 - [aho-corasick 1.1.5](https://github.com/BurntSushi/aho-corasick)
 - [globset 0.4.21](https://github.com/BurntSushi/ripgrep/tree/master/crates/globset)
 - [jiff-core 0.1.8](https://github.com/BurntSushi/jiff)
-- [jiff 0.2.44](https://github.com/BurntSushi/jiff)
+- [jiff 0.2.46](https://github.com/BurntSushi/jiff)
 - [memchr 2.8.3](https://github.com/BurntSushi/memchr)
 - [walkdir 2.5.0](https://github.com/BurntSushi/walkdir)
 
@@ -4508,7 +4508,7 @@ SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [bstr 1.13.1](https://github.com/BurntSushi/bstr)
+- [bstr 1.14.0](https://github.com/BurntSushi/bstr)
 
 ```
 The MIT License (MIT)

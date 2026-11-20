@@ -150,6 +150,21 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 
 ## [Unreleased] - ReleaseDate
 
+## [3.14.1] - 2026-11-20
+
+3.14.1 is a packaging fix for 3.14.0.
+The `llmenv` crate of 3.14.0 never reached crates.io, because `cargo publish` rejected a dev-dependency of the crate on itself (#3936).
+3.14.1 holds the same changes as 3.14.0, and it publishes all five crates.
+
+**Release.**
+Install 3.14.1, not 3.14.0, from crates.io or Homebrew, because 3.14.0 has no `llmenv` crate on crates.io (#3936).
+
+### Fixed
+
+- Publish the `llmenv` crate. The crate named itself as a dev-dependency with a version, so `cargo publish` looked for the crate that it was publishing and stopped. The dev-dependency has no version now, and `cargo publish` drops it. [fix:release] [#3936]
+
+## [3.14.0] - 2026-11-20
+
 3.14.0 adds opencode 2.x and Crush adapter features, trace telemetry for timing, and `llmenv prefill`.
 It also stops one conversation from changing the tasks of another, and it replaces many silent failures with notices that name the cause and the fix.
 
