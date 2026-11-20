@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.14.0] - 2026-11-20
+
 3.14.0 adds opencode 2.x and Crush adapter features, trace telemetry for timing, and `llmenv prefill`.
 It also stops one conversation from changing the tasks of another, and it replaces many silent failures with notices that name the cause and the fix.
 
