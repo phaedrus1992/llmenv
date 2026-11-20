@@ -1316,8 +1316,8 @@ Used by:
 - [getopts 0.2.24](https://github.com/rust-lang/getopts)
 - [log 0.4.35](https://github.com/rust-lang/log)
 - [num-traits 0.2.19](https://github.com/rust-num/num-traits)
-- [regex-automata 0.4.18](https://github.com/rust-lang/regex)
-- [regex-syntax 0.8.11](https://github.com/rust-lang/regex)
+- [regex-automata 0.4.19](https://github.com/rust-lang/regex)
+- [regex-syntax 0.8.12](https://github.com/rust-lang/regex)
 - [regex 1.13.1](https://github.com/rust-lang/regex)
 
 ```
@@ -2390,7 +2390,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [bytes 1.12.1](https://github.com/tokio-rs/bytes)
+- [bytes 1.12.2](https://github.com/tokio-rs/bytes)
 
 ```
 Copyright (c) 2018 Carl Lerche
@@ -2458,7 +2458,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [smallvec 1.16.5](https://github.com/servo/rust-smallvec)
+- [smallvec 1.16.6](https://github.com/smallvec/smallvec)
 
 ```
 Copyright (c) 2018 The Servo Project Developers
@@ -2619,7 +2619,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [zeroize 1.9.1](https://github.com/RustCrypto/utils)
+- [zeroize 1.9.2](https://github.com/RustCrypto/utils)
 
 ```
 Copyright (c) 2018-2026 The RustCrypto Project Developers
@@ -3240,7 +3240,7 @@ THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [llmenv 3.13.0](https://github.com/phaedrus1992/llmenv)
+- [llmenv 3.14.0](https://github.com/phaedrus1992/llmenv)
 
 ```
 Copyright (c) 2026 The llmenv Authors
@@ -3693,10 +3693,10 @@ SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [llmenv-config 3.13.0](https://github.com/phaedrus1992/llmenv)
-- [llmenv-git 3.13.0](https://github.com/phaedrus1992/llmenv)
-- [llmenv-paths 3.13.0](https://github.com/phaedrus1992/llmenv)
-- [llmenv-util 3.13.0](https://github.com/phaedrus1992/llmenv)
+- [llmenv-config 3.14.0](https://github.com/phaedrus1992/llmenv)
+- [llmenv-git 3.14.0](https://github.com/phaedrus1992/llmenv)
+- [llmenv-paths 3.14.0](https://github.com/phaedrus1992/llmenv)
+- [llmenv-util 3.14.0](https://github.com/phaedrus1992/llmenv)
 - [anes 0.1.6](https://github.com/zrzka/anes-rs)
 - [difflib 0.4.0](https://github.com/DimaKudosh/difflib)
 - [jni-macros 0.22.4](https://github.com/jni-rs/jni-rs)
@@ -4066,7 +4066,7 @@ Used by:
 - [aho-corasick 1.1.5](https://github.com/BurntSushi/aho-corasick)
 - [globset 0.4.21](https://github.com/BurntSushi/ripgrep/tree/master/crates/globset)
 - [jiff-core 0.1.8](https://github.com/BurntSushi/jiff)
-- [jiff 0.2.44](https://github.com/BurntSushi/jiff)
+- [jiff 0.2.46](https://github.com/BurntSushi/jiff)
 - [memchr 2.8.3](https://github.com/BurntSushi/memchr)
 - [walkdir 2.5.0](https://github.com/BurntSushi/walkdir)
 
@@ -4315,7 +4315,7 @@ SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [bstr 1.13.1](https://github.com/BurntSushi/bstr)
+- [bstr 1.14.0](https://github.com/BurntSushi/bstr)
 
 ```
 The MIT License (MIT)
