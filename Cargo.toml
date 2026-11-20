@@ -144,8 +144,7 @@ test-support = []
 
 [dev-dependencies]
 # The integration tests age a tree with set_modified, which only the mtime-only rule sees (#3432).
-# No `version` here: a self dependency with a version makes `cargo publish` look for the crate
-# that it is publishing (#3936). A path-only dev-dependency is dropped from the published manifest.
+# Path-only: a versioned self dev-dependency breaks `cargo publish` (#3936).
 llmenv = { path = ".", features = ["test-support"] }
 assert_cmd = "=2.2.2"
 insta = { version = "=1.49.0", features = ["yaml"] }
