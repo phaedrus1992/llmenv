@@ -1253,7 +1253,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
 name = "llmenv"
-version = "3.14.0"
+version = "3.14.1"
 dependencies = [
  "anstyle",
  "anyhow",
@@ -1301,7 +1301,7 @@ dependencies = [
 
 [[package]]
 name = "llmenv-config"
-version = "3.14.0"
+version = "3.14.1"
 dependencies = [
  "anyhow",
  "ipnet",
@@ -1317,7 +1317,7 @@ dependencies = [
 
 [[package]]
 name = "llmenv-git"
-version = "3.14.0"
+version = "3.14.1"
 dependencies = [
  "llmenv-paths",
  "proptest",
@@ -1327,7 +1327,7 @@ dependencies = [
 
 [[package]]
 name = "llmenv-paths"
-version = "3.14.0"
+version = "3.14.1"
 dependencies = [
  "anyhow",
  "proptest",
@@ -1338,7 +1338,7 @@ dependencies = [
 
 [[package]]
 name = "llmenv-util"
-version = "3.14.0"
+version = "3.14.1"
 dependencies = [
  "proptest",
  "serde_json",

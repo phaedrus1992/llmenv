@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.14.1] - 2026-11-20
+
 3.14.1 is a packaging fix for 3.14.0.
 The `llmenv` crate of 3.14.0 never reached crates.io, because `cargo publish` rejected a dev-dependency of the crate on itself (#3936).
 3.14.1 holds the same changes as 3.14.0, and it publishes all five crates.
@@ -1711,7 +1713,8 @@ the rc.1 and rc.2 sections below.
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.14.0...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.14.1...HEAD
+[3.14.1]: https://github.com/phaedrus1992/llmenv/compare/v3.14.0...v3.14.1
 [3.14.0]: https://github.com/phaedrus1992/llmenv/compare/v3.13.0...v3.14.0
 [3.13.0]: https://github.com/phaedrus1992/llmenv/compare/v3.12.2...v3.13.0
 [3.12.2]: https://github.com/phaedrus1992/llmenv/compare/v3.12.1...v3.12.2

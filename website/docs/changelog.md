@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.14.1] - 2026-11-20
+
 3.14.1 is a packaging fix for 3.14.0.
 The `llmenv` crate of 3.14.0 never reached crates.io, because `cargo publish` rejected a dev-dependency of the crate on itself (#3936).
 3.14.1 holds the same changes as 3.14.0, and it publishes all five crates.
