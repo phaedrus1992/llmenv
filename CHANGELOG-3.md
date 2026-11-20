@@ -11,6 +11,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.14.1] - 2026-11-20
+
+3.14.1 is a packaging fix for 3.14.0.
+The `llmenv` crate of 3.14.0 never reached crates.io, because `cargo publish` rejected a dev-dependency of the crate on itself (#3936).
+3.14.1 holds the same changes as 3.14.0, and it publishes all five crates.
+
+**Release.**
+Install 3.14.1, not 3.14.0, from crates.io or Homebrew, because 3.14.0 has no `llmenv` crate on crates.io (#3936).
+
+### Fixed
+
+- Publish the `llmenv` crate. The crate named itself as a dev-dependency with a version, so `cargo publish` looked for the crate that it was publishing and stopped. The dev-dependency has no version now, and `cargo publish` drops it. [fix:release] [#3936]
+
+## [3.14.0] - 2026-11-20
+
 3.14.0 adds opencode 2.x and Crush adapter features, trace telemetry for timing, and `llmenv prefill`.
 It also stops one conversation from changing the tasks of another, and it replaces many silent failures with notices that name the cause and the fix.
 
@@ -1698,7 +1713,9 @@ the rc.1 and rc.2 sections below.
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.13.0...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.14.1...HEAD
+[3.14.1]: https://github.com/phaedrus1992/llmenv/compare/v3.14.0...v3.14.1
+[3.14.0]: https://github.com/phaedrus1992/llmenv/compare/v3.13.0...v3.14.0
 [3.13.0]: https://github.com/phaedrus1992/llmenv/compare/v3.12.2...v3.13.0
 [3.12.2]: https://github.com/phaedrus1992/llmenv/compare/v3.12.1...v3.12.2
 [3.12.1]: https://github.com/phaedrus1992/llmenv/compare/v3.12.0...v3.12.1
