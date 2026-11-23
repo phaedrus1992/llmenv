@@ -4,14 +4,18 @@
 use serde_json::{Value, json};
 use tracing::{debug, error};
 
+use crate::hook_run::recall_breaker;
 use crate::hook_run::{BundleRecallQuery, TagRecallQuery};
 use llmenv_mcp::mcp_client::McpHttpClient;
 
+mod markers;
 pub use llmenv_scope::{bundle_keyword, tag_keyword};
 mod recalled;
 mod records;
 mod reply;
 mod response;
+
+pub use markers::{parse_importance_marker, parse_type_marker};
 
 #[cfg(test)]
 pub(crate) use records::split_recall_records;
@@ -20,38 +24,6 @@ use records::{MAX_TOPIC_CHARS, is_record_start};
 use records::{SCOPE_CONTEXT_TOPIC, is_unscoped};
 pub(crate) use reply::{Recalled, Reply};
 pub(crate) use response::strip_advisory;
-
-/// Internal: parse an `<!-- llmenv-<prefix>: X -->` HTML comment marker.
-fn parse_marker<'a>(chunk: &'a str, prefix: &'a str) -> Option<&'a str> {
-    chunk
-        .split("<!--")
-        .skip(1)
-        .filter_map(|s| s.split("-->").next())
-        .find_map(|s| s.trim().strip_prefix(prefix).map(str::trim))
-        .filter(|v| !v.is_empty())
-}
-
-/// Parse `<!-- llmenv-type: X -->` marker from a context chunk (R1).
-/// Returns the type value if found, `None` otherwise.
-///
-/// The marker is an HTML comment in the markdown context chunk:
-/// ```markdown
-/// <!-- llmenv-type: semantic -->
-/// ```
-/// Only the text between the comment delimiters is examined; nested `-->`
-/// within value text is not supported (the first `-->` terminates the match).
-#[must_use]
-pub fn parse_type_marker(chunk: &str) -> Option<&str> {
-    parse_marker(chunk, "llmenv-type:")
-}
-
-/// Parse `<!-- llmenv-importance: X -->` marker from a context chunk (R3).
-/// Returns the importance value if found, `None` otherwise. Semantics and
-/// performance are identical to [`parse_type_marker`].
-#[must_use]
-pub fn parse_importance_marker(chunk: &str) -> Option<&str> {
-    parse_marker(chunk, "llmenv-importance:")
-}
 
 /// The arguments of one `icm_wake_up` call. `None` fields are left out, so ICM
 /// applies its own default.
@@ -217,6 +189,20 @@ impl Action {
         chunk: &str,
     ) -> anyhow::Result<Reply> {
         debug!(action = ?self, "dispatching MCP tool call");
+        if self.is_recall() {
+            let call = self.call(client, query, chunk);
+            return recall_breaker::guard_recall(client.recall_breaker(), call).await;
+        }
+        self.call(client, query, chunk).await
+    }
+
+    /// One MCP tool call and its reply parsing. `run` wraps a recall in the breaker (#3896).
+    async fn call(
+        &self,
+        client: &McpHttpClient,
+        query: &str,
+        chunk: &str,
+    ) -> anyhow::Result<Reply> {
         let text = client
             .call_tool(self.tool_name(), self.arguments(query, chunk))
             .await

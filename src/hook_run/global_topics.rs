@@ -52,11 +52,16 @@ pub(crate) async fn recall(
                 answered += 1;
                 records.extend(found);
             }
+            // A skipped topic is not a failure. With no answer and no failure, all were skipped.
+            Err(e) if e.is::<crate::hook_run::recall_breaker::Skipped>() => {}
             Err(e) => {
                 tracing::error!("memory recall of the global topic {topic} failed: {e:#}");
                 failed.push((topic, e));
             }
         }
+    }
+    if answered == 0 && failed.is_empty() {
+        return Some(Err(crate::hook_run::recall_breaker::Skipped.into()));
     }
     if answered == 0 {
         let names: Vec<&str> = failed.iter().map(|(t, _)| t.as_str()).collect();
@@ -102,3 +107,64 @@ pub(crate) fn turn_actions(actions: Vec<Action>, text: &str, topics: &[String]) 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests;
+
+#[cfg(test)]
+mod breaker_tests {
+    use super::recall;
+    use crate::hook_run::recall_breaker::Skipped;
+    use llmenv_mcp::mcp_client::McpHttpClient;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn an_open_breaker_skips_every_topic_as_one_skip() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("recall-breaker.json");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs();
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"consecutive_failures":0,"open_until_unix":{}}}"#,
+                now + 100
+            ),
+        )?;
+        let client =
+            McpHttpClient::test_new("http://127.0.0.1:9".to_string(), Duration::from_secs(1))?
+                .with_recall_breaker(Some(path));
+        let topics = vec!["preferences".to_string(), "style".to_string()];
+        let result = recall(&client, "hello", &topics, 5).await;
+        let err = result
+            .and_then(Result::err)
+            .ok_or_else(|| anyhow::anyhow!("expected the skip to be reported"))?;
+        assert!(err.is::<Skipped>(), "{err:#}");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod mixed_breaker_tests {
+    use super::recall;
+    use crate::hook_run::recall_breaker::Skipped;
+    use llmenv_mcp::mcp_client::McpHttpClient;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn real_failures_are_reported_even_when_later_topics_were_skipped() -> anyhow::Result<()>
+    {
+        let dir = tempfile::tempdir()?;
+        // A dead server: each call is refused at once, so the third failure opens the breaker
+        // and the fourth topic is skipped.
+        let client =
+            McpHttpClient::test_new("http://127.0.0.1:9".to_string(), Duration::from_secs(1))?
+                .with_recall_breaker(Some(dir.path().join("recall-breaker.json")));
+        let topics: Vec<String> = ["a", "b", "c", "d"].iter().map(|t| t.to_string()).collect();
+        let result = recall(&client, "hello", &topics, 5).await;
+        let err = result
+            .and_then(Result::err)
+            .ok_or_else(|| anyhow::anyhow!("expected the failures to be reported"))?;
+        assert!(!err.is::<Skipped>(), "{err:#}");
+        assert!(err.to_string().contains("global topics"), "{err:#}");
+        Ok(())
+    }
+}

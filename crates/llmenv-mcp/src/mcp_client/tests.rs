@@ -82,3 +82,15 @@ async fn server_with_session(instructions: Option<&str>) -> MockServer {
         .await;
     server
 }
+
+#[test]
+fn a_recall_breaker_path_is_kept_until_it_is_replaced() -> anyhow::Result<()> {
+    let client = McpHttpClient::test_new("http://127.0.0.1:9".to_string(), Duration::from_secs(1))?;
+    assert_eq!(client.recall_breaker(), None);
+    let client = client.with_recall_breaker(Some(std::path::PathBuf::from("breaker.json")));
+    assert_eq!(
+        client.recall_breaker(),
+        Some(std::path::Path::new("breaker.json"))
+    );
+    Ok(())
+}

@@ -348,6 +348,16 @@ See [`memory`](commands.md#memory).
 
 See [MCP & Memory](mcp.md) for the full topology and security model.
 
+## Memory recall is skipped at session start (added in v3.15.0)
+
+A memory server that is slow or down costs each hook a timeout.
+After three failed recall calls in a row, hooks skip recall for five minutes, and one notice names the cause.
+A session start also shares a five-second budget across its recall calls.
+A call past the budget is cut, and the agent sees a notice that says the budget ran out.
+
+Run `llmenv doctor` to check the memory server.
+The skip ends by itself after five minutes, and the next recall call tries the server again.
+
 ## The agent sees an llmenv notice
 
 (added in v3.13.0)
