@@ -669,6 +669,24 @@ jobs:
               return 0
             fi
             echo "  THIRD-PARTY-LICENSES.md, website/docs/third-party-licenses.md: regenerating"
+            # The job holds the App token, so it runs only the target's copy of the generator,
+            # never one the source changed (#1532, #2171, #2177). HEAD is the target during a merge.
+            local target_gen
+            target_gen=$(mktemp) || {
+              echo "::error::attribution files: cannot create a temp file for the generator check" >&2
+              return 1
+            }
+            if ! git show HEAD:scripts/gen-attribution.sh > "$target_gen"; then
+              rm -f "$target_gen"
+              echo "::error::scripts/gen-attribution.sh: cannot read the target's copy" >&2
+              return 1
+            fi
+            if ! cmp -s "$target_gen" scripts/gen-attribution.sh; then
+              rm -f "$target_gen"
+              echo "::error::scripts/gen-attribution.sh differs from the target's copy, so it is not run here. A person must merge it" >&2
+              return 1
+            fi
+            rm -f "$target_gen"
             git checkout --ours -- THIRD-PARTY-LICENSES.md website/docs/third-party-licenses.md || {
               echo "::error::attribution files: git checkout --ours failed" >&2
               return 1

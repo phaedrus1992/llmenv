@@ -3425,7 +3425,7 @@ run_test "Issue #2803: cascade-only matches the author rule on generated cases" 
 # a conflicted `git merge source` on the target branch. Echoes the path.
 # ---------------------------------------------------------------------------
 make_attribution_conflict_repo() {
-  local generator="$1" repo
+  local generator="$1" source_generator="${2:-}" repo
   repo=$(mktemp -d)
   (
     cd "$repo" || exit 1
@@ -3443,6 +3443,9 @@ make_attribution_conflict_repo() {
     git switch -q -c source
     printf 'source\n' > THIRD-PARTY-LICENSES.md
     printf 'source\n' > website/docs/third-party-licenses.md
+    if [[ -n "$source_generator" ]]; then
+      printf '%s\n' "$source_generator" > scripts/gen-attribution.sh
+    fi
     git commit -q -am "source change"
 
     git switch -q target
@@ -3499,8 +3502,30 @@ test_2972_attribution_regeneration_failure_bails() {
   return 1
 }
 
+# ---------------------------------------------------------------------------
+# Test (Issue #2972): a generator that the source changed is never run in the
+# job, because the job holds the App token. The cascade halts instead.
+# ---------------------------------------------------------------------------
+test_2972_source_changed_generator_bails() {
+  local repo out
+  repo=$(make_attribution_conflict_repo 'printf "target\n" > THIRD-PARTY-LICENSES.md
+printf "target\n" > website/docs/third-party-licenses.md' 'printf "changed\n" > THIRD-PARTY-LICENSES.md')
+
+  out=$(cd "$repo" && SOURCE_REF=source TARGET=main SOURCE_DESC=release/4.x \
+    bash -c "$(resolve_block)" 2>&1 || true)
+  trash "$repo" 2>/dev/null || true
+
+  if [[ "$out" == *BAILED* ]] && [[ "$out" == *"differs from the target's copy"* ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
 run_test "Issue #2972: a conflicted attribution file is regenerated and resolves" \
   test_2972_attribution_conflict_is_regenerated
+run_test "Issue #2972: a generator changed on the source is not run" \
+  test_2972_source_changed_generator_bails
 run_test "Issue #2972: a failing attribution regeneration bails" \
   test_2972_attribution_regeneration_failure_bails
 
