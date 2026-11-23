@@ -44,7 +44,6 @@ pub(crate) async fn recall(
     let mut records = Vec::new();
     let mut answered = 0usize;
     let mut failed = Vec::new();
-    let mut skipped = 0usize;
     for q in queries {
         let topic = q.topic.clone().unwrap_or_default();
         let found = Action::RecallQuery(q).run(client, "", "").await;
@@ -53,14 +52,15 @@ pub(crate) async fn recall(
                 answered += 1;
                 records.extend(found);
             }
-            Err(e) if e.is::<crate::hook_run::recall_breaker::Skipped>() => skipped += 1,
+            // A skipped topic is not a failure. With no answer and no failure, all were skipped.
+            Err(e) if e.is::<crate::hook_run::recall_breaker::Skipped>() => {}
             Err(e) => {
                 tracing::error!("memory recall of the global topic {topic} failed: {e:#}");
                 failed.push((topic, e));
             }
         }
     }
-    if answered == 0 && failed.is_empty() && skipped > 0 {
+    if answered == 0 && failed.is_empty() {
         return Some(Err(crate::hook_run::recall_breaker::Skipped.into()));
     }
     if answered == 0 {
