@@ -5,12 +5,18 @@ use serde_json::{Value, json};
 use tracing::{debug, error};
 
 use crate::hook_run::mcp_client::McpHttpClient;
+use crate::hook_run::recall_breaker;
 use crate::hook_run::{BundleRecallQuery, TagRecallQuery};
 
+mod markers;
 mod recalled;
 mod records;
 mod reply;
 mod response;
+
+#[cfg(test)]
+use markers::{BUNDLE_KEYWORD_PREFIX, TAG_KEYWORD_PREFIX};
+pub use markers::{bundle_keyword, parse_importance_marker, parse_type_marker, tag_keyword};
 
 #[cfg(test)]
 pub(crate) use records::split_recall_records;
@@ -19,63 +25,6 @@ use records::{MAX_TOPIC_CHARS, is_record_start};
 use records::{SCOPE_CONTEXT_TOPIC, is_unscoped};
 pub(crate) use reply::{Recalled, Reply};
 pub(crate) use response::strip_advisory;
-
-/// The keyword prefix under which tag-scoped memory is stored and recalled.
-/// A memory written for tag `work-vpn` carries keyword `llmenv-tag:work-vpn`;
-/// recalling that keyword (project-unfiltered) surfaces it from any project.
-pub const TAG_KEYWORD_PREFIX: &str = "llmenv-tag:";
-
-/// The `llmenv-tag:<tag>` keyword for a tag. The tag is assumed pre-validated
-/// (see `hook_run::validate_tag`) so it contains no recall-query metacharacters.
-#[must_use]
-pub fn tag_keyword(tag: &str) -> String {
-    format!("{TAG_KEYWORD_PREFIX}{tag}")
-}
-
-/// The keyword prefix under which bundle-scoped memory is stored and recalled.
-/// A memory written for bundle `base` carries keyword `llmenv-bundle:base`;
-/// recalling that keyword (project-unfiltered) surfaces it from any project.
-pub const BUNDLE_KEYWORD_PREFIX: &str = "llmenv-bundle:";
-
-/// The `llmenv-bundle:<bundle>` keyword for a bundle. The bundle name is
-/// assumed pre-validated (see `hook_run::validate_bundle`) so it contains no
-/// recall-query metacharacters.
-#[must_use]
-pub fn bundle_keyword(bundle: &str) -> String {
-    format!("{BUNDLE_KEYWORD_PREFIX}{bundle}")
-}
-
-/// Internal: parse an `<!-- llmenv-<prefix>: X -->` HTML comment marker.
-fn parse_marker<'a>(chunk: &'a str, prefix: &'a str) -> Option<&'a str> {
-    chunk
-        .split("<!--")
-        .skip(1)
-        .filter_map(|s| s.split("-->").next())
-        .find_map(|s| s.trim().strip_prefix(prefix).map(str::trim))
-        .filter(|v| !v.is_empty())
-}
-
-/// Parse `<!-- llmenv-type: X -->` marker from a context chunk (R1).
-/// Returns the type value if found, `None` otherwise.
-///
-/// The marker is an HTML comment in the markdown context chunk:
-/// ```markdown
-/// <!-- llmenv-type: semantic -->
-/// ```
-/// Only the text between the comment delimiters is examined; nested `-->`
-/// within value text is not supported (the first `-->` terminates the match).
-#[must_use]
-pub fn parse_type_marker(chunk: &str) -> Option<&str> {
-    parse_marker(chunk, "llmenv-type:")
-}
-
-/// Parse `<!-- llmenv-importance: X -->` marker from a context chunk (R3).
-/// Returns the importance value if found, `None` otherwise. Semantics and
-/// performance are identical to [`parse_type_marker`].
-#[must_use]
-pub fn parse_importance_marker(chunk: &str) -> Option<&str> {
-    parse_marker(chunk, "llmenv-importance:")
-}
 
 /// The arguments of one `icm_wake_up` call. `None` fields are left out, so ICM
 /// applies its own default.
@@ -241,6 +190,20 @@ impl Action {
         chunk: &str,
     ) -> anyhow::Result<Reply> {
         debug!(action = ?self, "dispatching MCP tool call");
+        if self.is_recall() {
+            let call = self.call(client, query, chunk);
+            return recall_breaker::guard_recall(client.recall_breaker(), call).await;
+        }
+        self.call(client, query, chunk).await
+    }
+
+    /// One MCP tool call and its reply parsing. `run` wraps a recall in the breaker (#3896).
+    async fn call(
+        &self,
+        client: &McpHttpClient,
+        query: &str,
+        chunk: &str,
+    ) -> anyhow::Result<Reply> {
         let text = client
             .call_tool(self.tool_name(), self.arguments(query, chunk))
             .await

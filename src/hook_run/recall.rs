@@ -262,6 +262,9 @@ where
             }
         });
         let Ok(reply) = answered.inspect_err(|e| {
+            if e.is::<super::recall_breaker::Skipped>() {
+                return;
+            }
             tracing::error!("memory action failed, its text is missing: {e:#}");
             crate::agent_notice::record(format!(
                 "llmenv could not run a memory action, so its text is missing: {e:#}. \

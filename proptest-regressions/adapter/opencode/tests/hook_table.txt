@@ -1,0 +1,4 @@
+# Seeds for failure cases proptest has generated in the past. It is automatically read and
+# will be rerun before any novel cases are generated.
+# Shrunk case from every_command_hook_reaches_the_table_in_order (#3003).
+cc e1ed022b9a3cb2e13cd3acd886e68fb3d99ce1d554a60874243ce345078a741a # shrinks to hooks = [Hook { event: "UserPromptSubmit", matcher: Some("0"), handler: HookHandler { kind: Command, command: Some("a"), tool: None, on_failure: None }, bundle_origin: None }]

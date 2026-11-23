@@ -158,3 +158,26 @@ async fn a_failed_wake_up_keeps_the_project_memories() {
         "the failed wake-up must reach the agent: {notice}"
     );
 }
+
+#[tokio::test]
+async fn project_memories_skipped_by_an_open_breaker_gives_no_answer() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let mut f = fixture(&server);
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("recall-breaker.json");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    std::fs::write(
+        &path,
+        format!(
+            r#"{{"consecutive_failures":0,"open_until_unix":{}}}"#,
+            now + 100
+        ),
+    )?;
+    f.client = f.client.clone().with_recall_breaker(Some(path));
+    let (text, answered) = project_memories(&f.client, "proj").await;
+    assert!(text.is_empty());
+    assert_eq!(answered, None);
+    Ok(())
+}

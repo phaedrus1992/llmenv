@@ -56,10 +56,15 @@ async fn recall(
     wanted: &BTreeSet<String>,
 ) -> Option<anyhow::Result<Reply>> {
     let action = Action::RecallQuery(query?);
-    let reply = client
-        .call_tool(action.tool_name(), action.arguments("", ""))
-        .await;
-    Some(reply.and_then(|body| related_records(&body, wanted).map(Reply::Records)))
+    // The open breaker skips this call too, so a down server does not cost every failed tool
+    // call a timeout (#3896).
+    let call = async {
+        let body = client
+            .call_tool(action.tool_name(), action.arguments("", ""))
+            .await?;
+        related_records(&body, wanted).map(Reply::Records)
+    };
+    Some(crate::hook_run::recall_breaker::guard_recall(client.recall_breaker(), call).await)
 }
 
 /// The memories of a JSON recall reply that share a token in `wanted`, matched on the summary

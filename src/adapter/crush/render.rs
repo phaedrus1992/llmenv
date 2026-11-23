@@ -24,7 +24,7 @@ pub(super) fn render_lsp(
             e.insert("args".into(), json!(srv.args));
         }
         if !srv.env.is_empty() {
-            e.insert("env".into(), json!(srv.env));
+            e.insert("env".into(), render_env(&srv.env));
         }
         if !srv.filetypes.is_empty() {
             e.insert("filetypes".into(), json!(srv.filetypes));
