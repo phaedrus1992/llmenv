@@ -145,3 +145,30 @@ fn the_commit_gate_runs_pre_tool_use_for_bash() {
         "{off}"
     );
 }
+
+proptest::proptest! {
+    /// Every hook with a command reaches the table with its event, matcher, and command,
+    /// after the user hooks, and the table is deterministic. A matcher the plugin cannot check
+    /// fails the build instead, so the build fails exactly when such a hook is present (#3003).
+    #[test]
+    fn every_command_hook_reaches_the_table_in_order(
+        hooks in proptest::collection::vec(crate::adapter::skills::arb_hook(), 0..5)
+    ) {
+        let with_command: Vec<_> = hooks.iter().filter(|h| h.handler.command.is_some()).collect();
+        let rejected = with_command
+            .iter()
+            .any(|h| hook_bridge::check_matcher_subject(h).is_err());
+        let built = hook_bridge::hook_table(&hooks, &[], &[], &[]);
+        proptest::prop_assert_eq!(built.is_err(), rejected);
+        if let Ok(table) = built {
+            proptest::prop_assert_eq!(&table, &hook_bridge::hook_table(&hooks, &[], &[], &[]).unwrap());
+            let entries = table["hooks"].as_array().unwrap();
+            for (hook, entry) in with_command.iter().zip(entries) {
+                proptest::prop_assert_eq!(entry["event"].as_str(), Some(hook.event.as_str()));
+                proptest::prop_assert_eq!(entry["matcher"].as_str(), hook.matcher.as_deref());
+            }
+            // The three built-in hooks follow the user hooks.
+            proptest::prop_assert_eq!(entries.len(), with_command.len() + 3);
+        }
+    }
+}

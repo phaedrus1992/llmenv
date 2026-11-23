@@ -332,6 +332,13 @@ coexist in a single shell session without conflict.
 | Model providers (`model_providers`/`default_models`) | Supported | Rendered to `providers`/`models` using catwalk's field names; `api_type` passes through as `type` verbatim |
 | Global instructions (`agents_md`) | Supported | Written to `CRUSH.md` in the Crush config dir, which Crush loads as global context (added in v3.14.0) |
 
+### Env values escape `$` (changed in v3.15.0)
+
+Crush expands each `env` value as a shell word at startup.
+llmenv escapes `$`, backticks, and backslashes in the top-level `env`, and in each MCP and LSP `env` value.
+A `$(...)` in a bundle value therefore stays literal, and does not run a command.
+An MCP `env` value that relied on `$VAR` expansion in Crush now stays literal.
+
 ### The `native.crush` escape hatch
 
 Keys that no modeled feature owns go under `native.crush`:
@@ -447,7 +454,7 @@ A bus event, such as `Notification` or `PreCompact`, cannot block the work it re
 
 Not bridged yet: a `PreToolUse` `ask` decision, a `Stop` block that continues a finished turn, `transcript_path`, `mcp_tool` handlers, and a stop for a background `SubagentStop`.
 Each one has an open issue on the v3.14.0 milestone: #2997, #2998, #2999, #3000, and #3001.
-A matcher on `Notification`, `PostModelSwitch`, or `PostToolBatch` is ignored, because those events pass no matcher subject yet (#3003).
+`PostModelSwitch` and `PostToolBatch` have no matcher subject, so a matcher on either is rejected when the opencode config is generated (#3003).
 
 ### Env vars
 
@@ -457,6 +464,14 @@ A matcher on `Notification`, `PostModelSwitch`, or `PostToolBatch` is ignored, b
 | `OPENCODE_DISABLE_CLAUDE_CODE` | `1`                                               | opencode does not load skills from `~/.claude` or a project `.claude` folder (added in v3.13.0) |
 
 opencode 2.x also loads every skill in `~/.agents/skills`, and no setting turns that folder off. `llmenv doctor` warns when the folder exists and opencode is installed (added in v3.13.0).
+
+### Matchers on opencode hooks (changed in v3.15.0)
+
+A hook `matcher` is checked against a tool name.
+`PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `SubagentStart`, `SubagentStop`, `PreCompact`, `Notification`, and `SessionStart` pass a name. `SessionStart` passes its source, which is `startup`.
+For `Notification`, the name is the notification type, and a permission request has the type `permission_prompt`.
+A `matcher` on any other event is rejected when the opencode config is generated, so it is never silently ignored.
+A `matcher` of `*` or an empty string matches every call on any event.
 
 ### What the opencode adapter emits
 

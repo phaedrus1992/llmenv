@@ -154,6 +154,20 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- Skip memory recall for five minutes after three failed recall calls in a row, and print one notice, instead of waiting out a timeout on every hook. [feat:hook] [#3896]
+
+### Changed
+
+- Escape the Crush MCP and LSP `env` values, as the top-level `env` already does, so a `$(...)` in a bundle value no longer runs when Crush starts. An MCP `env` value that relied on `$VAR` expansion now stays literal. [fix:crush] [#2989]
+
+### Fixed
+
+- Regenerate the attribution files during a forward-merge, so the cascade no longer halts on `THIRD-PARTY-LICENSES.md` and `website/docs/third-party-licenses.md`. [fix:ci] [#2972]
+- Share a five-second budget across the recall calls of a session start. A call past the budget is cut, and the agent is told. The `config-context` cost is tracked in #4018. [fix:hook] [#3899]
+- Match an opencode `Notification` hook's `matcher` against the `permission_prompt` type. A `matcher` on an event that passes no tool name is rejected when the opencode config is generated. [fix:opencode] [#3003]
+
 ## [3.14.1] - 2026-11-20
 
 3.14.1 is a packaging fix for 3.14.0.

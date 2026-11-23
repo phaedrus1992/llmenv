@@ -190,6 +190,13 @@ jobs:
           node-version: 26.13.1
           package-manager-cache: false
 
+      # The attribution files conflict on every cascade. regenerate_attribution
+      # runs scripts/gen-attribution.sh, which calls cargo-about.
+      - name: Install cargo-about
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f  # v2.90.6
+        with:
+          tool: cargo-about@0.9.3
+
       - name: Forward-merge cascade
         env:
           CURRENT: ${{ steps.detect.outputs.current }}
@@ -653,6 +660,47 @@ jobs:
             fi
           }
 
+          # Regenerate the attribution files from the merged manifests. Both carry
+          # the crate versions of the line they sit on, so the target's copy is
+          # taken first and the generator then rewrites it. A failed generator
+          # returns non-zero, so a stale copy is never staged as resolved.
+          regenerate_attribution() {
+            if [[ "$1" -ne 1 ]]; then
+              return 0
+            fi
+            echo "  THIRD-PARTY-LICENSES.md, website/docs/third-party-licenses.md: regenerating"
+            # The job holds the App token, so it runs only the target's copy of the generator,
+            # never one the source changed (#1532, #2171, #2177). HEAD is the target during a merge.
+            local target_gen
+            target_gen=$(mktemp) || {
+              echo "::error::attribution files: cannot create a temp file for the generator check" >&2
+              return 1
+            }
+            if ! git show HEAD:scripts/gen-attribution.sh > "$target_gen"; then
+              rm -f "$target_gen"
+              echo "::error::scripts/gen-attribution.sh: cannot read the target's copy" >&2
+              return 1
+            fi
+            if ! cmp -s "$target_gen" scripts/gen-attribution.sh; then
+              rm -f "$target_gen"
+              echo "::error::scripts/gen-attribution.sh differs from the target's copy, so it is not run here. A person must merge it" >&2
+              return 1
+            fi
+            rm -f "$target_gen"
+            git checkout --ours -- THIRD-PARTY-LICENSES.md website/docs/third-party-licenses.md || {
+              echo "::error::attribution files: git checkout --ours failed" >&2
+              return 1
+            }
+            if ! bash scripts/gen-attribution.sh 2>&1 | sed -e 's/::/  /g'; then
+              echo "::error::THIRD-PARTY-LICENSES.md: scripts/gen-attribution.sh failed" >&2
+              return 1
+            fi
+            git add -- THIRD-PARTY-LICENSES.md website/docs/third-party-licenses.md || {
+              echo "::error::attribution files: git add failed" >&2
+              return 1
+            }
+          }
+
           # Resolve the conflicts a forward-merge produces every single time, and
           # only those. Returns non-zero the moment it meets one it has no rule
           # for, leaving the caller to bail.
@@ -670,7 +718,7 @@ jobs:
           #   * Cargo.lock and website/package-lock.json are regenerated once every
           #     other conflict is resolved, never merged by hand.
           auto_resolve_conflicts() {
-            local file conflicted_files remaining lock_cargo=0 lock_npm=0 mkt_rc
+            local file conflicted_files remaining lock_cargo=0 lock_npm=0 lock_attrib=0 mkt_rc
             # Captured to a variable, with an explicit `|| { ...; return 1; }`
             # handler — not streamed via `< <(git diff ...)`, and not relying
             # on `set -e` to catch a bare failure, since this whole function
@@ -772,6 +820,9 @@ jobs:
                 website/package-lock.json)
                   lock_npm=1
                   ;;
+                THIRD-PARTY-LICENSES.md | website/docs/third-party-licenses.md)
+                  lock_attrib=1
+                  ;;
                 Cargo.toml | crates/*/Cargo.toml)
                   # `if manifest_keeps_target ...; then mkt_rc=0; else mkt_rc=$?; fi` (not a
                   # bare `manifest_keeps_target; mkt_rc=$?`) -- same set -e hazard noted
@@ -806,6 +857,7 @@ jobs:
               esac
             done <<< "$conflicted_files"
             regenerate_lockfiles "$lock_cargo" "$lock_npm" || return 1
+            regenerate_attribution "$lock_attrib" || return 1
             # Same explicit-handler reasoning as above: this re-check must
             # not silently read as "nothing left" just because `git diff`
             # failed — `set -e` can't catch that here either.

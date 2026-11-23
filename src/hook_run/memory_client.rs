@@ -75,7 +75,11 @@ pub(super) fn resolve_memory_client<E: std::fmt::Display>(
         std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
         std::collections::hash_map::Entry::Vacant(entry) => {
             match McpHttpClient::new(entry.key().clone(), HOOK_TIMEOUT) {
-                Ok(client) => entry.insert(client).clone(),
+                Ok(client) => {
+                    let client =
+                        client.with_recall_breaker(crate::hook_run::recall_breaker::default_path());
+                    entry.insert(client).clone()
+                }
                 Err(e) => {
                     // Hook stderr never reaches the agent, so the reason is also a notice (#3129).
                     crate::agent_notice::record_logged(format!(

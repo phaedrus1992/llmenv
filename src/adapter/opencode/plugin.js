@@ -258,7 +258,7 @@ function state(sessionID) {
 function startSession(sessionID) {
   const s = state(sessionID);
   if (!s.started) {
-    s.started = runHooks("SessionStart", sessionID, { source: "startup" })
+    s.started = runHooks("SessionStart", sessionID, { source: "startup" }, "startup")
       .then((out) => {
         s.start = out.context;
         queueOutcome(s, out);
@@ -335,9 +335,12 @@ function modelText(ref) {
  * model step, including a step with no tool call.
  */
 const BUS_HOOKS = {
+  // Claude Code matches a Notification on its type. A permission request is the permission_prompt
+  // type, so a matcher on that name selects it (#3003).
   "permission.asked": (d) => ({
     event: "Notification",
     payload: { message: d.message ?? `Permission needed for ${d.action}: ${d.resources.join(", ")}` },
+    subject: "permission_prompt",
   }),
   "session.compaction.started": (d) => ({ event: "PreCompact", payload: { trigger: d.reason }, subject: d.reason }),
   "session.model.selected": (d) => ({

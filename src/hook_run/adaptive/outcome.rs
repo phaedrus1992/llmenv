@@ -2,6 +2,7 @@
 
 use crate::agent_notice;
 use crate::hook_run::action::{Recalled, Reply};
+use crate::hook_run::recall_breaker;
 
 /// What a set of recall calls returned.
 #[derive(Debug, Default)]
@@ -17,6 +18,11 @@ impl Outcome {
         let Some(result) = result else {
             return;
         };
+        // A call the open breaker skipped never ran, so it is neither a success nor a failure.
+        // The breaker's own notice names the skip, in the process that opened it.
+        if matches!(&result, Err(e) if e.is::<recall_breaker::Skipped>()) {
+            return;
+        }
         self.calls += 1;
         match result.and_then(Reply::into_records) {
             Ok(records) => self.records.extend(records),
@@ -49,5 +55,20 @@ impl Outcome {
 
     pub(super) fn all_failed(&self) -> bool {
         self.calls > 0 && self.failed == self.calls
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_skipped_call_is_neither_a_failure_nor_a_record() {
+        let skipped: anyhow::Result<Reply> = Err(recall_breaker::Skipped.into());
+        let mut out = Outcome::default();
+        out.push(Some(skipped));
+        assert_eq!((out.calls, out.failed), (0, 0));
+        assert!(out.records.is_empty());
+        assert!(!out.all_failed());
     }
 }
