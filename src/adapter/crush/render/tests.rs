@@ -182,3 +182,17 @@ fn env_value_without_metacharacters_is_unchanged() {
     env.insert("TOKEN_FILE".to_string(), "/run/tok".to_string());
     assert_eq!(render_env(&env)["TOKEN_FILE"], "/run/tok");
 }
+
+#[test]
+fn lsp_env_values_are_escaped_so_crush_reads_them_literally() {
+    let mut env = std::collections::BTreeMap::new();
+    env.insert("CMD".to_string(), "$(id)".to_string());
+    let srv = llmenv_config::LspServer {
+        name: "ra".to_string(),
+        command: "rust-analyzer".to_string(),
+        env,
+        ..Default::default()
+    };
+    let rendered = super::render_lsp(&[srv]).unwrap();
+    assert_eq!(rendered["ra"]["env"]["CMD"], "\\$(id)");
+}
