@@ -3514,7 +3514,6 @@ mod tests {
             prop_assert_eq!(command_once, command_twice);
         }
 
-
         /// A bare native rule (no parens) wildcard-matches and lowercases the
         /// tool name — exercised through `native_permissions.opencode` since
         /// `parse_native_rule` is private to `materialize`.

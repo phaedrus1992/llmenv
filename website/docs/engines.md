@@ -411,7 +411,7 @@ A bus event, such as `Notification` or `PreCompact`, cannot block the work it re
 
 Not bridged yet: a `PreToolUse` `ask` decision, a `Stop` block that continues a finished turn, `transcript_path`, `mcp_tool` handlers, and a stop for a background `SubagentStop`.
 Each one has an open issue on the v3.14.0 milestone: #2997, #2998, #2999, #3000, and #3001.
-A matcher on `Notification`, `PostModelSwitch`, or `PostToolBatch` is ignored, because those events pass no matcher subject yet (#3003).
+`PostModelSwitch` and `PostToolBatch` have no matcher subject, so a matcher on either is rejected when the opencode config is generated (#3003).
 
 ### Env vars
 
@@ -425,9 +425,9 @@ opencode 2.x also loads every skill in `~/.agents/skills`, and no setting turns 
 ### Matchers on opencode hooks (changed in v3.15.0)
 
 A hook `matcher` is checked against a tool name.
-`PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `SubagentStart`, `SubagentStop`, `PreCompact`, and `Notification` pass a name.
+`PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `SubagentStart`, `SubagentStop`, `PreCompact`, `Notification`, and `SessionStart` pass a name. `SessionStart` passes its source, which is `startup`.
 For `Notification`, the name is the notification type, and a permission request has the type `permission_prompt`.
-A `matcher` on any other event is rejected when the opencode config is generated, so it never runs unfiltered.
+A `matcher` on any other event is rejected when the opencode config is generated, so it is never silently ignored.
 A `matcher` of `*` or an empty string matches every call on any event.
 
 ### What the opencode adapter emits

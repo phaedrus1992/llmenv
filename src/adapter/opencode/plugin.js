@@ -258,7 +258,7 @@ function state(sessionID) {
 function startSession(sessionID) {
   const s = state(sessionID);
   if (!s.started) {
-    s.started = runHooks("SessionStart", sessionID, { source: "startup" })
+    s.started = runHooks("SessionStart", sessionID, { source: "startup" }, "startup")
       .then((out) => {
         s.start = out.context;
         queueOutcome(s, out);

@@ -51,6 +51,7 @@ const EVENTS_WITH_TOOL_NAME: &[&str] = &[
     "SubagentStop",
     "PreCompact",
     "Notification",
+    "SessionStart",
 ];
 
 /// The neutral tools that `hook-run pre_tool_use` must see on opencode: the codebase-memory

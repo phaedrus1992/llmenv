@@ -155,3 +155,39 @@ describe("notification matcher", () => {
     expect(logged).not.toHaveBeenCalledWith("notified");
   });
 });
+
+describe("session start matcher", () => {
+  // The plugin starts every session with source startup, so only that matcher selects it.
+  const created = { type: "session.created", data: { sessionID: "s1" } };
+
+  const startContext = async (matcher) => {
+    const { default: plugin } = await loadPlugin(
+      tableOf(hook("SessionStart", `printf 'start text'`, { matcher })),
+    );
+    const { ctx, handlers } = fakeContext([created]);
+    await plugin.setup(ctx);
+    const e = { sessionID: "s1", system: [] };
+    await vi.waitFor(async () => {
+      e.system = [];
+      await handlers["session.context"](e);
+      expect(e.system.length).toBeGreaterThan(0);
+    });
+    return e.system.map((part) => part.text);
+  };
+
+  it("runs a SessionStart hook whose matcher is startup", async () => {
+    expect(await startContext("startup")).toContain("start text");
+  });
+
+  it("skips a SessionStart hook whose matcher names another source", async () => {
+    const { default: plugin } = await loadPlugin(
+      tableOf(hook("SessionStart", `printf 'start text'`, { matcher: "resume" })),
+    );
+    const { ctx, handlers } = fakeContext([created]);
+    await plugin.setup(ctx);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const e = { sessionID: "s1", system: [] };
+    await handlers["session.context"](e);
+    expect(e.system.map((part) => part.text)).not.toContain("start text");
+  });
+});
