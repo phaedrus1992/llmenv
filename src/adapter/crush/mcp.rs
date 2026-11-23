@@ -20,7 +20,7 @@ pub(super) fn render_mcp(
                 e.insert("command".into(), json!(command));
                 e.insert("args".into(), json!(args));
                 if !env.is_empty() {
-                    e.insert("env".into(), json!(env));
+                    e.insert("env".into(), super::render::render_env(env));
                 }
                 e
             }
@@ -53,4 +53,35 @@ pub(super) fn render_mcp(
         "native_mcp.crush",
     )?;
     Ok((!mcp_value.as_object().is_none_or(serde_json::Map::is_empty)).then_some(mcp_value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_mcp;
+    use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
+    use crate::merge::MergedManifest;
+
+    #[test]
+    fn mcp_stdio_env_values_are_escaped_for_crush() -> anyhow::Result<()> {
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("CMD".to_string(), "$(id)".to_string());
+        let mut manifest = MergedManifest::default();
+        manifest.mcps.push(ResolvedMcp {
+            name: "srv".to_string(),
+            kind: ResolvedKind::Stdio {
+                command: "srv-bin".to_string(),
+                args: vec![],
+                env,
+            },
+            headers: std::collections::BTreeMap::new(),
+            timeout: None,
+            disabled_tools: vec![],
+            mcp_permissions: None,
+            memory_hook: None,
+            always_load: None,
+        });
+        let rendered = render_mcp(&manifest)?.ok_or_else(|| anyhow::anyhow!("no mcp object"))?;
+        assert_eq!(rendered["srv"]["env"]["CMD"], "\\$(id)");
+        Ok(())
+    }
 }

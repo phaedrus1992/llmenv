@@ -311,3 +311,50 @@ console.log(JSON.stringify({ a: m.systemParts("s1"), b: m.systemParts("s1") }));
         );
     }
 }
+
+#[test]
+fn a_matcher_on_an_event_without_a_tool_name_is_rejected() -> anyhow::Result<()> {
+    for event in [
+        "PostModelSwitch",
+        "PostToolBatch",
+        "Stop",
+        "UserPromptSubmit",
+    ] {
+        let err = hook_table(&[hook(event, Some("Bash"), "true")], &[], &[], &[])
+            .err()
+            .ok_or_else(|| {
+                anyhow::anyhow!("{event}: a matcher the plugin cannot check was accepted")
+            })?;
+        let text = err.to_string();
+        assert!(text.contains(event), "{text}");
+        assert!(text.contains("Fix:"), "{text}");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_matcher_on_an_event_with_a_tool_name_is_kept() -> anyhow::Result<()> {
+    for event in [
+        "PreToolUse",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "SubagentStart",
+        "SubagentStop",
+        "PreCompact",
+        "Notification",
+        "SessionStart",
+    ] {
+        let table = hook_table(&[hook(event, Some("Bash"), "true")], &[], &[], &[])?;
+        assert_eq!(table["hooks"][0]["matcher"], "Bash", "{event}");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_match_all_matcher_is_kept_on_any_event() -> anyhow::Result<()> {
+    for matcher in ["*", ""] {
+        let table = hook_table(&[hook("Stop", Some(matcher), "true")], &[], &[], &[])?;
+        assert_eq!(table["hooks"][0]["event"], "Stop");
+    }
+    Ok(())
+}

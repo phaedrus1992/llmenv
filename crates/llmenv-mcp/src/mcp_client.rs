@@ -32,6 +32,8 @@ pub struct McpHttpClient {
     session_id: std::sync::Arc<tokio::sync::Mutex<Option<String>>>,
     /// What the server said in its last `initialize` reply (#2148).
     init_info: std::sync::Arc<tokio::sync::Mutex<Option<InitializeInfo>>>,
+    /// State file for the recall breaker (#3896). Only the hook's cached client sets it.
+    recall_breaker: Option<std::path::PathBuf>,
 }
 
 /// What an MCP server reports about itself in its `initialize` reply.
@@ -147,6 +149,7 @@ impl McpHttpClient {
             client,
             session_id: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             init_info: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            recall_breaker: None,
         })
     }
 
@@ -165,7 +168,20 @@ impl McpHttpClient {
             client,
             session_id: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             init_info: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            recall_breaker: None,
         })
+    }
+
+    /// Attaches the recall breaker state file (#3896). `None` runs recall with no breaker.
+    #[must_use]
+    pub fn with_recall_breaker(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.recall_breaker = path;
+        self
+    }
+
+    /// The recall breaker state file, when one is attached.
+    pub fn recall_breaker(&self) -> Option<&std::path::Path> {
+        self.recall_breaker.as_deref()
     }
 
     /// The server URL without credentials or a query string, for error text that reaches a
