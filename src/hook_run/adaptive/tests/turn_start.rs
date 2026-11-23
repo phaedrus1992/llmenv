@@ -153,10 +153,12 @@ async fn a_failed_scope_call_ends_the_fallback_for_this_turn() {
     let server = failing_server().await;
     let f = fixture(&server);
     let mut budget = RecallBudget::new(RECALL_BUDGET_BYTES, std::collections::BTreeSet::new());
+    // No deadline: this test covers the scope loop, not the session start budget.
     let (outcome, unrun) = run_scope(
         &ctx(&f, &json!({"prompt": "hi"})),
         vec![tag_action("a"), tag_action("b"), tag_action("c")],
         &mut budget,
+        None,
     )
     .await;
     assert_eq!(outcome.calls, 1, "{outcome:?}");

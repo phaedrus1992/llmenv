@@ -24,8 +24,10 @@ mod cut;
 mod failure;
 mod local;
 mod outcome;
+mod project_recall;
 mod scope;
 mod session_reset;
+mod session_start_budget;
 mod subagent;
 mod waves;
 
@@ -35,6 +37,7 @@ use cut::{drop_cut_items, join_sections, note_cut_items, pack_bytes};
 pub(super) use failure::tool_failure;
 pub(super) use local::record_local;
 use outcome::Outcome;
+use project_recall::project_memories;
 use scope::run_scope;
 #[cfg(test)]
 use scope::{scope_cut_notice, unrun_notice};
@@ -129,38 +132,6 @@ async fn recall(client: &McpHttpClient, q: Option<RecallQuery>) -> Option<anyhow
     Some(Action::RecallQuery(q?).run(client, "", "").await)
 }
 
-/// The session project's own memories for the wake-up pack, and whether the call answered. The
-/// icm wake-up fills its budget with global records first, so this project-scoped recall runs
-/// beside it (#2756).
-async fn project_memories(client: &McpHttpClient, project: &str) -> (String, bool) {
-    let q = RecallQuery {
-        project: Some(project.to_string()),
-        ..query(project, MAIN_LIMIT)
-    };
-    let answered = Action::RecallQuery(q).run(client, "", "").await;
-    match answered.and_then(Reply::into_records) {
-        Ok(records) => {
-            let records: Vec<String> = records
-                .into_iter()
-                .map(|r| r.text)
-                .filter(|r| !r.starts_with(SCOPE_RECORD))
-                .collect();
-            let (kept, cut) = drop_cut_items(&records.join("\n"));
-            note_cut_items(cut);
-            (kept, true)
-        }
-        Err(e) => {
-            tracing::error!("session start: project memories not recalled for {project}: {e:#}");
-            agent_notice::record(format!(
-                "llmenv: project memories were skipped at session start: icm recall failed ({}). \
-                 Fix: run `llmenv doctor` to check the memory server.",
-                mcp_health::tidy_reason(&format!("{e:#}"))
-            ));
-            (String::new(), false)
-        }
-    }
-}
-
 /// Notice for a context reset that the ledger did not apply. Records seen before the
 /// reset stay filtered from recall, so the agent must hear about it.
 const RESET_UNDONE: &str = "llmenv: the recall ledger was not reset after a context reset (the \
@@ -174,6 +145,8 @@ pub(super) async fn session_start(
     wake: Action,
     scope: Vec<Action>,
 ) -> anyhow::Result<super::HookText> {
+    // One budget for every recall call of this start, the wake-up pack and the scope set alike.
+    let deadline = session_start_budget::session_start_deadline();
     let reset = resets_ledger(ctx.payload["source"].as_str());
     let project = match &wake {
         Action::WakeUp(args) => args.project.clone(),
@@ -205,16 +178,24 @@ pub(super) async fn session_start(
     } else {
         let (own, own_ok) = match &recall_project {
             Some(p) => {
-                let (text, ok) = project_memories(ctx.client, p).await;
-                (text, Some(ok))
+                match tokio::time::timeout_at(deadline, project_memories(ctx.client, p)).await {
+                    Ok((text, ok)) => (text, Some(ok)),
+                    Err(_) => {
+                        agent_notice::record(session_start_budget::cut_notice());
+                        (String::new(), Some(false))
+                    }
+                }
             }
             None => (String::new(), None),
         };
-        let wake = wake.run(ctx.client, "", "").await.map(|reply| {
-            let (kept, cut) = drop_cut_items(&reply.into_text());
-            note_cut_items(cut);
-            join_sections(&kept, &own)
-        });
+        let wake_call = wake.run(ctx.client, "", "");
+        let wake = session_start_budget::within(Some(deadline), wake_call)
+            .await
+            .map(|reply| {
+                let (kept, cut) = drop_cut_items(&reply.into_text());
+                note_cut_items(cut);
+                join_sections(&kept, &own)
+            });
         // These two calls are not in the scope outcome, so the health ring counts them here.
         let results = [Some(wake.is_ok()), own_ok];
         let ok = results.iter().filter(|r| **r == Some(true)).count();
@@ -227,7 +208,7 @@ pub(super) async fn session_start(
     let wake_bytes = pack_bytes(&wake, &own);
     let mut budget = RecallBudget::new(RECALL_BUDGET_BYTES.saturating_sub(wake_bytes), sent);
     let scope_len = scope.len();
-    let (outcome, unrun) = run_scope(ctx, scope, &mut budget).await;
+    let (outcome, unrun) = run_scope(ctx, scope, &mut budget, Some(deadline)).await;
     if let Some(notice) = unrun {
         agent_notice::record(notice);
     }
@@ -320,7 +301,7 @@ pub(super) async fn turn_start(
     let fallback = !ledger.scope_sent(MAIN_AGENT);
     let mut outcome = Outcome::default();
     if fallback {
-        let (scope_outcome, unrun) = run_scope(ctx, scope, &mut budget).await;
+        let (scope_outcome, unrun) = run_scope(ctx, scope, &mut budget, None).await;
         if let Some(notice) = unrun {
             agent_notice::record(notice);
         }
