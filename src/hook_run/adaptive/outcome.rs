@@ -2,6 +2,7 @@
 
 use crate::agent_notice;
 use crate::hook_run::action::{Recalled, Reply};
+use crate::hook_run::recall_breaker;
 
 /// What a set of recall calls returned.
 #[derive(Debug, Default)]
@@ -20,6 +21,8 @@ impl Outcome {
         self.calls += 1;
         match result.and_then(Reply::into_records) {
             Ok(records) => self.records.extend(records),
+            // A skipped call is not a failure. The breaker already printed its notice once.
+            Err(e) if e.is::<recall_breaker::Skipped>() => {}
             Err(e) => {
                 self.failed += 1;
                 tracing::error!("adaptive recall call failed, its records are skipped: {e:#}");
@@ -49,5 +52,20 @@ impl Outcome {
 
     pub(super) fn all_failed(&self) -> bool {
         self.calls > 0 && self.failed == self.calls
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_skipped_call_is_neither_a_failure_nor_a_record() {
+        let skipped: anyhow::Result<Reply> = Err(recall_breaker::Skipped.into());
+        let mut out = Outcome::default();
+        out.push(Some(skipped));
+        assert_eq!((out.calls, out.failed), (1, 0));
+        assert!(out.records.is_empty());
+        assert!(!out.all_failed());
     }
 }

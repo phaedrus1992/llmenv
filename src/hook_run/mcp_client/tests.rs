@@ -22,6 +22,7 @@ impl McpHttpClient {
             client,
             session_id: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             init_info: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            recall_breaker: None,
         })
     }
 }

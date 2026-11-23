@@ -59,12 +59,15 @@ pub(crate) mod read_once;
 use consolidation_spawn::post_session_consolidation_in;
 use consolidation_spawn::{consolidation_run_command, post_session_consolidation};
 mod recall;
+mod recall_breaker;
 pub(crate) mod recall_health;
 mod record_hash;
 mod relevance;
 pub(crate) mod repeat_detect;
 pub(crate) mod respawn;
 mod resume_cache;
+mod text_join;
+use text_join::{append_section, join_notes};
 mod session_emit;
 mod session_ledger;
 mod session_notices;
@@ -1075,15 +1078,6 @@ impl HookText {
 /// Whether a deny envelope would replace memory text that was computed in the same run.
 fn deny_drops_memory(text: &HookText) -> bool {
     text.notes.starts_with("__DENY__:") && !text.memory.is_empty()
-}
-
-/// Puts the agent notice in front of the llmenv notes, with no empty separator.
-fn join_notes(notice: Option<&str>, notes: &str) -> String {
-    [notice.unwrap_or_default(), notes]
-        .into_iter()
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n")
 }
 
 fn run_inner(
@@ -2181,17 +2175,6 @@ fn adaptive_state_dir(
 /// Whether a PostToolUse event may store fetched web content in ICM (#579).
 fn stores_web_fetch(event: HookEvent) -> bool {
     event == HookEvent::PostToolUse
-}
-
-/// Append `section` to `out` on its own line. An empty section adds nothing.
-fn append_section(out: &mut String, section: &str) {
-    if section.is_empty() {
-        return;
-    }
-    if !out.is_empty() {
-        out.push('\n');
-    }
-    out.push_str(section);
 }
 
 #[cfg(test)]
