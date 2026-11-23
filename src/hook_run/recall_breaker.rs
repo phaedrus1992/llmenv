@@ -357,3 +357,21 @@ mod notice_text_tests {
         assert!(text.contains("llmenv doctor"), "{text}");
     }
 }
+
+#[cfg(test)]
+mod path_and_read_tests {
+    use super::*;
+
+    #[test]
+    fn the_default_path_is_the_state_file_in_the_state_directory() {
+        assert!(default_path().is_some_and(|p| p.ends_with(STATE_FILE)));
+    }
+
+    #[test]
+    fn a_read_error_other_than_a_missing_file_is_reported() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        // A directory is not a readable state file, and the error is not a missing file.
+        assert!(load(dir.path(), 0).is_err());
+        Ok(())
+    }
+}
