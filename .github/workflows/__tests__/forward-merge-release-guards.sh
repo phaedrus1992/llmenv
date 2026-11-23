@@ -3417,6 +3417,93 @@ run_test "Issue #2803: a failed drop listing halts before the reset" \
 run_test "Issue #2803: cascade-only matches the author rule on generated cases" \
   test_2803_cascade_only_matches_the_author_rule
 
+# ---------------------------------------------------------------------------
+# Build a repo where target and source both change THIRD-PARTY-LICENSES.md and
+# website/docs/third-party-licenses.md, so the merge conflicts on both. The
+# given generator body is written to scripts/gen-attribution.sh, so a test
+# picks whether the regeneration succeeds or fails. Leaves the caller inside
+# a conflicted `git merge source` on the target branch. Echoes the path.
+# ---------------------------------------------------------------------------
+make_attribution_conflict_repo() {
+  local generator="$1" repo
+  repo=$(mktemp -d)
+  (
+    cd "$repo" || exit 1
+    git init -q -b target .
+    git config user.email t@t
+    git config user.name t
+    git config commit.gpgsign false
+    mkdir -p website/docs scripts
+    printf 'base\n' > THIRD-PARTY-LICENSES.md
+    printf 'base\n' > website/docs/third-party-licenses.md
+    printf '%s\n' "$generator" > scripts/gen-attribution.sh
+    git add THIRD-PARTY-LICENSES.md website/docs/third-party-licenses.md scripts/gen-attribution.sh
+    git commit -q -m base
+
+    git switch -q -c source
+    printf 'source\n' > THIRD-PARTY-LICENSES.md
+    printf 'source\n' > website/docs/third-party-licenses.md
+    git commit -q -am "source change"
+
+    git switch -q target
+    printf 'target\n' > THIRD-PARTY-LICENSES.md
+    printf 'target\n' > website/docs/third-party-licenses.md
+    git commit -q -am "target change"
+
+    git merge --no-commit --no-ff source >/dev/null 2>&1 || true
+  )
+  printf '%s\n' "$repo"
+}
+
+# ---------------------------------------------------------------------------
+# Test (Issue #2972): the generated attribution files conflict on every
+# forward-merge, because each release line carries its own crate versions.
+# The conflict resolves by regenerating both files from the merged manifests,
+# so the cascade no longer halts there.
+# ---------------------------------------------------------------------------
+test_2972_attribution_conflict_is_regenerated() {
+  local repo out lic site
+  repo=$(make_attribution_conflict_repo 'printf "regenerated\n" > THIRD-PARTY-LICENSES.md
+printf "regenerated\n" > website/docs/third-party-licenses.md')
+
+  out=$(cd "$repo" && SOURCE_REF=source TARGET=main SOURCE_DESC=release/4.x \
+    bash -c "$(resolve_block)" 2>&1 || true)
+  lic=$(cd "$repo" && sed -n 1p THIRD-PARTY-LICENSES.md)
+  site=$(cd "$repo" && sed -n 1p website/docs/third-party-licenses.md)
+  trash "$repo" 2>/dev/null || true
+
+  if [[ "$out" == *RESOLVED* ]] && [[ "$lic" == regenerated ]] && [[ "$site" == regenerated ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  printf '  files: %s / %s\n' "$lic" "$site" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Test (Issue #2972): a failing attribution regeneration bails. A stale copy
+# staged as resolved would ship wrong license text, so the cascade halts.
+# ---------------------------------------------------------------------------
+test_2972_attribution_regeneration_failure_bails() {
+  local repo out
+  repo=$(make_attribution_conflict_repo 'exit 1')
+
+  out=$(cd "$repo" && SOURCE_REF=source TARGET=main SOURCE_DESC=release/4.x \
+    bash -c "$(resolve_block)" 2>&1 || true)
+  trash "$repo" 2>/dev/null || true
+
+  if [[ "$out" == *BAILED* ]] && [[ "$out" == *"gen-attribution.sh failed"* ]]; then
+    return 0
+  fi
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+run_test "Issue #2972: a conflicted attribution file is regenerated and resolves" \
+  test_2972_attribution_conflict_is_regenerated
+run_test "Issue #2972: a failing attribution regeneration bails" \
+  test_2972_attribution_regeneration_failure_bails
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
