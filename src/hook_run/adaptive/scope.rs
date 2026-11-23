@@ -78,3 +78,19 @@ pub(super) fn unrun_notice(unrun: usize, failed: bool, budget_full: bool) -> Opt
         )
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::past;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn past_reports_only_a_deadline_that_has_passed() {
+        let now = tokio::time::Instant::now();
+        assert!(!past(None));
+        assert!(!past(Some(now + Duration::from_secs(3600))));
+        if let Some(earlier) = now.checked_sub(Duration::from_secs(1)) {
+            assert!(past(Some(earlier)));
+        }
+    }
+}
