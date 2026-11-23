@@ -32,49 +32,58 @@ struct State {
     open_until_unix: u64,
 }
 
-/// Returned in place of a recall call while the breaker is open. The caller counts it and
-/// does not print a per-hook failure.
+/// Returned in place of a recall call while the breaker is open. The caller counts it as
+/// neither a success nor a failure, and the breaker printed its own notice when it opened.
 #[derive(Debug, thiserror::Error)]
 #[error("memory recall is skipped while the breaker is open")]
 pub(crate) struct Skipped;
 
-/// The state file, in the llmenv state directory.
-///
-/// # Errors
-/// Returns an error when the state directory cannot be resolved.
-fn state_path() -> anyhow::Result<PathBuf> {
-    Ok(llmenv_paths::state_dir()
-        .context("cannot find the llmenv state directory for the recall breaker")?
-        .join(STATE_FILE))
-}
-
-/// Reads the state. A missing file means a closed breaker. A corrupt file also yields the
-/// closed state, with a warning, so one bad file cannot switch recall off for good.
-fn load(path: &Path) -> State {
-    match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-            tracing::warn!(path = %path.display(), error = %e, "recall breaker state is corrupt; treating it as closed");
-            State::default()
-        }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => State::default(),
+/// The state file for a hook's recall client. A state directory that cannot be resolved turns
+/// the breaker off, with a notice, so recall still runs.
+pub(crate) fn default_path() -> Option<PathBuf> {
+    match llmenv_paths::state_dir() {
+        Ok(dir) => Some(dir.join(STATE_FILE)),
         Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "recall breaker state is unreadable; treating it as closed");
-            State::default()
+            notice_problem("is off, because the state directory cannot be found", &e);
+            None
         }
     }
 }
 
-/// Writes the state through a temp file, so a reader never sees a half-written file.
+/// Reads the state. A missing file means a closed breaker. A corrupt file, an unreadable file,
+/// or a window that ends further away than `OPEN_FOR` is an error, so the caller can report it.
+fn load(path: &Path, now: u64) -> anyhow::Result<State> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(State::default()),
+        Err(e) => {
+            return Err(e).with_context(|| format!("cannot read {}", path.display()));
+        }
+    };
+    let state: State = serde_json::from_slice(&bytes)
+        .with_context(|| format!("{} is not a valid breaker state", path.display()))?;
+    if state.open_until_unix > now.saturating_add(OPEN_FOR.as_secs()) {
+        anyhow::bail!(
+            "{} holds a window longer than {} s",
+            path.display(),
+            OPEN_FOR.as_secs()
+        );
+    }
+    Ok(state)
+}
+
+/// Writes the state. A failed write leaves the old file in place, and the next call tries again.
 ///
 /// # Errors
-/// Returns an error when the file cannot be written or renamed into place.
+/// Returns an error when the state cannot be encoded or the file cannot be written.
 fn save(path: &Path, state: &State) -> anyhow::Result<()> {
-    let tmp = path.with_extension("json.tmp");
     let bytes = serde_json::to_vec(state).context("cannot encode the recall breaker state")?;
-    std::fs::write(&tmp, bytes)
-        .with_context(|| format!("cannot write recall breaker state to {}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("cannot move recall breaker state into {}", path.display()))
+    std::fs::write(path, bytes).with_context(|| {
+        format!(
+            "cannot write the recall breaker state to {}",
+            path.display()
+        )
+    })
 }
 
 /// True while the breaker skips recall. The window ends at `open_until_unix`, exclusive.
@@ -100,22 +109,20 @@ fn after(state: &State, ok: bool, now: u64) -> State {
     }
 }
 
-/// Current time in whole seconds since the Unix epoch.
-///
-/// # Errors
-/// Returns an error when the system clock is before the epoch.
-fn now_unix() -> anyhow::Result<u64> {
-    Ok(SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("system clock is before the Unix epoch")?
-        .as_secs())
+/// Reports a breaker state problem to the log and to the agent, with the fix.
+fn notice_problem(what: &str, error: &anyhow::Error) {
+    tracing::error!(error = %format!("{error:#}"), "recall breaker {what}");
+    agent_notice::record(format!(
+        "llmenv: the memory recall breaker {what}: {error:#}. Fix: run `llmenv doctor` to check \
+         the state directory."
+    ));
 }
 
 /// Runs one recall call under the breaker. While the breaker is open, `call` does not run and
 /// the result is `Skipped`. Otherwise `call` runs, and its outcome moves the breaker.
 ///
-/// A state file that cannot be read or written does not stop recall. The problem is logged,
-/// and the call still runs without the breaker.
+/// A state file that cannot be read, written, or trusted does not stop recall. The problem is
+/// reported to the agent, and the call runs with a closed breaker.
 ///
 /// # Errors
 /// Returns `Skipped` while the breaker is open. Otherwise returns the error from `call`.
@@ -123,8 +130,14 @@ async fn run_guarded<F>(path: &Path, call: F) -> anyhow::Result<Reply>
 where
     F: Future<Output = anyhow::Result<Reply>>,
 {
-    let now = now_unix()?;
-    let before = load(path);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before the Unix epoch")?
+        .as_secs();
+    let before = load(path, now).unwrap_or_else(|e| {
+        notice_problem("cannot be read, so recall runs without it", &e);
+        State::default()
+    });
     if is_open(&before, now) {
         return Err(Skipped.into());
     }
@@ -132,7 +145,7 @@ where
     let next = after(&before, result.is_ok(), now);
     let saved = (next != before).then(|| save(path, &next));
     if let Some(Err(e)) = saved {
-        tracing::warn!(error = %format!("{e:#}"), "recall breaker state was not saved");
+        notice_problem("was not saved", &e);
     }
     if is_open(&next, now) && !is_open(&before, now) {
         tracing::error!("recall breaker opened after {FAILURE_THRESHOLD} failed recall calls");
@@ -143,18 +156,6 @@ where
         ));
     }
     result
-}
-
-/// The state file for a hook's recall client. A state path that cannot be resolved turns the
-/// breaker off, with a warning, so recall still runs.
-pub(crate) fn default_path() -> Option<PathBuf> {
-    match state_path() {
-        Ok(path) => Some(path),
-        Err(e) => {
-            tracing::warn!(error = %format!("{e:#}"), "recall breaker is off for this client");
-            None
-        }
-    }
 }
 
 /// Runs one recall under the breaker when `path` is set. With no path, `call` runs unguarded.
@@ -174,6 +175,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn a_success_clears_the_failure_count() {
@@ -195,7 +197,7 @@ mod tests {
     }
 
     #[test]
-    fn the_threshold_failure_opens_the_breaker_for_the_window() -> anyhow::Result<()> {
+    fn the_threshold_failure_opens_the_breaker_for_the_window() {
         let mut state = State::default();
         for _ in 0..FAILURE_THRESHOLD {
             state = after(&state, false, 1_000);
@@ -204,35 +206,36 @@ mod tests {
         assert!(is_open(&state, 1_000 + OPEN_FOR.as_secs() - 1));
         assert!(!is_open(&state, 1_000 + OPEN_FOR.as_secs()));
         assert_eq!(state.open_until_unix, 1_000 + OPEN_FOR.as_secs());
-        Ok(())
     }
 
     #[test]
     fn a_missing_state_file_is_a_closed_breaker() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
-        assert_eq!(load(&dir.path().join("absent.json")), State::default());
+        assert_eq!(load(&dir.path().join("absent.json"), 0)?, State::default());
         Ok(())
     }
 
     #[test]
-    fn a_corrupt_state_file_is_a_closed_breaker() -> anyhow::Result<()> {
+    fn a_corrupt_state_file_is_an_error() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("bad.json");
         std::fs::write(&path, b"{not json")?;
-        assert_eq!(load(&path), State::default());
+        assert!(load(&path, 0).is_err());
         Ok(())
     }
 
     #[test]
-    fn saved_state_loads_back_unchanged() -> anyhow::Result<()> {
+    fn a_window_past_the_longest_open_time_is_an_error() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
-        let path = dir.path().join("state.json");
-        let state = State {
-            consecutive_failures: 1,
-            open_until_unix: 42,
-        };
-        save(&path, &state)?;
-        assert_eq!(load(&path), state);
+        let path = dir.path().join("far.json");
+        save(
+            &path,
+            &State {
+                consecutive_failures: 0,
+                open_until_unix: u64::MAX,
+            },
+        )?;
+        assert!(load(&path, 1_000).is_err());
         Ok(())
     }
 
@@ -267,7 +270,45 @@ mod tests {
         }
         let ok = run_guarded(&path, async { Ok(Reply::Text(String::new())) }).await;
         assert!(ok.is_ok());
-        assert_eq!(load(&path), State::default());
+        assert_eq!(load(&path, 0)?, State::default());
         Ok(())
+    }
+
+    proptest! {
+        /// Saving then loading returns the same state for any window inside the open limit.
+        #[test]
+        fn saved_state_loads_back_for_any_valid_state(
+            failures in any::<u32>(),
+            window in 0u64..=OPEN_FOR.as_secs(),
+        ) {
+            let fail = |e: anyhow::Error| TestCaseError::fail(format!("{e:#}"));
+            let dir = tempfile::tempdir().map_err(|e| fail(e.into()))?;
+            let path = dir.path().join("state.json");
+            let state = State { consecutive_failures: failures, open_until_unix: window };
+            save(&path, &state).map_err(fail)?;
+            prop_assert_eq!(load(&path, 0).map_err(fail)?, state);
+        }
+
+        /// Over any run of outcomes, the count stays below the threshold while the breaker is
+        /// closed, an open window holds no failure count, and a success clears the state.
+        #[test]
+        fn outcomes_keep_the_breaker_consistent(
+            outcomes in proptest::collection::vec(any::<bool>(), 0..40),
+        ) {
+            let mut state = State::default();
+            for (step, ok) in outcomes.into_iter().enumerate() {
+                let now = 1_000 + step as u64;
+                // A call inside an open window is skipped, so its outcome never reaches `after`.
+                if is_open(&state, now) {
+                    prop_assert_eq!(state.consecutive_failures, 0);
+                    continue;
+                }
+                state = after(&state, ok, now);
+                prop_assert!(state.consecutive_failures < FAILURE_THRESHOLD);
+                if ok {
+                    prop_assert_eq!(state.clone(), State::default());
+                }
+            }
+        }
     }
 }

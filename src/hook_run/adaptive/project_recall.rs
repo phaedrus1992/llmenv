@@ -11,7 +11,10 @@ use super::{MAIN_LIMIT, SCOPE_RECORD, query};
 /// The session project's own memories for the wake-up pack, and whether the call answered. The
 /// icm wake-up fills its budget with global records first, so this project-scoped recall runs
 /// beside it (#2756).
-pub(super) async fn project_memories(client: &McpHttpClient, project: &str) -> (String, bool) {
+pub(super) async fn project_memories(
+    client: &McpHttpClient,
+    project: &str,
+) -> (String, Option<bool>) {
     let q = RecallQuery {
         project: Some(project.to_string()),
         ..query(project, MAIN_LIMIT)
@@ -26,8 +29,9 @@ pub(super) async fn project_memories(client: &McpHttpClient, project: &str) -> (
                 .collect();
             let (kept, cut) = drop_cut_items(&records.join("\n"));
             note_cut_items(cut);
-            (kept, true)
+            (kept, Some(true))
         }
+        Err(e) if e.is::<crate::hook_run::recall_breaker::Skipped>() => (String::new(), None),
         Err(e) => {
             tracing::error!("session start: project memories not recalled for {project}: {e:#}");
             agent_notice::record(format!(
@@ -35,7 +39,7 @@ pub(super) async fn project_memories(client: &McpHttpClient, project: &str) -> (
                  Fix: run `llmenv doctor` to check the memory server.",
                 mcp_health::tidy_reason(&format!("{e:#}"))
             ));
-            (String::new(), false)
+            (String::new(), Some(false))
         }
     }
 }

@@ -4,7 +4,7 @@
 use crate::hook_run::action::Action;
 use crate::hook_run::adaptive::AdaptiveCtx;
 use crate::hook_run::adaptive::outcome::Outcome;
-use crate::hook_run::adaptive::session_start_budget::{cut_notice, within};
+use crate::hook_run::adaptive::session_start_budget::{Cut, cut_notice, within};
 use crate::hook_run::recall::RecallBudget;
 
 /// The notice for scope recalls that the output budget cut off, or `None` when none were cut
@@ -28,6 +28,7 @@ pub(super) async fn run_scope(
 ) -> (Outcome, Option<String>) {
     let mut outcome = Outcome::default();
     let mut actions = scope.into_iter();
+    let mut cut = false;
     // A refused or timed-out server would stall each remaining tag for one HOOK_TIMEOUT, so the
     // first failure ends the fallback for this turn (#2897).
     while !budget.is_full() && outcome.failed == 0 && !past(deadline) {
@@ -35,24 +36,27 @@ pub(super) async fn run_scope(
             break;
         };
         let call = action.run(ctx.client, "", "");
-        outcome.push(Some(within(deadline, call).await));
+        match within(deadline, call).await {
+            // A call the budget cut off is not a server failure. The notice names the budget.
+            Err(e) if e.is::<Cut>() => {
+                cut = true;
+                break;
+            }
+            result => outcome.push(Some(result)),
+        }
         budget.add_records(std::mem::take(&mut outcome.records));
     }
-    let notice = unrun_notice(actions.len(), outcome.failed > 0, budget.is_full());
-    (
-        outcome,
-        notice.or_else(|| cut_by_budget(actions.len(), deadline)),
-    )
+    let notice = if cut {
+        Some(cut_notice())
+    } else {
+        unrun_notice(actions.len(), outcome.failed > 0, budget.is_full())
+    };
+    (outcome, notice)
 }
 
 /// True once `deadline` has passed. With no deadline, it never passes.
 fn past(deadline: Option<tokio::time::Instant>) -> bool {
     deadline.is_some_and(|d| tokio::time::Instant::now() >= d)
-}
-
-/// The notice for scope recalls that the session start budget left unrun.
-fn cut_by_budget(unrun: usize, deadline: Option<tokio::time::Instant>) -> Option<String> {
-    (unrun > 0 && past(deadline)).then(cut_notice)
 }
 
 /// The notice for scope recalls that did not run, or `None` when none were skipped. A stop after

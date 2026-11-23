@@ -18,11 +18,14 @@ impl Outcome {
         let Some(result) = result else {
             return;
         };
+        // A call the open breaker skipped never ran, so it is neither a success nor a failure.
+        // The breaker's own notice names the skip, in the process that opened it.
+        if matches!(&result, Err(e) if e.is::<recall_breaker::Skipped>()) {
+            return;
+        }
         self.calls += 1;
         match result.and_then(Reply::into_records) {
             Ok(records) => self.records.extend(records),
-            // A skipped call is not a failure. The breaker already printed its notice once.
-            Err(e) if e.is::<recall_breaker::Skipped>() => {}
             Err(e) => {
                 self.failed += 1;
                 tracing::error!("adaptive recall call failed, its records are skipped: {e:#}");
@@ -64,7 +67,7 @@ mod tests {
         let skipped: anyhow::Result<Reply> = Err(recall_breaker::Skipped.into());
         let mut out = Outcome::default();
         out.push(Some(skipped));
-        assert_eq!((out.calls, out.failed), (1, 0));
+        assert_eq!((out.calls, out.failed), (0, 0));
         assert!(out.records.is_empty());
         assert!(!out.all_failed());
     }

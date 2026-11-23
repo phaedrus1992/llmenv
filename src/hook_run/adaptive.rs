@@ -179,7 +179,7 @@ pub(super) async fn session_start(
         let (own, own_ok) = match &recall_project {
             Some(p) => {
                 match tokio::time::timeout_at(deadline, project_memories(ctx.client, p)).await {
-                    Ok((text, ok)) => (text, Some(ok)),
+                    Ok((text, ok)) => (text, ok),
                     Err(_) => {
                         agent_notice::record(session_start_budget::cut_notice());
                         (String::new(), Some(false))
@@ -189,15 +189,20 @@ pub(super) async fn session_start(
             None => (String::new(), None),
         };
         let wake_call = wake.run(ctx.client, "", "");
-        let wake = session_start_budget::within(Some(deadline), wake_call)
-            .await
-            .map(|reply| {
-                let (kept, cut) = drop_cut_items(&reply.into_text());
-                note_cut_items(cut);
-                join_sections(&kept, &own)
-            });
+        let wake_raw = session_start_budget::within(Some(deadline), wake_call).await;
+        // A call the open breaker skipped is not a server answer, so the health ring skips it.
+        let wake_answer = match &wake_raw {
+            Ok(_) => Some(true),
+            Err(e) if e.is::<crate::hook_run::recall_breaker::Skipped>() => None,
+            Err(_) => Some(false),
+        };
+        let wake = wake_raw.map(|reply| {
+            let (kept, cut) = drop_cut_items(&reply.into_text());
+            note_cut_items(cut);
+            join_sections(&kept, &own)
+        });
         // These two calls are not in the scope outcome, so the health ring counts them here.
-        let results = [Some(wake.is_ok()), own_ok];
+        let results = [wake_answer, own_ok];
         let ok = results.iter().filter(|r| **r == Some(true)).count();
         let failed = results.iter().filter(|r| **r == Some(false)).count();
         crate::hook_run::recall_health::record(ctx.state_dir, ok, failed, unix_now());
@@ -216,17 +221,22 @@ pub(super) async fn session_start(
     report_ledger("session_start", &ledger_timing);
     let wake = match wake {
         Ok(text) => text,
-        Err(e) if (outcome.all_failed() || scope_len == 0) && own.is_empty() => return Err(e),
         Err(e) => {
-            // The agent is told: stderr from a hook never reaches it.
-            tracing::error!(
-                "session start: icm_wake_up failed, the wake-up pack is skipped: {e:#}"
-            );
-            agent_notice::record(format!(
-                "llmenv: memory wake-up skipped: icm_wake_up failed ({}); the scope set still \
-                 goes out. Fix: run `llmenv doctor` to check the memory server.",
-                mcp_health::tidy_reason(&format!("{e:#}"))
-            ));
+            // A skipped call already has the breaker's notice. Any other failure is reported
+            // here, before a return, because stderr from a hook never reaches the agent.
+            if !e.is::<crate::hook_run::recall_breaker::Skipped>() {
+                tracing::error!(
+                    "session start: icm_wake_up failed, the wake-up pack is skipped: {e:#}"
+                );
+                agent_notice::record(format!(
+                    "llmenv: memory wake-up skipped: icm_wake_up failed ({}); the scope set still \
+                     goes out. Fix: run `llmenv doctor` to check the memory server.",
+                    mcp_health::tidy_reason(&format!("{e:#}"))
+                ));
+            }
+            if (outcome.all_failed() || scope_len == 0) && own.is_empty() {
+                return Err(e);
+            }
             own
         }
     };

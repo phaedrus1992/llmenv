@@ -28,8 +28,17 @@ pub(super) fn cut_notice() -> String {
     )
 }
 
+/// Returned for a call that the budget cut off. It is not a server failure, so the caller does
+/// not count it as one.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "the session start recall budget of {} s ran out",
+    DEFAULT_SESSION_START_RECALL_BUDGET.as_secs()
+)]
+pub(crate) struct Cut;
+
 /// Runs `call` until `deadline`. With no deadline, `call` runs unbounded. A call that misses the
-/// deadline is dropped, and it fails with the budget error.
+/// deadline is dropped, and it fails with `Cut`.
 pub(super) async fn within<T>(
     deadline: Option<Instant>,
     call: impl Future<Output = anyhow::Result<T>>,
@@ -39,10 +48,7 @@ pub(super) async fn within<T>(
     };
     match tokio::time::timeout_at(deadline, call).await {
         Ok(result) => result,
-        Err(_) => Err(anyhow::anyhow!(
-            "the session start recall budget of {} s ran out",
-            DEFAULT_SESSION_START_RECALL_BUDGET.as_secs()
-        )),
+        Err(_) => Err(Cut.into()),
     }
 }
 
