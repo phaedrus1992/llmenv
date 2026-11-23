@@ -147,15 +147,22 @@ where
     if let Some(Err(e)) = saved {
         notice_problem("was not saved", &e);
     }
-    if is_open(&next, now) && !is_open(&before, now) {
+    if let Some(notice) = trip_notice(&before, &next, now) {
         tracing::error!("recall breaker opened after {FAILURE_THRESHOLD} failed recall calls");
-        agent_notice::record(format!(
+        agent_notice::record(notice);
+    }
+    result
+}
+
+/// The notice for the call that opened the window, or `None` for any other call.
+fn trip_notice(before: &State, after: &State, now: u64) -> Option<String> {
+    (is_open(after, now) && !is_open(before, now)).then(|| {
+        format!(
             "llmenv: memory recall is skipped for {} seconds after {FAILURE_THRESHOLD} failed \
              calls in a row. Fix: run `llmenv doctor` to check the memory server.",
             OPEN_FOR.as_secs()
-        ));
-    }
-    result
+        )
+    })
 }
 
 /// Runs one recall under the breaker when `path` is set. With no path, `call` runs unguarded.
@@ -314,25 +321,20 @@ mod tests {
 }
 
 #[cfg(test)]
-mod trip_tests {
+mod trip_notice_tests {
     use super::*;
 
-    #[tokio::test]
-    async fn the_trip_notice_is_recorded_on_the_call_that_opens_the_breaker() -> anyhow::Result<()>
-    {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path().join("trip.json");
-        let _ = run_guarded(&path, async { Err(anyhow::anyhow!("down")) }).await;
-        let first = agent_notice::current().unwrap_or_default();
-        assert!(!first.contains("after 3 failed calls in a row"), "{first}");
-        for _ in 1..FAILURE_THRESHOLD {
-            let _ = run_guarded(&path, async { Err(anyhow::anyhow!("down")) }).await;
+    #[test]
+    fn the_trip_notice_is_only_for_the_call_that_opens_the_window() {
+        let closed = State::default();
+        let one_failure = after(&closed, false, 100);
+        assert!(trip_notice(&closed, &one_failure, 100).is_none());
+        let mut opened = State::default();
+        for _ in 0..FAILURE_THRESHOLD {
+            opened = after(&opened, false, 100);
         }
-        let tripped = agent_notice::current().unwrap_or_default();
-        assert!(
-            tripped.contains("after 3 failed calls in a row"),
-            "{tripped}"
-        );
-        Ok(())
+        let notice = trip_notice(&closed, &opened, 100);
+        assert!(notice.is_some_and(|text| text.contains("after 3 failed calls in a row")));
+        assert!(trip_notice(&opened, &opened, 101).is_none());
     }
 }
