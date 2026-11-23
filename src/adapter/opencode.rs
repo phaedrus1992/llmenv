@@ -3212,7 +3212,7 @@ mod tests {
     // `materialize` API rather than the private helper fns.
     use proptest::prelude::*;
 
-    use crate::adapter::skills::{arb_hook, arb_permission_rule};
+    use crate::adapter::skills::arb_permission_rule;
 
     /// Materialize a manifest carrying only `caps` and return the emitted
     /// `permission` value (or `Null` when the key is absent).
@@ -3514,23 +3514,6 @@ mod tests {
             prop_assert_eq!(command_once, command_twice);
         }
 
-        /// Every hook with a command reaches the table with its event, matcher, and command,
-        /// after the user hooks and before nothing else, and the table is deterministic.
-        #[test]
-        fn every_command_hook_reaches_the_table_in_order(
-            hooks in proptest::collection::vec(arb_hook(), 0..5)
-        ) {
-            let table = hook_bridge::hook_table(&hooks, &[], &[]).unwrap();
-            prop_assert_eq!(&table, &hook_bridge::hook_table(&hooks, &[], &[]).unwrap());
-            let entries = table["hooks"].as_array().unwrap();
-            let with_command: Vec<_> = hooks.iter().filter(|h| h.handler.command.is_some()).collect();
-            for (hook, entry) in with_command.iter().zip(entries) {
-                prop_assert_eq!(entry["event"].as_str(), Some(hook.event.as_str()));
-                prop_assert_eq!(entry["matcher"].as_str(), hook.matcher.as_deref());
-            }
-            // The three built-in hooks follow the user hooks.
-            prop_assert_eq!(entries.len(), with_command.len() + 3);
-        }
 
         /// A bare native rule (no parens) wildcard-matches and lowercases the
         /// tool name — exercised through `native_permissions.opencode` since

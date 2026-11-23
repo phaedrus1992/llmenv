@@ -202,7 +202,7 @@ fn user_hook_entry(hook: &crate::config::Hook) -> anyhow::Result<Option<serde_js
 /// Rejects a matcher on an event whose plugin call passes no tool name. The plugin checks a
 /// matcher against that name, so with none the matcher would be ignored without a word (#3003).
 /// A match-all matcher (`*` or empty) selects every call, so it never needs the name.
-fn check_matcher_subject(hook: &crate::config::Hook) -> anyhow::Result<()> {
+pub(super) fn check_matcher_subject(hook: &crate::config::Hook) -> anyhow::Result<()> {
     let Some(matcher) = hook.matcher.as_deref() else {
         return Ok(());
     };
