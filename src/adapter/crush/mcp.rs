@@ -62,7 +62,7 @@ mod tests {
     use crate::merge::MergedManifest;
 
     #[test]
-    fn mcp_stdio_env_values_are_escaped_for_crush() {
+    fn mcp_stdio_env_values_are_escaped_for_crush() -> anyhow::Result<()> {
         let mut env = std::collections::BTreeMap::new();
         env.insert("CMD".to_string(), "$(id)".to_string());
         let mut manifest = MergedManifest::default();
@@ -80,7 +80,8 @@ mod tests {
             memory_hook: None,
             always_load: None,
         });
-        let rendered = render_mcp(&manifest).unwrap().unwrap();
+        let rendered = render_mcp(&manifest)?.ok_or_else(|| anyhow::anyhow!("no mcp object"))?;
         assert_eq!(rendered["srv"]["env"]["CMD"], "\\$(id)");
+        Ok(())
     }
 }
