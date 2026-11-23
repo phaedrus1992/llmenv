@@ -12,7 +12,7 @@ use tokio::time::Instant;
 /// The total wall time that the recall calls of one session start may take.
 /// A healthy local server answers in milliseconds, so a few seconds covers a slow start.
 /// It is a fixed value for now, because no config key exists for it yet.
-pub(crate) const DEFAULT_SESSION_START_RECALL_BUDGET: Duration = Duration::from_secs(5);
+const DEFAULT_SESSION_START_RECALL_BUDGET: Duration = Duration::from_secs(5);
 
 /// The instant when the session start budget runs out.
 pub(super) fn session_start_deadline() -> Instant {

@@ -17,11 +17,11 @@ use crate::hook_run::action::Reply;
 
 /// Consecutive failed recalls that open the breaker. Each failure waits out one call timeout,
 /// so three bound the cost of a dead server to three waits per window.
-pub(crate) const FAILURE_THRESHOLD: u32 = 3;
+const FAILURE_THRESHOLD: u32 = 3;
 
 /// How long an open breaker skips recall. Five minutes covers a burst of hooks, and a server
 /// that comes back is retried within the same session.
-pub(crate) const OPEN_FOR: Duration = Duration::from_secs(300);
+const OPEN_FOR: Duration = Duration::from_secs(300);
 
 const STATE_FILE: &str = "recall-breaker.json";
 
@@ -42,7 +42,7 @@ pub(crate) struct Skipped;
 ///
 /// # Errors
 /// Returns an error when the state directory cannot be resolved.
-pub(crate) fn state_path() -> anyhow::Result<PathBuf> {
+fn state_path() -> anyhow::Result<PathBuf> {
     Ok(llmenv_paths::state_dir()
         .context("cannot find the llmenv state directory for the recall breaker")?
         .join(STATE_FILE))
@@ -119,7 +119,7 @@ fn now_unix() -> anyhow::Result<u64> {
 ///
 /// # Errors
 /// Returns `Skipped` while the breaker is open. Otherwise returns the error from `call`.
-pub(crate) async fn run_guarded<F>(path: &Path, call: F) -> anyhow::Result<Reply>
+async fn run_guarded<F>(path: &Path, call: F) -> anyhow::Result<Reply>
 where
     F: Future<Output = anyhow::Result<Reply>>,
 {
