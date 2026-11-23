@@ -294,8 +294,7 @@ const RECALL_FAILED_NOTICE: &str = "a memory recall call failed, so its records 
 #[test]
 fn adaptive_events_fail_soft_with_an_unreachable_backend() {
     // #2249: with a session id, these events take the adaptive flow and write
-    // the recall ledger. A dead backend must still give exit 0.
-    let (dir, config_path) = setup_config(&config_with_memory_addr("127.0.0.1", 9));
+    // the recall ledger. A dead backend must exit 0. Each event gets a fresh state dir (#3896).
     for (event, payload) in [
         (
             "session_start",
@@ -318,6 +317,7 @@ fn adaptive_events_fail_soft_with_an_unreachable_backend() {
             r#"{"hook_event_name":"PostToolBatch","session_id":"s1","tool_calls":[]}"#,
         ),
     ] {
+        let (dir, config_path) = setup_config(&config_with_memory_addr("127.0.0.1", 9));
         let assert = hook_cmd(dir.path(), &config_path, event)
             .write_stdin(payload)
             .timeout(Duration::from_secs(25))
