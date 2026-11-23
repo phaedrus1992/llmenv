@@ -128,3 +128,30 @@ describe("tool names", () => {
     expect(plugin.fromNeutral("shell", neutral.input)).toEqual({ cmd: "ls" });
   });
 });
+
+describe("notification matcher", () => {
+  // A permission request is a Notification of the type permission_prompt (#3003).
+  const permission = {
+    type: "permission.asked",
+    data: { sessionID: "s1", message: "needs approval", action: "write", resources: ["a"] },
+  };
+
+  it("runs a Notification hook whose matcher names the notification type", async () => {
+    const { default: plugin } = await loadPlugin(
+      tableOf(hook("Notification", `printf '%s' '{"hookSpecificOutput":{"additionalContext":"notified"}}'`, { matcher: "permission_prompt" })),
+    );
+    const { ctx } = fakeContext([permission]);
+    await plugin.setup(ctx);
+    await vi.waitFor(() => expect(logged).toHaveBeenCalledWith("notified"));
+  });
+
+  it("skips a Notification hook whose matcher names another type", async () => {
+    const { default: plugin } = await loadPlugin(
+      tableOf(hook("Notification", `printf '%s' '{"hookSpecificOutput":{"additionalContext":"notified"}}'`, { matcher: "idle_prompt" })),
+    );
+    const { ctx } = fakeContext([permission]);
+    await plugin.setup(ctx);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(logged).not.toHaveBeenCalledWith("notified");
+  });
+});

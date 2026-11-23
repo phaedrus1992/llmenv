@@ -40,6 +40,19 @@ const BUILTIN_HOOK_TIMEOUT_MS: u64 = 5_000;
 /// `patch`, which keeps its own name and writes files through a patch text.
 const CONFIG_GUARD_MATCHER: &str = "Write|Edit|MultiEdit|patch";
 
+/// The events whose plugin call passes a tool name, so a matcher on them selects calls. The
+/// plugin passes the name as the subject: a tool name, an agent name, a compaction reason, or a
+/// notification type. Any other event has no subject, so a matcher on it is rejected (#3003).
+const EVENTS_WITH_TOOL_NAME: &[&str] = &[
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "SubagentStart",
+    "SubagentStop",
+    "PreCompact",
+    "Notification",
+];
+
 /// The neutral tools that `hook-run pre_tool_use` must see on opencode: the codebase-memory
 /// `index_repository` guard (#1331), and `Bash` for the commit gate of the task tracker (#2456).
 pub(super) fn pre_tool_hook_tools(manifest: &crate::merge::MergedManifest) -> Vec<&'static str> {
@@ -102,7 +115,10 @@ pub(super) fn hook_table(
     pre_tools: &[&str],
     mcp_servers: &[&str],
 ) -> anyhow::Result<serde_json::Value> {
-    let mut entries: Vec<serde_json::Value> = hooks.iter().filter_map(user_hook_entry).collect();
+    let mut entries: Vec<serde_json::Value> = Vec::new();
+    for hook in hooks {
+        entries.extend(user_hook_entry(hook)?);
+    }
     let builtin = |event: &str, matcher: Option<&str>, command: &str| {
         serde_json::json!({
             "event": event,
@@ -159,27 +175,46 @@ pub(super) fn hook_table(
 
 /// The table entry for one user hook, or `None` for a hook with no command. Such a hook (an
 /// `mcp_tool` handler) cannot run from the plugin, so it is skipped with a warning.
-fn user_hook_entry(hook: &crate::config::Hook) -> Option<serde_json::Value> {
+fn user_hook_entry(hook: &crate::config::Hook) -> anyhow::Result<Option<serde_json::Value>> {
     let Some(command) = hook.handler.command.as_deref() else {
         eprintln!(
             "warning: a {} hook has no command, so opencode skips it. Fix: give the hook a \
              `command`, or remove it from the opencode scope",
             hook.event
         );
-        return None;
+        return Ok(None);
     };
+    check_matcher_subject(hook)?;
     let command = match &hook.bundle_origin {
         // `None` means no word of the command is a bundle-relative path, so it runs as written.
         Some(bundle_dir) => super::super::resolve_bundle_relative_paths(command, bundle_dir)
             .unwrap_or_else(|| command.to_string()),
         None => command.to_string(),
     };
-    Some(serde_json::json!({
+    Ok(Some(serde_json::json!({
         "event": hook.event,
         "matcher": hook.matcher,
         "command": command,
         "timeout": USER_HOOK_TIMEOUT_MS,
-    }))
+    })))
+}
+
+/// Rejects a matcher on an event whose plugin call passes no tool name. The plugin checks a
+/// matcher against that name, so with none the matcher would be ignored without a word (#3003).
+/// A match-all matcher (`*` or empty) selects every call, so it never needs the name.
+fn check_matcher_subject(hook: &crate::config::Hook) -> anyhow::Result<()> {
+    let Some(matcher) = hook.matcher.as_deref() else {
+        return Ok(());
+    };
+    if matcher.is_empty() || matcher == "*" || EVENTS_WITH_TOOL_NAME.contains(&hook.event.as_str())
+    {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "the {event} hook has the matcher `{matcher}`, but opencode gives a {event} call no tool \
+         name to match. Fix: remove the matcher, or move the hook to an event that takes one",
+        event = hook.event
+    )
 }
 
 #[cfg(all(test, unix))]
