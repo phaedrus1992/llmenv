@@ -89,3 +89,13 @@ mod tests {
         Ok(())
     }
 }
+
+#[test]
+fn the_cut_notice_names_the_budget_and_the_fix() {
+    let text = cut_notice();
+    assert!(
+        text.contains("session start recall budget of 5 s"),
+        "{text}"
+    );
+    assert!(text.contains("llmenv doctor"), "{text}");
+}

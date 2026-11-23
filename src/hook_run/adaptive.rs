@@ -190,12 +190,8 @@ pub(super) async fn session_start(
         };
         let wake_call = wake.run(ctx.client, "", "");
         let wake_raw = session_start_budget::within(Some(deadline), wake_call).await;
-        // A call the open breaker skipped is not a server answer, so the health ring skips it.
-        let wake_answer = match &wake_raw {
-            Ok(_) => Some(true),
-            Err(e) if e.is::<crate::hook_run::recall_breaker::Skipped>() => None,
-            Err(_) => Some(false),
-        };
+        // The wake-up is not a recall, so the breaker never skips it.
+        let wake_answer = Some(wake_raw.is_ok());
         let wake = wake_raw.map(|reply| {
             let (kept, cut) = drop_cut_items(&reply.into_text());
             note_cut_items(cut);
@@ -222,18 +218,15 @@ pub(super) async fn session_start(
     let wake = match wake {
         Ok(text) => text,
         Err(e) => {
-            // A skipped call already has the breaker's notice. Any other failure is reported
-            // here, before a return, because stderr from a hook never reaches the agent.
-            if !e.is::<crate::hook_run::recall_breaker::Skipped>() {
-                tracing::error!(
-                    "session start: icm_wake_up failed, the wake-up pack is skipped: {e:#}"
-                );
-                agent_notice::record(format!(
-                    "llmenv: memory wake-up skipped: icm_wake_up failed ({}); the scope set still \
-                     goes out. Fix: run `llmenv doctor` to check the memory server.",
-                    mcp_health::tidy_reason(&format!("{e:#}"))
-                ));
-            }
+            // Reported here, before a return, because stderr from a hook never reaches the agent.
+            tracing::error!(
+                "session start: icm_wake_up failed, the wake-up pack is skipped: {e:#}"
+            );
+            agent_notice::record(format!(
+                "llmenv: memory wake-up skipped: icm_wake_up failed ({}); the scope set still \
+                 goes out. Fix: run `llmenv doctor` to check the memory server.",
+                mcp_health::tidy_reason(&format!("{e:#}"))
+            ));
             if (outcome.all_failed() || scope_len == 0) && own.is_empty() {
                 return Err(e);
             }

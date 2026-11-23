@@ -46,7 +46,9 @@ pub(super) async fn run_scope(
         }
         budget.add_records(std::mem::take(&mut outcome.records));
     }
-    let notice = if cut {
+    // A deadline that passed before the first call also leaves recalls unrun, and the budget
+    // is the reason, so the notice names it.
+    let notice = if cut || (past(deadline) && actions.len() > 0) {
         Some(cut_notice())
     } else {
         unrun_notice(actions.len(), outcome.failed > 0, budget.is_full())
