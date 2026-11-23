@@ -1,6 +1,9 @@
 use std::path::Path;
 
-use super::{reject_native_disabled_tools, render_env, render_options, render_permission_lists};
+use super::{
+    escape_for_crush_expansion, reject_native_disabled_tools, render_env, render_options,
+    render_permission_lists,
+};
 use crate::config::{PermissionRule, Permissions};
 
 fn rule(tool: &str) -> PermissionRule {
@@ -195,4 +198,29 @@ fn lsp_env_values_are_escaped_so_crush_reads_them_literally() {
     };
     let rendered = super::render_lsp(&[srv]).unwrap();
     assert_eq!(rendered["ra"]["env"]["CMD"], "\\$(id)");
+}
+
+/// Undoes `escape_for_crush_expansion`, and fails on a bare `$` or backtick, which Crush would
+/// expand. A backslash keeps the character after it literal.
+fn decode_crush_escape(text: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => out.push(chars.next()?),
+            '$' | '`' => return None,
+            other => out.push(other),
+        }
+    }
+    Some(out)
+}
+
+proptest::proptest! {
+    /// Any value escapes to text that Crush reads back as the same value, with no bare `$` or
+    /// backtick left for it to expand.
+    #[test]
+    fn crush_escape_round_trips_with_no_bare_expansion_character(value in ".*") {
+        let escaped = escape_for_crush_expansion(&value);
+        proptest::prop_assert_eq!(decode_crush_escape(&escaped), Some(value));
+    }
 }
