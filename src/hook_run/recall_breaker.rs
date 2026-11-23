@@ -44,7 +44,10 @@ pub(crate) fn default_path() -> Option<PathBuf> {
     match llmenv_paths::state_dir() {
         Ok(dir) => Some(dir.join(STATE_FILE)),
         Err(e) => {
-            notice_problem("is off, because the state directory cannot be found", &e);
+            agent_notice::record(notice_problem(
+                "is off, because the state directory cannot be found",
+                &e,
+            ));
             None
         }
     }
@@ -109,13 +112,13 @@ fn after(state: &State, ok: bool, now: u64) -> State {
     }
 }
 
-/// Reports a breaker state problem to the log and to the agent, with the fix.
-fn notice_problem(what: &str, error: &anyhow::Error) {
+/// The agent notice for a breaker state problem, with the fix. The caller records it.
+fn notice_problem(what: &str, error: &anyhow::Error) -> String {
     tracing::error!(error = %format!("{error:#}"), "recall breaker {what}");
-    agent_notice::record(format!(
+    format!(
         "llmenv: the memory recall breaker {what}: {error:#}. Fix: run `llmenv doctor` to check \
          the state directory."
-    ));
+    )
 }
 
 /// Runs one recall call under the breaker. While the breaker is open, `call` does not run and
@@ -135,7 +138,10 @@ where
         .context("system clock is before the Unix epoch")?
         .as_secs();
     let before = load(path, now).unwrap_or_else(|e| {
-        notice_problem("cannot be read, so recall runs without it", &e);
+        agent_notice::record(notice_problem(
+            "cannot be read, so recall runs without it",
+            &e,
+        ));
         State::default()
     });
     if is_open(&before, now) {
@@ -145,7 +151,7 @@ where
     let next = after(&before, result.is_ok(), now);
     let saved = (next != before).then(|| save(path, &next));
     if let Some(Err(e)) = saved {
-        notice_problem("was not saved", &e);
+        agent_notice::record(notice_problem("was not saved", &e));
     }
     if let Some(notice) = trip_notice(&before, &next, now) {
         tracing::error!("recall breaker opened after {FAILURE_THRESHOLD} failed recall calls");
@@ -336,5 +342,18 @@ mod trip_notice_tests {
         let notice = trip_notice(&closed, &opened, 100);
         assert!(notice.is_some_and(|text| text.contains("after 3 failed calls in a row")));
         assert!(trip_notice(&opened, &opened, 101).is_none());
+    }
+}
+
+#[cfg(test)]
+mod notice_text_tests {
+    use super::*;
+
+    #[test]
+    fn a_problem_notice_names_the_state_the_cause_and_the_fix() {
+        let text = notice_problem("cannot be read", &anyhow::anyhow!("permission denied"));
+        assert!(text.contains("cannot be read"), "{text}");
+        assert!(text.contains("permission denied"), "{text}");
+        assert!(text.contains("llmenv doctor"), "{text}");
     }
 }
