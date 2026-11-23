@@ -107,3 +107,37 @@ pub(crate) fn turn_actions(actions: Vec<Action>, text: &str, topics: &[String]) 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests;
+
+#[cfg(test)]
+mod breaker_tests {
+    use super::recall;
+    use crate::hook_run::mcp_client::McpHttpClient;
+    use crate::hook_run::recall_breaker::Skipped;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn an_open_breaker_skips_every_topic_as_one_skip() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("recall-breaker.json");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs();
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"consecutive_failures":0,"open_until_unix":{}}}"#,
+                now + 100
+            ),
+        )?;
+        let client =
+            McpHttpClient::test_new("http://127.0.0.1:9".to_string(), Duration::from_secs(1))?
+                .with_recall_breaker(Some(path));
+        let topics = vec!["preferences".to_string(), "style".to_string()];
+        let result = recall(&client, "hello", &topics, 5).await;
+        let err = result
+            .and_then(Result::err)
+            .ok_or_else(|| anyhow::anyhow!("expected the skip to be reported"))?;
+        assert!(err.is::<Skipped>(), "{err:#}");
+        Ok(())
+    }
+}

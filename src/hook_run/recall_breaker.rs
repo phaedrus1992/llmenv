@@ -312,3 +312,27 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod trip_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_trip_notice_is_recorded_on_the_call_that_opens_the_breaker() -> anyhow::Result<()>
+    {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("trip.json");
+        let _ = run_guarded(&path, async { Err(anyhow::anyhow!("down")) }).await;
+        let first = agent_notice::current().unwrap_or_default();
+        assert!(!first.contains("after 3 failed calls in a row"), "{first}");
+        for _ in 1..FAILURE_THRESHOLD {
+            let _ = run_guarded(&path, async { Err(anyhow::anyhow!("down")) }).await;
+        }
+        let tripped = agent_notice::current().unwrap_or_default();
+        assert!(
+            tripped.contains("after 3 failed calls in a row"),
+            "{tripped}"
+        );
+        Ok(())
+    }
+}
