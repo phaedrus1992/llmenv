@@ -9,6 +9,8 @@ use anyhow::Context;
 
 use crate::hook_run::checkpoint;
 
+mod lock;
+
 /// The inputs of one index job: what the wrapper needs to build the indexer command.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct IndexInputs {
@@ -58,6 +60,14 @@ fn run_cbm_index_with(
     build: impl FnOnce(&Path, Option<&str>, Option<u32>) -> std::process::Command,
 ) -> anyhow::Result<()> {
     let loaded = checkpoint::load(checkpoint_path)?;
+    // A second job of the same project stops here, and the first job settles the checkpoint.
+    let Some(_lock) = lock::take(checkpoint_path)? else {
+        tracing::info!(
+            checkpoint = %checkpoint_path.display(),
+            "another index job of this project is running, so this job stops"
+        );
+        return Ok(());
+    };
     let inputs: IndexInputs = serde_json::from_value(loaded.inputs)
         .context("the checkpoint holds no project root for the indexer")?;
     let mut cmd = build(
@@ -154,6 +164,25 @@ mod tests {
         let mut cmd = std::process::Command::new("sh");
         cmd.args(["-c", script]);
         cmd
+    }
+
+    // #3914: a job that finds the lock of its project taken does not start the indexer, and it
+    // leaves the checkpoint for the running job.
+    #[test]
+    fn a_job_stops_when_another_job_of_the_project_holds_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = written(dir.path());
+        let ran = dir.path().join("indexer-ran");
+        let held = lock::take(&path).unwrap();
+        assert!(held.is_some());
+        let script = format!("touch {}", ran.display());
+        run_cbm_index_with(&path, |_, _, _| shell(&script)).unwrap();
+        assert!(!ran.exists(), "the indexer must not start");
+        assert!(path.exists(), "the checkpoint stays for the running job");
+        drop(held);
+        run_cbm_index_with(&path, |_, _, _| shell(&script)).unwrap();
+        assert!(ran.exists(), "the indexer starts once the lock is free");
+        assert!(!path.exists(), "a finished job settles its checkpoint");
     }
 
     proptest::proptest! {
