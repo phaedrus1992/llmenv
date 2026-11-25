@@ -64,7 +64,14 @@ async fn recall(
             .await?;
         related_records(&body, wanted).map(Reply::Records)
     };
-    Some(crate::hook_run::recall_breaker::guard_recall(client.recall_breaker(), call).await)
+    Some(
+        crate::hook_run::recall_breaker::guard_recall(
+            client.recall_breaker(),
+            client.recall_deadline(),
+            call,
+        )
+        .await,
+    )
 }
 
 /// The memories of a JSON recall reply that share a token in `wanted`, matched on the summary

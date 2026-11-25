@@ -1,4 +1,5 @@
 use super::*;
+use crate::hook_run::recall_deadline::Deadline;
 
 #[tokio::test]
 async fn turn_start_falls_back_to_the_scope_set_without_session_start() {
@@ -153,12 +154,10 @@ async fn a_failed_scope_call_ends_the_fallback_for_this_turn() {
     let server = failing_server().await;
     let f = fixture(&server);
     let mut budget = RecallBudget::new(RECALL_BUDGET_BYTES, std::collections::BTreeSet::new());
-    // No deadline: this test covers the scope loop, not the session start budget.
     let (outcome, unrun) = run_scope(
         &ctx(&f, &json!({"prompt": "hi"})),
         vec![tag_action("a"), tag_action("b"), tag_action("c")],
         &mut budget,
-        None,
     )
     .await;
     assert_eq!(outcome.calls, 1, "{outcome:?}");
@@ -331,13 +330,16 @@ async fn a_scope_run_past_its_deadline_makes_no_call_and_says_so() {
         .expect(0)
         .mount(&server)
         .await;
-    let f = fixture(&server);
+    let mut f = fixture(&server);
+    f.client = f
+        .client
+        .clone()
+        .with_recall_deadline(Some(Deadline::expiring_in(Duration::ZERO)));
     let mut budget = RecallBudget::new(RECALL_BUDGET_BYTES, std::collections::BTreeSet::new());
     let (outcome, unrun) = run_scope(
         &ctx(&f, &json!({"prompt": "hi"})),
         vec![tag_action("a")],
         &mut budget,
-        Some(tokio::time::Instant::now()),
     )
     .await;
     assert_eq!(outcome.calls, 0, "{outcome:?}");
@@ -352,17 +354,52 @@ async fn a_scope_call_cut_by_the_budget_is_not_a_server_failure() {
         .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(2)))
         .mount(&server)
         .await;
-    let f = fixture(&server);
+    let mut f = fixture(&server);
+    f.client = f
+        .client
+        .clone()
+        .with_recall_deadline(Some(Deadline::expiring_in(Duration::from_millis(100))));
     let mut budget = RecallBudget::new(RECALL_BUDGET_BYTES, std::collections::BTreeSet::new());
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
     let (outcome, unrun) = run_scope(
         &ctx(&f, &json!({"prompt": "hi"})),
         vec![tag_action("a")],
         &mut budget,
-        Some(deadline),
     )
     .await;
     assert_eq!((outcome.calls, outcome.failed), (0, 0), "{outcome:?}");
     let notice = unrun.unwrap_or_default();
     assert!(notice.contains("session start recall budget"), "{notice}");
+}
+
+/// #4023: a memory server that answers every call just inside the call timeout cannot hold a
+/// prompt past the turn start budget, and the agent hears which budget ran out.
+#[tokio::test]
+async fn a_slow_server_cannot_hold_a_turn_past_the_turn_start_budget() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("initialize"))
+        .respond_with(crate::hook_run::test_recall::ToolReply(String::new()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(1_900)))
+        .mount(&server)
+        .await;
+    let mut f = fixture(&server);
+    // Four global topics make four calls in a row, so the unbounded turn waits about 7.6 s.
+    f.topics = ["a", "b", "c", "d"].map(str::to_string).to_vec();
+    f.store.update("s1", |l| l.set_scope_sent(MAIN_AGENT));
+    let turn = json!({"prompt": "slow"});
+    let started = std::time::Instant::now();
+    turn_start(&ctx(&f, &turn), vec![]).await.unwrap();
+    let waited = started.elapsed();
+    assert!(
+        waited < Duration::from_millis(4_500),
+        "the turn waited {waited:?}"
+    );
+    let notices = crate::agent_notice::current().unwrap_or_default();
+    assert!(
+        notices.contains("turn start recall budget of 3 s"),
+        "{notices}"
+    );
 }

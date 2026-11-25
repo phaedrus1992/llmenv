@@ -60,6 +60,7 @@ use consolidation_spawn::post_session_consolidation_in;
 use consolidation_spawn::{consolidation_run_command, post_session_consolidation};
 mod recall;
 mod recall_breaker;
+mod recall_deadline;
 pub(crate) mod recall_health;
 mod record_hash;
 mod relevance;

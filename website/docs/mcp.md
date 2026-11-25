@@ -677,6 +677,14 @@ A recall skipped for the budget counts in the "recall queries skipped" notice.
 When the budget is already full before the first recall, no recall runs for that prompt.
 When the first recalls take more than 1.5 seconds, the fanouts do not run, and the llmenv log records the skip.
 
+(added in v3.14.2) The recall calls of one hook run share a time budget.
+A session start has 5 seconds, and a prompt has 3 seconds.
+A call that runs past the budget is cut, and the agent gets a notice that names the budget.
+A slow memory server therefore cannot hold a prompt for longer than the budget.
+The recall circuit breaker counts a cut call as a failed call.
+After three failed recall calls in a row, the breaker skips recall for five minutes and prints one notice.
+The budgets are fixed, and no config key sets them.
+
 (changed in v3.13.0) After a tool error, a memory is injected only when its summary or keywords share a distinctive word or an error code with the error.
 A distinctive word has four or more characters and is not a common error word such as "error" or "failed".
 ICM ranks the best of an unrelated set near the top score, so the score alone cannot tell a related memory from an unrelated one.
