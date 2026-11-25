@@ -260,6 +260,37 @@ fn subagent_queue_dedups_by_tool_use_id_and_takes_oldest_match() {
     );
 }
 
+proptest! {
+    /// `drop_expired` keeps an in-order subset of the entries, keeps only those with an age in
+    /// `0..=PENDING_TTL_SECS`, and a second call changes nothing.
+    #[test]
+    fn drop_expired_keeps_the_fresh_entries_in_order(
+        times in prop::collection::vec(-1_000i64..2_000, 0..12),
+        now in -1_000i64..2_000,
+    ) {
+        let mut l = Ledger::default();
+        for (i, at) in times.iter().enumerate() {
+            l.pending_subagents.push_back(PendingSubagent {
+                tool_use_id: format!("u{i}"),
+                subagent_type: "Explore".into(),
+                task: format!("t{i}"),
+                at: *at,
+            });
+        }
+        let expected: Vec<i64> = times
+            .iter()
+            .copied()
+            .filter(|at| (0..=PENDING_TTL_SECS).contains(&(now - at)))
+            .collect();
+        l.drop_expired(now);
+        let kept: Vec<i64> = l.pending_subagents.iter().map(|p| p.at).collect();
+        prop_assert_eq!(&kept, &expected);
+        l.drop_expired(now);
+        let again: Vec<i64> = l.pending_subagents.iter().map(|p| p.at).collect();
+        prop_assert_eq!(again, expected);
+    }
+}
+
 #[test]
 fn a_pending_subagent_with_a_time_in_the_future_has_expired() {
     let mut l = Ledger::default();

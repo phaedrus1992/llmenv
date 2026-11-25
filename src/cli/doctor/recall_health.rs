@@ -65,7 +65,8 @@ fn health_line(
         }
     };
     let (failed, calls, last) = (h.failed, h.calls, age(h.newest_at, now));
-    if now.saturating_sub(h.newest_at) > STALE_AFTER_SECS
+    // A ring from the future is not trusted as recent either, so it reads as old (#3907).
+    if !crate::util::ttl::is_within(h.newest_at, now, STALE_AFTER_SECS + 1)
         && let Some(line) = old_ring_line(&h, &last)
     {
         return line;
@@ -173,6 +174,12 @@ mod tests {
         assert!(text.contains("1 days ago"), "{text}");
         let (level, _) = line(Ok(Some(health(10, 6, false, NOW - STALE_AFTER_SECS))));
         assert_eq!(level, CheckLevel::Warn, "exactly a day is still current");
+    }
+
+    #[test]
+    fn a_failing_ring_from_the_future_reads_as_old() {
+        let (level, text) = line(Ok(Some(health(10, 6, false, NOW + 90))));
+        assert_eq!(level, CheckLevel::Info, "{text}");
     }
 
     #[test]

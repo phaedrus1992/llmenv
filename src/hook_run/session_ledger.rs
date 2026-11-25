@@ -190,7 +190,7 @@ impl Ledger {
     /// a clock that stepped back cannot keep one alive (#3907).
     fn drop_expired(&mut self, now: i64) {
         self.pending_subagents
-            .retain(|p| (0..=PENDING_TTL_SECS).contains(&now.saturating_sub(p.at)));
+            .retain(|p| crate::util::ttl::is_within(p.at, now, PENDING_TTL_SECS + 1));
     }
 }
 

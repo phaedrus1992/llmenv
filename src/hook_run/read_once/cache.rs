@@ -117,12 +117,30 @@ impl SessionCache {
 /// clock that stepped back cannot keep an entry alive (#3907).
 pub(super) fn within_ttl(now: i64, first_read_at: i64, ttl_seconds: u64) -> bool {
     let ttl = i64::try_from(ttl_seconds).unwrap_or(i64::MAX);
-    (0..ttl).contains(&now.saturating_sub(first_read_at))
+    crate::util::ttl::is_within(first_read_at, now, ttl)
 }
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::within_ttl;
+
+    proptest! {
+        /// An entry is inside the TTL exactly when its age is at least zero and below the TTL,
+        /// for any times, and the check never panics.
+        #[test]
+        fn inside_means_an_age_in_zero_to_the_ttl(
+            now in any::<i64>(),
+            first_read_at in any::<i64>(),
+            ttl in any::<u64>(),
+        ) {
+            let age = i128::from(now) - i128::from(first_read_at);
+            let in_range = age >= 0 && age < i128::from(ttl).min(i128::from(i64::MAX));
+            let representable = age >= i128::from(i64::MIN) && age <= i128::from(i64::MAX);
+            prop_assert_eq!(within_ttl(now, first_read_at, ttl), in_range && representable);
+        }
+    }
 
     #[test]
     fn an_entry_exactly_one_ttl_old_has_expired() {
