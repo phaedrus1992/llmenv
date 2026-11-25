@@ -122,9 +122,17 @@ fn staging_is_orphan(p: &Path, now: SystemTime) -> bool {
         writer_gone(any_user, own_user, owned_by_another_user(p))
     });
     // A folder with a time in the future is kept, and the skew is reported with its path.
-    let old = std::fs::symlink_metadata(p)
-        .and_then(|m| m.modified())
-        .is_ok_and(|m| crate::materialize::expiry::is_expired(now, m, STAGING_GRACE, p));
+    let old = match std::fs::symlink_metadata(p).and_then(|m| m.modified()) {
+        Ok(mtime) => crate::materialize::expiry::is_expired(now, mtime, STAGING_GRACE, p),
+        Err(e) => {
+            // A folder that cannot be examined is kept, so the reason must show (#3509).
+            tracing::error!(
+                path = %p.display(),
+                "cannot read the modification time of a staging folder, so its age does not decide: {e}"
+            );
+            false
+        }
+    };
     owner_gone || old
 }
 
@@ -356,6 +364,14 @@ mod tests {
             .unwrap();
         assert!(!staging_is_orphan(&staging, SystemTime::now()));
         assert!(crate::materialize::expiry::skew_was_reported(&staging));
+    }
+
+    /// A staging folder that cannot be examined is kept, and the cause is logged (#3509).
+    #[test]
+    fn a_staging_folder_that_cannot_be_examined_is_kept() {
+        let missing = Path::new("/nonexistent/llmenv-test")
+            .join(format!("gone.{}.1.tmp", std::process::id()));
+        assert!(!staging_is_orphan(&missing, SystemTime::now()));
     }
 
     /// A staging folder whose writer is gone is an orphan, and gc removes it at once.
