@@ -179,17 +179,14 @@ fn materialize_shim_gates_the_shell_and_file_tools_with_the_tmp_guard() {
         &std::fs::read(tmp.path().join("plugin/llmenv-hooks.json")).unwrap(),
     )
     .unwrap();
-    let entry = table["hooks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|h| {
-            h["command"]
-                .as_str()
-                .unwrap()
-                .contains("tmp-guard --engine opencode")
-        })
-        .expect("a hook runs tmp-guard");
+    let entry = table["hooks"].as_array().unwrap().iter().find(|h| {
+        h["command"]
+            .as_str()
+            .unwrap()
+            .contains("tmp-guard --engine opencode")
+    });
+    assert!(entry.is_some(), "a hook runs tmp-guard");
+    let entry = entry.unwrap();
     assert_eq!(entry["event"], "PreToolUse");
     assert_eq!(entry["failClosed"], true);
     let matcher = entry["matcher"].as_str().unwrap();
