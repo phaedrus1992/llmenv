@@ -172,7 +172,7 @@ fn a_dry_run_with_tmp_older_than_lists_each_tmp_entry_with_its_age() {
     let f = fixture();
     let (ok, stderr) = run(
         f.dir.path(),
-        &["clean", "--dry-run", "--tmp-older-than", "0s"],
+        &["clean", "--dry-run", "--tmp-older-than", "1ms"],
     );
     assert!(ok, "clean --dry-run failed: {stderr}");
     let name = f.tmp_file.file_name().expect("file name").to_string_lossy();
@@ -183,4 +183,14 @@ fn a_dry_run_with_tmp_older_than_lists_each_tmp_entry_with_its_age() {
         "no aged line for the tmp file: {stderr}"
     );
     assert!(f.tmp_file.exists(), "a dry run removed the tmp file");
+}
+
+#[test]
+fn a_zero_tmp_older_than_is_refused_before_anything_is_removed() {
+    let f = fixture();
+    let (ok, stderr) = run(f.dir.path(), &["clean", "--tmp-older-than", "0s"]);
+    assert!(!ok, "clean accepted a zero duration");
+    assert!(stderr.contains("--tmp-older-than"), "{stderr}");
+    assert!(stderr.contains("zero"), "{stderr}");
+    assert!(f.orphan_stage.exists() && f.tmp_file.exists());
 }

@@ -49,9 +49,8 @@ pub(super) fn run_clean(args: &CleanArgs, use_color: bool) -> anyhow::Result<()>
     let tmp_older_than = args
         .tmp_older_than
         .as_deref()
-        .map(crate::util::time::parse_age)
-        .transpose()
-        .context("invalid --tmp-older-than")?;
+        .map(parse_tmp_older_than)
+        .transpose()?;
     let config = Config::load(&paths::config_path()?)?;
     let cache_dir = PathBuf::from(paths::expand_tilde(&config.cache.cache_dir)?);
     let pruned = run_prune(args, mode, &config, &cache_dir);
@@ -100,6 +99,18 @@ fn prune_mode(args: &CleanArgs) -> anyhow::Result<PruneMode> {
     Ok(PruneMode::OlderThan(
         crate::materialize::expiry::AgeRule::new(duration),
     ))
+}
+
+/// Read `--tmp-older-than`. A zero duration is refused, as a zero `tmp_retention_hours` is,
+/// because it would remove every `state/tmp` entry that no process holds open.
+fn parse_tmp_older_than(raw: &str) -> anyhow::Result<std::time::Duration> {
+    let duration = crate::util::time::parse_age(raw).context("invalid --tmp-older-than")?;
+    anyhow::ensure!(
+        !duration.is_zero(),
+        "invalid --tmp-older-than {raw:?}: the duration is zero, so it would remove every \
+         state/tmp entry that no process holds open. Give a positive duration, such as 1h"
+    );
+    Ok(duration)
 }
 
 /// What one step of the cache-folder cleanup removed and could not remove.

@@ -171,3 +171,22 @@ fn a_dry_run_removes_nothing() {
         "a dry run removed an entry"
     );
 }
+
+#[test]
+fn the_age_of_an_entry_names_why_it_cannot_be_given() {
+    use crate::materialize::cache::AgeSource;
+    use crate::materialize::tmp_sweep::entry_age;
+
+    let t = tmp_fixture();
+    let source = AgeSource::MtimeOnly;
+    assert_eq!(entry_age(&t.recent, source, t.later), Ok(3 * DAY));
+
+    // The entry changed after the clock of the sweep.
+    let early = t.later - 30 * DAY;
+    let future = entry_age(&t.recent, source, early).unwrap_err();
+    assert!(future.contains("in the future"), "{future}");
+
+    let missing = t.state.path().join("tmp").join("gone");
+    let unreadable = entry_age(&missing, source, t.later).unwrap_err();
+    assert!(unreadable.contains("cannot read it"), "{unreadable}");
+}

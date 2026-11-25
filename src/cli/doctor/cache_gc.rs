@@ -35,25 +35,23 @@ impl GcOutput<'_> {
             return;
         }
         for p in removed {
-            let age = ages.and_then(|(source, now)| tmp_sweep::entry_age(p, source, now));
-            match age {
-                Some(age) => eprintln!(
+            match ages.map(|(source, now)| tmp_sweep::entry_age(p, source, now)) {
+                Some(Ok(age)) => eprintln!(
                     "  would remove: {} (age {})",
                     p.display(),
                     crate::util::time::format_age(age)
                 ),
+                Some(Err(cause)) => {
+                    eprintln!("  would remove: {} (age unknown: {cause})", p.display());
+                }
                 None => eprintln!("  would remove: {}", p.display()),
             }
         }
     }
 
-    /// Print the summary line, the dry-run list, and each failure of one sweep.
-    fn report(&self, what: &str, report: &GcReport) {
-        self.report_aged(what, report, None);
-    }
-
-    /// [`Self::report`], with the age of each dry-run entry when `ages` is set.
-    fn report_aged(&self, what: &str, report: &GcReport, ages: Option<(AgeSource, SystemTime)>) {
+    /// Print the summary line, the dry-run list, and each failure of one sweep. With `ages`, a
+    /// dry-run line also gives the age of the entry.
+    fn report(&self, what: &str, report: &GcReport, ages: Option<(AgeSource, SystemTime)>) {
         let (pass, warn) = (self.pass, self.warn);
         eprintln!(
             "{pass} GC complete{what}: {} {} entries, kept {}",
@@ -247,7 +245,7 @@ fn sweep_state_tmp(
     });
     match swept {
         Ok(report) => {
-            out.report_aged(
+            out.report(
                 " for state/tmp",
                 &report,
                 Some((cutoff.rule().source, cutoff.now)),
@@ -310,7 +308,7 @@ fn sweep_cbm_indexes(
     });
     match swept {
         Ok(report) => {
-            out.report(" for old codebase-memory indexes", &report);
+            out.report(" for old codebase-memory indexes", &report, None);
             report.failed.len()
         }
         Err(e) => {
