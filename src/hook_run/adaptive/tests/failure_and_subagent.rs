@@ -356,3 +356,42 @@ async fn tool_failure_with_the_recall_off_records_the_error_and_asks_nothing() {
     let asked = server.received_requests().await.unwrap();
     assert!(asked.is_empty(), "no request expected: {asked:?}");
 }
+
+/// A slow memory server cannot hold a subagent start past the subagent start budget (#4023).
+#[tokio::test]
+async fn a_slow_server_cannot_hold_a_subagent_start_past_its_budget() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("initialize"))
+        .respond_with(crate::hook_run::test_recall::ToolReply(String::new()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(1_900)))
+        .mount(&server)
+        .await;
+    let mut f = fixture(&server);
+    // Four global topics make four calls in a row, so the unbounded start waits about 7.6 s.
+    f.topics = ["a", "b", "c", "d"].map(str::to_string).to_vec();
+    f.store.update("s1", |l| l.set_scope_sent(MAIN_AGENT));
+    record_local(
+        HookEvent::SubagentTask,
+        &f.store,
+        "s1",
+        &json!({"tool_name": "Agent", "tool_use_id": "u1",
+                "tool_input": {"subagent_type": "Explore", "prompt": "map the recall path"}}),
+    );
+    let payload = json!({"agent_id": "agent-1", "agent_type": "Explore"});
+    let started = std::time::Instant::now();
+    subagent_start(&ctx(&f, &payload)).await.unwrap();
+    let waited = started.elapsed();
+    assert!(
+        waited < Duration::from_millis(4_500),
+        "the start waited {waited:?}"
+    );
+    let notices = crate::agent_notice::current().unwrap_or_default();
+    assert!(
+        notices.contains("subagent start recall budget of 3 s"),
+        "{notices}"
+    );
+}

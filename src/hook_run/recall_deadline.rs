@@ -18,6 +18,7 @@ pub(crate) use cut::Cut;
 enum Flow {
     SessionStart,
     TurnStart,
+    SubagentStart,
 }
 
 impl Flow {
@@ -25,6 +26,7 @@ impl Flow {
         match self {
             Self::SessionStart => "session start",
             Self::TurnStart => "turn start",
+            Self::SubagentStart => "subagent start",
         }
     }
 
@@ -36,6 +38,8 @@ impl Flow {
             Self::SessionStart => Duration::from_secs(5),
             // The prompt waits for this hook, so its bound is shorter than the session start one.
             Self::TurnStart => Duration::from_secs(3),
+            // The subagent waits for this hook before it starts, as a prompt does.
+            Self::SubagentStart => Duration::from_secs(3),
         }
     }
 }
@@ -56,6 +60,11 @@ impl Deadline {
     /// The deadline for a prompt that begins now.
     pub(crate) fn turn_start() -> Self {
         Self::new(Flow::TurnStart)
+    }
+
+    /// The deadline for a subagent start that begins now.
+    pub(crate) fn subagent_start() -> Self {
+        Self::new(Flow::SubagentStart)
     }
 
     fn new(flow: Flow) -> Self {
@@ -162,6 +171,15 @@ mod tests {
         let turn = Deadline::turn_start().cut_notice();
         assert!(turn.contains("turn start recall budget of 3 s"), "{turn}");
         assert!(turn.contains("llmenv doctor"), "{turn}");
+    }
+
+    #[test]
+    fn the_subagent_start_notice_names_its_own_budget() {
+        let text = Deadline::subagent_start().cut_notice();
+        assert!(
+            text.contains("subagent start recall budget of 3 s"),
+            "{text}"
+        );
     }
 
     #[test]
