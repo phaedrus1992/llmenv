@@ -357,6 +357,10 @@ A memory server that is slow or down costs each hook a timeout.
 After three failed recall calls in a row, hooks skip recall for five minutes, and one notice names the cause.
 A session start also shares a five-second budget across its recall calls.
 A call past the budget is cut, and the agent sees a notice that says the budget ran out.
+(added in v3.14.2) A prompt and a subagent start share a three-second budget in the same way.
+A call that the budget cuts off counts as a failed call for the skip,
+so a server that is always too slow starts the skip too.
+A call that starts after the budget ran out never reaches the server, and it does not count.
 
 Run `llmenv doctor` to check the memory server.
 The skip ends by itself after five minutes, and the next recall call tries the server again.
@@ -467,6 +471,20 @@ These notices come from the hook itself (added in v3.14.0):
   with no checkpoint` — the state folder is missing or not valid. Set `HOME` or `LLMENV_STATE_DIR`.
 - `the activity time of session <id> is not` saved — the task change is saved, but the session can
   look idle. Run `llmenv task session show`.
+
+These notices come from the hook itself (added in v3.14.2):
+
+- `the shared MCP session file <path> cannot be read`, `was not saved`, or `cannot be deleted` — hooks open
+  their own session with the memory server, which costs a round trip each.
+  Check the permissions of the state folder, or remove the named file.
+- `N more notice(s) were left out` — the notices of one hook output did not fit under the point where
+  Claude Code cuts a hook output.
+  The first notices stay whole, and the rest are in the llmenv log. Run `llmenv doctor`.
+- `auth: the cached credential at <path> is not valid JSON` or `holds no OAuth credential` — llmenv
+  ignored the file and replaced the account.
+  Run `llmenv login`.
+- `auth: <path> does not hold a timestamp` — the keychain is read on each export until llmenv writes
+  the marker again. Delete the named file.
 
 ## Profiling hook-run latency
 
