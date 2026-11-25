@@ -2392,7 +2392,8 @@ fn run_config_context() -> anyhow::Result<()> {
             serde_json::json!({
                 "hookSpecificOutput": {
                     "hookEventName": hook_event_name,
-                    "additionalContext": ctx
+                    // Printed here and not through an adapter, so the cap applies here too (#3357).
+                    "additionalContext": crate::adapter::context_cap::fit_notes(ctx, 0)
                 }
             })
         );

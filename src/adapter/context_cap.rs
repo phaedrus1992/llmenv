@@ -3,35 +3,37 @@
 //! Claude Code cuts the text that a hook returns at a fixed number of characters. A cut in the
 //! middle of a notice leaves half a sentence, and Claude Code 2.1.314 made a very large PreCompact
 //! output fail or repeat compaction. The notices are the part of a hook output with no size
-//! limit of its own, so they are shortened here, to whole notices.
+//! limit of its own, so they are shortened here, to whole lines. The notices of a hook run are
+//! one per line, so a cut keeps whole notices.
 
 /// The number of characters at which Claude Code cuts a hook output.
 const CLAUDE_CODE_CUT_CHARS: usize = 10_000;
 
-/// The most characters that a hook output may hold. The margin keeps the JSON escape of a quote
-/// and the line that reports the omission under the cut.
-pub(super) const MAX_CONTEXT_CHARS: usize = CLAUDE_CODE_CUT_CHARS - 500;
+/// The most characters that a hook output may hold. The margin leaves room for the line that
+/// reports the omission, and for the header of the memory block.
+pub(crate) const MAX_CONTEXT_CHARS: usize = CLAUDE_CODE_CUT_CHARS - 500;
 
 /// The characters of the blank line that separates the notices from the memory block.
 const SEPARATOR_CHARS: usize = 2;
 
 /// The length of `text` in UTF-16 units, which is how Claude Code counts characters.
-pub(super) fn context_len(text: &str) -> usize {
+pub(crate) fn context_len(text: &str) -> usize {
     text.encode_utf16().count()
 }
 
 /// The line that replaces the notices that did not fit.
 fn omission_line(left_out: usize) -> String {
     format!(
-        "llmenv: {left_out} more notice(s) were left out, because Claude Code cuts a hook output \
+        "llmenv: {left_out} more line(s) of notices were left out, because Claude Code cuts a hook output \
          at {CLAUDE_CODE_CUT_CHARS} characters. Fix: run `llmenv doctor`, and read the llmenv log."
     )
 }
 
 /// Shortens `notes` so that the notices, and `memory_chars` characters of memory after them, fit
 /// in [`MAX_CONTEXT_CHARS`]. The first notices stay whole, one per line. One line counts the rest.
-/// With no room for even that line, the notices are dropped, and the memory keeps its place.
-pub(super) fn fit_notes(notes: &str, memory_chars: usize) -> String {
+/// With no room for even that line, the notices are dropped and the drop is logged, and the
+/// memory keeps its place.
+pub(crate) fn fit_notes(notes: &str, memory_chars: usize) -> String {
     let reserved = if memory_chars > 0 {
         memory_chars + SEPARATOR_CHARS
     } else {
@@ -61,6 +63,11 @@ pub(super) fn fit_notes(notes: &str, memory_chars: usize) -> String {
 fn close_with_omission(mut kept: String, left_out: usize, used: usize, room: usize) -> String {
     let omission = omission_line(left_out);
     if used + context_len(&omission) > room {
+        tracing::error!(
+            left_out,
+            room,
+            "the notices of a hook output are dropped, because the memory block fills the cap"
+        );
         return String::new();
     }
     kept.push_str(&omission);
@@ -99,7 +106,10 @@ mod tests {
         );
         assert!(out.starts_with("llmenv: notice 0 "), "{out}");
         let last = out.lines().last().unwrap();
-        assert!(last.contains("more notice(s) were left out"), "{last}");
+        assert!(
+            last.contains("more line(s) of notices were left out"),
+            "{last}"
+        );
         assert!(last.contains("llmenv doctor"), "{last}");
         // Every kept notice is whole: it ends with its padding.
         for line in out.lines().filter(|l| l.starts_with("llmenv: notice")) {

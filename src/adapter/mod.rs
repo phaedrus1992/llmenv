@@ -1,5 +1,5 @@
 pub mod claude_code;
-mod context_cap;
+pub(crate) mod context_cap;
 pub mod crush;
 pub(crate) mod hook_command;
 pub(crate) mod hook_program;

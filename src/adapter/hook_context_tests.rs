@@ -159,7 +159,10 @@ fn a_flood_of_notices_on_pre_compact_stays_under_the_cut() {
         context_cap::context_len(&ctx)
     );
     assert!(ctx.starts_with("llmenv: notice 0 "), "{ctx}");
-    assert!(ctx.contains("more notice(s) were left out"), "{ctx}");
+    assert!(
+        ctx.contains("more line(s) of notices were left out"),
+        "{ctx}"
+    );
 }
 
 /// Memory keeps its text whole, and the notices give way to it.

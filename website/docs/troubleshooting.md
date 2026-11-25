@@ -477,7 +477,7 @@ These notices come from the hook itself (added in v3.14.2):
 - `the shared MCP session file <path> cannot be read`, `was not saved`, or `cannot be deleted` — hooks open
   their own session with the memory server, which costs a round trip each.
   Check the permissions of the state folder, or remove the named file.
-- `N more notice(s) were left out` — the notices of one hook output did not fit under the point where
+- `N more line(s) of notices were left out` — the notices of one hook output did not fit under the point where
   Claude Code cuts a hook output.
   The first notices stay whole, and the rest are in the llmenv log. Run `llmenv doctor`.
 - `auth: the cached credential at <path> is not valid JSON` or `holds no OAuth credential` — llmenv
