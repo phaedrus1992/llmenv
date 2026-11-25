@@ -125,7 +125,10 @@ pub(crate) async fn within<T>(
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     #[tokio::test]
@@ -158,6 +161,30 @@ mod tests {
         .await?;
         assert_eq!(value, 7);
         Ok(())
+    }
+
+    proptest::proptest! {
+        /// A call that finishes inside the budget gives its own result, value or error, with or
+        /// without a deadline.
+        #[test]
+        fn a_fast_call_result_passes_through_unchanged(ok in any::<bool>(), n in any::<i32>()) {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let call = || async move {
+                if ok { Ok(n) } else { Err(anyhow::anyhow!("failed {n}")) }
+            };
+            let bounded = runtime.block_on(within(Some(Deadline::turn_start()), call()));
+            let unbounded = runtime.block_on(within(None, call()));
+            for result in [bounded, unbounded] {
+                match (ok, result) {
+                    (true, Ok(got)) => proptest::prop_assert_eq!(got, n),
+                    (false, Err(e)) => proptest::prop_assert_eq!(e.to_string(), format!("failed {n}")),
+                    (_, other) => proptest::prop_assert!(false, "unexpected result {other:?}"),
+                }
+            }
+        }
     }
 
     #[tokio::test]

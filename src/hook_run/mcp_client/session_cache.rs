@@ -162,6 +162,8 @@ impl SessionCache {
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     fn cache() -> (tempfile::TempDir, SessionCache) {
@@ -238,6 +240,41 @@ mod tests {
         let notices = crate::agent_notice::current().unwrap_or_default();
         assert!(notices.contains("shared MCP session file"), "{notices}");
         assert!(notices.contains("llmenv doctor"), "{notices}");
+    }
+
+    proptest::proptest! {
+        /// Any id that is safe in a header comes back unchanged.
+        #[test]
+        fn a_valid_id_round_trips(id in "[!-~]{1,256}") {
+            let (_dir, cache) = cache();
+            cache.save(&id);
+            proptest::prop_assert_eq!(cache.load(), Some(id));
+        }
+
+        /// A record is trusted when its age is inside the window. A time in the future counts as
+        /// age zero. The offsets stay clear of the window edge, so the clock cannot flip a case.
+        #[test]
+        fn the_window_decides_whether_a_record_is_trusted(
+            age in prop_oneof![0u64..590, 612u64..5_000],
+            future in any::<bool>(),
+            id in "[!-~]{1,40}",
+        ) {
+            let (_dir, cache) = cache();
+            let now = now_unix().unwrap();
+            let saved_at_unix = if future { now + age } else { now - age };
+            let saved = Saved { session_id: id.clone(), saved_at_unix };
+            std::fs::write(&cache.path, serde_json::to_vec(&saved).unwrap()).unwrap();
+            let trusted = future || age <= TTL_SECS;
+            proptest::prop_assert_eq!(cache.load(), trusted.then_some(id));
+        }
+
+        /// Whatever the file holds, a load never panics.
+        #[test]
+        fn any_file_content_loads_without_a_panic(bytes in prop::collection::vec(any::<u8>(), 0..200)) {
+            let (_dir, cache) = cache();
+            std::fs::write(&cache.path, bytes).unwrap();
+            let _ = cache.load();
+        }
     }
 
     #[test]

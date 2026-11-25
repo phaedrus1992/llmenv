@@ -129,6 +129,26 @@ fn idle_reminder_leads_with_wait_after_a_question_and_with_start_otherwise() {
     );
 }
 
+proptest::proptest! {
+    /// A message is a question exactly when its text, without trailing whitespace, ends with `?`.
+    #[test]
+    fn a_message_is_a_question_iff_it_ends_with_a_question_mark(s in "\\PC{0,60}") {
+        let expected = if s.trim_end().ends_with('?') {
+            TurnEnd::Question
+        } else {
+            TurnEnd::Statement
+        };
+        proptest::prop_assert_eq!(TurnEnd::of(Some(&s)), expected);
+    }
+
+    /// Trailing whitespace never changes the answer, and a trailing mark always makes a question.
+    #[test]
+    fn trailing_whitespace_does_not_change_the_end(s in "\\PC{0,60}", ws in "[ \t\n\r]{0,5}") {
+        proptest::prop_assert_eq!(TurnEnd::of(Some(&format!("{s}{ws}"))), TurnEnd::of(Some(&s)));
+        proptest::prop_assert_eq!(TurnEnd::of(Some(&format!("{s}?{ws}"))), TurnEnd::Question);
+    }
+}
+
 #[test]
 fn turn_end_reads_a_trailing_question_mark_after_trailing_whitespace() {
     assert_eq!(TurnEnd::of(Some("Which one?\n")), TurnEnd::Question);
