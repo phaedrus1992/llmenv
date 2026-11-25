@@ -190,3 +190,35 @@ fn the_age_of_an_entry_names_why_it_cannot_be_given() {
     let unreadable = entry_age(&missing, source, t.later).unwrap_err();
     assert!(unreadable.contains("cannot read it"), "{unreadable}");
 }
+
+mod properties {
+    use std::time::Duration;
+
+    use proptest::prelude::*;
+
+    use super::{Config, Retention};
+
+    const HOUR: u64 = 3600;
+
+    proptest! {
+        // The flag replaces the age of state/tmp only. The general age always comes from the
+        // config, and a null cache_retention_hours turns off the config age of state/tmp.
+        #[test]
+        fn the_flag_sets_the_tmp_age_and_the_config_sets_the_rest(
+            flag in prop::option::of(1u64..1_000_000),
+            cache_hours in prop::option::of(1u64..100_000),
+            tmp_hours in prop::option::of(1u64..100_000),
+        ) {
+            let mut config = Config::default();
+            config.cache.cache_retention_hours = cache_hours;
+            config.cache.tmp_retention_hours = tmp_hours;
+
+            let got = Retention::resolve(&config, flag.map(Duration::from_secs));
+
+            let hours = |h: u64| Duration::from_secs(h * HOUR);
+            prop_assert_eq!(got.general, cache_hours.map(hours));
+            let from_config = cache_hours.and(tmp_hours).map(hours);
+            prop_assert_eq!(got.tmp, flag.map(Duration::from_secs).or(from_config));
+        }
+    }
+}

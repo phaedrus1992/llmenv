@@ -246,3 +246,6 @@ fn is_tmp_path(path: &str) -> bool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests;
+
+#[cfg(test)]
+mod prop_tests;
