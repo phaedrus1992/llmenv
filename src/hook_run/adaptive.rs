@@ -69,6 +69,8 @@ pub(super) struct AdaptiveCtx<'a> {
     pub(super) payload: &'a Value,
     /// The topics that the main recall reads across every project (#2950).
     pub(super) global_topics: &'a [String],
+    /// Whether a failed tool call recalls memories about its error (#3897).
+    pub(super) failure_recall: bool,
     /// Where the recall health ring lives (#2919).
     pub(super) state_dir: &'a Path,
 }

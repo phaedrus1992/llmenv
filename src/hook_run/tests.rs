@@ -362,6 +362,7 @@ fn consolidation_guard_needs_a_non_empty_value() {
 fn adaptive_applies_only_to_its_events_with_a_valid_session() {
     let on = Some(MemoryHookSettings {
         adaptive_recall: true,
+        failure_recall: true,
         global_topics: vec![],
         ..MemoryHookSettings::default()
     });
@@ -708,6 +709,7 @@ fn memory_url_uses_persisted_cache_when_key_matches() {
         mcp_permissions: None,
         wakeup_max_tokens: None,
         adaptive_recall: true,
+        failure_recall: true,
         global_topics: crate::config::Memory::default().global_topics,
     }];
     let mut persisted_host = std::collections::BTreeMap::new();
@@ -2970,6 +2972,7 @@ proptest! {
 fn memory_settings(default_type: Option<llmenv_config::MemoryType>) -> MemoryHookSettings {
     MemoryHookSettings {
         adaptive_recall: true,
+        failure_recall: true,
         default_type,
         global_topics: vec![],
         ..MemoryHookSettings::default()

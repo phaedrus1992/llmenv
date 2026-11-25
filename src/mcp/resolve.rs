@@ -58,6 +58,8 @@ pub struct MemoryHookSettings {
     pub(crate) wakeup_max_tokens: Option<u32>,
     /// Whether adaptive recall is on (#2249).
     pub(crate) adaptive_recall: bool,
+    /// Whether a failed tool call recalls memories about its error (#3897).
+    pub(crate) failure_recall: bool,
     /// Type marker for stored chunks without their own marker (R1). Carried
     /// here so a bundle-declared entry's default applies too.
     pub(crate) default_type: Option<llmenv_config::MemoryType>,
@@ -310,6 +312,7 @@ fn resolve_memory(
         memory_hook: Some(MemoryHookSettings {
             wakeup_max_tokens: mem.wakeup_max_tokens,
             adaptive_recall: mem.adaptive_recall,
+            failure_recall: mem.failure_recall,
             default_type: mem.default_type,
             default_importance: mem.default_importance,
             global_topics: mem.global_topics.clone(),
@@ -637,6 +640,7 @@ mod tests {
         let mut mem = memory();
         mem.wakeup_max_tokens = Some(750);
         mem.adaptive_recall = false;
+        mem.failure_recall = false;
         mem.default_type = Some(llmenv_config::MemoryType::Semantic);
         mem.default_importance = Some(llmenv_config::ImportanceLevel::High);
         let resolved = resolve_mcps(&[], &[mem], &base_host(), &tags(&["network-home"])).unwrap();
@@ -645,6 +649,7 @@ mod tests {
             Some(MemoryHookSettings {
                 wakeup_max_tokens: Some(750),
                 adaptive_recall: false,
+                failure_recall: false,
                 default_type: Some(llmenv_config::MemoryType::Semantic),
                 default_importance: Some(llmenv_config::ImportanceLevel::High),
                 global_topics: vec![],
@@ -660,6 +665,7 @@ mod tests {
             resolved[0].memory_hook,
             Some(MemoryHookSettings {
                 adaptive_recall: true,
+                failure_recall: true,
                 global_topics: vec![],
                 ..MemoryHookSettings::default()
             })

@@ -320,6 +320,8 @@ recall events also need `adaptive_recall` on):
 - `post_tool_use_failure` (added in v3.12.0) — records the error and injects
   memories about it. (changed in v3.13.0) A memory is injected only when its
   summary or keywords share a distinctive word or an error code with the error
+  (changed in v3.14.2) `failure_recall: false` on the memory entry skips the recall and still
+  records the error
 - `subagent_start` (added in v3.12.0) — injects memories that match the
   subagent's task, which `subagent_task` records
 - `subagent_task` (added in v3.12.0) — a `PreToolUse` hook on the `Agent` tool

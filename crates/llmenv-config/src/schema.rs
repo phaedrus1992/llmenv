@@ -6,7 +6,7 @@ mod task_tracker;
 mod throttle;
 
 pub use hooks::{Hook, HookHandler, HookHandlerKind, HookOnFailure, dedup_hooks};
-use memory_defaults::{default_adaptive_recall, default_global_topics};
+use memory_defaults::{default_adaptive_recall, default_failure_recall, default_global_topics};
 pub use task_tracker::TaskTracker;
 pub use throttle::Throttle;
 
@@ -1340,6 +1340,11 @@ pub struct Memory {
     /// restores the stateless per-turn recall.
     #[serde(default = "default_adaptive_recall")]
     pub adaptive_recall: bool,
+    /// Whether a failed tool call recalls memories about its error (#3897). The error is recorded
+    /// either way, so the per-turn recall still sees it. `false` skips the recall of the failure
+    /// hook only.
+    #[serde(default = "default_failure_recall")]
+    pub failure_recall: bool,
     /// The topics that the per-turn recall reads across every project (#2950). The rest of the
     /// recall reads the session's own project only, so a record of another project does not
     /// reach this one. Unset means `preferences` and `errors-resolved`.

@@ -123,6 +123,10 @@ pub(in crate::hook_run) async fn tool_failure(
         note_skipped();
         return Ok(crate::hook_run::HookText::default());
     };
+    // The error is recorded above, so the per-turn recall still sees it (#3897).
+    if !ctx.failure_recall {
+        return Ok(crate::hook_run::HookText::default());
+    }
     // A generic failure matches memories from every project, so no recall runs (#2910).
     if is_generic(error) {
         return Ok(crate::hook_run::HookText::default());

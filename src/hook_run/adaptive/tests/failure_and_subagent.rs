@@ -340,3 +340,19 @@ async fn a_failure_with_no_distinctive_token_sends_no_recall() {
         "the error is still recorded"
     );
 }
+
+/// `failure_recall: false` records the error and makes no recall call (#3897).
+#[tokio::test]
+async fn tool_failure_with_the_recall_off_records_the_error_and_asks_nothing() {
+    let fix = memories(&[("errors-resolved", "fix: pin mcp<2", &["request_ctx"])]);
+    let server = server_with(&[("errors-resolved", &fix)]).await;
+    let f = fixture(&server);
+    let payload = json!({"tool_name": "Bash", "error": "Exit code 1\nImportError request_ctx"});
+    let mut off = ctx(&f, &payload);
+    off.failure_recall = false;
+    let out = tool_failure(&off).await.unwrap().text();
+    assert_eq!(out, "");
+    assert_eq!(f.store.load("s1").unwrap().errors().len(), 1);
+    let asked = server.received_requests().await.unwrap();
+    assert!(asked.is_empty(), "no request expected: {asked:?}");
+}

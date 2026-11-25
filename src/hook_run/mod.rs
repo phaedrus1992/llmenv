@@ -548,6 +548,7 @@ async fn run_event_memory(call: MemoryCall<'_>) -> anyhow::Result<HookText> {
         session_id,
         payload: call.payload,
         global_topics: call.settings.map_or(&[], |s| &s.global_topics),
+        failure_recall: call.settings.is_none_or(|s| s.failure_recall),
         state_dir,
     };
     match call.event {
