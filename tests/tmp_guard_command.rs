@@ -62,9 +62,12 @@ fn a_read_of_tmp_prints_nothing() {
 }
 
 #[test]
-fn a_payload_that_is_not_json_is_named_on_stderr_and_does_not_block() {
+fn a_payload_that_is_not_json_is_denied_with_the_cause() {
     let (ok, stdout, stderr) = run("not json");
-    assert!(ok);
-    assert_eq!(stdout, "");
-    assert!(stderr.contains("not JSON"), "{stderr}");
+    assert!(ok, "tmp-guard failed: {stderr}");
+    assert!(
+        stdout.contains(r#""permissionDecision":"deny""#),
+        "{stdout}"
+    );
+    assert!(stdout.contains("the hook payload is not JSON"), "{stdout}");
 }

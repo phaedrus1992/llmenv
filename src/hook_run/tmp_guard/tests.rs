@@ -154,9 +154,62 @@ fn a_command_nested_past_the_limit_is_denied_with_the_fix() {
 }
 
 #[test]
-fn a_payload_with_no_tool_name_is_allowed() {
-    assert_eq!(deny_reason(&json!({})), None);
-    assert_eq!(deny_reason(&json!({"tool_name": 3})), None);
+fn a_payload_with_no_tool_name_is_denied_with_the_cause() {
+    for payload in [
+        json!({}),
+        json!({"tool_name": 3}),
+        json!({"tool_name": null}),
+    ] {
+        let reason = deny_reason(&payload).unwrap_or_else(|| panic!("allowed: {payload}"));
+        assert!(reason.contains("the call has no tool name"), "{reason}");
+    }
+}
+
+#[test]
+fn a_file_tool_call_with_no_path_string_is_denied() {
+    for input in [json!({}), json!({"file_path": 7}), json!({"content": "x"})] {
+        let reason = deny_reason(&json!({"tool_name": "Write", "tool_input": input}))
+            .unwrap_or_else(|| panic!("allowed: {input}"));
+        assert!(reason.contains("the file path is missing"), "{reason}");
+    }
+    assert!(deny_reason(&json!({"tool_name": "Edit"})).is_some());
+}
+
+#[test]
+fn a_redirect_joined_to_the_word_before_it_is_denied() {
+    let denied = [
+        "echo hi>/tmp/x",
+        "echo hi>>/tmp/x",
+        "ls>/tmp/x",
+        "cmd 2>/tmp/err",
+        "cmd>|/tmp/x",
+        "exec 3<>/tmp/x",
+        "exec {fd}>/tmp/x",
+        "echo \"a b\">/tmp/x",
+        "echo a>b>/tmp/x",
+        "(cd repo;ls>/tmp/x)",
+    ];
+    for command in denied {
+        let reason = bash(command).unwrap_or_else(|| panic!("allowed: {command}"));
+        assert!(reason.contains(RULE), "{command}: {reason}");
+    }
+}
+
+#[test]
+fn a_quoted_or_relative_redirect_sign_is_not_a_redirect_to_tmp() {
+    let allowed = [
+        "echo \"a>/tmp/x\"",
+        "echo 'a>/tmp/x'",
+        "echo a\\>/tmp/x",
+        "echo hi>out.txt",
+        "echo hi>\"$TMPDIR/x\"",
+        "cmd 2>&1",
+        "cmd >&2",
+        "[ 3 -gt 2 ] && echo ok",
+    ];
+    for command in allowed {
+        assert_eq!(bash(command), None, "denied: {command}");
+    }
 }
 
 #[test]

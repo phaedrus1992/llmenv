@@ -1278,8 +1278,10 @@ The guard reads a path as text, with `.` and `..` resolved.
 It does not expand a variable, and it does not follow a symlink.
 A command that changes into `/tmp` and then writes a relative path is not seen.
 A read of `/tmp` is allowed, and so is a copy from `/tmp` to another place.
-A shell call whose command is missing, or is nested too deeply to check, is denied.
-A payload that is not JSON gives a message on stderr, and the call runs.
+A redirect sign inside quotes is text, not a redirect, and `echo hi>/tmp/x` is a redirect.
+A call that cannot be checked is denied, with the cause in the message.
+These are a missing tool name, shell command, or file path.
+They are also a command nested too deeply, and a payload that is not JSON.
 The command always exits 0, and the deny is the JSON on stdout.
 Claude Code is the only engine that runs the guard so far (opencode and Crush: #4052).
 

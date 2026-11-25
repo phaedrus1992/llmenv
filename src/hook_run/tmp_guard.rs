@@ -37,18 +37,37 @@ pub(crate) fn guarded_tools() -> Vec<&'static str> {
 ///
 /// A shell command that cannot be read is denied, so the guard fails closed.
 pub(crate) fn deny_reason(payload: &serde_json::Value) -> Option<String> {
-    let tool = payload.get("tool_name")?.as_str()?;
+    let Some(tool) = payload.get("tool_name").and_then(|t| t.as_str()) else {
+        return Some(unreadable_reason("the call has no tool name"));
+    };
     let input = payload.get("tool_input");
     if is_shell_tool(tool) {
         return shell_reason(input);
     }
     if WRITE_TOOLS.contains(&tool) {
-        let path = ["file_path", "notebook_path"]
-            .iter()
-            .find_map(|key| input?.get(key)?.as_str())?;
-        return is_tmp_path(path).then(|| reason_for(path));
+        return file_reason(input);
     }
     None
+}
+
+/// The reason to deny a call that cannot be checked. The deny is the safe side, and the text
+/// names the cause.
+pub(crate) fn unreadable_reason(cause: &str) -> String {
+    format!(
+        "llmenv blocked this call, because {cause}, so it cannot be checked for a write to \
+         /tmp. Send the call in the form that the tool defines."
+    )
+}
+
+/// The reason to deny a file tool call, or `None` when its path is not under a temp root.
+fn file_reason(input: Option<&serde_json::Value>) -> Option<String> {
+    let path = ["file_path", "notebook_path"]
+        .iter()
+        .find_map(|key| input?.get(key)?.as_str());
+    match path {
+        Some(path) => is_tmp_path(path).then(|| reason_for(path)),
+        None => Some(unreadable_reason("the file path is missing from the call")),
+    }
 }
 
 /// The reason to deny a shell call, or `None` when the command writes nowhere under a temp root.
@@ -57,11 +76,9 @@ fn shell_reason(input: Option<&serde_json::Value>) -> Option<String> {
         .and_then(|i| i.get("command"))
         .and_then(|c| c.as_str());
     let Some(command) = command else {
-        return Some(
-            "llmenv blocked this call, because the shell command is missing from the call, so it \
-             cannot be checked for a write to /tmp. Send the command as a string."
-                .to_string(),
-        );
+        return Some(unreadable_reason(
+            "the shell command is missing from the call",
+        ));
     };
     match shell_write_in_tmp(command) {
         Ok(found) => found.map(|path| reason_for(&path)),
@@ -80,12 +97,11 @@ fn reason_for(found: &str) -> String {
 /// The first path under a temp root that the command writes, or an error text when the command
 /// cannot be split. `Ok(None)` means the command writes nowhere under a temp root.
 fn shell_write_in_tmp(command: &str) -> Result<Option<String>, String> {
-    let segments = shell_segments(command).map_err(|_| {
-        format!(
-            "llmenv blocked this call, because the command cannot be checked for a write to \
-             /tmp: {}",
+    let segments = shell_segments(&space_redirects(command)).map_err(|_| {
+        unreadable_reason(&format!(
+            "the command is nested too deeply ({})",
             nesting_reason()
-        )
+        ))
     })?;
     // A `|` or an `&` after `>` ends the segment, so the target is the first word of the next one.
     let nexts = segments
@@ -98,6 +114,36 @@ fn shell_write_in_tmp(command: &str) -> Result<Option<String>, String> {
         .flat_map(|(words, next)| written_paths(words, next))
         .find(|path| is_tmp_path(path))
         .map(str::to_owned))
+}
+
+/// `command` with a space on each side of every unquoted run of `>`, so `echo hi>/tmp/x` reads
+/// as `echo hi > /tmp/x`. The splitter keeps `hi>/tmp/x` as one word, and a redirect is then not
+/// seen. A `>` inside quotes stays as it is.
+fn space_redirects(command: &str) -> String {
+    let mut out = String::with_capacity(command.len() + 8);
+    let mut quote: Option<char> = None;
+    let mut chars = command.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => {
+                quote = None;
+                out.push(c);
+            }
+            (Some('\''), c) => out.push(c),
+            (_, '\\') => {
+                out.push(c);
+                out.extend(chars.next());
+            }
+            (Some(_), c) => out.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                out.push(c);
+            }
+            (None, '>') => out.push_str(" > "),
+            (None, c) => out.push(c),
+        }
+    }
+    out
 }
 
 /// The paths that one command segment writes: redirect targets, and the operands of the commands
