@@ -14,19 +14,23 @@ use crate::hook_run::shell_tool::{SHELL_TOOLS, is_shell_tool};
 const WRITE_TOOLS: [&str; 4] = ["Write", "Edit", "MultiEdit", "NotebookEdit"];
 
 /// The path roots that nothing cleans. A macOS `/tmp` is a link into `/private/tmp`, and
-/// `/var/folders` holds the per-user temp folder of macOS.
-const TMP_ROOTS: [&[&str]; 4] = [
+/// `/var/folders` holds the per-user temp folder of macOS. `/var/tmp` and `/dev/shm` are cleaned less often than `/tmp`, or not at all.
+const TMP_ROOTS: [&[&str]; 7] = [
     &["tmp"],
     &["private", "tmp"],
     &["var", "folders"],
     &["private", "var", "folders"],
+    &["var", "tmp"],
+    &["private", "var", "tmp"],
+    &["dev", "shm"],
 ];
 
 /// The commands whose operands are all paths that the command creates or changes.
 const WRITE_ALL_OPERANDS: [&str; 4] = ["tee", "touch", "mkdir", "mktemp"];
 
-/// The commands whose last operand, or `-t` value, is the place that the command writes to.
-const WRITE_DESTINATION: [&str; 3] = ["cp", "mv", "install"];
+/// The commands whose last operand, or `-t` value, is the place that the command writes to. A
+/// `ln` or `rsync` source is a read.
+const WRITE_DESTINATION: [&str; 5] = ["cp", "mv", "install", "ln", "rsync"];
 
 /// The tool names that the hook matcher names: the shell tools and the file tools.
 pub(crate) fn guarded_tools() -> Vec<&'static str> {
@@ -162,6 +166,7 @@ fn written_paths<'a>(words: &'a [String], next: Option<&'a str>) -> Vec<&'a str>
     } else if WRITE_DESTINATION.contains(&name) {
         paths.extend(destination(tail));
     }
+    paths.extend(writers::written_by_option(name, tail));
     paths
 }
 
@@ -242,6 +247,8 @@ fn is_tmp_path(path: &str) -> bool {
                 .all(|(part, name)| part.eq_ignore_ascii_case(name))
     })
 }
+
+mod writers;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

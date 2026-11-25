@@ -236,6 +236,11 @@ fn a_tmp_path_is_judged_on_its_resolved_components() {
         "/a/../tmp/b",
         "/private/tmp/a",
         "/var/folders",
+        "/var/tmp",
+        "/var/tmp/a",
+        "/private/var/tmp/a",
+        "/dev/shm",
+        "/dev/shm/seg",
     ] {
         assert!(is_tmp_path(path), "{path}");
     }
@@ -246,9 +251,74 @@ fn a_tmp_path_is_judged_on_its_resolved_components() {
         "/",
         "/tmp/../etc/x",
         "/tmpx",
-        "/var/tmp",
         "/var",
+        "/var/tmpx",
+        "/dev",
+        "/dev/null",
+        "/dev/shmx",
     ] {
         assert!(!is_tmp_path(path), "{path}");
+    }
+}
+
+#[test]
+fn the_option_writers_are_denied_for_a_temp_target_and_allowed_for_other_targets() {
+    let denied = [
+        "git clone https://host/repo.git /tmp/repo",
+        "git clone --depth 1 -b main https://host/repo.git /tmp/repo",
+        "git -C /tmp clone https://host/repo.git",
+        "git clone --separate-git-dir /tmp/g https://host/repo.git repo",
+        "curl -o /tmp/x https://host/x",
+        "curl -sSo /tmp/x https://host/x",
+        "curl -o/tmp/x https://host/x",
+        "curl --output /tmp/x https://host/x",
+        "curl --output=/tmp/x https://host/x",
+        "curl --output-dir /tmp -O https://host/x",
+        "wget -O /tmp/x https://host/x",
+        "wget -O/tmp/x https://host/x",
+        "wget -P /tmp https://host/x",
+        "wget --output-document=/tmp/x https://host/x",
+        "wget --directory-prefix /tmp https://host/x",
+        "dd if=/dev/zero of=/tmp/x bs=1 count=1",
+        "ln -s ./target /tmp/link",
+        "ln -sf a b /tmp",
+        "rsync -a src/ /tmp/dest/",
+        "rsync -a --delete src /var/tmp/dest",
+        "tar -xzf a.tgz -C /tmp",
+        "tar xzf a.tgz -C /tmp",
+        "tar -xf a.tar --directory=/tmp",
+        "tar --extract --directory /tmp -f a.tar",
+        "touch /var/tmp/x",
+        "echo hi > /dev/shm/x",
+    ];
+    for command in denied {
+        let reason = bash(command).unwrap_or_else(|| panic!("allowed: {command}"));
+        assert!(reason.contains(RULE), "{command}: {reason}");
+    }
+    let allowed = [
+        "git clone https://host/repo.git",
+        "git clone https://host/repo.git ./repo",
+        "git clone --depth 1 https://host/tmp/repo.git repo",
+        "git -C /tmp status",
+        "git -C /tmp log",
+        "curl -o ./x https://host/tmp/x",
+        "curl -O https://host/x",
+        "curl https://host/x -H 'X: /tmp/y'",
+        "curl -d @/tmp/body https://host/x",
+        "wget -O ./x https://host/x",
+        "wget -qO- https://host/x",
+        "wget -P ./dir https://host/x",
+        "dd if=/tmp/x of=./y",
+        "ln -s /tmp/x ./link",
+        "rsync -a /tmp/src ./dest",
+        "rsync -a src host:/tmp/dest",
+        "tar -cf out.tar -C /tmp x",
+        "tar -czf out.tgz -C /tmp x",
+        "tar -tf /tmp/a.tar",
+        "tar -xzf /tmp/a.tgz -C ./dir",
+        "tar xzf /tmp/a.tgz",
+    ];
+    for command in allowed {
+        assert_eq!(bash(command), None, "denied: {command}");
     }
 }

@@ -1266,11 +1266,19 @@ No config setting is needed.
 
 The deny message is `Use "$TMPDIR" for scratch files. /tmp is not cleaned up.`, with the path that the call writes.
 
-The guard denies a write under `/tmp`, `/private/tmp`, `/var/folders`, or `/private/var/folders`:
+The guard denies a write under `/tmp`, `/private/tmp`, `/var/folders`, `/private/var/folders`, `/var/tmp`,
+`/private/var/tmp`, or `/dev/shm`.
+The guard denies:
 
 - A shell redirect (`>`, `>>`, `2>`, `&>`, `>|`) with a target there.
 - The `tee`, `touch`, `mkdir`, and `mktemp` commands, when any operand is there.
-- The `cp`, `mv`, and `install` commands, when the destination (the last operand, or the `-t` value) is there.
+- The `cp`, `mv`, `install`, `ln`, and `rsync` commands, when the destination (the last operand, or the `-t` value) is there.
+- The destination operand of a `git clone`, the `git -C` folder of a clone, and a `--separate-git-dir` folder.
+- The `curl` `-o`, `--output`, and `--output-dir` values.
+- The `wget` `-O`, `-P`, `--output-document`, and `--directory-prefix` values.
+- The `of=` operand of `dd`.
+- The `-C` or `--directory` folder of a `tar` that extracts.
+  A `tar` that creates an archive reads from that folder, so it is allowed.
 - A `Write`, `Edit`, `MultiEdit`, or `NotebookEdit` call with a path there.
 
 The guard reads a path as text, with `.` and `..` resolved.
