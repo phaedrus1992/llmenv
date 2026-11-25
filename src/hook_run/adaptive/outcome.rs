@@ -97,6 +97,18 @@ mod tests {
     }
 
     #[test]
+    fn merging_a_cut_set_marks_the_total_as_cut() {
+        let mut total = Outcome::default();
+        total.merge(Outcome {
+            cut: true,
+            ..Outcome::default()
+        });
+        assert!(total.cut && !total.complete());
+        total.merge(Outcome::default());
+        assert!(total.cut, "a later complete set does not clear the cut");
+    }
+
+    #[test]
     fn a_skipped_call_is_neither_a_failure_nor_a_record() {
         let skipped: anyhow::Result<Reply> = Err(recall_breaker::Skipped.into());
         let mut out = Outcome::default();

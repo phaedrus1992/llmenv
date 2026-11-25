@@ -352,6 +352,60 @@ async fn a_scope_run_past_its_deadline_makes_no_call_and_says_so() {
 }
 
 #[tokio::test]
+async fn a_scope_run_inside_its_deadline_is_complete_and_has_no_notice() {
+    let server = server_with(&[("llmenv-tag:a", "[context-p] fact")]).await;
+    let mut f = fixture(&server);
+    f.client = f
+        .client
+        .clone()
+        .with_recall_deadline(Some(Deadline::session_start()));
+    let mut budget = RecallBudget::new(RECALL_BUDGET_BYTES, std::collections::BTreeSet::new());
+    let (outcome, unrun) = run_scope(
+        &ctx(&f, &json!({"prompt": "hi"})),
+        vec![tag_action("a")],
+        &mut budget,
+    )
+    .await;
+    assert!(outcome.complete() && outcome.calls == 1, "{outcome:?}");
+    assert_eq!(unrun, None);
+}
+
+#[tokio::test]
+async fn a_failed_scope_call_inside_its_deadline_is_a_failure_and_not_a_cut() {
+    let server = failing_server().await;
+    let mut f = fixture(&server);
+    f.client = f
+        .client
+        .clone()
+        .with_recall_deadline(Some(Deadline::session_start()));
+    let mut budget = RecallBudget::new(RECALL_BUDGET_BYTES, std::collections::BTreeSet::new());
+    let (outcome, unrun) = run_scope(
+        &ctx(&f, &json!({"prompt": "hi"})),
+        vec![tag_action("a"), tag_action("b"), tag_action("c")],
+        &mut budget,
+    )
+    .await;
+    assert!(!outcome.cut && outcome.failed == 1, "{outcome:?}");
+    let notice = unrun.unwrap_or_default();
+    assert!(notice.contains("2 scope recall action(s)"), "{notice}");
+}
+
+#[tokio::test]
+async fn an_empty_scope_set_past_its_deadline_is_not_a_cut() {
+    let server = failing_server().await;
+    let mut f = fixture(&server);
+    f.client = f
+        .client
+        .clone()
+        .with_recall_deadline(Some(Deadline::expiring_in(Duration::ZERO)));
+    let mut budget = RecallBudget::new(RECALL_BUDGET_BYTES, std::collections::BTreeSet::new());
+    let (outcome, unrun) =
+        run_scope(&ctx(&f, &json!({"prompt": "hi"})), Vec::new(), &mut budget).await;
+    assert!(outcome.complete(), "{outcome:?}");
+    assert_eq!(unrun, None);
+}
+
+#[tokio::test]
 async fn a_scope_call_cut_by_the_budget_is_not_a_server_failure() {
     let server = MockServer::start().await;
     Mock::given(wiremock::matchers::any())

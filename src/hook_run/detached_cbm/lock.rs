@@ -194,6 +194,25 @@ mod tests {
     }
 
     #[test]
+    fn a_second_job_names_a_holder_that_ran_past_the_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let checkpoint = dir.path().join("cbm-index-hung.json");
+        std::fs::write(checkpoint.with_extension("lock"), "4242 1000").unwrap();
+        note_busy(&checkpoint, 1_800);
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(notices.contains("stop process 4242"), "{notices}");
+    }
+
+    #[test]
+    fn the_holder_text_is_read_from_the_lock_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("a.lock");
+        std::fs::write(&lock, "7 8").unwrap();
+        assert_eq!(read_holder(&lock).unwrap(), "7 8");
+        assert!(read_holder(&dir.path().join("missing.lock")).is_err());
+    }
+
+    #[test]
     fn two_projects_do_not_share_a_lock() {
         let dir = tempfile::tempdir().unwrap();
         let a = take(&dir.path().join("cbm-index-a.json")).unwrap();

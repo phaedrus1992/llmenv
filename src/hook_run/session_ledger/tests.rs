@@ -241,6 +241,27 @@ fn error_head_is_capped_on_a_char_boundary() {
 }
 
 #[test]
+fn a_pending_subagent_is_kept_through_its_last_second_and_a_future_one_is_dropped() {
+    let mut l = Ledger::default();
+    l.queue_subagent("u1", "Explore", "edge", 100);
+    assert!(
+        l.take_subagent("Explore", 100 + PENDING_TTL_SECS).is_some(),
+        "age at the limit"
+    );
+    l.queue_subagent("u2", "Explore", "old", 100);
+    assert!(
+        l.take_subagent("Explore", 100 + PENDING_TTL_SECS + 1)
+            .is_none(),
+        "one past"
+    );
+    l.queue_subagent("u3", "Explore", "future", 500);
+    assert!(
+        l.take_subagent("Explore", 499).is_none(),
+        "a time in the future"
+    );
+}
+
+#[test]
 fn subagent_queue_dedups_by_tool_use_id_and_takes_oldest_match() {
     let mut l = Ledger::default();
     l.queue_subagent("u1", "Explore", "find the parser", 100);

@@ -248,6 +248,20 @@ mod tests {
         assert!(!notices.contains(&own), "{notices}");
     }
 
+    /// A file that cannot be deleted for a reason other than being absent is noticed.
+    #[test]
+    fn a_file_that_cannot_be_deleted_is_noticed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.json");
+        std::fs::create_dir(&path).unwrap();
+        SessionCache::at(path.clone()).forget();
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(
+            notices.contains(&path.display().to_string()) && notices.contains("cannot be deleted"),
+            "{notices}"
+        );
+    }
+
     proptest::proptest! {
         /// Any id that is safe in a header comes back unchanged.
         #[test]
