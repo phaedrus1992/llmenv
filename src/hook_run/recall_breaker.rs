@@ -134,6 +134,11 @@ async fn run_guarded<F>(path: &Path, deadline: Option<Deadline>, call: F) -> any
 where
     F: Future<Output = anyhow::Result<Reply>>,
 {
+    // Slow calls before this one may have used the whole budget. This call then never reaches
+    // the server, so it moves neither the failure count nor the state file.
+    if let Some(cut) = deadline.and_then(Deadline::expired_cut) {
+        return Err(cut.into());
+    }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock is before the Unix epoch")?
@@ -302,6 +307,29 @@ mod tests {
             .err()
             .ok_or_else(|| anyhow::anyhow!("expected a skip"))?;
         assert!(err.is::<Skipped>(), "the breaker must be open: {err}");
+        Ok(())
+    }
+
+    // A call that starts after the shared deadline never reaches the server, so it is not a
+    // failed call.
+    #[tokio::test]
+    async fn a_call_that_starts_after_the_deadline_leaves_the_breaker_alone() -> anyhow::Result<()>
+    {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("b.json");
+        for _ in 0..FAILURE_THRESHOLD + 1 {
+            let expired = Deadline::expiring_in(Duration::ZERO);
+            let mut ran = false;
+            let cut = run_guarded(&path, Some(expired), async {
+                ran = true;
+                Ok(Reply::Text(String::new()))
+            })
+            .await;
+            let err = cut.err().ok_or_else(|| anyhow::anyhow!("expected a cut"))?;
+            assert!(err.is::<crate::hook_run::recall_deadline::Cut>(), "{err}");
+            assert!(!ran, "an expired call must not run");
+        }
+        assert!(!path.exists(), "the state file must stay untouched");
         Ok(())
     }
 

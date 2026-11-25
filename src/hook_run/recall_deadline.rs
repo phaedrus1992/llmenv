@@ -79,6 +79,12 @@ impl Deadline {
         Instant::now() >= self.at
     }
 
+    /// The cut error when the deadline passed before the call began. Such a call never
+    /// reaches the server, so it says nothing about the server.
+    pub(crate) fn expired_cut(self) -> Option<Cut> {
+        self.has_passed().then(|| self.cut())
+    }
+
     /// The notice for a recall that the budget cut off.
     pub(crate) fn cut_notice(self) -> String {
         format!(
