@@ -678,9 +678,9 @@ When the budget is already full before the first recall, no recall runs for that
 When the first recalls take more than 1.5 seconds, the fanouts do not run, and the llmenv log records the skip.
 
 (added in v3.14.2) The recall calls of one hook run share a time budget.
-A session start has 5 seconds, and a prompt has 3 seconds.
+A session start has 5 seconds, and a prompt and a subagent start have 3 seconds each.
 A call that runs past the budget is cut, and the agent gets a notice that names the budget.
-A slow memory server therefore cannot hold a prompt for longer than the budget.
+A slow memory server therefore cannot hold a prompt or a subagent start for longer than the budget.
 The recall circuit breaker counts a cut call as a failed call.
 After three failed recall calls in a row, the breaker skips recall for five minutes and prints one notice.
 The budgets are fixed, and no config key sets them.

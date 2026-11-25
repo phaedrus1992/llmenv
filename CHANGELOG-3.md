@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - Regenerate the attribution files during a forward-merge, so the cascade no longer halts on `THIRD-PARTY-LICENSES.md` and `website/docs/third-party-licenses.md`. [fix:ci] [#2972]
 - Share a five-second budget across the recall calls of a session start. A call past the budget is cut, and the agent is told. The `config-context` cost is tracked in #4018. [fix:hook] [#3899]
-- Share a three-second budget across the recall calls of a prompt, so a slow memory server cannot hold a prompt longer, and count a call that a budget cuts off as a failed call, so a server that is always too slow opens the recall breaker. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp). [fix:hook] [#4023] [#4022]
+- Share a three-second budget across the recall calls of a prompt and of a subagent start, so a slow memory server cannot hold either longer, and count a call that a budget cuts off as a failed call, so a server that is always too slow opens the recall breaker. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp). [fix:hook] [#4023] [#4022]
 - Match an opencode `Notification` hook's `matcher` against the `permission_prompt` type. A `matcher` on an event that passes no tool name is rejected when the opencode config is generated. [fix:opencode] [#3003]
 
 ## [3.14.1] - 2026-11-20
