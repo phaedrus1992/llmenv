@@ -223,12 +223,13 @@ fn read_credentials_file(config_dir: &Path) -> anyhow::Result<Option<Credentials
     match serde_json::from_slice::<serde_json::Value>(&bytes) {
         Ok(value) => Ok(Credentials::from_json(value)),
         Err(e) => {
-            tracing::debug!(
-                "{} is not valid JSON (line {}, column {})",
+            cache::report_ignored(&format!(
+                "{} is not valid JSON (line {}, column {}), so it is ignored. Fix: run `llmenv \
+                 login`.",
                 path.display(),
                 e.line(),
                 e.column()
-            );
+            ));
             Ok(None)
         }
     }
@@ -571,6 +572,11 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        // #3904: the person is told which file was ignored.
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        let file = folder.path().join(CREDENTIALS_FILE).display().to_string();
+        assert!(notices.contains(&file), "{notices}");
+        assert!(notices.contains("llmenv login"), "{notices}");
     }
 
     // Not run on macOS: there `forget` invokes `security`, which would reach the
