@@ -105,6 +105,14 @@ pub(super) fn judge_entry(
     }
 }
 
+/// The age of one entry by the rule of the sweep, so a dry run can print it (#4046). `None`
+/// when the entry cannot be read, or when its time is in the future.
+pub fn entry_age(path: &Path, source: AgeSource, now: SystemTime) -> Option<std::time::Duration> {
+    let is_dir = std::fs::symlink_metadata(path).ok()?.is_dir();
+    let modified = entry_mtime(path, is_dir, source).ok()?;
+    now.duration_since(modified).ok()
+}
+
 /// The newest file mtime of an entry. A symlink is judged by its own mtime and never followed.
 fn entry_mtime(path: &Path, is_dir: bool, source: AgeSource) -> anyhow::Result<SystemTime> {
     if is_dir {

@@ -157,3 +157,30 @@ fn a_bad_older_than_value_removes_nothing() {
     assert!(stderr.contains("--older-than"), "{stderr}");
     assert!(f.orphan_stage.exists() && f.tmp_file.exists());
 }
+
+#[test]
+fn a_bad_tmp_older_than_value_removes_nothing() {
+    let f = fixture();
+    let (ok, stderr) = run(f.dir.path(), &["clean", "--tmp-older-than", "2dayz"]);
+    assert!(!ok, "clean accepted a bad duration");
+    assert!(stderr.contains("--tmp-older-than"), "{stderr}");
+    assert!(f.orphan_stage.exists() && f.tmp_file.exists());
+}
+
+#[test]
+fn a_dry_run_with_tmp_older_than_lists_each_tmp_entry_with_its_age() {
+    let f = fixture();
+    let (ok, stderr) = run(
+        f.dir.path(),
+        &["clean", "--dry-run", "--tmp-older-than", "0s"],
+    );
+    assert!(ok, "clean --dry-run failed: {stderr}");
+    let name = f.tmp_file.file_name().expect("file name").to_string_lossy();
+    assert!(
+        stderr.lines().any(|l| l.contains("would remove")
+            && l.contains(name.as_ref())
+            && l.contains("(age ")),
+        "no aged line for the tmp file: {stderr}"
+    );
+    assert!(f.tmp_file.exists(), "a dry run removed the tmp file");
+}

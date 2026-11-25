@@ -10,6 +10,7 @@ mod remove;
 mod summary;
 pub use remove::sweep;
 mod walk;
+pub use walk::entry_age;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]

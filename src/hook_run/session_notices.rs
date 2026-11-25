@@ -44,11 +44,8 @@ pub(super) fn session_start_notices(
         (h, r) => h.or(r),
     };
     let t_stale = std::time::Instant::now();
-    let hint = match (
-        config.cache.cache_retention_hours,
-        crate::paths::state_dir(),
-    ) {
-        // `null` turns age-based GC off, so no entry is stale (#2829).
+    let hint = match (config.cache.tmp_retention_hours, crate::paths::state_dir()) {
+        // `null` turns the state/tmp sweep off, so no entry is stale (#2829, #4046).
         (None, _) => None,
         (Some(hours), Ok(state_dir)) => stale_tmp_hint(
             &state_dir,
@@ -62,7 +59,7 @@ pub(super) fn session_start_notices(
             "run `llmenv doctor` to check the state directory",
         )),
     };
-    if config.cache.cache_retention_hours.is_some() {
+    if config.cache.tmp_retention_hours.is_some() {
         phases.stale_hint = Some(t_stale.elapsed());
     }
     let result = match (base, hint) {

@@ -3,10 +3,14 @@ use std::time::{Duration, SystemTime};
 
 use super::cache_sweep::{sweep_cache, sweep_cache_root};
 use super::state_gate::state_may_have_stale_entries;
-use super::{Cutoff, GcOutput, sweep_cbm_indexes, sweep_state, sweep_state_tmp};
+use super::{Cutoff, GcOutput, Retention, sweep_cbm_indexes, sweep_state, sweep_state_tmp};
 use crate::config::Config;
 
 const DAY: Duration = Duration::from_secs(86_400);
+const WEEK: Retention = Retention {
+    general: Some(Duration::from_secs(7 * 86_400)),
+    tmp: Some(Duration::from_secs(7 * 86_400)),
+};
 const OUT: GcOutput<'static> = GcOutput {
     pass: "ok",
     warn: "warn",
@@ -101,7 +105,7 @@ fn the_state_sweep_keeps_a_rotation_restored_with_an_old_mtime() {
     sweep_state(
         state.path(),
         &Config::default(),
-        DAY * 7,
+        WEEK,
         SystemTime::now(),
         OUT,
     );
@@ -119,7 +123,7 @@ fn the_state_sweep_removes_a_rotation_old_by_mtime_and_change_time() {
     std::fs::write(&rotated, b"{}").unwrap();
     let later = SystemTime::now() + 30 * DAY;
 
-    sweep_state(state.path(), &Config::default(), DAY * 7, later, OUT);
+    sweep_state(state.path(), &Config::default(), WEEK, later, OUT);
 
     assert!(!rotated.exists(), "an old rotation was kept");
 }
@@ -145,7 +149,8 @@ fn a_later_clock_is_one_verdict_for_the_gate_and_every_state_sweep() {
     assert!(
         state_may_have_stale_entries(
             state.path(),
-            cutoff,
+            Some(cutoff),
+            Some(cutoff),
             false,
             crate::materialize::cache::AgeSource::MtimeOrCtime,
         ),
@@ -178,7 +183,7 @@ fn a_dry_run_of_the_state_sweep_keeps_an_old_rotation() {
     sweep_state(
         state.path(),
         &Config::default(),
-        DAY * 7,
+        WEEK,
         SystemTime::now(),
         preview,
     );
@@ -192,7 +197,7 @@ fn the_state_sweep_with_no_tmp_folder_and_no_log_changes_nothing() {
     sweep_state(
         state.path(),
         &Config::default(),
-        DAY * 7,
+        WEEK,
         SystemTime::now(),
         OUT,
     );

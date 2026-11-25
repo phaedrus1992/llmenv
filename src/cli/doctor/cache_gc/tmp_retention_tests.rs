@@ -1,0 +1,156 @@
+//! The age of `state/tmp` is its own setting, apart from `cache_retention_hours` (#4046).
+
+use std::fs::File;
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
+
+use super::{GcOutput, Retention, sweep_state};
+use crate::config::Config;
+
+const DAY: Duration = Duration::from_secs(86_400);
+const OUT: GcOutput<'static> = GcOutput {
+    pass: "ok",
+    warn: "warn",
+    dry_run: false,
+};
+
+/// Two `state/tmp` entries, judged at a clock 8 days ahead. The sweep keeps an entry whose mtime
+/// or change time is new, and a test cannot set a change time, so the later clock stands for it:
+/// the change time of both entries is 8 days old, and the mtime decides.
+struct Tmp {
+    state: tempfile::TempDir,
+    /// Not changed for 3 days.
+    recent: PathBuf,
+    /// Not changed for 9 days.
+    old: PathBuf,
+    later: SystemTime,
+}
+
+fn tmp_fixture() -> Tmp {
+    let state = tempfile::tempdir().unwrap();
+    let tmp = state.path().join("tmp");
+    std::fs::create_dir(&tmp).unwrap();
+    let later = SystemTime::now() + 8 * DAY;
+    let make = |name: &str, idle: Duration| {
+        let path = tmp.join(name);
+        std::fs::write(&path, b"x").unwrap();
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(later - idle)
+            .unwrap();
+        path
+    };
+    let recent = make("recent", 3 * DAY);
+    let old = make("old", 9 * DAY);
+    Tmp {
+        state,
+        recent,
+        old,
+        later,
+    }
+}
+
+fn sweep(t: &Tmp, retention: Retention, out: GcOutput<'_>) {
+    assert_eq!(
+        sweep_state(t.state.path(), &Config::default(), retention, t.later, out),
+        0
+    );
+}
+
+#[test]
+fn the_default_keeps_a_tmp_entry_for_seven_days() {
+    let t = tmp_fixture();
+    let retention = Retention::resolve(&Config::default(), None);
+    assert_eq!(retention.tmp, Some(7 * DAY));
+
+    sweep(&t, retention, OUT);
+
+    assert!(t.recent.exists(), "a 3-day entry was removed");
+    assert!(!t.old.exists(), "a 9-day entry was kept");
+}
+
+#[test]
+fn the_config_setting_sets_the_age_of_state_tmp() {
+    let t = tmp_fixture();
+    let mut config = Config::default();
+    config.cache.tmp_retention_hours = Some(48);
+
+    sweep(&t, Retention::resolve(&config, None), OUT);
+
+    assert!(!t.recent.exists(), "a 3-day entry survived a 48-hour age");
+    assert!(!t.old.exists());
+}
+
+#[test]
+fn the_flag_replaces_the_config_setting_for_state_tmp_only() {
+    let mut config = Config::default();
+    config.cache.tmp_retention_hours = Some(24 * 30);
+    config.cache.cache_retention_hours = Some(24 * 14);
+
+    let retention = Retention::resolve(&config, Some(2 * DAY));
+
+    assert_eq!(retention.tmp, Some(2 * DAY));
+    assert_eq!(retention.general, Some(14 * DAY));
+    let t = tmp_fixture();
+    sweep(&t, retention, OUT);
+    assert!(!t.recent.exists(), "--tmp-older-than 2d kept a 3-day entry");
+}
+
+#[test]
+fn the_cache_retention_does_not_change_how_long_state_tmp_is_kept() {
+    let t = tmp_fixture();
+    let mut config = Config::default();
+    config.cache.cache_retention_hours = Some(1);
+
+    sweep(&t, Retention::resolve(&config, None), OUT);
+
+    assert!(t.recent.exists(), "cache_retention_hours reached state/tmp");
+    assert!(!t.old.exists());
+}
+
+#[test]
+fn a_null_cache_retention_still_sweeps_state_tmp() {
+    let t = tmp_fixture();
+    let mut config = Config::default();
+    config.cache.cache_retention_hours = None;
+
+    let retention = Retention::resolve(&config, None);
+    assert_eq!(retention.general, None);
+    sweep(&t, retention, OUT);
+
+    assert!(
+        !t.old.exists(),
+        "a null cache_retention_hours stopped the tmp sweep"
+    );
+}
+
+#[test]
+fn a_null_tmp_retention_keeps_every_entry() {
+    let t = tmp_fixture();
+    let mut config = Config::default();
+    config.cache.tmp_retention_hours = None;
+
+    let retention = Retention::resolve(&config, None);
+    assert_eq!(retention.tmp, None);
+    sweep(&t, retention, OUT);
+
+    assert!(t.old.exists() && t.recent.exists());
+}
+
+#[test]
+fn a_dry_run_removes_nothing() {
+    let t = tmp_fixture();
+    let preview = GcOutput {
+        dry_run: true,
+        ..OUT
+    };
+
+    sweep(&t, Retention::resolve(&Config::default(), None), preview);
+
+    assert!(
+        t.old.exists() && t.recent.exists(),
+        "a dry run removed an entry"
+    );
+}

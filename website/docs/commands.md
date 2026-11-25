@@ -432,6 +432,8 @@ It replaces `llmenv prune` and `llmenv doctor --gc`, which are deprecated (see [
    With no flag, these are the folders from previous binary versions and orphaned `*.tmp` staging folders.
 2. It runs the age-based sweeps, with the window set by `cache_retention_hours` (see [Configuration](configuration.md)).
    A `null` value turns these sweeps off.
+   (added in v3.14.2) The sweep of `state/tmp` has its own window, `tmp_retention_hours` (default 168).
+   A `null` value turns off that sweep only.
 
 The age-based sweeps remove:
 
@@ -444,6 +446,7 @@ The age-based sweeps remove:
 - If `cache_dir` is itself a symlink, `clean` skips the cache sweep and names the real folder to set (added in v3.14.0).
   It does not follow the link, so it never removes entries under a link target.
 - Old entries in the state temp folder, `state/tmp`, which `TMPDIR` points at.
+  (changed in v3.14.2) An entry is old after `tmp_retention_hours`, not after `cache_retention_hours`.
   An entry that a process holds open is kept.
   (changed in v3.14.0) An entry's age comes from the newest file in it, not from folder mtimes.
   A file's age is the later of its mtime and its change time.
@@ -468,11 +471,17 @@ Flags:
   Examples: `14d`, `1w`, `90 days`, `1h30m`.
   (changed in v3.14.0) A month or a year has no fixed length, so `1mo` and `1y` are refused.
   Use weeks or days, such as `52w`.
-  The age-based sweeps still use `cache_retention_hours`.
+  The other age-based sweeps still use `cache_retention_hours`.
   `--all` and `--older-than` cannot be used together.
+  A bad value stops the command before anything is removed.
+- `--tmp-older-than DUR` — (added in v3.14.2) remove `state/tmp` entries older than `DUR`.
+  It replaces `tmp_retention_hours` for this run.
+  It takes the same forms as `--older-than`, such as `2d` or `12h`.
+  It does not change the cache-folder step or the other sweeps.
   A bad value stops the command before anything is removed.
 - `--dry-run` — list every item that a real run tries to remove, and remove nothing.
   This covers the cache folders and every age-based sweep.
+  (added in v3.14.2) Each `state/tmp` line ends with the age of the entry, such as `(age 9d 2h)`.
   A real run can still fail on an item that the dry run lists, for example a folder without write access.
 - `--plugin-cache` — also remove the shared plugin cache folder of each adapter.
   A folder that does not exist is not listed.

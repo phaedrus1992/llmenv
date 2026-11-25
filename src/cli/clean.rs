@@ -23,9 +23,13 @@ pub(super) struct CleanArgs {
     #[arg(long, conflicts_with = "older_than")]
     all: bool,
     /// In the cache-folder step, remove ONLY current-version cache folders older than this
-    /// duration (e.g., "14d", "1w"). The age-based sweeps always use cache_retention_hours
+    /// duration (e.g., "14d", "1w"). The other age-based sweeps use cache_retention_hours
     #[arg(long)]
     older_than: Option<String>,
+    /// Remove state/tmp entries older than this duration (e.g., "2d", "12h"), in place of
+    /// cache.tmp_retention_hours for this run
+    #[arg(long)]
+    tmp_older_than: Option<String>,
     /// List every item that a real run tries to remove, and remove nothing
     #[arg(long)]
     dry_run: bool,
@@ -42,6 +46,12 @@ pub(super) struct CleanArgs {
 /// sweeps still run after a cache-folder failure, and the cache-folder error comes first.
 pub(super) fn run_clean(args: &CleanArgs, use_color: bool) -> anyhow::Result<()> {
     let mode = prune_mode(args)?;
+    let tmp_older_than = args
+        .tmp_older_than
+        .as_deref()
+        .map(crate::util::time::parse_age)
+        .transpose()
+        .context("invalid --tmp-older-than")?;
     let config = Config::load(&paths::config_path()?)?;
     let cache_dir = PathBuf::from(paths::expand_tilde(&config.cache.cache_dir)?);
     let pruned = run_prune(args, mode, &config, &cache_dir);
@@ -54,7 +64,7 @@ pub(super) fn run_clean(args: &CleanArgs, use_color: bool) -> anyhow::Result<()>
         warn: &warn,
         dry_run: args.dry_run,
     };
-    let sweep_failures = cache_gc::run(&cache_dir, &config, out);
+    let sweep_failures = cache_gc::run(&cache_dir, &config, out, tmp_older_than);
     pruned?;
     // #1346: a cleanup that could not finish is not a success, even though each failure was
     // printed above. A script that sees exit 0 moves on with the files still there.
