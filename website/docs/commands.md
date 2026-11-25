@@ -1263,6 +1263,9 @@ Nothing cleans `/tmp`, so a scratch file written there stays for good.
 The auto-registered `PreToolUse` hook runs this command in every session.
 It covers the `Bash`, `Monitor`, `Write`, `Edit`, `MultiEdit`, and `NotebookEdit` tools.
 No config setting is needed.
+Claude Code, opencode, and Crush run it.
+The command takes `--engine`, and for Crush it reads the lower-case tool names (`bash`, `write`, `edit`, `multiedit`).
+On opencode, the hook is a gate: a run that cannot start, or that times out, blocks the call.
 
 The deny message is `Use "$TMPDIR" for scratch files. /tmp is not cleaned up.`, with the path that the call writes.
 
@@ -1290,7 +1293,6 @@ A call that cannot be checked is denied, with the cause in the message.
 These are a missing tool name, shell command, or file path.
 They are also a command nested too deeply, and a payload that is not JSON.
 The command always exits 0, and the deny is the JSON on stdout.
-Claude Code is the only engine that runs the guard so far (opencode and Crush: #4052).
 
 ## `throttle`
 

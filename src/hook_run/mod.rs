@@ -24,7 +24,7 @@ pub(crate) mod checkpoint;
 pub(crate) mod detached_cbm;
 pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
-mod engine_rules;
+pub(crate) mod engine_rules;
 mod event;
 mod memory_call;
 mod memory_endpoint;

@@ -111,10 +111,10 @@ fn the_plugin_runs_hooks_as_opencode_would() {
     ];
     let mut table = hook_table(&hooks, &[], &["codebase-memory-mcp"]).unwrap();
     // Keep only the test hooks: the built-in hooks call an installed `llmenv`.
-    table["hooks"]
-        .as_array_mut()
-        .unwrap()
-        .retain(|h| !h["command"].as_str().unwrap().starts_with("llmenv "));
+    table["hooks"].as_array_mut().unwrap().retain(|h| {
+        let command = h["command"].as_str().unwrap();
+        !command.starts_with("llmenv ") && !command.contains(" tmp-guard ")
+    });
     let plugin = write_plugin(dir.path(), &table);
     let out = run_node(DRIVER, &[&plugin, dir.path()]);
 

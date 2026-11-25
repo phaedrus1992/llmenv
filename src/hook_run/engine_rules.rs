@@ -5,7 +5,7 @@
 use serde_json::Value;
 
 /// Applies the payload rules for `engine`. Only Crush needs one: its tool names differ.
-pub(super) fn neutralize_for_engine(engine: &str, payload: Option<&mut Value>) {
+pub(crate) fn neutralize_for_engine(engine: &str, payload: Option<&mut Value>) {
     if let Some(payload) = payload.filter(|_| engine == "crush") {
         neutralize_crush_tool_name(payload);
     }
