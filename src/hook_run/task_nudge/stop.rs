@@ -7,7 +7,7 @@ use super::{
 };
 use crate::config::TaskTracker;
 use crate::hook_run::session_state::lock_state_file;
-use crate::task::Tracking;
+use crate::task::{Tracking, TurnEnd};
 
 /// Turn ends between two Stop reminders for a task in progress with tasks queued behind it. Absent
 /// means 5, so a long run is reminded once every five turn ends (#3318).
@@ -75,9 +75,7 @@ pub(crate) fn handle_stop(
     if !tracker.nudges {
         return String::new();
     }
-    let asks = payload["last_assistant_message"]
-        .as_str()
-        .is_some_and(|m| m.trim_end().ends_with('?'));
+    let asks = TurnEnd::of(payload["last_assistant_message"].as_str()) == TurnEnd::Question;
     let tracking = crate::task::tracking_in(stored, caller);
     let stalled = matches!(
         &tracking,
