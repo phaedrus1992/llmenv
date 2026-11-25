@@ -13,6 +13,14 @@ mod cut;
 
 pub(crate) use cut::Cut;
 
+/// The budget of a session start. A healthy local server answers in milliseconds, so a few
+/// seconds covers a slow server. The value is fixed until a config key sets it (#4038).
+const DEFAULT_SESSION_START_BUDGET: Duration = Duration::from_secs(5);
+
+/// The budget of a prompt and of a subagent start. The agent waits for these hooks, so the bound is
+/// shorter than the session start one. The value is fixed until a config key sets it (#4038).
+const DEFAULT_WAITING_BUDGET: Duration = Duration::from_secs(3);
+
 /// A hook flow that bounds the wall time of its recall calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Flow {
@@ -31,15 +39,10 @@ impl Flow {
     }
 
     /// The total wall time that the recall calls of one run of the flow may take.
-    /// A healthy local server answers in milliseconds, so a few seconds covers a slow server.
-    /// The values are fixed for now, because no config key exists for them yet.
     fn budget(self) -> Duration {
         match self {
-            Self::SessionStart => Duration::from_secs(5),
-            // The prompt waits for this hook, so its bound is shorter than the session start one.
-            Self::TurnStart => Duration::from_secs(3),
-            // The subagent waits for this hook before it starts, as a prompt does.
-            Self::SubagentStart => Duration::from_secs(3),
+            Self::SessionStart => DEFAULT_SESSION_START_BUDGET,
+            Self::TurnStart | Self::SubagentStart => DEFAULT_WAITING_BUDGET,
         }
     }
 }
