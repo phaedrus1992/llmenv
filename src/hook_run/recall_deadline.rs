@@ -24,25 +24,25 @@ const DEFAULT_WAITING_BUDGET: Duration = Duration::from_secs(3);
 /// A hook flow that bounds the wall time of its recall calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Flow {
-    SessionStart,
-    TurnStart,
-    SubagentStart,
+    Session,
+    Turn,
+    Subagent,
 }
 
 impl Flow {
     fn name(self) -> &'static str {
         match self {
-            Self::SessionStart => "session start",
-            Self::TurnStart => "turn start",
-            Self::SubagentStart => "subagent start",
+            Self::Session => "session start",
+            Self::Turn => "turn start",
+            Self::Subagent => "subagent start",
         }
     }
 
     /// The total wall time that the recall calls of one run of the flow may take.
     fn budget(self) -> Duration {
         match self {
-            Self::SessionStart => DEFAULT_SESSION_START_BUDGET,
-            Self::TurnStart | Self::SubagentStart => DEFAULT_WAITING_BUDGET,
+            Self::Session => DEFAULT_SESSION_START_BUDGET,
+            Self::Turn | Self::Subagent => DEFAULT_WAITING_BUDGET,
         }
     }
 }
@@ -57,17 +57,17 @@ pub(crate) struct Deadline {
 impl Deadline {
     /// The deadline for a session start that begins now.
     pub(crate) fn session_start() -> Self {
-        Self::new(Flow::SessionStart)
+        Self::new(Flow::Session)
     }
 
     /// The deadline for a prompt that begins now.
     pub(crate) fn turn_start() -> Self {
-        Self::new(Flow::TurnStart)
+        Self::new(Flow::Turn)
     }
 
     /// The deadline for a subagent start that begins now.
     pub(crate) fn subagent_start() -> Self {
-        Self::new(Flow::SubagentStart)
+        Self::new(Flow::Subagent)
     }
 
     fn new(flow: Flow) -> Self {
@@ -103,7 +103,7 @@ impl Deadline {
     pub(crate) fn expiring_in(wait: Duration) -> Self {
         Self {
             at: Instant::now() + wait,
-            flow: Flow::SessionStart,
+            flow: Flow::Session,
         }
     }
 
@@ -138,7 +138,7 @@ mod tests {
     async fn a_call_that_misses_the_deadline_fails_with_the_budget_error() -> anyhow::Result<()> {
         let deadline = Deadline {
             at: Instant::now() + Duration::from_millis(20),
-            flow: Flow::SessionStart,
+            flow: Flow::Session,
         };
         let slow = async {
             tokio::time::sleep(Duration::from_secs(2)).await;
@@ -226,7 +226,7 @@ mod tests {
         };
         let past = Deadline {
             at: earlier,
-            flow: Flow::TurnStart,
+            flow: Flow::Turn,
         };
         assert!(past.has_passed());
     }
