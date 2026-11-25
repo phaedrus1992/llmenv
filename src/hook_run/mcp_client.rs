@@ -190,11 +190,10 @@ impl McpHttpClient {
 
         // The `initialize` reply body is the only source of `init_info`, so a saved id serves
         // only a caller that does not read it.
-        if !capture_info {
-            if let Some(sid) = self.session_cache.as_ref().and_then(SessionCache::load) {
-                *cached = Some(sid.clone());
-                return Ok(Some(sid));
-            }
+        if !capture_info && let Some(sid) = self.session_cache.as_ref().and_then(SessionCache::load)
+        {
+            *cached = Some(sid.clone());
+            return Ok(Some(sid));
         }
         let sid = self.negotiate_session(capture_info).await?;
         *cached = sid.clone();
@@ -210,6 +209,15 @@ impl McpHttpClient {
         *self.session_id.lock().await = None;
         if let Some(cache) = &self.session_cache {
             cache.forget();
+        }
+    }
+
+    /// Forgets the session id that the server rejected, in this process and in the shared file.
+    /// A newer id that another process saved stays in the file.
+    async fn drop_rejected(&self) {
+        let rejected = self.session_id.lock().await.take();
+        if let (Some(cache), Some(id)) = (&self.session_cache, rejected) {
+            cache.forget_if(&id);
         }
     }
 
@@ -250,7 +258,7 @@ impl McpHttpClient {
             let body = match self.post_rpc("tools/list", &params, "tools/list").await {
                 Ok(body) => body,
                 Err(CallToolError::StaleSession(first_err)) => {
-                    self.drop_session().await;
+                    self.drop_rejected().await;
                     self.post_rpc("tools/list", &params, "tools/list")
                         .await
                         .map_err(anyhow::Error::from)
@@ -297,7 +305,7 @@ impl McpHttpClient {
                     tool = %name,
                     "cached MCP session rejected, re-initializing and retrying once"
                 );
-                self.drop_session().await;
+                self.drop_rejected().await;
                 self.try_call_tool(name, &arguments)
                     .await
                     .map_err(anyhow::Error::from)

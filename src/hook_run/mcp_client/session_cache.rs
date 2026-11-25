@@ -4,15 +4,24 @@
 //! `initialize` round trip before its first call. A file in the state folder hands the id to the
 //! next process. The server stays the judge of the id: a rejected id is forgotten, and the call
 //! retries once with a new one.
+//!
+//! The file name holds a hash of the URL and nothing else, so the URL is the whole identity of
+//! the cache. A client that sends per-identity headers MUST NOT use it. No hook client sets
+//! headers.
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 /// How long a saved id is trusted. The server expires its session on its own clock, and a
 /// rejected id costs one extra request, so a short window keeps that cost rare.
 const TTL_SECS: u64 = 600;
+
+/// The longest id that is trusted. A real id is a UUID or a short token, and the id goes into a
+/// request header, so an oversized value is a corrupt file.
+const MAX_ID_BYTES: usize = 256;
 
 /// The file of one memory server's session id.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +42,11 @@ fn now_unix() -> Option<u64> {
         .map(|d| d.as_secs())
 }
 
+/// True for an id that is safe in a request header: visible ASCII, not empty, and short.
+fn is_valid_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= MAX_ID_BYTES && id.bytes().all(|b| b.is_ascii_graphic())
+}
+
 impl SessionCache {
     /// The cache of the server at `url`, in the state folder. The file name holds a hash of the
     /// URL, so a credential in the URL never reaches a file name. `None` when the state folder
@@ -44,7 +58,11 @@ impl SessionCache {
                 crate::hook_run::record_hash::hash_prefix(url.as_bytes())
             )))),
             Err(e) => {
-                tracing::warn!("the MCP session id is not shared between hooks: {e:#}");
+                crate::agent_notice::record_logged(format!(
+                    "llmenv: the MCP session id is not shared between hooks, because the state \
+                     folder cannot be resolved: {e:#}. Fix: set HOME, or set LLMENV_STATE_DIR to \
+                     a valid absolute path."
+                ));
                 None
             }
         }
@@ -54,65 +72,89 @@ impl SessionCache {
         Self { path }
     }
 
-    /// The saved id, or `None` when no file exists, the file is unreadable, or the id is older
-    /// than the window. A file that cannot be used is logged, and the caller negotiates a new
-    /// session.
-    pub(crate) fn load(&self) -> Option<String> {
+    /// Tells the agent about a file problem that makes every hook pay the `initialize` round
+    /// trip, with the fix.
+    fn notice(&self, what: &str, error: &dyn std::fmt::Display) {
+        crate::agent_notice::record_logged(format!(
+            "llmenv: the shared MCP session file {} {what}: {error}. Hooks open their own \
+             session until this is fixed. Fix: run `llmenv doctor` to check the state folder.",
+            self.path.display()
+        ));
+    }
+
+    /// The saved record, or `None` when no file exists or the file cannot be used. A file that
+    /// cannot be read is noticed. A file that does not parse is only logged, because the next
+    /// save replaces it.
+    fn read(&self) -> Option<Saved> {
         let bytes = match std::fs::read(&self.path) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
             Err(e) => {
-                tracing::warn!("cannot read {}: {e}", self.path.display());
+                self.notice("cannot be read", &e);
                 return None;
             }
         };
-        let saved: Saved = match serde_json::from_slice(&bytes) {
-            Ok(saved) => saved,
-            Err(e) => {
-                tracing::warn!("{} is not a saved MCP session: {e}", self.path.display());
-                return None;
-            }
-        };
-        let age = now_unix()?.saturating_sub(saved.saved_at_unix);
-        // A saved time in the future gives age 0, so a bad clock cannot extend the window by
-        // more than the skew itself. The server rejects a dead id either way.
-        (age <= TTL_SECS && !saved.session_id.is_empty()).then_some(saved.session_id)
+        serde_json::from_slice(&bytes)
+            .inspect_err(|e| {
+                tracing::warn!("{} is not a saved MCP session: {e}", self.path.display())
+            })
+            .ok()
     }
 
-    /// Saves `session_id`. A failed write is logged. The next process then negotiates its own
+    /// The saved id, or `None` when none is saved, the id is older than the window, or the id is
+    /// not safe in a header.
+    pub(crate) fn load(&self) -> Option<String> {
+        let saved = self.read()?;
+        let Some(now) = now_unix() else {
+            self.notice(
+                "cannot be aged",
+                &"the system clock is before the Unix epoch",
+            );
+            return None;
+        };
+        // A saved time in the future gives age 0, so a bad clock cannot extend the window by
+        // more than the skew itself. The server rejects a dead id either way.
+        let age = now.saturating_sub(saved.saved_at_unix);
+        (age <= TTL_SECS && is_valid_id(&saved.session_id)).then_some(saved.session_id)
+    }
+
+    /// Saves `session_id`. A failed write is noticed, and the next process negotiates its own
     /// session, which is the cost without the cache.
     pub(crate) fn save(&self, session_id: &str) {
-        let Some(now) = now_unix() else {
-            tracing::warn!("the system clock is before the Unix epoch, so no session id is saved");
-            return;
-        };
-        let saved = Saved {
-            session_id: session_id.to_string(),
-            saved_at_unix: now,
-        };
-        let bytes = match serde_json::to_vec(&saved) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                tracing::warn!("cannot encode the MCP session id: {e}");
-                return;
-            }
-        };
-        // Unsynced: a power loss leaves a file that `load` reads as missing, and the cost is one
-        // `initialize` round trip.
-        if let Err(e) = llmenv_paths::write_owner_only_atomic_unsynced(&self.path, &bytes) {
-            tracing::warn!(
-                "cannot save the MCP session id to {}: {e}",
-                self.path.display()
-            );
+        if let Err(e) = self.try_save(session_id) {
+            self.notice("was not saved", &format!("{e:#}"));
         }
     }
 
-    /// Deletes the saved id. The server rejected it, so no later process may reuse it.
+    fn try_save(&self, session_id: &str) -> anyhow::Result<()> {
+        let saved_at_unix = now_unix().context("the system clock is before the Unix epoch")?;
+        let saved = Saved {
+            session_id: session_id.to_string(),
+            saved_at_unix,
+        };
+        let bytes = serde_json::to_vec(&saved).context("cannot encode the session id")?;
+        // Unsynced: a power loss leaves a file that `load` reads as missing, and the cost is one
+        // `initialize` round trip.
+        llmenv_paths::write_owner_only_atomic_unsynced(&self.path, &bytes)
+            .context("cannot write the file")
+    }
+
+    /// Deletes the saved id when it is `rejected`. A newer id that another process saved stays.
+    pub(crate) fn forget_if(&self, rejected: &str) {
+        if self
+            .read()
+            .is_some_and(|saved| saved.session_id == rejected)
+        {
+            self.forget();
+        }
+    }
+
+    /// Deletes the saved id, whatever it is.
     pub(crate) fn forget(&self) {
         match std::fs::remove_file(&self.path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => tracing::warn!("cannot delete {}: {e}", self.path.display()),
+            Err(e) => self.notice("cannot be deleted", &e),
         }
     }
 }
@@ -151,12 +193,27 @@ mod tests {
     }
 
     #[test]
-    fn a_corrupt_file_and_an_empty_id_load_as_missing() {
+    fn a_corrupt_file_and_an_unsafe_id_load_as_missing() {
         let (_dir, cache) = cache();
         std::fs::write(&cache.path, b"not json").unwrap();
         assert_eq!(cache.load(), None);
-        cache.save("");
+        for bad in ["", "a b", "a\nb", "a\u{e9}", &"x".repeat(MAX_ID_BYTES + 1)] {
+            cache.save(bad);
+            assert_eq!(cache.load(), None, "{bad:?}");
+        }
+        cache.save(&"x".repeat(MAX_ID_BYTES));
+        assert!(cache.load().is_some());
+    }
+
+    #[test]
+    fn forget_if_removes_only_the_rejected_id() {
+        let (_dir, cache) = cache();
+        cache.save("newer");
+        cache.forget_if("older");
+        assert_eq!(cache.load().as_deref(), Some("newer"));
+        cache.forget_if("newer");
         assert_eq!(cache.load(), None);
+        cache.forget_if("newer");
     }
 
     #[cfg(unix)]
@@ -167,6 +224,20 @@ mod tests {
         cache.save("abc");
         let mode = std::fs::metadata(&cache.path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_saved_or_read_is_noticed() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where the file belongs makes the read fail, and so does the write.
+        let path = dir.path().join("s.json");
+        std::fs::create_dir(&path).unwrap();
+        let cache = SessionCache::at(path);
+        assert_eq!(cache.load(), None);
+        cache.save("abc");
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(notices.contains("shared MCP session file"), "{notices}");
+        assert!(notices.contains("llmenv doctor"), "{notices}");
     }
 
     #[test]
