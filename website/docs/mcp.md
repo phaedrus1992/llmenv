@@ -685,6 +685,12 @@ The recall circuit breaker counts a cut call as a failed call.
 After three failed recall calls in a row, the breaker skips recall for five minutes and prints one notice.
 The budgets are fixed, and no config key sets them.
 
+(added in v3.14.2) The hook processes of one memory server share one MCP session.
+The first process negotiates the session and saves its id in the state folder, in a file named `mcp-session-<hash>.json` that only the owner can read.
+Each later process reads the id for up to 10 minutes, so it skips the `initialize` round trip.
+A session that the server rejects is dropped from the file, and the call retries once with a new session.
+Before, each hook process and each detached record job opened its own session. A transcript audit of one busy server found a new transport for 92% of the tool calls.
+
 (changed in v3.13.0) After a tool error, a memory is injected only when its summary or keywords share a distinctive word or an error code with the error.
 A distinctive word has four or more characters and is not a common error word such as "error" or "failed".
 ICM ranks the best of an unrelated set near the top score, so the score alone cannot tell a related memory from an unrelated one.

@@ -8,14 +8,19 @@ use serde_json::{Value, json};
 
 mod body;
 mod call_error;
+mod handshake;
 mod parse;
 mod request_headers;
+mod session_cache;
 
 mod ssrf;
 
 use call_error::{CallToolError, is_stale_session_status};
+#[cfg(test)]
+use parse::parse_initialize_info;
 pub(crate) use parse::parse_tools_page;
-use parse::{extract_text, parse_initialize_info, parse_rpc_body};
+use parse::{extract_text, parse_rpc_body};
+pub(crate) use session_cache::SessionCache;
 pub(crate) use ssrf::{SsrfPolicy, resolve_with_timeout, validate_url_production};
 use ssrf::{redact_url, require_https_for_public};
 
@@ -40,6 +45,8 @@ pub struct McpHttpClient {
     recall_breaker: Option<std::path::PathBuf>,
     /// The time budget of the recall calls of this hook run (#4023).
     recall_deadline: Option<Deadline>,
+    /// The session id that the hook processes of one server share (#2909).
+    session_cache: Option<SessionCache>,
 }
 
 /// What an MCP server reports about itself in its `initialize` reply.
@@ -121,6 +128,7 @@ impl McpHttpClient {
             init_info: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             recall_breaker: None,
             recall_deadline: None,
+            session_cache: None,
         })
     }
 
@@ -140,6 +148,13 @@ impl McpHttpClient {
     #[must_use]
     pub(crate) fn with_recall_deadline(mut self, deadline: Option<Deadline>) -> Self {
         self.recall_deadline = deadline;
+        self
+    }
+
+    /// Shares the session id with the other hook processes of this server (#2909).
+    #[must_use]
+    pub(crate) fn with_session_cache(mut self, cache: Option<SessionCache>) -> Self {
+        self.session_cache = cache;
         self
     }
 
@@ -173,107 +188,29 @@ impl McpHttpClient {
             return Ok(Some(sid.clone()));
         }
 
-        // #3017: time the `initialize` request and the `notifications/initialized` ack.
-        let init_start = std::time::Instant::now();
-        let init_req = json!({
-            "jsonrpc": "2.0",
-            "id": 0,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-06-18",
-                "capabilities": {},
-                "clientInfo": { "name": "llmenv", "version": env!("CARGO_PKG_VERSION") }
-            }
-        });
-        let resp = self
-            .client
-            .post(&self.url)
-            .header(
-                reqwest::header::ACCEPT,
-                "application/json, text/event-stream",
-            )
-            .json(&init_req)
-            .send()
-            .await
-            .map_err(reqwest::Error::without_url)
-            .with_context(|| format!("POST {} for MCP initialize", self.display_url()))
-            .map_err(crate::proxy_note::with_proxy_note)?;
-        let init_req_bytes = init_req.to_string().len() as u64;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = body::error_body(resp, "MCP initialize").await;
-            let resp_bytes = body.len() as u64;
-            crate::mcp_trace::emit_mcp_handshake_trace(
-                "initialize",
-                init_start.elapsed(),
-                Some(status.as_u16()),
-                init_req_bytes,
-                resp_bytes,
-            );
-            return Err(anyhow!("MCP initialize returned HTTP {status}: {body}"));
-        }
-        let sid = resp
-            .headers()
-            .get("mcp-session-id")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned);
-        let init_resp_bytes = if capture_info {
-            let text = body::read_capped(resp, body::MAX_REPLY_BYTES, "MCP initialize")
-                .await
-                .with_context(|| format!("reading the reply from {}", self.display_url()))?;
-            *self.init_info.lock().await = Some(parse_initialize_info(&text)?);
-            text.len() as u64
-        } else {
-            0
-        };
-        crate::mcp_trace::emit_mcp_handshake_trace(
-            "initialize",
-            init_start.elapsed(),
-            None,
-            init_req_bytes,
-            init_resp_bytes,
-        );
-
-        if let Some(sid) = &sid {
-            // Best-effort: some servers require this ack before accepting
-            // further calls, others ignore it. Its own failure isn't fatal —
-            // the subsequent tools/call attempt is the real signal, and it carries the cause.
-            let ack_start = std::time::Instant::now();
-            let ack_req = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
-            let ack_req_bytes = ack_req.to_string().len() as u64;
-            let ack = self
-                .client
-                .post(&self.url)
-                .header(
-                    reqwest::header::ACCEPT,
-                    "application/json, text/event-stream",
-                )
-                .header("mcp-session-id", sid)
-                .json(&ack_req)
-                .send()
-                .await;
-            let ack_resp_bytes = if let Ok(r) = &ack {
-                r.content_length().unwrap_or(0)
-            } else {
-                0
-            };
-            crate::mcp_trace::emit_mcp_handshake_trace(
-                "notifications/initialized",
-                ack_start.elapsed(),
-                None,
-                ack_req_bytes,
-                ack_resp_bytes,
-            );
-            if let Err(e) = ack {
-                tracing::debug!(
-                    "MCP initialized notification to {} not sent: {e}",
-                    self.display_url()
-                );
+        // The `initialize` reply body is the only source of `init_info`, so a saved id serves
+        // only a caller that does not read it.
+        if !capture_info {
+            if let Some(sid) = self.session_cache.as_ref().and_then(SessionCache::load) {
+                *cached = Some(sid.clone());
+                return Ok(Some(sid));
             }
         }
-
+        let sid = self.negotiate_session(capture_info).await?;
         *cached = sid.clone();
+        if let (Some(cache), Some(sid)) = (&self.session_cache, &sid) {
+            cache.save(sid);
+        }
         Ok(sid)
+    }
+
+    /// Forgets the session id, in this process and in the shared file, so the next call
+    /// negotiates a new session.
+    async fn drop_session(&self) {
+        *self.session_id.lock().await = None;
+        if let Some(cache) = &self.session_cache {
+            cache.forget();
+        }
     }
 
     /// Check that the server answers a fresh MCP `initialize` within the client timeout.
@@ -282,7 +219,7 @@ impl McpHttpClient {
     /// Network failure, timeout, or a non-2xx status.
     pub async fn probe(&self) -> anyhow::Result<()> {
         // Drop any cached session: a probe must ask the server, not trust an old id.
-        *self.session_id.lock().await = None;
+        self.drop_session().await;
         self.ensure_session().await.map(|_| ())
     }
 
@@ -292,7 +229,7 @@ impl McpHttpClient {
     /// Network failure, timeout, a non-2xx status, or a reply with no readable `result`.
     pub(crate) async fn initialize_info(&self) -> anyhow::Result<InitializeInfo> {
         // Drop any cached session: the info must come from a fresh `initialize`.
-        *self.session_id.lock().await = None;
+        self.drop_session().await;
         self.ensure_session_with(true).await?;
         Ok(self.init_info.lock().await.clone().unwrap_or_default())
     }
@@ -313,7 +250,7 @@ impl McpHttpClient {
             let body = match self.post_rpc("tools/list", &params, "tools/list").await {
                 Ok(body) => body,
                 Err(CallToolError::StaleSession(first_err)) => {
-                    *self.session_id.lock().await = None;
+                    self.drop_session().await;
                     self.post_rpc("tools/list", &params, "tools/list")
                         .await
                         .map_err(anyhow::Error::from)
@@ -360,7 +297,7 @@ impl McpHttpClient {
                     tool = %name,
                     "cached MCP session rejected, re-initializing and retrying once"
                 );
-                *self.session_id.lock().await = None;
+                self.drop_session().await;
                 self.try_call_tool(name, &arguments)
                     .await
                     .map_err(anyhow::Error::from)
