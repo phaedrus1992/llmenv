@@ -121,11 +121,10 @@ fn staging_is_orphan(p: &Path, now: SystemTime) -> bool {
     let owner_gone = writer.is_some_and(|(_, any_user, own_user)| {
         writer_gone(any_user, own_user, owned_by_another_user(p))
     });
+    // A folder with a time in the future is kept, and the skew is reported with its path.
     let old = std::fs::symlink_metadata(p)
         .and_then(|m| m.modified())
-        .ok()
-        .and_then(|m| now.duration_since(m).ok())
-        .is_some_and(|age| age > STAGING_GRACE);
+        .is_ok_and(|m| crate::materialize::expiry::is_expired(now, m, STAGING_GRACE, p));
     owner_gone || old
 }
 
@@ -339,6 +338,24 @@ mod tests {
             .join(format!("pending.{}.1.tmp", std::process::id()));
         std::fs::create_dir(&staging).unwrap();
         assert!(!staging_is_orphan(&staging, SystemTime::now()));
+    }
+
+    /// A staging folder with a time in the future is kept, and the clock skew is reported with the
+    /// folder path (#3907).
+    #[test]
+    fn a_staging_folder_with_a_future_time_is_kept_and_reported() {
+        let root = tempfile::TempDir::new().unwrap();
+        let staging = root
+            .path()
+            .join(format!("skew.{}.1.tmp", std::process::id()));
+        std::fs::create_dir(&staging).unwrap();
+        let ahead = SystemTime::now() + std::time::Duration::from_secs(86_400);
+        std::fs::File::open(&staging)
+            .unwrap()
+            .set_modified(ahead)
+            .unwrap();
+        assert!(!staging_is_orphan(&staging, SystemTime::now()));
+        assert!(crate::materialize::expiry::skew_was_reported(&staging));
     }
 
     /// A staging folder whose writer is gone is an orphan, and gc removes it at once.
