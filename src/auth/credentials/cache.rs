@@ -29,25 +29,33 @@ pub(crate) fn load_cached(adapter_root: &Path) -> anyhow::Result<Option<Credenti
         Ok(value) => {
             let creds = Credentials::from_json(value);
             if creds.is_none() {
-                tracing::warn!(
-                    "cached credential at {} holds no OAuth credential, so it is ignored and then \
-                     replaced. Fix: run `llmenv login`.",
+                report_ignored(&format!(
+                    "the cached credential at {} holds no OAuth credential, so it is ignored \
+                     and then replaced. Fix: run `llmenv login`.",
                     path.display()
-                );
+                ));
             }
             Ok(creds)
         }
         Err(e) => {
-            tracing::warn!(
-                "cached credential at {} is not valid JSON (line {}, column {}), so it is ignored \
-                 and then replaced. Fix: run `llmenv login`.",
+            report_ignored(&format!(
+                "the cached credential at {} is not valid JSON (line {}, column {}), so it is \
+                 ignored and then replaced. Fix: run `llmenv login`.",
                 path.display(),
                 e.line(),
                 e.column()
-            );
+            ));
             Ok(None)
         }
     }
+}
+
+/// Tells the person and the agent about a credential file that is ignored. The stderr line shows
+/// beside the account line, as for a skipped auth entry (#3842), and the notice reaches the
+/// agent. A log line alone left the person without a reason for the replaced account (#3904).
+pub(super) fn report_ignored(text: &str) {
+    eprintln!("[llmenv] auth: {text}");
+    crate::agent_notice::record_logged(format!("llmenv: auth: {text}"));
 }
 
 /// Write the credential cache, owner-only (0o600) and atomically.

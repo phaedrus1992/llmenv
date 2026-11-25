@@ -724,7 +724,16 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
             if text.notes.starts_with("__DENY__:") {
                 let reason = text.notes.trim_start_matches("__DENY__:");
                 let reason = match notice {
-                    Some(notice) => format!("{notice}\n\n{reason}"),
+                    // The notices shrink to leave the reason its room under the cut (#3357).
+                    Some(notice) => {
+                        let reason_chars = crate::adapter::context_cap::context_len(reason);
+                        let notice = crate::adapter::context_cap::fit_notes(&notice, reason_chars);
+                        if notice.is_empty() {
+                            reason.to_string()
+                        } else {
+                            format!("{notice}\n\n{reason}")
+                        }
+                    }
                     None => reason.to_string(),
                 };
                 let envelope = serde_json::json!({

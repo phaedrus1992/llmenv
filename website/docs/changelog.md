@@ -36,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Regenerate the attribution files during a forward-merge, so the cascade no longer halts on `THIRD-PARTY-LICENSES.md` and `website/docs/third-party-licenses.md`. [fix:ci] [#2972]
 - Share a five-second budget across the recall calls of a session start. A call past the budget is cut, and the agent is told. The `config-context` cost is tracked in #4018. [fix:hook] [#3899]
 - Share a three-second budget across the recall calls of a prompt and of a subagent start, so a slow memory server cannot hold either longer, and count a call that a budget cuts off as a failed call, so a server that is always too slow opens the recall breaker. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp). [fix:hook] [#4023] [#4022]
+- Treat a timestamp in the future as expired in the read-once cache, the pending subagent queue, the job checkpoint start, and the shared MCP session id, so a clock that stepped back cannot keep an entry alive. A cache staging folder with a time in the future is still kept, and the clock skew is now reported with its path. [fix:hook] [#3907]
+- Print a line and tell the agent when a credential cache or a dead-folder marker is ignored, with the file path and the fix, so the person learns why the account was replaced. See [Troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#the-agent-sees-an-llmenv-notice). [fix:auth] [#3904]
+- Show a memory recall ring with no call in the last day as info in `llmenv doctor` when it failed often, as for a stuck ring, so old failures no longer read as current. [fix:doctor] [#3912]
+- Shorten the notices of a hook output to whole notices when they pass the point where Claude Code cuts a hook output, so a flood of notices on `PreCompact` no longer makes compaction fail. [fix:hook] [#3357]
+- Stop a second code index job of one project while the first runs. Each job holds a lock file beside its checkpoint. [fix:hook] [#3914]
 - Match an opencode `Notification` hook's `matcher` against the `permission_prompt` type. A `matcher` on an event that passes no tool name is rejected when the opencode config is generated. [fix:opencode] [#3003]
 
 ## [3.14.1] - 2026-11-20

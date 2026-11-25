@@ -511,6 +511,7 @@ When that directory is gone, the session start deletes the checkpoint and shows 
 A failed start of a resumed job uses up one of its 3 attempts.
 Consolidation keeps the model summary in its checkpoint, so a resume never pays for the model twice.
 The index job is not resumed, because every session start runs the indexer anyway.
+(added in v3.14.2) A second index job of one project stops at once while the first runs, because each job holds a lock file beside its checkpoint, and the lock ends with the job.
 See [Background work](troubleshooting.md#background-work-that-did-not-finish).
 
 (added in v3.14.0) If llmenv cannot save a checkpoint, it shows a notice at every session start until the state folder is fixed.

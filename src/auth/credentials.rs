@@ -223,12 +223,13 @@ fn read_credentials_file(config_dir: &Path) -> anyhow::Result<Option<Credentials
     match serde_json::from_slice::<serde_json::Value>(&bytes) {
         Ok(value) => Ok(Credentials::from_json(value)),
         Err(e) => {
-            tracing::debug!(
-                "{} is not valid JSON (line {}, column {})",
+            cache::report_ignored(&format!(
+                "{} is not valid JSON (line {}, column {}), so it is ignored. Fix: run `llmenv \
+                 login`.",
                 path.display(),
                 e.line(),
                 e.column()
-            );
+            ));
             Ok(None)
         }
     }
@@ -390,6 +391,22 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"{ not json").unwrap();
         assert!(load_cached(tmp.path()).unwrap().is_none());
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(notices.contains(&path.display().to_string()), "{notices}");
+        assert!(notices.contains("llmenv login"), "{notices}");
+    }
+
+    // #3904: a cache with no OAuth credential is replaced, and the person is told which file.
+    #[test]
+    fn load_cached_tells_the_person_when_the_cache_holds_no_credential() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = cache_path(tmp.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, br#"{"unrelated": 1}"#).unwrap();
+        assert!(load_cached(tmp.path()).unwrap().is_none());
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(notices.contains(&path.display().to_string()), "{notices}");
+        assert!(notices.contains("no OAuth credential"), "{notices}");
     }
 
     #[test]
@@ -555,6 +572,11 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        // #3904: the person is told which file was ignored.
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        let file = folder.path().join(CREDENTIALS_FILE).display().to_string();
+        assert!(notices.contains(&file), "{notices}");
+        assert!(notices.contains("llmenv login"), "{notices}");
     }
 
     // Not run on macOS: there `forget` invokes `security`, which would reach the

@@ -260,6 +260,32 @@ fn staleness_follows_the_deadline_of_the_kind() {
     assert!(JobKind::CbmIndex.deadline_secs() > JobKind::Consolidation.deadline_secs());
 }
 
+proptest::proptest! {
+    /// A job is stale exactly when its start is in the future or older than the deadline of
+    /// its kind, for any start and any clock, and once stale it stays stale as the clock moves on.
+    #[test]
+    fn staleness_is_a_future_start_or_an_age_past_the_deadline(
+        started_at in proptest::prelude::any::<u64>(),
+        now in proptest::prelude::any::<u64>(),
+        later in 0u64..1_000_000,
+    ) {
+        let mut c = cp(JobKind::IcmStore, 1);
+        c.started_at = started_at;
+        let deadline = JobKind::IcmStore.deadline_secs();
+        let expected = now < started_at || now - started_at > deadline;
+        proptest::prop_assert_eq!(c.is_stale(now), expected);
+        if now >= started_at && expected {
+            proptest::prop_assert!(c.is_stale(now.saturating_add(later)));
+        }
+    }
+}
+
+#[test]
+fn a_job_started_in_the_future_is_stale() {
+    let c = cp(JobKind::IcmStore, 1);
+    assert!(c.is_stale(c.started_at - 1));
+}
+
 #[test]
 fn run_tags_differ_and_the_first_attempt_records_the_working_directory() {
     assert_ne!(run_tag(), run_tag());
