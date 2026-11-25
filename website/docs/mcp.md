@@ -682,7 +682,9 @@ When the first recalls take more than 1.5 seconds, the fanouts do not run, and t
 A session start has 5 seconds, and a prompt and a subagent start have 3 seconds each.
 A call that runs past the budget is cut, and the agent gets a notice that names the budget.
 A slow memory server therefore cannot hold a prompt or a subagent start for longer than the budget.
-The recall circuit breaker counts a cut call as a failed call.
+A cut call is not a failed recall, and a scope set with a cut call is not marked as sent.
+The recall circuit breaker counts a call that started in time and was cut as a failed call.
+A call that the budget cut before it started is not counted.
 After three failed recall calls in a row, the breaker skips recall for five minutes and prints one notice.
 The budgets are fixed, and no config key sets them.
 
