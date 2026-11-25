@@ -261,6 +261,12 @@ fn staleness_follows_the_deadline_of_the_kind() {
 }
 
 #[test]
+fn a_job_started_in_the_future_is_stale() {
+    let c = cp(JobKind::IcmStore, 1);
+    assert!(c.is_stale(c.started_at - 1));
+}
+
+#[test]
 fn run_tags_differ_and_the_first_attempt_records_the_working_directory() {
     assert_ne!(run_tag(), run_tag());
     let c = cp(JobKind::IcmStore, 1);

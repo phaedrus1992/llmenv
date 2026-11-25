@@ -112,10 +112,10 @@ impl SessionCache {
             );
             return None;
         };
-        // A saved time in the future gives age 0, so a bad clock cannot extend the window by
-        // more than the skew itself. The server rejects a dead id either way.
-        let age = now.saturating_sub(saved.saved_at_unix);
-        (age <= TTL_SECS && is_valid_id(&saved.session_id)).then_some(saved.session_id)
+        // A saved time in the future is not trusted, so a clock that stepped back cannot keep
+        // an id alive (#3907).
+        let trusted = saved.saved_at_unix <= now && now - saved.saved_at_unix <= TTL_SECS;
+        (trusted && is_valid_id(&saved.session_id)).then_some(saved.session_id)
     }
 
     /// Saves `session_id`. A failed write is noticed, and the next process negotiates its own
@@ -251,8 +251,8 @@ mod tests {
             proptest::prop_assert_eq!(cache.load(), Some(id));
         }
 
-        /// A record is trusted when its age is inside the window. A time in the future counts as
-        /// age zero. The offsets stay clear of the window edge, so the clock cannot flip a case.
+        /// A record is trusted when its age is inside the window. A time in the future is not
+        /// trusted. The offsets stay clear of the window edge, so the clock cannot flip a case.
         #[test]
         fn the_window_decides_whether_a_record_is_trusted(
             age in prop_oneof![0u64..590, 612u64..5_000],
@@ -264,7 +264,7 @@ mod tests {
             let saved_at_unix = if future { now + age } else { now - age };
             let saved = Saved { session_id: id.clone(), saved_at_unix };
             std::fs::write(&cache.path, serde_json::to_vec(&saved).unwrap()).unwrap();
-            let trusted = future || age <= TTL_SECS;
+            let trusted = if future { age == 0 } else { age <= TTL_SECS };
             proptest::prop_assert_eq!(cache.load(), trusted.then_some(id));
         }
 

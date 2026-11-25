@@ -113,9 +113,11 @@ impl SessionCache {
 }
 
 /// Whether an entry first read at `first_read_at` is still inside the TTL at `now`. An entry
-/// whose age equals the TTL has expired.
+/// whose age equals the TTL has expired, and so has an entry first read in the future, so a
+/// clock that stepped back cannot keep an entry alive (#3907).
 pub(super) fn within_ttl(now: i64, first_read_at: i64, ttl_seconds: u64) -> bool {
-    now.saturating_sub(first_read_at) < i64::try_from(ttl_seconds).unwrap_or(i64::MAX)
+    let ttl = i64::try_from(ttl_seconds).unwrap_or(i64::MAX);
+    (0..ttl).contains(&now.saturating_sub(first_read_at))
 }
 
 #[cfg(test)]
@@ -126,6 +128,12 @@ mod tests {
     fn an_entry_exactly_one_ttl_old_has_expired() {
         assert!(!within_ttl(1000, 900, 100));
         assert!(within_ttl(999, 900, 100));
+    }
+
+    #[test]
+    fn an_entry_first_read_in_the_future_has_expired() {
+        assert!(!within_ttl(900, 1000, 100));
+        assert!(!within_ttl(0, i64::MAX, u64::MAX));
     }
 
     #[test]

@@ -261,6 +261,16 @@ fn subagent_queue_dedups_by_tool_use_id_and_takes_oldest_match() {
 }
 
 #[test]
+fn a_pending_subagent_with_a_time_in_the_future_has_expired() {
+    let mut l = Ledger::default();
+    l.queue_subagent("u1", "Explore", "find the parser", 1_000);
+    assert!(
+        l.take_subagent("Explore", 500).is_none(),
+        "the clock stepped back"
+    );
+}
+
+#[test]
 fn a_lock_released_during_the_wait_is_taken() {
     let (_dir, store) = store();
     let held = store.lock("s1").unwrap();
