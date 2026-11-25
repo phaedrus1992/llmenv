@@ -32,6 +32,19 @@ async fn session_start_adds_project_memories_and_drops_cut_records() {
 }
 
 #[tokio::test]
+async fn project_memories_cut_by_the_budget_are_not_a_failure_and_the_notice_names_the_budget() {
+    let server = server_with(&[]).await;
+    let mut f = fixture(&server);
+    f.client = f.client.clone().with_recall_deadline(Some(
+        crate::hook_run::recall_deadline::Deadline::expiring_in(Duration::ZERO),
+    ));
+    let (text, answered) = project_memories(&f.client, "proj-a").await;
+    assert_eq!((text.as_str(), answered), ("", None));
+    let notices = crate::agent_notice::current().unwrap_or_default();
+    assert!(notices.contains("session start recall budget"), "{notices}");
+}
+
+#[tokio::test]
 async fn wake_up_drops_only_the_cut_bullet() {
     // icm writes wake-up items as bullets under headings, not as `[topic]` records.
     let server = server_with(&[(

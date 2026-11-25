@@ -90,12 +90,7 @@ impl Deadline {
 
     /// The notice for a recall that the budget cut off.
     pub(crate) fn cut_notice(self) -> String {
-        format!(
-            "llmenv: memory recall was skipped, because the {} recall budget of {} s ran out. \
-             Fix: run `llmenv doctor` to check the memory server.",
-            self.flow.name(),
-            self.flow.budget().as_secs()
-        )
+        self.cut().notice()
     }
 
     /// A session start deadline that runs out after `wait`, for tests that need a short budget.
@@ -105,6 +100,12 @@ impl Deadline {
             at: Instant::now() + wait,
             flow: Flow::Session,
         }
+    }
+
+    /// The error of a call that this deadline cut off.
+    #[cfg(test)]
+    pub(crate) fn cut_error(self) -> Cut {
+        self.cut()
     }
 
     fn cut(self) -> Cut {

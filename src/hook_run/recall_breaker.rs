@@ -134,11 +134,6 @@ async fn run_guarded<F>(path: &Path, deadline: Option<Deadline>, call: F) -> any
 where
     F: Future<Output = anyhow::Result<Reply>>,
 {
-    // Slow calls before this one may have used the whole budget. This call then never reaches
-    // the server, so it moves neither the failure count nor the state file.
-    if let Some(cut) = deadline.and_then(Deadline::expired_cut) {
-        return Err(cut.into());
-    }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock is before the Unix epoch")?
@@ -191,6 +186,11 @@ pub(crate) async fn guard_recall<F>(
 where
     F: Future<Output = anyhow::Result<Reply>>,
 {
+    // Slow calls before this one may have used the whole budget. This call then never reaches
+    // the server, so it moves neither the failure count nor the state file.
+    if let Some(cut) = deadline.and_then(Deadline::expired_cut) {
+        return Err(cut.into());
+    }
     match path {
         Some(path) => run_guarded(path, deadline, call).await,
         None => within(deadline, call).await,
@@ -320,7 +320,7 @@ mod tests {
         for _ in 0..FAILURE_THRESHOLD + 1 {
             let expired = Deadline::expiring_in(Duration::ZERO);
             let mut ran = false;
-            let cut = run_guarded(&path, Some(expired), async {
+            let cut = guard_recall(Some(&path), Some(expired), async {
                 ran = true;
                 Ok(Reply::Text(String::new()))
             })

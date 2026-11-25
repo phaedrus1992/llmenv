@@ -32,6 +32,13 @@ pub(super) async fn project_memories(
             (kept, Some(true))
         }
         Err(e) if e.is::<crate::hook_run::recall_breaker::Skipped>() => (String::new(), None),
+        // A call that the budget cut off says nothing about the server. The notice names the budget.
+        Err(e) if e.is::<crate::hook_run::recall_deadline::Cut>() => {
+            if let Some(cut) = e.downcast_ref::<crate::hook_run::recall_deadline::Cut>() {
+                agent_notice::record(cut.notice());
+            }
+            (String::new(), None)
+        }
         Err(e) => {
             tracing::error!("session start: project memories not recalled for {project}: {e:#}");
             agent_notice::record(format!(

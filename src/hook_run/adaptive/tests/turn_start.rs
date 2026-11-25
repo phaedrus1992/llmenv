@@ -343,6 +343,10 @@ async fn a_scope_run_past_its_deadline_makes_no_call_and_says_so() {
     )
     .await;
     assert_eq!(outcome.calls, 0, "{outcome:?}");
+    assert!(
+        outcome.cut && !outcome.complete(),
+        "a cut scope set is not complete: {outcome:?}"
+    );
     let notice = unrun.unwrap_or_default();
     assert!(notice.contains("session start recall budget"), "{notice}");
 }
@@ -367,6 +371,10 @@ async fn a_scope_call_cut_by_the_budget_is_not_a_server_failure() {
     )
     .await;
     assert_eq!((outcome.calls, outcome.failed), (0, 0), "{outcome:?}");
+    assert!(
+        outcome.cut && !outcome.complete(),
+        "a cut scope set is not complete: {outcome:?}"
+    );
     let notice = unrun.unwrap_or_default();
     assert!(notice.contains("session start recall budget"), "{notice}");
 }

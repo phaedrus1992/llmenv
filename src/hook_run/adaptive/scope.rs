@@ -39,6 +39,7 @@ pub(super) async fn run_scope(
         match action.run(ctx.client, "", "").await {
             // A call the budget cut off is not a server failure. The notice names the budget.
             Err(e) if e.is::<Cut>() => {
+                outcome.push(Some(Err(e)));
                 cut = true;
                 break;
             }
@@ -49,6 +50,8 @@ pub(super) async fn run_scope(
     // A deadline that passed before the first call also leaves recalls unrun, and the budget
     // is the reason, so the notice names it.
     let budget_cut = deadline.filter(|d| cut || (d.has_passed() && actions.len() > 0));
+    // A cut scope set is unknown, not empty, so it is not complete and is not marked as sent.
+    outcome.cut |= budget_cut.is_some();
     let notice = budget_cut
         .map(Deadline::cut_notice)
         .or_else(|| unrun_notice(actions.len(), outcome.failed > 0, budget.is_full()));

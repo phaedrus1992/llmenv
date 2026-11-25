@@ -193,7 +193,12 @@ pub(super) async fn session_start(
         let wake_call = wake.run(ctx.client, "", "");
         let wake_raw = within(Some(deadline), wake_call).await;
         // The wake-up is not a recall, so the breaker never skips it.
-        let wake_answer = Some(wake_raw.is_ok());
+        // A wake-up that the budget cut off says nothing about the server, as for the recalls.
+        let wake_answer = match &wake_raw {
+            Ok(_) => Some(true),
+            Err(e) if e.is::<crate::hook_run::recall_deadline::Cut>() => None,
+            Err(_) => Some(false),
+        };
         let wake = wake_raw.map(|reply| {
             let (kept, cut) = drop_cut_items(&reply.into_text());
             note_cut_items(cut);
@@ -235,7 +240,7 @@ pub(super) async fn session_start(
             own
         }
     };
-    let complete = outcome.failed == 0;
+    let complete = outcome.complete();
     let kept = budget.kept_keys();
     note_unless_saved(
         ctx.store.update(ctx.session_id, |l| {

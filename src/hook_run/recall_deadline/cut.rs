@@ -13,4 +13,13 @@ impl Cut {
     pub(super) fn new(flow: &'static str, secs: u64) -> Self {
         Self { flow, secs }
     }
+
+    /// The notice for a recall that the budget cut off.
+    pub(crate) fn notice(&self) -> String {
+        format!(
+            "llmenv: memory recall was skipped, because the {} recall budget of {} s ran out. \
+             Fix: run `llmenv doctor` to check the memory server.",
+            self.flow, self.secs
+        )
+    }
 }
