@@ -40,7 +40,7 @@ pub(super) fn register(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     // #4045: the guard loads in every session, so an empty manifest carries it too.
     #[test]
