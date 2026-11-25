@@ -11,7 +11,7 @@ const CLAUDE_CODE_CUT_CHARS: usize = 10_000;
 
 /// The most characters that a hook output may hold. The margin leaves room for the line that
 /// reports the omission, and for the header of the memory block.
-pub(crate) const MAX_CONTEXT_CHARS: usize = CLAUDE_CODE_CUT_CHARS - 500;
+const MAX_CONTEXT_CHARS: usize = CLAUDE_CODE_CUT_CHARS - 500;
 
 /// The characters of the blank line that separates the notices from the memory block.
 const SEPARATOR_CHARS: usize = 2;
