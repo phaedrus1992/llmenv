@@ -38,6 +38,12 @@ pub(super) fn dispatch_config_guard(engine: &str) {
     timed("config-guard", || crate::cli::config_guard::run(engine));
 }
 
+/// Dispatch `tmp-guard`. Called from the CLI `run` match arm.
+pub(super) fn dispatch_tmp_guard(engine: &str) {
+    dispatch_guard_command(engine, "tmp-guard");
+    timed("tmp-guard", || crate::cli::tmp_guard::run(engine));
+}
+
 /// Dispatch `throttle`. Called from the CLI `run` match arm.
 pub(super) fn dispatch_throttle(event: &str) {
     dispatch_guard_command(event, "throttle");

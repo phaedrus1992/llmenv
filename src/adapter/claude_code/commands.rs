@@ -17,6 +17,12 @@ pub(super) fn config_guard_command() -> anyhow::Result<String> {
     hook_command("config-guard --engine claude_code")
 }
 
+/// Command the auto-emitted PreToolUse hook runs to deny a write under `/tmp` (#4045). Reads
+/// the shell, Write, Edit, MultiEdit, and NotebookEdit tool calls from stdin.
+pub(super) fn tmp_guard_command() -> anyhow::Result<String> {
+    hook_command("tmp-guard --engine claude_code")
+}
+
 /// Command the auto-emitted throttle hooks run. Throttle hooks fire on
 /// PreToolUse and UserPromptSubmit to poll the usage backend and sleep a
 /// capped adaptive delay to avoid rate limits.

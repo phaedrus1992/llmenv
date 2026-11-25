@@ -228,7 +228,7 @@ The marker goes to stderr or to `LLMENV_TRACE_FILE`. Stdout is the same with tra
 
 ### Guard command trace markers
 
-The five guard commands (`config-guard`, `config-context`, `check-stale`,
+The six guard commands (`config-guard`, `tmp-guard`, `config-context`, `check-stale`,
 `read-once clear`, `throttle`) each emit one `llmenv-trace` marker with `op: "guard"`.
 
 ```text

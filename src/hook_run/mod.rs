@@ -88,6 +88,7 @@ use cbm_index_cmd::{
 mod stop_reminder;
 pub(crate) mod task_nudge;
 pub(crate) mod task_tools;
+pub(crate) mod tmp_guard;
 pub(crate) mod transcript;
 mod transcript_link;
 use respawn::respawn_job;

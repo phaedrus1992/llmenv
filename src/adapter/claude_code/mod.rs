@@ -15,7 +15,7 @@ use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
 use crate::merge::MergedManifest;
 use crate::plugins::resolve::ResolvedMarketplace;
 use crate::util::{dedup, merge_json};
-use commands::{config_context_command, config_guard_command, hook_run_command, throttle_command};
+use commands::{config_context_command, hook_run_command, throttle_command};
 use hook_purge::purge_stale_owned_hooks;
 use hooks_sidecar::read_hooks_sidecar;
 use lsp_plugin::write_lsp_plugin;
@@ -30,6 +30,7 @@ pub(crate) mod version;
 #[cfg(test)]
 use seed::classify_claude_path;
 mod commands;
+mod guard_hooks;
 mod hook_json;
 mod lsp_plugin;
 pub(crate) use seed::{apply_seeded_settings, seed_install_method, seed_status_line};
@@ -1135,29 +1136,8 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             "hooks": [{ "type": "command", "command": config_context_command()? }],
         }));
 
-    // #289: warn the agent when it tries to write inside the managed cache dir.
-    // Anchored regex so only exact tool names match, not substrings like BatchEdit.
-    // Exits 0 (fail-soft, never blocks the write).
-    hooks_by_event
-        .entry("PreToolUse".to_string())
-        .or_default()
-        .push(json!({
-            "matcher": "^(Write|Edit|MultiEdit)$",
-            "hooks": [{ "type": "command", "command": config_guard_command()? }],
-        }));
-
-    // #318: read-once file dedup hook — warn or deny repeated file reads.
-    // Registered unconditionally (no config gating). The hook-run handler in
-    // `run_inner` checks `features.read_once.enabled` and returns empty
-    // (pass-through) when disabled, so the regex match is the only cost when
-    // the feature is off.
-    hooks_by_event
-        .entry("PreToolUse".to_string())
-        .or_default()
-        .push(json!({
-            "matcher": "^Read$",
-            "hooks": [{ "type": "command", "command": format!("{} pre_tool_use", hook_run_command()?) }],
-        }));
+    // The config guard (#289), the /tmp guard (#4045), and the read-once hook (#318).
+    guard_hooks::register(&mut hooks_by_event)?;
 
     // #317: the metrics layer counts on PostToolUse, which only session
     // logging registers today. Without this the counter never runs and the
@@ -2397,18 +2377,18 @@ mod tests {
     }
 
     use super::super::AgentAdapter;
+    use super::commands::config_guard_command;
     use super::{
         CBM_DESTRUCTIVE, CBM_MCP_PREFIX, CBM_MUTATION, CBM_READ_ONLY, CLAUDE_JSON_FILE,
         CLAUDE_JSON_OWNED_SERVERS_FILE, CTX_DESTRUCTIVE, CTX_MUTATION, CTX_READ_ONLY,
         ClaudeCodeAdapter, ICM_DESTRUCTIVE, ICM_MUTATION, ICM_READ_ONLY,
         LLMENV_OWNED_SETTINGS_KEYS, MODELED_SETTINGS_KEYS, RENDERED_ENTRY_KEYS, build_mcp_servers,
-        carry_runtime_keys, classify_claude_path, config_context_command, config_guard_command,
-        dedup_hooks_doc, generate_installed_plugins_json, generate_settings_json, hook_run_command,
-        is_hook_json, merge_mcp_into_claude_json, normalize_deprecated_tool, overlay_native,
-        permission_mode_str, plugin_install_paths_json, purge_hooks_from_disabled_plugins,
-        read_owned_servers, reconcile_settings, reject_modeled_keys_in_catch_all,
-        render_marketplace_source, render_permission_rule, seed_install_method, seed_status_line,
-        starting_permission_mode,
+        carry_runtime_keys, classify_claude_path, config_context_command, dedup_hooks_doc,
+        generate_installed_plugins_json, generate_settings_json, hook_run_command, is_hook_json,
+        merge_mcp_into_claude_json, normalize_deprecated_tool, overlay_native, permission_mode_str,
+        plugin_install_paths_json, purge_hooks_from_disabled_plugins, read_owned_servers,
+        reconcile_settings, reject_modeled_keys_in_catch_all, render_marketplace_source,
+        render_permission_rule, seed_install_method, seed_status_line, starting_permission_mode,
     };
     use crate::adapter::skills::{
         arb_distinct_resolved_mcps, arb_yaml_value, reject_hardcoded_config_path, validate_skills,

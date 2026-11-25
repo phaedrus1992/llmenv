@@ -1249,6 +1249,37 @@ whether the target path is inside the llmenv cache and prints a redirection hint
 pointing at the source config. Always exits 0 (fail-soft — the write is not
 blocked). Invoked automatically — not normally run by users.
 
+## `tmp-guard`
+
+```text
+llmenv tmp-guard
+```
+
+(added in v3.14.2) Deny a tool call that writes under `/tmp`, and name `$TMPDIR` as the fix.
+llmenv sets `TMPDIR` to `state/tmp`, and `llmenv clean` removes old entries there.
+Nothing cleans `/tmp`, so a scratch file written there stays for good.
+The auto-registered `PreToolUse` hook runs this command in every session.
+It covers the `Bash`, `Monitor`, `Write`, `Edit`, `MultiEdit`, and `NotebookEdit` tools.
+No config setting is needed.
+
+The deny message is `Use "$TMPDIR" for scratch files. /tmp is not cleaned up.`, with the path that the call writes.
+
+The guard denies a write under `/tmp`, `/private/tmp`, `/var/folders`, or `/private/var/folders`:
+
+- A shell redirect (`>`, `>>`, `2>`, `&>`, `>|`) with a target there.
+- The `tee`, `touch`, `mkdir`, and `mktemp` commands, when any operand is there.
+- The `cp`, `mv`, and `install` commands, when the destination (the last operand, or the `-t` value) is there.
+- A `Write`, `Edit`, `MultiEdit`, or `NotebookEdit` call with a path there.
+
+The guard reads a path as text, with `.` and `..` resolved.
+It does not expand a variable, and it does not follow a symlink.
+A command that changes into `/tmp` and then writes a relative path is not seen.
+A read of `/tmp` is allowed, and so is a copy from `/tmp` to another place.
+A shell call whose command is missing, or is nested too deeply to check, is denied.
+A payload that is not JSON gives a message on stderr, and the call runs.
+The command always exits 0, and the deny is the JSON on stdout.
+Claude Code is the only engine that runs the guard so far (opencode and Crush: #4052).
+
 ## `throttle`
 
 ```text

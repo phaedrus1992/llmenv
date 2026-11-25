@@ -22,6 +22,7 @@ mod init_settings;
 mod login;
 mod prefill;
 mod shell_names;
+mod tmp_guard;
 use env_vars::reject_invalid_var_names;
 use login::{import_auth_from_file, run_login, run_login_capture};
 use shell_names::{completion_filename, detect_shell};
@@ -314,6 +315,15 @@ enum Command {
     ConfigGuard {
         /// Engine that invoked this hook (e.g. "claude_code"). Accepted for
         /// forward-compatibility; the value is stored for future dispatch use.
+        #[arg(long, default_value = "claude_code")]
+        engine: String,
+    },
+    /// Deny a tool call that writes under /tmp, and name `$TMPDIR` as the fix (#4045).
+    ///
+    /// Invoked by the auto-registered PreToolUse hook. Reads the tool call from stdin and
+    /// prints a deny envelope, or nothing to let the call run. Exits 0 in every case.
+    TmpGuard {
+        /// Engine that invoked this hook (e.g. "claude_code").
         #[arg(long, default_value = "claude_code")]
         engine: String,
     },
@@ -954,6 +964,9 @@ pub fn run() -> anyhow::Result<()> {
         }
         Some(Command::ConfigGuard { engine }) => {
             guard::dispatch_config_guard(&engine);
+        }
+        Some(Command::TmpGuard { engine }) => {
+            guard::dispatch_tmp_guard(&engine);
         }
         Some(Command::Throttle { event }) => {
             guard::dispatch_throttle(&event);
