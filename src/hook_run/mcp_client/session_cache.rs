@@ -236,10 +236,23 @@ mod tests {
         std::fs::create_dir(&path).unwrap();
         let cache = SessionCache::at(path);
         assert_eq!(cache.load(), None);
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(notices.contains("cannot be read"), "{notices}");
+        assert!(notices.contains("llmenv doctor"), "{notices}");
         cache.save("abc");
         let notices = crate::agent_notice::current().unwrap_or_default();
-        assert!(notices.contains("shared MCP session file"), "{notices}");
-        assert!(notices.contains("llmenv doctor"), "{notices}");
+        assert!(notices.contains("was not saved"), "{notices}");
+    }
+
+    /// A file that does not exist yet is the normal first run, so it gives no notice.
+    #[test]
+    fn a_missing_file_loads_as_missing_without_a_notice() {
+        let (_dir, cache) = cache();
+        assert_eq!(cache.load(), None);
+        cache.forget();
+        cache.forget_if("any");
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(!notices.contains("shared MCP session file"), "{notices}");
     }
 
     proptest::proptest! {
