@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Skip memory recall for five minutes after three failed recall calls in a row, and print one notice, instead of waiting out a timeout on every hook. [feat:hook] [#3896]
 - Add `failure_recall: false` on a `features.memory` entry to skip the memory recall after a failed tool call. The error is still recorded. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#featuresmemory). [feat:memory] [#3897]
 
+- Keep a `state/tmp` entry for its own time, set by `cache.tmp_retention_hours` (default 168). `cache_retention_hours` no longer changes it. Add `llmenv clean --tmp-older-than <duration>` to set the time for one run, and show the age of each entry in `--dry-run`. See [the clean command](https://phaedrus1992.github.io/llmenv/docs/commands). [feat:doctor] [#4046]
+
+- Deny a Bash, Write, or Edit call that writes under `/tmp`, and name `$TMPDIR` as the fix, in every Claude Code session. A read of `/tmp` is allowed. The new `llmenv tmp-guard` command does it. See [the tmp-guard command](https://phaedrus1992.github.io/llmenv/docs/commands#tmp-guard). [feat:hook] [#4045]
+
 ### Changed
 
 - Escape the Crush MCP and LSP `env` values, as the top-level `env` already does, so a `$(...)` in a bundle value no longer runs when Crush starts. An MCP `env` value that relied on `$VAR` expansion now stays literal. [fix:crush] [#2989]

@@ -105,6 +105,23 @@ pub(super) fn judge_entry(
     }
 }
 
+/// The age of one entry by the rule of the sweep, so a dry run can print it (#4046).
+///
+/// # Errors
+/// Returns the cause as text when the entry cannot be read, or when its time is in the future.
+pub fn entry_age(
+    path: &Path,
+    source: AgeSource,
+    now: SystemTime,
+) -> Result<std::time::Duration, String> {
+    let is_dir = std::fs::symlink_metadata(path)
+        .map_err(|e| format!("cannot read it: {e}"))?
+        .is_dir();
+    let modified = entry_mtime(path, is_dir, source).map_err(|e| format!("{e:#}"))?;
+    now.duration_since(modified)
+        .map_err(|_| "its time is in the future".to_string())
+}
+
 /// The newest file mtime of an entry. A symlink is judged by its own mtime and never followed.
 fn entry_mtime(path: &Path, is_dir: bool, source: AgeSource) -> anyhow::Result<SystemTime> {
     if is_dir {

@@ -28,7 +28,7 @@ pub(super) fn sweep_cache(
         out.dry_run,
     ) {
         Ok(report) => {
-            out.report("", &report);
+            out.report("", &report, None);
             // A dry run deletes nothing, so it drops no credentials and has none to fail (#3073).
             let credential_failures = if out.dry_run {
                 0
@@ -36,7 +36,7 @@ pub(super) fn sweep_cache(
                 report_credential_drops(&report.removed, out)
             };
             let orphans = prune_orphan_marketplaces(cache_dir, config, out.dry_run);
-            out.report(" (marketplace clones)", &orphans);
+            out.report(" (marketplace clones)", &orphans, None);
             report.failed.len() + credential_failures + orphans.failed.len()
         }
         Err(e) => {

@@ -430,8 +430,11 @@ It replaces `llmenv prune` and `llmenv doctor --gc`, which are deprecated (see [
 
 1. It removes stale cache folders.
    With no flag, these are the folders from previous binary versions and orphaned `*.tmp` staging folders.
-2. It runs the age-based sweeps, with the window set by `cache_retention_hours` (see [Configuration](configuration.md)).
-   A `null` value turns these sweeps off.
+2. It runs the age-based sweeps (see [Configuration](configuration.md)).
+   The cache, session-log, and codebase-memory sweeps use `cache_retention_hours`.
+   A `null` value turns off every age-based sweep.
+   (added in v3.14.2) The sweep of `state/tmp` has its own window, `tmp_retention_hours` (default 168).
+   A `null` value turns off that sweep only.
 
 The age-based sweeps remove:
 
@@ -444,6 +447,7 @@ The age-based sweeps remove:
 - If `cache_dir` is itself a symlink, `clean` skips the cache sweep and names the real folder to set (added in v3.14.0).
   It does not follow the link, so it never removes entries under a link target.
 - Old entries in the state temp folder, `state/tmp`, which `TMPDIR` points at.
+  (changed in v3.14.2) An entry is old after `tmp_retention_hours`, not after `cache_retention_hours`.
   An entry that a process holds open is kept.
   (changed in v3.14.0) An entry's age comes from the newest file in it, not from folder mtimes.
   A file's age is the later of its mtime and its change time.
@@ -468,11 +472,19 @@ Flags:
   Examples: `14d`, `1w`, `90 days`, `1h30m`.
   (changed in v3.14.0) A month or a year has no fixed length, so `1mo` and `1y` are refused.
   Use weeks or days, such as `52w`.
-  The age-based sweeps still use `cache_retention_hours`.
+  The other age-based sweeps still use `cache_retention_hours`.
   `--all` and `--older-than` cannot be used together.
   A bad value stops the command before anything is removed.
+- `--tmp-older-than DUR` — (added in v3.14.2) remove `state/tmp` entries older than `DUR`.
+  It replaces `tmp_retention_hours` for this run.
+  It takes the same forms as `--older-than`, such as `2d` or `12h`.
+  It does not change the cache-folder step or the other sweeps.
+  A bad value, or a zero duration, stops the command before anything is removed.
+  It runs the `state/tmp` sweep even when `cache_retention_hours` or `tmp_retention_hours` is `null`.
 - `--dry-run` — list every item that a real run tries to remove, and remove nothing.
   This covers the cache folders and every age-based sweep.
+  (added in v3.14.2) Each `state/tmp` line ends with the age of the entry, such as `(age 9d 2h)`.
+  An entry whose age cannot be read shows `(age unknown: <cause>)` in its place.
   A real run can still fail on an item that the dry run lists, for example a folder without write access.
 - `--plugin-cache` — also remove the shared plugin cache folder of each adapter.
   A folder that does not exist is not listed.
@@ -1239,6 +1251,39 @@ auto-registered `PreToolUse` hook with matcher `Write|Edit|MultiEdit`). Checks
 whether the target path is inside the llmenv cache and prints a redirection hint
 pointing at the source config. Always exits 0 (fail-soft — the write is not
 blocked). Invoked automatically — not normally run by users.
+
+## `tmp-guard`
+
+```text
+llmenv tmp-guard
+```
+
+(added in v3.14.2) Deny a tool call that writes under `/tmp`, and name `$TMPDIR` as the fix.
+llmenv sets `TMPDIR` to `state/tmp`, and `llmenv clean` removes old entries there.
+Nothing cleans `/tmp`, so a scratch file written there stays for good.
+The auto-registered `PreToolUse` hook runs this command in every session.
+It covers the `Bash`, `Monitor`, `Write`, `Edit`, `MultiEdit`, and `NotebookEdit` tools.
+No config setting is needed.
+
+The deny message is `Use "$TMPDIR" for scratch files. /tmp is not cleaned up.`, with the path that the call writes.
+
+The guard denies a write under `/tmp`, `/private/tmp`, `/var/folders`, or `/private/var/folders`:
+
+- A shell redirect (`>`, `>>`, `2>`, `&>`, `>|`) with a target there.
+- The `tee`, `touch`, `mkdir`, and `mktemp` commands, when any operand is there.
+- The `cp`, `mv`, and `install` commands, when the destination (the last operand, or the `-t` value) is there.
+- A `Write`, `Edit`, `MultiEdit`, or `NotebookEdit` call with a path there.
+
+The guard reads a path as text, with `.` and `..` resolved.
+It does not expand a variable, and it does not follow a symlink.
+A command that changes into `/tmp` and then writes a relative path is not seen.
+A read of `/tmp` is allowed, and so is a copy from `/tmp` to another place.
+A redirect sign inside quotes is text, not a redirect, and `echo hi>/tmp/x` is a redirect.
+A call that cannot be checked is denied, with the cause in the message.
+These are a missing tool name, shell command, or file path.
+They are also a command nested too deeply, and a payload that is not JSON.
+The command always exits 0, and the deny is the JSON on stdout.
+Claude Code is the only engine that runs the guard so far (opencode and Crush: #4052).
 
 ## `throttle`
 

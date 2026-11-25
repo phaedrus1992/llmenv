@@ -1,14 +1,16 @@
 use super::Config;
 #[cfg(test)]
 use super::PermissionRule;
-use llmenv_paths::has_parent_component;
 
+mod cache;
 mod hooks;
 pub use hooks::validate_hooks;
 mod permissions;
 mod scope_match;
 mod servers;
 mod widgets;
+#[cfg(test)]
+use cache::is_safe_cache_dir;
 #[cfg(test)]
 use permissions::has_balanced_parens;
 pub use permissions::{validate_permission_rule, validate_permission_string};
@@ -45,6 +47,8 @@ pub enum ValidateError {
     CacheDirTraversal(String),
     #[error("cache_retention_hours must be > 0")]
     CacheRetentionInvalid,
+    #[error("tmp_retention_hours must be > 0")]
+    TmpRetentionInvalid,
     #[error("transcript.retention_days must be >= 1")]
     RetentionDaysInvalid,
     #[error("duplicate mcp name: {0}")]
@@ -337,15 +341,6 @@ fn is_valid_var_name(name: &str) -> bool {
         .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
-fn is_safe_cache_dir(dir: &str) -> bool {
-    if dir.is_empty() || dir.len() > 4096 {
-        return false;
-    }
-    // Parse components rather than substring-match so traversal can't slip
-    // through as `foo/..` (no trailing slash) or via host-OS separators.
-    !dir.contains('\0') && !has_parent_component(dir)
-}
-
 /// Whether `root` has a shape that the codebase-memory root expansion accepts: an absolute path,
 /// `~` alone or `~/...` (`~user` is not supported), or a path whose variables are well formed.
 /// The variable grammar is the one the expansion uses, so a malformed entry fails here rather
@@ -365,7 +360,7 @@ fn allowed_root_shape_is_valid(root: &str) -> bool {
 
 impl Config {
     pub fn validate(&self) -> Result<(), ValidateError> {
-        self.validate_cache()?;
+        cache::validate_cache(self)?;
         self.validate_widget_displays()?;
         self.validate_scope_ids()?;
         self.validate_scope_matches()?;
@@ -381,29 +376,6 @@ impl Config {
         self.validate_plugins()?;
         self.validate_state()?;
         self.validate_permissions()?;
-        Ok(())
-    }
-
-    fn validate_cache(&self) -> Result<(), ValidateError> {
-        if !is_safe_cache_dir(&self.cache.cache_dir) {
-            return Err(ValidateError::CacheDirTraversal(
-                self.cache.cache_dir.clone(),
-            ));
-        }
-        if let Some(hours) = self.cache.cache_retention_hours
-            && hours == 0
-        {
-            return Err(ValidateError::CacheRetentionInvalid);
-        }
-        if let Some(days) = self
-            .session_log
-            .as_ref()
-            .and_then(|s| s.transcript.as_ref())
-            .and_then(|t| t.retention_days)
-            && days == 0
-        {
-            return Err(ValidateError::RetentionDaysInvalid);
-        }
         Ok(())
     }
 
