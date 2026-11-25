@@ -430,8 +430,9 @@ It replaces `llmenv prune` and `llmenv doctor --gc`, which are deprecated (see [
 
 1. It removes stale cache folders.
    With no flag, these are the folders from previous binary versions and orphaned `*.tmp` staging folders.
-2. It runs the age-based sweeps, with the window set by `cache_retention_hours` (see [Configuration](configuration.md)).
-   A `null` value turns these sweeps off.
+2. It runs the age-based sweeps (see [Configuration](configuration.md)).
+   The cache, session-log, and codebase-memory sweeps use `cache_retention_hours`.
+   A `null` value turns off every age-based sweep.
    (added in v3.14.2) The sweep of `state/tmp` has its own window, `tmp_retention_hours` (default 168).
    A `null` value turns off that sweep only.
 

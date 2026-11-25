@@ -110,19 +110,36 @@ fn the_cache_retention_does_not_change_how_long_state_tmp_is_kept() {
     assert!(!t.old.exists());
 }
 
+// A null `cache_retention_hours` is the opt-out of all age-based GC. It keeps state/tmp too.
 #[test]
-fn a_null_cache_retention_still_sweeps_state_tmp() {
+fn a_null_cache_retention_keeps_every_state_tmp_entry() {
     let t = tmp_fixture();
     let mut config = Config::default();
     config.cache.cache_retention_hours = None;
 
     let retention = Retention::resolve(&config, None);
-    assert_eq!(retention.general, None);
+    assert_eq!((retention.general, retention.tmp), (None, None));
     sweep(&t, retention, OUT);
 
     assert!(
-        !t.old.exists(),
-        "a null cache_retention_hours stopped the tmp sweep"
+        t.old.exists() && t.recent.exists(),
+        "a null opt-out was ignored"
+    );
+}
+
+#[test]
+fn the_flag_sweeps_state_tmp_even_when_the_config_is_null() {
+    let t = tmp_fixture();
+    let mut config = Config::default();
+    config.cache.cache_retention_hours = None;
+
+    let retention = Retention::resolve(&config, Some(2 * DAY));
+    assert_eq!((retention.general, retention.tmp), (None, Some(2 * DAY)));
+    sweep(&t, retention, OUT);
+
+    assert!(
+        !t.old.exists() && !t.recent.exists(),
+        "the flag was ignored"
     );
 }
 

@@ -39,17 +39,28 @@ impl Cache {
     /// A multiplication that would wrap saturates, so it keeps every entry.
     #[must_use]
     pub fn gc_retention(&self) -> Option<std::time::Duration> {
-        self.cache_retention_hours
-            .map(|hours| std::time::Duration::from_secs(hours.saturating_mul(3600)))
+        self.cache_retention_hours.map(hours_window)
     }
 
-    /// The keep time of a `state/tmp` entry, or `None` when `tmp_retention_hours` is `null`
+    /// The keep time of a `state/tmp` entry in hours, or `None` when `tmp_retention_hours` is
+    /// `null`, or when `cache_retention_hours` is `null`. A `null` `cache_retention_hours` turns
+    /// age-based GC off, and that includes `state/tmp` (#4046).
+    #[must_use]
+    pub fn tmp_gc_hours(&self) -> Option<u64> {
+        self.cache_retention_hours.and(self.tmp_retention_hours)
+    }
+
+    /// The keep time of a `state/tmp` entry, or `None` when [`Cache::tmp_gc_hours`] is `None`
     /// (#4046). A multiplication that would wrap saturates, so it keeps every entry.
     #[must_use]
     pub fn tmp_retention(&self) -> Option<std::time::Duration> {
-        self.tmp_retention_hours
-            .map(|hours| std::time::Duration::from_secs(hours.saturating_mul(3600)))
+        self.tmp_gc_hours().map(hours_window)
     }
+}
+
+/// `hours` as a duration. A multiplication that would wrap saturates.
+fn hours_window(hours: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(hours.saturating_mul(3600))
 }
 
 impl Default for Cache {
@@ -110,14 +121,6 @@ mod tests {
             }
         }
 
-        #[test]
-        fn tmp_retention_is_hours_in_seconds(hours in proptest::num::u64::ANY) {
-            let cache = Cache { tmp_retention_hours: Some(hours), ..Cache::default() };
-            proptest::prop_assert_eq!(
-                cache.tmp_retention().map(|d| d.as_secs()),
-                Some(hours.saturating_mul(HOUR))
-            );
-        }
     }
 
     #[test]
@@ -156,11 +159,21 @@ mod tests {
     }
 
     #[test]
-    fn the_two_retention_settings_are_independent() {
+    fn the_cache_retention_sets_no_age_for_state_tmp() {
         let cache: Cache = serde_yaml::from_str("cache_retention_hours: 1").unwrap();
         assert_eq!(
             cache.tmp_retention(),
             Some(std::time::Duration::from_secs(168 * HOUR))
         );
+    }
+
+    #[test]
+    fn a_null_cache_retention_turns_state_tmp_gc_off_too() {
+        let cache: Cache = serde_yaml::from_str("cache_retention_hours: null").unwrap();
+        assert_eq!(cache.tmp_gc_hours(), None);
+        assert_eq!(cache.tmp_retention(), None);
+        let with_tmp: Cache =
+            serde_yaml::from_str("cache_retention_hours: null\ntmp_retention_hours: 24").unwrap();
+        assert_eq!(with_tmp.tmp_retention(), None);
     }
 }

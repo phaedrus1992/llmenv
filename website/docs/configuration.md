@@ -70,14 +70,15 @@ cache:
 Defaults: `cache_dir` = `~/.cache/llmenv`, `sync_interval_minutes` = `15`,
 `cache_retention_hours` = `168`, `remote_sync` = `true`. Set
 `cache_retention_hours` to `null` to disable age-based GC.
-With `null`, `llmenv clean` (and the deprecated `llmenv doctor --gc`) skips the cache, session-log, and codebase-memory sweeps (fixed in v3.13.0: before, `null` used the 168-hour default).
+With `null`, `llmenv clean` (and the deprecated `llmenv doctor --gc`) skips every age-based sweep (fixed in v3.13.0: before, `null` used the 168-hour default).
+That covers the cache, `state/tmp`, session-log, and codebase-memory sweeps, and SessionStart shows no stale `state/tmp` hint.
 
 `tmp_retention_hours` (added in v3.14.2) is the keep time of an entry in `state/tmp`, which `TMPDIR` points at.
 The default is `168`.
-`cache_retention_hours` does not change it, because a scratch file needs a shorter time than a cache folder.
-A `null` value turns off the `state/tmp` sweep, and SessionStart shows no stale `state/tmp` hint.
+A number in `cache_retention_hours` does not change it, because a scratch file needs a shorter time than a cache folder.
+A `null` value turns off the `state/tmp` sweep only, and SessionStart shows no stale `state/tmp` hint.
 `0` is refused.
-`llmenv clean --tmp-older-than 2d` replaces the setting for one run.
+`llmenv clean --tmp-older-than 2d` replaces the setting for one run, even when either setting is `null`.
 
 (added in v3.13.0)
 

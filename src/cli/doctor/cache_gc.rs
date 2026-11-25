@@ -106,9 +106,15 @@ pub(in crate::cli) fn run(
         );
     }
     if retention.tmp.is_none() {
+        let null_setting = if config.cache.cache_retention_hours.is_none() {
+            "cache.cache_retention_hours"
+        } else {
+            "cache.tmp_retention_hours"
+        };
         eprintln!(
-            "{} GC of state/tmp skipped: cache.tmp_retention_hours is null, so the age-based \
-             sweep of state/tmp is off. Set it to a number of hours to turn it on.",
+            "{} GC of state/tmp skipped: {null_setting} is null, so the age-based sweep of \
+             state/tmp is off. Set it to a number of hours, or give --tmp-older-than, to turn it \
+             on.",
             out.pass
         );
     }
