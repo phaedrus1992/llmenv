@@ -58,7 +58,7 @@ impl JobKind {
     /// Seconds a healthy job can run: its longest timeout plus a margin. The cbm indexer has no
     /// timeout, so it gets half an hour; the upstream benchmark for a very large repository is
     /// about three minutes.
-    fn deadline_secs(self) -> u64 {
+    pub(crate) fn deadline_secs(self) -> u64 {
         let longest = match self {
             // The LLM call allows 120 s and each ICM call 30 s.
             Self::Consolidation => 120 + 30,

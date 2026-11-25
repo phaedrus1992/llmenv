@@ -59,15 +59,24 @@ fn run_cbm_index_with(
     checkpoint_path: &Path,
     build: impl FnOnce(&Path, Option<&str>, Option<u32>) -> std::process::Command,
 ) -> anyhow::Result<()> {
-    let loaded = checkpoint::load(checkpoint_path)?;
-    // A second job of the same project stops here, and the first job settles the checkpoint.
+    // The lock comes first, so a job never starts from the checkpoint of a job that ended while
+    // it waited. A second job of the same project stops here, and the first job settles the
+    // checkpoint.
     let Some(_lock) = lock::take(checkpoint_path)? else {
-        tracing::info!(
-            checkpoint = %checkpoint_path.display(),
-            "another index job of this project is running, so this job stops"
+        lock::note_busy(
+            checkpoint_path,
+            checkpoint::JobKind::CbmIndex.deadline_secs(),
         );
         return Ok(());
     };
+    if !checkpoint_path.exists() {
+        tracing::info!(
+            checkpoint = %checkpoint_path.display(),
+            "the index job of this project already finished, so this job stops"
+        );
+        return Ok(());
+    }
+    let loaded = checkpoint::load(checkpoint_path)?;
     let inputs: IndexInputs = serde_json::from_value(loaded.inputs)
         .context("the checkpoint holds no project root for the indexer")?;
     let mut cmd = build(
@@ -164,6 +173,18 @@ mod tests {
         let mut cmd = std::process::Command::new("sh");
         cmd.args(["-c", script]);
         cmd
+    }
+
+    // A job whose checkpoint a finished job removed stops without running the indexer (#3914).
+    #[test]
+    fn a_job_stops_when_its_checkpoint_was_settled_while_it_waited() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = written(dir.path());
+        std::fs::remove_file(&path).unwrap();
+        let ran = dir.path().join("indexer-ran");
+        let script = format!("touch {}", ran.display());
+        run_cbm_index_with(&path, |_, _, _| shell(&script)).unwrap();
+        assert!(!ran.exists(), "the indexer must not start");
     }
 
     // #3914: a job that finds the lock of its project taken does not start the indexer, and it
