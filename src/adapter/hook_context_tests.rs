@@ -141,3 +141,45 @@ fn emit_hook_context_event_table() {
         }
     }
 }
+
+/// #3357: a PreCompact output with a flood of notices stays under the cut of Claude Code, is
+/// valid JSON, and keeps the first notices whole.
+#[test]
+fn a_flood_of_notices_on_pre_compact_stays_under_the_cut() {
+    let notes = (0..500)
+        .map(|i| format!("llmenv: notice {i} {}", "y".repeat(80)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let out = emit_hook_context("PreCompact", "", &notes, SessionStartContext::Accepted);
+    let ctx = additional_context(&out);
+    assert!(!ctx.is_empty(), "{out}");
+    assert!(
+        context_cap::context_len(&ctx) < 10_000,
+        "{}",
+        context_cap::context_len(&ctx)
+    );
+    assert!(ctx.starts_with("llmenv: notice 0 "), "{ctx}");
+    assert!(ctx.contains("more notice(s) were left out"), "{ctx}");
+}
+
+/// Memory keeps its text whole, and the notices give way to it.
+#[test]
+fn memory_stays_whole_when_the_notices_do_not_fit_beside_it() {
+    let memory = "m".repeat(8_000);
+    let notes = (0..200)
+        .map(|i| format!("llmenv: notice {i} {}", "z".repeat(80)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let out = emit_hook_context(
+        "UserPromptSubmit",
+        &memory,
+        &notes,
+        SessionStartContext::Accepted,
+    );
+    let ctx = additional_context(&out);
+    assert!(
+        ctx.ends_with(&memory),
+        "the memory block must stay whole and last"
+    );
+    assert!(context_cap::context_len(&ctx) < 10_000);
+}
