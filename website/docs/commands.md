@@ -484,7 +484,6 @@ Flags:
 - `--dry-run` — list every item that a real run tries to remove, and remove nothing.
   This covers the cache folders and every age-based sweep.
   (added in v3.14.2) Each `state/tmp` line ends with the age of the entry, such as `(age 9d 2h)`.
-  An entry whose age cannot be read shows `(age unknown: <cause>)` in its place.
   A real run can still fail on an item that the dry run lists, for example a folder without write access.
 - `--plugin-cache` — also remove the shared plugin cache folder of each adapter.
   A folder that does not exist is not listed.

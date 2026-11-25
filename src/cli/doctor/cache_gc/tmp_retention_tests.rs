@@ -173,22 +173,26 @@ fn a_dry_run_removes_nothing() {
 }
 
 #[test]
-fn the_age_of_an_entry_names_why_it_cannot_be_given() {
+fn a_dry_run_report_carries_the_age_that_the_sweep_judged() {
     use crate::materialize::cache::AgeSource;
-    use crate::materialize::tmp_sweep::entry_age;
+    use crate::materialize::expiry::AgeRule;
 
     let t = tmp_fixture();
-    let source = AgeSource::MtimeOnly;
-    assert_eq!(entry_age(&t.recent, source, t.later), Ok(3 * DAY));
+    let rule = AgeRule {
+        older_than: 7 * DAY,
+        source: AgeSource::MtimeOnly,
+    };
+    let tmp = t.state.path().join("tmp");
 
-    // The entry changed after the clock of the sweep.
-    let early = t.later - 30 * DAY;
-    let future = entry_age(&t.recent, source, early).unwrap_err();
-    assert!(future.contains("in the future"), "{future}");
+    let report = crate::materialize::tmp_sweep::sweep(&tmp, rule, &[], true, t.later).unwrap();
 
-    let missing = t.state.path().join("tmp").join("gone");
-    let unreadable = entry_age(&missing, source, t.later).unwrap_err();
-    assert!(unreadable.contains("cannot read it"), "{unreadable}");
+    assert_eq!(report.removed, vec![t.old.clone()]);
+    assert_eq!(report.ages.get(&t.old), Some(&(9 * DAY)));
+    assert!(
+        !report.ages.contains_key(&t.recent),
+        "a kept entry has an age"
+    );
+    assert!(t.old.exists(), "a dry run removed an entry");
 }
 
 mod properties {
@@ -220,5 +224,42 @@ mod properties {
             let from_config = cache_hours.and(tmp_hours).map(hours);
             prop_assert_eq!(got.tmp, flag.map(Duration::from_secs).or(from_config));
         }
+    }
+}
+
+// The gate and the sweep read the age source from one cutoff, so they agree for each source
+// (#4054). The fixture entries have an old mtime and a new change time.
+#[test]
+fn the_gate_and_the_sweep_agree_for_each_age_source() {
+    use super::state_gate::state_may_have_stale_entries;
+    use super::{Cutoff, sweep_state_tmp};
+    use crate::materialize::cache::AgeSource;
+
+    for (source, removed) in [
+        (AgeSource::MtimeOnly, true),
+        (AgeSource::MtimeOrCtime, false),
+    ] {
+        let state = tempfile::tempdir().unwrap();
+        let tmp = state.path().join("tmp");
+        std::fs::create_dir(&tmp).unwrap();
+        let entry = tmp.join("old");
+        std::fs::write(&entry, b"x").unwrap();
+        File::options()
+            .write(true)
+            .open(&entry)
+            .unwrap()
+            .set_modified(SystemTime::now() - 30 * DAY)
+            .unwrap();
+        let cutoff = Cutoff {
+            retention: 7 * DAY,
+            now: SystemTime::now(),
+            source,
+        };
+
+        let may_remove = state_may_have_stale_entries(state.path(), Some(cutoff), None, false);
+        assert_eq!(sweep_state_tmp(state.path(), cutoff, Ok(&[]), OUT), 0);
+
+        assert_eq!(may_remove, removed, "{source:?}: the gate");
+        assert_eq!(!entry.exists(), removed, "{source:?}: the sweep");
     }
 }

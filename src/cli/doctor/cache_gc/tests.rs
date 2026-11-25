@@ -144,16 +144,11 @@ fn a_later_clock_is_one_verdict_for_the_gate_and_every_state_sweep() {
     let cutoff = Cutoff {
         retention: DAY * 7,
         now: SystemTime::now() + 30 * DAY,
+        source: crate::materialize::cache::AgeSource::MtimeOrCtime,
     };
 
     assert!(
-        state_may_have_stale_entries(
-            state.path(),
-            Some(cutoff),
-            Some(cutoff),
-            false,
-            crate::materialize::cache::AgeSource::MtimeOrCtime,
-        ),
+        state_may_have_stale_entries(state.path(), Some(cutoff), Some(cutoff), false),
         "the gate read the wall clock"
     );
     let failures = sweep_state_tmp(state.path(), cutoff, Ok(&[]), OUT)
