@@ -320,6 +320,8 @@ recall events also need `adaptive_recall` on):
 - `post_tool_use_failure` (added in v3.12.0) — records the error and injects
   memories about it. (changed in v3.13.0) A memory is injected only when its
   summary or keywords share a distinctive word or an error code with the error
+  (changed in v3.14.2) `failure_recall: false` on the memory entry skips the recall and still
+  records the error
 - `subagent_start` (added in v3.12.0) — injects memories that match the
   subagent's task, which `subagent_task` records
 - `subagent_task` (added in v3.12.0) — a `PreToolUse` hook on the `Agent` tool
@@ -1455,7 +1457,8 @@ active context (active bundles, active MCP servers, etc.). Checks:
   more than 20% of the calls failed, and reports the memory server as stuck when
   the last 10 calls all failed. Each line gives the age of the newest call. A stuck
   result with no call in the last day is info only, because the server may be fixed
-  since. A ring file that is not valid is replaced by the next hook, and the agent is
+  since. (changed in v3.14.2) A failing-often result with no call in the last day is
+  info only too. A ring file that is not valid is replaced by the next hook, and the agent is
   told. See [Adaptive recall](mcp.md#adaptive-recall-added-in-v3120).
 - cached OAuth credential (added in v3.8.0) — reports whether a token is cached
   in the durable state dir, and warns when the cached token has expired. See

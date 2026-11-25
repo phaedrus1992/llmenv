@@ -109,6 +109,7 @@ pub(super) fn default_memory_hook() -> MemoryHookSettings {
     MemoryHookSettings {
         wakeup_max_tokens: None,
         adaptive_recall: true,
+        failure_recall: true,
         default_type: None,
         default_importance: None,
         global_topics: crate::config::Memory::default().global_topics,

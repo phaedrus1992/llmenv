@@ -186,9 +186,11 @@ impl Ledger {
             .retain(|p| p.tool_use_id != tool_use_id);
     }
 
+    /// Drops each pending subagent that is older than the TTL, or has a time in the future, so
+    /// a clock that stepped back cannot keep one alive (#3907).
     fn drop_expired(&mut self, now: i64) {
         self.pending_subagents
-            .retain(|p| now.saturating_sub(p.at) <= PENDING_TTL_SECS);
+            .retain(|p| crate::util::ttl::is_within(p.at, now, PENDING_TTL_SECS + 1));
     }
 }
 

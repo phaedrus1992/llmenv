@@ -82,6 +82,8 @@ pub(super) async fn is_stored(
         "limit": RECALL_LIMIT,
         "format": crate::memory::recall_json::FORMAT,
     });
+    // A detached job runs this and no hook waits for it, so it has neither the hook recall
+    // budget nor the recall breaker.
     let output = client.call_tool("icm_memory_recall", args).await?;
     let stored = crate::memory::recall_json::parse(&output)?;
     let in_topic = stored

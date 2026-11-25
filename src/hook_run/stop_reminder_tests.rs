@@ -126,8 +126,11 @@ fn stop_reminder_separates_tracker_text_from_the_critique() {
         &config,
         &serde_json::Value::Null,
     );
-    let tracker_only =
-        crate::task::stop_hook_reminder(&crate::task::Stored::read(state_dir.path()), None);
+    let tracker_only = crate::task::stop_hook_reminder(
+        &crate::task::Stored::read(state_dir.path()),
+        None,
+        crate::task::TurnEnd::Statement,
+    );
     assert!(
         !tracker_only.is_empty(),
         "fixture must produce tracker text, or this proves nothing"
@@ -184,8 +187,11 @@ fn stop_reminder_appends_the_waiting_reminder_after_a_question() {
     .expect("test");
     crate::task::start_task(state_dir.path(), &task.slug, false).expect("test");
     let text = resolve_stop_reminder(state_dir.path(), Some("s1"), &config, &question);
-    let tracker_only =
-        crate::task::stop_hook_reminder(&crate::task::Stored::read(state_dir.path()), None);
+    let tracker_only = crate::task::stop_hook_reminder(
+        &crate::task::Stored::read(state_dir.path()),
+        None,
+        crate::task::TurnEnd::Statement,
+    );
     assert!(
         !tracker_only.is_empty(),
         "the fixture must produce tracker text"
@@ -202,4 +208,45 @@ fn stop_reminder_appends_the_waiting_reminder_after_a_question() {
     let statement = serde_json::json!({ "last_assistant_message": "Done." });
     let quiet = resolve_stop_reminder(state_dir.path(), Some("s1"), &config, &statement);
     assert_eq!(quiet, tracker_only);
+}
+
+// #2473: the Stop hook passes the end of the last message to the idle reminder, so a question
+// to the user puts the `wait` command first.
+#[test]
+fn the_idle_reminder_leads_with_wait_after_a_question() {
+    let state_dir = tempfile::tempdir().expect("test");
+    let project = crate::task::project::current_tag().expect("test");
+    start_owned_session(state_dir.path(), &project, "s1");
+    let task = crate::task::add_task(
+        state_dir.path(),
+        "finish the parser",
+        crate::task::ParentSpec::Detached,
+        crate::task::SessionChoice::Resolve(
+            &crate::task::session::EngineIdentity::from_session_id(Some("s1")),
+        ),
+        &project,
+    )
+    .expect("test");
+    let config = crate::config::Config {
+        features: Some(crate::config::Features {
+            repeat_detect: Some(crate::config::RepeatDetect {
+                enabled: false,
+                threshold: 1,
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let start = format!("llmenv task start {}", task.slug);
+    let wait = format!("llmenv task wait {}", task.slug);
+
+    let question = serde_json::json!({ "last_assistant_message": "Which one?" });
+    let asked = resolve_stop_reminder(state_dir.path(), Some("s1"), &config, &question);
+    assert!(asked.find(&wait) < asked.find(&start), "{asked:?}");
+    assert!(asked.contains(&start), "{asked:?}");
+
+    let statement = serde_json::json!({ "last_assistant_message": "Done." });
+    let told = resolve_stop_reminder(state_dir.path(), Some("s1"), &config, &statement);
+    assert!(told.find(&start) < told.find(&wait), "{told:?}");
+    assert!(told.contains(&wait), "{told:?}");
 }

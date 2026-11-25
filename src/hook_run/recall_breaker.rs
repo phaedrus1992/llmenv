@@ -7,13 +7,14 @@
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::agent_notice;
 use crate::hook_run::action::Reply;
+use crate::hook_run::recall_deadline::{Deadline, within};
 
 /// Consecutive failed recalls that open the breaker. Each failure waits out one call timeout,
 /// so three bound the cost of a dead server to three waits per window.
@@ -129,14 +130,11 @@ fn notice_problem(what: &str, error: &anyhow::Error) -> String {
 ///
 /// # Errors
 /// Returns `Skipped` while the breaker is open. Otherwise returns the error from `call`.
-async fn run_guarded<F>(path: &Path, call: F) -> anyhow::Result<Reply>
+async fn run_guarded<F>(path: &Path, deadline: Option<Deadline>, call: F) -> anyhow::Result<Reply>
 where
     F: Future<Output = anyhow::Result<Reply>>,
 {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("system clock is before the Unix epoch")?
-        .as_secs();
+    let now = u64::try_from(crate::hook_run::session_state::unix_now()).unwrap_or(0);
     let before = load(path, now).unwrap_or_else(|e| {
         agent_notice::record(notice_problem(
             "cannot be read, so recall runs without it",
@@ -147,7 +145,9 @@ where
     if is_open(&before, now) {
         return Err(Skipped.into());
     }
-    let result = call.await;
+    // The deadline sits inside the guard, so a call that the budget cuts off still counts as a
+    // failed call (#4022).
+    let result = within(deadline, call).await;
     let next = after(&before, result.is_ok(), now);
     let saved = (next != before).then(|| save(path, &next));
     if let Some(Err(e)) = saved {
@@ -175,13 +175,22 @@ fn trip_notice(before: &State, after: &State, now: u64) -> Option<String> {
 ///
 /// # Errors
 /// Returns `Skipped` while the breaker is open. Otherwise returns the error from `call`.
-pub(crate) async fn guard_recall<F>(path: Option<&Path>, call: F) -> anyhow::Result<Reply>
+pub(crate) async fn guard_recall<F>(
+    path: Option<&Path>,
+    deadline: Option<Deadline>,
+    call: F,
+) -> anyhow::Result<Reply>
 where
     F: Future<Output = anyhow::Result<Reply>>,
 {
+    // Slow calls before this one may have used the whole budget. This call then never reaches
+    // the server, so it moves neither the failure count nor the state file.
+    if let Some(cut) = deadline.and_then(Deadline::expired_cut) {
+        return Err(cut.into());
+    }
     match path {
-        Some(path) => run_guarded(path, call).await,
-        None => call.await,
+        Some(path) => run_guarded(path, deadline, call).await,
+        None => within(deadline, call).await,
     }
 }
 
@@ -257,11 +266,12 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("b.json");
         for _ in 0..FAILURE_THRESHOLD {
-            let down = run_guarded(&path, async { Err(anyhow::anyhow!("server down")) }).await;
+            let down =
+                run_guarded(&path, None, async { Err(anyhow::anyhow!("server down")) }).await;
             assert!(down.is_err());
         }
         let mut ran = false;
-        let skipped = run_guarded(&path, async {
+        let skipped = run_guarded(&path, None, async {
             ran = true;
             Ok(Reply::Text(String::new()))
         })
@@ -274,14 +284,60 @@ mod tests {
         Ok(())
     }
 
+    // #4022: a server that is slower than the budget on every call opens the breaker.
+    #[tokio::test]
+    async fn a_call_the_budget_cuts_off_counts_as_a_failed_call() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("b.json");
+        for _ in 0..FAILURE_THRESHOLD {
+            let deadline = Deadline::expiring_in(Duration::from_millis(10));
+            let slow = async {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                Ok(Reply::Text(String::new()))
+            };
+            let cut = run_guarded(&path, Some(deadline), slow).await;
+            let err = cut.err().ok_or_else(|| anyhow::anyhow!("expected a cut"))?;
+            assert!(err.is::<crate::hook_run::recall_deadline::Cut>(), "{err}");
+        }
+        let skipped = run_guarded(&path, None, async { Ok(Reply::Text(String::new())) }).await;
+        let err = skipped
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("expected a skip"))?;
+        assert!(err.is::<Skipped>(), "the breaker must be open: {err}");
+        Ok(())
+    }
+
+    // A call that starts after the shared deadline never reaches the server, so it is not a
+    // failed call.
+    #[tokio::test]
+    async fn a_call_that_starts_after_the_deadline_leaves_the_breaker_alone() -> anyhow::Result<()>
+    {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("b.json");
+        for _ in 0..FAILURE_THRESHOLD + 1 {
+            let expired = Deadline::expiring_in(Duration::ZERO);
+            let mut ran = false;
+            let cut = guard_recall(Some(&path), Some(expired), async {
+                ran = true;
+                Ok(Reply::Text(String::new()))
+            })
+            .await;
+            let err = cut.err().ok_or_else(|| anyhow::anyhow!("expected a cut"))?;
+            assert!(err.is::<crate::hook_run::recall_deadline::Cut>(), "{err}");
+            assert!(!ran, "an expired call must not run");
+        }
+        assert!(!path.exists(), "the state file must stay untouched");
+        Ok(())
+    }
+
     #[tokio::test]
     async fn a_success_resets_the_failure_run() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("b.json");
         for _ in 0..FAILURE_THRESHOLD - 1 {
-            let _ = run_guarded(&path, async { Err(anyhow::anyhow!("down")) }).await;
+            let _ = run_guarded(&path, None, async { Err(anyhow::anyhow!("down")) }).await;
         }
-        let ok = run_guarded(&path, async { Ok(Reply::Text(String::new())) }).await;
+        let ok = run_guarded(&path, None, async { Ok(Reply::Text(String::new())) }).await;
         assert!(ok.is_ok());
         assert_eq!(load(&path, 0)?, State::default());
         Ok(())
