@@ -198,6 +198,21 @@ mod tests {
         );
     }
 
+    proptest::proptest! {
+        #[test]
+        fn age_names_the_unit_of_the_clamped_elapsed_time(at: i64, now: i64) {
+            let secs = i128::from(now).saturating_sub(i128::from(at)).max(0);
+            let text = age(at, now);
+            let unit = match secs {
+                0..60 => " s ago",
+                60..3600 => " min ago",
+                3600..86_400 => " h ago",
+                _ => " days ago",
+            };
+            proptest::prop_assert!(text.ends_with(unit), "{} for {}", text, secs);
+        }
+    }
+
     #[test]
     fn age_uses_the_largest_whole_unit_and_never_goes_negative() {
         assert_eq!(age(NOW, NOW), "0 s ago");
