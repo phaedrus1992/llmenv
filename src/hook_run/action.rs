@@ -192,7 +192,12 @@ impl Action {
         debug!(action = ?self, "dispatching MCP tool call");
         if self.is_recall() {
             let call = self.call(client, query, chunk);
-            return recall_breaker::guard_recall(client.recall_breaker(), call).await;
+            return recall_breaker::guard_recall(
+                client.recall_breaker(),
+                client.recall_deadline(),
+                call,
+            )
+            .await;
         }
         self.call(client, query, chunk).await
     }

@@ -23,6 +23,11 @@ pub(crate) use blockers::block_task;
 use blockers::first_undone_in_subtree;
 pub(crate) mod core_text;
 mod finish_hints;
+mod idle;
+pub(crate) use idle::TurnEnd;
+use idle::idle_session_reminders;
+#[cfg(test)]
+use idle::{idle_reminder_lines, idle_sessions};
 mod parent_chain;
 mod queue_order;
 use ancestors::ancestors_to_start;
@@ -67,7 +72,6 @@ pub(crate) use resolve::resolve_identifier;
 
 pub(crate) use relation::Placement;
 use relation::Relation;
-use session::Session;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -890,7 +894,7 @@ pub(crate) fn session_start_reminder(state_dir: &Path) -> String {
 ///
 /// Only `wip` tasks are listed one by one. A session with `open` tasks and
 /// nothing in progress gets one line that names its next task
-/// ([`idle_sessions`], #2338), because an agent that adds steps and never
+/// (`idle::idle_sessions`, #2338), because an agent that adds steps and never
 /// starts them needs the reminder most. `waiting` tasks are deliberately silent on Stop — they're correctly paused
 /// on something outside the agent's control, and re-injecting their FYI on
 /// every turn nags about a state that is meant to be quiet (they still show at
@@ -905,7 +909,10 @@ pub(crate) fn session_start_reminder(state_dir: &Path) -> String {
 /// `wip` task from a different project sharing this task store must never
 /// surface here. See [`wip_reminder`] for why, within the project, the
 /// footer never presumes a listed task belongs to this conversation (#1028).
-pub(crate) fn stop_hook_reminder(stored: &Stored, caller: Option<&str>) -> String {
+///
+/// `end` says how the last message ended. After a question to the user the idle reminder leads
+/// with `llmenv task wait`, and otherwise with `llmenv task start` (#2473).
+pub(crate) fn stop_hook_reminder(stored: &Stored, caller: Option<&str>, end: TurnEnd) -> String {
     // The caller reads the tasks and the sessions once for the whole Stop run, task tracking
     // included (#3466, #3468, #3472).
     let (tasks, store_warning) = match tasks_visible_to(caller, stored) {
@@ -927,127 +934,10 @@ pub(crate) fn stop_hook_reminder(stored: &Stored, caller: Option<&str>) -> Strin
              `llmenv task note <slug> \"...\"` the blocker instead of repeating status.",
         ),
         session_finish_reminders(caller, stored),
-        idle_session_reminders(caller, stored),
+        idle_session_reminders(caller, stored, end),
         for_current_project(|project| session::missing_context_reminders(project, caller, stored)),
         store_warning,
     ])
-}
-
-/// An open session that holds `open` tasks while none of its tasks is `wip`
-/// or `waiting`: work is planned, but nothing is in progress (#2338).
-#[derive(Debug, Clone)]
-struct IdleSession {
-    session: session::Session,
-    /// The task to start next: the first `open` task in execution order that `task start`
-    /// accepts. `None` when the start refuses every open task, and `loop_error` then says why.
-    next: Option<Task>,
-    open_count: usize,
-    /// Set when no task is actionable: the slug of the first open task that a blocker keeps from
-    /// starting, and why (a loop in the blocker walk, or a blocker that is not done). The reminder
-    /// names the reason instead of advising a start that cannot run (#3618, #3764).
-    loop_error: Option<(String, String)>,
-}
-
-/// Every open session for `project` that [`IdleSession`] describes. Kept
-/// separate from the Stop wording so other end-of-turn checks can share it
-/// (#2339). A `waiting` task makes a session quiet on purpose, so such a
-/// session is not idle.
-#[must_use]
-fn idle_sessions(open: Vec<Session>, all_tasks: &[Task]) -> Vec<IdleSession> {
-    let by_slug: HashMap<&str, &Task> = all_tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
-    open.into_iter()
-        .filter_map(|session| {
-            let tasks: Vec<Task> = all_tasks
-                .iter()
-                .filter(|t| t.session.as_deref() == Some(session.id.as_str()))
-                .cloned()
-                .collect();
-            if tasks
-                .iter()
-                .any(|t| matches!(t.state, TaskState::Wip | TaskState::Waiting))
-            {
-                return None;
-            }
-            let order = execution_order(&tasks);
-            let open: Vec<&Task> = order
-                .iter()
-                .filter(|t| t.state == TaskState::Open)
-                .collect();
-            if open.is_empty() {
-                return None;
-            }
-            let next = startability::first_startable(&open, all_tasks, &by_slug);
-            let loop_error = match next {
-                Some(_) => None,
-                None => blockers::first_obstacle(&open, all_tasks, &by_slug),
-            };
-            Some(IdleSession {
-                next: next.map(Task::to_owned),
-                open_count: open.len(),
-                loop_error,
-                session,
-            })
-        })
-        .collect()
-}
-
-/// The Stop reminder for each [`IdleSession`] in the current project. Like
-/// [`session_finish_reminders`], it cannot tell whose session it names
-/// (#1028), so the nudge is conditioned on the agent recognizing it.
-fn idle_session_reminders(caller: Option<&str>, stored: &Stored) -> String {
-    for_current_project(|project| idle_reminder_lines(project, caller, stored))
-}
-
-fn idle_reminder_lines(project: &str, caller: Option<&str>, stored: &Stored) -> String {
-    let tasks = match store_for_reminder(project, stored) {
-        Ok(tasks) => tasks,
-        Err(warning) => return warning,
-    };
-    let open = match stored.open_sessions_visible_to(project, caller) {
-        Ok(open) => open,
-        Err(e) => return store_warning_text(&e),
-    };
-    let open_ids: Vec<String> = open.iter().map(|s| s.id.clone()).collect();
-    let stalled = relation::stalled_parent_lines(tasks.as_slice(), &open_ids);
-    let idle = idle_sessions(open, tasks.as_slice())
-        .iter()
-        .map(|idle| {
-            let id = &idle.session.id;
-            let label = idle.session.name.as_deref().unwrap_or(id.as_str());
-            if let Some((looped, why)) = &idle.loop_error {
-                return format!(
-                    "Session '{label}' ({id}) has {count} open task(s) and none in progress, but \
-                     '{looped}' cannot start: {why}. If you don't recognize the session, it \
-                     belongs to a different session — leave it alone.",
-                    count = idle.open_count,
-                );
-            }
-            let Some(next) = &idle.next else {
-                return format!(
-                    "Session '{label}' ({id}) has {count} open task(s) and none in progress, but \
-                     the start refuses every one of them. Run `llmenv task ls` to see why.",
-                    count = idle.open_count,
-                );
-            };
-            format!(
-                "Session '{label}' ({id}) has {count} open task(s) and none in progress. If \
-                 you recognize this as your own session, run `llmenv task start {next}` \
-                 ({title}) before you work on that step. If that step needs the user or an \
-                 outside event first, run `llmenv task wait {next} \"<reason>\"` instead. \
-                 The session cannot be closed while any task is open. If you don't \
-                 recognize it, it belongs to a different session — leave it alone.",
-                count = idle.open_count,
-                next = next.slug,
-                title = next.title,
-            )
-        })
-        .collect::<Vec<_>>();
-    empty_session_lines(stored, tasks.as_slice(), project, caller)
-        .into_iter()
-        .chain(stalled)
-        .chain(idle)
-        .collect::<Vec<_>>()
-        .join("\n\n")
 }
 
 /// A line for each open session of `project` that holds no task at all (#2456). An empty session
@@ -1322,6 +1212,10 @@ fn waiting_reminder(tasks: &[Task]) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod idle_tests;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

@@ -29,6 +29,7 @@ async fn run_with_keywords(
         session_id: "s1",
         payload: &payload,
         global_topics: topics,
+        failure_recall: true,
         state_dir: dir.path(),
     };
     let mut budget = RecallBudget::default();
@@ -280,6 +281,7 @@ async fn a_budget_full_before_the_waves_runs_no_recall() {
         session_id: "s1",
         payload: &payload,
         global_topics: &global,
+        failure_recall: true,
         state_dir: dir.path(),
     };
     let mut budget = RecallBudget::default();

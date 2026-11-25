@@ -132,7 +132,7 @@ fn try_list_tasks_skips_both_corrupt_and_unreadable_individual_files() {
 /// cwd/`$HOME` — there's no injection point, so tests that need a task
 /// attributed to "the current project" must resolve the same real tag
 /// the code under test will use).
-fn current_project() -> String {
+pub(super) fn current_project() -> String {
     project::current_tag().expect("test")
 }
 
@@ -140,7 +140,7 @@ fn current_project() -> String {
 /// "test-session" id, this session actually exists in the store — needed
 /// for the #949 project-scoping tests, which filter against real session
 /// records).
-fn session_for_project(dir: &Path, project: &str) -> String {
+pub(super) fn session_for_project(dir: &Path, project: &str) -> String {
     let outcome = start_session(dir, None, None, project, StartDecision::New).expect("test");
     let StartOutcome::Created(session) = outcome else {
         panic!("expected Created");
@@ -1158,7 +1158,7 @@ fn stop_reminder_names_a_session_with_open_tasks_and_no_resume_context() {
     let dir = TempDir::new().expect("test");
     let created = start_session_here(dir.path(), &resume::ResumeContext::default());
     add_task_for_session(dir.path(), "Step", ParentSpec::Detached, &created.id).expect("add");
-    let reminder = stop_hook_reminder(&Stored::read(dir.path()), None);
+    let reminder = stop_hook_reminder(&Stored::read(dir.path()), None, TurnEnd::Statement);
     assert!(reminder.contains("no resume context"), "{reminder}");
     assert!(reminder.contains("task session edit"), "{reminder}");
     assert!(
@@ -1183,13 +1183,15 @@ fn stop_reminder_stays_quiet_about_context_when_it_is_set_or_no_task_is_open() {
     )
     .expect("add");
     assert!(
-        !stop_hook_reminder(&Stored::read(with_context.path()), None).contains("no resume context")
+        !stop_hook_reminder(&Stored::read(with_context.path()), None, TurnEnd::Statement)
+            .contains("no resume context")
     );
 
     let no_tasks = TempDir::new().expect("test");
     start_session_here(no_tasks.path(), &resume::ResumeContext::default());
     assert!(
-        !stop_hook_reminder(&Stored::read(no_tasks.path()), None).contains("no resume context")
+        !stop_hook_reminder(&Stored::read(no_tasks.path()), None, TurnEnd::Statement)
+            .contains("no resume context")
     );
 
     let all_done = TempDir::new().expect("test");
@@ -1198,7 +1200,8 @@ fn stop_reminder_stays_quiet_about_context_when_it_is_set_or_no_task_is_open() {
         .expect("add");
     complete_task(all_done.path(), &task.slug, true).expect("done");
     assert!(
-        !stop_hook_reminder(&Stored::read(all_done.path()), None).contains("no resume context")
+        !stop_hook_reminder(&Stored::read(all_done.path()), None, TurnEnd::Statement)
+            .contains("no resume context")
     );
 }
 
@@ -1212,172 +1215,13 @@ fn session_start_reminder_empty_on_missing_state_dir() {
 #[test]
 fn stop_hook_reminder_empty_when_store_is_empty() {
     let dir = TempDir::new().expect("test");
-    assert!(stop_hook_reminder(&Stored::read(dir.path()), None).is_empty());
+    assert!(stop_hook_reminder(&Stored::read(dir.path()), None, TurnEnd::Statement).is_empty());
 }
 
 // --- open tasks, nothing started (#2338) ---
 
 /// A real session in `project` holding two `open` tasks, chained the way
 /// `task add` chains them by default. Returns (session id, first, second).
-fn idle_session_in_project(dir: &Path, project: &str) -> (String, Task, Task) {
-    let session_id = session_for_project(dir, project);
-    let first =
-        add_task_for_session(dir, "Step 1", ParentSpec::Detached, &session_id).expect("test");
-    let second =
-        add_task_for_session(dir, "Step 2", ParentSpec::Detached, &session_id).expect("test");
-    (session_id, first, second)
-}
-
-#[test]
-fn stop_hook_reminder_flags_open_tasks_when_none_is_wip() {
-    let dir = TempDir::new().expect("test");
-    let (session_id, first, second) = idle_session_in_project(dir.path(), &current_project());
-
-    let reminder = stop_hook_reminder(&Stored::read(dir.path()), None);
-    assert!(
-        reminder.contains(&session_id),
-        "must name the session: {reminder}"
-    );
-    assert!(
-        reminder.contains(&format!("llmenv task start {}", first.slug)),
-        "must name the next open task to start: {reminder}"
-    );
-    assert!(
-        !reminder.contains(&second.slug),
-        "names the next task only: {reminder}"
-    );
-    assert!(reminder.contains("2 open task(s)"), "{reminder}");
-    assert!(
-        !reminder.contains("session finish"),
-        "a session with open tasks must not be offered `session finish` (#2416): {reminder}"
-    );
-    assert!(
-        reminder.contains("recognize"),
-        "must not presume ownership: {reminder}"
-    );
-}
-
-// #3764: an idle session whose only open task waits on an undone blocker names the reason, and
-// it does not advise a start that the start refuses.
-#[test]
-fn an_idle_reminder_names_the_unmet_blocker_and_not_a_start() {
-    let dir = TempDir::new().expect("test");
-    let session_id = session_for_project(dir.path(), &current_project());
-    let waiter = add_task_for_session(dir.path(), "Waiter", ParentSpec::Detached, &session_id)
-        .expect("test");
-    let mut blocker = add_task_for_session(
-        dir.path(),
-        "Elsewhere",
-        ParentSpec::Detached,
-        "other-session",
-    )
-    .expect("test");
-    blocker.state = TaskState::Wip;
-    save_task(dir.path(), &blocker).expect("test");
-    block_task(dir.path(), &waiter.slug, &blocker.slug).expect("test");
-
-    let reminder = stop_hook_reminder(&Stored::read(dir.path()), None);
-    assert!(
-        reminder.contains(&format!("'{}' cannot start", waiter.slug)),
-        "{reminder}"
-    );
-    assert!(
-        reminder.contains(&format!("waits on '{}'", blocker.slug)),
-        "{reminder}"
-    );
-    assert!(
-        !reminder.contains(&format!("llmenv task start {}", waiter.slug)),
-        "{reminder}"
-    );
-}
-
-// #2608: an unreadable store must say so in the reminder, not print that no session is open.
-#[test]
-fn unreadable_store_reminder_warns_instead_of_reporting_no_work() {
-    let dir = TempDir::new().expect("test");
-    std::fs::write(dir.path().join("tasks"), "x").expect("test");
-    let stored = Stored::read(dir.path());
-    let reminder = idle_reminder_lines(&current_project(), None, &stored);
-    assert!(reminder.contains("task store cannot be read"), "{reminder}");
-    assert!(!reminder.contains("has no tasks"), "{reminder}");
-}
-
-// #2468: the first idle reminder must already offer `wait`, for a step that needs the user.
-#[test]
-fn first_idle_reminder_offers_start_and_wait() {
-    let dir = TempDir::new().expect("test");
-    let (_, first, _) = idle_session_in_project(dir.path(), &current_project());
-
-    let reminder = stop_hook_reminder(&Stored::read(dir.path()), None);
-    let start = format!("llmenv task start {}", first.slug);
-    let wait = format!("llmenv task wait {} \"<reason>\"", first.slug);
-    assert!(reminder.contains(&start), "{reminder}");
-    assert!(reminder.contains(&wait), "{reminder}");
-    assert!(
-        reminder.contains("needs the user"),
-        "must say when `wait` applies: {reminder}"
-    );
-}
-
-#[test]
-fn stop_hook_reminder_skips_idle_check_for_session_with_wip_task() {
-    let dir = TempDir::new().expect("test");
-    let (session_id, first, second) = idle_session_in_project(dir.path(), &current_project());
-    start_task(dir.path(), &first.slug, false).expect("test");
-
-    let reminder = stop_hook_reminder(&Stored::read(dir.path()), None);
-    assert!(
-        reminder.contains(&first.slug),
-        "wip reminder still fires: {reminder}"
-    );
-    assert!(!reminder.contains(&second.slug), "{reminder}");
-    assert!(!reminder.contains("none in progress"), "{reminder}");
-    assert!(reminder.contains(&session_id));
-}
-
-#[test]
-fn stop_hook_reminder_skips_idle_check_for_session_with_waiting_task() {
-    let dir = TempDir::new().expect("test");
-    let (_, first, second) = idle_session_in_project(dir.path(), &current_project());
-    start_task(dir.path(), &first.slug, false).expect("test");
-    wait_task(dir.path(), &first.slug, "spec review").expect("test");
-
-    // A `waiting` task means the session is paused on purpose; stay quiet.
-    let reminder = stop_hook_reminder(&Stored::read(dir.path()), None);
-    assert!(!reminder.contains(&second.slug), "{reminder}");
-}
-
-#[test]
-fn stop_hook_reminder_skips_idle_session_from_other_project() {
-    let dir = TempDir::new().expect("test");
-    let (_, first, _) = idle_session_in_project(dir.path(), "other-project-0000000000");
-    assert!(!stop_hook_reminder(&Stored::read(dir.path()), None).contains(&first.slug));
-}
-
-#[test]
-fn idle_sessions_name_the_obstacle_when_a_blocker_and_the_queue_refuse_every_task() {
-    let dir = TempDir::new().expect("test");
-    let project = current_project();
-    let (session_id, first, second) = idle_session_in_project(dir.path(), &project);
-    block_task(dir.path(), &first.slug, &second.slug).expect("test");
-
-    let open = session::open_sessions_strict(dir.path(), &project).expect("test");
-    let idle = idle_sessions(open, &list_tasks(dir.path()));
-    assert_eq!(idle.len(), 1);
-    assert_eq!(idle[0].session.id, session_id);
-    // The first task waits on the second, and the queue holds the second behind the first, so
-    // the start refuses both. The reminder keeps the first task and names why it cannot
-    // start (#3770), where it used to advise a start of the second that the queue refused.
-    assert!(idle[0].next.is_none());
-    let (slug, why) = idle[0].loop_error.as_ref().expect("an obstacle is named");
-    assert_eq!(slug, &first.slug);
-    assert!(
-        why.contains(&format!("waits on '{}'", second.slug)),
-        "{why}"
-    );
-    assert_eq!(idle[0].open_count, 2);
-}
-
 fn child_new<'a>(title: &'a str, parent: &'a str) -> NewTask<'a> {
     NewTask {
         title,
@@ -1409,7 +1253,7 @@ fn the_stop_reminder_names_a_parent_with_only_unstarted_sub_tasks() {
     start_task(dir.path(), &scan.slug, false).expect("test");
     complete_task(dir.path(), &scan.slug, false).expect("test");
 
-    let reminder = stop_hook_reminder(&Stored::read(dir.path()), None);
+    let reminder = stop_hook_reminder(&Stored::read(dir.path()), None, TurnEnd::Statement);
     assert!(reminder.contains("1 of 2 sub-tasks done"), "{reminder}");
     assert!(
         reminder.contains(&format!("llmenv task start {}", audit.slug)),
@@ -1432,7 +1276,7 @@ fn the_wip_reminder_shows_how_far_the_sub_tasks_have_come() {
     .expect("test");
     start_task(dir.path(), &scan.slug, false).expect("test");
 
-    let reminder = stop_hook_reminder(&Stored::read(dir.path()), None);
+    let reminder = stop_hook_reminder(&Stored::read(dir.path()), None, TurnEnd::Statement);
     assert!(
         reminder.contains("0 of 1 sub-tasks done, 1 in progress"),
         "{reminder}"
@@ -1788,7 +1632,7 @@ fn reopen_task_leaves_non_done_task_unchanged() {
 fn stop_hook_reminder_flags_wip_tasks() {
     let dir = TempDir::new().expect("test");
     let task = wip_task_in_project(dir.path(), "Left in progress", &current_project());
-    let reminder = stop_hook_reminder(&Stored::read(dir.path()), None);
+    let reminder = stop_hook_reminder(&Stored::read(dir.path()), None, TurnEnd::Statement);
     assert!(reminder.contains(&task.slug));
 }
 
@@ -1798,7 +1642,7 @@ fn stop_hook_reminder_silent_when_only_waiting_tasks() {
     let task = mk(dir.path(), "Blocked on review", None).expect("test");
     wait_task(dir.path(), &task.slug, "spec review").expect("test");
     // `waiting` is meant to be quiet — Stop must not re-inject its FYI.
-    assert!(stop_hook_reminder(&Stored::read(dir.path()), None).is_empty());
+    assert!(stop_hook_reminder(&Stored::read(dir.path()), None, TurnEnd::Statement).is_empty());
 }
 
 #[test]
@@ -1808,7 +1652,7 @@ fn stop_hook_reminder_shows_wip_but_not_waiting() {
     let wip = wip_task_in_project(dir.path(), "Actively working", &project);
     let waiting = waiting_task_in_project(dir.path(), "Blocked on review", &project, "spec review");
 
-    let reminder = stop_hook_reminder(&Stored::read(dir.path()), None);
+    let reminder = stop_hook_reminder(&Stored::read(dir.path()), None, TurnEnd::Statement);
     assert!(reminder.contains(&wip.slug));
     assert!(reminder.contains("exhaust safe autonomous remediation"));
     // The waiting task and its FYI must stay silent on Stop.
@@ -1828,7 +1672,7 @@ fn stop_hook_reminder_shows_session_tag_and_never_presumes_ownership() {
     let dir = TempDir::new().expect("test");
     let task = wip_task_in_project(dir.path(), "Someone's task", &current_project());
 
-    let reminder = stop_hook_reminder(&Stored::read(dir.path()), None);
+    let reminder = stop_hook_reminder(&Stored::read(dir.path()), None, TurnEnd::Statement);
     assert!(
         reminder.contains(task.session.as_deref().expect("test")),
         "reminder must name the owning session so the agent can tell whether it's its \
@@ -1919,7 +1763,7 @@ fn stop_hook_reminder_does_not_leak_wip_task_from_other_project() {
     let leaked = wip_task_in_project(dir.path(), "Other project's task", other_project);
     // No session/task tagged to the real current project at all — a
     // `wip` task belonging to a different project must not surface.
-    let reminder = stop_hook_reminder(&Stored::read(dir.path()), None);
+    let reminder = stop_hook_reminder(&Stored::read(dir.path()), None, TurnEnd::Statement);
     assert!(!reminder.contains(&leaked.slug));
     assert!(reminder.is_empty());
 }
@@ -1942,7 +1786,7 @@ fn stop_hook_reminder_shows_only_current_projects_wip_task() {
     let mine = wip_task_in_project(dir.path(), "My task", &project);
     let leaked = wip_task_in_project(dir.path(), "Other project's task", "other-project-999");
 
-    let reminder = stop_hook_reminder(&Stored::read(dir.path()), None);
+    let reminder = stop_hook_reminder(&Stored::read(dir.path()), None, TurnEnd::Statement);
     assert!(reminder.contains(&mine.slug), "own-project task must show");
     assert!(
         !reminder.contains(&leaked.slug),
@@ -1961,7 +1805,10 @@ fn legacy_task_with_no_session_is_not_surfaced_cross_project() {
     legacy.state = TaskState::Wip;
     save_task(dir.path(), &legacy).expect("test");
 
-    assert!(!stop_hook_reminder(&Stored::read(dir.path()), None).contains(&legacy.slug));
+    assert!(
+        !stop_hook_reminder(&Stored::read(dir.path()), None, TurnEnd::Statement)
+            .contains(&legacy.slug)
+    );
     assert!(!session_start_reminder(dir.path()).contains(&legacy.slug));
 }
 

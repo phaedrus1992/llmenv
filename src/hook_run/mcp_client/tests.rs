@@ -23,6 +23,8 @@ impl McpHttpClient {
             session_id: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             init_info: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             recall_breaker: None,
+            recall_deadline: None,
+            session_cache: None,
         })
     }
 }
@@ -31,6 +33,7 @@ mod calls;
 mod listing_and_headers;
 mod probe_and_info;
 mod proxy_note;
+mod shared_session;
 mod ssrf_addrs;
 mod ssrf_url;
 mod text_and_timeouts;

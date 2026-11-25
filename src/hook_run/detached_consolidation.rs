@@ -72,8 +72,10 @@ fn run_consolidation_at(
         return Ok(());
     };
     let url = crate::hook_run::memory_url(&config, config_dir, &active)?.into_url()?;
+    let cache = crate::hook_run::mcp_client::SessionCache::for_url(&url);
     let client = McpHttpClient::new(url, CONSOLIDATION_TIMEOUT)
-        .map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))?
+        .with_session_cache(cache);
 
     // The parent starts this child in the session's directory, the same one the
     // scope detection above reads.

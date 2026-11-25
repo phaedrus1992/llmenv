@@ -60,6 +60,7 @@ use consolidation_spawn::post_session_consolidation_in;
 use consolidation_spawn::{consolidation_run_command, post_session_consolidation};
 mod recall;
 mod recall_breaker;
+mod recall_deadline;
 pub(crate) mod recall_health;
 mod record_hash;
 mod relevance;
@@ -548,6 +549,7 @@ async fn run_event_memory(call: MemoryCall<'_>) -> anyhow::Result<HookText> {
         session_id,
         payload: call.payload,
         global_topics: call.settings.map_or(&[], |s| &s.global_topics),
+        failure_recall: call.settings.is_none_or(|s| s.failure_recall),
         state_dir,
     };
     match call.event {
