@@ -244,7 +244,8 @@ mod tests {
         cache.forget();
         cache.forget_if("any");
         let notices = crate::agent_notice::current().unwrap_or_default();
-        assert!(!notices.contains("shared MCP session file"), "{notices}");
+        let own = cache.path.display().to_string();
+        assert!(!notices.contains(&own), "{notices}");
     }
 
     proptest::proptest! {
