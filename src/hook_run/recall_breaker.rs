@@ -7,7 +7,7 @@
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -134,10 +134,7 @@ async fn run_guarded<F>(path: &Path, deadline: Option<Deadline>, call: F) -> any
 where
     F: Future<Output = anyhow::Result<Reply>>,
 {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("system clock is before the Unix epoch")?
-        .as_secs();
+    let now = u64::try_from(crate::hook_run::session_state::unix_now()).unwrap_or(0);
     let before = load(path, now).unwrap_or_else(|e| {
         agent_notice::record(notice_problem(
             "cannot be read, so recall runs without it",

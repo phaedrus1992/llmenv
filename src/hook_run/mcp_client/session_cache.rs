@@ -10,7 +10,6 @@
 //! headers.
 
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -35,11 +34,10 @@ struct Saved {
     saved_at_unix: u64,
 }
 
-fn now_unix() -> Option<u64> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .map(|d| d.as_secs())
+/// Seconds since the Unix epoch; 0 for a clock set before 1970, so a saved id then fails the
+/// age check and is not trusted.
+fn now_unix() -> u64 {
+    u64::try_from(crate::hook_run::session_state::unix_now()).unwrap_or(0)
 }
 
 /// True for an id that is safe in a request header: visible ASCII, not empty, and short.
@@ -105,13 +103,7 @@ impl SessionCache {
     /// not safe in a header.
     pub(crate) fn load(&self) -> Option<String> {
         let saved = self.read()?;
-        let Some(now) = now_unix() else {
-            self.notice(
-                "cannot be aged",
-                &"the system clock is before the Unix epoch",
-            );
-            return None;
-        };
+        let now = now_unix();
         // A saved time in the future is not trusted, so a clock that stepped back cannot keep
         // an id alive (#3907).
         let trusted = saved.saved_at_unix <= now && now - saved.saved_at_unix <= TTL_SECS;
@@ -127,7 +119,7 @@ impl SessionCache {
     }
 
     fn try_save(&self, session_id: &str) -> anyhow::Result<()> {
-        let saved_at_unix = now_unix().context("the system clock is before the Unix epoch")?;
+        let saved_at_unix = now_unix();
         let saved = Saved {
             session_id: session_id.to_string(),
             saved_at_unix,
@@ -188,7 +180,7 @@ mod tests {
         let (_dir, cache) = cache();
         let old = Saved {
             session_id: "abc".into(),
-            saved_at_unix: now_unix().unwrap() - TTL_SECS - 5,
+            saved_at_unix: now_unix() - TTL_SECS - 5,
         };
         std::fs::write(&cache.path, serde_json::to_vec(&old).unwrap()).unwrap();
         assert_eq!(cache.load(), None);
@@ -273,7 +265,7 @@ mod tests {
             id in "[!-~]{1,40}",
         ) {
             let (_dir, cache) = cache();
-            let now = now_unix().unwrap();
+            let now = now_unix();
             let saved_at_unix = if future { now + age } else { now - age };
             let saved = Saved { session_id: id.clone(), saved_at_unix };
             std::fs::write(&cache.path, serde_json::to_vec(&saved).unwrap()).unwrap();

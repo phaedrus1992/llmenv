@@ -8,13 +8,8 @@
 
 use std::fs::{File, TryLockError};
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
+use crate::hook_run::checkpoint::now_secs;
 
 /// The lock of the job whose checkpoint is `checkpoint_path`, or `None` when another job holds it.
 /// The file stays after the job and holds nothing: the lock is the system lock on the open file,
@@ -64,6 +59,11 @@ fn record_holder(mut file: &File, lock: &Path) {
             "cannot record the holder in the index lock {}: {e}",
             lock.display()
         );
+        // A stale process id from an earlier holder must not stay in the file, because the
+        // hung-holder notice tells the agent to stop that process.
+        if let Err(e) = file.set_len(0) {
+            tracing::warn!("cannot clear the index lock {}: {e}", lock.display());
+        }
     }
 }
 
@@ -71,7 +71,7 @@ fn record_holder(mut file: &File, lock: &Path) {
 /// longer than `deadline_secs` is probably hung, and the agent is told how to end it.
 pub(super) fn note_busy(checkpoint_path: &Path, deadline_secs: u64) {
     let lock = checkpoint_path.with_extension("lock");
-    let held = std::fs::read_to_string(&lock).unwrap_or_else(|e| {
+    let held = read_holder(&lock).unwrap_or_else(|e| {
         tracing::warn!(
             "cannot read the holder of the index lock {}: {e}",
             lock.display()
@@ -85,6 +85,17 @@ pub(super) fn note_busy(checkpoint_path: &Path, deadline_secs: u64) {
             "another index job of this project is running, so this job stops"
         ),
     }
+}
+
+/// The text of the lock file. A link is refused, as in [`take`].
+fn read_holder(lock: &Path) -> std::io::Result<String> {
+    use std::io::Read as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    crate::paths::refuse_symlink(&mut options);
+    let mut text = String::new();
+    options.open(lock)?.read_to_string(&mut text)?;
+    Ok(text)
 }
 
 /// The notice for a holder that started at the time in `held` (`<pid> <seconds>`) and has run for
@@ -160,6 +171,25 @@ mod tests {
     fn a_file_with_no_holder_or_a_future_start_gives_no_notice() {
         for held in ["", "garbage", "x 1", "1 y", "42 9999999"] {
             assert_eq!(hung_notice(held, 100, 10), None, "{held:?}");
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn hung_notice_never_panics_on_any_text(held in ".*", now: u64, deadline: u64) {
+            let _ = hung_notice(&held, now, deadline);
+        }
+
+        #[test]
+        fn a_holder_is_hung_exactly_when_it_ran_past_the_deadline(
+            pid: u32, since: u64, now: u64, deadline: u64,
+        ) {
+            let notice = hung_notice(&format!("{pid} {since}"), now, deadline);
+            let hung = now >= since && now - since > deadline;
+            proptest::prop_assert_eq!(notice.is_some(), hung);
+            if let Some(text) = notice {
+                proptest::prop_assert!(text.contains(&format!("process {pid}")), "{}", text);
+            }
         }
     }
 
