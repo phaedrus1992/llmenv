@@ -16,9 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Skip memory recall for five minutes after three failed recall calls in a row, and print one notice, instead of waiting out a timeout on every hook. [feat:hook] [#3896]
 - Add `failure_recall: false` on a `features.memory` entry to skip the memory recall after a failed tool call. The error is still recorded. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#featuresmemory). [feat:memory] [#3897]
 
-- Keep a `state/tmp` entry for its own time, set by `cache.tmp_retention_hours` (default 168). `cache_retention_hours` no longer changes it. Add `llmenv clean --tmp-older-than <duration>` to set the time for one run, and show the age of each entry in `--dry-run`. See [the clean command](https://phaedrus1992.github.io/llmenv/docs/commands). [feat:doctor] [#4046]
+- Keep a `state/tmp` entry for its own time, set by `cache.tmp_retention_hours` (default 168). `cache_retention_hours` no longer changes its time, but a `null` `cache_retention_hours` still turns the sweep off. Add `llmenv clean --tmp-older-than <duration>` to set the time for one run, and show the age of each entry in `--dry-run`. See [the clean command](https://phaedrus1992.github.io/llmenv/docs/commands). [feat:doctor] [#4046]
 
-- Deny a Bash, Write, or Edit call that writes under `/tmp`, `/var/tmp`, or `/dev/shm`, and name `$TMPDIR` as the fix, in every Claude Code, opencode, and Crush session. A read of `/tmp` is allowed. The new `llmenv tmp-guard` command does it. See [the tmp-guard command](https://phaedrus1992.github.io/llmenv/docs/commands#tmp-guard). [feat:hook] [#4045]
+- Deny a Bash, Monitor, Write, Edit, MultiEdit, or NotebookEdit call that writes under `/tmp`, `/var/tmp`, or `/dev/shm`, and name `$TMPDIR` as the fix, in every Claude Code, opencode, and Crush session. A read of `/tmp` is allowed. The new `llmenv tmp-guard` command does it. See [the tmp-guard command](https://phaedrus1992.github.io/llmenv/docs/commands#tmp-guard). [feat:hook] [#4045]
 
 ### Changed
 
