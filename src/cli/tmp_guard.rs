@@ -18,12 +18,16 @@ pub(super) fn run(engine: &str) {
     let read = std::io::stdin().read_to_string(&mut stdin_buf);
     let reason = match read {
         Ok(_) => decide(&stdin_buf, engine),
-        Err(e) => Some(unreadable_reason(&format!(
-            "the hook payload cannot be read from stdin ({e})"
-        ))),
+        Err(e) => {
+            tracing::error!("llmenv tmp-guard cannot read its stdin: {e}");
+            Some(unreadable_reason(&format!(
+                "the hook payload cannot be read from stdin ({e})"
+            )))
+        }
     };
     if let Some(reason) = reason {
-        tracing::error!("llmenv tmp-guard denied a call: {reason}");
+        // A deny is the normal result for a write to /tmp, so it is not an error event.
+        tracing::warn!("llmenv tmp-guard denied a call: {reason}");
         println!("{}", envelope(&reason));
     }
 }
@@ -37,9 +41,12 @@ fn decide(payload: &str, engine: &str) -> Option<String> {
             neutralize_for_engine(engine, Some(&mut payload));
             deny_reason(&payload)
         }
-        Err(e) => Some(unreadable_reason(&format!(
-            "the hook payload is not JSON ({e})"
-        ))),
+        Err(e) => {
+            tracing::error!("llmenv tmp-guard payload is not JSON: {e}");
+            Some(unreadable_reason(&format!(
+                "the hook payload is not JSON ({e})"
+            )))
+        }
     }
 }
 
