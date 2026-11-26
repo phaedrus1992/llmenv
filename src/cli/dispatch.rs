@@ -1,7 +1,11 @@
 //! The dispatch of the `llmenv` subcommands (#4055).
 //!
 //! One function holds one group of commands. A group function runs the commands that it knows and
-//! hands any other command back, so no function holds the whole `match`.
+//! hands any other command back, so no function holds the whole `match`. A group function returns
+//! the result of the command, and the `?` operator stays out of the arms, because each `?` counts
+//! as a branch of the function.
+
+use std::path::PathBuf;
 
 use crate::cli::{
     ColorMode, Command, MemoryCommand, ReadOnceCommand, checked_checkpoint, clean, doctor, guard,
@@ -56,7 +60,7 @@ pub(super) fn dispatch(
             Pass(next) => command = next,
         }
     }
-    // Every command belongs to a group. The `Command` enum has no other variant.
+    // Every command belongs to a group, and a test counts them.
     anyhow::bail!("llmenv: the command has no handler. This is a bug. Run `llmenv --help`")
 }
 
@@ -65,60 +69,60 @@ fn environment_commands(
     use_color: bool,
     _color: ColorMode,
 ) -> anyhow::Result<Routed> {
-    match command {
+    let result = match command {
         Command::Doctor {
             restart_memory_proxy: true,
             ..
-        } => proxy_restart::run(use_color)?,
+        } => proxy_restart::run(use_color),
         Command::Doctor {
             gc, all, probe_mcp, ..
-        } => doctor::run_doctor(gc, all, probe_mcp, use_color)?,
+        } => doctor::run_doctor(gc, all, probe_mcp, use_color),
         Command::Export {
             scope,
             tag,
             explain,
             compress,
-        } => run_export(scope, tag, explain, compress)?,
-        Command::Regenerate => run_regenerate()?,
-        Command::Init { path, repo } => run_init(path, repo)?,
-        Command::Setup(args) => setup::run_setup_command(args)?,
+        } => run_export(scope, tag, explain, compress),
+        Command::Regenerate => run_regenerate(),
+        Command::Init { path, repo } => run_init(path, repo),
+        Command::Setup(args) => setup::run_setup_command(args),
         other => return Ok(Pass(other)),
-    }
-    Ok(Done)
+    };
+    result.map(|()| Done)
 }
 
 fn status_commands(command: Command, use_color: bool, _color: ColorMode) -> anyhow::Result<Routed> {
-    match command {
-        Command::Statusline => run_statusline_cmd(use_color)?,
-        Command::Status { section } => status::run_status(section, use_color)?,
-        Command::Context { bundle, why } => run_context(bundle.as_deref(), why, use_color)?,
-        Command::Validate => run_validate(use_color)?,
-        Command::Edit { bundle } => run_edit(bundle)?,
+    let result = match command {
+        Command::Statusline => run_statusline_cmd(use_color),
+        Command::Status { section } => status::run_status(section, use_color),
+        Command::Context { bundle, why } => run_context(bundle.as_deref(), why, use_color),
+        Command::Validate => run_validate(use_color),
+        Command::Edit { bundle } => run_edit(bundle),
         other => return Ok(Pass(other)),
-    }
-    Ok(Done)
+    };
+    result.map(|()| Done)
 }
 
 fn shell_commands(command: Command, _use_color: bool, _color: ColorMode) -> anyhow::Result<Routed> {
-    match command {
-        Command::Hook { shell } => run_hook(&shell)?,
-        Command::Login { global } => run_login(global)?,
+    let result = match command {
+        Command::Hook { shell } => run_hook(&shell),
+        Command::Login { global } => run_login(global),
         Command::Completions {
             shell,
             install,
             dir,
             force,
-        } => run_completions_command(shell, install, dir, force)?,
+        } => run_completions_command(shell, install, dir, force),
         other => return Ok(Pass(other)),
-    }
-    Ok(Done)
+    };
+    result.map(|()| Done)
 }
 
 /// `llmenv completions`: print the script, or install it with `--install` or `--dir`.
 fn run_completions_command(
     shell: Option<clap_complete::Shell>,
     install: bool,
-    dir: Option<std::path::PathBuf>,
+    dir: Option<PathBuf>,
     force: bool,
 ) -> anyhow::Result<()> {
     if install || dir.is_some() {
@@ -149,68 +153,49 @@ fn deprecated_listing_commands(
         other => return Ok(Pass(other)),
     };
     eprintln!("warning: '{old}' is deprecated; use 'status {new}' instead");
-    status::run_status(Some(section), use_color)?;
-    Ok(Done)
+    status::run_status(Some(section), use_color).map(|()| Done)
 }
 
 fn sync_commands(command: Command, use_color: bool, _color: ColorMode) -> anyhow::Result<Routed> {
-    match command {
-        Command::PluginSync => run_plugin_sync()?,
-        Command::Sync { dry_run } => run_sync(dry_run)?,
-        Command::Upgrade { check, track } => upgrade::run_upgrade(track, check)?,
-        Command::Clean(args) => clean::run_clean(&args, use_color)?,
-        Command::Prune(args) => clean::run_prune_alias(&args, use_color)?,
-        Command::Prefill(args) => prefill::run_prefill(&args)?,
+    let result = match command {
+        Command::PluginSync => run_plugin_sync(),
+        Command::Sync { dry_run } => run_sync(dry_run),
+        Command::Upgrade { check, track } => upgrade::run_upgrade(track, check),
+        Command::Clean(args) => clean::run_clean(&args, use_color),
+        Command::Prune(args) => clean::run_prune_alias(&args, use_color),
+        Command::Prefill(args) => prefill::run_prefill(&args),
         other => return Ok(Pass(other)),
-    }
-    Ok(Done)
+    };
+    result.map(|()| Done)
 }
 
 /// The commands that the hooks run on every tool call, outside `hook-run`.
 fn guard_commands(command: Command, use_color: bool, _color: ColorMode) -> anyhow::Result<Routed> {
-    match command {
+    let result = match command {
         Command::CheckStale { auto_fix, engine } => {
-            guard::dispatch_check_stale(use_color, auto_fix, &engine)?;
+            guard::dispatch_check_stale(use_color, auto_fix, &engine)
         }
-        Command::ConfigContext { engine } => guard::dispatch_config_context(&engine)?,
+        Command::ConfigContext { engine } => guard::dispatch_config_context(&engine),
         Command::ConfigGuard { engine } => guard::dispatch_config_guard(&engine),
         Command::TmpGuard { engine } => guard::dispatch_tmp_guard(&engine),
         Command::Throttle { event } => guard::dispatch_throttle(&event),
         other => return Ok(Pass(other)),
-    }
-    Ok(Done)
+    };
+    result.map(|()| Done)
 }
 
 /// `hook-run` and the detached jobs that it starts.
 fn job_commands(command: Command, _use_color: bool, _color: ColorMode) -> anyhow::Result<Routed> {
-    match command {
-        Command::HookRun { event, engine } => run_hook_run(&event, &engine)?,
-        Command::SessionLogRecord { checkpoint } => {
-            // The checkpoint check starts the notice spool, so a stdin error reaches the agent.
-            let checkpoint = checked_checkpoint(checkpoint)?;
-            let payload_json = read_job_payload()?;
-            crate::session_log::detached::run_record(&payload_json, checkpoint.as_deref())?;
-        }
-        Command::IcmStore { checkpoint } => {
-            let checkpoint = checked_checkpoint(checkpoint)?;
-            let payload_json = read_job_payload()?;
-            crate::hook_run::detached_store::run_icm_store(&payload_json, checkpoint.as_deref())?;
-        }
-        Command::StatuslinePrRefresh => crate::cli::statusline::widget::pr_refresh::run()?,
-        Command::ConsolidationRun { checkpoint } => {
-            let checkpoint = checked_checkpoint(checkpoint)?;
-            crate::hook_run::detached_consolidation::run_consolidation(
-                &paths::config_path()?,
-                checkpoint.as_deref(),
-            )?;
-        }
-        Command::CbmIndexRun { checkpoint } => {
-            let checkpoint = checked_checkpoint(Some(checkpoint))?.unwrap_or_default();
-            crate::hook_run::detached_cbm::run_cbm_index(&checkpoint)?;
-        }
+    let result = match command {
+        Command::HookRun { event, engine } => run_hook_run(&event, &engine),
+        Command::SessionLogRecord { checkpoint } => run_session_log_record(checkpoint),
+        Command::IcmStore { checkpoint } => run_icm_store(checkpoint),
+        Command::StatuslinePrRefresh => crate::cli::statusline::widget::pr_refresh::run(),
+        Command::ConsolidationRun { checkpoint } => run_consolidation(checkpoint),
+        Command::CbmIndexRun { checkpoint } => run_cbm_index(checkpoint),
         other => return Ok(Pass(other)),
-    }
-    Ok(Done)
+    };
+    result.map(|()| Done)
 }
 
 /// `llmenv hook-run <event>`: run the hook, and exit 2 when it blocks the tool call.
@@ -226,14 +211,44 @@ fn run_hook_run(event: &str, engine: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The detached job that records a session-log line. The checkpoint check starts the notice
+/// spool, so an error on stdin reaches the agent.
+fn run_session_log_record(checkpoint: Option<PathBuf>) -> anyhow::Result<()> {
+    let checkpoint = checked_checkpoint(checkpoint)?;
+    let payload_json = read_job_payload()?;
+    crate::session_log::detached::run_record(&payload_json, checkpoint.as_deref())
+}
+
+/// The detached job that stores a memory.
+fn run_icm_store(checkpoint: Option<PathBuf>) -> anyhow::Result<()> {
+    let checkpoint = checked_checkpoint(checkpoint)?;
+    let payload_json = read_job_payload()?;
+    crate::hook_run::detached_store::run_icm_store(&payload_json, checkpoint.as_deref())
+}
+
+/// The detached job that consolidates memories.
+fn run_consolidation(checkpoint: Option<PathBuf>) -> anyhow::Result<()> {
+    let checkpoint = checked_checkpoint(checkpoint)?;
+    crate::hook_run::detached_consolidation::run_consolidation(
+        &paths::config_path()?,
+        checkpoint.as_deref(),
+    )
+}
+
+/// The detached job that indexes a project for codebase-memory.
+fn run_cbm_index(checkpoint: PathBuf) -> anyhow::Result<()> {
+    let checkpoint = checked_checkpoint(Some(checkpoint))?.unwrap_or_default();
+    crate::hook_run::detached_cbm::run_cbm_index(&checkpoint)
+}
+
 fn data_commands(command: Command, _use_color: bool, color: ColorMode) -> anyhow::Result<Routed> {
-    match command {
-        Command::ReadOnce { command } => run_read_once(command)?,
-        Command::Memory { command } => run_memory(command)?,
-        Command::Task { command } => run_task_command(*command, color)?,
+    let result = match command {
+        Command::ReadOnce { command } => run_read_once(command),
+        Command::Memory { command } => run_memory(command),
+        Command::Task { command } => run_task_command(*command, color),
         other => return Ok(Pass(other)),
-    }
-    Ok(Done)
+    };
+    result.map(|()| Done)
 }
 
 fn run_read_once(command: ReadOnceCommand) -> anyhow::Result<()> {
