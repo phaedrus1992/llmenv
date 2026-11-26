@@ -23,7 +23,7 @@ pub(super) fn register(
     }));
 
     // #4045: deny a write under /tmp, because nothing cleans it. A separate command, so no other
-    // hook layer sees these calls.
+    // hook layer sees these calls. Claude Code lets the call run when this command cannot start.
     pre.push(json!({
         "matcher": tools_matcher(&crate::hook_run::tmp_guard::guarded_tools()),
         "hooks": [{ "type": "command", "command": tmp_guard_command()? }],

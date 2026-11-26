@@ -1266,6 +1266,8 @@ No config setting is needed.
 Claude Code, opencode, and Crush run it.
 The command takes `--engine`, and for Crush it reads the lower-case tool names (`bash`, `write`, `edit`, `multiedit`).
 On opencode, the hook is a gate: a run that cannot start, or that times out, blocks the call.
+On Claude Code and Crush, a run that cannot start, such as a missing `llmenv` binary,
+does not block the call, so the write goes through.
 
 The deny message is `Use "$TMPDIR" for scratch files. /tmp is not cleaned up.`, with the path that the call writes.
 
