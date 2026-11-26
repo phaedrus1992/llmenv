@@ -1,5 +1,5 @@
 //! The commands that write a file or a folder through an option, for the `/tmp` guard (#4053):
-//! `git clone`, `curl`, `wget`, `dd`, and `tar`.
+//! `git clone`, `curl`, `wget`, `dd`, `tar`, and `unzip`.
 //!
 //! Each function returns the paths that the command writes. A path that the command only reads
 //! is not returned.
@@ -37,6 +37,13 @@ const WGET: Options = Options {
     ],
 };
 
+/// `unzip -d DIR` extracts into `DIR`. Its `-P` takes a password.
+const UNZIP: Options = Options {
+    write: &['d'],
+    other: &['P'],
+    long: &[],
+};
+
 /// The paths that `name` writes through its options, or an empty list for a command that has no
 /// such rule here. `args` are the words after the program name.
 pub(super) fn written_by_option(name: &str, args: &[&str]) -> Vec<String> {
@@ -51,6 +58,7 @@ pub(super) fn written_by_option(name: &str, args: &[&str]) -> Vec<String> {
             .map(str::to_owned)
             .collect(),
         "tar" => tar_paths(args),
+        "unzip" => owned(option_values(args, UNZIP.write, UNZIP.other, UNZIP.long)),
         _ => Vec::new(),
     }
 }

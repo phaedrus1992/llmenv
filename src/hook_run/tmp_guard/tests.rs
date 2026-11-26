@@ -49,6 +49,8 @@ fn a_bash_write_to_tmp_is_denied_with_the_tmpdir_rule() {
         "touch /TMP/x",
         "touch '/tmp/with space'",
         "mkdir /tmp",
+        "unzip a.zip -d /tmp",
+        "unzip -qd /tmp/x a.zip",
         "for f in a b; do cp $f /tmp/; done",
         "if true; then touch /tmp/x; fi",
         "if false; then :; else touch /tmp/x; fi",

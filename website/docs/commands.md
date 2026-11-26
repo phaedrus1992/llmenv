@@ -1286,6 +1286,7 @@ The guard denies:
 - The `wget` `-O`, `-P`, `-o`, and `-a` values.
   The long forms are `--output-document`, `--directory-prefix`, `--output-file`, and `--append-output`.
 - The `of=` operand of `dd`.
+- The `-d` folder of an `unzip`.
 - The `-C` or `--directory` folder of a `tar` that extracts.
 - The `-f` or `--file` archive of a `tar` that creates, appends, or updates.
   A `tar` that creates an archive reads from its `-C` folder, so that folder is allowed.
@@ -1301,6 +1302,7 @@ A long option can be a unique prefix, as in `wget --output-doc=/tmp/x`.
 The guard reads a prefix of a listed option as that option.
 The known limits are an `rsync` destination that is followed by an option.
 Another is a global `git` option that takes a value and is not in the guard's list.
+A write through `find -exec`, `sed -i`, a `git` worktree command, or a `$'...'` path is not seen.
 A call that cannot be checked is denied, with the cause in the message.
 These are a missing tool name, shell command, or file path.
 They are also a command nested too deeply, and a payload that is not JSON.
