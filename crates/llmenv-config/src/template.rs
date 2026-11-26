@@ -12,6 +12,8 @@ cache:
   sync_interval_minutes: 60
   # Optional: minutes to retain cached materializations (default: 168 = 7 days)
   # cache_retention_hours: 168
+  # Optional: hours to keep a scratch entry in state/tmp (default: 168 = 7 days)
+  # tmp_retention_hours: 168
   # Cache-folder strictness dial (default: normal). One knob, three positions,
   # ordered by how aggressively a folder is reused: loose ⊂ normal ⊂ strict.
   #   loose  — folder = <shape>. Selection-addressed only; a binary upgrade

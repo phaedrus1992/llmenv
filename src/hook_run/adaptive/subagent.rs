@@ -12,6 +12,7 @@ use super::{
 use crate::agent_notice;
 use crate::hook_run::HookText;
 use crate::hook_run::recall::RecallBudget;
+use crate::hook_run::recall_deadline::Deadline;
 use crate::hook_run::relevance;
 use crate::hook_run::session_ledger::MAIN_AGENT;
 use crate::hook_run::session_state::unix_now;
@@ -28,6 +29,15 @@ pub(super) fn agent_key(payload: &Value) -> (String, bool) {
 
 /// `SubagentStart`: task-relevant memories for a fresh subagent context.
 pub(in crate::hook_run) async fn subagent_start(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<HookText> {
+    // A slow memory server cannot hold the subagent start past this budget (#4023).
+    let bounded = ctx
+        .client
+        .clone()
+        .with_recall_deadline(Some(Deadline::subagent_start()));
+    let ctx = &AdaptiveCtx {
+        client: &bounded,
+        ..*ctx
+    };
     let (key, record) = agent_key(ctx.payload);
     if !record || key == MAIN_AGENT {
         agent_notice::record(

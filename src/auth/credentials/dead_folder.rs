@@ -49,10 +49,11 @@ pub(super) fn is_recent(adapter_root: &Path, now_ms: i64) -> anyhow::Result<bool
         Ok(at) => Ok(crate::util::ttl::is_within(at, now_ms, DEAD_FOLDER_TTL_MS)),
         Err(_) => {
             // The keychain is read on every export until the next dead read rewrites the file.
-            tracing::warn!(
-                "{} does not hold a timestamp, so the keychain is read on each export. Fix: delete the file.",
+            super::cache::report_ignored(&format!(
+                "{} does not hold a timestamp, so the keychain is read on each export. Fix: \
+                 delete the file.",
                 path.display()
-            );
+            ));
             Ok(false)
         }
     }
@@ -157,6 +158,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(marker_path(root.path()), "not a timestamp").unwrap();
         assert!(!is_recent(root.path(), 0).unwrap());
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        let file = marker_path(root.path()).display().to_string();
+        assert!(notices.contains(&file), "{notices}");
+        assert!(notices.contains("delete the file"), "{notices}");
     }
 
     #[test]

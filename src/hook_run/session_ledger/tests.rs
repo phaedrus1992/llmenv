@@ -241,6 +241,27 @@ fn error_head_is_capped_on_a_char_boundary() {
 }
 
 #[test]
+fn a_pending_subagent_is_kept_through_its_last_second_and_a_future_one_is_dropped() {
+    let mut l = Ledger::default();
+    l.queue_subagent("u1", "Explore", "edge", 100);
+    assert!(
+        l.take_subagent("Explore", 100 + PENDING_TTL_SECS).is_some(),
+        "age at the limit"
+    );
+    l.queue_subagent("u2", "Explore", "old", 100);
+    assert!(
+        l.take_subagent("Explore", 100 + PENDING_TTL_SECS + 1)
+            .is_none(),
+        "one past"
+    );
+    l.queue_subagent("u3", "Explore", "future", 500);
+    assert!(
+        l.take_subagent("Explore", 499).is_none(),
+        "a time in the future"
+    );
+}
+
+#[test]
 fn subagent_queue_dedups_by_tool_use_id_and_takes_oldest_match() {
     let mut l = Ledger::default();
     l.queue_subagent("u1", "Explore", "find the parser", 100);
@@ -257,6 +278,47 @@ fn subagent_queue_dedups_by_tool_use_id_and_takes_oldest_match() {
         l.take_subagent("Plan", 102 + PENDING_TTL_SECS + 5)
             .is_none(),
         "expired"
+    );
+}
+
+proptest! {
+    /// `drop_expired` keeps an in-order subset of the entries, keeps only those with an age in
+    /// `0..=PENDING_TTL_SECS`, and a second call changes nothing.
+    #[test]
+    fn drop_expired_keeps_the_fresh_entries_in_order(
+        times in prop::collection::vec(-1_000i64..2_000, 0..12),
+        now in -1_000i64..2_000,
+    ) {
+        let mut l = Ledger::default();
+        for (i, at) in times.iter().enumerate() {
+            l.pending_subagents.push_back(PendingSubagent {
+                tool_use_id: format!("u{i}"),
+                subagent_type: "Explore".into(),
+                task: format!("t{i}"),
+                at: *at,
+            });
+        }
+        let expected: Vec<i64> = times
+            .iter()
+            .copied()
+            .filter(|at| (0..=PENDING_TTL_SECS).contains(&(now - at)))
+            .collect();
+        l.drop_expired(now);
+        let kept: Vec<i64> = l.pending_subagents.iter().map(|p| p.at).collect();
+        prop_assert_eq!(&kept, &expected);
+        l.drop_expired(now);
+        let again: Vec<i64> = l.pending_subagents.iter().map(|p| p.at).collect();
+        prop_assert_eq!(again, expected);
+    }
+}
+
+#[test]
+fn a_pending_subagent_with_a_time_in_the_future_has_expired() {
+    let mut l = Ledger::default();
+    l.queue_subagent("u1", "Explore", "find the parser", 1_000);
+    assert!(
+        l.take_subagent("Explore", 500).is_none(),
+        "the clock stepped back"
     );
 }
 

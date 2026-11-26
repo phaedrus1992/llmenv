@@ -683,6 +683,8 @@ recall events also need `adaptive_recall` on):
 - `post_tool_use_failure` (added in v3.12.0) — records the error and injects
   memories about it. (changed in v3.13.0) A memory is injected only when its
   summary or keywords share a distinctive word or an error code with the error
+  (changed in v3.14.2) `failure_recall: false` on the memory entry skips the recall and still
+  records the error
 - `subagent_start` (added in v3.12.0) — injects memories that match the
   subagent's task, which `subagent_task` records
 - `subagent_task` (added in v3.12.0) — a `PreToolUse` hook on the `Agent` tool
@@ -791,8 +793,11 @@ It replaces `llmenv prune` and `llmenv doctor --gc`, which are deprecated (see [
 
 1. It removes stale cache folders.
    With no flag, these are the folders from previous binary versions and orphaned `*.tmp` staging folders.
-2. It runs the age-based sweeps, with the window set by `cache_retention_hours` (see [Configuration](configuration.md)).
-   A `null` value turns these sweeps off.
+2. It runs the age-based sweeps (see [Configuration](configuration.md)).
+   The cache, session-log, and codebase-memory sweeps use `cache_retention_hours`.
+   A `null` value turns off every age-based sweep.
+   (added in v3.14.2) The sweep of `state/tmp` has its own window, `tmp_retention_hours` (default 168).
+   A `null` value turns off that sweep only.
 
 The age-based sweeps remove:
 
@@ -805,6 +810,7 @@ The age-based sweeps remove:
 - If `cache_dir` is itself a symlink, `clean` skips the cache sweep and names the real folder to set (added in v3.14.0).
   It does not follow the link, so it never removes entries under a link target.
 - Old entries in the state temp folder, `state/tmp`, which `TMPDIR` points at.
+  (changed in v3.14.2) An entry is old after `tmp_retention_hours`, not after `cache_retention_hours`.
   An entry that a process holds open is kept.
   (changed in v3.14.0) An entry's age comes from the newest file in it, not from folder mtimes.
   A file's age is the later of its mtime and its change time.
@@ -829,11 +835,18 @@ Flags:
   Examples: `14d`, `1w`, `90 days`, `1h30m`.
   (changed in v3.14.0) A month or a year has no fixed length, so `1mo` and `1y` are refused.
   Use weeks or days, such as `52w`.
-  The age-based sweeps still use `cache_retention_hours`.
+  The other age-based sweeps still use `cache_retention_hours`.
   `--all` and `--older-than` cannot be used together.
   A bad value stops the command before anything is removed.
+- `--tmp-older-than DUR` — (added in v3.14.2) remove `state/tmp` entries older than `DUR`.
+  It replaces `tmp_retention_hours` for this run.
+  It takes the same forms as `--older-than`, such as `2d` or `12h`.
+  It does not change the cache-folder step or the other sweeps.
+  A bad value, or a zero duration, stops the command before anything is removed.
+  It runs the `state/tmp` sweep even when `cache_retention_hours` or `tmp_retention_hours` is `null`.
 - `--dry-run` — list every item that a real run tries to remove, and remove nothing.
   This covers the cache folders and every age-based sweep.
+  (added in v3.14.2) Each `state/tmp` line ends with the age of the entry, such as `(age 9d 2h)`.
   A real run can still fail on an item that the dry run lists, for example a folder without write access.
 - `--plugin-cache` — also remove the shared plugin cache folder of each adapter.
   A folder that does not exist is not listed.
@@ -1601,6 +1614,63 @@ whether the target path is inside the llmenv cache and prints a redirection hint
 pointing at the source config. Always exits 0 (fail-soft — the write is not
 blocked). Invoked automatically — not normally run by users.
 
+## `tmp-guard`
+
+```text
+llmenv tmp-guard
+```
+
+(added in v3.14.2) Deny a tool call that writes under `/tmp`, and name `$TMPDIR` as the fix.
+llmenv sets `TMPDIR` to `state/tmp`, and `llmenv clean` removes old entries there.
+Nothing cleans `/tmp`, so a scratch file written there stays for good.
+The auto-registered `PreToolUse` hook runs this command in every session.
+It covers the `Bash`, `Monitor`, `Write`, `Edit`, `MultiEdit`, and `NotebookEdit` tools.
+No config setting is needed.
+Claude Code, opencode, and Crush run it.
+The command takes `--engine`, and for Crush it reads the lower-case tool names (`bash`, `write`, `edit`, `multiedit`).
+On opencode, the hook is a gate: a run that cannot start, or that times out, blocks the call.
+On Claude Code and Crush, a run that cannot start, such as a missing `llmenv` binary,
+does not block the call, so the write goes through.
+
+The deny message is `Use "$TMPDIR" for scratch files. /tmp is not cleaned up.`, with the path that the call writes.
+
+The guard denies a write under `/tmp`, `/private/tmp`, `/var/folders`, `/private/var/folders`, `/var/tmp`,
+`/private/var/tmp`, or `/dev/shm`.
+The guard denies:
+
+- A shell redirect (`>`, `>>`, `2>`, `&>`, `>|`) with a target there.
+- The `tee`, `touch`, `mkdir`, and `mktemp` commands, when any operand is there.
+- The `cp`, `mv`, `install`, and `ln` commands, when the destination is there.
+  The destination is the `-t` or `--target-directory` value, else the last operand.
+  A `-t` value can be attached, as in `-t/tmp/x`, or in a cluster, as in `-rt`.
+- The `rsync` command, when its last operand is there.
+- The destination operand of a `git clone`, the `git -C` folder of a clone, and a `--separate-git-dir` folder.
+- The `curl` `-o`, `-D`, `-c`, `--output`, `--output-dir`, `--dump-header`, and `--cookie-jar` values.
+- The `wget` `-O`, `-P`, `-o`, and `-a` values.
+  The long forms are `--output-document`, `--directory-prefix`, `--output-file`, and `--append-output`.
+- The `of=` operand of `dd`.
+- The `-d` folder of an `unzip`.
+- The `-C` or `--directory` folder of a `tar` that extracts.
+- The `-f` or `--file` archive of a `tar` that creates, appends, or updates.
+  A `tar` that creates an archive reads from its `-C` folder, so that folder is allowed.
+- A `Write`, `Edit`, `MultiEdit`, or `NotebookEdit` call with a path there.
+- An opencode `patch` call whose patch text adds, updates, deletes, or moves a file there.
+
+The guard reads a path as text, with `.` and `..` resolved.
+It does not expand a variable, and it does not follow a symlink.
+A command that changes into `/tmp` and then writes a relative path is not seen.
+A read of `/tmp` is allowed, and so is a copy from `/tmp` to another place.
+A redirect sign inside quotes is text, not a redirect, and `echo hi>/tmp/x` is a redirect.
+A long option can be a unique prefix, as in `wget --output-doc=/tmp/x`.
+The guard reads a prefix of a listed option as that option.
+The known limits are an `rsync` destination that is followed by an option.
+Another is a global `git` option that takes a value and is not in the guard's list.
+A write through `find -exec`, `sed -i`, a `git` worktree command, or a `$'...'` path is not seen.
+A call that cannot be checked is denied, with the cause in the message.
+These are a missing tool name, shell command, or file path.
+They are also a command nested too deeply, and a payload that is not JSON.
+The command always exits 0, and the deny is the JSON on stdout.
+
 ## `throttle`
 
 ```text
@@ -1855,7 +1925,8 @@ active context (active bundles, active MCP servers, etc.). Checks:
   more than 20% of the calls failed, and reports the memory server as stuck when
   the last 10 calls all failed. Each line gives the age of the newest call. A stuck
   result with no call in the last day is info only, because the server may be fixed
-  since. A ring file that is not valid is replaced by the next hook, and the agent is
+  since. (changed in v3.14.2) A failing-often result with no call in the last day is
+  info only too. A ring file that is not valid is replaced by the next hook, and the agent is
   told. See [Adaptive recall](mcp.md#adaptive-recall-added-in-v3120).
 - cached OAuth credential (added in v3.8.0) — reports whether a token is cached
   in the durable state dir, and warns when the cached token has expired. See

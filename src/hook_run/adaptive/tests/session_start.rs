@@ -234,6 +234,40 @@ async fn the_session_project_ranks_first_after_session_start() {
 
 /// The wake-up and project-memories calls count in the health ring, so a dead server shows in
 /// doctor even when the session has no scope action (#2919).
+/// A start whose calls the session budget cuts off counts no call in the recall health, because
+/// the cut says nothing about the server (#4037).
+#[tokio::test]
+async fn a_session_start_cut_by_its_budget_adds_no_call_to_the_recall_health() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("initialize"))
+        .respond_with(crate::hook_run::test_recall::ToolReply(String::new()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(6)))
+        .mount(&server)
+        .await;
+    let mut f = fixture(&server);
+    // The call timeout is longer than the budget, so only the budget can end the project recall.
+    f.client = McpHttpClient::test_new(server.uri(), Duration::from_secs(10)).unwrap();
+    let wake = crate::hook_run::action::WakeUpArgs {
+        project: Some("proj".to_string()),
+        ..Default::default()
+    };
+    let _ = session_start(
+        &ctx(&f, &json!({"source": "startup"})),
+        Action::WakeUp(wake),
+        Vec::new(),
+    )
+    .await;
+    let health = crate::hook_run::recall_health::health(f._dir.path()).unwrap();
+    assert!(
+        health.is_none_or(|h| (h.calls, h.failed) == (0, 0)),
+        "{health:?}"
+    );
+}
+
 #[tokio::test]
 async fn session_start_records_the_wake_up_and_project_calls() {
     let server = failing_server().await;

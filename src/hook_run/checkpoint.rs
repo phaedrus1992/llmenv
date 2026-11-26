@@ -58,7 +58,7 @@ impl JobKind {
     /// Seconds a healthy job can run: its longest timeout plus a margin. The cbm indexer has no
     /// timeout, so it gets half an hour; the upstream benchmark for a very large repository is
     /// about three minutes.
-    fn deadline_secs(self) -> u64 {
+    pub(crate) fn deadline_secs(self) -> u64 {
         let longest = match self {
             // The LLM call allows 120 s and each ICM call 30 s.
             Self::Consolidation => 120 + 30,
@@ -108,9 +108,11 @@ impl Checkpoint {
         }
     }
 
-    /// Whether the job has run past its deadline, so its child is not still working.
+    /// Whether the job has run past its deadline, so its child is not still working. A start in
+    /// the future is stale too, so a clock that stepped back cannot hold a job under the
+    /// attempt limit (#3907).
     pub(crate) fn is_stale(&self, now: u64) -> bool {
-        now.saturating_sub(self.started_at) > self.kind.deadline_secs()
+        now < self.started_at || now - self.started_at > self.kind.deadline_secs()
     }
 
     fn file_name(&self) -> String {

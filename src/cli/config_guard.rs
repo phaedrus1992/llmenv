@@ -142,7 +142,7 @@ fn extract_hook_file_paths(stdin_buf: &str) -> Vec<String> {
         return Vec::new();
     }
     let cwd = std::path::Path::new(payload["cwd"].as_str().unwrap_or_default());
-    patch::patch_paths(
+    crate::util::patch_paths::patch_paths(
         payload["tool_input"]["patchText"]
             .as_str()
             .unwrap_or_default(),
@@ -172,8 +172,6 @@ pub(super) fn extract_hook_file_path(stdin_buf: &str) -> Option<String> {
         }
     }
 }
-
-mod patch;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

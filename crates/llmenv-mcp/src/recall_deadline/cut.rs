@@ -1,0 +1,25 @@
+//! The error of a recall call that a time budget cut off.
+
+/// Returned for a call that the budget cut off. The breaker counts it as a failed call, because
+/// a server that is always slower than the budget never answers in time.
+#[derive(Debug, thiserror::Error)]
+#[error("the {flow} recall budget of {secs} s ran out")]
+pub struct Cut {
+    flow: &'static str,
+    secs: u64,
+}
+
+impl Cut {
+    pub(super) fn new(flow: &'static str, secs: u64) -> Self {
+        Self { flow, secs }
+    }
+
+    /// The notice for a recall that the budget cut off.
+    pub fn notice(&self) -> String {
+        format!(
+            "llmenv: memory recall was skipped, because the {} recall budget of {} s ran out. \
+             Fix: run `llmenv doctor` to check the memory server.",
+            self.flow, self.secs
+        )
+    }
+}
