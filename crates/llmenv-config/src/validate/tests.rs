@@ -1986,6 +1986,15 @@ fn a_zero_tmp_retention_is_rejected_and_a_null_one_is_accepted() {
     assert!(config.validate().is_ok());
 }
 
+proptest! {
+    #[test]
+    fn any_positive_tmp_retention_is_accepted(hours in 1..=u64::MAX) {
+        let mut config = Config::default();
+        config.cache.tmp_retention_hours = Some(hours);
+        prop_assert!(config.validate().is_ok());
+    }
+}
+
 #[test]
 fn test_cache_retention_valid() {
     let config = Config {

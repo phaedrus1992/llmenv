@@ -121,6 +121,29 @@ mod tests {
             }
         }
 
+        #[test]
+        fn tmp_retention_is_hours_in_seconds_and_monotone(h1 in proptest::num::u64::ANY, h2 in proptest::num::u64::ANY) {
+            let at = |hours| Cache {
+                cache_retention_hours: Some(168),
+                tmp_retention_hours: Some(hours),
+                ..Cache::default()
+            }
+            .tmp_retention();
+            proptest::prop_assert_eq!(at(h1).map(|d| d.as_secs()), Some(h1.saturating_mul(3600)));
+            if h1 <= h2 {
+                proptest::prop_assert!(at(h1) <= at(h2));
+            }
+        }
+
+        #[test]
+        fn a_null_cache_retention_turns_the_tmp_window_off(hours in proptest::num::u64::ANY) {
+            let cache = Cache {
+                cache_retention_hours: None,
+                tmp_retention_hours: Some(hours),
+                ..Cache::default()
+            };
+            proptest::prop_assert_eq!(cache.tmp_retention(), None);
+        }
     }
 
     #[test]
