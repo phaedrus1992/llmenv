@@ -21,10 +21,13 @@ type Doc = serde_json::Map<String, serde_json::Value>;
 /// Write `crush.json` and the files that it points to. Returns the paths that the adapter owns.
 pub(super) fn materialize(manifest: &MergedManifest, out: &Path) -> anyhow::Result<Vec<PathBuf>> {
     crate::adapter::skills::create_dir_owner_only(out)?;
+    // The filter warns about each skipped hook, and those warnings come before any skill is
+    // written.
+    let hooks = compatible_hooks(manifest);
     let (owned, has_skills) = write_skills(manifest, out)?;
     // The gate that the Claude Code adapter runs too: frontmatter and the hardcoded-path scan.
     crate::adapter::skills::validate_skills(out)?;
-    let doc = build_doc(manifest, out, has_skills)?;
+    let doc = build_doc(manifest, out, has_skills, &hooks)?;
     let json_bytes = serde_json::to_vec_pretty(&doc)?;
     crate::paths::write_owner_only(&out.join(CRUSH_JSON_FILE), &json_bytes)?;
     Ok(owned)
@@ -125,9 +128,10 @@ fn build_doc(
     manifest: &MergedManifest,
     out: &Path,
     has_skills: bool,
+    hooks: &[&crate::config::Hook],
 ) -> anyhow::Result<serde_json::Value> {
     let mut doc = Doc::new();
-    insert(&mut doc, "hooks", render_hooks(manifest)?);
+    insert(&mut doc, "hooks", render_hooks(manifest, hooks)?);
     // Crush has one permission key, `allowed_tools`. A tool named in `deny` or `ask` is withheld
     // from it, because an `allow` grant would otherwise override the rule (#1325). Omitting a
     // tool from the list is already fail-closed, and `disabled_tools` carries the deny.
@@ -212,23 +216,30 @@ fn render_lsp_section(manifest: &MergedManifest) -> anyhow::Result<Option<serde_
         .then_some(value))
 }
 
-/// The `hooks` object, or `None` when it holds no event.
-///
-/// Crush wants a flat `{ matcher?, command, name?, timeout? }` entry for each event, not the
-/// nested `{ matcher, hooks: [...] }` form of Claude Code. The nested form gives an empty
-/// `command`, and Crush rejects the whole config at load time.
-fn render_hooks(manifest: &MergedManifest) -> anyhow::Result<Option<serde_json::Value>> {
-    // A bundle shared between engines often holds hooks that only Claude Code can run. That is a
-    // gap between engines, not a mistake, so the hook is skipped with a warning (#543).
-    let compatible: Vec<&crate::config::Hook> = manifest
+/// The hooks that Crush can run. A bundle shared between engines often holds hooks that only
+/// Claude Code can run. That is a gap between engines, not a mistake, so the hook is skipped with
+/// a warning (#543).
+fn compatible_hooks(manifest: &MergedManifest) -> Vec<&crate::config::Hook> {
+    manifest
         .capabilities
         .hooks
         .iter()
         .filter(|hook| {
             crate::adapter::hook_support::engine_can_run_hook("Crush", SUPPORTED_HOOK_EVENTS, hook)
         })
-        .collect();
-    let mut by_event = render::render_hook_entries(&compatible);
+        .collect()
+}
+
+/// The `hooks` object, or `None` when it holds no event.
+///
+/// Crush wants a flat `{ matcher?, command, name?, timeout? }` entry for each event, not the
+/// nested `{ matcher, hooks: [...] }` form of Claude Code. The nested form gives an empty
+/// `command`, and Crush rejects the whole config at load time.
+fn render_hooks(
+    manifest: &MergedManifest,
+    compatible: &[&crate::config::Hook],
+) -> anyhow::Result<Option<serde_json::Value>> {
+    let mut by_event = render::render_hook_entries(compatible);
     let pre_tool_use = by_event.entry("PreToolUse".into()).or_default();
     // The guards of llmenv run on every tool call, as on Claude Code.
     pre_tool_use.push(json!({ "command": hook_command("hook-run --engine crush pre_tool_use")? }));
