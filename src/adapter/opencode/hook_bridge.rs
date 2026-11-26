@@ -143,26 +143,25 @@ pub(super) fn hook_table(
         Some(CONFIG_GUARD_MATCHER),
         &hook_command("config-guard --engine opencode")?,
     ));
-    // #4052: deny a write under /tmp. A guard that cannot run blocks the call, as the gate below.
-    let mut tmp_guard = builtin(
+    // A guard that denies on purpose blocks the call when its run times out or cannot start.
+    let fail_closed = |mut entry: serde_json::Value| {
+        entry["timeout"] = USER_HOOK_TIMEOUT_MS.into();
+        entry["failClosed"] = true.into();
+        entry
+    };
+    // #4052: deny a write under /tmp.
+    entries.push(fail_closed(builtin(
         "PreToolUse",
         Some(&crate::hook_run::tmp_guard::opencode_tools().join("|")),
         &hook_command("tmp-guard --engine opencode")?,
-    );
-    tmp_guard["timeout"] = USER_HOOK_TIMEOUT_MS.into();
-    tmp_guard["failClosed"] = true.into();
-    entries.push(tmp_guard);
+    )));
     if !pre_tools.is_empty() {
-        // The commit gate and the index guard deny on purpose, so a run that times out or cannot
-        // start blocks the call instead of letting it through.
-        let mut gate = builtin(
+        // The commit gate and the index guard.
+        entries.push(fail_closed(builtin(
             "PreToolUse",
             Some(&pre_tools.join("|")),
             &hook_command("hook-run pre_tool_use --engine opencode")?,
-        );
-        gate["timeout"] = USER_HOOK_TIMEOUT_MS.into();
-        gate["failClosed"] = true.into();
-        entries.push(gate);
+        )));
     }
     let mut namespaces = serde_json::Map::new();
     for server in mcp_servers {
