@@ -1,9 +1,8 @@
 # Unattended run report: 2026-11-25 (milestone v3.14.2)
 
 Branch `unattended/local-main`, based on `origin/release/3.x` (9366439f).
-It holds 35 commits, and 3 of them are sprint merge commits.
-The commits are not signed yet.
-The run disabled signing, and `scripts/resign.sh` signs every commit again before the push.
+It holds 36 commits, and 3 of them are sprint merge commits.
+All commits are signed. The signer stayed unlocked, so the run never disabled signing.
 Nothing was pushed, and no PR is open.
 
 ## Rules of the run
@@ -101,7 +100,6 @@ The other analyzers cover those files.
 
 ## What the user must do
 
-1. Unlock the signer, then run `scripts/signing.sh restore` and `scripts/resign.sh`.
-2. Say go to push `unattended/local-main` and open one PR against `release/3.x`.
-3. Answer #4035, #3911, #4057, and #3633 on the issues.
-4. Confirm that the next release number is 3.14.2, because the docs tag the new features `(added in v3.14.2)`.
+1. Say go to push `unattended/local-main` and open one PR against `release/3.x`.
+2. Answer #4035, #3911, #4057, and #3633 on the issues.
+3. Confirm that the next release number is 3.14.2, because the docs tag the new features `(added in v3.14.2)`.
