@@ -1555,7 +1555,7 @@ pub(super) fn run_doctor(
             dry_run: false,
         };
         // #1346: a sweep that could not finish is not a success, as in `llmenv clean`.
-        let failures = cache_gc::run(&cache_dir, &config, out);
+        let failures = cache_gc::run(&cache_dir, &config, out, None);
         if failures > 0 {
             anyhow::bail!(
                 "{failures} sweep entry(ies) or sweep(s) could not be checked or removed — see \

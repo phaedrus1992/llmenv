@@ -24,7 +24,7 @@ pub(crate) mod checkpoint;
 pub(crate) mod detached_cbm;
 pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
-mod engine_rules;
+pub(crate) mod engine_rules;
 mod event;
 mod memory_call;
 mod memory_endpoint;
@@ -88,6 +88,7 @@ use cbm_index_cmd::{
 mod stop_reminder;
 pub(crate) mod task_nudge;
 pub(crate) mod task_tools;
+pub(crate) mod tmp_guard;
 pub(crate) mod transcript;
 mod transcript_link;
 use respawn::respawn_job;
@@ -606,7 +607,8 @@ fn resets_read_state(event: HookEvent, payload: &serde_json::Value) -> bool {
 ///
 /// Exit code 2 is what both supported engines read as "don't run this tool":
 /// Claude Code documents it as equivalent to a `deny` decision, and opencode's
-/// generated plugin shim treats it as the only block signal (`code === 2`).
+/// generated plugin shim treats it as a block signal (`code === 2`), as it does the deny
+/// envelope on stdout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HookExit {
     /// Nothing to block; exit 0.

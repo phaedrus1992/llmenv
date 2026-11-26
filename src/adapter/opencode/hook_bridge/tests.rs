@@ -110,11 +110,14 @@ fn the_plugin_runs_hooks_as_opencode_would() {
         hook("SessionStart", None, "echo start note"),
     ];
     let mut table = hook_table(&hooks, &[], &["codebase-memory-mcp"]).unwrap();
-    // Keep only the test hooks: the built-in hooks call an installed `llmenv`.
-    table["hooks"]
-        .as_array_mut()
-        .unwrap()
-        .retain(|h| !h["command"].as_str().unwrap().starts_with("llmenv "));
+    // Keep only the test hooks: every built-in hook names its engine and calls an installed
+    // `llmenv`.
+    table["hooks"].as_array_mut().unwrap().retain(|h| {
+        !h["command"]
+            .as_str()
+            .unwrap()
+            .ends_with("--engine opencode")
+    });
     let plugin = write_plugin(dir.path(), &table);
     let out = run_node(DRIVER, &[&plugin, dir.path()]);
 

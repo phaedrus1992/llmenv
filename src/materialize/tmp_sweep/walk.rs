@@ -17,6 +17,8 @@ use crate::materialize::expiry::AgeRule;
 pub(super) struct Stale {
     pub(super) path: PathBuf,
     pub(super) is_dir: bool,
+    /// How long ago the entry last changed, by the rule of the scan.
+    pub(super) age: std::time::Duration,
 }
 
 /// What a scan of `state/tmp` found. Nothing is removed by a scan.
@@ -101,6 +103,8 @@ pub(super) fn judge_entry(
         scan.stale.push(Stale {
             path: path.to_path_buf(),
             is_dir,
+            // `is_expired` keeps a time in the future, so a stale entry is never newer than `now`.
+            age: now.duration_since(modified).unwrap_or_default(),
         });
     }
 }

@@ -18,6 +18,11 @@ examine_globs = [
   "src/hook_run/**",
 ]
 
+# The baseline of a shard runs in about 2 s, so the auto-set limit is 20 s. A test that kills a
+# mutant late in the run order still ends the run only after the slow tests that run beside it
+# finish. Such a kill took more than 20 s and read as a timeout, for example in `validate_cache`.
+minimum_test_timeout = 120
+
 # Equivalent mutants: each compares an elapsed time with a limit, and no test
 # can observe the difference between `<` and `<=` at the exact boundary.
 exclude_re = [

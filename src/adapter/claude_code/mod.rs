@@ -15,7 +15,6 @@ use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
 use crate::merge::MergedManifest;
 use crate::plugins::resolve::ResolvedMarketplace;
 use crate::util::{dedup, merge_json};
-use commands::{config_context_command, config_guard_command, hook_run_command, throttle_command};
 use hook_purge::purge_stale_owned_hooks;
 use hooks_sidecar::read_hooks_sidecar;
 use lsp_plugin::write_lsp_plugin;
@@ -30,8 +29,11 @@ pub(crate) mod version;
 #[cfg(test)]
 use seed::classify_claude_path;
 mod commands;
+mod guard_hooks;
 mod hook_json;
 mod lsp_plugin;
+mod settings_hooks;
+mod settings_permissions;
 pub(crate) use seed::{apply_seeded_settings, seed_install_method, seed_status_line};
 pub(crate) use skill_copy::copy_dir_owner_only;
 
@@ -1060,624 +1062,51 @@ const DIAGNOSE_SKILL_CONTENT: &str = concat!(
     "- Add a regression guard if appropriate\n",
 );
 
-/// SessionStart (#85): the hook object shape supports it; hash-comparison logic
-/// lives in the runtime hook script.
+/// Render `settings.json` into `out`. The hooks, the permissions, and the plugins come from their
+/// own renderers. The overlays of the engine come after them, and the result goes through
+/// [`reconcile_settings`], so a key that another tool wrote to the file is kept.
 fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Result<()> {
     let mut settings = serde_json::Map::new();
+    settings.insert("hooks".into(), settings_hooks::render_hooks(out, manifest)?);
+    if let Some(permissions) = settings_permissions::render_permissions(manifest) {
+        settings.insert("permissions".into(), permissions);
+    }
+    insert_scalar_settings(&mut settings, manifest);
+    // Plugins (#59): the marketplaces and the enabled plugins. llmenv owns the clone of each
+    // marketplace in its cache, so Claude Code reads that checkout through a `directory` source.
+    render_plugins(&mut settings, manifest);
+    let settings_value = overlay_settings(settings, manifest)?;
+    persist_settings(out, manifest, settings_value)
+}
 
-    // #499: whether a memory backend (the `icm` MCP) resolved for this scope —
-    // reused below both to gate turn_start/UserPromptSubmit and to decide
-    // autoMemoryEnabled, per the design's "Auto-wiring (config gating)" section
-    // (no new config field; the existing `memory:` block already gates this).
+/// The settings that hold one value each: auto memory, the sync of the Claude AI account, the
+/// effort level, the advisor model, and the output style. They come before the native overlays,
+/// so a `native.claude_code` key can still override them.
+fn insert_scalar_settings(
+    settings: &mut serde_json::Map<String, serde_json::Value>,
+    manifest: &MergedManifest,
+) {
+    // #227, #123: when the ICM memory backend is active, Claude Code auto memory is off, so the
+    // two do not compete. The key is written when the config sets it, or when ICM needs it off.
     let icm_active = manifest.mcps.iter().any(|m| m.name == MEMORY_MCP_NAME);
-
-    // #90: Transform hooks: Vec<Hook> into { EventName: [{ matcher, hooks: [...] }] }
-    // Design: https://github.com/phaedrus1992/llmenv/blob/main/docs/design/engine-capabilities.md
-    let mut hooks_by_event: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
-        std::collections::BTreeMap::new();
-
-    let mut warned_hook_paths = std::collections::BTreeSet::new();
-    let write_on_failure =
-        hook_json::on_failure_allowed(&manifest.capabilities.hooks, version::detected);
-    for hook in &manifest.capabilities.hooks {
-        // Resolve bundle-relative paths against the cache directory so hook
-        // commands reference the materialized files, not the source bundle
-        // location (issue #162). Files are already copied into `out` by the
-        // caller; a relative path like `hooks/guard.sh` must resolve to
-        // `{cache_dir}/hooks/guard.sh`, not the original bundle directory.
-        //
-        // Two-pass resolution:
-        // 1. Clean relative paths (e.g. `bash hooks/guard.sh`) — direct join.
-        // 2. Shell-var / absolute prefixes (e.g.
-        //    `bash ${HOME}/.../hooks/guard.sh`) — suffix-match against the
-        //    files we already copied into `out`.
-        let resolved_command = hook
-            .handler
-            .command
-            .as_deref()
-            .map(|cmd| {
-                crate::adapter::hook_command::resolve_hook_command(
-                    cmd,
-                    hook.bundle_origin.as_deref(),
-                    out,
-                    &manifest.files,
-                    &mut warned_hook_paths,
-                )
-            })
-            .transpose()?;
-
-        let handler = hook_json::hook_handler_value(hook, resolved_command, write_on_failure);
-
-        let mut hook_entry = serde_json::Map::new();
-        if let Some(matcher) = &hook.matcher {
-            hook_entry.insert("matcher".into(), json!(matcher));
-        }
-        hook_entry.insert("hooks".into(), json!([handler]));
-
-        hooks_by_event
-            .entry(hook.event.clone())
-            .or_default()
-            .push(serde_json::Value::Object(hook_entry));
-    }
-
-    // #121/#85: the SessionStart drift check used to be registered here as its
-    // own hook. #741 folded it into `hook-run session_start` (registered below
-    // via BASELINE_HOOK_EVENTS), so session start spawns one `llmenv` process
-    // instead of two that each re-parsed the config. `llmenv check-stale`
-    // remains as a command users can run directly.
-
-    // #289: inject source config paths at session start so the agent knows where
-    // to edit llmenv config rather than touching managed cache files.
-    hooks_by_event
-        .entry("SessionStart".to_string())
-        .or_default()
-        .push(json!({
-            "hooks": [{ "type": "command", "command": config_context_command()? }],
-        }));
-
-    // #289: warn the agent when it tries to write inside the managed cache dir.
-    // Anchored regex so only exact tool names match, not substrings like BatchEdit.
-    // Exits 0 (fail-soft, never blocks the write).
-    hooks_by_event
-        .entry("PreToolUse".to_string())
-        .or_default()
-        .push(json!({
-            "matcher": "^(Write|Edit|MultiEdit)$",
-            "hooks": [{ "type": "command", "command": config_guard_command()? }],
-        }));
-
-    // #318: read-once file dedup hook — warn or deny repeated file reads.
-    // Registered unconditionally (no config gating). The hook-run handler in
-    // `run_inner` checks `features.read_once.enabled` and returns empty
-    // (pass-through) when disabled, so the regex match is the only cost when
-    // the feature is off.
-    hooks_by_event
-        .entry("PreToolUse".to_string())
-        .or_default()
-        .push(json!({
-            "matcher": "^Read$",
-            "hooks": [{ "type": "command", "command": format!("{} pre_tool_use", hook_run_command()?) }],
-        }));
-
-    // #317: the metrics layer counts on PostToolUse, which only session
-    // logging registers today. Without this the counter never runs and the
-    // session-end summary is always empty.
-    if manifest
-        .capabilities
-        .features
-        .as_ref()
-        .and_then(|f| f.slippage.as_ref())
-        .is_some_and(|s| s.enabled && s.metrics)
-        && !manifest.session_log.any_sink_enabled()
-    {
-        hooks_by_event
-            .entry("PostToolUse".to_string())
-            .or_default()
-            .push(json!({
-                "hooks": [{ "type": "command", "command": format!("{} post_tool_use", hook_run_command()?) }],
-            }));
-    }
-
-    // #317 phase 3: the transcript-scan layers judge Bash commands, so Bash
-    // has to reach hook-run. Nothing else routes it there.
-    if manifest
-        .capabilities
-        .features
-        .as_ref()
-        .and_then(|f| f.slippage.as_ref())
-        .is_some_and(|s| s.enabled && (s.answer_before_act || s.explain_before_act))
-    {
-        hooks_by_event
-            .entry("PreToolUse".to_string())
-            .or_default()
-            .push(json!({
-                "matcher": format!("^({})$", crate::hook_run::shell_tool::SHELL_TOOLS.join("|")),
-                "hooks": [{ "type": "command", "command": format!("{} pre_tool_use", hook_run_command()?) }],
-            }));
-    }
-
-    // #317: the write guard needs to see `Write`. `Read` already reaches
-    // hook-run via the read-once registration above, but nothing routes
-    // `Write` there — the existing `^(Write|Edit|MultiEdit)$` entry runs the
-    // config guard, a different command. Without this the layer would record
-    // reads and never act on them.
-    if manifest
-        .capabilities
-        .features
-        .as_ref()
-        .and_then(|f| f.slippage.as_ref())
-        .is_some_and(|s| s.enabled && s.read_before_edit)
-    {
-        hooks_by_event
-            .entry("PreToolUse".to_string())
-            .or_default()
-            .push(json!({
-                "matcher": "^Write$",
-                "hooks": [{ "type": "command", "command": format!("{} pre_tool_use", hook_run_command()?) }],
-            }));
-    }
-
-    // #1331: block `index_repository`'s project-name override, which can
-    // overwrite an unrelated project's index (see `hook_run::cbm_index_guard`).
-    // Registered only when codebase-memory-mcp is actually wired — unlike
-    // read_once above, whose tool exists in every session regardless of config.
-    if manifest
-        .mcps
-        .iter()
-        .any(|m| m.name == crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME)
-    {
-        hooks_by_event
-            .entry("PreToolUse".to_string())
-            .or_default()
-            .push(json!({
-                "matcher": format!("^{}$", crate::hook_run::cbm_index_guard::INDEX_REPOSITORY_TOOL),
-                "hooks": [{ "type": "command", "command": format!("{} pre_tool_use", hook_run_command()?) }],
-            }));
-    }
-
-    // #985: redirect Claude Code's built-in task tools to the `llmenv task`
-    // tracker so tasks actually land there instead of Claude's ephemeral state.
-    // Only registered when the task tracker is enabled; the `pre_tool_use`
-    // handler dispatches on tool_name (TaskCreate/TaskList/TaskUpdate) and denies
-    // the native tool with the equivalent `llmenv task` result. (Root-level
-    // `features.task_tracker` reaches this gate because build_manifest folds
-    // root features into the manifest — see fold_root_features, #987.)
-    //
-    // #980: `block_engine_task_tools` (default true) is the opt-out — a user
-    // who wants the tracker's CLAUDE.md fragment and reminders but still wants
-    // Claude's native Task tools available (e.g. for genuine multi-agent
-    // teammate coordination) can flip it off without disabling the tracker.
-    if manifest
-        .capabilities
-        .features
-        .as_ref()
-        .and_then(|f| f.task_tracker.as_ref())
-        .is_some_and(|t| t.enabled && t.block_engine_task_tools)
-    {
-        hooks_by_event
-            .entry("PreToolUse".to_string())
-            .or_default()
-            .push(json!({
-                "matcher": "^(TaskCreate|TaskList|TaskUpdate)$",
-                "hooks": [{ "type": "command", "command": format!("{} pre_tool_use", hook_run_command()?) }],
-            }));
-    }
-
-    // Throttle hooks: poll usage backend and sleep adaptive delay to avoid rate limits.
-    if manifest.throttle.is_some() {
-        hooks_by_event
-            .entry("PreToolUse".to_string())
-            .or_default()
-            .push(json!({
-                "hooks": [{ "type": "command", "command": format!("{} pre-tool", throttle_command()?) }],
-            }));
-        hooks_by_event
-            .entry("UserPromptSubmit".to_string())
-            .or_default()
-            .push(json!({
-                "hooks": [{ "type": "command", "command": format!("{} prompt", throttle_command()?) }],
-            }));
-    }
-
-    // Baseline lifecycle hooks: ICM memory wake-up/store + session-log
-    // lifecycle/scope events (#382). Always registered; `hook-run` itself
-    // no-ops cheaply when nothing is configured for either.
-    for (neutral_event, native_event) in BASELINE_HOOK_EVENTS {
-        hooks_by_event
-            .entry((*native_event).to_string())
-            .or_default()
-            .push(json!({
-                "hooks": [{ "type": "command", "command": format!("{} {neutral_event}", hook_run_command()?) }],
-            }));
-    }
-
-    // #317: the rules digest runs on UserPromptSubmit, so enabling the layer
-    // has to register the event — the memory-recall gate below and session
-    // logging are the only other things that do, and neither is implied by
-    // turning slippage on.
-    let slippage_reinjection = manifest
-        .capabilities
-        .features
-        .as_ref()
-        .and_then(|f| f.slippage.as_ref())
-        .is_some_and(|s| s.enabled && s.rule_reinjection);
-    if slippage_reinjection
-        && !manifest.session_log.any_sink_enabled()
-        && !lifecycle_hook_registrations(manifest)
-            .iter()
-            .any(|(event, registered, _)| *event == "turn_start" && *registered)
-    {
-        hooks_by_event
-            .entry("UserPromptSubmit".to_string())
-            .or_default()
-            .push(json!({
-                "hooks": [{ "type": "command", "command": format!("{} user_prompt_submit", hook_run_command()?) }],
-            }));
-    }
-
-    // #499: continuous per-prompt memory recall. Gated on icm_active (unlike the
-    // always-on baseline events above) because this runs on every prompt, not
-    // just session start/end — an unconditional per-turn network-backed hook
-    // would add latency for every scope, including ones with no memory backend
-    // configured at all.
-    // Gate read from `lifecycle_hook_registrations` so `doctor` reports exactly
-    // what gets written here rather than re-deriving the condition (#741).
-    if lifecycle_hook_registrations(manifest)
-        .iter()
-        .any(|(event, registered, _)| *event == "turn_start" && *registered)
-    {
-        hooks_by_event
-            .entry("UserPromptSubmit".to_string())
-            .or_default()
-            .push(json!({
-                "hooks": [{ "type": "command", "command": format!("{} turn_start", hook_run_command()?) }],
-            }));
-    }
-
-    // #2249: adaptive recall records tool activity, injects on failures and subagent
-    // starts, and queues subagent tasks. Same gate as turn_start: each hook fires often.
-    let registered = lifecycle_hook_registrations(manifest);
-    let is_on = |name: &str| {
-        registered
-            .iter()
-            .any(|(event, on, _)| *event == name && *on)
-    };
-    for (neutral_event, native_event) in ADAPTIVE_RECALL_HOOK_EVENTS {
-        if is_on(neutral_event) {
-            hooks_by_event
-                .entry((*native_event).to_string())
-                .or_default()
-                .push(json!({
-                    "hooks": [{ "type": "command", "command": format!("{} {neutral_event}", hook_run_command()?) }],
-                }));
-        }
-    }
-    if is_on("subagent_start") {
-        hooks_by_event
-            .entry("PreToolUse".to_string())
-            .or_default()
-            .push(json!({
-                "matcher": "^Agent$",
-                "hooks": [{ "type": "command", "command": format!("{} subagent_task", hook_run_command()?) }],
-            }));
-    }
-
-    // Session-log turn hooks: per-prompt/tool-use capture, registered when any
-    // sink is enabled (#382). The hook-run binary filters by per-sink level.
-    if manifest.session_log.any_sink_enabled() {
-        for (neutral_event, native_event) in SESSION_LOG_HOOK_EVENTS {
-            hooks_by_event
-                .entry((*native_event).to_string())
-                .or_default()
-                .push(json!({
-                    "hooks": [{ "type": "command", "command": format!("{} {neutral_event}", hook_run_command()?) }],
-                }));
-        }
-    } else if lifecycle_hook_registrations(manifest)
-        .iter()
-        .any(|(event, registered, _)| *event == "stop" && *registered)
-    {
-        // #231: the task tracker's Stop reminder needs its own hook
-        // registration — it must not depend on session logging happening to
-        // be on, and #317's self-critique layer needs the same. Only registers
-        // `Stop` (not the other session-log events), and only in the `else`
-        // branch above so a session-log-enabled setup doesn't get two hook-run
-        // invocations on the same event. Reads the shared gate rather than
-        // re-deriving the condition, so the two can't drift (#741).
-        hooks_by_event
-            .entry("Stop".to_string())
-            .or_default()
-            .push(json!({
-                "hooks": [{ "type": "command", "command": format!("{} stop", hook_run_command()?) }],
-            }));
-    }
-
-    // #2456: the task nudges and the commit deny-once. An entry is skipped when another feature
-    // already routes that event and tool to hook-run, so one tool call does not run the handler
-    // twice. This runs after every other registration so it can see them.
-    if let Some(tracker) = manifest
-        .capabilities
-        .features
-        .as_ref()
-        .and_then(|f| f.task_tracker.as_ref())
-        .filter(|t| t.enabled)
-    {
-        let post = format!("{} post_tool_use", hook_run_command()?);
-        let pre = format!("{} pre_tool_use", hook_run_command()?);
-        // The shell tools come from one list, so a Monitor command gets the same reminder as Bash.
-        let post_candidates: Vec<&str> = ["Skill", "Edit", "Write", "MultiEdit", "AskUserQuestion"]
-            .into_iter()
-            .chain(crate::hook_run::shell_tool::SHELL_TOOLS)
-            .collect();
-        let post_tools = unrouted_tools(hooks_by_event.get("PostToolUse"), &post, &post_candidates);
-        if tracker.nudges && !post_tools.is_empty() {
-            hooks_by_event
-                .entry("PostToolUse".to_string())
-                .or_default()
-                .push(json!({
-                    "matcher": tools_matcher(&post_tools),
-                    "hooks": [{ "type": "command", "command": post }],
-                }));
-        }
-        let pre_tools = unrouted_tools(
-            hooks_by_event.get("PreToolUse"),
-            &pre,
-            &crate::hook_run::shell_tool::SHELL_TOOLS,
-        );
-        if tracker.enforce_commit && !pre_tools.is_empty() {
-            hooks_by_event
-                .entry("PreToolUse".to_string())
-                .or_default()
-                .push(json!({
-                    "matcher": tools_matcher(&pre_tools),
-                    "hooks": [{ "type": "command", "command": pre }],
-                }));
-        }
-    }
-
-    let mut hooks_obj = serde_json::Map::new();
-    for (event, entries) in hooks_by_event {
-        hooks_obj.insert(event, json!(entries));
-    }
-    // #97: overlay the per-engine `native_hooks` fragment (a `hooks`-shaped
-    // settings.json object) so engine-only events and handlers merge in. Shared
-    // events concat their entry arrays; native is the higher-precedence overlay.
-    let mut hooks_value = serde_json::Value::Object(hooks_obj);
-    overlay_native(
-        &mut hooks_value,
-        manifest.capabilities.native_hooks.get("claude_code"),
-    )?;
-    // #977: dedup the fresh doc itself. reconcile_settings only dedups when a
-    // prior settings.json exists (it returns `fresh` verbatim otherwise), so a
-    // first/strict render — or a native_hooks overlay that repeats a typed hook
-    // — would otherwise write each hook entry twice and run every guard twice
-    // per event. Same (strip-nulls, then per-event dedup) invariant reconcile
-    // applies, so both paths converge on one entry per (event, matcher, command).
-    dedup_hooks_doc(&mut hooks_value);
-    settings.insert("hooks".into(), hooks_value);
-
-    // #34: Render neutral permission rules into Claude's string grammar
-    // (`Tool(pattern)` / `Tool(path)` / bare `Tool`), then append the per-engine
-    // `native.claude_code` rule strings verbatim (aside from the #888 `Write` ->
-    // `Edit` rewrite below) into the same allow/ask/deny arrays. Native rules are
-    // not a separate object — Claude Code reads one flat array per action (see
-    // docs/reference/claude-code/permissions.md). They share the array because
-    // both are just permission rule strings; the only difference is neutral
-    // rules are generated and native ones are authored.
-    let perms = &manifest.capabilities.permissions;
-    let native = manifest.capabilities.native_permissions.get("claude_code");
-
-    // #888: normalize native rule strings up front so a user (or bundle)
-    // authoring the deprecated `Write(...)` form directly — following stale
-    // docs/examples rather than the neutral schema — gets the same rewrite as
-    // neutral rules, before suppression comparisons and before landing in
-    // settings.json.
-    let normalize_native = |select: fn(&crate::config::NativePermissionRules) -> &[String]| {
-        native.map_or_else(Vec::new, |n| {
-            select(n)
-                .iter()
-                .map(|s| normalize_deprecated_tool(s))
-                .collect()
-        })
-    };
-    let native_allow: Vec<String> = normalize_native(|n| &n.allow);
-    let native_ask_rules: Vec<String> = normalize_native(|n| &n.ask);
-    let native_deny_rules: Vec<String> = normalize_native(|n| &n.deny);
-
-    // Native rules win over neutral ones, but only in the safe direction: deny is
-    // authoritative. Authority runs deny > ask > allow (most restrictive wins). A
-    // neutral string is dropped only when a *more authoritative* native action
-    // claims it — so a native `deny: ["WebFetch(domain:x)"]` suppresses a neutral
-    // `allow`/`ask` of the same string (native deny wins), but a native `allow`
-    // never suppresses a neutral `deny`. Silently weakening a deny would be a
-    // security regression. Within the same action, agreeing native+neutral strings
-    // simply dedupe (the native list is appended below).
-    // Only deny and ask can outrank a neutral rule (deny > ask > allow), so a
-    // native allow set is never a suppressor and isn't collected.
-    let native_ask: std::collections::BTreeSet<&str> =
-        native_ask_rules.iter().map(String::as_str).collect();
-    let native_deny: std::collections::BTreeSet<&str> =
-        native_deny_rules.iter().map(String::as_str).collect();
-
-    // For a neutral rule in `action`, the set of native strings that outrank it.
-    let suppressors = |action: PermissionAction| -> Vec<&std::collections::BTreeSet<&str>> {
-        match action {
-            PermissionAction::Allow => vec![&native_deny, &native_ask],
-            PermissionAction::Ask => vec![&native_deny],
-            PermissionAction::Deny => Vec::new(),
-        }
-    };
-
-    let render_action = |neutral: &[crate::config::PermissionRule],
-                         native_rules: &[String],
-                         action: PermissionAction| {
-        let outranking = suppressors(action);
-        let mut out: Vec<String> = Vec::new();
-        for rule in neutral {
-            for s in render_permission_rule(rule) {
-                // Drop the neutral string only when a more authoritative native
-                // action asserts it — unless this action's own native list also
-                // asserts it (appended below, so an agreeing pair still emits).
-                let outranked = outranking.iter().any(|set| set.contains(s.as_str()));
-                if outranked && !native_rules.contains(&s) {
-                    continue;
-                }
-                out.push(s);
-            }
-        }
-        out.extend(native_rules.iter().cloned());
-        dedup(&mut out);
-        out
-    };
-
-    let mut allow = render_action(&perms.allow, &native_allow, PermissionAction::Allow);
-    let mut ask = render_action(&perms.ask, &native_ask_rules, PermissionAction::Ask);
-    let mut deny = render_action(&perms.deny, &native_deny_rules, PermissionAction::Deny);
-
-    // #946: feature-enabled MCP tool tiers render into exactly one action per
-    // tool (allow/ask/deny), replacing #490's wildcard allow. The wildcard used
-    // to coexist with these same tier-based ask/deny entries; because Claude
-    // Code resolves deny > ask > allow (specific beats wildcard), the wildcard
-    // was silently shadowed — mutation tools prompted every call and
-    // destructive tools were blocked outright, even though the feature was
-    // enabled. Default policy: read-only/mutation -> allow, destructive -> ask;
-    // overridable per feature via `mcp_permissions`.
-    // Hoisted once and shared by both tier-permission call sites below (NLL
-    // ends this borrow at the last `apply_mcp_tier_permissions` call, so the
-    // `dedup(&mut allow/ask/deny)` calls after still borrow independently).
-    let mut buckets = PermBuckets {
-        allow: &mut allow,
-        ask: &mut ask,
-        deny: &mut deny,
-    };
-    // #972: same native deny/ask lookups the neutral-rule suppression above
-    // uses, reused here so a tiered MCP tool already covered by a more
-    // authoritative native rule doesn't also get a competing tier entry.
-    let native_cover = NativeCover {
-        deny: &native_deny,
-        ask: &native_ask,
-    };
-
-    if manifest.plugins.iter().any(|p| {
-        p.marketplace == crate::config::CONTEXT_MODE_MARKETPLACE
-            && p.plugin == crate::config::CONTEXT_MODE_PLUGIN
-    }) {
-        let overrides = manifest
-            .capabilities
-            .features
-            .as_ref()
-            .and_then(|f| f.context_mode.as_ref())
-            .and_then(|c| c.mcp_permissions.as_ref());
-        apply_mcp_tier_permissions(
-            &mut buckets,
-            crate::config::CONTEXT_MODE_MCP_PREFIX,
-            [
-                (CTX_READ_ONLY, McpTier::ReadOnly),
-                (CTX_MUTATION, McpTier::Mutation),
-                (CTX_DESTRUCTIVE, McpTier::Destructive),
-            ],
-            overrides,
-            &native_cover,
-        );
-    }
-
-    if let Some(icm) = manifest.mcps.iter().find(|m| m.name == MEMORY_MCP_NAME) {
-        apply_mcp_tier_permissions(
-            &mut buckets,
-            ICM_MCP_PREFIX,
-            [
-                (ICM_READ_ONLY, McpTier::ReadOnly),
-                (ICM_MUTATION, McpTier::Mutation),
-                (ICM_DESTRUCTIVE, McpTier::Destructive),
-            ],
-            icm.mcp_permissions.as_ref(),
-            &native_cover,
-        );
-    }
-
-    if let Some(cbm) = manifest
-        .mcps
-        .iter()
-        .find(|m| m.name == crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME)
-    {
-        apply_mcp_tier_permissions(
-            &mut buckets,
-            CBM_MCP_PREFIX,
-            [
-                (CBM_READ_ONLY, McpTier::ReadOnly),
-                (CBM_MUTATION, McpTier::Mutation),
-                (CBM_DESTRUCTIVE, McpTier::Destructive),
-            ],
-            cbm.mcp_permissions.as_ref(),
-            &native_cover,
-        );
-    }
-
-    dedup(&mut allow);
-    dedup(&mut ask);
-    dedup(&mut deny);
-
-    // #1322: the suppression above only resolves neutral-vs-*native*
-    // conflicts (a native deny/ask outranking a *different* neutral rule of
-    // the same rendered string). It never cross-checks the neutral buckets
-    // against each other, so a `PermissionRule` authored directly in both
-    // `permissions.allow` and `permissions.deny` (or `ask`/`deny`) — no
-    // native rule involved at all — lands in both. Same deny > ask > allow
-    // authority as above, applied as a final pass so every source that can
-    // populate these three buckets (neutral rules, native rules, MCP tiers)
-    // is covered uniformly, matching what
-    // `generate_settings_json_permission_buckets_never_overlap` asserts.
-    let deny_set: std::collections::BTreeSet<&str> = deny.iter().map(String::as_str).collect();
-    ask.retain(|s| !deny_set.contains(s.as_str()));
-    allow.retain(|s| !deny_set.contains(s.as_str()));
-    let ask_set: std::collections::BTreeSet<&str> = ask.iter().map(String::as_str).collect();
-    allow.retain(|s| !ask_set.contains(s.as_str()));
-
-    let has_perms =
-        !allow.is_empty() || !ask.is_empty() || !deny.is_empty() || perms.default_mode.is_some();
-    if has_perms {
-        let mut perm_obj = serde_json::Map::new();
-        if let Some(mode) = perms.default_mode {
-            perm_obj.insert("defaultMode".into(), json!(permission_mode_str(mode)));
-        }
-        // Always emit the three arrays when any permission config exists, so the
-        // shape matches Claude Code's object schema even if one action is empty.
-        perm_obj.insert("allow".into(), json!(allow));
-        perm_obj.insert("ask".into(), json!(ask));
-        perm_obj.insert("deny".into(), json!(deny));
-        settings.insert("permissions".into(), serde_json::Value::Object(perm_obj));
-    }
-
-    // #227/#123: manage auto memory enablement. When llmenv's ICM memory backend
-    // is active, disable Claude's auto memory to prevent competition. Only emit
-    // the key if: (1) explicitly set in config, or (2) ICM is active and we need
-    // to disable it. Emitted before native overlays so `native.claude_code.autoMemoryEnabled`
-    // can still override if set (native is the highest-precedence layer).
     if let Some(configured) = manifest.capabilities.auto_memory_enabled {
         settings.insert("autoMemoryEnabled".into(), json!(configured));
     } else if icm_active {
         settings.insert("autoMemoryEnabled".into(), json!(false));
     }
-
-    // #2146: account sync loads skills and plugins outside llmenv's scope rules
-    // (Claude Code 2.1.275). Disable by default; native settings can turn it back on.
-    // Emitted before native overlays so native.claude_code.syncClaudeAiSkills
-    // can still override if set.
+    // #2146: an account sync loads skills and plugins outside the scope rules of llmenv (Claude
+    // Code 2.1.275), so it is off by default.
     settings.insert("syncClaudeAiSkills".into(), json!(false));
     settings.insert("syncClaudeAiPlugins".into(), json!(false));
-
-    // #221: Render first-class capability fields (effort level, advisor model)
+    // #221: the first-class capability fields.
     if let Some(effort_level) = &manifest.capabilities.effort_level {
         settings.insert("effortLevel".into(), json!(effort_level));
     }
     if let Some(advisor_model) = &manifest.capabilities.advisor_model {
         settings.insert("advisorModel".into(), json!(advisor_model));
     }
-
-    // #1130: select an output style when exactly one non-`force_for_plugin`
-    // entry is tag-active. See `output_styles::write_native_output_styles`
-    // for why zero/multiple selectable styles leaves this key unset rather
-    // than erroring.
+    // #1130: select an output style when exactly one entry without `force_for_plugin` is active.
+    // With none, or with several, the key stays unset (see `output_styles`).
     let selectable_styles: Vec<&str> = manifest
         .capabilities
         .output_styles
@@ -1688,44 +1117,45 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     if let [name] = selectable_styles[..] {
         settings.insert("outputStyle".into(), json!(name));
     }
+}
 
-    // Plugins (#59): declare marketplaces + enabled plugins into settings.json.
-    // llmenv owns the marketplace clone in its cache, so each marketplace points
-    // Claude at that checkout via a `directory` source (no re-fetch). Plugins are
-    // keyed `<plugin>@<marketplace>` and force-enabled.
-    render_plugins(&mut settings, manifest);
-
-    // #97: overlay the per-engine `native_plugins` fragment at the settings top
-    // level (plugin-related keys Claude understands but llmenv has no neutral
-    // form for, e.g. extra `enabledPlugins` entries).
-    let mut settings_value = serde_json::Value::Object(settings);
+/// The settings with the overlays of the engine on top: `native_plugins` (#97), then the
+/// `native.claude_code` catch-all, which has the highest precedence (#96).
+///
+/// The catch-all is for keys that no modeled feature owns. A key of a modeled feature
+/// (`permissions`, `hooks`) would overlay last, and it would erase the security-rendered output,
+/// such as the `deny` array (#102). That is an error. The key belongs in the `native_<feature>`
+/// block, which merges in the safe direction.
+fn overlay_settings(
+    settings: serde_json::Map<String, serde_json::Value>,
+    manifest: &MergedManifest,
+) -> anyhow::Result<serde_json::Value> {
+    let mut value = serde_json::Value::Object(settings);
     overlay_native(
-        &mut settings_value,
+        &mut value,
         manifest.capabilities.native_plugins.get("claude_code"),
     )?;
-
-    // #96: overlay the top-level `native.claude_code` catch-all last — opaque
-    // keys that belong to no modeled feature (e.g. `alwaysThinkingEnabled`).
-    // It is the highest-precedence layer, applied after every modeled render.
-    //
-    // Security guard (#102): the catch-all is for keys NO modeled feature owns.
-    // A modeled-feature key here (`permissions`, `hooks`) would overlay LAST over
-    // the security-rendered output, silently clobbering it — e.g. erasing the
-    // permission `deny` array, bypassing the deny-never-weakened invariant. Per
-    // design D3 ("Layer 1 wins, or hard-error"), reject it loudly. The key
-    // belongs in the `native_<feature>` sibling, which merges in the safe
-    // direction.
     if let Some(native) = manifest.native.get("claude_code") {
         reject_modeled_keys_in_catch_all(native)?;
     }
-    overlay_native(&mut settings_value, manifest.native.get("claude_code"))?;
+    overlay_native(&mut value, manifest.native.get("claude_code"))?;
+    // #1264: a native `null` deletes the key. The shared-key arm of `merge_json` does not strip
+    // nulls, so a null on a key that the renderer wrote must go after the last overlay.
+    super::strip_json_nulls(&mut value);
+    Ok(value)
+}
 
-    // #1264: a native `null` deletes the key rather than emitting an explicit
-    // JSON null — `merge_json`'s shared-key overwrite arm deliberately does not
-    // null-strip, so a null on a key the renderer already emitted survived to
-    // here. Runs after the last overlay so it catches every layer.
-    super::strip_json_nulls(&mut settings_value);
-
+/// Write `settings.json`, and the sidecars that the next render reads.
+///
+/// `modelSettings` is shared with `/effort` of Claude Code, so it merges after the reconcile and
+/// does not replace the key (#2144). The sidecars record what llmenv rendered, so the next
+/// reconcile can tell a hook that llmenv owned and dropped from the config (purge it) from a hook
+/// that a plugin registered itself (keep it) (#991, #1793).
+fn persist_settings(
+    out: &Path,
+    manifest: &MergedManifest,
+    mut settings_value: serde_json::Value,
+) -> anyhow::Result<()> {
     let settings_path = out.join("settings.json");
 
     // #2144: `modelSettings` is shared with Claude Code's `/effort`, so it must
@@ -1780,35 +1210,40 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
 
     model_effort.persist(out)?;
 
-    // Record what llmenv rendered this round for the next reconcile's owned-vs-
-    // foreign diff. Best-effort: a missing/failed sidecar just degrades reconcile
-    // to its prior union-only behavior (foreign preserved, stale llmenv hooks
-    // linger) — never fail the render over it.
+    write_hooks_sidecar(&hooks_sidecar, rendered_hooks);
+    write_plugin_paths_sidecar(&plugin_paths_sidecar, &rendered_plugin_paths);
+    Ok(())
+}
+
+/// Record the hooks that llmenv rendered this round, for the next reconcile's owned-vs-foreign
+/// diff. Best-effort: a sidecar that cannot be written degrades the reconcile to its union-only
+/// behavior (foreign hooks are kept, and stale llmenv hooks stay), and the render does not fail.
+fn write_hooks_sidecar(path: &Path, rendered_hooks: Option<serde_json::Value>) {
     if let Some(hooks) = rendered_hooks
         && let Ok(bytes) = serde_json::to_vec(&hooks)
-        && let Err(e) = crate::paths::write_owner_only_atomic(&hooks_sidecar, &bytes)
+        && let Err(e) = crate::paths::write_owner_only_atomic(path, &bytes)
     {
         eprintln!(
             "warning: cannot write the hooks record {}: {e}. Stale llmenv hooks may stay in \
              settings.json.",
-            hooks_sidecar.display()
+            path.display()
         );
     }
+}
 
-    // Same best-effort contract as the hooks sidecar above: a failed write just
-    // means the next render can't trace a disabled plugin's hook back to its
-    // directory, degrading to "never purge" rather than failing the render.
-    if let Ok(bytes) = serde_json::to_vec(&rendered_plugin_paths)
-        && let Err(e) = crate::paths::write_owner_only_atomic(&plugin_paths_sidecar, &bytes)
+/// Record the install paths of the plugins that llmenv rendered as enabled. It has the same
+/// best-effort contract as [`write_hooks_sidecar`]: without it, the next render cannot trace the
+/// hook of a disabled plugin back to its directory, and it purges nothing.
+fn write_plugin_paths_sidecar(path: &Path, rendered_plugin_paths: &serde_json::Value) {
+    if let Ok(bytes) = serde_json::to_vec(rendered_plugin_paths)
+        && let Err(e) = crate::paths::write_owner_only_atomic(path, &bytes)
     {
         eprintln!(
             "warning: cannot write the plugin install-path record {}: {e}. The hooks of a \
              disabled plugin may stay in settings.json.",
-            plugin_paths_sidecar.display()
+            path.display()
         );
     }
-
-    Ok(())
 }
 
 /// Sidecar recording the `hooks` object llmenv rendered, for the owned-vs-foreign
@@ -2397,18 +1832,18 @@ mod tests {
     }
 
     use super::super::AgentAdapter;
+    use super::commands::{config_context_command, config_guard_command, hook_run_command};
     use super::{
         CBM_DESTRUCTIVE, CBM_MCP_PREFIX, CBM_MUTATION, CBM_READ_ONLY, CLAUDE_JSON_FILE,
         CLAUDE_JSON_OWNED_SERVERS_FILE, CTX_DESTRUCTIVE, CTX_MUTATION, CTX_READ_ONLY,
         ClaudeCodeAdapter, ICM_DESTRUCTIVE, ICM_MUTATION, ICM_READ_ONLY,
         LLMENV_OWNED_SETTINGS_KEYS, MODELED_SETTINGS_KEYS, RENDERED_ENTRY_KEYS, build_mcp_servers,
-        carry_runtime_keys, classify_claude_path, config_context_command, config_guard_command,
-        dedup_hooks_doc, generate_installed_plugins_json, generate_settings_json, hook_run_command,
-        is_hook_json, merge_mcp_into_claude_json, normalize_deprecated_tool, overlay_native,
-        permission_mode_str, plugin_install_paths_json, purge_hooks_from_disabled_plugins,
-        read_owned_servers, reconcile_settings, reject_modeled_keys_in_catch_all,
-        render_marketplace_source, render_permission_rule, seed_install_method, seed_status_line,
-        starting_permission_mode,
+        carry_runtime_keys, classify_claude_path, dedup_hooks_doc, generate_installed_plugins_json,
+        generate_settings_json, is_hook_json, merge_mcp_into_claude_json,
+        normalize_deprecated_tool, overlay_native, permission_mode_str, plugin_install_paths_json,
+        purge_hooks_from_disabled_plugins, read_owned_servers, reconcile_settings,
+        reject_modeled_keys_in_catch_all, render_marketplace_source, render_permission_rule,
+        seed_install_method, seed_status_line, starting_permission_mode,
     };
     use crate::adapter::skills::{
         arb_distinct_resolved_mcps, arb_yaml_value, reject_hardcoded_config_path, validate_skills,

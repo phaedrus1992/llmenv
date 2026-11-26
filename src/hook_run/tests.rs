@@ -470,9 +470,8 @@ fn only_claude_code_session_start_triggers_the_drift_check() {
     assert_eq!(triggered, vec!["claude-code/session_start".to_string()]);
 }
 
-// #1331: opencode's shim blocks on `code === 2` alone, so a deny that
-// exits 0 there is silently allowed. Claude Code stays on exit 0 — it
-// honours the envelope, and this keeps a working path unchanged.
+// #1331: opencode's shim blocks on `code === 2`, so `hook-run` denies with exit 2 there. Claude
+// Code stays on exit 0 — it honours the envelope, and this keeps a working path unchanged.
 
 // #231/#864: returning early when a sink still wants the event drops its
 // log line, and both arms return the same text — so nothing but a direct
