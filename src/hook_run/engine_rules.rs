@@ -30,8 +30,9 @@ pub(super) fn neutralize_crush_tool_name(payload: &mut Value) {
 ///
 /// opencode's generated plugin shim blocks on `code === 2`, and it also reads the deny envelope
 /// on stdout (`readResult` in `plugin.js`). Exit 2 is the signal that a gate with `failClosed`
-/// always reads, so a deny from `hook-run` uses it there./// Claude Code honours the envelope itself, and exit 2 would only duplicate a
-/// decision it has already made.
+/// always reads, so a deny from `hook-run` uses it there.
+/// Claude Code honours the envelope itself, and exit 2 would only duplicate a decision it has
+/// already made.
 ///
 /// `engine` is [`crate::adapter::AgentAdapter::name`]'s hyphenated cache-dir
 /// form, the same value `should_check_stale` takes — see the warning there.
