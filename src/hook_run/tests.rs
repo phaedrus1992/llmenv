@@ -385,6 +385,7 @@ fn consolidation_guard_needs_a_non_empty_value() {
 fn adaptive_applies_only_to_its_events_with_a_valid_session() {
     let on = Some(MemoryHookSettings {
         adaptive_recall: true,
+        failure_recall: true,
         global_topics: vec![],
         ..MemoryHookSettings::default()
     });
@@ -492,9 +493,8 @@ fn only_claude_code_session_start_triggers_the_drift_check() {
     assert_eq!(triggered, vec!["claude-code/session_start".to_string()]);
 }
 
-// #1331: opencode's shim blocks on `code === 2` alone, so a deny that
-// exits 0 there is silently allowed. Claude Code stays on exit 0 — it
-// honours the envelope, and this keeps a working path unchanged.
+// #1331: opencode's shim blocks on `code === 2`, so `hook-run` denies with exit 2 there. Claude
+// Code stays on exit 0 — it honours the envelope, and this keeps a working path unchanged.
 
 // #231/#864: returning early when a sink still wants the event drops its
 // log line, and both arms return the same text — so nothing but a direct
@@ -731,6 +731,7 @@ fn memory_url_uses_persisted_cache_when_key_matches() {
         mcp_permissions: None,
         wakeup_max_tokens: None,
         adaptive_recall: true,
+        failure_recall: true,
         global_topics: crate::config::Memory::default().global_topics,
     }];
     let mut persisted_host = std::collections::BTreeMap::new();
@@ -2782,6 +2783,7 @@ proptest! {
 fn memory_settings(default_type: Option<llmenv_config::MemoryType>) -> MemoryHookSettings {
     MemoryHookSettings {
         adaptive_recall: true,
+        failure_recall: true,
         default_type,
         global_topics: vec![],
         ..MemoryHookSettings::default()

@@ -33,15 +33,24 @@ pub(super) fn dispatch_config_context(engine: &str) -> anyhow::Result<()> {
 }
 
 /// Dispatch `config-guard`. Called from the CLI `run` match arm.
-pub(super) fn dispatch_config_guard(engine: &str) {
+pub(super) fn dispatch_config_guard(engine: &str) -> anyhow::Result<()> {
     dispatch_guard_command(engine, "config-guard");
     timed("config-guard", || crate::cli::config_guard::run(engine));
+    Ok(())
+}
+
+/// Dispatch `tmp-guard`. Called from the CLI `run` match arm.
+pub(super) fn dispatch_tmp_guard(engine: &str) -> anyhow::Result<()> {
+    dispatch_guard_command(engine, "tmp-guard");
+    timed("tmp-guard", || crate::cli::tmp_guard::run(engine));
+    Ok(())
 }
 
 /// Dispatch `throttle`. Called from the CLI `run` match arm.
-pub(super) fn dispatch_throttle(event: &str) {
+pub(super) fn dispatch_throttle(event: &str) -> anyhow::Result<()> {
     dispatch_guard_command(event, "throttle");
     timed("throttle", || crate::throttle::run_throttle_hook(event));
+    Ok(())
 }
 
 /// Log a guard command invocation and warn about unknown engines.

@@ -41,6 +41,15 @@ fn first_skew_report(path: &Path) -> bool {
         .insert(path.to_path_buf())
 }
 
+/// Whether `path` has a clock-skew report in this process.
+#[cfg(test)]
+pub(crate) fn skew_was_reported(path: &Path) -> bool {
+    SKEW_REPORTED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(path)
+}
+
 /// Check whether `mtime` is older than `older_than` relative to `now`.
 ///
 /// An mtime in the future is kept. It stays kept until the clock passes it, and then its age is

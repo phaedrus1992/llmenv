@@ -24,6 +24,8 @@ use claude_root::{is_split_root, scan_split_root};
 struct Stale {
     path: PathBuf,
     is_dir: bool,
+    /// How long ago the entry last changed, by the rule of the scan.
+    age: std::time::Duration,
 }
 
 /// What a scan of `state/tmp` found. Nothing is removed by a scan.
@@ -71,6 +73,7 @@ pub fn sweep(
         ..GcReport::new(dry_run)
     };
     for stale in &scan.stale {
+        report.ages.insert(stale.path.clone(), stale.age);
         if stale.is_dir {
             gc_remove_dir(&stale.path, &mut report);
         } else {
@@ -211,6 +214,8 @@ fn judge_entry(path: &Path, is_dir: bool, rule: AgeRule, now: SystemTime, scan: 
         scan.stale.push(Stale {
             path: path.to_path_buf(),
             is_dir,
+            // `is_expired` keeps a time in the future, so a stale entry is never newer than `now`.
+            age: now.duration_since(modified).unwrap_or_default(),
         });
     }
 }

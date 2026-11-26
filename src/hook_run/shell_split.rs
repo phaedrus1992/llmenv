@@ -252,7 +252,34 @@ pub(super) fn program_words(words: &[String]) -> Vec<&str> {
         .map(|w| w.trim_start_matches(['(', '{']))
         .filter(|w| !w.is_empty())
         .collect();
-    skip_wrappers(&words).to_vec()
+    skip_wrappers(skip_keywords(&words)).to_vec()
+}
+
+/// The shell reserved words that start a command list, such as the `do` of a loop. The command
+/// after one of them is the program of the segment.
+const LIST_KEYWORDS: [&str; 10] = [
+    "if", "then", "else", "elif", "while", "until", "do", "!", "time", "{",
+];
+
+/// `words` without its leading reserved words and a leading `case` pattern (`a|b)`), so the
+/// program of `do cp x /tmp/` is `cp`.
+fn skip_keywords<'a, 'b>(mut words: &'b [&'a str]) -> &'b [&'a str] {
+    while let Some((first, tail)) = words.split_first() {
+        if *first == "case" {
+            // `case WORD in` ends at the first `in`; the first arm follows it.
+            words = tail
+                .iter()
+                .position(|w| *w == "in")
+                .map_or(tail, |i| &tail[i + 1..]);
+            continue;
+        }
+        let is_case_arm = first.ends_with(')') && !tail.is_empty();
+        if !(LIST_KEYWORDS.contains(first) || is_case_arm) {
+            break;
+        }
+        words = tail;
+    }
+    words
 }
 
 /// `rest` without its leading env assignments, and wrappers with the words they take. The first

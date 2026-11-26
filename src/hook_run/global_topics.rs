@@ -44,6 +44,7 @@ pub(crate) async fn recall(
     let mut records = Vec::new();
     let mut answered = 0usize;
     let mut failed = Vec::new();
+    let mut cut = None;
     for q in queries {
         let topic = q.topic.clone().unwrap_or_default();
         let found = Action::RecallQuery(q).run(client, "", "").await;
@@ -54,14 +55,28 @@ pub(crate) async fn recall(
             }
             // A skipped topic is not a failure. With no answer and no failure, all were skipped.
             Err(e) if e.is::<crate::hook_run::recall_breaker::Skipped>() => {}
+            // A topic that the budget cut off is not a failure. The first cut is returned if no
+            // topic answered, so the caller sees a cut and not a failure.
+            Err(e) if e.is::<crate::hook_run::recall_deadline::Cut>() => {
+                cut.get_or_insert(e);
+            }
             Err(e) => {
                 tracing::error!("memory recall of the global topic {topic} failed: {e:#}");
                 failed.push((topic, e));
             }
         }
     }
+    // The budget notice is recorded here, so a mix of failures and cuts still names the budget.
+    if let Some(cut) = cut
+        .as_ref()
+        .and_then(|e| e.downcast_ref::<crate::hook_run::recall_deadline::Cut>())
+    {
+        crate::agent_notice::record(cut.notice());
+    }
     if answered == 0 && failed.is_empty() {
-        return Some(Err(crate::hook_run::recall_breaker::Skipped.into()));
+        return Some(Err(
+            cut.unwrap_or_else(|| crate::hook_run::recall_breaker::Skipped.into())
+        ));
     }
     if answered == 0 {
         let names: Vec<&str> = failed.iter().map(|(t, _)| t.as_str()).collect();
@@ -138,6 +153,30 @@ mod breaker_tests {
             .and_then(Result::err)
             .ok_or_else(|| anyhow::anyhow!("expected the skip to be reported"))?;
         assert!(err.is::<Skipped>(), "{err:#}");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod cut_tests {
+    use super::recall;
+    use crate::hook_run::recall_deadline::{Cut, Deadline};
+    use llmenv_mcp::mcp_client::McpHttpClient;
+    use std::time::Duration;
+
+    /// Topics that the budget cut off are a cut and not a failure, so the caller does not count a
+    /// failed call.
+    #[tokio::test]
+    async fn topics_that_the_budget_cut_off_are_reported_as_a_cut() -> anyhow::Result<()> {
+        let client =
+            McpHttpClient::test_new("http://127.0.0.1:9".to_string(), Duration::from_secs(1))?
+                .with_recall_deadline(Some(Deadline::expiring_in(Duration::ZERO)));
+        let topics = vec!["preferences".to_string(), "style".to_string()];
+        let err = recall(&client, "hello", &topics, 5)
+            .await
+            .and_then(Result::err)
+            .ok_or_else(|| anyhow::anyhow!("expected a cut"))?;
+        assert!(err.is::<Cut>(), "{err:#}");
         Ok(())
     }
 }

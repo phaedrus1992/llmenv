@@ -34,6 +34,7 @@ fn memory(when: &str, server_host: &str, backend: crate::config::ConsolidationBa
         mcp_permissions: None,
         wakeup_max_tokens: None,
         adaptive_recall: true,
+        failure_recall: true,
         global_topics: vec![],
     }
 }

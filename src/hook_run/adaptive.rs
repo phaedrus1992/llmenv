@@ -13,6 +13,7 @@ use crate::agent_notice;
 use crate::hook_run::HookEvent;
 use crate::hook_run::action::{Action, RecallQuery, Reply};
 use crate::hook_run::recall::{RECALL_BUDGET_BYTES, RecallBudget};
+use crate::hook_run::recall_deadline::{Deadline, within};
 use crate::hook_run::relevance::{self, TurnSignals};
 use crate::hook_run::session_ledger::{Ledger, LedgerStore, LedgerTiming, MAIN_AGENT, record_hash};
 use crate::hook_run::session_state::unix_now;
@@ -26,7 +27,6 @@ mod outcome;
 mod project_recall;
 mod scope;
 mod session_reset;
-mod session_start_budget;
 mod subagent;
 mod waves;
 
@@ -61,6 +61,7 @@ const RESOLVED_TOPIC: &str = "errors-resolved";
 const SCOPE_RECORD: &str = "[llmenv-scope-context]";
 
 /// What every adaptive flow needs.
+#[derive(Clone, Copy)]
 pub(super) struct AdaptiveCtx<'a> {
     pub(super) client: &'a McpHttpClient,
     pub(super) store: &'a LedgerStore,
@@ -68,6 +69,8 @@ pub(super) struct AdaptiveCtx<'a> {
     pub(super) payload: &'a Value,
     /// The topics that the main recall reads across every project (#2950).
     pub(super) global_topics: &'a [String],
+    /// Whether a failed tool call recalls memories about its error (#3897).
+    pub(super) failure_recall: bool,
     /// Where the recall health ring lives (#2919).
     pub(super) state_dir: &'a Path,
 }
@@ -145,7 +148,14 @@ pub(super) async fn session_start(
     scope: Vec<Action>,
 ) -> anyhow::Result<super::HookText> {
     // One budget for every recall call of this start, the wake-up pack and the scope set alike.
-    let deadline = session_start_budget::session_start_deadline();
+    let deadline = Deadline::session_start();
+    // The client holds the deadline, so every recall call of this start is bounded, and the breaker
+    // counts a call that the budget cuts off (#4022).
+    let bounded = ctx.client.clone().with_recall_deadline(Some(deadline));
+    let ctx = &AdaptiveCtx {
+        client: &bounded,
+        ..*ctx
+    };
     let reset = resets_ledger(ctx.payload["source"].as_str());
     let project = match &wake {
         Action::WakeUp(args) => args.project.clone(),
@@ -176,21 +186,18 @@ pub(super) async fn session_start(
         (Ok(String::new()), String::new())
     } else {
         let (own, own_ok) = match &recall_project {
-            Some(p) => {
-                match tokio::time::timeout_at(deadline, project_memories(ctx.client, p)).await {
-                    Ok((text, ok)) => (text, ok),
-                    Err(_) => {
-                        agent_notice::record(session_start_budget::cut_notice());
-                        (String::new(), Some(false))
-                    }
-                }
-            }
+            Some(p) => project_memories(ctx.client, p).await,
             None => (String::new(), None),
         };
         let wake_call = wake.run(ctx.client, "", "");
-        let wake_raw = session_start_budget::within(Some(deadline), wake_call).await;
+        let wake_raw = within(Some(deadline), wake_call).await;
         // The wake-up is not a recall, so the breaker never skips it.
-        let wake_answer = Some(wake_raw.is_ok());
+        // A wake-up that the budget cut off says nothing about the server, as for the recalls.
+        let wake_answer = match &wake_raw {
+            Ok(_) => Some(true),
+            Err(e) if e.is::<crate::hook_run::recall_deadline::Cut>() => None,
+            Err(_) => Some(false),
+        };
         let wake = wake_raw.map(|reply| {
             let (kept, cut) = drop_cut_items(&reply.into_text());
             note_cut_items(cut);
@@ -208,7 +215,7 @@ pub(super) async fn session_start(
     let wake_bytes = pack_bytes(&wake, &own);
     let mut budget = RecallBudget::new(RECALL_BUDGET_BYTES.saturating_sub(wake_bytes), sent);
     let scope_len = scope.len();
-    let (outcome, unrun) = run_scope(ctx, scope, &mut budget, Some(deadline)).await;
+    let (outcome, unrun) = run_scope(ctx, scope, &mut budget).await;
     if let Some(notice) = unrun {
         agent_notice::record(notice);
     }
@@ -232,7 +239,7 @@ pub(super) async fn session_start(
             own
         }
     };
-    let complete = outcome.failed == 0;
+    let complete = outcome.complete();
     let kept = budget.kept_keys();
     note_unless_saved(
         ctx.store.update(ctx.session_id, |l| {
@@ -296,6 +303,15 @@ pub(super) async fn turn_start(
     ctx: &AdaptiveCtx<'_>,
     scope: Vec<Action>,
 ) -> anyhow::Result<super::HookText> {
+    // A slow memory server cannot stretch the prompt past this budget (#4023).
+    let bounded = ctx
+        .client
+        .clone()
+        .with_recall_deadline(Some(Deadline::turn_start()));
+    let ctx = &AdaptiveCtx {
+        client: &bounded,
+        ..*ctx
+    };
     let Some(ledger) = ledger_or_skip(ctx.store, ctx.session_id, "turn_start") else {
         return Ok(super::HookText::default());
     };
@@ -303,7 +319,7 @@ pub(super) async fn turn_start(
     let fallback = !ledger.scope_sent(MAIN_AGENT);
     let mut outcome = Outcome::default();
     if fallback {
-        let (scope_outcome, unrun) = run_scope(ctx, scope, &mut budget, None).await;
+        let (scope_outcome, unrun) = run_scope(ctx, scope, &mut budget).await;
         if let Some(notice) = unrun {
             agent_notice::record(notice);
         }

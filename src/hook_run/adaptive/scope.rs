@@ -4,8 +4,8 @@
 use crate::hook_run::action::Action;
 use crate::hook_run::adaptive::AdaptiveCtx;
 use crate::hook_run::adaptive::outcome::Outcome;
-use crate::hook_run::adaptive::session_start_budget::{Cut, cut_notice, within};
 use crate::hook_run::recall::RecallBudget;
+use crate::hook_run::recall_deadline::{Cut, Deadline};
 
 /// The notice for scope recalls that the output budget cut off, or `None` when none were cut
 /// (#2766). The recalls are unknown to the agent, not empty, so the notice says so.
@@ -24,21 +24,22 @@ pub(super) async fn run_scope(
     ctx: &AdaptiveCtx<'_>,
     scope: Vec<Action>,
     budget: &mut RecallBudget,
-    deadline: Option<tokio::time::Instant>,
 ) -> (Outcome, Option<String>) {
+    // The client holds the deadline, so the breaker counts a call that the budget cuts off.
+    let deadline = ctx.client.recall_deadline();
     let mut outcome = Outcome::default();
     let mut actions = scope.into_iter();
     let mut cut = false;
     // A refused or timed-out server would stall each remaining tag for one HOOK_TIMEOUT, so the
     // first failure ends the fallback for this turn (#2897).
-    while !budget.is_full() && outcome.failed == 0 && !past(deadline) {
+    while !budget.is_full() && outcome.failed == 0 && !deadline.is_some_and(Deadline::has_passed) {
         let Some(action) = actions.next() else {
             break;
         };
-        let call = action.run(ctx.client, "", "");
-        match within(deadline, call).await {
+        match action.run(ctx.client, "", "").await {
             // A call the budget cut off is not a server failure. The notice names the budget.
             Err(e) if e.is::<Cut>() => {
+                outcome.push(Some(Err(e)));
                 cut = true;
                 break;
             }
@@ -48,17 +49,13 @@ pub(super) async fn run_scope(
     }
     // A deadline that passed before the first call also leaves recalls unrun, and the budget
     // is the reason, so the notice names it.
-    let notice = if cut || (past(deadline) && actions.len() > 0) {
-        Some(cut_notice())
-    } else {
-        unrun_notice(actions.len(), outcome.failed > 0, budget.is_full())
-    };
+    let budget_cut = deadline.filter(|d| cut || (d.has_passed() && actions.len() > 0));
+    // A cut scope set is unknown, not empty, so it is not complete and is not marked as sent.
+    outcome.cut |= budget_cut.is_some();
+    let notice = budget_cut
+        .map(Deadline::cut_notice)
+        .or_else(|| unrun_notice(actions.len(), outcome.failed > 0, budget.is_full()));
     (outcome, notice)
-}
-
-/// True once `deadline` has passed. With no deadline, it never passes.
-fn past(deadline: Option<tokio::time::Instant>) -> bool {
-    deadline.is_some_and(|d| tokio::time::Instant::now() >= d)
 }
 
 /// The notice for scope recalls that did not run, or `None` when none were skipped. A stop after
@@ -77,20 +74,4 @@ pub(super) fn unrun_notice(unrun: usize, failed: bool, budget_full: bool) -> Opt
              Fix: run `llmenv doctor` to check the memory server."
         )
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::past;
-    use std::time::Duration;
-
-    #[tokio::test]
-    async fn past_reports_only_a_deadline_that_has_passed() {
-        let now = tokio::time::Instant::now();
-        assert!(!past(None));
-        assert!(!past(Some(now + Duration::from_secs(3600))));
-        if let Some(earlier) = now.checked_sub(Duration::from_secs(1)) {
-            assert!(past(Some(earlier)));
-        }
-    }
 }

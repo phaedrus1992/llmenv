@@ -511,6 +511,7 @@ When that directory is gone, the session start deletes the checkpoint and shows 
 A failed start of a resumed job uses up one of its 3 attempts.
 Consolidation keeps the model summary in its checkpoint, so a resume never pays for the model twice.
 The index job is not resumed, because every session start runs the indexer anyway.
+(added in v3.14.2) A second index job of one project stops at once while the first runs, because each job holds a lock file beside its checkpoint, and the lock ends with the job.
 See [Background work](troubleshooting.md#background-work-that-did-not-finish).
 
 (added in v3.14.0) If llmenv cannot save a checkpoint, it shows a notice at every session start until the state folder is fixed.
@@ -676,6 +677,22 @@ The keyword and topic fanouts run only when those recalls leave room in the 8,00
 A recall skipped for the budget counts in the "recall queries skipped" notice.
 When the budget is already full before the first recall, no recall runs for that prompt.
 When the first recalls take more than 1.5 seconds, the fanouts do not run, and the llmenv log records the skip.
+
+(added in v3.14.2) The recall calls of one hook run share a time budget.
+A session start has 5 seconds, and a prompt and a subagent start have 3 seconds each.
+A call that runs past the budget is cut, and the agent gets a notice that names the budget.
+A slow memory server therefore cannot hold a prompt or a subagent start for longer than the budget.
+A cut call is not a failed recall, and a scope set with a cut call is not marked as sent.
+The recall circuit breaker counts a call that started in time and was cut as a failed call.
+A call that the budget cut before it started is not counted.
+After three failed recall calls in a row, the breaker skips recall for five minutes and prints one notice.
+The budgets are fixed, and no config key sets them.
+
+(added in v3.14.2) The hook processes of one memory server share one MCP session.
+The first process negotiates the session and saves its id in the state folder, in a file named `mcp-session-<hash>.json` that only the owner can read.
+Each later process reads the id for up to 10 minutes, so it skips the `initialize` round trip.
+A session that the server rejects is dropped from the file, and the call retries once with a new session.
+Before, each hook process and each detached record job opened its own session. A transcript audit of one busy server found a new transport for 92% of the tool calls.
 
 (changed in v3.13.0) After a tool error, a memory is injected only when its summary or keywords share a distinctive word or an error code with the error.
 A distinctive word has four or more characters and is not a common error word such as "error" or "failed".

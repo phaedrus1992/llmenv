@@ -21,6 +21,10 @@ hooks:
           type: command
       matcher: ^(Write|Edit|MultiEdit)$
     - hooks:
+        - command: llmenv tmp-guard --engine claude_code
+          type: command
+      matcher: ^(Bash|Monitor|Write|Edit|MultiEdit|NotebookEdit)$
+    - hooks:
         - command: llmenv hook-run --engine claude_code pre_tool_use
           type: command
       matcher: ^Read$

@@ -20,6 +20,26 @@ fn age(at: i64, now: i64) -> String {
     }
 }
 
+/// The Info line for a ring that no call has touched for [`STALE_AFTER_SECS`]: its failures are
+/// old news (#3912). `None` when the ring holds no failure to report.
+fn old_ring_line(h: &Health, last: &str) -> Option<(CheckLevel, String)> {
+    let what = if h.stuck {
+        format!("was stuck at the last recorded call ({last}): the last {STUCK_RUN} calls failed")
+    } else if h.failing_often() {
+        format!(
+            "failed often at the last recorded calls ({last}): {} of {} calls failed, more than \
+             {WARN_FAILED_PERCENT}%",
+            h.failed, h.calls
+        )
+    } else {
+        return None;
+    };
+    Some((
+        CheckLevel::Info,
+        format!("memory recall {what}, and no adaptive recall ran since"),
+    ))
+}
+
 fn health_line(
     read: anyhow::Result<Option<Health>>,
     path: &Path,
@@ -45,14 +65,11 @@ fn health_line(
         }
     };
     let (failed, calls, last) = (h.failed, h.calls, age(h.newest_at, now));
-    if h.stuck && now.saturating_sub(h.newest_at) > STALE_AFTER_SECS {
-        return (
-            CheckLevel::Info,
-            format!(
-                "memory recall was stuck at the last recorded call ({last}): the last {STUCK_RUN} \
-                 calls failed, and no adaptive recall ran since"
-            ),
-        );
+    // A ring from the future is not trusted as recent either, so it reads as old (#3907).
+    if !crate::util::ttl::is_within(h.newest_at, now, STALE_AFTER_SECS + 1)
+        && let Some(line) = old_ring_line(&h, &last)
+    {
+        return line;
     }
     if h.stuck {
         return (
@@ -146,6 +163,32 @@ mod tests {
     }
 
     #[test]
+    fn a_failing_often_ring_older_than_a_day_is_info() {
+        let at = NOW - STALE_AFTER_SECS - 1;
+        let (level, text) = line(Ok(Some(health(10, 6, false, at))));
+        assert_eq!(level, CheckLevel::Info, "{text}");
+        assert!(
+            text.contains("6 of 10") && text.contains("no adaptive recall ran since"),
+            "{text}"
+        );
+        assert!(text.contains("1 days ago"), "{text}");
+        let (level, _) = line(Ok(Some(health(10, 6, false, NOW - STALE_AFTER_SECS))));
+        assert_eq!(level, CheckLevel::Warn, "exactly a day is still current");
+    }
+
+    #[test]
+    fn a_failing_ring_from_the_future_reads_as_old() {
+        let (level, text) = line(Ok(Some(health(10, 6, false, NOW + 90))));
+        assert_eq!(level, CheckLevel::Info, "{text}");
+    }
+
+    #[test]
+    fn a_healthy_ring_older_than_a_day_still_passes() {
+        let at = NOW - STALE_AFTER_SECS - 1;
+        assert_eq!(line(Ok(Some(health(10, 1, false, at)))).0, CheckLevel::Pass);
+    }
+
+    #[test]
     fn an_unreadable_file_warns_with_its_path() {
         let (level, text) = line(Err(anyhow::anyhow!("bad json")));
         assert_eq!(level, CheckLevel::Warn);
@@ -153,6 +196,21 @@ mod tests {
             text.contains("/s/recall_health.json") && text.contains("bad json"),
             "{text}"
         );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn age_names_the_unit_of_the_clamped_elapsed_time(at: i64, now: i64) {
+            let secs = i128::from(now).saturating_sub(i128::from(at)).max(0);
+            let text = age(at, now);
+            let unit = match secs {
+                0..60 => " s ago",
+                60..3600 => " min ago",
+                3600..86_400 => " h ago",
+                _ => " days ago",
+            };
+            proptest::prop_assert!(text.ends_with(unit), "{} for {}", text, secs);
+        }
     }
 
     #[test]

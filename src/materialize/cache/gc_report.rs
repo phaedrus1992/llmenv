@@ -15,6 +15,9 @@ pub struct GcReport {
     /// Same contract as [`super::PruneReport::failed`]: never counted as `removed` (#1372). A map,
     /// so a path is listed once and always has a cause (#3441).
     pub(crate) failed: BTreeMap<PathBuf, String>,
+    /// The age of each removed entry that the sweep judged by age, so a dry run can print it
+    /// (#4054). A sweep that does not judge by age leaves it empty.
+    pub(crate) ages: BTreeMap<PathBuf, std::time::Duration>,
     /// When set, the sweep records each removal in `removed` and deletes nothing (#2917).
     pub(crate) dry_run: bool,
 }
@@ -26,6 +29,7 @@ impl GcReport {
             removed: Vec::new(),
             kept: 0,
             failed: BTreeMap::new(),
+            ages: BTreeMap::new(),
             dry_run,
         }
     }

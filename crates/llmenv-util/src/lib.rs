@@ -1,6 +1,7 @@
 //! Small shared helpers with no better home.
 
 pub mod agent_notice;
+pub mod hash;
 pub mod mcp_trace;
 pub mod proc_start;
 pub mod process;

@@ -1,4 +1,5 @@
 pub(crate) use llmenv_util::normalize_yaml;
+pub(crate) mod patch_paths;
 pub(crate) mod semver;
 pub(crate) use llmenv_util::time;
 pub(crate) use llmenv_util::ttl;
