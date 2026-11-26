@@ -173,10 +173,10 @@ proptest! {
 
     #[test]
     fn options_are_never_the_destination(
-        flags in prop::collection::vec("-[a-z]{1,2}", 0..4),
+        // No letter of `-t` or of a value option, so no flag takes the next word.
+        flags in prop::collection::vec("-[a-fh-ln-np-su-z]{1,2}", 0..4),
         dest in operand(),
     ) {
-        prop_assume!(flags.iter().all(|f| f != "-t"));
         let mut words: Vec<&str> = flags.iter().map(String::as_str).collect();
         words.push(dest.as_str());
         prop_assert_eq!(destination(&words), Some(dest.as_str()));
@@ -201,7 +201,7 @@ proptest! {
         words.extend(after);
         let words: Vec<&str> = words.iter().map(String::as_str).collect();
         prop_assert_eq!(
-            option_values(&words, &['o'], &["--output"]),
+            option_values(&words, &['o'], &[], &["output"]),
             vec![value.as_str()]
         );
     }
@@ -209,7 +209,7 @@ proptest! {
     #[test]
     fn operands_alone_give_no_option_value(words in prop::collection::vec(operand(), 0..6)) {
         let words: Vec<&str> = words.iter().map(String::as_str).collect();
-        prop_assert!(option_values(&words, &['o'], &["--output"]).is_empty());
+        prop_assert!(option_values(&words, &['o'], &[], &["output"]).is_empty());
     }
 
     #[test]

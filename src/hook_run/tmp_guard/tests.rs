@@ -322,3 +322,86 @@ fn the_option_writers_are_denied_for_a_temp_target_and_allowed_for_other_targets
         assert_eq!(bash(command), None, "denied: {command}");
     }
 }
+
+// The review of #4053 reproduced each bypass in this list.
+#[test]
+fn the_reviewed_bypasses_are_denied_and_their_near_misses_are_allowed() {
+    let denied = [
+        "rsync -t src /tmp/dest",
+        "cp src -t/tmp/x",
+        "cp -rt /tmp/x src",
+        "install -t/tmp/d a",
+        "mv --target-dir=/tmp a",
+        "git clone --upload-pack x url /tmp/dst",
+        "git clone --server-option x url /tmp/d",
+        "git clone --bundle-uri b url /tmp/r",
+        "git clone --ref-format files url /tmp/r",
+        "git -C /tmp -C . clone url",
+        "git -C /home/u -C ../../tmp clone url",
+        "git --config-env a=b clone url /tmp/x",
+        "git clone --sep=/tmp/g url r",
+        "wget --output-doc=/tmp/x url",
+        "wget --direc=/tmp url",
+        "wget -o /tmp/log url",
+        "wget -a /tmp/log url",
+        "curl -D /tmp/h url",
+        "curl -c /tmp/jar url",
+        "curl --dump-header=/tmp/h url",
+        "curl --cookie-j /tmp/jar url",
+        "tar czf /tmp/b.tgz dir",
+        "tar xfC a.tar /tmp",
+        "tar xCf /tmp/dir a.tar",
+        "tar -xf a --direc=/tmp",
+        "tar cf /tmp/a.tar x",
+        "tar --create --file=/tmp/a.tar x",
+        "tar -rf /tmp/a.tar x",
+    ];
+    for command in denied {
+        let reason = bash(command).unwrap_or_else(|| panic!("allowed: {command}"));
+        assert!(reason.contains(RULE), "{command}: {reason}");
+    }
+    let allowed = [
+        "rsync -t /tmp/s ./d",
+        "rsync -t src ./dst",
+        "curl -uroot:pw https://h/x",
+        "curl -A ua https://h/x",
+        "curl -Hfoo https://h/x",
+        "curl -XPOST -d @/tmp/b https://h/x",
+        "git clone --upload-pack x url ./dst",
+        "git -C /tmp clone url /home/u/x",
+        "git clone /tmp/src ./dst",
+        "tar tf /tmp/a.tar",
+        "tar xzf /tmp/a.tgz -C ./d",
+        "tar cf out.tar -C /tmp x",
+        "tar -cf out.tar /tmp/x",
+        "tar xf /tmp/a.tar",
+    ];
+    for command in allowed {
+        assert_eq!(bash(command), None, "denied: {command}");
+    }
+}
+
+#[test]
+fn an_opencode_patch_is_denied_when_its_patch_text_names_a_temp_file() {
+    let patch =
+        |text: &str| deny_reason(&json!({"tool_name": "patch", "tool_input": {"patchText": text}}));
+    for header in ["Add File", "Update File", "Delete File", "Move to"] {
+        let text = format!("*** Begin Patch\n*** {header}: /tmp/x.txt\n*** End Patch");
+        let reason = patch(&text).unwrap_or_else(|| panic!("allowed: {header}"));
+        assert!(reason.contains(RULE), "{header}: {reason}");
+    }
+    assert_eq!(
+        patch(
+            "*** Begin Patch\n*** Add File: src/a.rs\n*** Update File: /home/u/b.rs\n*** End Patch"
+        ),
+        None
+    );
+    let missing = deny_reason(&json!({"tool_name": "patch", "tool_input": {}})).unwrap();
+    assert!(missing.contains("the patch text is missing"), "{missing}");
+}
+
+#[test]
+fn only_the_opencode_matcher_names_the_patch_tool() {
+    assert!(!guarded_tools().contains(&"patch"));
+    assert!(super::opencode_tools().contains(&"patch"));
+}

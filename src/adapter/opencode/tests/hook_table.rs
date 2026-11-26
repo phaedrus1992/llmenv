@@ -190,7 +190,7 @@ fn materialize_shim_gates_the_shell_and_file_tools_with_the_tmp_guard() {
     assert_eq!(entry["event"], "PreToolUse");
     assert_eq!(entry["failClosed"], true);
     let matcher = entry["matcher"].as_str().unwrap();
-    for tool in ["Bash", "Write", "Edit", "MultiEdit"] {
+    for tool in ["Bash", "Write", "Edit", "MultiEdit", "patch"] {
         assert!(matcher.split('|').any(|t| t == tool), "{tool} in {matcher}");
     }
 }

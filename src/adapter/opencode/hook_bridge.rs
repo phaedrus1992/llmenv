@@ -146,7 +146,7 @@ pub(super) fn hook_table(
     // #4052: deny a write under /tmp. A guard that cannot run blocks the call, as the gate below.
     let mut tmp_guard = builtin(
         "PreToolUse",
-        Some(&crate::hook_run::tmp_guard::guarded_tools().join("|")),
+        Some(&crate::hook_run::tmp_guard::opencode_tools().join("|")),
         &hook_command("tmp-guard --engine opencode")?,
     );
     tmp_guard["timeout"] = USER_HOOK_TIMEOUT_MS.into();

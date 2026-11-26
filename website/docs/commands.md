@@ -1275,20 +1275,30 @@ The guard denies:
 
 - A shell redirect (`>`, `>>`, `2>`, `&>`, `>|`) with a target there.
 - The `tee`, `touch`, `mkdir`, and `mktemp` commands, when any operand is there.
-- The `cp`, `mv`, `install`, `ln`, and `rsync` commands, when the destination (the last operand, or the `-t` value) is there.
+- The `cp`, `mv`, `install`, and `ln` commands, when the destination is there.
+  The destination is the `-t` or `--target-directory` value, else the last operand.
+  A `-t` value can be attached, as in `-t/tmp/x`, or in a cluster, as in `-rt`.
+- The `rsync` command, when its last operand is there.
 - The destination operand of a `git clone`, the `git -C` folder of a clone, and a `--separate-git-dir` folder.
-- The `curl` `-o`, `--output`, and `--output-dir` values.
-- The `wget` `-O`, `-P`, `--output-document`, and `--directory-prefix` values.
+- The `curl` `-o`, `-D`, `-c`, `--output`, `--output-dir`, `--dump-header`, and `--cookie-jar` values.
+- The `wget` `-O`, `-P`, `-o`, and `-a` values.
+  The long forms are `--output-document`, `--directory-prefix`, `--output-file`, and `--append-output`.
 - The `of=` operand of `dd`.
 - The `-C` or `--directory` folder of a `tar` that extracts.
-  A `tar` that creates an archive reads from that folder, so it is allowed.
+- The `-f` or `--file` archive of a `tar` that creates, appends, or updates.
+  A `tar` that creates an archive reads from its `-C` folder, so that folder is allowed.
 - A `Write`, `Edit`, `MultiEdit`, or `NotebookEdit` call with a path there.
+- An opencode `patch` call whose patch text adds, updates, deletes, or moves a file there.
 
 The guard reads a path as text, with `.` and `..` resolved.
 It does not expand a variable, and it does not follow a symlink.
 A command that changes into `/tmp` and then writes a relative path is not seen.
 A read of `/tmp` is allowed, and so is a copy from `/tmp` to another place.
 A redirect sign inside quotes is text, not a redirect, and `echo hi>/tmp/x` is a redirect.
+A long option can be a unique prefix, as in `wget --output-doc=/tmp/x`.
+The guard reads a prefix of a listed option as that option.
+The known limits are an `rsync` destination that is followed by an option.
+Another is a global `git` option that takes a value and is not in the guard's list.
 A call that cannot be checked is denied, with the cause in the message.
 These are a missing tool name, shell command, or file path.
 They are also a command nested too deeply, and a payload that is not JSON.
