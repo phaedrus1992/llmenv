@@ -244,7 +244,7 @@ fn render_hooks(
     // The guards of llmenv run on every tool call, as on Claude Code.
     pre_tool_use.push(json!({ "command": hook_command("hook-run --engine crush pre_tool_use")? }));
     // #4052: deny a write under /tmp. The command reads the tool name itself, so it takes no
-    // matcher.
+    // matcher. A deny from either guard blocks the call, so the order of the two does not matter.
     pre_tool_use.push(json!({ "command": hook_command("tmp-guard --engine crush")? }));
     let mut value =
         serde_json::Value::Object(by_event.into_iter().map(|(k, v)| (k, json!(v))).collect());
