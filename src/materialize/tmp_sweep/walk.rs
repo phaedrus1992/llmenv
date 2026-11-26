@@ -103,6 +103,7 @@ pub(super) fn judge_entry(
         scan.stale.push(Stale {
             path: path.to_path_buf(),
             is_dir,
+            // `is_expired` keeps a time in the future, so a stale entry is never newer than `now`.
             age: now.duration_since(modified).unwrap_or_default(),
         });
     }

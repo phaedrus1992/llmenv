@@ -29,14 +29,14 @@ impl GcOutput<'_> {
         }
     }
 
-    /// Print each entry of a dry run, so the preview names every item (#2917). With `ages`, each
-    /// line also gives the age that the sweep judged for the entry (#4054).
-    fn list(&self, removed: &[PathBuf], ages: Option<&BTreeMap<PathBuf, Duration>>) {
+    /// Print each entry of a dry run, so the preview names every item (#2917). An entry with an age in
+    /// `ages` also shows it, the age that the sweep judged (#4054).
+    fn list(&self, removed: &[PathBuf], ages: &BTreeMap<PathBuf, Duration>) {
         if !self.dry_run {
             return;
         }
         for p in removed {
-            match ages.and_then(|ages| ages.get(p)) {
+            match ages.get(p) {
                 Some(age) => eprintln!(
                     "  would remove: {} (age {})",
                     p.display(),
@@ -57,7 +57,7 @@ impl GcOutput<'_> {
             report.removed.len(),
             report.kept
         );
-        self.list(&report.removed, Some(&report.ages));
+        self.list(&report.removed, &report.ages);
         // #1372: a removal failure does not abort the walk, so the skipped entries are named here.
         for (p, cause) in &report.failed {
             eprintln!("{warn} GC: could not process {}: {cause}", p.display());

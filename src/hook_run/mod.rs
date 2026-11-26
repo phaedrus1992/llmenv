@@ -607,7 +607,8 @@ fn resets_read_state(event: HookEvent, payload: &serde_json::Value) -> bool {
 ///
 /// Exit code 2 is what both supported engines read as "don't run this tool":
 /// Claude Code documents it as equivalent to a `deny` decision, and opencode's
-/// generated plugin shim treats it as the only block signal (`code === 2`).
+/// generated plugin shim treats it as a block signal (`code === 2`), as it does the deny
+/// envelope on stdout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HookExit {
     /// Nothing to block; exit 0.
