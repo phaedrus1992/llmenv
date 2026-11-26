@@ -36,3 +36,6 @@ pub(super) fn is_safe_cache_dir(dir: &str) -> bool {
     // through as `foo/..` (no trailing slash) or via host-OS separators.
     !dir.contains('\0') && !has_parent_component(dir)
 }
+
+#[cfg(test)]
+mod tests;
