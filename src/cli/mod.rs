@@ -28,6 +28,7 @@ mod init_settings;
 mod login;
 mod prefill;
 mod shell_names;
+mod tmp_guard;
 use env_vars::{reject_invalid_var_names, validate_var_name, validate_var_value};
 use login::{import_auth_from_file, run_login, run_login_capture};
 pub(crate) mod doctor;
@@ -36,6 +37,7 @@ use sync_cmd::run_sync;
 mod export_print;
 mod plugin_check;
 use plugin_check::check_selected_plugins;
+mod dispatch;
 mod hook_event;
 mod init_cmd;
 mod task_add;
@@ -311,6 +313,15 @@ enum Command {
     ConfigGuard {
         /// Engine that invoked this hook (e.g. "claude_code"). Accepted for
         /// forward-compatibility; the value is stored for future dispatch use.
+        #[arg(long, default_value = "claude_code")]
+        engine: String,
+    },
+    /// Deny a tool call that writes under /tmp, and name `$TMPDIR` as the fix (#4045).
+    ///
+    /// Invoked by the auto-registered PreToolUse hook. Reads the tool call from stdin and
+    /// prints a deny envelope, or nothing to let the call run. Exits 0 in every case.
+    TmpGuard {
+        /// Engine that invoked this hook (e.g. "claude_code").
         #[arg(long, default_value = "claude_code")]
         engine: String,
     },
@@ -844,16 +855,6 @@ enum MemoryCommand {
     },
 }
 
-fn run_deprecated_shim(
-    old: &str,
-    new: &str,
-    section: status::StatusSection,
-    use_color: bool,
-) -> anyhow::Result<()> {
-    eprintln!("warning: '{old}' is deprecated; use 'status {new}' instead");
-    status::run_status(Some(section), use_color)
-}
-
 pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
@@ -862,218 +863,7 @@ pub fn run() -> anyhow::Result<()> {
     use std::io::IsTerminal;
     let use_color = should_use_color(Some(cli.color.to_mode()), std::io::stdout().is_terminal());
 
-    match cli.command {
-        Some(Command::Doctor {
-            restart_memory_proxy: true,
-            ..
-        }) => proxy_restart::run(use_color)?,
-        Some(Command::Doctor {
-            gc, all, probe_mcp, ..
-        }) => {
-            doctor::run_doctor(gc, all, probe_mcp, use_color)?;
-        }
-        Some(Command::Export {
-            scope,
-            tag,
-            explain,
-            compress,
-        }) => {
-            run_export(scope, tag, explain, compress)?;
-        }
-        Some(Command::Launch {
-            scope,
-            tag,
-            compress,
-            auto_restart,
-            container,
-            no_container,
-            engine,
-            args,
-        }) => {
-            // clap's `conflicts_with` on `container` already rejects passing
-            // both flags, so exactly one of these two bools is ever true.
-            let container_override = if container {
-                Some(true)
-            } else if no_container {
-                Some(false)
-            } else {
-                None
-            };
-            crate::launch::run(
-                &engine,
-                args,
-                crate::launch::LaunchScope {
-                    scope,
-                    tag,
-                    compress,
-                    auto_restart,
-                    container_override,
-                },
-            )?;
-        }
-        Some(Command::Regenerate) => {
-            run_regenerate()?;
-        }
-        Some(Command::Statusline) => {
-            run_statusline_cmd(use_color)?;
-        }
-        Some(Command::Hook { shell }) => {
-            run_hook(&shell)?;
-        }
-        Some(Command::Init { path, repo }) => {
-            run_init(path, repo)?;
-        }
-        Some(Command::Setup(args)) => setup::run_setup_command(args)?,
-        Some(Command::Status { section }) => {
-            status::run_status(section, use_color)?;
-        }
-        Some(Command::Context { bundle, why }) => {
-            run_context(bundle.as_deref(), why, use_color)?;
-        }
-        Some(Command::ScopeLs) => {
-            run_deprecated_shim(
-                "scope-ls",
-                "scopes",
-                status::StatusSection::Scopes,
-                use_color,
-            )?;
-        }
-        Some(Command::TagLs) => {
-            run_deprecated_shim("tag-ls", "tags", status::StatusSection::Tags, use_color)?;
-        }
-        Some(Command::BundleLs) => {
-            run_deprecated_shim(
-                "bundle-ls",
-                "bundles",
-                status::StatusSection::Bundles,
-                use_color,
-            )?;
-        }
-        Some(Command::McpLs) => {
-            run_deprecated_shim("mcp-ls", "mcps", status::StatusSection::Mcps, use_color)?;
-        }
-        Some(Command::MarketplaceLs) => {
-            run_deprecated_shim(
-                "marketplace-ls",
-                "marketplaces",
-                status::StatusSection::Marketplaces,
-                use_color,
-            )?;
-        }
-        Some(Command::PluginLs) => {
-            run_deprecated_shim(
-                "plugin-ls",
-                "plugins",
-                status::StatusSection::Plugins,
-                use_color,
-            )?;
-        }
-        Some(Command::PluginSync) => {
-            run_plugin_sync()?;
-        }
-        Some(Command::Sync { dry_run }) => {
-            run_sync(dry_run)?;
-        }
-        Some(Command::CheckStale { auto_fix, engine }) => {
-            guard::dispatch_check_stale(use_color, auto_fix, &engine)?;
-        }
-        Some(Command::ConfigContext { engine }) => {
-            guard::dispatch_config_context(&engine)?;
-        }
-        Some(Command::ConfigGuard { engine }) => {
-            guard::dispatch_config_guard(&engine);
-        }
-        Some(Command::Throttle { event }) => {
-            guard::dispatch_throttle(&event);
-        }
-        Some(Command::HookRun { event, engine }) => {
-            tracing::debug!(engine, "hook-run invoked by engine");
-            // Rejected, not warned about, unlike the read-only commands above:
-            // hook-run dispatches on the adapter, so an unrecognized id used to
-            // mean "run this hook against whatever the environment looks like"
-            // with only a `warn!` nobody sees to say so (#1386).
-            crate::adapter::require_known_engine(&engine)?;
-            if crate::hook_run::run(&event, &engine)? == crate::hook_run::HookExit::Block {
-                // Exit 2 is what makes a `PreToolUse` deny actually stop the
-                // tool call — on Claude Code and, since its plugin shim reads
-                // nothing else, on opencode. Exiting here rather than
-                // returning an error keeps the deny reason (already on stderr
-                // and stdout) from being wrapped in an `llmenv: ...` prefix.
-                std::process::exit(2);
-            }
-        }
-        Some(Command::SessionLogRecord { checkpoint }) => {
-            // The checkpoint check starts the notice spool, so a stdin error reaches the agent.
-            let checkpoint = checked_checkpoint(checkpoint)?;
-            let payload_json = read_job_payload()?;
-            crate::session_log::detached::run_record(&payload_json, checkpoint.as_deref())?;
-        }
-        Some(Command::IcmStore { checkpoint }) => {
-            let checkpoint = checked_checkpoint(checkpoint)?;
-            let payload_json = read_job_payload()?;
-            crate::hook_run::detached_store::run_icm_store(&payload_json, checkpoint.as_deref())?;
-        }
-        Some(Command::StatuslinePrRefresh) => statusline::widget::pr_refresh::run()?,
-        Some(Command::ConsolidationRun { checkpoint }) => {
-            let checkpoint = checked_checkpoint(checkpoint)?;
-            crate::hook_run::detached_consolidation::run_consolidation(
-                &paths::config_path()?,
-                checkpoint.as_deref(),
-            )?;
-        }
-        Some(Command::CbmIndexRun { checkpoint }) => {
-            let checkpoint = checked_checkpoint(Some(checkpoint))?.unwrap_or_default();
-            crate::hook_run::detached_cbm::run_cbm_index(&checkpoint)?;
-        }
-        Some(Command::Login { global }) => {
-            run_login(global)?;
-        }
-        Some(Command::ReadOnce { command }) => match command {
-            ReadOnceCommand::Clear => guard::timed("read-once", || {
-                crate::hook_run::read_once::clear_cache(&paths::state_dir()?)
-            })?,
-        },
-        Some(Command::Memory { command }) => match command {
-            MemoryCommand::Stats => crate::memory::stats()?,
-            MemoryCommand::List => crate::memory::list()?,
-            MemoryCommand::Diff => crate::memory::diff()?,
-            MemoryCommand::Prune { dry_run } => crate::memory::prune(dry_run)?,
-        },
-        Some(Command::Upgrade { check, track }) => {
-            upgrade::run_upgrade(track, check)?;
-        }
-        Some(Command::Task { command }) => run_task_command(*command, cli.color.to_mode())?,
-        Some(Command::Clean(args)) => clean::run_clean(&args, use_color)?,
-        Some(Command::Prefill(args)) => prefill::run_prefill(&args)?,
-        Some(Command::Prune(args)) => clean::run_prune_alias(&args, use_color)?,
-        Some(Command::Validate) => {
-            run_validate(use_color)?;
-        }
-        Some(Command::Edit { bundle }) => {
-            run_edit(bundle)?;
-        }
-        Some(Command::Completions {
-            shell,
-            install,
-            dir,
-            force,
-        }) => {
-            if install || dir.is_some() {
-                run_completions_install(shell, dir, force)?;
-            } else {
-                let shell = shell.ok_or_else(|| {
-                    anyhow::anyhow!("SHELL is required unless --install is passed")
-                })?;
-                run_completions(shell)?;
-            }
-        }
-        None => {
-            eprintln!("Usage: llmenv [COMMAND]");
-            eprintln!("Run 'llmenv --help' for more information.");
-        }
-    }
-
-    Ok(())
+    dispatch::dispatch(cli.command, use_color, cli.color.to_mode())
 }
 
 fn check_git_remote(dir: &Path) -> anyhow::Result<String> {
@@ -2703,7 +2493,8 @@ fn run_config_context() -> anyhow::Result<()> {
             serde_json::json!({
                 "hookSpecificOutput": {
                     "hookEventName": hook_event_name,
-                    "additionalContext": ctx
+                    // Printed here and not through an adapter, so the cap applies here too (#3357).
+                    "additionalContext": crate::adapter::context_cap::fit_notes(ctx, 0)
                 }
             })
         );

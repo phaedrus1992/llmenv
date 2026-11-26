@@ -2,11 +2,12 @@
 //! then `state/tmp`, then session-log rotations, then old codebase-memory indexes (#2814, #2816,
 //! #2917).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::config::Config;
-use crate::materialize::cache::GcReport;
+use crate::materialize::cache::{AgeSource, GcReport};
 use crate::materialize::tmp_sweep;
 use crate::paths;
 
@@ -28,16 +29,26 @@ impl GcOutput<'_> {
         }
     }
 
-    /// Print each entry of a dry run, so the preview names every item (#2917).
-    fn list(&self, removed: &[PathBuf]) {
-        if self.dry_run {
-            for p in removed {
-                eprintln!("  would remove: {}", p.display());
+    /// Print each entry of a dry run, so the preview names every item (#2917). An entry with an age in
+    /// `ages` also shows it, the age that the sweep judged (#4054).
+    fn list(&self, removed: &[PathBuf], ages: &BTreeMap<PathBuf, Duration>) {
+        if !self.dry_run {
+            return;
+        }
+        for p in removed {
+            match ages.get(p) {
+                Some(age) => eprintln!(
+                    "  would remove: {} (age {})",
+                    p.display(),
+                    crate::util::time::format_age(*age)
+                ),
+                None => eprintln!("  would remove: {}", p.display()),
             }
         }
     }
 
-    /// Print the summary line, the dry-run list, and each failure of one sweep.
+    /// Print the summary line, the dry-run list, and each failure of one sweep. A sweep that
+    /// judges by age gives its `ages` in the report, and the dry-run line shows them.
     fn report(&self, what: &str, report: &GcReport) {
         let (pass, warn) = (self.pass, self.warn);
         eprintln!(
@@ -46,7 +57,7 @@ impl GcOutput<'_> {
             report.removed.len(),
             report.kept
         );
-        self.list(&report.removed);
+        self.list(&report.removed, &report.ages);
         // #1372: a removal failure does not abort the walk, so the skipped entries are named here.
         for (p, cause) in &report.failed {
             eprintln!("{warn} GC: could not process {}: {cause}", p.display());
@@ -67,22 +78,49 @@ use index_use::{CacheUse, cbm_use};
 use session_rotation::prune_session_log;
 use state_gate::state_may_have_stale_entries;
 
-/// Run every sweep, and return how many entries or sweeps failed. All of them use
-/// `cache.cache_retention_hours` (default 168). A `null` value turns all of them off (#2829).
+/// Run every sweep, and return how many entries or sweeps failed. The `state/tmp` sweep uses
+/// `tmp_older_than`, else `cache.tmp_retention_hours` (default 168). The other sweeps use
+/// `cache.cache_retention_hours` (default 168). A `null` value turns off the sweeps that it
+/// governs (#2829, #4046).
 ///
 /// A failure is printed as a warning here. `llmenv clean` turns a nonzero count into an error, so
 /// a script does not read a skipped sweep as a finished one.
-pub(in crate::cli) fn run(cache_dir: &Path, config: &Config, out: GcOutput<'_>) -> usize {
+pub(in crate::cli) fn run(
+    cache_dir: &Path,
+    config: &Config,
+    out: GcOutput<'_>,
+    tmp_older_than: Option<Duration>,
+) -> usize {
     eprintln!("Running garbage collection...");
-    let Some(retention) = config.cache.gc_retention() else {
+    let retention = Retention::resolve(config, tmp_older_than);
+    if retention.general.is_none() {
         eprintln!(
-            "{} GC skipped: cache.cache_retention_hours is null, so age-based GC is off. \
-             Set it to a number of hours to turn GC on.",
+            "{} GC of the cache, session-log rotations, and codebase-memory indexes skipped: \
+             cache.cache_retention_hours is null, so age-based GC is off. Set it to a number of \
+             hours to turn GC on.",
             out.pass
         );
-        return 0;
+    }
+    if retention.tmp.is_none() {
+        let null_setting = if config.cache.cache_retention_hours.is_none() {
+            "cache.cache_retention_hours"
+        } else {
+            "cache.tmp_retention_hours"
+        };
+        eprintln!(
+            "{} GC of state/tmp skipped: {null_setting} is null, so the age-based sweep of \
+             state/tmp is off. Set it to a number of hours, or give --tmp-older-than, to turn it \
+             on.",
+            out.pass
+        );
+    }
+    let mut failures = match retention.general {
+        Some(general) => sweep_cache_root(cache_dir, config, general, out),
+        None => 0,
     };
-    let mut failures = sweep_cache_root(cache_dir, config, retention, out);
+    if retention.general.is_none() && retention.tmp.is_none() {
+        return failures;
+    }
     match paths::state_dir() {
         Ok(state_dir) => {
             failures += sweep_state(&state_dir, config, retention, SystemTime::now(), out);
@@ -99,6 +137,27 @@ pub(in crate::cli) fn run(cache_dir: &Path, config: &Config, out: GcOutput<'_>) 
     failures
 }
 
+/// The age of each group of sweeps. `None` turns the group off. `state/tmp` has its own age,
+/// because a scratch file needs a shorter keep time than a cache folder (#4046).
+#[derive(Debug, Clone, Copy)]
+struct Retention {
+    /// The cache folders, the session-log rotations, and the codebase-memory indexes.
+    general: Option<Duration>,
+    /// `state/tmp`.
+    tmp: Option<Duration>,
+}
+
+impl Retention {
+    /// The ages from the config. A `tmp_older_than` from the command line replaces the age of
+    /// `state/tmp` only.
+    fn resolve(config: &Config, tmp_older_than: Option<Duration>) -> Self {
+        Self {
+            general: config.cache.gc_retention(),
+            tmp: tmp_older_than.or_else(|| config.cache.tmp_retention()),
+        }
+    }
+}
+
 /// Sweep the folders under `state_dir`: `state/tmp`, the session-log rotations, and the old
 /// codebase-memory indexes. Returns the count of failures.
 ///
@@ -109,10 +168,21 @@ pub(in crate::cli) fn run(cache_dir: &Path, config: &Config, out: GcOutput<'_>) 
 fn sweep_state(
     state_dir: &Path,
     config: &Config,
-    retention: Duration,
+    retention: Retention,
     now: SystemTime,
     out: GcOutput<'_>,
 ) -> usize {
+    let cutoff = |retention| Cutoff {
+        retention,
+        now,
+        source: STATE_AGE_SOURCE,
+    };
+    let (tmp, general) = (retention.tmp.map(cutoff), retention.general.map(cutoff));
+    let rotations = |out| {
+        retention.general.map_or(0, |general| {
+            prune_session_log(state_dir, config, general, now, out)
+        })
+    };
     // With nothing old enough to remove, the tmp and index sweeps are skipped. A sweep that ran
     // now could see an entry that crossed the cutoff after this check, and remove it without
     // the in-use list.
@@ -120,23 +190,17 @@ fn sweep_state(
     let cbm_live = matches!(cbm, CacheUse::Live);
     // An unreadable config cannot say whether the codebase-memory folder is live. The sweep then
     // runs, so it reports that the folder could not be checked, and the gate does not hide it.
-    let cbm_unknown = matches!(cbm, CacheUse::Unknown(_));
-    let cutoff = Cutoff { retention, now };
-    if !cbm_unknown
-        && !state_may_have_stale_entries(
-            state_dir,
-            cutoff,
-            cbm_live,
-            crate::materialize::cache::AgeSource::MtimeOrCtime,
-        )
-    {
-        return prune_session_log(state_dir, config, retention, now, out);
+    let cbm_unknown = general.is_some() && matches!(cbm, CacheUse::Unknown(_));
+    if !cbm_unknown && !state_may_have_stale_entries(state_dir, tmp, general, cbm_live) {
+        return rotations(out);
     }
     let in_use = crate::materialize::open_files::open_paths().map_err(|e| format!("{e:#}"));
     let in_use = in_use.as_ref().map(Vec::as_slice).map_err(String::as_str);
-    sweep_state_tmp(state_dir, cutoff, in_use, out)
-        + prune_session_log(state_dir, config, retention, now, out)
-        + sweep_cbm_indexes(state_dir, config, cutoff, in_use, out)
+    tmp.map_or(0, |cutoff| sweep_state_tmp(state_dir, cutoff, in_use, out))
+        + rotations(out)
+        + general.map_or(0, |cutoff| {
+            sweep_cbm_indexes(state_dir, config, cutoff, in_use, out)
+        })
 }
 
 /// The retention of the state sweeps and the one clock that judges every age, so the gate and
@@ -145,17 +209,26 @@ fn sweep_state(
 struct Cutoff {
     retention: Duration,
     now: SystemTime,
+    source: AgeSource,
 }
 
+/// What an entry age is read from in the state sweeps: the later of mtime and change time, so a
+/// restored entry is kept (#3275). The gate and each sweep read it from their [`Cutoff`], so they
+/// cannot disagree (#4054).
+const STATE_AGE_SOURCE: AgeSource = AgeSource::MtimeOrCtime;
+
 impl Cutoff {
-    /// The age rule of the state sweeps: the retention, judged by mtime or change time, so a
-    /// restored entry is kept (#3275).
+    /// The age rule of the state sweeps: the retention, read from the source of the cutoff.
     fn rule(self) -> crate::materialize::expiry::AgeRule {
-        crate::materialize::expiry::AgeRule::new(self.retention)
+        crate::materialize::expiry::AgeRule {
+            older_than: self.retention,
+            source: self.source,
+        }
     }
 }
 
-/// Sweep `state/tmp`, which `TMPDIR` points at, with the same retention as the cache (#2814).
+/// Sweep `state/tmp`, which `TMPDIR` points at (#2814). Its age is `cache.tmp_retention_hours`
+/// (#4046).
 fn sweep_state_tmp(
     state_dir: &Path,
     cutoff: Cutoff,
@@ -246,3 +319,7 @@ fn sweep_cbm_indexes(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tmp_retention_tests;

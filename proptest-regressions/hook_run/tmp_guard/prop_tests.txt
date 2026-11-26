@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 7716e3d02d51492ee43ea7c23aee9a6449ab0e0dbceb022518d4bc1d00669e73 # shrinks to path = "/tmp"
+cc 747ab426e2570275f2361cc9096cf0af01ac2dc51bd64c648c2ee9b3c532b239 # shrinks to path = "/tmp", detour = "a"
+cc a76decfde68478b8e0b52b6f09d8641d44096a4c6979223411df375d8fd0a86e # shrinks to flags = ["-ta"], dest = "0"

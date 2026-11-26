@@ -2,3 +2,4 @@
 # will be rerun before any novel cases are generated.
 # Shrunk case from every_command_hook_reaches_the_table_in_order (#3003).
 cc e1ed022b9a3cb2e13cd3acd886e68fb3d99ce1d554a60874243ce345078a741a # shrinks to hooks = [Hook { event: "UserPromptSubmit", matcher: Some("0"), handler: HookHandler { kind: Command, command: Some("a"), tool: None, on_failure: None }, bundle_origin: None }]
+cc 76a2d2b7380a81e43dc4c71e228d431c5784967581fc07088f70eff87835de03 # shrinks to hooks = []

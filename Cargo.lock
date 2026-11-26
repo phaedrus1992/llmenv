@@ -1411,6 +1411,7 @@ dependencies = [
  "proptest",
  "reqwest",
  "rustix",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",

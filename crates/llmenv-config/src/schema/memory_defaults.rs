@@ -11,6 +11,10 @@ pub(super) fn default_adaptive_recall() -> bool {
     true
 }
 
+pub(super) fn default_failure_recall() -> bool {
+    true
+}
+
 /// Manual, not derived (#1044): `listen_host`'s real default is
 /// `default_listen_host()` (`"127.0.0.1"`), not `String::default()`
 /// (`""`) — a bare `#[derive(Default)]` would silently diverge from the
@@ -34,6 +38,7 @@ impl Default for Memory {
             mcp_permissions: None,
             wakeup_max_tokens: None,
             adaptive_recall: default_adaptive_recall(),
+            failure_recall: default_failure_recall(),
             always_load: None,
         }
     }
@@ -55,6 +60,16 @@ mod tests {
         let built = Memory::default();
         assert_eq!(built.global_topics, parsed.global_topics);
         assert_eq!(built.adaptive_recall, parsed.adaptive_recall);
+        assert!(parsed.failure_recall);
+        assert_eq!(built.failure_recall, parsed.failure_recall);
         assert_eq!(built.listen_host, parsed.listen_host);
+    }
+
+    #[test]
+    fn failure_recall_accepts_false() {
+        let off: Memory =
+            serde_yaml::from_str("server_host: h\nport: 9092\nfailure_recall: false\n").unwrap();
+        assert!(!off.failure_recall);
+        assert!(off.adaptive_recall);
     }
 }

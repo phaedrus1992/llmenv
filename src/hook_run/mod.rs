@@ -21,7 +21,7 @@ pub(crate) mod checkpoint;
 pub(crate) mod detached_cbm;
 pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
-mod engine_rules;
+pub(crate) mod engine_rules;
 mod event;
 mod memory_call;
 mod memory_client;
@@ -50,6 +50,7 @@ use consolidation_spawn::post_session_consolidation_in;
 use consolidation_spawn::{consolidation_run_command, post_session_consolidation};
 mod recall;
 mod recall_breaker;
+mod recall_deadline;
 pub(crate) mod recall_health;
 mod record_hash;
 mod relevance;
@@ -77,6 +78,7 @@ use cbm_index_cmd::{
 mod stop_reminder;
 pub(crate) mod task_nudge;
 pub(crate) mod task_tools;
+pub(crate) mod tmp_guard;
 pub(crate) mod transcript;
 mod transcript_link;
 use respawn::respawn_job;
@@ -536,6 +538,7 @@ async fn run_event_memory(call: MemoryCall<'_>) -> anyhow::Result<HookText> {
         session_id,
         payload: call.payload,
         global_topics: call.settings.map_or(&[], |s| &s.global_topics),
+        failure_recall: call.settings.is_none_or(|s| s.failure_recall),
         state_dir,
     };
     match call.event {
@@ -592,7 +595,8 @@ fn resets_read_state(event: HookEvent, payload: &serde_json::Value) -> bool {
 ///
 /// Exit code 2 is what both supported engines read as "don't run this tool":
 /// Claude Code documents it as equivalent to a `deny` decision, and opencode's
-/// generated plugin shim treats it as the only block signal (`code === 2`).
+/// generated plugin shim treats it as a block signal (`code === 2`), as it does the deny
+/// envelope on stdout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HookExit {
     /// Nothing to block; exit 0.
@@ -729,7 +733,16 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
             if text.notes.starts_with("__DENY__:") {
                 let reason = text.notes.trim_start_matches("__DENY__:");
                 let reason = match notice {
-                    Some(notice) => format!("{notice}\n\n{reason}"),
+                    // The notices shrink to leave the reason its room under the cut (#3357).
+                    Some(notice) => {
+                        let reason_chars = crate::adapter::context_cap::context_len(reason);
+                        let notice = crate::adapter::context_cap::fit_notes(&notice, reason_chars);
+                        if notice.is_empty() {
+                            reason.to_string()
+                        } else {
+                            format!("{notice}\n\n{reason}")
+                        }
+                    }
                     None => reason.to_string(),
                 };
                 let envelope = serde_json::json!({

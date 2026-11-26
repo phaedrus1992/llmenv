@@ -78,15 +78,24 @@ fn arb_cache() -> impl Strategy<Value = Cache> {
         arb_string(),
         0u64..120,
         prop::option::of(0u64..10_000),
+        prop::option::of(0u64..10_000),
         arb_hashing_mode(),
         prop::bool::ANY,
     )
         .prop_map(
-            |(cache_dir, sync_interval_minutes, cache_retention_hours, hashing, remote_sync)| {
+            |(
+                cache_dir,
+                sync_interval_minutes,
+                cache_retention_hours,
+                tmp_retention_hours,
+                hashing,
+                remote_sync,
+            )| {
                 Cache {
                     cache_dir,
                     sync_interval_minutes,
                     cache_retention_hours,
+                    tmp_retention_hours,
                     hashing,
                     remote_sync,
                 }
@@ -1832,6 +1841,7 @@ fn test_cache_dir_with_traversal() {
             cache_dir: "~/.cache/../../../etc/passwd".to_string(),
             sync_interval_minutes: 15,
             cache_retention_hours: Some(168),
+            tmp_retention_hours: Some(168),
             ..Default::default()
         },
         capabilities: Default::default(),
@@ -1864,6 +1874,7 @@ fn test_cache_dir_trailing_parent_no_slash() {
             cache_dir: "~/.cache/llmenv/..".to_string(),
             sync_interval_minutes: 15,
             cache_retention_hours: Some(168),
+            tmp_retention_hours: Some(168),
             ..Default::default()
         },
         capabilities: Default::default(),
@@ -1894,6 +1905,7 @@ fn test_cache_dir_with_null_byte() {
             cache_dir: "~/.cache/llm\0env".to_string(),
             sync_interval_minutes: 15,
             cache_retention_hours: Some(168),
+            tmp_retention_hours: Some(168),
             ..Default::default()
         },
         capabilities: Default::default(),
@@ -1949,6 +1961,7 @@ fn test_cache_retention_zero() {
             cache_dir: "~/.cache/llmenv".to_string(),
             sync_interval_minutes: 15,
             cache_retention_hours: Some(0),
+            tmp_retention_hours: Some(168),
             ..Default::default()
         },
         capabilities: Default::default(),
@@ -1971,6 +1984,26 @@ fn test_cache_retention_zero() {
 }
 
 #[test]
+fn a_zero_tmp_retention_is_rejected_and_a_null_one_is_accepted() {
+    let mut config = Config::default();
+    config.cache.tmp_retention_hours = Some(0);
+    let err = config.validate().unwrap_err().to_string();
+    assert_eq!(err, "tmp_retention_hours must be > 0");
+
+    config.cache.tmp_retention_hours = None;
+    assert!(config.validate().is_ok());
+}
+
+proptest! {
+    #[test]
+    fn any_positive_tmp_retention_is_accepted(hours in 1..=u64::MAX) {
+        let mut config = Config::default();
+        config.cache.tmp_retention_hours = Some(hours);
+        prop_assert!(config.validate().is_ok());
+    }
+}
+
+#[test]
 fn test_cache_retention_valid() {
     let config = Config {
         disabled_engines: vec![],
@@ -1979,6 +2012,7 @@ fn test_cache_retention_valid() {
             cache_dir: "~/.cache/llmenv".to_string(),
             sync_interval_minutes: 15,
             cache_retention_hours: Some(168),
+            tmp_retention_hours: Some(168),
             ..Default::default()
         },
         capabilities: Default::default(),
@@ -2009,6 +2043,7 @@ fn test_cache_retention_none() {
             cache_dir: "~/.cache/llmenv".to_string(),
             sync_interval_minutes: 15,
             cache_retention_hours: None,
+            tmp_retention_hours: Some(168),
             ..Default::default()
         },
         capabilities: Default::default(),

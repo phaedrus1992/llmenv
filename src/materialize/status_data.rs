@@ -313,8 +313,10 @@ fn collect_mcps(
         Ok(Vec::new())
     } else {
         crate::mcp::resolve::codebase_memory_paths()
-            .ok()
-            .ok_or(())
+            .inspect_err(|e| {
+                tracing::warn!("statusline: codebase-memory paths not resolved: {e:#}");
+            })
+            .map_err(|_| ())
             .and_then(|(project_root, state_dir)| {
                 crate::mcp::resolve::resolve_codebase_memory_entries(
                     codebase_memory_entries,
@@ -322,6 +324,9 @@ fn collect_mcps(
                     &project_root,
                     &state_dir,
                 )
+                .inspect_err(|e| {
+                    tracing::warn!("statusline: codebase-memory entries not resolved: {e:#}");
+                })
                 .map_err(|_| ())
             })
     };

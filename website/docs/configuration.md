@@ -62,6 +62,7 @@ cache:
   cache_dir: "~/.cache/llmenv"      # where materialized configs are stored
   sync_interval_minutes: 15         # how often `export` pulls config from git
   cache_retention_hours: 168        # GC retention window (default: 7 days)
+  tmp_retention_hours: 168          # keep time of a state/tmp entry (default: 7 days)
   remote_sync: true                 # enable remote git ops (fetch, pull, push)
   hashing: normal                   # loose | normal | strict (default: normal)
 ```
@@ -69,7 +70,15 @@ cache:
 Defaults: `cache_dir` = `~/.cache/llmenv`, `sync_interval_minutes` = `15`,
 `cache_retention_hours` = `168`, `remote_sync` = `true`. Set
 `cache_retention_hours` to `null` to disable age-based GC.
-With `null`, `llmenv clean` (and the deprecated `llmenv doctor --gc`) skips the cache, `state/tmp`, and session-log sweeps, and SessionStart shows no stale `state/tmp` hint (fixed in v3.13.0: before, `null` used the 168-hour default).
+With `null`, `llmenv clean` (and the deprecated `llmenv doctor --gc`) skips every age-based sweep (fixed in v3.13.0: before, `null` used the 168-hour default).
+That covers the cache, `state/tmp`, session-log, and codebase-memory sweeps, and SessionStart shows no stale `state/tmp` hint.
+
+`tmp_retention_hours` (added in v3.14.2) is the keep time of an entry in `state/tmp`, which `TMPDIR` points at.
+The default is `168`.
+A number in `cache_retention_hours` does not change it, because a scratch file needs a shorter time than a cache folder.
+A `null` value turns off the `state/tmp` sweep only, and SessionStart shows no stale `state/tmp` hint.
+`0` is refused.
+`llmenv clean --tmp-older-than 2d` replaces the setting for one run, even when either setting is `null`.
 
 (added in v3.13.0)
 
@@ -726,6 +735,7 @@ features:
 | `mcp_permissions` | no | Per-tier permission override for the ICM MCP's tools — see [`mcp_permissions`](#featuresmcp_permissions) below |
 | `wakeup_max_tokens` | no | Token budget for the `SessionStart` wake-up call, `20`-`4000` (added in v3.8.0) |
 | `adaptive_recall` | no | Per-session adaptive recall, `true` or `false`, default `true` (added in v3.12.0) |
+| `failure_recall` | no | Whether a failed tool call recalls memories about its error, `true` or `false`, default `true`. Needs `adaptive_recall` (added in v3.14.2) |
 | `global_topics` | no | Topics that the per-prompt recall reads from every project, default `[preferences, errors-resolved]` (added in v3.13.0) |
 | `always_load` | no | Claude Code `alwaysLoad` for the ICM server, `true` or `false`, default `true`: the ICM tools load with the prompt instead of behind tool search. Set `false` to defer them again (added in v3.12.0) |
 | `default_type` | no | Memory type, `episodic`, `semantic`, or `procedural`, that llmenv tags on the memories it stores (added in v3.0.0) |
@@ -758,6 +768,12 @@ It does not read other topics of other projects, so the facts of one project do 
 A session with no project reads the global topics only, and with `global_topics: []` it reads no memories on a prompt.
 A failed tool call reads `errors-resolved` from every project only while this list names it.
 Set `global_topics: []` to read the session's project only.
+
+`failure_recall` (added in v3.14.2) controls the recall that runs when a tool call fails.
+The hook records the error either way, so the next prompt recall still sees it.
+Set `failure_recall: false` to skip the recall of the failure hook only.
+A recall costs a round trip to the memory server on each failed call, and failures come in bursts.
+The setting has no effect with `adaptive_recall: false`, because that setting turns the failure hook off.
 
 #### Post-session consolidation
 
