@@ -66,7 +66,7 @@ fn prune_one(path: &Path, retention: Duration, now: SystemTime, out: GcOutput<'_
                 removed.len(),
                 path.display()
             );
-            out.list(&removed, None);
+            out.list(&removed, &std::collections::BTreeMap::new());
             0
         }
         Err(e) => {

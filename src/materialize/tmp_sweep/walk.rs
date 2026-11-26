@@ -17,6 +17,8 @@ use crate::materialize::expiry::AgeRule;
 pub(super) struct Stale {
     pub(super) path: PathBuf,
     pub(super) is_dir: bool,
+    /// How long ago the entry last changed, by the rule of the scan.
+    pub(super) age: std::time::Duration,
 }
 
 /// What a scan of `state/tmp` found. Nothing is removed by a scan.
@@ -101,25 +103,10 @@ pub(super) fn judge_entry(
         scan.stale.push(Stale {
             path: path.to_path_buf(),
             is_dir,
+            // `is_expired` keeps a time in the future, so a stale entry is never newer than `now`.
+            age: now.duration_since(modified).unwrap_or_default(),
         });
     }
-}
-
-/// The age of one entry by the rule of the sweep, so a dry run can print it (#4046).
-///
-/// # Errors
-/// Returns the cause as text when the entry cannot be read, or when its time is in the future.
-pub fn entry_age(
-    path: &Path,
-    source: AgeSource,
-    now: SystemTime,
-) -> Result<std::time::Duration, String> {
-    let is_dir = std::fs::symlink_metadata(path)
-        .map_err(|e| format!("cannot read it: {e}"))?
-        .is_dir();
-    let modified = entry_mtime(path, is_dir, source).map_err(|e| format!("{e:#}"))?;
-    now.duration_since(modified)
-        .map_err(|_| "its time is in the future".to_string())
 }
 
 /// The newest file mtime of an entry. A symlink is judged by its own mtime and never followed.

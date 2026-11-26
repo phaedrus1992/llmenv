@@ -2,6 +2,7 @@
 
 use proptest::prelude::*;
 
+use super::writers::{option_values, written_by_option};
 use super::{all_operands, destination, is_tmp_path, redirect_target};
 
 /// One path segment: a name, a `.`, or a `..`, so a path can hold every form that the guard
@@ -63,7 +64,10 @@ proptest! {
             Just("/tmp"),
             Just("/private/tmp"),
             Just("/var/folders"),
-            Just("/private/var/folders")
+            Just("/private/var/folders"),
+            Just("/var/tmp"),
+            Just("/private/var/tmp"),
+            Just("/dev/shm")
         ],
         rest in prop::collection::vec("[a-z0-9]{1,6}", 0..4),
     ) {
@@ -169,12 +173,51 @@ proptest! {
 
     #[test]
     fn options_are_never_the_destination(
-        flags in prop::collection::vec("-[a-z]{1,2}", 0..4),
+        // No letter of `-t` or of a value option, so no flag takes the next word.
+        flags in prop::collection::vec("-[a-fh-ln-np-su-z]{1,2}", 0..4),
         dest in operand(),
     ) {
-        prop_assume!(flags.iter().all(|f| f != "-t"));
         let mut words: Vec<&str> = flags.iter().map(String::as_str).collect();
         words.push(dest.as_str());
         prop_assert_eq!(destination(&words), Some(dest.as_str()));
+    }
+
+    #[test]
+    fn an_option_value_is_found_in_each_form_and_wherever_the_option_stands(
+        value in "[a-z/][a-z/._]{0,10}",
+        before in prop::collection::vec(operand(), 0..3),
+        after in prop::collection::vec(operand(), 0..3),
+        form in 0usize..5,
+    ) {
+        let option: Vec<String> = match form {
+            0 => vec!["-o".into(), value.clone()],
+            1 => vec![format!("-o{value}")],
+            2 => vec!["--output".into(), value.clone()],
+            3 => vec![format!("--output={value}")],
+            _ => vec![format!("-sSo{value}")],
+        };
+        let mut words: Vec<String> = before;
+        words.extend(option);
+        words.extend(after);
+        let words: Vec<&str> = words.iter().map(String::as_str).collect();
+        prop_assert_eq!(
+            option_values(&words, &['o'], &[], &["output"]),
+            vec![value.as_str()]
+        );
+    }
+
+    #[test]
+    fn operands_alone_give_no_option_value(words in prop::collection::vec(operand(), 0..6)) {
+        let words: Vec<&str> = words.iter().map(String::as_str).collect();
+        prop_assert!(option_values(&words, &['o'], &[], &["output"]).is_empty());
+    }
+
+    #[test]
+    fn the_option_parsers_never_panic(
+        name in prop_oneof![Just("git"), Just("curl"), Just("wget"), Just("dd"), Just("tar")],
+        words in prop::collection::vec("\\PC{0,12}", 0..6),
+    ) {
+        let words: Vec<&str> = words.iter().map(String::as_str).collect();
+        let _ = written_by_option(name, &words);
     }
 }

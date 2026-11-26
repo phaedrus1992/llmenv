@@ -5,7 +5,7 @@
 use serde_json::Value;
 
 /// Applies the payload rules for `engine`. Only Crush needs one: its tool names differ.
-pub(super) fn neutralize_for_engine(engine: &str, payload: Option<&mut Value>) {
+pub(crate) fn neutralize_for_engine(engine: &str, payload: Option<&mut Value>) {
     if let Some(payload) = payload.filter(|_| engine == "crush") {
         neutralize_crush_tool_name(payload);
     }
@@ -28,9 +28,9 @@ pub(super) fn neutralize_crush_tool_name(payload: &mut Value) {
 /// Whether `engine`'s hook bridge decides a tool call was blocked from the
 /// process exit code rather than the JSON envelope on stdout.
 ///
-/// opencode's generated plugin shim checks `code === 2` and ignores stdout for
-/// the block decision, so a deny that exits 0 there is silently allowed.
-/// Claude Code honours the envelope itself, and exit 2 would only duplicate a
+/// opencode's generated plugin shim blocks on `code === 2`, and it also reads the deny envelope
+/// on stdout (`readResult` in `plugin.js`). Exit 2 is the signal that a gate with `failClosed`
+/// always reads, so a deny from `hook-run` uses it there./// Claude Code honours the envelope itself, and exit 2 would only duplicate a
 /// decision it has already made.
 ///
 /// `engine` is [`crate::adapter::AgentAdapter::name`]'s hyphenated cache-dir

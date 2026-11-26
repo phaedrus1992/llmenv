@@ -162,8 +162,35 @@ proptest::proptest! {
                 proptest::prop_assert_eq!(entry["event"].as_str(), Some(hook.event.as_str()));
                 proptest::prop_assert_eq!(entry["matcher"].as_str(), hook.matcher.as_deref());
             }
-            // The three built-in hooks follow the user hooks.
-            proptest::prop_assert_eq!(entries.len(), with_command.len() + 3);
+            // The four built-in hooks follow the user hooks.
+            proptest::prop_assert_eq!(entries.len(), with_command.len() + 4);
         }
+    }
+}
+
+// #4052: the /tmp guard is a gate, so a run that cannot start blocks the call.
+#[test]
+fn materialize_shim_gates_the_shell_and_file_tools_with_the_tmp_guard() {
+    let tmp = tempfile::tempdir().unwrap();
+    OpencodeAdapter
+        .materialize(&MergedManifest::default(), tmp.path())
+        .unwrap();
+    let table: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(tmp.path().join("plugin/llmenv-hooks.json")).unwrap(),
+    )
+    .unwrap();
+    let entry = table["hooks"].as_array().unwrap().iter().find(|h| {
+        h["command"]
+            .as_str()
+            .unwrap()
+            .contains("tmp-guard --engine opencode")
+    });
+    assert!(entry.is_some(), "a hook runs tmp-guard");
+    let entry = entry.unwrap();
+    assert_eq!(entry["event"], "PreToolUse");
+    assert_eq!(entry["failClosed"], true);
+    let matcher = entry["matcher"].as_str().unwrap();
+    for tool in ["Bash", "Write", "Edit", "MultiEdit", "patch"] {
+        assert!(matcher.split('|').any(|t| t == tool), "{tool} in {matcher}");
     }
 }

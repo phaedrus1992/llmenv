@@ -12,7 +12,7 @@ const HEADERS: &[&str] = &[
 ];
 
 /// Each file path that `patch_text` names, in order.
-pub(super) fn patch_paths(patch_text: &str) -> Vec<&str> {
+pub(crate) fn patch_paths(patch_text: &str) -> Vec<&str> {
     patch_text
         .lines()
         .filter_map(|line| {

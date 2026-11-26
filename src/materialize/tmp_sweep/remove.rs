@@ -32,6 +32,7 @@ pub fn sweep(
         ..GcReport::new(dry_run)
     };
     for stale in &scan.stale {
+        report.ages.insert(stale.path.clone(), stale.age);
         if stale.is_dir {
             gc_remove_dir(&stale.path, &mut report);
         } else {

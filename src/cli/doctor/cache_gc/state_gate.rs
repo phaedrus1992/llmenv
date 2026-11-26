@@ -18,9 +18,8 @@ pub(super) fn state_may_have_stale_entries(
     tmp: Option<super::Cutoff>,
     cbm: Option<super::Cutoff>,
     cbm_live: bool,
-    source: crate::materialize::cache::AgeSource,
 ) -> bool {
-    let tmp_stale = tmp.is_some_and(|cutoff| tmp_has_stale_entries(state_dir, cutoff, source));
+    let tmp_stale = tmp.is_some_and(|cutoff| tmp_has_stale_entries(state_dir, cutoff));
     // A codebase-memory folder that a features.codebase_memory index_path uses is live, and the
     // sweep never removes it, so it needs no in-use list (#3075).
     tmp_stale
@@ -29,7 +28,7 @@ pub(super) fn state_may_have_stale_entries(
                 && cbm_may_have_stale_units(
                     &state_dir.join("codebase-memory"),
                     cutoff.retention,
-                    source,
+                    cutoff.source,
                     cutoff.now,
                 )
         })
@@ -37,21 +36,9 @@ pub(super) fn state_may_have_stale_entries(
 
 /// Whether the `state/tmp` sweep could remove an entry older than the cutoff. An entry that cannot
 /// be read counts as possibly stale.
-fn tmp_has_stale_entries(
-    state_dir: &Path,
-    cutoff: super::Cutoff,
-    source: crate::materialize::cache::AgeSource,
-) -> bool {
+fn tmp_has_stale_entries(state_dir: &Path, cutoff: super::Cutoff) -> bool {
     let tmp = state_dir.join("tmp");
-    match tmp_sweep::stale_summary_in(
-        &tmp,
-        crate::materialize::expiry::AgeRule {
-            older_than: cutoff.retention,
-            source,
-        },
-        &[],
-        cutoff.now,
-    ) {
+    match tmp_sweep::stale_summary_in(&tmp, cutoff.rule(), &[], cutoff.now) {
         Ok(summary) => summary.count > 0 || summary.unreadable > 0,
         Err(e) => {
             tracing::error!(
@@ -103,14 +90,9 @@ mod tests {
         let cutoff = Cutoff {
             retention: DAY * 7,
             now: SystemTime::now(),
+            source: crate::materialize::cache::AgeSource::MtimeOnly,
         };
-        state_may_have_stale_entries(
-            state,
-            Some(cutoff),
-            Some(cutoff),
-            cbm_live,
-            crate::materialize::cache::AgeSource::MtimeOnly,
-        )
+        state_may_have_stale_entries(state, Some(cutoff), Some(cutoff), cbm_live)
     }
 
     fn age(path: &Path) {

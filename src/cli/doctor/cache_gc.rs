@@ -2,6 +2,7 @@
 //! then `state/tmp`, then session-log rotations, then old codebase-memory indexes (#2814, #2816,
 //! #2917).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -28,30 +29,27 @@ impl GcOutput<'_> {
         }
     }
 
-    /// Print each entry of a dry run, so the preview names every item (#2917). With `ages`, each
-    /// line also gives the age of the entry by that rule (#4046).
-    fn list(&self, removed: &[PathBuf], ages: Option<(AgeSource, SystemTime)>) {
+    /// Print each entry of a dry run, so the preview names every item (#2917). An entry with an age in
+    /// `ages` also shows it, the age that the sweep judged (#4054).
+    fn list(&self, removed: &[PathBuf], ages: &BTreeMap<PathBuf, Duration>) {
         if !self.dry_run {
             return;
         }
         for p in removed {
-            match ages.map(|(source, now)| tmp_sweep::entry_age(p, source, now)) {
-                Some(Ok(age)) => eprintln!(
+            match ages.get(p) {
+                Some(age) => eprintln!(
                     "  would remove: {} (age {})",
                     p.display(),
-                    crate::util::time::format_age(age)
+                    crate::util::time::format_age(*age)
                 ),
-                Some(Err(cause)) => {
-                    eprintln!("  would remove: {} (age unknown: {cause})", p.display());
-                }
                 None => eprintln!("  would remove: {}", p.display()),
             }
         }
     }
 
-    /// Print the summary line, the dry-run list, and each failure of one sweep. With `ages`, a
-    /// dry-run line also gives the age of the entry.
-    fn report(&self, what: &str, report: &GcReport, ages: Option<(AgeSource, SystemTime)>) {
+    /// Print the summary line, the dry-run list, and each failure of one sweep. A sweep that
+    /// judges by age gives its `ages` in the report, and the dry-run line shows them.
+    fn report(&self, what: &str, report: &GcReport) {
         let (pass, warn) = (self.pass, self.warn);
         eprintln!(
             "{pass} GC complete{what}: {} {} entries, kept {}",
@@ -59,7 +57,7 @@ impl GcOutput<'_> {
             report.removed.len(),
             report.kept
         );
-        self.list(&report.removed, ages);
+        self.list(&report.removed, &report.ages);
         // #1372: a removal failure does not abort the walk, so the skipped entries are named here.
         for (p, cause) in &report.failed {
             eprintln!("{warn} GC: could not process {}: {cause}", p.display());
@@ -174,7 +172,11 @@ fn sweep_state(
     now: SystemTime,
     out: GcOutput<'_>,
 ) -> usize {
-    let cutoff = |retention| Cutoff { retention, now };
+    let cutoff = |retention| Cutoff {
+        retention,
+        now,
+        source: STATE_AGE_SOURCE,
+    };
     let (tmp, general) = (retention.tmp.map(cutoff), retention.general.map(cutoff));
     let rotations = |out| {
         retention.general.map_or(0, |general| {
@@ -189,15 +191,7 @@ fn sweep_state(
     // An unreadable config cannot say whether the codebase-memory folder is live. The sweep then
     // runs, so it reports that the folder could not be checked, and the gate does not hide it.
     let cbm_unknown = general.is_some() && matches!(cbm, CacheUse::Unknown(_));
-    if !cbm_unknown
-        && !state_may_have_stale_entries(
-            state_dir,
-            tmp,
-            general,
-            cbm_live,
-            crate::materialize::cache::AgeSource::MtimeOrCtime,
-        )
-    {
+    if !cbm_unknown && !state_may_have_stale_entries(state_dir, tmp, general, cbm_live) {
         return rotations(out);
     }
     let in_use = crate::materialize::open_files::open_paths().map_err(|e| format!("{e:#}"));
@@ -215,13 +209,21 @@ fn sweep_state(
 struct Cutoff {
     retention: Duration,
     now: SystemTime,
+    source: AgeSource,
 }
 
+/// What an entry age is read from in the state sweeps: the later of mtime and change time, so a
+/// restored entry is kept (#3275). The gate and each sweep read it from their [`Cutoff`], so they
+/// cannot disagree (#4054).
+const STATE_AGE_SOURCE: AgeSource = AgeSource::MtimeOrCtime;
+
 impl Cutoff {
-    /// The age rule of the state sweeps: the retention, judged by mtime or change time, so a
-    /// restored entry is kept (#3275).
+    /// The age rule of the state sweeps: the retention, read from the source of the cutoff.
     fn rule(self) -> crate::materialize::expiry::AgeRule {
-        crate::materialize::expiry::AgeRule::new(self.retention)
+        crate::materialize::expiry::AgeRule {
+            older_than: self.retention,
+            source: self.source,
+        }
     }
 }
 
@@ -245,11 +247,7 @@ fn sweep_state_tmp(
     });
     match swept {
         Ok(report) => {
-            out.report(
-                " for state/tmp",
-                &report,
-                Some((cutoff.rule().source, cutoff.now)),
-            );
+            out.report(" for state/tmp", &report);
             report.failed.len()
         }
         Err(e) => {
@@ -308,7 +306,7 @@ fn sweep_cbm_indexes(
     });
     match swept {
         Ok(report) => {
-            out.report(" for old codebase-memory indexes", &report, None);
+            out.report(" for old codebase-memory indexes", &report);
             report.failed.len()
         }
         Err(e) => {

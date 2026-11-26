@@ -484,7 +484,6 @@ Flags:
 - `--dry-run` — list every item that a real run tries to remove, and remove nothing.
   This covers the cache folders and every age-based sweep.
   (added in v3.14.2) Each `state/tmp` line ends with the age of the entry, such as `(age 9d 2h)`.
-  An entry whose age cannot be read shows `(age unknown: <cause>)` in its place.
   A real run can still fail on an item that the dry run lists, for example a folder without write access.
 - `--plugin-cache` — also remove the shared plugin cache folder of each adapter.
   A folder that does not exist is not listed.
@@ -1264,26 +1263,46 @@ Nothing cleans `/tmp`, so a scratch file written there stays for good.
 The auto-registered `PreToolUse` hook runs this command in every session.
 It covers the `Bash`, `Monitor`, `Write`, `Edit`, `MultiEdit`, and `NotebookEdit` tools.
 No config setting is needed.
+Claude Code, opencode, and Crush run it.
+The command takes `--engine`, and for Crush it reads the lower-case tool names (`bash`, `write`, `edit`, `multiedit`).
+On opencode, the hook is a gate: a run that cannot start, or that times out, blocks the call.
 
 The deny message is `Use "$TMPDIR" for scratch files. /tmp is not cleaned up.`, with the path that the call writes.
 
-The guard denies a write under `/tmp`, `/private/tmp`, `/var/folders`, or `/private/var/folders`:
+The guard denies a write under `/tmp`, `/private/tmp`, `/var/folders`, `/private/var/folders`, `/var/tmp`,
+`/private/var/tmp`, or `/dev/shm`.
+The guard denies:
 
 - A shell redirect (`>`, `>>`, `2>`, `&>`, `>|`) with a target there.
 - The `tee`, `touch`, `mkdir`, and `mktemp` commands, when any operand is there.
-- The `cp`, `mv`, and `install` commands, when the destination (the last operand, or the `-t` value) is there.
+- The `cp`, `mv`, `install`, and `ln` commands, when the destination is there.
+  The destination is the `-t` or `--target-directory` value, else the last operand.
+  A `-t` value can be attached, as in `-t/tmp/x`, or in a cluster, as in `-rt`.
+- The `rsync` command, when its last operand is there.
+- The destination operand of a `git clone`, the `git -C` folder of a clone, and a `--separate-git-dir` folder.
+- The `curl` `-o`, `-D`, `-c`, `--output`, `--output-dir`, `--dump-header`, and `--cookie-jar` values.
+- The `wget` `-O`, `-P`, `-o`, and `-a` values.
+  The long forms are `--output-document`, `--directory-prefix`, `--output-file`, and `--append-output`.
+- The `of=` operand of `dd`.
+- The `-C` or `--directory` folder of a `tar` that extracts.
+- The `-f` or `--file` archive of a `tar` that creates, appends, or updates.
+  A `tar` that creates an archive reads from its `-C` folder, so that folder is allowed.
 - A `Write`, `Edit`, `MultiEdit`, or `NotebookEdit` call with a path there.
+- An opencode `patch` call whose patch text adds, updates, deletes, or moves a file there.
 
 The guard reads a path as text, with `.` and `..` resolved.
 It does not expand a variable, and it does not follow a symlink.
 A command that changes into `/tmp` and then writes a relative path is not seen.
 A read of `/tmp` is allowed, and so is a copy from `/tmp` to another place.
 A redirect sign inside quotes is text, not a redirect, and `echo hi>/tmp/x` is a redirect.
+A long option can be a unique prefix, as in `wget --output-doc=/tmp/x`.
+The guard reads a prefix of a listed option as that option.
+The known limits are an `rsync` destination that is followed by an option.
+Another is a global `git` option that takes a value and is not in the guard's list.
 A call that cannot be checked is denied, with the cause in the message.
 These are a missing tool name, shell command, or file path.
 They are also a command nested too deeply, and a payload that is not JSON.
 The command always exits 0, and the deny is the JSON on stdout.
-Claude Code is the only engine that runs the guard so far (opencode and Crush: #4052).
 
 ## `throttle`
 
