@@ -392,3 +392,7 @@ fn finish(manifest: &MergedManifest, hooks: HooksByEvent) -> anyhow::Result<serd
     dedup_hooks_doc(&mut value);
     Ok(value)
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests;
