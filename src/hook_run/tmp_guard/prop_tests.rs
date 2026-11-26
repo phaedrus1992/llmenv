@@ -3,7 +3,9 @@
 use proptest::prelude::*;
 
 use super::writers::{option_values, written_by_option};
-use super::{all_operands, destination, is_tmp_path, redirect_target};
+use super::{
+    all_operands, deny_reason, destination, is_tmp_path, redirect_target, space_redirects,
+};
 
 /// One path segment: a name, a `.`, or a `..`, so a path can hold every form that the guard
 /// resolves.
@@ -219,5 +221,80 @@ proptest! {
     ) {
         let words: Vec<&str> = words.iter().map(String::as_str).collect();
         let _ = written_by_option(name, &words);
+    }
+    #[test]
+    fn the_guard_never_panics_on_any_command(command in "\\PC{0,64}") {
+        let payload = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": command}});
+        let _ = deny_reason(&payload);
+    }
+
+    #[test]
+    fn the_guard_never_panics_on_any_payload_shape(
+        tool in prop_oneof![Just("Bash"), Just("Write"), Just("patch"), Just("Other")],
+        input in "\\PC{0,24}",
+        number in any::<i64>(),
+    ) {
+        for tool_input in [
+            serde_json::json!(input),
+            serde_json::json!(number),
+            serde_json::json!({"command": number, "file_path": input, "patchText": number}),
+            serde_json::Value::Null,
+        ] {
+            let _ = deny_reason(&serde_json::json!({"tool_name": tool, "tool_input": tool_input}));
+        }
+        let _ = deny_reason(&serde_json::json!({"tool_name": number}));
+    }
+
+    #[test]
+    fn spacing_a_redirect_only_inserts_whitespace(command in "[a-z0-9 >/]{0,24}") {
+        let strip = |text: &str| text.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        prop_assert_eq!(strip(&command), strip(&space_redirects(&command)));
+    }
+
+    #[test]
+    fn an_unquoted_redirect_sign_has_a_space_on_each_side(command in "[a-z0-9 >/]{0,24}") {
+        let spaced: Vec<char> = space_redirects(&command).chars().collect();
+        for (i, c) in spaced.iter().enumerate() {
+            if *c == '>' {
+                prop_assert_eq!(spaced.get(i.wrapping_sub(1)), Some(&' '));
+                prop_assert_eq!(spaced.get(i + 1), Some(&' '));
+            }
+        }
+    }
+
+    #[test]
+    fn a_clone_gives_its_destination_joined_onto_the_dash_c_folder(
+        url in "https://[a-z]{1,8}\\.example/[a-z]{1,8}",
+        dest in "[a-z]{1,8}",
+        folder in "/[a-z]{1,8}",
+    ) {
+        prop_assert_eq!(
+            written_by_option("git", &["clone", &url, &dest]),
+            vec![dest.clone()]
+        );
+        prop_assert_eq!(
+            written_by_option("git", &["-C", &folder, "clone", &url, &dest]),
+            vec![format!("{folder}/{dest}")]
+        );
+        let absolute = format!("/{dest}");
+        prop_assert_eq!(
+            written_by_option("git", &["-C", &folder, "clone", &url, &absolute]),
+            vec![absolute.clone()]
+        );
+    }
+
+    #[test]
+    fn tar_gives_the_archive_that_it_creates_and_the_folder_that_it_extracts(
+        archive in "[a-z]{1,8}\\.tar",
+        folder in "/[a-z]{1,8}",
+    ) {
+        prop_assert_eq!(
+            written_by_option("tar", &["-cf", &archive, "src"]),
+            vec![archive.clone()]
+        );
+        prop_assert_eq!(
+            written_by_option("tar", &["-xf", &archive, "-C", &folder]),
+            vec![folder.clone()]
+        );
     }
 }

@@ -148,7 +148,7 @@ fn shell_write_in_tmp(command: &str) -> Result<Option<String>, String> {
         .find(|path| is_tmp_path(path)))
 }
 
-/// `command` with a space on each side of every unquoted run of `>`, so `echo hi>/tmp/x` reads
+/// `command` with a space on each side of every unquoted `>`, so `echo hi>/tmp/x` reads
 /// as `echo hi > /tmp/x`. The splitter keeps `hi>/tmp/x` as one word, and a redirect is then not
 /// seen. A `>` inside quotes stays as it is.
 fn space_redirects(command: &str) -> String {
