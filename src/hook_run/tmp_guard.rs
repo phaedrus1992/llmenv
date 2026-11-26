@@ -305,4 +305,8 @@ mod writers;
 mod tests;
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod writer_tests;
+
+#[cfg(test)]
 mod prop_tests;

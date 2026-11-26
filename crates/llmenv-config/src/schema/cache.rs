@@ -147,6 +147,15 @@ mod tests {
     }
 
     #[test]
+    fn remote_sync_is_on_unless_the_config_turns_it_off() {
+        assert!(Cache::default().remote_sync);
+        let omitted: Cache = serde_yaml::from_str("sync_interval_minutes: 5").unwrap();
+        assert!(omitted.remote_sync);
+        let off: Cache = serde_yaml::from_str("remote_sync: false").unwrap();
+        assert!(!off.remote_sync);
+    }
+
+    #[test]
     fn gc_retention_is_off_only_for_an_explicit_null() {
         let explicit_null: Cache = serde_yaml::from_str("cache_retention_hours: null").unwrap();
         assert_eq!(explicit_null.gc_retention(), None);
