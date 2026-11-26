@@ -76,7 +76,7 @@ Status key: **parity** (works the same), **partial** (works with a loss), **brok
 | `SessionStart` hook-run (ICM wake-up, check-stale, config-context) | shim on `session.created` | broken (shim does not load) | `ctx.event.subscribe` on `session.created`; inject with `ctx.session.synthetic` or a `session.hook("context")` system part |
 | `SessionEnd` | shim on `session.deleted` and `dispose` | broken | `session.deleted` event; plugin cleanup function |
 | `UserPromptSubmit` (`turn_start` recall, rules digest, throttle) | shim on `chat.message`; throttle not wired | broken; throttle missing | `ctx.session.hook("prompt")` (mutable prompt) |
-| `PreToolUse` deny | exit code 2 only | broken | `ctx.tool.hook("execute.before")` fails with `Tool.Error` |
+| `PreToolUse` deny | exit code 2, or a deny envelope on stdout | broken | `ctx.tool.hook("execute.before")` fails with `Tool.Error` |
 | `PreToolUse` `ask` decision | not supported | missing (#2998) | `ctx.permission.hook("evaluate")` sets `effect` to `ask` (`opencode/packages/plugin/src/effect/permission.ts:10-22`) |
 | `PreToolUse` `updatedInput` | not supported | missing | `execute.before` has a mutable `input` (`opencode/packages/plugin/src/effect/tool.ts:20-28`) |
 | `PostToolUse` | shim on `tool.execute.after` | broken | `execute.after` with mutable `result` |

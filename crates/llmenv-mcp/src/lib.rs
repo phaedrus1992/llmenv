@@ -10,5 +10,6 @@ pub(crate) mod pid_state;
 pub mod proxy;
 pub(crate) mod proxy_command;
 pub mod proxy_ops;
+pub mod recall_deadline;
 pub mod resolve;
 pub mod stdio_rpc;

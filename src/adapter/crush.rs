@@ -1,14 +1,11 @@
 use std::path::{Path, PathBuf};
 
-use serde_json::json;
-
 use super::AgentAdapter;
-use super::hook_program::hook_command;
 use crate::merge::MergedManifest;
 
+mod assemble;
 mod mcp;
 mod render;
-use render::{CRUSH_MODELED_KEYS, render_default_models, render_lsp, render_model_providers};
 
 /// Adapter for Crush: writes `crush.json` into the cache dir and exports
 /// `CRUSH_GLOBAL_CONFIG` / `CRUSH_GLOBAL_DATA` so Crush discovers it.
@@ -159,254 +156,7 @@ impl AgentAdapter for CrushAdapter {
     }
 
     fn materialize(&self, manifest: &MergedManifest, out: &Path) -> anyhow::Result<Vec<PathBuf>> {
-        // 1. Create output dir with owner-only permissions
-        super::skills::create_dir_owner_only(out)?;
-
-        // 2. Filter hooks Crush can't express (#543 follow-up): a bundle shared
-        // across engines commonly declares hooks only Claude Code supports (e.g.
-        // PostToolUse). That is a cross-engine compatibility gap, not a
-        // config-authoring mistake — failing the whole render over one
-        // incompatible hook would also drop every other capability (MCP, LSP,
-        // skills, permissions) Crush *can* express. Skip the incompatible hook
-        // and warn loudly instead so the rest of the config still materializes.
-        let compatible_hooks: Vec<&crate::config::Hook> = manifest
-            .capabilities
-            .hooks
-            .iter()
-            .filter(|hook| {
-                crate::adapter::hook_support::engine_can_run_hook(
-                    "Crush",
-                    SUPPORTED_HOOK_EVENTS,
-                    hook,
-                )
-            })
-            .collect();
-
-        // 3. Write first-class skills (fix 2)
-        let skill_paths =
-            crate::adapter::skills::write_first_class_skills(out, &manifest.capabilities.skills)?;
-
-        // 4. Project plugin skills, skipping plugins with non-skill content Crush
-        // can't express (#543 follow-up: was a hard-error that aborted the whole
-        // render over one incompatible plugin, dropping every other plugin's
-        // skills, MCP servers, permissions, and hooks along with it).
-        let mut owned: Vec<PathBuf> = vec![PathBuf::from(CRUSH_JSON_FILE)];
-        owned.extend(skill_paths.iter().cloned());
-
-        // Crush loads CRUSH.md from the config dir it is pointed at, so the merged
-        // instructions reach the agent without a crush.json key. An empty render
-        // stays out of `owned`, so a stale copy is reconciled away as a ghost.
-        super::skills::reject_hardcoded_config_path(&manifest.agents_md, CRUSH_MD_FILE)?;
-        if !manifest.agents_md.trim().is_empty() {
-            let path = out.join(CRUSH_MD_FILE);
-            crate::paths::write_owner_only(&path, manifest.agents_md.as_bytes())?;
-            owned.push(PathBuf::from(CRUSH_MD_FILE));
-        }
-
-        let mut plugin_skill_paths: Vec<PathBuf> = Vec::new();
-        // Skills actually projected below — used as the collision check's
-        // input further down, instead of a second, separate directory walk
-        // (#1335: two independent walks of the same plugin payload could
-        // observe different states between them).
-        let mut projected_plugin_skills: Vec<crate::adapter::output_styles::ProjectedPluginSkill> =
-            Vec::new();
-        for plugin in &manifest.plugins {
-            let payload = super::resolve_plugin_payload(plugin, &manifest.marketplaces)?;
-            if let Some(bad_dir) = unsupported_plugin_dir(&payload)? {
-                eprintln!(
-                    "warning: plugin '{}' contains unsupported Crush content: '{}/' \
-                     directory — skipping this plugin. Crush has no equivalent for \
-                     plugin agents, commands, or hooks. Scope this bundle away from \
-                     Crush with `when:` or remove the content to silence this warning.",
-                    plugin.plugin, bad_dir
-                );
-                continue;
-            }
-            let (paths, names) = crate::adapter::skills::project_plugin_skills(&payload, out)?;
-            plugin_skill_paths.extend(paths);
-            projected_plugin_skills.extend(names.into_iter().map(|skill_name| {
-                crate::adapter::output_styles::ProjectedPluginSkill {
-                    skill_name,
-                    plugin_name: plugin.plugin.clone(),
-                }
-            }));
-        }
-        owned.extend(plugin_skill_paths.iter().cloned());
-
-        // Built-in `llmenv` skill: one reference file per enabled first-party
-        // feature. No-op when none are enabled. Counted toward `skills_paths`
-        // below so Crush discovers it even when it's the only skill present.
-        let llmenv_skill_paths =
-            crate::adapter::llmenv_skill::materialize_llmenv_skill(out, manifest)?;
-        owned.extend(llmenv_skill_paths.iter().cloned());
-
-        // #1130: Crush has no native output-style concept — render each
-        // declared output style as a generated skill instead. #1333/#1335:
-        // check for a plugin-projected skill name collision first, against
-        // the exact names the loop above already wrote (not a fresh walk) —
-        // plugin skills were already written above, so an unrejected
-        // collision here would silently overwrite them.
-        crate::adapter::output_styles::reject_plugin_skill_collisions(
-            &manifest.capabilities.output_styles,
-            &projected_plugin_skills,
-        )?;
-        for style in &manifest.capabilities.output_styles {
-            owned.extend(crate::adapter::output_styles::write_output_style_as_skill(
-                out, style,
-            )?);
-        }
-
-        // P1-1: validate skills (frontmatter + hardcoded-path scan), same gate as ClaudeCodeAdapter
-        crate::adapter::skills::validate_skills(out)?;
-
-        // 5. Build doc
-        let mut doc = serde_json::Map::new();
-
-        // Hooks: Crush's HookConfig (internal/config/config.go) is a flat
-        // { matcher?, command, name?, timeout? } object per event entry — unlike
-        // Claude Code's { matcher, hooks: [{ type, command, tool }] } nesting.
-        // Rendering the nested shape here means Crush reads an empty `command`
-        // off the wrapper object and rejects the whole config at load time.
-        let mut hooks_by_event = render::render_hook_entries(&compatible_hooks);
-
-        hooks_by_event
-            .entry("PreToolUse".into())
-            .or_default()
-            // Guards for llmenv's own PreToolUse hooks, run on every tool call as on Claude Code.
-            .push(json!({ "command": hook_command("hook-run --engine crush pre_tool_use")? }));
-
-        let mut hooks_value = serde_json::Value::Object(
-            hooks_by_event
-                .into_iter()
-                .map(|(k, v)| (k, json!(v)))
-                .collect(),
-        );
-        super::overlay_native_json(
-            &mut hooks_value,
-            manifest.capabilities.native_hooks.get("crush"),
-            "native_hooks.crush",
-        )?;
-        // P1-4: validate every event key in the merged hooks object — native_hooks.crush can
-        // inject unsupported events (e.g. PostToolUse) that bypass the earlier manifest gate.
-        if let Some(obj) = hooks_value.as_object() {
-            for event in obj.keys() {
-                if !SUPPORTED_HOOK_EVENTS.contains(&event.as_str()) {
-                    anyhow::bail!(
-                        "native_hooks.crush contains unsupported hook event '{}'. \
-                         Supported events: {}. Remove or move this hook.",
-                        event,
-                        SUPPORTED_HOOK_EVENTS.join(", ")
-                    );
-                }
-            }
-        }
-        if !hooks_value
-            .as_object()
-            .is_none_or(serde_json::Map::is_empty)
-        {
-            doc.insert("hooks".into(), hooks_value);
-        }
-
-        // Permissions: Crush's PermissionsConfig (internal/config/config.go) has
-        // exactly one field, `allowed_tools` — an allow-list of tools that skip
-        // the interactive approval prompt. There is no `denied_tools` or
-        // `default_mode` concept, so `ask`/`deny` rules render no key of their
-        // own — omitting a tool from `allowed_tools` is already fail-closed.
-        // Rendering extra keys here previously did nothing (Crush's plain
-        // `json.Unmarshal` silently drops unknown fields), so this was already
-        // a no-op, not a security regression — just dead output (#554).
-        // #1325: a tool named in `deny`/`ask` is withheld from `allowed_tools`, because an
-        // `allow` grant would otherwise override it. `disabled_tools` (below) carries the deny.
-        let (allowed_tools, disabled_tools) = render::render_permission_lists(
-            &manifest.capabilities.permissions,
-            manifest.capabilities.native_permissions.get("crush"),
-        );
-
-        if !allowed_tools.is_empty() {
-            let mut perm_obj = serde_json::Map::new();
-            perm_obj.insert("allowed_tools".into(), json!(allowed_tools));
-            doc.insert("permissions".into(), serde_json::Value::Object(perm_obj));
-        }
-
-        // MCP servers: the transport and field shapes live in `render::render_mcp`.
-        if let Some(mcp) = mcp::render_mcp(manifest)? {
-            doc.insert("mcp".into(), mcp);
-        }
-
-        // LSP servers (fix 1): skip disabled servers; omit "lsp" key if none remain.
-        if !manifest.capabilities.lsp.is_empty() {
-            let lsp_value = render_lsp(&manifest.capabilities.lsp)?;
-            if lsp_value.as_object().is_some_and(|o| !o.is_empty()) {
-                doc.insert("lsp".into(), lsp_value);
-            }
-        }
-
-        // Model providers (fix 1 pattern): skip disabled providers; omit
-        // "providers" key if none remain. The JSON tags here match catwalk's
-        // Provider/Model struct tags (confirmed in Task 5 of the spec).
-        let mut providers_value = render_model_providers(&manifest.capabilities.model_providers)?;
-        super::overlay_native_json(
-            &mut providers_value,
-            manifest.capabilities.native_model_providers.get("crush"),
-            "native_model_providers.crush",
-        )?;
-        if providers_value.as_object().is_some_and(|o| !o.is_empty()) {
-            doc.insert("providers".into(), providers_value);
-        }
-
-        // Default models (fix 1 pattern): omit "models" key if none, after the
-        // native_default_models.crush overlay (#1031) — mirrors the providers
-        // block above, so a native-only per-role override (`reasoning_effort`,
-        // `think`, `max_tokens`) can populate "models" even with no modeled
-        // `default_models` entry for that role.
-        let mut models_value = render_default_models(&manifest.capabilities.default_models);
-        super::overlay_native_json(
-            &mut models_value,
-            manifest.capabilities.native_default_models.get("crush"),
-            "native_default_models.crush",
-        )?;
-        if models_value.as_object().is_some_and(|o| !o.is_empty()) {
-            doc.insert("models".into(), models_value);
-        }
-
-        // options.skills_paths: emit whenever any skills exist (first-class or plugin-projected).
-        // P1-2: must include plugin_skill_paths — plugin-only skill sets omit this key otherwise.
-        let has_skills = !skill_paths.is_empty()
-            || !plugin_skill_paths.is_empty()
-            || !llmenv_skill_paths.is_empty();
-        if let Some(options) = render::render_options(out, has_skills, &disabled_tools)? {
-            doc.insert("options".into(), options);
-        }
-
-        // Bundle env vars (capabilities.env) become Crush's top-level `env`. Crush
-        // shell-expands each value at startup, so a literal `$` needs escaping.
-        if !manifest.capabilities.env.is_empty() {
-            doc.insert("env".into(), render::render_env(&manifest.capabilities.env));
-        }
-
-        // 6. native.crush passthrough — highest-precedence layer
-        // P1-3: reject modeled keys in the catch-all fragment before overlaying — these
-        // keys have dedicated rendering paths and must not clobber the security output.
-        // Use native_permissions.crush / native_hooks.crush / native_mcp.crush /
-        // native_model_providers.crush / native_default_models.crush instead.
-        render::reject_native_disabled_tools(manifest.native.get("crush"))?;
-        if let Some(native) = manifest.native.get("crush") {
-            super::reject_modeled_native_keys(native, CRUSH_MODELED_KEYS, "crush")?;
-        }
-        let mut doc_value = serde_json::Value::Object(doc);
-        super::overlay_native_json(&mut doc_value, manifest.native.get("crush"), "native.crush")?;
-        // #1270: a native null on a key already rendered must delete the key
-        // rather than persist an explicit JSON null (mirrors #1264's fix for
-        // the Claude Code adapter's settings.json). Runs after the last
-        // overlay so it catches every layer.
-        super::strip_json_nulls(&mut doc_value);
-
-        // 7. Write crush.json
-        let json_bytes = serde_json::to_vec_pretty(&doc_value)?;
-        let out_path = out.join(CRUSH_JSON_FILE);
-        crate::paths::write_owner_only(&out_path, &json_bytes)?;
-
-        Ok(owned)
+        assemble::materialize(manifest, out)
     }
 
     fn emit_hook_context(&self, hook_event_name: &str, memory: &str, notes: &str) -> String {
@@ -428,8 +178,9 @@ impl AgentAdapter for CrushAdapter {
 mod tests {
     use crate::adapter::hook_program::hook_command;
 
+    use super::render::CRUSH_MODELED_KEYS;
     use super::render::{crush_tool_name, render_permission_rule};
-    use super::{CRUSH_JSON_FILE, CRUSH_MODELED_KEYS, CrushAdapter, SUPPORTED_HOOK_EVENTS};
+    use super::{CRUSH_JSON_FILE, CrushAdapter, SUPPORTED_HOOK_EVENTS};
     use crate::adapter::AgentAdapter;
     use crate::adapter::skills::arb_yaml_value;
     use crate::config::{
@@ -648,7 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn materialize_empty_config_carries_only_the_llmenv_hook() {
+    fn materialize_empty_config_carries_only_the_llmenv_hooks() {
         let tmp = tempfile::tempdir().unwrap();
         CrushAdapter
             .materialize(&empty_manifest(), tmp.path())
@@ -657,7 +408,7 @@ mod tests {
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(
             doc,
-            serde_json::json!({ "hooks": { "PreToolUse": [{ "command": hook_command("hook-run --engine crush pre_tool_use").unwrap() }] } })
+            serde_json::json!({ "hooks": { "PreToolUse": [{ "command": hook_command("hook-run --engine crush pre_tool_use").unwrap() }, { "command": hook_command("tmp-guard --engine crush").unwrap() }] } })
         );
     }
 
@@ -802,8 +553,8 @@ mod tests {
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(
             doc["hooks"]["PreToolUse"],
-            serde_json::json!([{ "command": hook_command("hook-run --engine crush pre_tool_use").unwrap() }]),
-            "unsupported hook must not appear in output, so only llmenv's own hook remains: {doc}"
+            serde_json::json!([{ "command": hook_command("hook-run --engine crush pre_tool_use").unwrap() }, { "command": hook_command("tmp-guard --engine crush").unwrap() }]),
+            "unsupported hook must not appear in output, so only llmenv's own hooks remain: {doc}"
         );
     }
 
@@ -1503,7 +1254,7 @@ mod tests {
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(
             doc["hooks"]["PreToolUse"],
-            serde_json::json!([{ "command": hook_command("hook-run --engine crush pre_tool_use").unwrap() }]),
+            serde_json::json!([{ "command": hook_command("hook-run --engine crush pre_tool_use").unwrap() }, { "command": hook_command("tmp-guard --engine crush").unwrap() }]),
             "mcp_tool hook must not appear in output, so only llmenv's own hook remains: {doc}"
         );
     }
@@ -2436,7 +2187,7 @@ mod tests {
                 .filter(|s| !s.disabled)
                 .map(|s| s.name.clone())
                 .collect();
-            let result = super::render_lsp(&servers).unwrap();
+            let result = super::render::render_lsp(&servers).unwrap();
             let got: std::collections::BTreeSet<String> = result
                 .as_object()
                 .map(|o| o.keys().cloned().collect())
@@ -2607,7 +2358,7 @@ mod tests {
                 .filter(|p| !p.disabled)
                 .map(|p| p.id.clone())
                 .collect();
-            let result = super::render_model_providers(&providers).unwrap();
+            let result = super::render::render_model_providers(&providers).unwrap();
             let got: std::collections::BTreeSet<String> = result
                 .as_object()
                 .map(|o| o.keys().cloned().collect())
@@ -2627,7 +2378,7 @@ mod tests {
                 api_key,
                 ..Default::default()
             };
-            let _ = super::render_model_providers(std::slice::from_ref(&provider));
+            let _ = super::render::render_model_providers(std::slice::from_ref(&provider));
         }
 
         #[test]
@@ -2638,7 +2389,7 @@ mod tests {
         ) {
             let mut map = std::collections::BTreeMap::new();
             map.insert(role, llmenv_config::ModelRef { provider, model });
-            let _ = super::render_default_models(&map);
+            let _ = super::render::render_default_models(&map);
         }
     }
 

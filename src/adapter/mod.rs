@@ -1,5 +1,6 @@
 pub mod claude_code;
 pub mod codex;
+pub(crate) mod context_cap;
 pub mod crush;
 pub(crate) mod hook_command;
 pub(crate) mod hook_program;
@@ -12,6 +13,7 @@ pub(crate) mod native_keys;
 pub mod opencode;
 pub(crate) mod output_styles;
 pub(crate) use json_nulls::strip_json_nulls;
+mod plugin_payload;
 mod remote_transport;
 pub(crate) mod skills;
 mod temp_dir;
@@ -24,6 +26,7 @@ use std::path::{Path, PathBuf};
 
 use crate::mcp::resolve::MEMORY_MCP_NAME;
 use crate::merge::MergedManifest;
+use plugin_payload::resolve_plugin_payload;
 
 /// Which engine-neutral lifecycle events get a `hook-run` registration for this
 /// manifest, and why.
@@ -662,7 +665,11 @@ fn emit_hook_context(
         MEMORY_CONTEXT_HEADER
     };
     let memory_block = (!memory.trim().is_empty()).then(|| format!("{header}\n{memory}"));
-    let notes_block = (!notes.trim().is_empty()).then(|| notes.to_string());
+    // The notices have no size limit of their own, so they shrink to leave the memory its room
+    // under the cap that Claude Code cuts a hook output at (#3357).
+    let memory_chars = memory_block.as_deref().map_or(0, context_cap::context_len);
+    let notes = context_cap::fit_notes(notes, memory_chars);
+    let notes_block = (!notes.trim().is_empty()).then_some(notes);
     let parts: Vec<String> = [notes_block, memory_block].into_iter().flatten().collect();
     if parts.is_empty() {
         return String::new();
@@ -674,44 +681,6 @@ fn emit_hook_context(
         }
     })
     .to_string()
-}
-
-/// Resolve the on-disk payload directory for a plugin.
-///
-/// External plugins (`install_path = Some`) use that path directly.
-/// First-party plugins look up their marketplace `install_location`.
-///
-/// Shared across adapters: previously lived in `crush.rs` and was
-/// cross-imported by opencode via `super::crush::resolve_plugin_payload`.
-fn resolve_plugin_payload(
-    plugin: &crate::plugins::resolve::ResolvedPlugin,
-    marketplaces: &[crate::plugins::resolve::ResolvedMarketplace],
-) -> anyhow::Result<PathBuf> {
-    // P2-5/#534: guard before any path join, regardless of which path is taken.
-    if !crate::paths::is_valid_short_name(&plugin.plugin) {
-        anyhow::bail!("plugin name '{}' is not a valid name", plugin.plugin);
-    }
-    if let Some(p) = &plugin.install_path {
-        return Ok(PathBuf::from(p));
-    }
-    let mkt = marketplaces
-        .iter()
-        .find(|m| m.name == plugin.marketplace)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "plugin '{}': marketplace '{}' not found in resolved marketplaces",
-                plugin.plugin,
-                plugin.marketplace
-            )
-        })?;
-    let install_location = mkt.install_location.as_deref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "plugin '{}': marketplace '{}' has no install_location (not yet synced?)",
-            plugin.plugin,
-            plugin.marketplace
-        )
-    })?;
-    Ok(PathBuf::from(install_location).join(&plugin.plugin))
 }
 
 #[cfg(test)]

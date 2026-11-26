@@ -64,7 +64,14 @@ async fn recall(
             .await?;
         related_records(&body, wanted).map(Reply::Records)
     };
-    Some(crate::hook_run::recall_breaker::guard_recall(client.recall_breaker(), call).await)
+    Some(
+        crate::hook_run::recall_breaker::guard_recall(
+            client.recall_breaker(),
+            client.recall_deadline(),
+            call,
+        )
+        .await,
+    )
 }
 
 /// The memories of a JSON recall reply that share a token in `wanted`, matched on the summary
@@ -123,6 +130,10 @@ pub(in crate::hook_run) async fn tool_failure(
         note_skipped();
         return Ok(crate::hook_run::HookText::default());
     };
+    // The error is recorded above, so the per-turn recall still sees it (#3897).
+    if !ctx.failure_recall {
+        return Ok(crate::hook_run::HookText::default());
+    }
     // A generic failure matches memories from every project, so no recall runs (#2910).
     if is_generic(error) {
         return Ok(crate::hook_run::HookText::default());

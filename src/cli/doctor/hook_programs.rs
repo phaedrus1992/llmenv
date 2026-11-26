@@ -8,9 +8,10 @@ use std::path::PathBuf;
 
 /// The llmenv subcommands that a built-in hook or the status line runs. A test reads every
 /// `hook_command("...")` call in the adapters, so a new subcommand cannot be left out.
-const LLMENV_SUBCOMMANDS: [&str; 6] = [
+const LLMENV_SUBCOMMANDS: [&str; 7] = [
     "hook-run",
     "config-guard",
+    "tmp-guard",
     "config-context",
     "check-stale",
     "throttle",

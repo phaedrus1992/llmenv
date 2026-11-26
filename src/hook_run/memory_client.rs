@@ -76,8 +76,10 @@ pub(super) fn resolve_memory_client<E: std::fmt::Display>(
         std::collections::hash_map::Entry::Vacant(entry) => {
             match McpHttpClient::new(entry.key().clone(), HOOK_TIMEOUT) {
                 Ok(client) => {
-                    let client =
-                        client.with_recall_breaker(crate::hook_run::recall_breaker::default_path());
+                    let cache = llmenv_mcp::mcp_client::SessionCache::for_url(entry.key());
+                    let client = client
+                        .with_recall_breaker(crate::hook_run::recall_breaker::default_path())
+                        .with_session_cache(cache);
                     entry.insert(client).clone()
                 }
                 Err(e) => {

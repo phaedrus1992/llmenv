@@ -152,8 +152,9 @@ const STALE_PENDING_SECS: i64 = 60;
 /// Log and notice a pending transcript link that is older than a start takes. Events are not
 /// sent to the ICM transcript while it stands (#2834).
 pub(super) fn note_pending(since: i64, now: i64) {
-    let age = now.saturating_sub(since);
-    if age < STALE_PENDING_SECS {
+    // A marker from the future reads as stale, as in every other age check (#3889).
+    let age = now.saturating_sub(since).max(0);
+    if crate::util::ttl::is_within(since, now, STALE_PENDING_SECS) {
         tracing::debug!("ICM transcript start pending for {age} s; event not logged");
         return;
     }
@@ -214,5 +215,12 @@ mod tests {
         note_pending(5_000, 5_000 + STALE_PENDING_SECS);
         let notices = crate::agent_notice::current().unwrap_or_default();
         assert!(notices.contains("pending for 60 s"), "{notices}");
+    }
+
+    #[test]
+    fn a_pending_link_stamped_in_the_future_is_noticed_as_stale() {
+        note_pending(90_000, 80_000);
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(notices.contains("pending for 0 s"), "{notices}");
     }
 }
