@@ -49,6 +49,13 @@ fn a_bash_write_to_tmp_is_denied_with_the_tmpdir_rule() {
         "touch /TMP/x",
         "touch '/tmp/with space'",
         "mkdir /tmp",
+        "for f in a b; do cp $f /tmp/; done",
+        "if true; then touch /tmp/x; fi",
+        "if false; then :; else touch /tmp/x; fi",
+        "until false; do touch /tmp/x; done",
+        "while true; do touch /tmp/x; break; done",
+        "! touch /tmp/x",
+        "case $x in a) touch /tmp/x ;; esac",
     ];
     for command in denied {
         let reason = bash(command).unwrap_or_else(|| panic!("allowed: {command}"));
