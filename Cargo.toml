@@ -14,7 +14,7 @@ resolver = "2"
 [workspace.dependencies]
 # Time text for stored timestamps and ages (#3790).
 jiff = { version = "=0.2.46", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
-anyhow = "=1.0.104"
+anyhow = "=1.0.105"
 ipnet = "=2.12.2"
 if-addrs = "=0.15.0"
 serde = { version = "=1.0.229", features = ["derive"] }
@@ -23,14 +23,14 @@ serde_yaml = { package = "serde_yaml_ng", version = "=0.10.0" }
 # Codex's config is TOML (#233). A hand-rolled emitter would have to quote
 # table keys correctly, and MCP server names come from user config — a name
 # containing a dot would silently become nested tables.
-toml = "=1.2.1"
+toml = "=1.2.3"
 thiserror = "=2.0.21"
 tracing = "=0.1.44"
 proptest = "=1.12.0"
 pulldown-cmark = "=0.13.6"
 tempfile = "=3.27.0"
-globset = "=0.4.21"
-walkdir = "=2.5.0"
+globset = "=0.4.22"
+walkdir = "=2.5.1"
 sha2 = "=0.11.1"
 anstyle = "=1.0.14"
 url = "=2.5.9"
@@ -48,12 +48,12 @@ rustix = { version = "=1.1.6", features = ["fs", "process", "system", "time"] }
 # hyper/hyper-util/http-body-util/http/futures-util/regex are already present
 # transitively via reqwest — promoted to direct deps here for the launch
 # proxy's (#1289) HTTP server, not new additions to the dependency tree.
-hyper = { version = "=1.12.0", features = ["server", "http1"] }
+hyper = { version = "=1.13.0", features = ["server", "http1"] }
 hyper-util = { version = "=0.1.21", features = ["tokio"] }
 http-body-util = "=0.1.5"
 http = "=1.5.0"
 futures-util = "=0.3.34"
-regex = "=1.13.1"
+regex = "=1.13.2"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -92,8 +92,8 @@ llmenv-util = { path = "crates/llmenv-util", version = "5.0.0-alpha.1" }
 llmenv-scope = { path = "crates/llmenv-scope", version = "5.0.0-alpha.1" }
 llmenv-mcp = { path = "crates/llmenv-mcp", version = "5.0.0-alpha.1" }
 llmenv-task = { path = "crates/llmenv-task", version = "5.0.0-alpha.1" }
-clap = { version = "=4.6.7", features = ["derive"] }
-clap_complete = "=4.6.11"
+clap = { version = "=4.6.10", features = ["derive"] }
+clap_complete = "=4.6.12"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 serde_yaml = { package = "serde_yaml_ng", version = "=0.10.0" }
@@ -102,7 +102,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "json"] }
 thiserror = "=2.0.21"
-anyhow = "=1.0.104"
+anyhow = "=1.0.105"
 walkdir = { workspace = true }
 directories = "=6.0.0"
 sha2 = { workspace = true }
@@ -126,7 +126,7 @@ regex = { workspace = true }
 tempfile = "=3.27.0"
 pulldown-cmark = { workspace = true }
 dialoguer = "=0.12.0"
-zeroize = "=1.9.1"
+zeroize = "=1.9.2"
 getrandom = "=0.4.3"
 hmac = "=0.13.0"
 # Provides #[mutants::skip] — a no-op outside `cargo mutants` runs, used to
@@ -152,8 +152,8 @@ predicates = "=3.1.4"
 proptest = "=1.12.0"
 criterion = { version = "=0.8.2", features = ["html_reports"] }
 wiremock = "=0.6.5"
-filetime = "=0.2.29"
-regex = "=1.13.1"
+filetime = "=0.2.30"
+regex = "=1.13.2"
 # Enables llmenv-util's shared proptest generators (#1281) for this crate's
 # own tests, without pulling proptest into llmenv-util's default (non-test)
 # dependency graph.
