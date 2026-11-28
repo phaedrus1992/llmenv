@@ -39,7 +39,7 @@
     "jsdom": "30.1.3",
     "oxlint": "1.95.0",
     "typescript": "7.0.2",
-    "vitest": "5.1.1"
+    "vitest": "5.1.2"
   },
   "overrides": {
     "lodash-es": "4.18.1",
