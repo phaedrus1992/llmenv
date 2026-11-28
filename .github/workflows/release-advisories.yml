@@ -84,7 +84,7 @@ jobs:
       - name: cargo deny check advisories
         id: deny
         continue-on-error: true
-        uses: EmbarkStudios/cargo-deny-action@17aeb3c839e42274e2b8adf721c8c65edfdc74dd  # v2.1.3
+        uses: EmbarkStudios/cargo-deny-action@81891abc19297b21343b15ef67dc61e4aea74fda  # v2.1.4
         with:
           command: check advisories
 
